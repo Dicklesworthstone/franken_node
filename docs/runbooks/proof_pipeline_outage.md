@@ -29,16 +29,16 @@
 ## Investigation
 
 1. Identify pipeline stage failure (generation, aggregation, verification, storage).
-2. Check proof worker health and resource utilization.
+2. Check proof queue depth, proof status, and worker health with `franken-node proofs queue status --input <broker-snapshot.json> --json`.
 3. Review recent pipeline configuration or dependency changes.
 4. Determine whether outage is upstream (input data) or downstream (output storage).
 5. Assess backlog depth and estimated drain time.
 
 ## Repair
 
-1. Restart failed pipeline workers through the deployment supervisor for the affected environment.
+1. Validate and emit a restart request for failed proof workers with `franken-node proofs workers restart --worker-id <worker-id> --operator-id <operator-id> --operator-role pipeline_admin --reason <reason> --confirm --input <broker-snapshot.json> --json`.
 2. Clear any poisoned proof requests from the queue.
-3. Scale pipeline workers through the deployment supervisor if backlog exceeds capacity.
+3. Use `franken-node proofs workers restart --all-workers --operator-id <operator-id> --operator-role pipeline_admin --reason <reason> --confirm --input <broker-snapshot.json> --json` when every degraded worker in the snapshot should be restarted.
 4. Fix underlying configuration or dependency issue.
 
 ## Verification
@@ -65,8 +65,10 @@ Verify that detection fires, circuit breaker activates, requests are queued
 
 - `franken-node ops validation-readiness --input <broker-snapshot.json> --receipt <receipt.json> --json`
 - `franken-node ops resource-governor --requested-proof-class <proof-class> --source-only-allowed --json`
-- Manual: restart or scale proof workers through the deployment supervisor for the active environment.
-- Future dedicated proof queue/status and worker restart CLI/API surface: bd-rm6ex.
+- `franken-node proofs queue status --input <broker-snapshot.json> --receipt <receipt.json> --json`
+- `franken-node proofs workers restart --worker-id <worker-id> --operator-id <operator-id> --operator-role pipeline_admin --reason <reason> --confirm --input <broker-snapshot.json> --json`
+- `GET /api/v1/proofs/queue/status`
+- `POST /api/v1/proofs/workers/restart`
 
 ## Cross-References
 

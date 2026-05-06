@@ -11,10 +11,18 @@ use frankenengine_node::api::middleware::{
     AuthIdentity, AuthMethod, TraceContext, span_id_from_unix_nanos_for_tests,
 };
 use frankenengine_node::api::operator_routes::assert_process_start_cleanup_lock_order_for_tests;
+use frankenengine_node::api::proof_pipeline_routes::{
+    ProofWorkerRestartApiRequest, proof_queue_status_route, restart_proof_workers_route,
+};
 use frankenengine_node::api::service::TransportBoundaryKind;
 use frankenengine_node::api::{
     ApiState, ServiceConfig, build_api_service, build_default_api_service,
 };
+use frankenengine_node::ops::validation_broker::{
+    ProofEvidenceSource, ProofStatusKind, QueueState, RchMode, STATUS_SCHEMA_VERSION,
+    ValidationProofStatus,
+};
+use frankenengine_node::ops::validation_readiness::{RchWorkerReadiness, ValidationReadinessInput};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -96,6 +104,131 @@ fn fleet_admin_identity() -> AuthIdentity {
         method: AuthMethod::MtlsClientCert,
         roles: vec!["fleet-admin".to_string()],
     }
+}
+
+fn proof_operator_identity(role: &str) -> AuthIdentity {
+    AuthIdentity {
+        principal: "proof-pipeline-operator".to_string(),
+        method: AuthMethod::BearerToken,
+        roles: vec![role.to_string()],
+    }
+}
+
+fn proof_trace() -> TraceContext {
+    TraceContext {
+        trace_id: "proof-pipeline-control-plane-test".to_string(),
+        span_id: "0000000000000011".to_string(),
+        trace_flags: 1,
+    }
+}
+
+fn proof_readiness_input() -> ValidationReadinessInput {
+    ValidationReadinessInput {
+        proof_statuses: vec![ValidationProofStatus {
+            schema_version: STATUS_SCHEMA_VERSION.to_string(),
+            bead_id: "bd-rm6ex".to_string(),
+            thread_id: "bd-rm6ex".to_string(),
+            request_id: Some("proof-request-1".to_string()),
+            queue_id: Some("proof-queue-1".to_string()),
+            status: ProofStatusKind::Running,
+            proof_source: ProofEvidenceSource::BrokerQueue,
+            queue_state: Some(QueueState::Running),
+            deduplicated: false,
+            queue_depth: 1,
+            artifact_paths: None,
+            command_digest: None,
+            exit: None,
+            reason: None,
+            proof_cache: None,
+            observed_at: chrono::Utc::now(),
+        }],
+        rch_workers: vec![RchWorkerReadiness {
+            worker_id: "vmi-proof-1".to_string(),
+            reachable: false,
+            mode: RchMode::Unavailable,
+            required_toolchains: vec!["nightly".to_string()],
+            observed_toolchains: Vec::new(),
+            failure: Some("ssh timeout".to_string()),
+        }],
+        ..ValidationReadinessInput::default()
+    }
+}
+
+#[test]
+fn proof_pipeline_routes_are_in_endpoint_catalog() {
+    let api = build_default_api_service();
+    let catalog = api.catalog();
+
+    let queue_route = catalog
+        .iter()
+        .find(|entry| entry.method == "GET" && entry.path == "/api/v1/proofs/queue/status")
+        .expect("proof queue status route should be registered");
+    assert_eq!(queue_route.group, "operator");
+    assert_eq!(queue_route.auth_method, "BearerToken");
+    assert_eq!(queue_route.policy_hook, "proof_pipeline.queue.status");
+
+    let restart_route = catalog
+        .iter()
+        .find(|entry| entry.method == "POST" && entry.path == "/api/v1/proofs/workers/restart")
+        .expect("proof worker restart route should be registered");
+    assert_eq!(restart_route.group, "operator");
+    assert_eq!(restart_route.auth_method, "BearerToken");
+    assert_eq!(restart_route.policy_hook, "proof_pipeline.workers.restart");
+}
+
+#[test]
+fn proof_queue_status_route_reports_running_proof_and_degraded_worker() {
+    let response = proof_queue_status_route(
+        &proof_operator_identity("operator"),
+        &proof_trace(),
+        &proof_readiness_input(),
+    )
+    .expect("proof queue status");
+
+    assert_eq!(response.data.summary.queue_depth, 1);
+    assert_eq!(response.data.summary.degraded_workers, 1);
+    assert_eq!(response.data.proof_counts.running, 1);
+}
+
+#[test]
+fn proof_worker_restart_route_accepts_pipeline_admin_all_workers_scope() {
+    let request = ProofWorkerRestartApiRequest {
+        operator_id: "ops-1".to_string(),
+        reason: "outage drill".to_string(),
+        confirm: true,
+        worker_id: None,
+        all_workers: true,
+    };
+    let response = restart_proof_workers_route(
+        &proof_operator_identity("pipeline_admin"),
+        &proof_trace(),
+        &proof_readiness_input(),
+        &request,
+    )
+    .expect("proof worker restart");
+
+    assert!(response.data.ok);
+    assert_eq!(response.data.selected_workers, vec!["vmi-proof-1"]);
+}
+
+#[test]
+fn proof_worker_restart_route_denies_non_admin_operator() {
+    let request = ProofWorkerRestartApiRequest {
+        operator_id: "ops-1".to_string(),
+        reason: "outage drill".to_string(),
+        confirm: true,
+        worker_id: Some("vmi-proof-1".to_string()),
+        all_workers: false,
+    };
+    let err = restart_proof_workers_route(
+        &proof_operator_identity("operator"),
+        &proof_trace(),
+        &proof_readiness_input(),
+        &request,
+    )
+    .expect_err("operator role should not restart proof workers");
+
+    assert!(matches!(err, ApiError::PolicyDenied { .. }));
 }
 
 fn request_header<'request>(req: &'request Request, name: &str) -> Option<&'request str> {

@@ -125,6 +125,10 @@ pub enum Command {
     #[command(subcommand, name = "safe-mode")]
     SafeMode(SafeModeCommand),
 
+    /// Proof-pipeline queue and worker operator controls.
+    #[command(subcommand)]
+    Proofs(ProofsCommand),
+
     /// Migration audit, rewrite, and validation workflows.
     #[command(subcommand)]
     Migrate(MigrateCommand),
@@ -483,6 +487,93 @@ pub struct SafeModeExitArgs {
     /// Emit structured JSON output.
     #[arg(long)]
     pub json: bool,
+}
+
+// -- proofs --
+
+#[derive(Debug, Subcommand)]
+pub enum ProofsCommand {
+    /// Proof queue inspection commands.
+    #[command(subcommand)]
+    Queue(ProofQueueCommand),
+
+    /// Proof worker operator commands.
+    #[command(subcommand)]
+    Workers(ProofWorkersCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProofQueueCommand {
+    /// Inspect proof queue health from a validation-readiness snapshot.
+    Status(ProofQueueStatusArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct ProofQueueStatusArgs {
+    /// Emit JSON instead of human-readable output.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Stable trace ID for correlating proof queue status.
+    #[arg(long, default_value = "proofs-queue-status")]
+    pub trace_id: String,
+
+    /// JSON snapshot of validation broker, proof, worker, and resource readiness inputs.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub input: Option<PathBuf>,
+
+    /// Validation broker receipt JSON path. Repeat to include multiple receipts.
+    #[arg(long = "receipt", value_parser = parse_safe_content_pathbuf)]
+    pub receipts: Vec<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProofWorkersCommand {
+    /// Validate and emit a proof worker restart request.
+    Restart(ProofWorkersRestartArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct ProofWorkersRestartArgs {
+    /// Emit JSON instead of human-readable output.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Stable trace ID for correlating worker restart requests.
+    #[arg(long, default_value = "proofs-workers-restart")]
+    pub trace_id: String,
+
+    /// JSON snapshot of validation broker, proof, worker, and resource readiness inputs.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub input: Option<PathBuf>,
+
+    /// Validation broker receipt JSON path. Repeat to include multiple receipts.
+    #[arg(long = "receipt", value_parser = parse_safe_content_pathbuf)]
+    pub receipts: Vec<PathBuf>,
+
+    /// Operator identity requesting the restart.
+    #[arg(long)]
+    pub operator_id: String,
+
+    /// Operator role; repeat as needed. Restart requires `pipeline_admin`.
+    #[arg(long = "operator-role")]
+    pub operator_roles: Vec<String>,
+
+    /// Restart one degraded worker observed in the readiness snapshot.
+    #[arg(long)]
+    pub worker_id: Option<String>,
+
+    /// Restart all degraded workers observed in the readiness snapshot.
+    #[arg(long)]
+    pub all_workers: bool,
+
+    /// Operator-supplied restart reason.
+    #[arg(long)]
+    pub reason: String,
+
+    /// Explicit confirmation that the restart request should be emitted.
+    #[arg(long)]
+    pub confirm: bool,
 }
 
 // -- migrate --
@@ -2093,6 +2184,84 @@ mod parser_contract_extra_tests {
         assert!(args.trust_state_consistent);
         assert!(args.no_unresolved_incidents);
         assert!(args.evidence_ledger_intact);
+        assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn proofs_queue_status_parses_snapshot_and_receipt() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "proofs",
+            "queue",
+            "status",
+            "--input",
+            "fixtures/proof-readiness.json",
+            "--receipt",
+            "artifacts/validation/receipt.json",
+            "--trace-id",
+            "proof-queue-test",
+            "--json",
+        ])
+        .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::Proofs(ProofsCommand::Queue(ProofQueueCommand::Status(args))) => args,
+            other => {
+                return Err(format!(
+                    "expected proofs queue status command, got {other:?}"
+                ));
+            }
+        };
+        assert_eq!(
+            args.input,
+            Some(PathBuf::from("fixtures/proof-readiness.json"))
+        );
+        assert_eq!(
+            args.receipts,
+            vec![PathBuf::from("artifacts/validation/receipt.json")]
+        );
+        assert_eq!(args.trace_id, "proof-queue-test");
+        assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn proofs_workers_restart_parses_role_scope_and_confirmation() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "proofs",
+            "workers",
+            "restart",
+            "--input",
+            "fixtures/proof-readiness.json",
+            "--operator-id",
+            "ops-1",
+            "--operator-role",
+            "pipeline_admin",
+            "--worker-id",
+            "vmi-proof-1",
+            "--reason",
+            "outage drill",
+            "--confirm",
+            "--json",
+        ])
+        .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::Proofs(ProofsCommand::Workers(ProofWorkersCommand::Restart(args))) => args,
+            other => {
+                return Err(format!(
+                    "expected proofs workers restart command, got {other:?}"
+                ));
+            }
+        };
+        assert_eq!(args.operator_id, "ops-1");
+        assert_eq!(args.operator_roles, vec!["pipeline_admin"]);
+        assert_eq!(args.worker_id.as_deref(), Some("vmi-proof-1"));
+        assert!(!args.all_workers);
+        assert_eq!(args.reason, "outage drill");
+        assert!(args.confirm);
         assert!(args.json);
         Ok(())
     }

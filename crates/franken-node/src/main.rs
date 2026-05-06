@@ -94,7 +94,8 @@ use crate::cli::{
     DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand,
     IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand, OpsConfigAuditArgs,
     OpsMetricsFormat, OpsResourceGovernorArgs, OpsValidationCloseoutArgs,
-    OpsValidationReadinessArgs, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
+    OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs, ProofWorkersCommand,
+    ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
     RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand,
     SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
     TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
@@ -6941,18 +6942,7 @@ fn emit_ops_resource_governor_report(
 fn ops_validation_readiness_report(
     args: &OpsValidationReadinessArgs,
 ) -> Result<ops::validation_readiness::ValidationReadinessReport> {
-    let mut input = if let Some(path) = &args.input {
-        ops::validation_readiness::read_validation_readiness_input(path)
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?
-    } else {
-        ops::validation_readiness::ValidationReadinessInput::default()
-    };
-
-    for receipt_path in &args.receipts {
-        let receipt = ops::validation_readiness::read_validation_receipt(receipt_path)
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        input.receipts.push(receipt);
-    }
+    let input = proof_pipeline_readiness_input(args.input.as_deref(), &args.receipts)?;
 
     Ok(
         ops::validation_readiness::build_validation_readiness_report(
@@ -6961,6 +6951,26 @@ fn ops_validation_readiness_report(
             Utc::now(),
         ),
     )
+}
+
+fn proof_pipeline_readiness_input(
+    input_path: Option<&Path>,
+    receipt_paths: &[PathBuf],
+) -> Result<ops::validation_readiness::ValidationReadinessInput> {
+    let mut input = if let Some(path) = input_path {
+        ops::validation_readiness::read_validation_readiness_input(path)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?
+    } else {
+        ops::validation_readiness::ValidationReadinessInput::default()
+    };
+
+    for receipt_path in receipt_paths {
+        let receipt = ops::validation_readiness::read_validation_receipt(receipt_path)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        input.receipts.push(receipt);
+    }
+
+    Ok(input)
 }
 
 fn emit_ops_validation_readiness_report(
@@ -6980,6 +6990,100 @@ fn emit_ops_validation_readiness_report(
         );
     }
     Ok(())
+}
+
+fn proof_pipeline_queue_report(
+    args: &ProofQueueStatusArgs,
+) -> Result<ops::proof_pipeline::ProofPipelineQueueReport> {
+    let input = proof_pipeline_readiness_input(args.input.as_deref(), &args.receipts)?;
+    Ok(ops::proof_pipeline::build_queue_report(
+        &input,
+        args.trace_id.clone(),
+        Utc::now(),
+    ))
+}
+
+fn emit_proof_pipeline_queue_report(
+    report: &ops::proof_pipeline::ProofPipelineQueueReport,
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+    } else {
+        println!("{}", ops::proof_pipeline::render_queue_report_human(report));
+    }
+    Ok(())
+}
+
+fn proof_worker_restart_target(
+    args: &ProofWorkersRestartArgs,
+) -> Result<ops::proof_pipeline::ProofWorkerRestartTarget> {
+    match (args.all_workers, args.worker_id.as_deref()) {
+        (true, None) => Ok(ops::proof_pipeline::ProofWorkerRestartTarget::AllWorkers),
+        (false, Some(worker_id)) => Ok(ops::proof_pipeline::ProofWorkerRestartTarget::WorkerId(
+            worker_id.to_string(),
+        )),
+        (true, Some(_)) => anyhow::bail!("--worker-id and --all-workers are mutually exclusive"),
+        (false, None) => anyhow::bail!("one of --worker-id or --all-workers is required"),
+    }
+}
+
+fn proof_workers_restart_report(
+    args: &ProofWorkersRestartArgs,
+) -> Result<ops::proof_pipeline::ProofWorkerRestartReport> {
+    let input = proof_pipeline_readiness_input(args.input.as_deref(), &args.receipts)?;
+    let target = proof_worker_restart_target(args)?;
+    let request = ops::proof_pipeline::ProofWorkerRestartRequest {
+        operator_id: args.operator_id.clone(),
+        operator_roles: args.operator_roles.clone(),
+        target,
+        reason: args.reason.clone(),
+        confirm: args.confirm,
+    };
+    Ok(ops::proof_pipeline::evaluate_worker_restart_request(
+        &input,
+        &request,
+        args.trace_id.clone(),
+        Utc::now(),
+    ))
+}
+
+fn emit_proof_workers_restart_report(
+    report: &ops::proof_pipeline::ProofWorkerRestartReport,
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+    } else {
+        println!(
+            "{}",
+            ops::proof_pipeline::render_restart_report_human(report)
+        );
+    }
+    Ok(())
+}
+
+fn handle_proofs_command(command: ProofsCommand) -> Result<()> {
+    match command {
+        ProofsCommand::Queue(queue) => match queue {
+            ProofQueueCommand::Status(args) => {
+                let report = proof_pipeline_queue_report(&args)?;
+                emit_proof_pipeline_queue_report(&report, args.json)
+            }
+        },
+        ProofsCommand::Workers(workers) => match workers {
+            ProofWorkersCommand::Restart(args) => {
+                let report = proof_workers_restart_report(&args)?;
+                let ok = report.ok;
+                let reason_code = report.reason_code.clone();
+                emit_proof_workers_restart_report(&report, args.json)?;
+                if !ok {
+                    anyhow::bail!(reason_code);
+                }
+                Ok(())
+            }
+        },
+    }
 }
 
 fn ops_validation_closeout_report(
@@ -24940,6 +25044,10 @@ fn main() -> Result<()> {
 
         Command::SafeMode(sub) => {
             handle_safe_mode_command(sub)?;
+        }
+
+        Command::Proofs(sub) => {
+            handle_proofs_command(sub)?;
         }
 
         Command::Migrate(sub) => match sub {

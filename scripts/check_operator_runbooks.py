@@ -66,15 +66,14 @@ RUNBOOK_COMMAND_TRUTH_REQUIREMENTS = {
         "required": [
             "franken-node ops validation-readiness",
             "franken-node ops resource-governor",
-            "Manual:",
-            "bd-rm6ex",
-        ],
-        "forbidden": [
-            "franken-node proofs queue",
-            "franken-node proofs workers",
+            "franken-node proofs queue status",
+            "franken-node proofs workers restart",
             "GET /api/v1/proofs/queue/status",
             "POST /api/v1/proofs/workers/restart",
-            "/api/v1/proofs/workers/restart",
+        ],
+        "forbidden": [
+            "Future dedicated proof queue/status and worker restart CLI/API surface",
+            "Manual: restart or scale proof workers through the deployment supervisor",
         ],
     },
 }

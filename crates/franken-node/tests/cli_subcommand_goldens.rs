@@ -46,6 +46,41 @@ fn parse_json_stdout(command_name: &str, stdout: &[u8]) -> Result<Value, io::Err
     })
 }
 
+fn write_proof_pipeline_readiness_fixture(root: &Path) -> io::Result<String> {
+    let fixture_path = root.join("proof-readiness.json");
+    let payload = json!({
+        "schema_version": "franken-node/validation-readiness/input/v1",
+        "proof_statuses": [{
+            "schema_version": "franken-node/validation-broker/status/v1",
+            "bead_id": "bd-proof",
+            "thread_id": "bd-proof",
+            "request_id": "req-1",
+            "queue_id": "queue-1",
+            "status": "running",
+            "proof_source": "broker_queue",
+            "queue_state": "running",
+            "deduplicated": false,
+            "queue_depth": 1,
+            "artifact_paths": null,
+            "command_digest": null,
+            "exit": null,
+            "reason": null,
+            "observed_at": "2026-05-06T16:00:00Z"
+        }],
+        "rch_workers": [{
+            "worker_id": "vmi-proof-1",
+            "reachable": false,
+            "mode": "unavailable",
+            "required_toolchains": ["stable"],
+            "observed_toolchains": [],
+            "failure": "ssh timeout"
+        }],
+        "max_receipt_age_secs": 86400
+    });
+    fs::write(&fixture_path, serde_json::to_vec_pretty(&payload)?)?;
+    Ok("proof-readiness.json".to_string())
+}
+
 fn canonicalize_doctor_json(value: &mut Value, cwd: &Path) {
     match value {
         Value::Object(map) => {
@@ -616,6 +651,113 @@ fn safe_mode_cli_exit_without_confirmation_fails_closed_json() -> Result<(), Box
             .as_str()
             .expect("error string")
             .contains("operator_confirmed")
+    );
+    Ok(())
+}
+
+#[test]
+fn proofs_queue_status_json_reports_broker_and_worker_state() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    let input_arg = write_proof_pipeline_readiness_fixture(temp.path())?;
+
+    let mut status = Command::cargo_bin("franken-node")?;
+    let assertion = status
+        .current_dir(temp.path())
+        .args([
+            "proofs",
+            "queue",
+            "status",
+            "--input",
+            &input_arg,
+            "--trace-id",
+            "proof-queue-cli-test",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let status_json = parse_json_stdout("proofs queue status", &assertion.get_output().stdout)?;
+    assert_eq!(
+        status_json["schema_version"],
+        json!("franken-node/proof-pipeline/queue-report/v1")
+    );
+    assert_eq!(status_json["command"], json!("proofs queue status"));
+    assert_eq!(status_json["summary"]["queue_depth"], json!(1));
+    assert_eq!(status_json["summary"]["degraded_workers"], json!(1));
+    Ok(())
+}
+
+#[test]
+fn proofs_workers_restart_json_accepts_all_degraded_workers() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    let input_arg = write_proof_pipeline_readiness_fixture(temp.path())?;
+
+    let mut restart = Command::cargo_bin("franken-node")?;
+    let assertion = restart
+        .current_dir(temp.path())
+        .args([
+            "proofs",
+            "workers",
+            "restart",
+            "--input",
+            &input_arg,
+            "--operator-id",
+            "ops-1",
+            "--operator-role",
+            "pipeline_admin",
+            "--all-workers",
+            "--reason",
+            "outage drill",
+            "--confirm",
+            "--trace-id",
+            "proof-restart-cli-test",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let restart_json = parse_json_stdout("proofs workers restart", &assertion.get_output().stdout)?;
+    assert_eq!(
+        restart_json["schema_version"],
+        json!("franken-node/proof-pipeline/restart-report/v1")
+    );
+    assert_eq!(restart_json["ok"], json!(true));
+    assert_eq!(restart_json["selected_workers"], json!(["vmi-proof-1"]));
+    Ok(())
+}
+
+#[test]
+fn proofs_workers_restart_json_denies_missing_pipeline_admin() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    let input_arg = write_proof_pipeline_readiness_fixture(temp.path())?;
+
+    let mut restart = Command::cargo_bin("franken-node")?;
+    let assertion = restart
+        .current_dir(temp.path())
+        .args([
+            "proofs",
+            "workers",
+            "restart",
+            "--input",
+            &input_arg,
+            "--operator-id",
+            "ops-1",
+            "--operator-role",
+            "operator",
+            "--worker-id",
+            "vmi-proof-1",
+            "--reason",
+            "outage drill",
+            "--confirm",
+            "--trace-id",
+            "proof-restart-denied-cli-test",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let restart_json = parse_json_stdout("proofs workers restart", &assertion.get_output().stdout)?;
+    assert_eq!(restart_json["ok"], json!(false));
+    assert_eq!(
+        restart_json["reason_code"],
+        json!("ERR_PROOF_RESTART_PERMISSION_DENIED")
     );
     Ok(())
 }

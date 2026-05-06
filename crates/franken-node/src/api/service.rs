@@ -23,6 +23,7 @@ use super::middleware::{
     default_rate_limit,
 };
 use super::operator_routes;
+use super::proof_pipeline_routes;
 use super::safe_mode_routes;
 use super::verifier_routes;
 
@@ -104,6 +105,7 @@ pub fn build_endpoint_catalog() -> Vec<EndpointCatalogEntry> {
 pub fn all_route_metadata() -> Vec<RouteMetadata> {
     let mut routes = Vec::new();
     routes.extend(operator_routes::route_metadata());
+    routes.extend(proof_pipeline_routes::route_metadata());
     routes.extend(safe_mode_routes::route_metadata());
     routes.extend(verifier_routes::route_metadata());
     routes.extend(fleet_control_routes::route_metadata());
@@ -440,10 +442,10 @@ mod tests {
             .filter(|r| r.group == EndpointGroup::FleetControl)
             .count();
 
-        assert_eq!(operator_count, 7);
+        assert_eq!(operator_count, 9);
         assert_eq!(verifier_count, 7);
         assert_eq!(fleet_count, 10);
-        assert_eq!(routes.len(), 24);
+        assert_eq!(routes.len(), 26);
     }
 
     #[test]
@@ -451,7 +453,7 @@ mod tests {
         let _lock = super::operator_routes::process_start_test_lock();
         super::operator_routes::clear_process_start_override_for_tests();
         let catalog = build_endpoint_catalog();
-        assert_eq!(catalog.len(), 24);
+        assert_eq!(catalog.len(), 26);
 
         // All entries have non-empty fields
         for entry in &catalog {
@@ -512,9 +514,9 @@ mod tests {
         let _lock = super::operator_routes::process_start_test_lock();
         super::operator_routes::clear_process_start_override_for_tests();
         let report = generate_endpoint_report(&ServiceConfig::default());
-        assert_eq!(report.endpoints.len(), 24);
+        assert_eq!(report.endpoints.len(), 26);
         assert!(report.middleware_coverage.auth_coverage);
-        assert_eq!(report.performance_baselines.len(), 24);
+        assert_eq!(report.performance_baselines.len(), 26);
         assert_eq!(
             report.transport_boundary.kind,
             TransportBoundaryKind::InProcessCatalog

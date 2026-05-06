@@ -13,6 +13,7 @@ pub mod fleet_control_routes;
 pub mod fleet_quarantine;
 pub mod middleware;
 pub mod operator_routes;
+pub mod proof_pipeline_routes;
 pub mod safe_mode_routes;
 pub mod service;
 pub mod session_auth;

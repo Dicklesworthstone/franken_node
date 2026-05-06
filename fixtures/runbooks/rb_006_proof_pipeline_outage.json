@@ -26,15 +26,15 @@
     ],
     "investigation": [
       "Identify pipeline stage failure (generation, aggregation, verification, storage)",
-      "Check proof worker health and resource utilization",
+      "Check proof queue depth, proof status, and worker health with franken-node proofs queue status --input <broker-snapshot.json> --json",
       "Review recent pipeline configuration or dependency changes",
       "Determine whether outage is upstream (input data) or downstream (output storage)",
       "Assess backlog depth and estimated drain time"
     ],
     "repair": [
-      "Restart failed pipeline workers through the deployment supervisor for the affected environment",
+      "Validate and emit a restart request for failed proof workers with franken-node proofs workers restart --worker-id <worker-id> --operator-id <operator-id> --operator-role pipeline_admin --reason <reason> --confirm --input <broker-snapshot.json> --json",
       "Clear any poisoned proof requests from the queue",
-      "Scale pipeline workers through the deployment supervisor if backlog exceeds capacity",
+      "Use franken-node proofs workers restart --all-workers --operator-id <operator-id> --operator-role pipeline_admin --reason <reason> --confirm --input <broker-snapshot.json> --json when every degraded worker in the snapshot should be restarted",
       "Fix underlying configuration or dependency issue"
     ],
     "verification": [
@@ -55,7 +55,10 @@
   "command_references": [
     "franken-node ops validation-readiness --input <broker-snapshot.json> --receipt <receipt.json> --json",
     "franken-node ops resource-governor --requested-proof-class <proof-class> --source-only-allowed --json",
-    "Manual: restart or scale proof workers through the deployment supervisor for the active environment"
+    "franken-node proofs queue status --input <broker-snapshot.json> --receipt <receipt.json> --json",
+    "franken-node proofs workers restart --worker-id <worker-id> --operator-id <operator-id> --operator-role pipeline_admin --reason <reason> --confirm --input <broker-snapshot.json> --json",
+    "GET /api/v1/proofs/queue/status",
+    "POST /api/v1/proofs/workers/restart"
   ],
   "coverage_tags": [
     "malicious-extension-detection"

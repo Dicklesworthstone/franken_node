@@ -45,24 +45,28 @@ class TestHelpers(unittest.TestCase):
             )
         )
 
-    def test_rb006_truth_rejects_unshipped_proof_surface(self):
-        checks = mod.check_command_reference_truth(
-            "RB-006",
-            [
-                "franken-node proofs queue status",
-                "POST /api/v1/proofs/workers/restart",
-            ],
-        )
-        self.assertTrue(any(not check["pass"] for check in checks))
-
-    def test_rb006_truth_accepts_shipped_ops_references(self):
+    def test_rb006_truth_rejects_future_work_markers(self):
         checks = mod.check_command_reference_truth(
             "RB-006",
             [
                 "franken-node ops validation-readiness --input <broker-snapshot.json> --receipt <receipt.json> --json",
                 "franken-node ops resource-governor --requested-proof-class <proof-class> --source-only-allowed --json",
-                "Manual: restart or scale proof workers through the deployment supervisor for the active environment",
                 "Future dedicated proof queue/status and worker restart CLI/API surface: bd-rm6ex",
+                "Manual: restart or scale proof workers through the deployment supervisor for the active environment",
+            ],
+        )
+        self.assertTrue(any(not check["pass"] for check in checks))
+
+    def test_rb006_truth_accepts_shipped_proof_surface(self):
+        checks = mod.check_command_reference_truth(
+            "RB-006",
+            [
+                "franken-node ops validation-readiness --input <broker-snapshot.json> --receipt <receipt.json> --json",
+                "franken-node ops resource-governor --requested-proof-class <proof-class> --source-only-allowed --json",
+                "franken-node proofs queue status --input <broker-snapshot.json> --receipt <receipt.json> --json",
+                "franken-node proofs workers restart --worker-id <worker-id> --operator-id <operator-id> --operator-role pipeline_admin --reason <reason> --confirm --input <broker-snapshot.json> --json",
+                "GET /api/v1/proofs/queue/status",
+                "POST /api/v1/proofs/workers/restart",
             ],
         )
         self.assertTrue(all(check["pass"] for check in checks))
