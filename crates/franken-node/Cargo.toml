@@ -430,6 +430,11 @@ name = "trust_card_schema_conformance"
 path = "tests/trust_card_schema_conformance.rs"
 
 [[test]]
+name = "trust_card_conformance_runner"
+path = "../../tests/conformance_runner.rs"
+required-features = ["control-plane", "admin-tools"]
+
+[[test]]
 name = "canonical_serializer_real_inputs"
 path = "tests/canonical_serializer_real_inputs.rs"
 

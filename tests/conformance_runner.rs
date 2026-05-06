@@ -1,227 +1,242 @@
-//! Conformance Test Runner - Validates that trust-card conformance harnesses work correctly
+//! Registered trust-card conformance runner.
 //!
-//! This test runner ensures all our conformance test harnesses compile and execute
-//! without panics, providing a meta-test for conformance testing infrastructure.
+//! This target verifies the real registry and API-route surfaces used by the
+//! trust-card conformance contract. It intentionally avoids local substitutes so
+//! Cargo fails if the actual product paths stop compiling or stop enforcing
+//! evidence, lookup, filtering, and pagination behavior.
 
-#[cfg(test)]
-mod conformance_tests {
-    // Test that conformance modules can be imported and basic structures work
-    use std::collections::BTreeMap;
+use frankenengine_node::api::trust_card_routes::{
+    Pagination, create_trust_card, get_trust_card, list_trust_cards, search_trust_cards,
+};
+use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
+use frankenengine_node::supply_chain::trust_card::{
+    BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
+    ExtensionIdentity, ProvenanceSummary, PublisherIdentity, ReputationTrend, RevocationStatus,
+    RiskAssessment, RiskLevel, TrustCardError, TrustCardInput, TrustCardListFilter,
+    TrustCardRegistry,
+};
 
-    #[test]
-    fn conformance_infrastructure_basic_validation() {
-        // This is a meta-test that validates our conformance test infrastructure
-        // works correctly without requiring the full trust-card implementation.
+const BASE_TIMESTAMP: u64 = 1_764_000_000;
+const REGISTRY_KEY: &[u8] = b"trust-card-conformance-runner-real-registry-key-v1";
 
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        enum TestRequirementLevel {
-            Must,
-            Should,
-        }
+fn registry() -> TrustCardRegistry {
+    TrustCardRegistry::new(300, REGISTRY_KEY)
+}
 
-        #[derive(Debug, Clone)]
-        enum TestConformanceResult {
-            Pass,
-            Fail { reason: String },
-        }
+fn evidence_refs(id: &str) -> Vec<VerifiedEvidenceRef> {
+    vec![VerifiedEvidenceRef {
+        evidence_id: format!("runner-evidence-{id}"),
+        evidence_type: EvidenceType::TestCoverageReport,
+        verified_at_epoch: BASE_TIMESTAMP,
+        verification_receipt_hash: "a".repeat(64),
+    }]
+}
 
-        struct TestConformanceCase {
-            id: &'static str,
-            requirement_level: TestRequirementLevel,
-            description: &'static str,
-        }
-
-        // Mock test cases to validate the pattern works
-        let test_cases = vec![
-            TestConformanceCase {
-                id: "META-001",
-                requirement_level: TestRequirementLevel::Must,
-                description: "Conformance test infrastructure compiles and runs",
-            },
-            TestConformanceCase {
-                id: "META-002",
-                requirement_level: TestRequirementLevel::Must,
-                description: "Test result categorization works",
-            },
-        ];
-
-        let mut results = Vec::new();
-        let mut failures = 0;
-
-        for case in &test_cases {
-            // Mock test execution
-            let result = if case.id == "META-001" {
-                TestConformanceResult::Pass
-            } else {
-                TestConformanceResult::Pass
-            };
-
-            match &result {
-                TestConformanceResult::Pass => {
-                    eprintln!("  ✅ {} - {}", case.id, case.description);
-                }
-                TestConformanceResult::Fail { reason } => {
-                    eprintln!("  ❌ {} - {} (REASON: {})", case.id, case.description, reason);
-                    failures += 1;
-                }
-            }
-
-            results.push((case, result));
-        }
-
-        // Generate coverage report
-        let mut coverage_by_level: BTreeMap<TestRequirementLevel, (usize, usize)> = BTreeMap::new();
-        for (case, result) in &results {
-            let (level_total, level_pass) = coverage_by_level.entry(case.requirement_level).or_insert((0, 0));
-            *level_total += 1;
-            if matches!(result, TestConformanceResult::Pass) {
-                *level_pass += 1;
-            }
-        }
-
-        eprintln!("Conformance Infrastructure Validation:");
-        for (level, (total, passing)) in &coverage_by_level {
-            let percentage = if *total > 0 { (*passing * 100) / *total } else { 0 };
-            eprintln!("  {:?}: {}/{} ({}%)", level, passing, total, percentage);
-        }
-
-        // Validate that MUST requirements pass
-        let must_failures: Vec<_> = results.iter()
-            .filter(|(case, result)| {
-                case.requirement_level == TestRequirementLevel::Must &&
-                matches!(result, TestConformanceResult::Fail { .. })
-            })
-            .collect();
-
-        assert!(
-            must_failures.is_empty(),
-            "Conformance infrastructure validation failed: {} MUST requirements failed",
-            must_failures.len()
-        );
-
-        assert_eq!(failures, 0, "Conformance infrastructure validation had {} failures", failures);
-
-        eprintln!("✅ Conformance test infrastructure validation passed!");
+fn trust_card_input(
+    extension_id: &str,
+    publisher_id: &str,
+    capability_name: &str,
+    certification_level: CertificationLevel,
+) -> TrustCardInput {
+    TrustCardInput {
+        extension: ExtensionIdentity {
+            extension_id: extension_id.to_string(),
+            version: "1.0.0".to_string(),
+        },
+        publisher: PublisherIdentity {
+            publisher_id: publisher_id.to_string(),
+            display_name: format!("Publisher {publisher_id}"),
+        },
+        certification_level,
+        capability_declarations: vec![CapabilityDeclaration {
+            name: capability_name.to_string(),
+            description: format!("{capability_name} capability"),
+            risk: CapabilityRisk::Medium,
+        }],
+        behavioral_profile: BehavioralProfile {
+            network_access: capability_name.contains("net."),
+            filesystem_access: capability_name.contains("fs."),
+            subprocess_access: false,
+            profile_summary: format!("{capability_name} profile"),
+        },
+        revocation_status: RevocationStatus::Active,
+        provenance_summary: ProvenanceSummary {
+            attestation_level: "registered-runner".to_string(),
+            source_uri: format!("conformance-runner://{extension_id}"),
+            artifact_hashes: vec!["sha256:".to_string() + &"b".repeat(64)],
+            verified_at: "2026-05-06T18:00:00Z".to_string(),
+        },
+        reputation_score_basis_points: 9_100,
+        reputation_trend: ReputationTrend::Stable,
+        active_quarantine: false,
+        dependency_trust_summary: Vec::new(),
+        last_verified_timestamp: "2026-05-06T18:00:00Z".to_string(),
+        user_facing_risk_assessment: RiskAssessment {
+            level: RiskLevel::Medium,
+            summary: format!("{capability_name} requires policy review"),
+        },
+        evidence_refs: evidence_refs(extension_id),
     }
+}
 
-    #[test]
-    fn trust_card_conformance_pattern_validation() {
-        // Validate that the trust card conformance pattern is sound
+#[test]
+fn registered_runner_reads_real_trust_card_through_api_route() {
+    let mut registry = registry();
+    let extension_id = "npm:@runner/api-route";
 
-        // This test validates the basic pattern used in our conformance harnesses
-        // without requiring the actual trust card implementation to be complete.
+    let created = create_trust_card(
+        &mut registry,
+        trust_card_input(
+            extension_id,
+            "publisher:runner-api",
+            "net.fetch",
+            CertificationLevel::Silver,
+        ),
+        BASE_TIMESTAMP,
+        "runner-create",
+    )
+    .expect("real trust card create route must succeed");
 
-        struct MockTrustCard {
-            extension_id: String,
-            version: String,
-            signature: String,
+    assert!(created.ok);
+    assert_eq!(created.data.extension.extension_id, extension_id);
+    assert_eq!(created.data.registry_signature.len(), 64);
+    assert_eq!(created.data.card_hash.len(), 64);
+
+    let read = get_trust_card(
+        &mut registry,
+        extension_id,
+        BASE_TIMESTAMP + 1,
+        "runner-read",
+    )
+    .expect("real trust card read route must succeed");
+
+    let card = read
+        .data
+        .expect("created card must be returned by read route");
+    assert!(read.ok);
+    assert_eq!(card.extension.extension_id, extension_id);
+    assert_eq!(card.card_hash, created.data.card_hash);
+    assert_eq!(card.registry_signature, created.data.registry_signature);
+}
+
+#[test]
+fn registered_runner_rejects_missing_evidence_without_persisting_card() {
+    let mut registry = registry();
+    let extension_id = "npm:@runner/no-evidence";
+    let mut input = trust_card_input(
+        extension_id,
+        "publisher:runner-no-evidence",
+        "fs.read",
+        CertificationLevel::Bronze,
+    );
+    input.evidence_refs.clear();
+
+    let err = create_trust_card(
+        &mut registry,
+        input,
+        BASE_TIMESTAMP,
+        "runner-create-no-evidence",
+    )
+    .expect_err("missing evidence must fail closed through the real create route");
+
+    assert!(matches!(err, TrustCardError::EvidenceMissing));
+
+    let read = get_trust_card(
+        &mut registry,
+        extension_id,
+        BASE_TIMESTAMP + 1,
+        "runner-read-rejected",
+    )
+    .expect("read after rejected create must still be well-formed");
+    assert!(read.data.is_none());
+}
+
+#[test]
+fn registered_runner_exercises_real_search_filter_and_pagination() {
+    let mut registry = registry();
+
+    create_trust_card(
+        &mut registry,
+        trust_card_input(
+            "npm:@runner/network",
+            "publisher:runner-search",
+            "net.fetch",
+            CertificationLevel::Gold,
+        ),
+        BASE_TIMESTAMP,
+        "runner-create-network",
+    )
+    .expect("network card create route must succeed");
+    create_trust_card(
+        &mut registry,
+        trust_card_input(
+            "npm:@runner/filesystem",
+            "publisher:runner-search",
+            "fs.read",
+            CertificationLevel::Silver,
+        ),
+        BASE_TIMESTAMP + 1,
+        "runner-create-filesystem",
+    )
+    .expect("filesystem card create route must succeed");
+
+    let search = search_trust_cards(
+        &mut registry,
+        "net.fetch",
+        BASE_TIMESTAMP + 2,
+        "runner-search",
+        Pagination {
+            page: 1,
+            per_page: 10,
+        },
+    )
+    .expect("search route must succeed");
+    assert!(search.ok);
+    assert_eq!(search.data.len(), 1);
+    assert_eq!(search.data[0].extension.extension_id, "npm:@runner/network");
+    assert_eq!(
+        search
+            .page
+            .expect("search response must be paged")
+            .total_items,
+        1
+    );
+
+    let gold_filter = TrustCardListFilter {
+        certification_level: Some(CertificationLevel::Gold),
+        publisher_id: None,
+        capability: None,
+    };
+    let listed = list_trust_cards(
+        &mut registry,
+        &gold_filter,
+        BASE_TIMESTAMP + 3,
+        "runner-list",
+        Pagination {
+            page: 1,
+            per_page: 10,
+        },
+    )
+    .expect("list route must succeed");
+    assert_eq!(listed.data.len(), 1);
+    assert_eq!(listed.data[0].certification_level, CertificationLevel::Gold);
+
+    let err = list_trust_cards(
+        &mut registry,
+        &TrustCardListFilter::empty(),
+        BASE_TIMESTAMP + 4,
+        "runner-invalid-pagination",
+        Pagination {
+            page: 1,
+            per_page: 0,
+        },
+    )
+    .expect_err("invalid pagination must fail through the real route");
+    assert!(matches!(
+        err,
+        TrustCardError::InvalidPagination {
+            page: 1,
+            per_page: 0
         }
-
-        struct MockTrustCardRegistry {
-            cards: BTreeMap<String, MockTrustCard>,
-        }
-
-        impl MockTrustCardRegistry {
-            fn new() -> Self {
-                Self {
-                    cards: BTreeMap::new(),
-                }
-            }
-
-            fn create(&mut self, extension_id: String) -> Result<MockTrustCard, String> {
-                if extension_id.is_empty() {
-                    return Err("Empty extension ID".to_string());
-                }
-
-                let card = MockTrustCard {
-                    extension_id: extension_id.clone(),
-                    version: "1.0.0".to_string(),
-                    signature: "mock-signature".to_string(),
-                };
-
-                self.cards.insert(extension_id, card.clone());
-                Ok(card)
-            }
-
-            fn get(&self, extension_id: &str) -> Option<&MockTrustCard> {
-                self.cards.get(extension_id)
-            }
-        }
-
-        // Test the mock registry pattern that mirrors our real conformance tests
-        let mut registry = MockTrustCardRegistry::new();
-
-        // Test successful creation
-        let result = registry.create("npm:@test/package".to_string());
-        assert!(result.is_ok(), "Valid extension ID should succeed");
-
-        let card = result.unwrap();
-        assert_eq!(card.extension_id, "npm:@test/package");
-        assert_eq!(card.version, "1.0.0");
-
-        // Test retrieval
-        let retrieved = registry.get("npm:@test/package");
-        assert!(retrieved.is_some(), "Created card should be retrievable");
-
-        let retrieved_card = retrieved.unwrap();
-        assert_eq!(retrieved_card.extension_id, card.extension_id);
-        assert_eq!(retrieved_card.signature, card.signature);
-
-        // Test failure case
-        let error_result = registry.create("".to_string());
-        assert!(error_result.is_err(), "Empty extension ID should fail");
-
-        eprintln!("✅ Trust card conformance pattern validation passed!");
-    }
-
-    #[test]
-    fn api_surface_conformance_pattern_validation() {
-        // Validate the API surface testing pattern
-
-        #[derive(Debug, Clone)]
-        struct MockApiResponse<T> {
-            ok: bool,
-            data: T,
-        }
-
-        fn mock_get_trust_card(extension_id: &str) -> Result<MockApiResponse<Option<String>>, String> {
-            if extension_id.is_empty() {
-                return Err("Empty extension ID".to_string());
-            }
-
-            if extension_id == "nonexistent" {
-                return Ok(MockApiResponse {
-                    ok: false,
-                    data: None,
-                });
-            }
-
-            Ok(MockApiResponse {
-                ok: true,
-                data: Some(format!("trust-card-data-{}", extension_id)),
-            })
-        }
-
-        // Test successful API call
-        let result = mock_get_trust_card("npm:@test/api");
-        assert!(result.is_ok(), "Valid API call should succeed");
-
-        let response = result.unwrap();
-        assert!(response.ok, "Response should be ok");
-        assert!(response.data.is_some(), "Response should contain data");
-
-        // Test nonexistent case
-        let nonexistent_result = mock_get_trust_card("nonexistent");
-        assert!(nonexistent_result.is_ok(), "Nonexistent API call should not error");
-
-        let nonexistent_response = nonexistent_result.unwrap();
-        assert!(!nonexistent_response.ok, "Nonexistent response should not be ok");
-        assert!(nonexistent_response.data.is_none(), "Nonexistent response should have no data");
-
-        // Test error case
-        let error_result = mock_get_trust_card("");
-        assert!(error_result.is_err(), "Invalid API call should error");
-
-        eprintln!("✅ API surface conformance pattern validation passed!");
-    }
+    ));
 }
