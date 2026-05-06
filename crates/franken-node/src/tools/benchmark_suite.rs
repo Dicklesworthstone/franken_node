@@ -861,11 +861,11 @@ pub fn mean(values: &[f64]) -> f64 {
         if value.is_nan() {
             return f64::NAN;
         }
-        if value == f64::INFINITY {
+        if value.is_infinite() && value.is_sign_positive() {
             positive_infinity = true;
             continue;
         }
-        if value == f64::NEG_INFINITY {
+        if value.is_infinite() && value.is_sign_negative() {
             negative_infinity = true;
             continue;
         }
@@ -1809,7 +1809,16 @@ fn measured_lockstep_throughput(iteration: u32, cases: u32) -> f64 {
             "case": case,
             "value": left["value"].clone(),
         });
-        std::hint::black_box(left["value"] == right["value"]);
+        let values_match = left
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|left_value| {
+                right
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|right_value| left_value.as_bytes().eq(right_value.as_bytes()))
+            });
+        std::hint::black_box(values_match);
     }
     f64::from(cases) / started.elapsed().as_secs_f64().max(0.000_001)
 }
@@ -1817,7 +1826,11 @@ fn measured_lockstep_throughput(iteration: u32, cases: u32) -> f64 {
 fn measured_replay_identity_rate(iteration: u32) -> f64 {
     let first = digest_rounds("replay_identity", iteration, 64);
     let second = digest_rounds("replay_identity", iteration, 64);
-    if first == second { 100.0 } else { 0.0 }
+    if first.as_slice().eq(second.as_slice()) {
+        100.0
+    } else {
+        0.0
+    }
 }
 
 fn measured_adversarial_pass_rate() -> f64 {
@@ -3334,7 +3347,8 @@ mod tests {
     fn test_signed_report_hash_field_is_not_self_referential() {
         let report = signed_report_fixture();
         let mut resigned = report.clone();
-        resigned.provenance_hash = "sha256:previous-signature-placeholder".to_string();
+        resigned.provenance_hash =
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
 
         let original_recomputed = report.compute_provenance_hash();
         let resigned_recomputed = resigned.compute_provenance_hash();
