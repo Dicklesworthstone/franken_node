@@ -6,6 +6,10 @@ use frankenengine_node::ops::validation_broker::{
     ValidationBrokerRequest, ValidationErrorClass, ValidationExit, ValidationExitKind,
     ValidationPriority, ValidationReceipt, ValidationTiming,
 };
+use frankenengine_node::ops::validation_closeout::{
+    ValidationCloseoutOptions, ValidationCloseoutStatus, build_validation_closeout_report,
+    render_validation_closeout_json,
+};
 use frankenengine_node::ops::validation_proof_cache::{
     DirtyStatePolicy, GC_REPORT_SCHEMA_VERSION, ValidationProofCacheDecisionKind,
     ValidationProofCacheKey, ValidationProofCacheLookup, ValidationProofCacheQuotaPolicy,
@@ -13,13 +17,33 @@ use frankenengine_node::ops::validation_proof_cache::{
     error_codes, render_validation_proof_cache_decision_human,
     render_validation_proof_cache_decision_json, validation_proof_cache_rejection_decision,
 };
+use frankenengine_node::ops::validation_readiness::{
+    TrackedValidationBead, ValidationBeadState, ValidationReadinessInput,
+    ValidationReadinessStatus, build_validation_readiness_report,
+    render_validation_readiness_human,
+};
 use std::fs;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier, Mutex};
+use std::thread;
 use tempfile::TempDir;
 
 const FIXTURE_JSON: &str = include_str!(
     "../../../artifacts/validation_broker/proof_cache/validation_proof_cache_fixtures.v1.json"
 );
+const E2E_MATRIX_JSON: &str = include_str!(
+    "../../../artifacts/validation_broker/proof_cache/validation_proof_cache_e2e_matrix.v1.json"
+);
+const REQUIRED_LOG_FIELDS: [&str; 7] = [
+    "trace_id",
+    "cache_key",
+    "decision",
+    "reason_code",
+    "receipt_path",
+    "producer_agent",
+    "bead_id",
+];
 
 fn ts(second: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 5, 5, 12, 0, second)
@@ -324,6 +348,274 @@ fn populated_store(
     mutate_entry(&mut entry);
     store.put_entry(&entry).expect("entry persisted");
     (dir, store, key, entry)
+}
+
+fn count_entry_files(root: &Path) -> usize {
+    fn visit(path: &Path, count: &mut usize) {
+        for entry in fs::read_dir(path).expect("read proof-cache directory") {
+            let entry = entry.expect("directory entry");
+            let file_type = entry.file_type().expect("entry file type");
+            if file_type.is_dir() {
+                visit(&entry.path(), count);
+            } else if file_type.is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension == "json")
+            {
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+
+    let entries = root.join("entries");
+    if !entries.exists() {
+        return 0;
+    }
+    let mut count = 0;
+    visit(&entries, &mut count);
+    count
+}
+
+fn proof_cache_event(
+    decision: &frankenengine_node::ops::validation_proof_cache::ValidationProofCacheDecision,
+    producer_agent: &str,
+    bead_id: &str,
+    receipt_path: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "trace_id": decision.trace_id.as_str(),
+        "cache_key": decision.cache_key.hex.as_str(),
+        "decision": decision.decision.as_str(),
+        "reason_code": decision.reason_code.as_str(),
+        "receipt_path": receipt_path,
+        "producer_agent": producer_agent,
+        "bead_id": bead_id,
+    })
+}
+
+fn append_log_event(path: &Path, event: &serde_json::Value) {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("event log open");
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(event).expect("event log json")
+    )
+    .expect("event log write");
+}
+
+fn read_log_events(path: &Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(path)
+        .expect("event log read")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("event log line"))
+        .collect()
+}
+
+fn assert_log_event_fields(event: &serde_json::Value) {
+    for field in REQUIRED_LOG_FIELDS {
+        assert!(
+            event
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+            "missing structured log field {field}: {event}"
+        );
+    }
+}
+
+#[test]
+fn mock_free_e2e_concurrent_requests_converge_and_changed_digest_misses()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let root = Arc::new(dir.path().to_path_buf());
+    let receipt = receipt_for("bd-gcprh-equivalent", "equivalent", ts(50));
+    let (receipt_path, receipt_bytes) = write_receipt(dir.path(), &receipt);
+    let thread_count = 8;
+    let barrier = Arc::new(Barrier::new(thread_count));
+    let results = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    thread::scope(|thread_scope| {
+        for _ in 0..thread_count {
+            let root = Arc::clone(&root);
+            let receipt = receipt.clone();
+            let receipt_path = receipt_path.clone();
+            let receipt_bytes = receipt_bytes.clone();
+            let barrier = Arc::clone(&barrier);
+            let results = Arc::clone(&results);
+
+            thread_scope.spawn(move || {
+                let store = ValidationProofCacheStore::new(root.as_path());
+                let request = request_for("bd-gcprh-equivalent", "equivalent");
+                let key =
+                    ValidationProofCacheKey::from_request_and_receipt(&request, &receipt, scope())
+                        .expect("concurrent key");
+                let entry = store
+                    .build_entry(
+                        key,
+                        receipt_path,
+                        &receipt,
+                        &receipt_bytes,
+                        "PearlLeopard",
+                        ts(3),
+                    )
+                    .expect("concurrent entry");
+                barrier.wait();
+
+                let outcome = store
+                    .put_entry(&entry)
+                    .map(|_| "stored".to_string())
+                    .unwrap_or_else(|error| error.code().to_string());
+                results.lock().expect("results lock").push(outcome);
+            });
+        }
+    });
+
+    let results = Arc::try_unwrap(results)
+        .expect("results refs released")
+        .into_inner()
+        .expect("results lock released");
+    assert_eq!(
+        results
+            .iter()
+            .filter(|outcome| outcome.as_str() == "stored")
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|outcome| outcome.as_str() == error_codes::ERR_VPC_DUPLICATE_ENTRY)
+            .count(),
+        thread_count - 1
+    );
+    assert_eq!(count_entry_files(dir.path()), 1);
+
+    let store = ValidationProofCacheStore::new(dir.path());
+    let request = request_for("bd-gcprh-equivalent", "equivalent");
+    let key = ValidationProofCacheKey::from_request_and_receipt(&request, &receipt, scope())?;
+    let log_path: PathBuf = dir.path().join("proof-cache-events.ndjson");
+    let lookup = store.lookup(&key, ts(4))?;
+    let hit = match lookup {
+        ValidationProofCacheLookup::Hit(hit) => hit,
+        ValidationProofCacheLookup::Miss(decision) => {
+            return Err(format!(
+                "equivalent request should reuse one trusted cache entry, got {}",
+                decision.reason_code
+            )
+            .into());
+        }
+    };
+    let hit_event = proof_cache_event(
+        &hit.decision,
+        "PearlLeopard",
+        &receipt.bead_id,
+        &hit.entry.receipt_ref.path,
+    );
+    append_log_event(&log_path, &hit_event);
+
+    let changed_request = request_for("bd-gcprh-changed", "changed");
+    let changed_receipt = receipt_for("bd-gcprh-changed", "changed", ts(50));
+    let (changed_receipt_path, changed_receipt_bytes) = write_receipt(dir.path(), &changed_receipt);
+    let changed_key = ValidationProofCacheKey::from_request_and_receipt(
+        &changed_request,
+        &changed_receipt,
+        scope(),
+    )?;
+    assert_ne!(key.hex, changed_key.hex);
+
+    let changed_lookup = store.lookup(&changed_key, ts(4))?;
+    let miss = match changed_lookup {
+        ValidationProofCacheLookup::Miss(miss) => miss,
+        ValidationProofCacheLookup::Hit(hit) => {
+            return Err(format!(
+                "changed input digest must miss before the new proof is written, reused {}",
+                hit.entry.entry_id
+            )
+            .into());
+        }
+    };
+    assert_eq!(miss.decision, ValidationProofCacheDecisionKind::Miss);
+    assert_eq!(miss.reason_code, "VPC_MISS_NO_ENTRY");
+    let miss_event = proof_cache_event(
+        &miss,
+        "PearlLeopard",
+        &changed_receipt.bead_id,
+        &changed_receipt_path,
+    );
+    append_log_event(&log_path, &miss_event);
+
+    let changed_entry = store.build_entry(
+        changed_key,
+        changed_receipt_path,
+        &changed_receipt,
+        &changed_receipt_bytes,
+        "PearlLeopard",
+        ts(5),
+    )?;
+    store.put_entry(&changed_entry)?;
+    assert_eq!(count_entry_files(dir.path()), 2);
+
+    let events = read_log_events(&log_path);
+    assert_eq!(events.len(), 2);
+    for event in &events {
+        assert_log_event_fields(event);
+    }
+    assert!(events.iter().any(|event| matches!(
+        event.get("decision").and_then(serde_json::Value::as_str),
+        Some("hit")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event.get("decision").and_then(serde_json::Value::as_str),
+        Some("miss")
+    )));
+    Ok(())
+}
+
+#[test]
+fn stale_receipt_is_reported_in_readiness_and_closeout_outputs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let stale_receipt = receipt_for("bd-gcprh-stale", "stale", ts(3));
+    let readiness_input = ValidationReadinessInput {
+        tracked_beads: vec![TrackedValidationBead::new(
+            &stale_receipt.bead_id,
+            ValidationBeadState::Closed,
+        )],
+        receipts: vec![stale_receipt.clone()],
+        ..ValidationReadinessInput::default()
+    };
+    let readiness_report =
+        build_validation_readiness_report(&readiness_input, "bd-gcprh-readiness", ts(4));
+    let readiness_human = render_validation_readiness_human(&readiness_report);
+
+    assert_eq!(
+        readiness_report.overall_status,
+        ValidationReadinessStatus::Fail
+    );
+    assert_eq!(readiness_report.summary.stale_receipt_count, 1);
+    assert!(readiness_human.contains("stale_receipts=1"));
+    assert!(readiness_human.contains("Receipt freshness failed"));
+
+    let closeout_options =
+        ValidationCloseoutOptions::new(&stale_receipt.bead_id, "bd-gcprh-closeout");
+    let closeout_report =
+        build_validation_closeout_report(&stale_receipt, &closeout_options, ts(4))?;
+    let closeout_json = render_validation_closeout_json(&closeout_report)?;
+
+    assert_eq!(closeout_report.status, ValidationCloseoutStatus::Stale);
+    assert!(
+        closeout_report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("stale validation receipt is not closeout evidence"))
+    );
+    assert!(closeout_json.contains("stale validation receipt is not closeout evidence"));
+    Ok(())
 }
 
 #[test]
@@ -724,6 +1016,8 @@ fn gc_quota_eviction_preserves_active_beads_when_possible() {
     let mut policy = quota_policy();
     policy.max_entries = 2;
     policy.active_beads = vec!["bd-active".to_string()];
+    let active_entry_path = store.entry_path(&active.cache_key);
+    let active_receipt_path = dir.path().join(&active.receipt_ref.path);
 
     let report = store
         .plan_garbage_collection(&policy, ts(4), 1_000)
@@ -742,6 +1036,8 @@ fn gc_quota_eviction_preserves_active_beads_when_possible() {
     assert!(kept_ids.contains(&active.entry_id.as_str()));
     assert!(kept_ids.contains(&fresh.entry_id.as_str()));
     assert!(removed_ids.contains(&old.entry_id.as_str()));
+    assert!(active_entry_path.exists());
+    assert!(active_receipt_path.exists());
 }
 
 #[test]
@@ -821,4 +1117,46 @@ fn deterministic_contract_fixture_loads() {
             .len(),
         1
     );
+}
+
+#[test]
+fn e2e_harness_matrix_loads_and_covers_required_cases() {
+    let matrix: serde_json::Value = serde_json::from_str(E2E_MATRIX_JSON).expect("e2e matrix json");
+    let fields = matrix["required_log_fields"]
+        .as_array()
+        .expect("required log fields")
+        .iter()
+        .map(|value| value.as_str().expect("log field string"))
+        .collect::<Vec<_>>();
+    let scenario_names = matrix["scenarios"]
+        .as_array()
+        .expect("scenarios")
+        .iter()
+        .map(|value| value["name"].as_str().expect("scenario name"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        matrix["schema_version"],
+        "franken-node/validation-proof-cache/e2e-harness-matrix/v1"
+    );
+    assert_eq!(matrix["bead_id"], "bd-gcprh");
+    assert_eq!(matrix["registered_test_target"], "validation_proof_cache");
+    assert_eq!(matrix["uses_real_temp_dirs"], true);
+    assert_eq!(matrix["uses_real_artifact_files"], true);
+    for field in REQUIRED_LOG_FIELDS {
+        assert!(fields.contains(&field), "missing log field {field}");
+    }
+    for scenario in [
+        "equivalent_concurrent_requests",
+        "changed_input_digest_miss",
+        "stale_receipt_readiness_closeout",
+        "corrupted_cache_metadata",
+        "quota_gc_preserves_active_artifacts",
+        "structured_log_contract",
+    ] {
+        assert!(
+            scenario_names.contains(&scenario),
+            "missing e2e matrix scenario {scenario}"
+        );
+    }
 }

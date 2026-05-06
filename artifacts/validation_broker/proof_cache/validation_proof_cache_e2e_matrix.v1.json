@@ -1,0 +1,106 @@
+{
+  "schema_version": "franken-node/validation-proof-cache/e2e-harness-matrix/v1",
+  "bead_id": "bd-gcprh",
+  "registered_test_target": "validation_proof_cache",
+  "uses_real_temp_dirs": true,
+  "uses_real_artifact_files": true,
+  "required_log_fields": [
+    "trace_id",
+    "cache_key",
+    "decision",
+    "reason_code",
+    "receipt_path",
+    "producer_agent",
+    "bead_id"
+  ],
+  "scenarios": [
+    {
+      "name": "equivalent_concurrent_requests",
+      "coverage": "Two equivalent validation requests race to persist the same proof cache key and converge to one stored entry.",
+      "expected_decisions": [
+        "hit"
+      ],
+      "expected_reason_codes": [
+        "VPC_HIT_FRESH",
+        "ERR_VPC_DUPLICATE_ENTRY"
+      ],
+      "artifact_paths": [
+        "receipts/bd-gcprh-equivalent.json",
+        "entries/<cache-key-prefix>/<cache-key>.json",
+        "proof-cache-events.ndjson"
+      ]
+    },
+    {
+      "name": "changed_input_digest_miss",
+      "coverage": "A changed validation input digest produces a different cache key, records a miss, and then accepts a new proof entry.",
+      "expected_decisions": [
+        "miss"
+      ],
+      "expected_reason_codes": [
+        "VPC_MISS_NO_ENTRY"
+      ],
+      "artifact_paths": [
+        "receipts/bd-gcprh-changed.json",
+        "entries/<changed-cache-key-prefix>/<changed-cache-key>.json",
+        "proof-cache-events.ndjson"
+      ]
+    },
+    {
+      "name": "stale_receipt_readiness_closeout",
+      "coverage": "A stale receipt is rejected by proof status construction and is reported in readiness and closeout output.",
+      "expected_decisions": [
+        "stale"
+      ],
+      "expected_reason_codes": [
+        "ERR_VB_STALE_RECEIPT",
+        "VPC_REJECT_STALE"
+      ],
+      "artifact_paths": [
+        "receipts/bd-gcprh-stale.json"
+      ]
+    },
+    {
+      "name": "corrupted_cache_metadata",
+      "coverage": "Corrupted or invalidated cache metadata fails closed and renders a repair-cache action.",
+      "expected_decisions": [
+        "corrupted_entry"
+      ],
+      "expected_reason_codes": [
+        "VPC_REJECT_CORRUPTED"
+      ],
+      "artifact_paths": [
+        "entries/<corrupt-cache-key-prefix>/<corrupt-cache-key>.json"
+      ]
+    },
+    {
+      "name": "quota_gc_preserves_active_artifacts",
+      "coverage": "Quota planning removes old entries from the retained set while preserving active bead entry and receipt artifacts.",
+      "expected_decisions": [
+        "quota_blocked"
+      ],
+      "expected_reason_codes": [
+        "ERR_VPC_QUOTA_BLOCKED",
+        "VPC_KEEP_FRESH"
+      ],
+      "artifact_paths": [
+        "receipts/bd-active.json",
+        "entries/<active-cache-key-prefix>/<active-cache-key>.json"
+      ]
+    },
+    {
+      "name": "structured_log_contract",
+      "coverage": "Each proof-cache harness event is newline-delimited JSON with trace_id, cache_key, decision, reason_code, receipt_path, producer_agent, and bead_id.",
+      "expected_decisions": [
+        "hit",
+        "miss"
+      ],
+      "expected_reason_codes": [
+        "VPC_HIT_FRESH",
+        "VPC_MISS_NO_ENTRY"
+      ],
+      "artifact_paths": [
+        "proof-cache-events.ndjson"
+      ]
+    }
+  ]
+}
