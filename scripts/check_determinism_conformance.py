@@ -11,19 +11,20 @@ import json
 import struct
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 HARNESS = ROOT / "tests" / "conformance" / "replica_artifact_determinism.rs"
-STUB = ROOT / "crates" / "franken-node" / "tests" / "replica_artifact_determinism.rs"
+CRATE_TEST_BRIDGE = ROOT / "crates" / "franken-node" / "tests" / "replica_artifact_determinism.rs"
 FIXTURES_DIR = ROOT / "fixtures" / "determinism"
 RESULTS_CSV = ROOT / "artifacts" / "10.14" / "determinism_conformance_results.csv"
 SPEC = ROOT / "docs" / "specs" / "section_10_14" / "bd-1iyx_contract.md"
 SEED_IMPL = ROOT / "crates" / "franken-node" / "src" / "encoding" / "deterministic_seed.rs"
 
 BEAD_ID = "bd-1iyx"
+JSON_DECODER = json.JSONDecoder()
 
 # ---- helpers ---------------------------------------------------------------
 
@@ -65,7 +66,7 @@ def derive_seed_py(domain_prefix: str, content_hash_hex: str, cfg_hash: bytes) -
 
 def validate_fixture(fixture_path: Path) -> list:
     checks = []
-    data = json.loads(fixture_path.read_text())
+    data = JSON_DECODER.decode(fixture_path.read_text())
     name = data["fixture_name"]
     ch_hex = data["content_hash_hex"]
     cfg = data["config"]
@@ -92,7 +93,7 @@ def run_checks() -> dict:
 
     # File existence
     checks.append(_file_check("test harness", HARNESS))
-    checks.append(_file_check("test stub", STUB))
+    checks.append(_file_check("crate test bridge", CRATE_TEST_BRIDGE))
     checks.append(_file_check("spec contract", SPEC))
     checks.append(_file_check("results CSV", RESULTS_CSV))
     checks.append(_file_check("seed implementation", SEED_IMPL))
@@ -173,7 +174,7 @@ def run_checks() -> dict:
     # Results CSV
     if RESULTS_CSV.is_file():
         csv_content = RESULTS_CSV.read_text()
-        lines = [l for l in csv_content.strip().split('\n') if l.strip()]
+        lines = [line for line in csv_content.strip().split('\n') if line.strip()]
         checks.append(_check(
             "CSV header present",
             "fixture_name" in lines[0] if lines else False,
@@ -185,7 +186,7 @@ def run_checks() -> dict:
             len(data_lines) >= 3,
             f"{len(data_lines)} data rows",
         ))
-        all_pass = all("true" in l for l in data_lines)
+        all_pass = all("true" in line for line in data_lines)
         checks.append(_check(
             "CSV all_identical = true for all fixtures",
             all_pass,
@@ -221,7 +222,7 @@ def self_test():
 
 
 def main():
-    logger = configure_test_logging("check_determinism_conformance")
+    configure_test_logging("check_determinism_conformance")
     result = run_checks()
     if "--json" in sys.argv:
         print(json.dumps(result, indent=2))
