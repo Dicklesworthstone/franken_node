@@ -61,6 +61,9 @@ EXPECTED_WAIVER_REFERENCE = "bd-159q"
 CONTRACT_START = "<!-- POLICY_CONTRACT_START -->"
 CONTRACT_END = "<!-- POLICY_CONTRACT_END -->"
 TIER_KEYS = ("mandatory_modules", "should_use_modules", "optional_modules")
+POLICY_HASH_SELF_REFERENCE_MARKER = (
+    "__FRANKEN_NODE_ADJACENT_SUBSTRATE_POLICY_HASH_SELF_REFERENCE_V1__"
+)
 
 
 def _check(name: str, passed: bool, detail: str) -> dict[str, Any]:
@@ -94,7 +97,7 @@ def compute_policy_hash(manifest: dict[str, Any]) -> str:
     metadata = normalized.get("metadata")
     if isinstance(metadata, dict):
         metadata = dict(metadata)
-        metadata["policy_hash"] = "__POLICY_HASH_PLACEHOLDER__"
+        metadata["policy_hash"] = POLICY_HASH_SELF_REFERENCE_MARKER
         normalized["metadata"] = metadata
     canonical = json.dumps(
         normalized,

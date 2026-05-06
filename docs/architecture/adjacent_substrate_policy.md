@@ -101,6 +101,6 @@ Required waiver metadata fields:
       "plane": "service"
     }
   ],
-  "policy_hash": "sha256:e9d6014d69180125a91d09b251a00af938b029071fb1f18060828954d83c0dc1"
+  "policy_hash": "sha256:50d65df5663a61811f3a363417e78113d69cb932895aed1797ba6f9debf3751d"
 }
 <!-- POLICY_CONTRACT_END -->

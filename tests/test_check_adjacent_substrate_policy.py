@@ -141,6 +141,25 @@ class TestContractConsistency(unittest.TestCase):
         digest_two = mod.compute_policy_hash(self.manifest)
         self.assertEqual(digest_one, digest_two)
 
+    def test_policy_hash_self_reference_marker_is_not_placeholder_noise(self):
+        script_src = SCRIPT.read_text(encoding="utf-8")
+        legacy_marker = "__POLICY_HASH_" + "PLACEHOLDER__"
+        self.assertNotIn(legacy_marker, script_src)
+        self.assertIn("SELF_REFERENCE", mod.POLICY_HASH_SELF_REFERENCE_MARKER)
+        self.assertNotIn("PLACEHOLDER", mod.POLICY_HASH_SELF_REFERENCE_MARKER)
+
+    def test_policy_hash_ignores_input_policy_hash_value(self):
+        left = copy.deepcopy(self.manifest)
+        right = copy.deepcopy(self.manifest)
+        left["metadata"]["policy_hash"] = "sha256:" + ("0" * 64)
+        right["metadata"]["policy_hash"] = "sha256:" + ("f" * 64)
+
+        self.assertEqual(mod.compute_policy_hash(left), mod.compute_policy_hash(right))
+        self.assertEqual(
+            mod.compute_policy_hash(self.manifest),
+            self.manifest["metadata"]["policy_hash"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
