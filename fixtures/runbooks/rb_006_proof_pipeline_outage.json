@@ -32,9 +32,9 @@
       "Assess backlog depth and estimated drain time"
     ],
     "repair": [
-      "Restart failed pipeline workers",
+      "Restart failed pipeline workers through the deployment supervisor for the affected environment",
       "Clear any poisoned proof requests from the queue",
-      "Scale pipeline workers if backlog exceeds capacity",
+      "Scale pipeline workers through the deployment supervisor if backlog exceeds capacity",
       "Fix underlying configuration or dependency issue"
     ],
     "verification": [
@@ -50,12 +50,12 @@
       "Escalate if pipeline cannot be restored within estimated recovery time"
     ]
   },
-  "cross_references": ["proof_pipeline", "verification_subsystem", "circuit_breaker"],
+  "cross_references": ["proof_pipeline", "verification_subsystem", "circuit_breaker", "bd-rm6ex"],
   "drill_scenario": "Simulate proof pipeline outage by pausing proof worker processes in staging. Verify that detection fires, circuit breaker activates, requests are queued (not dropped), and pipeline recovery completes after workers are resumed.",
   "command_references": [
-    "franken-node proofs queue status",
-    "franken-node proofs workers restart --all",
-    "POST /api/v1/proofs/workers/restart"
+    "franken-node ops validation-readiness --input <broker-snapshot.json> --receipt <receipt.json> --json",
+    "franken-node ops resource-governor --requested-proof-class <proof-class> --source-only-allowed --json",
+    "Manual: restart or scale proof workers through the deployment supervisor for the active environment"
   ],
   "coverage_tags": [
     "malicious-extension-detection"

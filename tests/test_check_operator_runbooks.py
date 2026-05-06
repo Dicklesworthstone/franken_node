@@ -35,6 +35,38 @@ class TestHelpers(unittest.TestCase):
         self.assertTrue(ok)
         self.assertGreaterEqual(len(checks), 3)
 
+    def test_manual_operator_reference_is_valid(self):
+        self.assertTrue(mod.is_operator_reference("Manual: restart workers through supervisor"))
+
+    def test_runtime_model_operator_reference_is_valid(self):
+        self.assertTrue(
+            mod.is_operator_reference(
+                "Runtime safe-mode model: crates/franken-node/src/runtime/safe_mode.rs"
+            )
+        )
+
+    def test_rb006_truth_rejects_unshipped_proof_surface(self):
+        checks = mod.check_command_reference_truth(
+            "RB-006",
+            [
+                "franken-node proofs queue status",
+                "POST /api/v1/proofs/workers/restart",
+            ],
+        )
+        self.assertTrue(any(not check["pass"] for check in checks))
+
+    def test_rb006_truth_accepts_shipped_ops_references(self):
+        checks = mod.check_command_reference_truth(
+            "RB-006",
+            [
+                "franken-node ops validation-readiness --input <broker-snapshot.json> --receipt <receipt.json> --json",
+                "franken-node ops resource-governor --requested-proof-class <proof-class> --source-only-allowed --json",
+                "Manual: restart or scale proof workers through the deployment supervisor for the active environment",
+                "Future dedicated proof queue/status and worker restart CLI/API surface: bd-rm6ex",
+            ],
+        )
+        self.assertTrue(all(check["pass"] for check in checks))
+
 
 class TestRepositoryChecks(unittest.TestCase):
     def test_schema_exists(self):

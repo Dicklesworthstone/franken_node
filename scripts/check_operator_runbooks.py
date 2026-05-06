@@ -61,6 +61,24 @@ REQUIRED_CROSS_REFERENCES = {
     "fencing.rs",
 }
 
+RUNBOOK_COMMAND_TRUTH_REQUIREMENTS = {
+    "RB-006": {
+        "required": [
+            "franken-node ops validation-readiness",
+            "franken-node ops resource-governor",
+            "Manual:",
+            "bd-rm6ex",
+        ],
+        "forbidden": [
+            "franken-node proofs queue",
+            "franken-node proofs workers",
+            "GET /api/v1/proofs/queue/status",
+            "POST /api/v1/proofs/workers/restart",
+            "/api/v1/proofs/workers/restart",
+        ],
+    },
+}
+
 
 @dataclass(frozen=True)
 class RunbookEntry:
@@ -106,6 +124,61 @@ def load_json(path: Path) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     return payload, {"check": f"json: {path.relative_to(ROOT)}", "pass": True, "detail": "valid"}
 
 
+def normalize_operator_reference(reference: Any) -> str:
+    text = str(reference).strip()
+    if text.startswith("-"):
+        text = text[1:].strip()
+    return text.strip("`").strip()
+
+
+def is_operator_reference(reference: Any) -> bool:
+    normalized = normalize_operator_reference(reference)
+    return (
+        "franken-node " in normalized
+        or "/api/v1/" in normalized
+        or "crates/franken-node/src/" in normalized
+        or normalized.startswith("Runtime ")
+        or normalized.startswith("Manual:")
+    )
+
+
+def markdown_command_references(text: str) -> list[str]:
+    lines: list[str] = []
+    in_section = False
+    for line in text.splitlines():
+        if line == "## Command References":
+            in_section = True
+            continue
+        if in_section and line.startswith("## "):
+            break
+        if in_section and line.strip().startswith("-"):
+            lines.append(line.strip())
+    return lines
+
+
+def check_command_reference_truth(runbook_id: str, references: list[Any]) -> list[dict[str, Any]]:
+    requirements = RUNBOOK_COMMAND_TRUTH_REQUIREMENTS.get(runbook_id)
+    if not requirements:
+        return []
+
+    refs_text = "\n".join(normalize_operator_reference(reference) for reference in references)
+    checks: list[dict[str, Any]] = []
+    missing_required = [token for token in requirements["required"] if token not in refs_text]
+    checks.append({
+        "check": f"{runbook_id}: command truth required references",
+        "pass": len(missing_required) == 0,
+        "detail": "present" if len(missing_required) == 0 else f"missing={missing_required}",
+    })
+
+    forbidden_hits = [token for token in requirements["forbidden"] if token in refs_text]
+    checks.append({
+        "check": f"{runbook_id}: command truth excludes unshipped references",
+        "pass": len(forbidden_hits) == 0,
+        "detail": "clear" if len(forbidden_hits) == 0 else f"forbidden={forbidden_hits}",
+    })
+    return checks
+
+
 def validate_markdown(entry: RunbookEntry) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     path = ROOT / entry.markdown
     checks: list[dict[str, Any]] = [check_file(path, f"markdown {entry.runbook_id}")]
@@ -128,8 +201,10 @@ def validate_markdown(entry: RunbookEntry) -> tuple[list[dict[str, Any]], dict[s
         present = section in text
         checks.append({"check": f"{entry.runbook_id}: markdown section {section}", "pass": present, "detail": "present" if present else "MISSING"})
 
-    commands_present = ("`franken-node " in text) or ("`POST /api/v1/" in text)
+    command_refs = markdown_command_references(text)
+    commands_present = any(is_operator_reference(command_ref) for command_ref in command_refs)
     checks.append({"check": f"{entry.runbook_id}: markdown command references", "pass": commands_present, "detail": "present" if commands_present else "MISSING"})
+    checks.extend(check_command_reference_truth(entry.runbook_id, command_refs))
 
     reviewed_match = re.search(r"\*\*Last Reviewed\*\*:\s*(\d{4}-\d{2}-\d{2})", text)
     reviewed_str = reviewed_match.group(1) if reviewed_match else ""
@@ -189,12 +264,17 @@ def validate_json_runbook(entry: RunbookEntry, schema: dict[str, Any]) -> tuple[
     checks.append({"check": f"{entry.runbook_id}: all response phases populated", "pass": phases_ok, "detail": "valid" if phases_ok else "missing phases"})
 
     command_refs = payload.get("command_references", [])
-    command_refs_ok = isinstance(command_refs, list) and len(command_refs) > 0 and all(("franken-node" in cmd or "/api/v1/" in cmd) for cmd in command_refs)
+    command_refs_ok = isinstance(command_refs, list) and len(command_refs) > 0 and all(is_operator_reference(cmd) for cmd in command_refs)
     checks.append({
         "check": f"{entry.runbook_id}: explicit command/API references",
         "pass": command_refs_ok,
         "detail": f"count={len(command_refs) if isinstance(command_refs, list) else 0}",
     })
+    cross_references = payload.get("cross_references", [])
+    truth_refs: list[Any] = list(command_refs) if isinstance(command_refs, list) else []
+    if isinstance(cross_references, list):
+        truth_refs.extend(cross_references)
+    checks.extend(check_command_reference_truth(entry.runbook_id, truth_refs))
 
     coverage_tags = payload.get("coverage_tags", [])
     coverage_ok = isinstance(coverage_tags, list) and len(coverage_tags) > 0
@@ -220,7 +300,7 @@ def validate_json_runbook(entry: RunbookEntry, schema: dict[str, Any]) -> tuple[
     })
 
     meta["coverage_tags"] = coverage_tags if isinstance(coverage_tags, list) else []
-    meta["cross_references"] = payload.get("cross_references", []) if isinstance(payload.get("cross_references", []), list) else []
+    meta["cross_references"] = cross_references if isinstance(cross_references, list) else []
     meta["last_reviewed"] = reviewed_str
 
     return checks, meta

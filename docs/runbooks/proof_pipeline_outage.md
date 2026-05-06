@@ -36,9 +36,9 @@
 
 ## Repair
 
-1. Restart failed pipeline workers.
+1. Restart failed pipeline workers through the deployment supervisor for the affected environment.
 2. Clear any poisoned proof requests from the queue.
-3. Scale pipeline workers if backlog exceeds capacity.
+3. Scale pipeline workers through the deployment supervisor if backlog exceeds capacity.
 4. Fix underlying configuration or dependency issue.
 
 ## Verification
@@ -63,9 +63,10 @@ Verify that detection fires, circuit breaker activates, requests are queued
 
 ## Command References
 
-- `GET /api/v1/proofs/queue/status` (CLI proofs commands not yet implemented)
-- `POST /api/v1/proofs/workers/restart --data '{"scope": "all"}'`
-- `POST /api/v1/proofs/workers/restart`
+- `franken-node ops validation-readiness --input <broker-snapshot.json> --receipt <receipt.json> --json`
+- `franken-node ops resource-governor --requested-proof-class <proof-class> --source-only-allowed --json`
+- Manual: restart or scale proof workers through the deployment supervisor for the active environment.
+- Future dedicated proof queue/status and worker restart CLI/API surface: bd-rm6ex.
 
 ## Cross-References
 
