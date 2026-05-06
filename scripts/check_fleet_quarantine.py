@@ -23,6 +23,11 @@ SPEC_FILE = ROOT / "docs/specs/section_10_8/bd-tg2_contract.md"
 POLICY_FILE = ROOT / "docs/policy/fleet_quarantine_operations.md"
 EVIDENCE_FILE = ROOT / "artifacts/section_10_8/bd-tg2/verification_evidence.json"
 SUMMARY_FILE = ROOT / "artifacts/section_10_8/bd-tg2/verification_summary.md"
+E2E_TEST_FILE = ROOT / "crates/franken-node/tests/fleet_quarantine_e2e_full.rs"
+STATE_MACHINE_TEST_FILE = ROOT / "crates/franken-node/tests/fleet_quarantine_state_machine_conformance.rs"
+STATE_MACHINE_FIXTURE_FILE = ROOT / "crates/franken-node/tests/fixtures/fleet_quarantine_state_machine_vectors.json"
+ROLLBACK_RECEIPT_TEST_FILE = ROOT / "crates/franken-node/tests/fleet_quarantine_rollback_receipt.rs"
+METAMORPHIC_TEST_FILE = ROOT / "crates/franken-node/tests/fleet_quarantine_metamorphic.rs"
 
 # ── Required elements ──────────────────────────────────────────────────────
 
@@ -108,6 +113,80 @@ REQUIRED_SPEC_SECTIONS = [
     "Acceptance Criteria",
 ]
 
+REAL_EVIDENCE_REQUIREMENTS = [
+    (
+        "real evidence: quarantine-release-reconcile E2E",
+        E2E_TEST_FILE,
+        [
+            "fn quarantine_release_reconcile_e2e_persists_real_state_and_jsonl_evidence",
+            ".quarantine(",
+            ".release(",
+            ".reconcile(",
+            "FileFleetTransport",
+            "read_shared_state",
+            "verify_decision_receipt_signature",
+            "\"state_snapshot\"",
+        ],
+    ),
+    (
+        "real evidence: handler persistence failure",
+        E2E_TEST_FILE,
+        [
+            "fn quarantine_handler_reports_internal_error_for_broken_transport_persistence",
+            "handle_quarantine",
+            "FLEET_INTERNAL",
+            "expect_err",
+        ],
+    ),
+    (
+        "real evidence: state-machine vectors use manager",
+        STATE_MACHINE_TEST_FILE,
+        [
+            "include_str!(\"fixtures/fleet_quarantine_state_machine_vectors.json\")",
+            "fn fleet_quarantine_state_machine_vectors_match_authoritative_manager",
+            "manager.quarantine(",
+            "manager.reconcile(",
+            "manager.release(",
+            "manager.revoke(",
+        ],
+    ),
+    (
+        "real evidence: state-machine fixture covers required transitions",
+        STATE_MACHINE_FIXTURE_FILE,
+        [
+            "\"schema_version\": \"franken-node/fleet-quarantine-state-machine-conformance/v1\"",
+            "\"quarantine_transition\"",
+            "\"reconcile_transition\"",
+            "\"release_transition\"",
+            "\"expired_rollback_receipt_boundary\"",
+            "\"emergency_revocation_escalation\"",
+            "\"escalated_release_transition\"",
+        ],
+    ),
+    (
+        "real evidence: rollback receipt boundaries",
+        ROLLBACK_RECEIPT_TEST_FILE,
+        [
+            "fn quarantine_missing_decision_signing_material_fails_before_state_mutation",
+            "fn release_missing_decision_signing_material_fails_before_state_mutation",
+            "fn rollback_receipt_exact_ttl_boundary_fails_closed",
+            "FLEET_ROLLBACK_UNVERIFIED",
+            "verify_convergence_rollback_receipt_at_for_tests",
+        ],
+    ),
+    (
+        "real evidence: file-backed metamorphic inversion",
+        METAMORPHIC_TEST_FILE,
+        [
+            "FileFleetTransport",
+            "fn quarantine_release_restores_original_state_simple",
+            "fn quarantine_release_inversion_property_based",
+            ".quarantine(",
+            ".release(",
+        ],
+    ),
+]
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -123,6 +202,10 @@ def _read(path: Path) -> str:
 
 def _check(name: str, ok: bool, detail: str = "") -> dict:
     return {"check": name, "pass": ok, "detail": detail or ("ok" if ok else "FAIL")}
+
+
+def _missing_patterns(src: str, patterns: list[str]) -> list[str]:
+    return [pattern for pattern in patterns if pattern not in src]
 
 
 # ── Check groups ───────────────────────────────────────────────────────────
@@ -261,40 +344,14 @@ def check_acceptance_criteria() -> list:
     return checks
 
 
-def simulate_fleet_operations() -> dict:
-    results = {}
-
-    # Simulate quarantine flow
-    incidents = []
-    for i in range(3):
-        incident = {"id": f"inc-{i}", "zone": f"zone-{i % 2}", "status": "active"}
-        incidents.append(incident)
-    results["incidents_created"] = len(incidents)
-
-    # Simulate release
-    incidents[0]["status"] = "released"
-    active = sum(1 for inc in incidents if inc["status"] == "active")
-    results["active_after_release"] = active
-
-    # Simulate convergence
-    convergence = {"converged": 8, "total": 10, "pct": 80}
-    results["convergence_progress"] = convergence["pct"]
-
-    # Simulate reconcile
-    released = [inc for inc in incidents if inc["status"] == "released"]
-    results["cleaned_on_reconcile"] = len(released)
-
-    # Receipt determinism
-    payload = "op-1:admin:zone-1:2026-01-01"
-    h1 = _sha256_hex(payload.encode())
-    h2 = _sha256_hex(payload.encode())
-    results["receipt_hash_deterministic"] = h1 == h2
-
-    # Multi-zone
-    zones = set(inc["zone"] for inc in incidents)
-    results["zone_count"] = len(zones)
-
-    return results
+def check_real_fleet_evidence() -> list:
+    checks = []
+    for name, path, patterns in REAL_EVIDENCE_REQUIREMENTS:
+        src = _read(path)
+        missing = _missing_patterns(src, patterns)
+        detail = str(path) if not missing else f"{path}: missing {', '.join(missing[:3])}"
+        checks.append(_check(name, path.exists() and not missing, detail))
+    return checks
 
 
 # ── Main check runner ──────────────────────────────────────────────────────
@@ -314,14 +371,7 @@ def run_checks() -> dict:
     checks.extend(check_zone_scope())
     checks.extend(check_convergence())
     checks.extend(check_acceptance_criteria())
-
-    sim = simulate_fleet_operations()
-    checks.append(_check("sim: incidents created", sim["incidents_created"] == 3))
-    checks.append(_check("sim: active after release", sim["active_after_release"] == 2))
-    checks.append(_check("sim: convergence progress", sim["convergence_progress"] == 80))
-    checks.append(_check("sim: cleaned on reconcile", sim["cleaned_on_reconcile"] == 1))
-    checks.append(_check("sim: receipt hash deterministic", sim["receipt_hash_deterministic"]))
-    checks.append(_check("sim: multi-zone", sim["zone_count"] == 2))
+    checks.extend(check_real_fleet_evidence())
 
     passed = sum(1 for c in checks if c["pass"])
     failed = sum(1 for c in checks if not c["pass"])
@@ -350,14 +400,21 @@ def self_test() -> tuple:
     checks.append(_check("REQUIRED_ERROR_CODES count", len(REQUIRED_ERROR_CODES) == 6))
     checks.append(_check("REQUIRED_INVARIANTS count", len(REQUIRED_INVARIANTS) == 5))
     checks.append(_check("REQUIRED_FUNCTIONS count", len(REQUIRED_FUNCTIONS) >= 18))
-
-    sim = simulate_fleet_operations()
-    checks.append(_check("simulation returns dict", isinstance(sim, dict)))
+    checks.append(_check("REAL_EVIDENCE_REQUIREMENTS count", len(REAL_EVIDENCE_REQUIREMENTS) >= 6))
 
     result = run_checks()
     checks.append(_check("run_checks has bead_id", result.get("bead_id") == "bd-tg2"))
     checks.append(_check("run_checks has section", result.get("section") == "10.8"))
     checks.append(_check("run_checks has verdict", result.get("verdict") in ("PASS", "FAIL")))
+    checks.append(_check(
+        "run_checks includes real evidence checks",
+        any(c["check"].startswith("real evidence:") for c in result["checks"]),
+    ))
+    legacy_prefix = "sim" + ":"
+    checks.append(_check(
+        "run_checks has no synthetic fleet checks",
+        all(not c["check"].startswith(legacy_prefix) for c in result["checks"]),
+    ))
 
     h1 = _sha256_hex(b"test")
     h2 = _sha256_hex(b"test")

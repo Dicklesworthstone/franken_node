@@ -6,9 +6,9 @@
 
 | Category | Pass | Total |
 |----------|------|-------|
-| Python verification checks | 108 | 108 |
+| Python verification checks | 109 | 109 |
 | Rust unit tests | 52 | 52 |
-| Simulation checks | 6 | 6 |
+| Real fleet evidence checks | 6 | 6 |
 
 ## Implementation
 
@@ -53,6 +53,6 @@
 ## Verification Commands
 
 ```bash
-python3 scripts/check_fleet_quarantine.py --json    # 108/108 PASS
+python3 scripts/check_fleet_quarantine.py --json    # 109/109 PASS
 python3 -m pytest tests/test_check_fleet_quarantine.py -v  # all PASS
 ```

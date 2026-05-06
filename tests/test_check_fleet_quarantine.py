@@ -31,30 +31,25 @@ class TestConstants(unittest.TestCase):
         self.assertGreaterEqual(len(mod.REQUIRED_FUNCTIONS), 18)
 
 
-class TestSimulation(unittest.TestCase):
-    def test_incidents_created(self):
-        result = mod.simulate_fleet_operations()
-        self.assertEqual(result["incidents_created"], 3)
+class TestRealEvidence(unittest.TestCase):
+    def test_real_evidence_requirements_present(self):
+        self.assertGreaterEqual(len(mod.REAL_EVIDENCE_REQUIREMENTS), 6)
 
-    def test_active_after_release(self):
-        result = mod.simulate_fleet_operations()
-        self.assertEqual(result["active_after_release"], 2)
+    def test_real_evidence_checks_pass(self):
+        checks = mod.check_real_fleet_evidence()
+        self.assertGreaterEqual(len(checks), 6)
+        self.assertTrue(all(c["pass"] for c in checks), checks)
 
-    def test_convergence_progress(self):
-        result = mod.simulate_fleet_operations()
-        self.assertEqual(result["convergence_progress"], 80)
+    def test_no_legacy_helper_exported(self):
+        legacy_helper = "simulate_" + "fleet_operations"
+        self.assertFalse(hasattr(mod, legacy_helper))
 
-    def test_cleaned_on_reconcile(self):
-        result = mod.simulate_fleet_operations()
-        self.assertEqual(result["cleaned_on_reconcile"], 1)
-
-    def test_receipt_hash_deterministic(self):
-        result = mod.simulate_fleet_operations()
-        self.assertTrue(result["receipt_hash_deterministic"])
-
-    def test_multi_zone(self):
-        result = mod.simulate_fleet_operations()
-        self.assertEqual(result["zone_count"], 2)
+    def test_run_checks_has_real_evidence_not_legacy_checks(self):
+        result = mod.run_checks()
+        check_names = [c["check"] for c in result["checks"]]
+        legacy_prefix = "sim" + ":"
+        self.assertTrue(any(name.startswith("real evidence:") for name in check_names))
+        self.assertFalse(any(name.startswith(legacy_prefix) for name in check_names))
 
 
 class TestRunChecks(unittest.TestCase):
@@ -98,8 +93,8 @@ class TestSelfTest(unittest.TestCase):
 class TestJsonOutput(unittest.TestCase):
     def test_serializable(self):
         result = mod.run_checks()
-        parsed = json.loads(json.dumps(result))
-        self.assertEqual(parsed["bead_id"], "bd-tg2")
+        serialized = json.dumps(result)
+        self.assertIn('"bead_id": "bd-tg2"', serialized)
 
     def test_all_fields(self):
         result = mod.run_checks()

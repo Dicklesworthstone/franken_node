@@ -3,8 +3,8 @@
   "title": "Fleet control API for quarantine/revocation operations",
   "section": "10.8",
   "verdict": "PASS",
-  "total": 108,
-  "passed": 108,
+  "total": 109,
+  "passed": 109,
   "failed": 0,
   "checks": [
     {
@@ -518,34 +518,34 @@
       "detail": "ok"
     },
     {
-      "check": "sim: incidents created",
+      "check": "real evidence: quarantine-release-reconcile E2E",
       "pass": true,
-      "detail": "ok"
+      "detail": "/data/projects/franken_node/crates/franken-node/tests/fleet_quarantine_e2e_full.rs"
     },
     {
-      "check": "sim: active after release",
+      "check": "real evidence: handler persistence failure",
       "pass": true,
-      "detail": "ok"
+      "detail": "/data/projects/franken_node/crates/franken-node/tests/fleet_quarantine_e2e_full.rs"
     },
     {
-      "check": "sim: convergence progress",
+      "check": "real evidence: state-machine vectors use manager",
       "pass": true,
-      "detail": "ok"
+      "detail": "/data/projects/franken_node/crates/franken-node/tests/fleet_quarantine_state_machine_conformance.rs"
     },
     {
-      "check": "sim: cleaned on reconcile",
+      "check": "real evidence: state-machine fixture covers required transitions",
       "pass": true,
-      "detail": "ok"
+      "detail": "/data/projects/franken_node/crates/franken-node/tests/fixtures/fleet_quarantine_state_machine_vectors.json"
     },
     {
-      "check": "sim: receipt hash deterministic",
+      "check": "real evidence: rollback receipt boundaries",
       "pass": true,
-      "detail": "ok"
+      "detail": "/data/projects/franken_node/crates/franken-node/tests/fleet_quarantine_rollback_receipt.rs"
     },
     {
-      "check": "sim: multi-zone",
+      "check": "real evidence: file-backed metamorphic inversion",
       "pass": true,
-      "detail": "ok"
+      "detail": "/data/projects/franken_node/crates/franken-node/tests/fleet_quarantine_metamorphic.rs"
     }
   ]
 }

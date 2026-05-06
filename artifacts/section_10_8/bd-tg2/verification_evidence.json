@@ -11,8 +11,8 @@
     "python_tests": "tests/test_check_fleet_quarantine.py"
   },
   "metrics": {
-    "python_checks_total": 108,
-    "python_checks_passing": 108,
+    "python_checks_total": 109,
+    "python_checks_passing": 109,
     "python_checks_failing": 0,
     "rust_unit_tests": 52,
     "structs_verified": 14,
@@ -21,7 +21,7 @@
     "error_codes_verified": 5,
     "invariants_verified": 5,
     "functions_verified": 18,
-    "simulation_checks": 6,
+    "real_evidence_checks": 6,
     "acceptance_criteria_verified": 8
   },
   "acceptance_criteria": {
