@@ -21,6 +21,12 @@ use std::path::{Path, PathBuf};
 pub const WORK_KEY_SCHEMA_VERSION: &str = "franken-node/validation-proof-coalescer/work-key/v1";
 pub const LEASE_SCHEMA_VERSION: &str = "franken-node/validation-proof-coalescer/lease/v1";
 pub const DECISION_SCHEMA_VERSION: &str = "franken-node/validation-proof-coalescer/decision/v1";
+pub const CAPACITY_SNAPSHOT_SCHEMA_VERSION: &str =
+    "franken-node/validation-proof-coalescer/rch-capacity-snapshot/v1";
+pub const ADMISSION_POLICY_SCHEMA_VERSION: &str =
+    "franken-node/validation-proof-coalescer/admission-policy/v1";
+pub const ADMISSION_DECISION_SCHEMA_VERSION: &str =
+    "franken-node/validation-proof-coalescer/admission-decision/v1";
 const SHA256_HEX_LEN: usize = 64;
 
 pub mod error_codes {
@@ -36,6 +42,7 @@ pub mod error_codes {
     pub const ERR_VPCO_CAPACITY_REJECTED: &str = "ERR_VPCO_CAPACITY_REJECTED";
     pub const ERR_VPCO_CORRUPTED_STATE: &str = "ERR_VPCO_CORRUPTED_STATE";
     pub const ERR_VPCO_MALFORMED_DECISION: &str = "ERR_VPCO_MALFORMED_DECISION";
+    pub const ERR_VPCO_MALFORMED_POLICY: &str = "ERR_VPCO_MALFORMED_POLICY";
     pub const ERR_VPCO_DUPLICATE_LEASE: &str = "ERR_VPCO_DUPLICATE_LEASE";
 }
 
@@ -61,6 +68,244 @@ pub mod reason_codes {
     pub const REJECT_DIRTY_POLICY: &str = "VPCO_REJECT_DIRTY_POLICY";
     pub const REJECT_CAPACITY: &str = "VPCO_REJECT_CAPACITY";
     pub const REPAIR_CORRUPTED: &str = "VPCO_REPAIR_CORRUPTED";
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationProofPriority {
+    Low,
+    Normal,
+    High,
+}
+
+impl ValidationProofPriority {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationProofTargetDirClass {
+    OffRepo,
+    Tmp,
+    RepoLocal,
+    Unknown,
+}
+
+impl ValidationProofTargetDirClass {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OffRepo => "off_repo",
+            Self::Tmp => "tmp",
+            Self::RepoLocal => "repo_local",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationProofCapacityMode {
+    ObserveOnly,
+    QueueWhenBusy,
+    RejectWhenBusy,
+}
+
+impl ValidationProofCapacityMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ObserveOnly => "observe_only",
+            Self::QueueWhenBusy => "queue_when_busy",
+            Self::RejectWhenBusy => "reject_when_busy",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofRchWorkerCapacity {
+    pub worker_id: String,
+    pub total_slots: u16,
+    pub available_slots: u16,
+    pub queue_depth: u16,
+    pub degraded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofRchCapacitySnapshot {
+    pub schema_version: String,
+    pub observed_at: DateTime<Utc>,
+    pub workers: Vec<ValidationProofRchWorkerCapacity>,
+    pub queue_depth: u16,
+    pub oldest_queued_age_seconds: Option<u64>,
+    pub disk_pressure_warning: bool,
+}
+
+impl ValidationProofRchCapacitySnapshot {
+    #[must_use]
+    pub fn available_worker_slots(&self) -> u16 {
+        self.workers.iter().fold(0_u16, |total, worker| {
+            total.saturating_add(worker.available_slots)
+        })
+    }
+
+    #[must_use]
+    pub fn observed_queue_depth(&self) -> u16 {
+        self.workers.iter().fold(self.queue_depth, |total, worker| {
+            total.saturating_add(worker.queue_depth)
+        })
+    }
+
+    #[must_use]
+    pub fn has_degraded_workers(&self) -> bool {
+        self.workers.iter().any(|worker| worker.degraded)
+    }
+}
+
+pub trait ValidationProofRchCapacityProbe {
+    fn sample_capacity(
+        &self,
+    ) -> Result<ValidationProofRchCapacitySnapshot, ValidationProofCoalescerError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct StaticValidationProofRchCapacityProbe {
+    snapshot: ValidationProofRchCapacitySnapshot,
+}
+
+impl StaticValidationProofRchCapacityProbe {
+    #[must_use]
+    pub fn new(snapshot: ValidationProofRchCapacitySnapshot) -> Self {
+        Self { snapshot }
+    }
+}
+
+impl ValidationProofRchCapacityProbe for StaticValidationProofRchCapacityProbe {
+    fn sample_capacity(
+        &self,
+    ) -> Result<ValidationProofRchCapacitySnapshot, ValidationProofCoalescerError> {
+        Ok(self.snapshot.clone())
+    }
+}
+
+pub fn sample_validation_proof_capacity(
+    probe: &impl ValidationProofRchCapacityProbe,
+) -> Result<ValidationProofRchCapacitySnapshot, ValidationProofCoalescerError> {
+    probe.sample_capacity()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofAdmissionThreshold {
+    pub min_available_worker_slots: u16,
+    pub max_queue_depth: u16,
+    pub max_oldest_queue_age_seconds: u64,
+    pub min_timeout_budget_seconds: u64,
+    pub allow_degraded_workers: bool,
+    pub reject_on_disk_pressure: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofAdmissionPolicy {
+    pub schema_version: String,
+    pub policy_id: String,
+    pub capacity_mode: ValidationProofCapacityMode,
+    pub dirty_state_policy: DirtyStatePolicy,
+    pub low_priority: ValidationProofAdmissionThreshold,
+    pub normal_priority: ValidationProofAdmissionThreshold,
+    pub high_priority: ValidationProofAdmissionThreshold,
+}
+
+impl ValidationProofAdmissionPolicy {
+    #[must_use]
+    pub fn default_policy(policy_id: impl Into<String>) -> Self {
+        Self {
+            schema_version: ADMISSION_POLICY_SCHEMA_VERSION.to_string(),
+            policy_id: policy_id.into(),
+            capacity_mode: ValidationProofCapacityMode::QueueWhenBusy,
+            dirty_state_policy: DirtyStatePolicy::CleanRequired,
+            low_priority: ValidationProofAdmissionThreshold {
+                min_available_worker_slots: 3,
+                max_queue_depth: 4,
+                max_oldest_queue_age_seconds: 300,
+                min_timeout_budget_seconds: 900,
+                allow_degraded_workers: false,
+                reject_on_disk_pressure: true,
+            },
+            normal_priority: ValidationProofAdmissionThreshold {
+                min_available_worker_slots: 2,
+                max_queue_depth: 8,
+                max_oldest_queue_age_seconds: 600,
+                min_timeout_budget_seconds: 600,
+                allow_degraded_workers: false,
+                reject_on_disk_pressure: true,
+            },
+            high_priority: ValidationProofAdmissionThreshold {
+                min_available_worker_slots: 1,
+                max_queue_depth: 16,
+                max_oldest_queue_age_seconds: 900,
+                min_timeout_budget_seconds: 300,
+                allow_degraded_workers: true,
+                reject_on_disk_pressure: false,
+            },
+        }
+    }
+
+    #[must_use]
+    pub const fn threshold_for(
+        &self,
+        priority: ValidationProofPriority,
+    ) -> ValidationProofAdmissionThreshold {
+        match priority {
+            ValidationProofPriority::Low => self.low_priority,
+            ValidationProofPriority::Normal => self.normal_priority,
+            ValidationProofPriority::High => self.high_priority,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofAdmissionInput {
+    pub trace_id: String,
+    pub capacity_snapshot: ValidationProofRchCapacitySnapshot,
+    pub proof_priority: ValidationProofPriority,
+    pub bead_priority: u8,
+    pub dirty_worktree: bool,
+    pub dirty_state_policy: DirtyStatePolicy,
+    pub target_dir_class: ValidationProofTargetDirClass,
+    pub timeout_budget_seconds: u64,
+    pub current_queue_depth: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofAdmissionDiagnostics {
+    pub trace_id: String,
+    pub message: String,
+    pub fail_closed: bool,
+    pub event_code: String,
+    pub effective_priority: ValidationProofPriority,
+    pub available_worker_slots: u16,
+    pub observed_queue_depth: u16,
+    pub oldest_queued_age_seconds: Option<u64>,
+    pub disk_pressure_warning: bool,
+    pub target_dir_class: ValidationProofTargetDirClass,
+    pub timeout_budget_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofAdmissionDecision {
+    pub schema_version: String,
+    pub policy_id: String,
+    pub decision: ValidationProofCoalescerDecisionKind,
+    pub reason_code: String,
+    pub required_action: ValidationProofCoalescerRequiredAction,
+    pub diagnostics: ValidationProofAdmissionDiagnostics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -861,6 +1106,250 @@ impl ValidationProofCoalescerError {
     }
 }
 
+pub fn decide_validation_proof_admission(
+    policy: &ValidationProofAdmissionPolicy,
+    input: &ValidationProofAdmissionInput,
+) -> Result<ValidationProofAdmissionDecision, ValidationProofCoalescerError> {
+    validate_admission_policy(policy)?;
+    validate_admission_input(input)?;
+
+    let effective_priority =
+        effective_admission_priority(input.proof_priority, input.bead_priority);
+    let threshold = policy.threshold_for(effective_priority);
+    let available_worker_slots = input.capacity_snapshot.available_worker_slots();
+    let observed_queue_depth = input
+        .capacity_snapshot
+        .observed_queue_depth()
+        .saturating_add(input.current_queue_depth);
+
+    if input.dirty_worktree && matches!(input.dirty_state_policy, DirtyStatePolicy::CleanRequired) {
+        return Ok(admission_decision(AdmissionDecisionInput {
+            policy_id: policy.policy_id.clone(),
+            kind: ValidationProofCoalescerDecisionKind::RejectDirtyPolicy,
+            reason_code: reason_codes::REJECT_DIRTY_POLICY,
+            required_action: ValidationProofCoalescerRequiredAction::FailClosed,
+            event_code: event_codes::DIRTY_POLICY_REJECTED,
+            fail_closed: true,
+            message: "dirty worktree rejected by clean-required validation admission policy",
+            effective_priority,
+            input,
+            available_worker_slots,
+            observed_queue_depth,
+        }));
+    }
+
+    if observed_queue_depth >= threshold.max_queue_depth {
+        return Ok(admission_decision(AdmissionDecisionInput {
+            policy_id: policy.policy_id.clone(),
+            kind: ValidationProofCoalescerDecisionKind::RejectCapacity,
+            reason_code: reason_codes::REJECT_CAPACITY,
+            required_action: ValidationProofCoalescerRequiredAction::FailClosed,
+            event_code: event_codes::CAPACITY_REJECTED,
+            fail_closed: true,
+            message: "validation admission rejected to bound proof queue growth",
+            effective_priority,
+            input,
+            available_worker_slots,
+            observed_queue_depth,
+        }));
+    }
+
+    if input.capacity_snapshot.disk_pressure_warning && threshold.reject_on_disk_pressure {
+        return Ok(admission_decision(AdmissionDecisionInput {
+            policy_id: policy.policy_id.clone(),
+            kind: ValidationProofCoalescerDecisionKind::RejectCapacity,
+            reason_code: reason_codes::REJECT_CAPACITY,
+            required_action: ValidationProofCoalescerRequiredAction::FailClosed,
+            event_code: event_codes::CAPACITY_REJECTED,
+            fail_closed: true,
+            message: "validation admission rejected because capacity snapshot reports disk pressure",
+            effective_priority,
+            input,
+            available_worker_slots,
+            observed_queue_depth,
+        }));
+    }
+
+    if input
+        .capacity_snapshot
+        .oldest_queued_age_seconds
+        .is_some_and(|age| age > threshold.max_oldest_queue_age_seconds)
+    {
+        return Ok(admission_decision(AdmissionDecisionInput {
+            policy_id: policy.policy_id.clone(),
+            kind: ValidationProofCoalescerDecisionKind::RejectCapacity,
+            reason_code: reason_codes::REJECT_CAPACITY,
+            required_action: ValidationProofCoalescerRequiredAction::FailClosed,
+            event_code: event_codes::CAPACITY_REJECTED,
+            fail_closed: true,
+            message: "validation admission rejected because RCH queue age is stale",
+            effective_priority,
+            input,
+            available_worker_slots,
+            observed_queue_depth,
+        }));
+    }
+
+    let capacity_is_busy = available_worker_slots < threshold.min_available_worker_slots
+        || (!threshold.allow_degraded_workers && input.capacity_snapshot.has_degraded_workers())
+        || input.timeout_budget_seconds < threshold.min_timeout_budget_seconds;
+
+    if capacity_is_busy {
+        match policy.capacity_mode {
+            ValidationProofCapacityMode::ObserveOnly => {}
+            ValidationProofCapacityMode::QueueWhenBusy => {
+                return Ok(admission_decision(AdmissionDecisionInput {
+                    policy_id: policy.policy_id.clone(),
+                    kind: ValidationProofCoalescerDecisionKind::QueuedByPolicy,
+                    reason_code: reason_codes::QUEUE_CAPACITY,
+                    required_action: ValidationProofCoalescerRequiredAction::QueueValidation,
+                    event_code: event_codes::QUEUED_BY_CAPACITY,
+                    fail_closed: false,
+                    message: "validation proof queued until RCH capacity is available",
+                    effective_priority,
+                    input,
+                    available_worker_slots,
+                    observed_queue_depth,
+                }));
+            }
+            ValidationProofCapacityMode::RejectWhenBusy => {
+                return Ok(admission_decision(AdmissionDecisionInput {
+                    policy_id: policy.policy_id.clone(),
+                    kind: ValidationProofCoalescerDecisionKind::RejectCapacity,
+                    reason_code: reason_codes::REJECT_CAPACITY,
+                    required_action: ValidationProofCoalescerRequiredAction::FailClosed,
+                    event_code: event_codes::CAPACITY_REJECTED,
+                    fail_closed: true,
+                    message: "validation admission rejected because RCH capacity is below threshold",
+                    effective_priority,
+                    input,
+                    available_worker_slots,
+                    observed_queue_depth,
+                }));
+            }
+        }
+    }
+
+    Ok(admission_decision(AdmissionDecisionInput {
+        policy_id: policy.policy_id.clone(),
+        kind: ValidationProofCoalescerDecisionKind::RunLocallyViaRch,
+        reason_code: reason_codes::RUN_NO_LEASE,
+        required_action: ValidationProofCoalescerRequiredAction::StartRchValidation,
+        event_code: event_codes::PRODUCER_ADMITTED,
+        fail_closed: false,
+        message: "validation admission accepted producer for RCH execution",
+        effective_priority,
+        input,
+        available_worker_slots,
+        observed_queue_depth,
+    }))
+}
+
+struct AdmissionDecisionInput<'a> {
+    policy_id: String,
+    kind: ValidationProofCoalescerDecisionKind,
+    reason_code: &'static str,
+    required_action: ValidationProofCoalescerRequiredAction,
+    event_code: &'static str,
+    fail_closed: bool,
+    message: &'static str,
+    effective_priority: ValidationProofPriority,
+    input: &'a ValidationProofAdmissionInput,
+    available_worker_slots: u16,
+    observed_queue_depth: u16,
+}
+
+fn admission_decision(input: AdmissionDecisionInput<'_>) -> ValidationProofAdmissionDecision {
+    ValidationProofAdmissionDecision {
+        schema_version: ADMISSION_DECISION_SCHEMA_VERSION.to_string(),
+        policy_id: input.policy_id,
+        decision: input.kind,
+        reason_code: input.reason_code.to_string(),
+        required_action: input.required_action,
+        diagnostics: ValidationProofAdmissionDiagnostics {
+            trace_id: input.input.trace_id.clone(),
+            message: input.message.to_string(),
+            fail_closed: input.fail_closed,
+            event_code: input.event_code.to_string(),
+            effective_priority: input.effective_priority,
+            available_worker_slots: input.available_worker_slots,
+            observed_queue_depth: input.observed_queue_depth,
+            oldest_queued_age_seconds: input.input.capacity_snapshot.oldest_queued_age_seconds,
+            disk_pressure_warning: input.input.capacity_snapshot.disk_pressure_warning,
+            target_dir_class: input.input.target_dir_class,
+            timeout_budget_seconds: input.input.timeout_budget_seconds,
+        },
+    }
+}
+
+fn effective_admission_priority(
+    proof_priority: ValidationProofPriority,
+    bead_priority: u8,
+) -> ValidationProofPriority {
+    let inherited = match bead_priority {
+        0 | 1 => ValidationProofPriority::High,
+        2 => ValidationProofPriority::Normal,
+        _ => ValidationProofPriority::Low,
+    };
+    proof_priority.max(inherited)
+}
+
+fn validate_admission_policy(
+    policy: &ValidationProofAdmissionPolicy,
+) -> Result<(), ValidationProofCoalescerError> {
+    if !string_eq(&policy.schema_version, ADMISSION_POLICY_SCHEMA_VERSION)
+        || policy.policy_id.trim().is_empty()
+    {
+        return Err(ValidationProofCoalescerError::contract(
+            error_codes::ERR_VPCO_MALFORMED_POLICY,
+            "validation proof admission policy identity is malformed",
+        ));
+    }
+    for threshold in [
+        policy.low_priority,
+        policy.normal_priority,
+        policy.high_priority,
+    ] {
+        if threshold.max_queue_depth == 0
+            || threshold.max_oldest_queue_age_seconds == 0
+            || threshold.min_timeout_budget_seconds == 0
+        {
+            return Err(ValidationProofCoalescerError::contract(
+                error_codes::ERR_VPCO_MALFORMED_POLICY,
+                "validation proof admission thresholds must be non-zero where they bound growth",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_admission_input(
+    input: &ValidationProofAdmissionInput,
+) -> Result<(), ValidationProofCoalescerError> {
+    if input.trace_id.trim().is_empty()
+        || !string_eq(
+            &input.capacity_snapshot.schema_version,
+            CAPACITY_SNAPSHOT_SCHEMA_VERSION,
+        )
+        || input.capacity_snapshot.workers.is_empty()
+        || input.timeout_budget_seconds == 0
+    {
+        return Err(ValidationProofCoalescerError::contract(
+            error_codes::ERR_VPCO_MALFORMED_POLICY,
+            "validation proof admission input is malformed",
+        ));
+    }
+    if input.capacity_snapshot.workers.iter().any(|worker| {
+        worker.worker_id.trim().is_empty() || worker.available_slots > worker.total_slots
+    }) {
+        return Err(ValidationProofCoalescerError::contract(
+            error_codes::ERR_VPCO_MALFORMED_POLICY,
+            "validation proof RCH worker capacity is malformed",
+        ));
+    }
+    Ok(())
+}
+
 struct DecisionInput {
     kind: ValidationProofCoalescerDecisionKind,
     reason_code: &'static str,
@@ -1332,6 +1821,52 @@ mod tests {
         }
     }
 
+    fn capacity_snapshot(
+        available_slots: u16,
+        queue_depth: u16,
+        oldest_queued_age_seconds: Option<u64>,
+        degraded: bool,
+        disk_pressure_warning: bool,
+    ) -> ValidationProofRchCapacitySnapshot {
+        ValidationProofRchCapacitySnapshot {
+            schema_version: CAPACITY_SNAPSHOT_SCHEMA_VERSION.to_string(),
+            observed_at: ts(1),
+            workers: vec![ValidationProofRchWorkerCapacity {
+                worker_id: "vmi-test-1".to_string(),
+                total_slots: 4,
+                available_slots,
+                queue_depth: 0,
+                degraded,
+            }],
+            queue_depth,
+            oldest_queued_age_seconds,
+            disk_pressure_warning,
+        }
+    }
+
+    fn admission_input(
+        capacity_snapshot: ValidationProofRchCapacitySnapshot,
+        proof_priority: ValidationProofPriority,
+        bead_priority: u8,
+        current_queue_depth: u16,
+    ) -> ValidationProofAdmissionInput {
+        ValidationProofAdmissionInput {
+            trace_id: format!(
+                "trace-admission-{}-{}",
+                proof_priority.as_str(),
+                bead_priority
+            ),
+            capacity_snapshot,
+            proof_priority,
+            bead_priority,
+            dirty_worktree: false,
+            dirty_state_policy: DirtyStatePolicy::CleanRequired,
+            target_dir_class: ValidationProofTargetDirClass::OffRepo,
+            timeout_budget_seconds: 900,
+            current_queue_depth,
+        }
+    }
+
     fn replacement_marker() -> String {
         ["new", "lease", "marker"].join("-")
     }
@@ -1476,6 +2011,136 @@ mod tests {
             completed.diagnostics.event_code,
             event_codes::RECEIPT_HANDOFF_COMPLETED
         );
+    }
+
+    #[test]
+    fn admission_accepts_healthy_capacity_deterministically() {
+        let policy = ValidationProofAdmissionPolicy::default_policy(
+            "validation-proof-coalescer/admission/default/v1",
+        );
+        let input = admission_input(
+            capacity_snapshot(4, 0, Some(0), false, false),
+            ValidationProofPriority::Normal,
+            2,
+            0,
+        );
+
+        let first =
+            decide_validation_proof_admission(&policy, &input).expect("first admission decision");
+        let second =
+            decide_validation_proof_admission(&policy, &input).expect("second admission decision");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.decision,
+            ValidationProofCoalescerDecisionKind::RunLocallyViaRch
+        );
+        assert_eq!(
+            first.required_action,
+            ValidationProofCoalescerRequiredAction::StartRchValidation
+        );
+        assert_eq!(
+            first.diagnostics.effective_priority,
+            ValidationProofPriority::Normal
+        );
+    }
+
+    #[test]
+    fn admission_queues_busy_normal_priority_without_shelling_out() {
+        let policy = ValidationProofAdmissionPolicy::default_policy(
+            "validation-proof-coalescer/admission/default/v1",
+        );
+        let probe = StaticValidationProofRchCapacityProbe::new(capacity_snapshot(
+            1,
+            2,
+            Some(15),
+            false,
+            false,
+        ));
+        let sampled = sample_validation_proof_capacity(&probe).expect("static capacity sample");
+        let input = admission_input(sampled, ValidationProofPriority::Normal, 2, 0);
+
+        let decision =
+            decide_validation_proof_admission(&policy, &input).expect("admission decision");
+
+        assert_eq!(
+            decision.decision,
+            ValidationProofCoalescerDecisionKind::QueuedByPolicy
+        );
+        assert_eq!(decision.reason_code, reason_codes::QUEUE_CAPACITY);
+        assert!(!decision.diagnostics.fail_closed);
+    }
+
+    #[test]
+    fn admission_rejects_at_queue_high_watermark() {
+        let policy = ValidationProofAdmissionPolicy::default_policy(
+            "validation-proof-coalescer/admission/default/v1",
+        );
+        let input = admission_input(
+            capacity_snapshot(4, 7, Some(30), false, false),
+            ValidationProofPriority::Normal,
+            2,
+            1,
+        );
+
+        let decision =
+            decide_validation_proof_admission(&policy, &input).expect("admission decision");
+
+        assert_eq!(
+            decision.decision,
+            ValidationProofCoalescerDecisionKind::RejectCapacity
+        );
+        assert_eq!(decision.reason_code, reason_codes::REJECT_CAPACITY);
+        assert!(decision.diagnostics.fail_closed);
+        assert_eq!(decision.diagnostics.observed_queue_depth, 8);
+    }
+
+    #[test]
+    fn admission_inherits_high_priority_from_bead_priority() {
+        let policy = ValidationProofAdmissionPolicy::default_policy(
+            "validation-proof-coalescer/admission/default/v1",
+        );
+        let input = admission_input(
+            capacity_snapshot(1, 0, Some(0), false, false),
+            ValidationProofPriority::Low,
+            1,
+            0,
+        );
+
+        let decision =
+            decide_validation_proof_admission(&policy, &input).expect("admission decision");
+
+        assert_eq!(
+            decision.decision,
+            ValidationProofCoalescerDecisionKind::RunLocallyViaRch
+        );
+        assert_eq!(
+            decision.diagnostics.effective_priority,
+            ValidationProofPriority::High
+        );
+    }
+
+    #[test]
+    fn admission_rejects_disk_pressure_for_normal_priority() {
+        let policy = ValidationProofAdmissionPolicy::default_policy(
+            "validation-proof-coalescer/admission/default/v1",
+        );
+        let input = admission_input(
+            capacity_snapshot(4, 0, Some(0), false, true),
+            ValidationProofPriority::Normal,
+            2,
+            0,
+        );
+
+        let decision =
+            decide_validation_proof_admission(&policy, &input).expect("admission decision");
+
+        assert_eq!(
+            decision.decision,
+            ValidationProofCoalescerDecisionKind::RejectCapacity
+        );
+        assert!(decision.diagnostics.disk_pressure_warning);
+        assert!(decision.diagnostics.fail_closed);
     }
 
     fn receipt_ref(seed: &str) -> ValidationProofCoalescerReceiptRef {

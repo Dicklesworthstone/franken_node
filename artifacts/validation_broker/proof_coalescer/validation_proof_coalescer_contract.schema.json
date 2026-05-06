@@ -4,7 +4,9 @@
   "work_key_schema_uri": "https://franken-node.local/schemas/validation-proof-coalescer/work-key/v1",
   "lease_schema_uri": "https://franken-node.local/schemas/validation-proof-coalescer/lease/v1",
   "decision_schema_uri": "https://franken-node.local/schemas/validation-proof-coalescer/decision/v1",
+  "capacity_snapshot_schema_uri": "https://franken-node.local/schemas/validation-proof-coalescer/rch-capacity-snapshot/v1",
   "admission_policy_schema_uri": "https://franken-node.local/schemas/validation-proof-coalescer/admission-policy/v1",
+  "admission_decision_schema_uri": "https://franken-node.local/schemas/validation-proof-coalescer/admission-decision/v1",
   "lease_states": [
     "proposed",
     "running",
@@ -53,6 +55,17 @@
     "observe_only",
     "queue_when_busy",
     "reject_when_busy"
+  ],
+  "proof_priorities": [
+    "low",
+    "normal",
+    "high"
+  ],
+  "target_dir_classes": [
+    "off_repo",
+    "tmp",
+    "repo_local",
+    "unknown"
   ],
   "event_codes": [
     "VPCO-001",
@@ -128,6 +141,22 @@
     "min_available_worker_slots",
     "dirty_state_policy",
     "capacity_mode"
+  ],
+  "required_capacity_snapshot_fields": [
+    "schema_version",
+    "observed_at",
+    "workers",
+    "queue_depth",
+    "oldest_queued_age_seconds",
+    "disk_pressure_warning"
+  ],
+  "required_admission_decision_fields": [
+    "schema_version",
+    "policy_id",
+    "decision",
+    "reason_code",
+    "required_action",
+    "diagnostics"
   ],
   "schemas": {
     "DigestRef": {
@@ -220,6 +249,28 @@
         "min_available_worker_slots",
         "dirty_state_policy",
         "capacity_mode"
+      ]
+    },
+    "ValidationProofRchCapacitySnapshot": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "observed_at",
+        "workers",
+        "queue_depth",
+        "oldest_queued_age_seconds",
+        "disk_pressure_warning"
+      ]
+    },
+    "ValidationProofAdmissionDecision": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "policy_id",
+        "decision",
+        "reason_code",
+        "required_action",
+        "diagnostics"
       ]
     }
   }

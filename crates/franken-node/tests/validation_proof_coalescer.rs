@@ -2,10 +2,15 @@ use chrono::{DateTime, TimeZone, Utc};
 use frankenengine_node::ops::validation_broker::{CommandSpec, InputDigest};
 use frankenengine_node::ops::validation_proof_cache::DirtyStatePolicy;
 use frankenengine_node::ops::validation_proof_coalescer::{
-    CompleteLeaseRequest, CreateLeaseRequest, FenceStaleLeaseRequest,
-    ValidationProofCoalescerDecisionKind, ValidationProofCoalescerReceiptRef,
-    ValidationProofCoalescerStore, ValidationProofLeaseState, ValidationProofRchCommand,
-    ValidationProofWorkKey, ValidationProofWorkKeyParts, error_codes, event_codes,
+    CAPACITY_SNAPSHOT_SCHEMA_VERSION, CompleteLeaseRequest, CreateLeaseRequest,
+    FenceStaleLeaseRequest, StaticValidationProofRchCapacityProbe, ValidationProofAdmissionInput,
+    ValidationProofAdmissionPolicy, ValidationProofCoalescerDecisionKind,
+    ValidationProofCoalescerReceiptRef, ValidationProofCoalescerRequiredAction,
+    ValidationProofCoalescerStore, ValidationProofLeaseState, ValidationProofPriority,
+    ValidationProofRchCapacitySnapshot, ValidationProofRchCommand,
+    ValidationProofRchWorkerCapacity, ValidationProofTargetDirClass, ValidationProofWorkKey,
+    ValidationProofWorkKeyParts, decide_validation_proof_admission, error_codes, event_codes,
+    reason_codes, sample_validation_proof_capacity,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -89,6 +94,52 @@ fn receipt_ref(seed: &str) -> ValidationProofCoalescerReceiptRef {
         path: format!("artifacts/validation_broker/receipts/{seed}.json"),
         bead_id: "bd-y4coj".to_string(),
         proof_cache_key_hex: key.proof_cache_key.hex,
+    }
+}
+
+fn capacity_snapshot(
+    available_slots: u16,
+    queue_depth: u16,
+    oldest_queued_age_seconds: Option<u64>,
+    degraded: bool,
+    disk_pressure_warning: bool,
+) -> ValidationProofRchCapacitySnapshot {
+    ValidationProofRchCapacitySnapshot {
+        schema_version: CAPACITY_SNAPSHOT_SCHEMA_VERSION.to_string(),
+        observed_at: ts(1),
+        workers: vec![ValidationProofRchWorkerCapacity {
+            worker_id: "vmi-integration-1".to_string(),
+            total_slots: 4,
+            available_slots,
+            queue_depth: 0,
+            degraded,
+        }],
+        queue_depth,
+        oldest_queued_age_seconds,
+        disk_pressure_warning,
+    }
+}
+
+fn admission_input(
+    capacity_snapshot: ValidationProofRchCapacitySnapshot,
+    proof_priority: ValidationProofPriority,
+    bead_priority: u8,
+    current_queue_depth: u16,
+) -> ValidationProofAdmissionInput {
+    ValidationProofAdmissionInput {
+        trace_id: format!(
+            "trace-integration-admission-{}-{}",
+            proof_priority.as_str(),
+            bead_priority
+        ),
+        capacity_snapshot,
+        proof_priority,
+        bead_priority,
+        dirty_worktree: false,
+        dirty_state_policy: DirtyStatePolicy::CleanRequired,
+        target_dir_class: ValidationProofTargetDirClass::OffRepo,
+        timeout_budget_seconds: 900,
+        current_queue_depth,
     }
 }
 
@@ -215,4 +266,55 @@ fn real_temp_dir_stale_fence_blocks_old_owner_completion() {
         })
         .expect_err("old owner cannot complete");
     assert_eq!(err.code(), error_codes::ERR_VPCO_FENCED_OWNER);
+}
+
+#[test]
+fn deterministic_capacity_fixture_queues_normal_priority_without_live_rch() {
+    let policy = ValidationProofAdmissionPolicy::default_policy(
+        "validation-proof-coalescer/admission/default/v1",
+    );
+    let probe =
+        StaticValidationProofRchCapacityProbe::new(capacity_snapshot(1, 2, Some(30), false, false));
+    let sampled = sample_validation_proof_capacity(&probe).expect("static capacity sample");
+    let input = admission_input(sampled, ValidationProofPriority::Normal, 2, 0);
+
+    let decision = decide_validation_proof_admission(&policy, &input).expect("admission decision");
+
+    assert_eq!(
+        decision.decision,
+        ValidationProofCoalescerDecisionKind::QueuedByPolicy
+    );
+    assert_eq!(
+        decision.required_action,
+        ValidationProofCoalescerRequiredAction::QueueValidation
+    );
+    assert_eq!(decision.reason_code, reason_codes::QUEUE_CAPACITY);
+    assert!(!decision.diagnostics.fail_closed);
+}
+
+#[test]
+fn deterministic_capacity_fixture_rejects_bounded_queue_growth() {
+    let policy = ValidationProofAdmissionPolicy::default_policy(
+        "validation-proof-coalescer/admission/default/v1",
+    );
+    let input = admission_input(
+        capacity_snapshot(4, 7, Some(30), false, false),
+        ValidationProofPriority::Normal,
+        2,
+        1,
+    );
+
+    let decision = decide_validation_proof_admission(&policy, &input).expect("admission decision");
+
+    assert_eq!(
+        decision.decision,
+        ValidationProofCoalescerDecisionKind::RejectCapacity
+    );
+    assert_eq!(
+        decision.required_action,
+        ValidationProofCoalescerRequiredAction::FailClosed
+    );
+    assert_eq!(decision.reason_code, reason_codes::REJECT_CAPACITY);
+    assert_eq!(decision.diagnostics.observed_queue_depth, 8);
+    assert!(decision.diagnostics.fail_closed);
 }

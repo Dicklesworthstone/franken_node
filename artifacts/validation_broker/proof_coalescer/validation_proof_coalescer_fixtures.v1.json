@@ -54,6 +54,158 @@
       "capacity_mode": "queue_when_busy"
     }
   ],
+  "rch_capacity_fixtures": [
+    {
+      "name": "healthy_fleet",
+      "snapshot": {
+        "schema_version": "franken-node/validation-proof-coalescer/rch-capacity-snapshot/v1",
+        "observed_at": "2026-05-06T02:00:00Z",
+        "workers": [
+          {
+            "worker_id": "vmi-healthy-1",
+            "total_slots": 4,
+            "available_slots": 4,
+            "queue_depth": 0,
+            "degraded": false
+          }
+        ],
+        "queue_depth": 0,
+        "oldest_queued_age_seconds": 0,
+        "disk_pressure_warning": false
+      },
+      "admission_input": {
+        "proof_priority": "normal",
+        "bead_priority": 2,
+        "dirty_worktree": false,
+        "dirty_state_policy": "clean_required",
+        "target_dir_class": "off_repo",
+        "timeout_budget_seconds": 900,
+        "current_queue_depth": 0
+      },
+      "expected_decision": "run_locally_via_rch",
+      "expected_reason_code": "VPCO_RUN_NO_LEASE"
+    },
+    {
+      "name": "saturated_fleet",
+      "snapshot": {
+        "schema_version": "franken-node/validation-proof-coalescer/rch-capacity-snapshot/v1",
+        "observed_at": "2026-05-06T02:01:00Z",
+        "workers": [
+          {
+            "worker_id": "vmi-saturated-1",
+            "total_slots": 4,
+            "available_slots": 0,
+            "queue_depth": 2,
+            "degraded": false
+          }
+        ],
+        "queue_depth": 2,
+        "oldest_queued_age_seconds": 30,
+        "disk_pressure_warning": false
+      },
+      "admission_input": {
+        "proof_priority": "normal",
+        "bead_priority": 2,
+        "dirty_worktree": false,
+        "dirty_state_policy": "clean_required",
+        "target_dir_class": "off_repo",
+        "timeout_budget_seconds": 900,
+        "current_queue_depth": 0
+      },
+      "expected_decision": "queued_by_policy",
+      "expected_reason_code": "VPCO_QUEUE_CAPACITY"
+    },
+    {
+      "name": "degraded_worker",
+      "snapshot": {
+        "schema_version": "franken-node/validation-proof-coalescer/rch-capacity-snapshot/v1",
+        "observed_at": "2026-05-06T02:02:00Z",
+        "workers": [
+          {
+            "worker_id": "vmi-degraded-1",
+            "total_slots": 4,
+            "available_slots": 3,
+            "queue_depth": 0,
+            "degraded": true
+          }
+        ],
+        "queue_depth": 0,
+        "oldest_queued_age_seconds": 0,
+        "disk_pressure_warning": false
+      },
+      "admission_input": {
+        "proof_priority": "normal",
+        "bead_priority": 2,
+        "dirty_worktree": false,
+        "dirty_state_policy": "clean_required",
+        "target_dir_class": "off_repo",
+        "timeout_budget_seconds": 900,
+        "current_queue_depth": 0
+      },
+      "expected_decision": "queued_by_policy",
+      "expected_reason_code": "VPCO_QUEUE_CAPACITY"
+    },
+    {
+      "name": "stale_queue",
+      "snapshot": {
+        "schema_version": "franken-node/validation-proof-coalescer/rch-capacity-snapshot/v1",
+        "observed_at": "2026-05-06T02:03:00Z",
+        "workers": [
+          {
+            "worker_id": "vmi-stale-1",
+            "total_slots": 4,
+            "available_slots": 4,
+            "queue_depth": 0,
+            "degraded": false
+          }
+        ],
+        "queue_depth": 1,
+        "oldest_queued_age_seconds": 900,
+        "disk_pressure_warning": false
+      },
+      "admission_input": {
+        "proof_priority": "normal",
+        "bead_priority": 2,
+        "dirty_worktree": false,
+        "dirty_state_policy": "clean_required",
+        "target_dir_class": "off_repo",
+        "timeout_budget_seconds": 900,
+        "current_queue_depth": 0
+      },
+      "expected_decision": "reject_capacity",
+      "expected_reason_code": "VPCO_REJECT_CAPACITY"
+    },
+    {
+      "name": "disk_pressure_warning",
+      "snapshot": {
+        "schema_version": "franken-node/validation-proof-coalescer/rch-capacity-snapshot/v1",
+        "observed_at": "2026-05-06T02:04:00Z",
+        "workers": [
+          {
+            "worker_id": "vmi-disk-1",
+            "total_slots": 4,
+            "available_slots": 4,
+            "queue_depth": 0,
+            "degraded": false
+          }
+        ],
+        "queue_depth": 0,
+        "oldest_queued_age_seconds": 0,
+        "disk_pressure_warning": true
+      },
+      "admission_input": {
+        "proof_priority": "normal",
+        "bead_priority": 2,
+        "dirty_worktree": false,
+        "dirty_state_policy": "clean_required",
+        "target_dir_class": "off_repo",
+        "timeout_budget_seconds": 900,
+        "current_queue_depth": 0
+      },
+      "expected_decision": "reject_capacity",
+      "expected_reason_code": "VPCO_REJECT_CAPACITY"
+    }
+  ],
   "valid_leases": [
     {
       "schema_version": "franken-node/validation-proof-coalescer/lease/v1",
