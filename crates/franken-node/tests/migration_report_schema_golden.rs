@@ -4,16 +4,34 @@
 //! Migration artifacts are used for compliance audits and regulatory requirements,
 //! any schema change would break audit tooling and compliance validation.
 
-use std::{fs, path::Path};
-use serde_json::Value;
 use frankenengine_node::connector::migration_artifact::{
-    MigrationArtifact, generate_reference_artifact
+    MigrationArtifact, generate_reference_artifact,
 };
+use serde_json::Value;
+use std::{fs, path::Path};
 
 /// Create a deterministic migration artifact for golden testing
 fn create_deterministic_migration_artifact() -> MigrationArtifact {
     // Use the reference artifact generator which produces deterministic output
     generate_reference_artifact()
+}
+
+fn assert_real_hex_field(value: &Value, field: &str) {
+    assert!(
+        value.is_string(),
+        "{field} should be serialized as a string"
+    );
+    let text = value.as_str().unwrap_or("");
+    let lowered = text.to_ascii_lowercase();
+    assert!(
+        !lowered.contains("placeholder") && !lowered.contains("sentinel"),
+        "{field} must not contain placeholder or sentinel material: {text}"
+    );
+    assert_eq!(text.len(), 64, "{field} should be 64 hex characters");
+    assert!(
+        text.chars().all(|ch| ch.is_ascii_hexdigit()),
+        "{field} should be hex encoded: {text}"
+    );
 }
 
 #[test]
@@ -79,29 +97,90 @@ fn migration_report_schema_structure_stability() {
     assert!(json_value.get("signature").unwrap().is_string());
     assert!(json_value.get("content_hash").unwrap().is_string());
     assert!(json_value.get("created_at").unwrap().is_string());
+    assert_real_hex_field(json_value.get("signature").unwrap(), "signature");
+    assert_real_hex_field(json_value.get("content_hash").unwrap(), "content_hash");
 
     // Verify rollback receipt structure
     let rollback_receipt = json_value.get("rollback_receipt").unwrap();
-    assert!(rollback_receipt.get("original_state_ref").unwrap().is_string());
-    assert!(rollback_receipt.get("rollback_procedure_hash").unwrap().is_string());
-    assert!(rollback_receipt.get("max_rollback_time_ms").unwrap().is_number());
+    assert!(
+        rollback_receipt
+            .get("original_state_ref")
+            .unwrap()
+            .is_string()
+    );
+    assert!(
+        rollback_receipt
+            .get("rollback_procedure_hash")
+            .unwrap()
+            .is_string()
+    );
+    assert!(
+        rollback_receipt
+            .get("max_rollback_time_ms")
+            .unwrap()
+            .is_number()
+    );
     assert!(rollback_receipt.get("signer_identity").unwrap().is_string());
     assert!(rollback_receipt.get("signature").unwrap().is_string());
+    assert_real_hex_field(
+        rollback_receipt.get("signature").unwrap(),
+        "rollback_receipt.signature",
+    );
 
     // Verify confidence interval structure
     let confidence_interval = json_value.get("confidence_interval").unwrap();
     assert!(confidence_interval.get("probability").unwrap().is_number());
-    assert!(confidence_interval.get("dry_run_success_rate").unwrap().is_number());
-    assert!(confidence_interval.get("historical_similarity").unwrap().is_number());
-    assert!(confidence_interval.get("precondition_coverage").unwrap().is_number());
-    assert!(confidence_interval.get("rollback_validation").unwrap().is_boolean());
+    assert!(
+        confidence_interval
+            .get("dry_run_success_rate")
+            .unwrap()
+            .is_number()
+    );
+    assert!(
+        confidence_interval
+            .get("historical_similarity")
+            .unwrap()
+            .is_number()
+    );
+    assert!(
+        confidence_interval
+            .get("precondition_coverage")
+            .unwrap()
+            .is_number()
+    );
+    assert!(
+        confidence_interval
+            .get("rollback_validation")
+            .unwrap()
+            .is_boolean()
+    );
 
     // Verify verifier metadata structure
     let verifier_metadata = json_value.get("verifier_metadata").unwrap();
-    assert!(verifier_metadata.get("replay_capsule_refs").unwrap().is_array());
-    assert!(verifier_metadata.get("expected_state_hashes").unwrap().is_object());
-    assert!(verifier_metadata.get("assertion_schemas").unwrap().is_array());
-    assert!(verifier_metadata.get("verification_procedures").unwrap().is_array());
+    assert!(
+        verifier_metadata
+            .get("replay_capsule_refs")
+            .unwrap()
+            .is_array()
+    );
+    assert!(
+        verifier_metadata
+            .get("expected_state_hashes")
+            .unwrap()
+            .is_object()
+    );
+    assert!(
+        verifier_metadata
+            .get("assertion_schemas")
+            .unwrap()
+            .is_array()
+    );
+    assert!(
+        verifier_metadata
+            .get("verification_procedures")
+            .unwrap()
+            .is_array()
+    );
 
     // Verify migration steps array structure
     let steps = json_value.get("steps").unwrap().as_array().unwrap();
