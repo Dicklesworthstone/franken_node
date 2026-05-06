@@ -33,6 +33,20 @@ class TestCheckConformanceFile(unittest.TestCase):
     def test_passes(self):
         self.assertEqual(ch.check_conformance_test_file()["status"], "PASS")
 
+    def test_rejects_synthetic_boolean_harness(self):
+        synthetic = "\n".join(
+            [
+                "fn fail_closed_default() { let has_override = false; }",
+                "fn expired_override_rejected() { let current_time = \"2026\"; let expires_at = \"2020\"; assert!(current_time > expires_at); }",
+                "fn deterministic_outcome() {}",
+            ]
+        )
+        result = ch.conformance_test_content_findings(synthetic)
+        self.assertIn(
+            "let has_override = false",
+            result["forbidden_synthetic_snippets"],
+        )
+
 
 class TestCheckSpec(unittest.TestCase):
     def test_passes(self):

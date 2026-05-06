@@ -1,4 +1,3 @@
-import os
 #!/usr/bin/env python3
 """
 Conformance Harness and Publication Gate Verification (bd-3en).
@@ -13,13 +12,33 @@ Usage:
 import json
 import subprocess
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from scripts.lib.test_logger import configure_test_logging
+
+
+FORBIDDEN_SYNTHETIC_HARNESS_SNIPPETS = [
+    "let has_override = false",
+    "let conformance_passed = false",
+    "connector_count = 0",
+    "let blocked_count = 0",
+    "current_time > expires_at",
+    "current_time < expires_at",
+    "Vec<&str>::contains",
+]
+
+REQUIRED_REAL_HARNESS_TOKENS = [
+    "check_publication(",
+    "run_harness(",
+    "MethodDeclaration",
+    "PolicyOverride",
+    "GateErrorCode::PublicationBlocked",
+    "GateErrorCode::OverrideScopeMismatch",
+    "GateErrorCode::OverrideExpired",
+]
 
 
 def check_harness_impl() -> dict:
@@ -103,18 +122,29 @@ def check_ci_workflow() -> dict:
     }
 
 
+def conformance_test_content_findings(content: str) -> dict:
+    expected = ["fail_closed_default", "expired_override_rejected", "deterministic_outcome"]
+    missing = [e for e in expected if e not in content]
+    missing_real_tokens = [token for token in REQUIRED_REAL_HARNESS_TOKENS if token not in content]
+    forbidden_hits = [snippet for snippet in FORBIDDEN_SYNTHETIC_HARNESS_SNIPPETS if snippet in content]
+    return {
+        "missing_tests": missing,
+        "missing_real_harness_tokens": missing_real_tokens,
+        "forbidden_synthetic_snippets": forbidden_hits,
+    }
+
+
 def check_conformance_test_file() -> dict:
     """HARNESS-CONFORMANCE: Conformance test file exists."""
     path = ROOT / "tests" / "conformance" / "connector_protocol_harness.rs"
     if not path.exists():
         return {"id": "HARNESS-CONFORMANCE", "status": "FAIL"}
     content = path.read_text()
-    expected = ["fail_closed_default", "expired_override_rejected", "deterministic_outcome"]
-    missing = [e for e in expected if e not in content]
+    details = conformance_test_content_findings(content)
     return {
         "id": "HARNESS-CONFORMANCE",
-        "status": "PASS" if not missing else "FAIL",
-        "details": {"missing_tests": missing},
+        "status": "PASS" if not any(details.values()) else "FAIL",
+        "details": details,
     }
 
 
@@ -178,7 +208,7 @@ def self_test() -> dict:
 
 
 def main():
-    logger = configure_test_logging("check_conformance_harness")
+    configure_test_logging("check_conformance_harness")
     json_output = "--json" in sys.argv
     result = self_test()
 
