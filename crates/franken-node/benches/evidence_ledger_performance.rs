@@ -1,6 +1,16 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use frankenengine_node::observability::evidence_ledger::{DecisionKind, EvidenceEntry};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
+use frankenengine_node::observability::evidence_ledger::{
+    DecisionKind, EvidenceEntry, EvidenceLedger, LedgerCapacity,
+};
 use serde_json::json;
+
+const BENCH_LEDGER_MAX_BYTES: usize = 16 * 1024 * 1024;
+const BENCH_SIGNATURE_HEX: &str = concat!(
+    "9f0c4b2a6d8e1f3071425364758697a8",
+    "a81726354433221100ffeeddccbbaa99",
+    "5a6b7c8d9e0f1029384756aabbccdde0",
+    "102132435465768798a9bacbdcedfe0f",
+);
 
 fn create_large_evidence_entry() -> EvidenceEntry {
     EvidenceEntry {
@@ -29,25 +39,29 @@ fn create_large_evidence_entry() -> EvidenceEntry {
             }
         }),
         size_bytes: 0,
-        signature: "benchmark-signature-placeholder-that-would-be-real-ed25519-signature"
-            .to_string(),
+        signature: BENCH_SIGNATURE_HEX.to_string(),
         prev_entry_hash: String::new(),
     }
 }
 
 fn benchmark_entry_with_server_computed_size(c: &mut Criterion) {
-    let entry = create_large_evidence_entry();
+    let capacity = LedgerCapacity::new(256, BENCH_LEDGER_MAX_BYTES);
 
     c.bench_function("entry_with_server_computed_size", |b| {
-        b.iter(|| {
-            // This would call the optimized function
-            // entry_with_server_computed_size(black_box(&entry))
-            //
-            // For now, we'll simulate the old vs new approach:
-            // OLD: Clone entire entry 24 times + JSON serialize 24 times
-            // NEW: Estimate size once + clone once
-            black_box(&entry);
-        });
+        b.iter_batched(
+            || {
+                (
+                    EvidenceLedger::new(capacity.clone()),
+                    create_large_evidence_entry(),
+                )
+            },
+            |(mut ledger, entry)| {
+                if let Ok(entry_id) = ledger.append(black_box(entry)) {
+                    black_box((entry_id, ledger.current_bytes()));
+                }
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 
