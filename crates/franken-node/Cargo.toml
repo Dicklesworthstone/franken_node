@@ -483,6 +483,11 @@ name = "supply_chain_trust_card_golden_bytes"
 path = "tests/supply_chain_trust_card_golden_bytes.rs"
 
 [[test]]
+name = "supply_chain_registry_claims_e2e_integration"
+path = "tests/supply_chain_registry_claims_e2e_integration.rs"
+required-features = ["extended-surfaces"]
+
+[[test]]
 name = "frankensqlite_adapter_conformance"
 path = "tests/frankensqlite_adapter_conformance.rs"
 
