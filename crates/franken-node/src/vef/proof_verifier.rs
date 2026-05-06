@@ -1490,14 +1490,13 @@ mod tests {
         proof.generated_at_millis = NOW - default_predicate().max_proof_age_millis;
         proof.expires_at_millis = NOW + 1;
 
-        let report = gate.verify(&make_request(proof)).expect("report");
+        let result = gate.verify(&make_request(proof));
 
-        match report.decision {
-            TrustDecision::Deny(reason) => {
-                assert!(reason.contains("proof age 600000ms exceeds limit 600000ms"));
-            }
-            other => panic!("expected Deny at exact age boundary, got {other:?}"),
-        }
+        assert!(matches!(
+            result.as_ref().map(|report| &report.decision),
+            Ok(TrustDecision::Deny(reason))
+                if reason.contains("proof age 600000ms exceeds limit 600000ms")
+        ));
     }
 
     #[test]
@@ -1512,14 +1511,13 @@ mod tests {
         proof.generated_at_millis = NOW - 30_000;
         proof.expires_at_millis = NOW + 1;
 
-        let report = gate.verify(&make_request(proof)).expect("report");
+        let result = gate.verify(&make_request(proof));
 
-        match report.decision {
-            TrustDecision::Deny(reason) => {
-                assert!(reason.contains("proof age 30000ms exceeds limit 30000ms"));
-            }
-            other => panic!("expected Deny at exact global age boundary, got {other:?}"),
-        }
+        assert!(matches!(
+            result.as_ref().map(|report| &report.decision),
+            Ok(TrustDecision::Deny(reason))
+                if reason.contains("proof age 30000ms exceeds limit 30000ms")
+        ));
     }
 
     #[test]
@@ -1604,15 +1602,122 @@ mod tests {
         );
     }
 
-    // ── NEGATIVE-PATH TESTS: Security & Robustness ──────────────────
-    // Note: These tests use outdated API and are commented out to prevent compilation errors.
-    // They should be updated to use the current ComplianceProof and VerificationRequest API.
-
-    /*
     #[test]
-    fn test_negative_edge_cases_boundary_conditions() {
-        // Add tests for boundary conditions using current API
-        // TODO: Implement negative path tests with proper API
+    fn malformed_proof_fields_fail_closed_with_invalid_format() {
+        let cases: [(&str, fn(&mut ComplianceProof)); 3] = [
+            ("proof_id is empty", |proof| proof.proof_id.clear()),
+            ("proof_hash is empty", |proof| proof.proof_hash.clear()),
+            ("action_class is empty", |proof| proof.action_class.clear()),
+        ];
+
+        for (expected_message, mutate) in cases {
+            let mut gate = gate_with_predicate();
+            let mut proof = valid_proof();
+            mutate(&mut proof);
+
+            let result = gate.verify(&make_request(proof));
+            assert!(
+                result.is_err(),
+                "invalid proof field must fail for {expected_message}"
+            );
+            let err = match result {
+                Err(err) => err,
+                Ok(_) => continue,
+            };
+
+            assert_eq!(err.code, error_codes::ERR_PVF_INVALID_FORMAT);
+            assert!(err.message.contains(expected_message));
+            assert!(
+                gate.events().iter().any(|event| {
+                    event.event_code == event_codes::PVF_004_DENY_LOGGED
+                        && event.detail.contains(expected_message)
+                }),
+                "invalid proof field must emit a deny event for {expected_message}"
+            );
+            assert!(
+                gate.reports().is_empty(),
+                "invalid proof format must not commit reports for {expected_message}"
+            );
+        }
     }
-    */
+
+    #[test]
+    fn verification_request_deserialize_rejects_malformed_request_shape() {
+        let proof = serde_json::to_value(valid_proof());
+        assert!(proof.is_ok(), "valid proof must serialize");
+        let proof = match proof {
+            Ok(proof) => proof,
+            Err(_) => return,
+        };
+        let cases = [
+            (
+                "missing request_id",
+                serde_json::json!({
+                    "proof": proof.clone(),
+                    "now_millis": NOW,
+                    "trace_id": "trace-missing-request-id"
+                }),
+            ),
+            (
+                "numeric trace_id",
+                serde_json::json!({
+                    "request_id": "req-numeric-trace",
+                    "proof": proof,
+                    "now_millis": NOW,
+                    "trace_id": 42
+                }),
+            ),
+        ];
+
+        for (case_name, raw) in cases {
+            let result: Result<VerificationRequest, _> = serde_json::from_value(raw);
+
+            assert!(
+                result.is_err(),
+                "verification request must reject {case_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn compound_negative_proof_preserves_complete_deny_evidence() {
+        let mut gate = gate_with_predicate();
+        let mut proof = valid_proof();
+        proof.expires_at_millis = NOW;
+        proof.generated_at_millis = NOW - default_predicate().max_proof_age_millis;
+        proof.confidence = 50;
+        proof.witness_references.clear();
+        proof.policy_version_hash = "sha256:wrong-policy".to_string();
+
+        let result = gate.verify(&make_request(proof));
+        assert!(result.is_ok(), "compound negative proof should report Deny");
+        let report = match result {
+            Ok(report) => report,
+            Err(_) => return,
+        };
+
+        assert!(matches!(&report.decision, TrustDecision::Deny(reason)
+            if reason.contains("proof expired")
+                && reason.contains("proof age 600000ms exceeds limit 600000ms")
+                && reason.contains("confidence 50 below minimum 90")
+                && reason.contains("witness count 0 below required 2")
+                && reason.contains("policy version hash mismatch")
+        ));
+        assert_eq!(report.evidence.len(), 6);
+        assert_eq!(
+            report
+                .evidence
+                .iter()
+                .filter(|evidence| !evidence.satisfied)
+                .count(),
+            5
+        );
+        assert!(
+            report
+                .events
+                .iter()
+                .any(|event| event.event_code == event_codes::PVF_004_DENY_LOGGED),
+            "compound negative proof must preserve a deny event"
+        );
+    }
 }
