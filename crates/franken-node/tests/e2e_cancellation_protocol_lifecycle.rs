@@ -157,22 +157,10 @@ fn e2e_cancellation_protocol_happy_path_six_phases() {
     // INV-CANP-AUDIT-COMPLETE: every phase logged.
     let log = proto.audit_log();
     let event_codes: Vec<_> = log.iter().map(|e| e.event_code.as_str()).collect();
-    assert!(
-        event_codes.iter().any(|c| *c == "CAN-001"),
-        "request logged"
-    );
-    assert!(
-        event_codes.iter().any(|c| *c == "CAN-002"),
-        "drain start logged"
-    );
-    assert!(
-        event_codes.iter().any(|c| *c == "CAN-003"),
-        "drain complete logged"
-    );
-    assert!(
-        event_codes.iter().any(|c| *c == "CAN-005"),
-        "finalize logged"
-    );
+    assert!(event_codes.contains(&"CAN-001"), "request logged");
+    assert!(event_codes.contains(&"CAN-002"), "drain start logged");
+    assert!(event_codes.contains(&"CAN-003"), "drain complete logged");
+    assert!(event_codes.contains(&"CAN-005"), "finalize logged");
     h.log_phase("audit_complete", true, json!({"events": log.len()}));
 
     // Re-finalizing a Finalized workflow returns AlreadyFinal.

@@ -202,13 +202,27 @@ fn active_divergence_fingerprint(gate: &ControlPlaneDivergenceGate) -> String {
         .authorization_fingerprint()
 }
 
+struct DivergencePreservation<'a> {
+    audit_before: usize,
+    events_before: usize,
+    fingerprint_before: &'a str,
+}
+
+impl<'a> DivergencePreservation<'a> {
+    fn capture(gate: &ControlPlaneDivergenceGate, fingerprint_before: &'a str) -> Self {
+        Self {
+            audit_before: gate.audit_log().len(),
+            events_before: gate.events().len(),
+            fingerprint_before,
+        }
+    }
+}
+
 fn assert_unauthorized_recovery_preserves_divergence(
     h: &Harness,
     gate: &ControlPlaneDivergenceGate,
     err: DivergenceGateError,
-    audit_before: usize,
-    events_before: usize,
-    fingerprint_before: &str,
+    preserved: DivergencePreservation<'_>,
     expected_reason: &str,
     phase: &str,
 ) {
@@ -218,9 +232,12 @@ fn assert_unauthorized_recovery_preserves_divergence(
             "expected reason containing {expected_reason:?}, got {reason:?}"
         );
         assert_eq!(gate.state(), GateState::Diverged);
-        assert_eq!(gate.audit_log().len(), audit_before);
-        assert_eq!(gate.events().len(), events_before);
-        assert_eq!(active_divergence_fingerprint(gate), fingerprint_before);
+        assert_eq!(gate.audit_log().len(), preserved.audit_before);
+        assert_eq!(gate.events().len(), preserved.events_before);
+        assert_eq!(
+            active_divergence_fingerprint(gate),
+            preserved.fingerprint_before
+        );
         h.log_phase(phase, true, json!({"reason": reason}));
     } else {
         assert!(matches!(
@@ -570,8 +587,7 @@ fn e2e_divergence_gate_recovery_authorization_binding_contract() {
         "e2e-operator-key-v2",
         SIGNING_KEY.to_vec(),
     );
-    let audit_before = gate.audit_log().len();
-    let events_before = gate.events().len();
+    let preserved = DivergencePreservation::capture(&gate, &cycle_a_fingerprint);
     let err = gate
         .respond_recover(
             &auth_a,
@@ -585,9 +601,7 @@ fn e2e_divergence_gate_recovery_authorization_binding_contract() {
         &h,
         &gate,
         err,
-        audit_before,
-        events_before,
-        &cycle_a_fingerprint,
+        preserved,
         "verification failed",
         "wrong_key_id_rejected",
     );
@@ -597,8 +611,7 @@ fn e2e_divergence_gate_recovery_authorization_binding_contract() {
         .resync_checkpoint_epoch
         .checked_add(1)
         .expect("checkpoint increment");
-    let audit_before = gate.audit_log().len();
-    let events_before = gate.events().len();
+    let preserved = DivergencePreservation::capture(&gate, &cycle_a_fingerprint);
     let err = gate
         .respond_recover(
             &wrong_checkpoint,
@@ -612,9 +625,7 @@ fn e2e_divergence_gate_recovery_authorization_binding_contract() {
         &h,
         &gate,
         err,
-        audit_before,
-        events_before,
-        &cycle_a_fingerprint,
+        preserved,
         "verification failed",
         "wrong_checkpoint_rejected",
     );
@@ -626,8 +637,7 @@ fn e2e_divergence_gate_recovery_authorization_binding_contract() {
         1_745_760_030,
         "cycle-a-stale-recovery",
     );
-    let audit_before = gate.audit_log().len();
-    let events_before = gate.events().len();
+    let preserved = DivergencePreservation::capture(&gate, &cycle_a_fingerprint);
     let err = gate
         .respond_recover(
             &stale_auth,
@@ -641,9 +651,7 @@ fn e2e_divergence_gate_recovery_authorization_binding_contract() {
         &h,
         &gate,
         err,
-        audit_before,
-        events_before,
-        &cycle_a_fingerprint,
+        preserved,
         "expired",
         "expired_timestamp_rejected",
     );
@@ -685,8 +693,7 @@ fn e2e_divergence_gate_recovery_authorization_binding_contract() {
         json!({"fingerprint": cycle_b_fingerprint.as_str()}),
     );
 
-    let audit_before = gate.audit_log().len();
-    let events_before = gate.events().len();
+    let preserved = DivergencePreservation::capture(&gate, &cycle_b_fingerprint);
     let err = gate
         .respond_recover(
             &auth_a,
@@ -700,9 +707,7 @@ fn e2e_divergence_gate_recovery_authorization_binding_contract() {
         &h,
         &gate,
         err,
-        audit_before,
-        events_before,
-        &cycle_b_fingerprint,
+        preserved,
         "active divergence",
         "cycle_a_authorization_rejected_for_cycle_b",
     );
@@ -719,8 +724,7 @@ fn e2e_divergence_gate_recovery_authorization_binding_contract() {
     replayed_nonce.authorization_hash = expected_authorization_hash(&replayed_nonce);
     replayed_nonce.signature = expected_authorization_signature(&replayed_nonce);
     assert!(replayed_nonce.verify(&auth_key(&replayed_nonce)));
-    let audit_before = gate.audit_log().len();
-    let events_before = gate.events().len();
+    let preserved = DivergencePreservation::capture(&gate, &cycle_b_fingerprint);
     let err = gate
         .respond_recover(
             &replayed_nonce,
@@ -734,9 +738,7 @@ fn e2e_divergence_gate_recovery_authorization_binding_contract() {
         &h,
         &gate,
         err,
-        audit_before,
-        events_before,
-        &cycle_b_fingerprint,
+        preserved,
         "nonce already consumed",
         "consumed_nonce_rejected",
     );

@@ -549,7 +549,7 @@ mod tests {
             .expect("simulate result");
 
         assert_eq!(report.verdict, "FAIL");
-        assert_eq!(simulate.required, false);
+        assert!(!simulate.required);
         assert_eq!(simulate.status, "FAIL");
         assert!(
             simulate
@@ -734,7 +734,7 @@ mod tests {
             .expect("simulate result");
 
         assert_eq!(report.verdict, "FAIL");
-        assert_eq!(simulate.required, false);
+        assert!(!simulate.required);
         assert_eq!(simulate.status, "FAIL");
         assert!(
             simulate

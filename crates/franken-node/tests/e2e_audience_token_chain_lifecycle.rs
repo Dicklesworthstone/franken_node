@@ -119,29 +119,30 @@ fn caps(scopes: &[ActionScope]) -> BTreeSet<ActionScope> {
 
 /// Build, sign, and return a fresh AudienceBoundToken using the real
 /// `signature_preimage` and a real Ed25519 signer.
-fn make_signed_token(
-    key: &SigningKey,
-    token_id: &str,
-    issuer: &str,
+struct TokenSpec<'a> {
+    token_id: &'a str,
+    issuer: &'a str,
     audience: Vec<String>,
     capabilities: BTreeSet<ActionScope>,
     issued_at: u64,
     expires_at: u64,
-    nonce: &str,
+    nonce: &'a str,
     parent_token_hash: Option<String>,
     max_delegation_depth: u8,
-) -> AudienceBoundToken {
+}
+
+fn make_signed_token(key: &SigningKey, spec: TokenSpec<'_>) -> AudienceBoundToken {
     let mut t = AudienceBoundToken {
-        token_id: TokenId::new(token_id),
-        issuer: issuer.to_string(),
-        audience,
-        capabilities,
-        issued_at,
-        expires_at,
-        nonce: nonce.to_string(),
-        parent_token_hash,
+        token_id: TokenId::new(spec.token_id),
+        issuer: spec.issuer.to_string(),
+        audience: spec.audience,
+        capabilities: spec.capabilities,
+        issued_at: spec.issued_at,
+        expires_at: spec.expires_at,
+        nonce: spec.nonce.to_string(),
+        parent_token_hash: spec.parent_token_hash,
         signature: String::new(),
-        max_delegation_depth,
+        max_delegation_depth: spec.max_delegation_depth,
     };
     let sig = key.sign(&t.signature_preimage()).to_bytes();
     t.signature = format!("ed25519:{}", hex::encode(sig));
@@ -158,15 +159,17 @@ fn e2e_audience_token_root_chain_verifies() {
 
     let root = make_signed_token(
         &key,
-        "tk-root-1",
-        ISSUER,
-        vec!["svc-target".to_string()],
-        caps(&[ActionScope::Migrate, ActionScope::Configure]),
-        1_000_000_000_000,
-        1_000_000_900_000,
-        "nonce-root-1",
-        None,
-        2,
+        TokenSpec {
+            token_id: "tk-root-1",
+            issuer: ISSUER,
+            audience: vec!["svc-target".to_string()],
+            capabilities: caps(&[ActionScope::Migrate, ActionScope::Configure]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-root-1",
+            parent_token_hash: None,
+            max_delegation_depth: 2,
+        },
     );
     let chain = TokenChain::new(root.clone()).expect("root chain ok");
 
@@ -185,15 +188,17 @@ fn e2e_audience_token_root_chain_verifies() {
     let mut v_aud = TokenValidator::new(1).with_trusted_issuer_key(ISSUER, key.verifying_key());
     let aud_root = make_signed_token(
         &key,
-        "tk-aud",
-        ISSUER,
-        vec!["svc-target".to_string()],
-        caps(&[ActionScope::Migrate]),
-        1_000_000_000_000,
-        1_000_000_900_000,
-        "nonce-aud",
-        None,
-        0,
+        TokenSpec {
+            token_id: "tk-aud",
+            issuer: ISSUER,
+            audience: vec!["svc-target".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-aud",
+            parent_token_hash: None,
+            max_delegation_depth: 0,
+        },
     );
     let aud_chain = TokenChain::new(aud_root).unwrap();
     let err = v_aud
@@ -206,15 +211,17 @@ fn e2e_audience_token_root_chain_verifies() {
     let mut v_exp = TokenValidator::new(1).with_trusted_issuer_key(ISSUER, key.verifying_key());
     let exp_root = make_signed_token(
         &key,
-        "tk-exp",
-        ISSUER,
-        vec!["svc-target".to_string()],
-        caps(&[ActionScope::Migrate]),
-        1_000_000_000_000,
-        1_000_000_900_000,
-        "nonce-exp",
-        None,
-        0,
+        TokenSpec {
+            token_id: "tk-exp",
+            issuer: ISSUER,
+            audience: vec!["svc-target".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-exp",
+            parent_token_hash: None,
+            max_delegation_depth: 0,
+        },
     );
     let exp_chain = TokenChain::new(exp_root).unwrap();
     let err = v_exp
@@ -234,19 +241,21 @@ fn e2e_audience_token_delegation_chain_attenuates() {
     // Root: depth=2, 3 caps, audience {svc-A, svc-B}.
     let root = make_signed_token(
         &key,
-        "tk-root-2",
-        ISSUER,
-        vec!["svc-A".to_string(), "svc-B".to_string()],
-        caps(&[
-            ActionScope::Migrate,
-            ActionScope::Configure,
-            ActionScope::Promote,
-        ]),
-        1_000_000_000_000,
-        1_000_000_900_000,
-        "nonce-root-2",
-        None,
-        2,
+        TokenSpec {
+            token_id: "tk-root-2",
+            issuer: ISSUER,
+            audience: vec!["svc-A".to_string(), "svc-B".to_string()],
+            capabilities: caps(&[
+                ActionScope::Migrate,
+                ActionScope::Configure,
+                ActionScope::Promote,
+            ]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-root-2",
+            parent_token_hash: None,
+            max_delegation_depth: 2,
+        },
     );
     let mut chain = TokenChain::new(root.clone()).expect("root ok");
     let root_hash = chain.root().unwrap().hash();
@@ -255,15 +264,17 @@ fn e2e_audience_token_delegation_chain_attenuates() {
     // before parent. Must be accepted.
     let child = make_signed_token(
         &key,
-        "tk-child-2",
-        ISSUER,
-        vec!["svc-A".to_string()],
-        caps(&[ActionScope::Migrate]),
-        1_000_000_100_000,
-        1_000_000_800_000,
-        "nonce-child-2",
-        Some(root_hash.clone()),
-        1,
+        TokenSpec {
+            token_id: "tk-child-2",
+            issuer: ISSUER,
+            audience: vec!["svc-A".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_100_000,
+            expires_at: 1_000_000_800_000,
+            nonce: "nonce-child-2",
+            parent_token_hash: Some(root_hash.clone()),
+            max_delegation_depth: 1,
+        },
     );
     chain.append(child.clone()).expect("child ok");
     assert_eq!(chain.depth(), 2);
@@ -279,15 +290,17 @@ fn e2e_audience_token_delegation_chain_attenuates() {
     // INV-ABT-ATTENUATION: child grants a capability the root does not have.
     let bad_caps = make_signed_token(
         &key,
-        "tk-overcap",
-        ISSUER,
-        vec!["svc-A".to_string()],
-        caps(&[ActionScope::Revoke]), // not in parent's caps
-        1_000_000_100_000,
-        1_000_000_800_000,
-        "nonce-overcap",
-        Some(root_hash.clone()),
-        1,
+        TokenSpec {
+            token_id: "tk-overcap",
+            issuer: ISSUER,
+            audience: vec!["svc-A".to_string()],
+            capabilities: caps(&[ActionScope::Revoke]), // not in parent's caps
+            issued_at: 1_000_000_100_000,
+            expires_at: 1_000_000_800_000,
+            nonce: "nonce-overcap",
+            parent_token_hash: Some(root_hash.clone()),
+            max_delegation_depth: 1,
+        },
     );
     let mut bad_chain = TokenChain::new(root.clone()).unwrap();
     let err = bad_chain.append(bad_caps).expect_err("over-cap rejected");
@@ -297,15 +310,17 @@ fn e2e_audience_token_delegation_chain_attenuates() {
     // INV-ABT-ATTENUATION: child audience not a subset.
     let bad_aud = make_signed_token(
         &key,
-        "tk-aud-extra",
-        ISSUER,
-        vec!["svc-EXTERNAL".to_string()], // not in parent's audience
-        caps(&[ActionScope::Migrate]),
-        1_000_000_100_000,
-        1_000_000_800_000,
-        "nonce-aud-extra",
-        Some(root_hash.clone()),
-        1,
+        TokenSpec {
+            token_id: "tk-aud-extra",
+            issuer: ISSUER,
+            audience: vec!["svc-EXTERNAL".to_string()], // not in parent's audience
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_100_000,
+            expires_at: 1_000_000_800_000,
+            nonce: "nonce-aud-extra",
+            parent_token_hash: Some(root_hash.clone()),
+            max_delegation_depth: 1,
+        },
     );
     let mut bad_chain = TokenChain::new(root.clone()).unwrap();
     let err = bad_chain
@@ -321,15 +336,17 @@ fn e2e_audience_token_delegation_chain_attenuates() {
     // INV-ABT-ATTENUATION: child max_delegation_depth >= parent's.
     let bad_depth = make_signed_token(
         &key,
-        "tk-depth",
-        ISSUER,
-        vec!["svc-A".to_string()],
-        caps(&[ActionScope::Migrate]),
-        1_000_000_100_000,
-        1_000_000_800_000,
-        "nonce-depth",
-        Some(root_hash.clone()),
-        2, // not strictly less than root's 2
+        TokenSpec {
+            token_id: "tk-depth",
+            issuer: ISSUER,
+            audience: vec!["svc-A".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_100_000,
+            expires_at: 1_000_000_800_000,
+            nonce: "nonce-depth",
+            parent_token_hash: Some(root_hash.clone()),
+            max_delegation_depth: 2, // not strictly less than root's 2
+        },
     );
     let mut bad_chain = TokenChain::new(root.clone()).unwrap();
     let err = bad_chain
@@ -345,15 +362,17 @@ fn e2e_audience_token_delegation_chain_attenuates() {
     // INV-ABT-ATTENUATION: child expires AFTER parent.
     let outlives = make_signed_token(
         &key,
-        "tk-outlives",
-        ISSUER,
-        vec!["svc-A".to_string()],
-        caps(&[ActionScope::Migrate]),
-        1_000_000_100_000,
-        1_000_001_000_000, // > root.expires_at
-        "nonce-outlives",
-        Some(root_hash.clone()),
-        1,
+        TokenSpec {
+            token_id: "tk-outlives",
+            issuer: ISSUER,
+            audience: vec!["svc-A".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_100_000,
+            expires_at: 1_000_001_000_000, // > root.expires_at
+            nonce: "nonce-outlives",
+            parent_token_hash: Some(root_hash.clone()),
+            max_delegation_depth: 1,
+        },
     );
     let mut bad_chain = TokenChain::new(root.clone()).unwrap();
     let err = bad_chain
@@ -372,15 +391,17 @@ fn e2e_audience_token_replay_detection_and_epoch_reset() {
 
     let root = make_signed_token(
         &key,
-        "tk-replay-root",
-        ISSUER,
-        vec!["svc-X".to_string()],
-        caps(&[ActionScope::Migrate]),
-        1_000_000_000_000,
-        1_000_000_900_000,
-        "nonce-replay-1",
-        None,
-        0,
+        TokenSpec {
+            token_id: "tk-replay-root",
+            issuer: ISSUER,
+            audience: vec!["svc-X".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-replay-1",
+            parent_token_hash: None,
+            max_delegation_depth: 0,
+        },
     );
     let chain = TokenChain::new(root.clone()).unwrap();
 
@@ -413,15 +434,17 @@ fn e2e_audience_token_signature_tampering_rejected() {
 
     let mut tok = make_signed_token(
         &key,
-        "tk-tamper",
-        ISSUER,
-        vec!["svc-Z".to_string()],
-        caps(&[ActionScope::Migrate]),
-        1_000_000_000_000,
-        1_000_000_900_000,
-        "nonce-tamper",
-        None,
-        0,
+        TokenSpec {
+            token_id: "tk-tamper",
+            issuer: ISSUER,
+            audience: vec!["svc-Z".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-tamper",
+            parent_token_hash: None,
+            max_delegation_depth: 0,
+        },
     );
     // Flip the last hex char of the signature.
     let mut sig: Vec<char> = tok.signature.chars().collect();
@@ -442,15 +465,17 @@ fn e2e_audience_token_signature_tampering_rejected() {
     let stranger_key = SigningKey::from_bytes(&[0x99; 32]);
     let stranger = make_signed_token(
         &stranger_key,
-        "tk-stranger",
-        "stranger-issuer-not-trusted",
-        vec!["svc-Z".to_string()],
-        caps(&[ActionScope::Migrate]),
-        1_000_000_000_000,
-        1_000_000_900_000,
-        "nonce-stranger",
-        None,
-        0,
+        TokenSpec {
+            token_id: "tk-stranger",
+            issuer: "stranger-issuer-not-trusted",
+            audience: vec!["svc-Z".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-stranger",
+            parent_token_hash: None,
+            max_delegation_depth: 0,
+        },
     );
     let chain = TokenChain::new(stranger).unwrap();
     let err = validator
@@ -467,15 +492,17 @@ fn e2e_audience_token_rejects_oversized_fields_before_preimage_work() {
     let key = signing_key();
     let mut oversized_audience = make_signed_token(
         &key,
-        "tk-oversized-audience",
-        ISSUER,
-        vec!["svc-Z".to_string()],
-        caps(&[ActionScope::Migrate]),
-        1_000_000_000_000,
-        1_000_000_900_000,
-        "nonce-oversized-audience",
-        None,
-        0,
+        TokenSpec {
+            token_id: "tk-oversized-audience",
+            issuer: ISSUER,
+            audience: vec!["svc-Z".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-oversized-audience",
+            parent_token_hash: None,
+            max_delegation_depth: 0,
+        },
     );
     oversized_audience
         .audience
@@ -497,15 +524,17 @@ fn e2e_audience_token_rejects_oversized_fields_before_preimage_work() {
 
     let mut oversized_signature = make_signed_token(
         &key,
-        "tk-oversized-signature",
-        ISSUER,
-        vec!["svc-Z".to_string()],
-        caps(&[ActionScope::Migrate]),
-        1_000_000_000_000,
-        1_000_000_900_000,
-        "nonce-oversized-signature",
-        None,
-        0,
+        TokenSpec {
+            token_id: "tk-oversized-signature",
+            issuer: ISSUER,
+            audience: vec!["svc-Z".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-oversized-signature",
+            parent_token_hash: None,
+            max_delegation_depth: 0,
+        },
     );
     oversized_signature.signature = "a".repeat(MAX_TOKEN_SIGNATURE_BYTES + 1);
 
@@ -526,15 +555,17 @@ fn e2e_audience_token_deserialization_is_bounded() {
     let key = signing_key();
     let token = make_signed_token(
         &key,
-        "tk-deser-bound",
-        ISSUER,
-        vec!["svc-Z".to_string()],
-        caps(&[ActionScope::Migrate]),
-        1_000_000_000_000,
-        1_000_000_900_000,
-        "nonce-deser-bound",
-        None,
-        0,
+        TokenSpec {
+            token_id: "tk-deser-bound",
+            issuer: ISSUER,
+            audience: vec!["svc-Z".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-deser-bound",
+            parent_token_hash: None,
+            max_delegation_depth: 0,
+        },
     );
 
     let mut token_value = serde_json::to_value(&token).expect("token serializes");

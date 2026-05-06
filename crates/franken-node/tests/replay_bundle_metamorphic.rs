@@ -91,8 +91,7 @@ mod evidence_backed_roundtrip_metamorphic {
                         EventType::PolicyEval,
                         EventType::ExternalSignal,
                         EventType::OperatorAction,
-                    ][rng.gen_range(0..4)]
-                    .clone(),
+                    ][rng.gen_range(0..4)],
                     payload: json!({
                         "case": case_index,
                         "event": event_index,
@@ -232,7 +231,7 @@ fn arbitrary_raw_event(rng: &mut impl Rng, sequence_base: u64) -> RawEvent {
         EventType::OperatorAction,
     ];
 
-    let event_type = event_types[rng.gen_range(0..event_types.len())].clone();
+    let event_type = event_types[rng.gen_range(0..event_types.len())];
 
     // Generate realistic but random payload based on event type
     let payload = match event_type {
@@ -371,8 +370,7 @@ fn fuzzed_entropy_replay_bundle(seed: u64) -> ReplayBundle {
                     EventType::PolicyEval,
                     EventType::ExternalSignal,
                     EventType::OperatorAction,
-                ][pattern_index % 4]
-                    .clone(),
+                ][pattern_index % 4],
                 payload: json!({
                     "case_seed": seed,
                     "event_index": event_index,
@@ -622,8 +620,7 @@ fn metamorphic_replay_bundle_stress_test() {
                 EventType::PolicyEval,
                 EventType::ExternalSignal,
                 EventType::OperatorAction,
-            ][i % 4]
-                .clone(),
+            ][i % 4],
             payload: json!({
                 "stress_data": "x".repeat(if i < 20 { 600_000 } else { rng.gen_range(10..1000) }),
                 "index": i,

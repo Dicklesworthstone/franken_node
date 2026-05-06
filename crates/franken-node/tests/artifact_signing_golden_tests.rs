@@ -95,10 +95,10 @@ fn manifest_json(manifest: &ChecksumManifest) -> Value {
 }
 
 fn scrub_audit_json(mut value: Value) -> Value {
-    if let Some(object) = value.as_object_mut() {
-        if object.contains_key("timestamp") {
-            object.insert("timestamp".to_string(), json!("[TIMESTAMP]"));
-        }
+    if let Some(object) = value.as_object_mut()
+        && object.contains_key("timestamp")
+    {
+        object.insert("timestamp".to_string(), json!("[TIMESTAMP]"));
     }
     value
 }

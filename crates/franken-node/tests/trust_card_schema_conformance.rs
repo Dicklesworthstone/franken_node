@@ -29,6 +29,7 @@ const TEST_REGISTRY_KEY: &str = "trust-card-conformance-key";
 enum RequirementLevel {
     Must,
     Should,
+    #[expect(dead_code, reason = "reserved for future MAY-level conformance cases")]
     May,
 }
 
@@ -845,15 +846,24 @@ fn trust_card_schema_conformance_full() {
         match &result {
             TestResult::Pass => {
                 pass_count += 1;
-                println!("PASS: {} - {}", case.id, case.description);
+                println!(
+                    "PASS [{:?}]: {} - {}",
+                    case.category, case.id, case.description
+                );
             }
             TestResult::Fail { reason } => {
                 fail_count += 1;
-                eprintln!("FAIL: {} - {}: {}", case.id, case.description, reason);
+                eprintln!(
+                    "FAIL [{:?}]: {} - {}: {}",
+                    case.category, case.id, case.description, reason
+                );
             }
             TestResult::ExpectedFailure { reason } => {
                 expected_fail_count += 1;
-                println!("XFAIL: {} - {}: {}", case.id, case.description, reason);
+                println!(
+                    "XFAIL [{:?}]: {} - {}: {}",
+                    case.category, case.id, case.description, reason
+                );
             }
         }
 
@@ -864,7 +874,7 @@ fn trust_card_schema_conformance_full() {
     println!("\n{}", report);
 
     // Write compliance report
-    if let Ok(_) = fs::create_dir_all("tests/golden/trust_card_conformance") {
+    if fs::create_dir_all("tests/golden/trust_card_conformance").is_ok() {
         let _ = fs::write(
             "tests/golden/trust_card_conformance/compliance_report.md",
             report,

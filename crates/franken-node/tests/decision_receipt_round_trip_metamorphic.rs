@@ -43,29 +43,33 @@ fn decision_strategy() -> impl Strategy<Value = Decision> {
     ]
 }
 
+struct ReceiptFields<'a> {
+    action_name: &'a str,
+    actor_identity: &'a str,
+    audience: &'a str,
+    rationale: &'a str,
+    rollback_command: &'a str,
+}
+
 fn build_receipt(
-    action_name: &str,
-    actor_identity: &str,
-    audience: &str,
-    rationale: &str,
-    rollback_command: &str,
+    fields: ReceiptFields<'_>,
     decision: Decision,
     confidence: f64,
     evidence_refs: Vec<String>,
     policy_rule_chain: Vec<String>,
 ) -> Receipt {
     Receipt::new(
-        action_name,
-        actor_identity,
-        audience,
-        &json!({"input_field": action_name, "n": 1}),
+        fields.action_name,
+        fields.actor_identity,
+        fields.audience,
+        &json!({"input_field": fields.action_name, "n": 1}),
         &json!({"output_field": "ok"}),
         decision,
-        rationale,
+        fields.rationale,
         evidence_refs,
         policy_rule_chain,
         confidence,
-        rollback_command,
+        fields.rollback_command,
     )
     .expect("receipt construction with valid confidence must succeed")
 }
@@ -95,11 +99,13 @@ proptest! {
         let public_key = signing_key.verifying_key();
 
         let receipt = build_receipt(
-            &action_name,
-            &actor_identity,
-            &audience,
-            &rationale,
-            &rollback_command,
+            ReceiptFields {
+                action_name: &action_name,
+                actor_identity: &actor_identity,
+                audience: &audience,
+                rationale: &rationale,
+                rollback_command: &rollback_command,
+            },
             decision,
             confidence,
             evidence_refs,
@@ -149,11 +155,13 @@ proptest! {
         let public_key = signing_key.verifying_key();
 
         let receipt = build_receipt(
-            &action_name,
-            "actor",
-            "audience",
-            "rationale",
-            "rollback",
+            ReceiptFields {
+                action_name: &action_name,
+                actor_identity: "actor",
+                audience: "audience",
+                rationale: "rationale",
+                rollback_command: "rollback",
+            },
             decision,
             confidence,
             vec![],
@@ -171,15 +179,14 @@ proptest! {
         sig_bytes[byte_idx] ^= 1_u8 << bit_in_byte;
         signed.signature = BASE64_STANDARD.encode(&sig_bytes);
 
-        match verify_receipt(&signed, &public_key) {
-            Ok(verified) => prop_assert!(
+        // Some tampered byte sequences are caught by Signature::from_slice / verify
+        // and surface as Err — that is also a valid rejection.
+        if let Ok(verified) = verify_receipt(&signed, &public_key) {
+            prop_assert!(
                 !verified,
                 "bit-flipped signature must not verify (bit {})",
                 bit_index
-            ),
-            // Some tampered byte sequences are caught by Signature::from_slice / verify
-            // and surface as Err — that is also a valid rejection.
-            Err(_) => {}
+            );
         }
     }
 
@@ -196,11 +203,13 @@ proptest! {
         let public_key = signing_key.verifying_key();
 
         let receipt = build_receipt(
-            &action_name,
-            "actor",
-            "audience",
-            "rationale",
-            "rollback",
+            ReceiptFields {
+                action_name: &action_name,
+                actor_identity: "actor",
+                audience: "audience",
+                rationale: "rationale",
+                rollback_command: "rollback",
+            },
             decision,
             confidence,
             vec![],
@@ -211,12 +220,11 @@ proptest! {
 
         signed.chain_hash.push_str(&suffix);
 
-        match verify_receipt(&signed, &public_key) {
-            Ok(verified) => prop_assert!(
+        if let Ok(verified) = verify_receipt(&signed, &public_key) {
+            prop_assert!(
                 !verified,
                 "verification must reject a tampered chain_hash"
-            ),
-            Err(_) => {}
+            );
         }
     }
 
@@ -236,11 +244,13 @@ proptest! {
         let public_key = signing_key.verifying_key();
 
         let receipt = build_receipt(
-            &action_name,
-            "actor",
-            "audience",
-            "rationale",
-            "rollback",
+            ReceiptFields {
+                action_name: &action_name,
+                actor_identity: "actor",
+                audience: "audience",
+                rationale: "rationale",
+                rollback_command: "rollback",
+            },
             decision,
             confidence,
             vec![],
@@ -251,12 +261,11 @@ proptest! {
 
         signed.receipt.action_name = replacement;
 
-        match verify_receipt(&signed, &public_key) {
-            Ok(verified) => prop_assert!(
+        if let Ok(verified) = verify_receipt(&signed, &public_key) {
+            prop_assert!(
                 !verified,
                 "verification must reject a tampered receipt body"
-            ),
-            Err(_) => {}
+            );
         }
     }
 }

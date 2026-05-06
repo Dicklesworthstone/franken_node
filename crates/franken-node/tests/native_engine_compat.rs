@@ -18,6 +18,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 
+fn balanced_config() -> Config {
+    Config {
+        profile: Profile::Balanced,
+        ..Config::default()
+    }
+}
+
 /// Create a test application file with simple JavaScript content
 fn create_test_app(dir: &Path, filename: &str, content: &str) -> PathBuf {
     let app_path = dir.join(filename);
@@ -171,8 +178,7 @@ fn test_native_engine_execution_with_telemetry() {
         r#"console.log("Hello from native engine");"#,
     );
 
-    let mut config = Config::default();
-    config.profile = Profile::Balanced; // Use balanced to allow native execution
+    let config = balanced_config();
 
     let dispatcher = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine);
     // Create test telemetry bridge
@@ -263,8 +269,7 @@ fn test_balanced_profile_allows_external_process_fallback() {
 
     let engine_path = create_mock_engine_binary(temp_dir.path());
 
-    let mut config = Config::default();
-    config.profile = Profile::Balanced; // Balanced allows fallback
+    let config = balanced_config();
 
     let dispatcher =
         EngineDispatcher::new(Some(engine_path.clone()), PreferredRuntime::FrankenEngine);
@@ -298,8 +303,7 @@ fn test_native_engine_error_handling_propagation() {
     // Test 1: Source file read error
     let nonexistent_path = temp_dir.path().join("nonexistent.js");
 
-    let mut config = Config::default();
-    config.profile = Profile::Balanced;
+    let config = balanced_config();
 
     let dispatcher = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine);
     // Create test telemetry bridge
@@ -372,8 +376,7 @@ fn test_engine_timeout_handling() {
     // Create a slow mock engine that takes 10 seconds to complete (longer than our 5s timeout)
     let slow_engine_path = create_slow_mock_engine_binary(temp_dir.path(), 10);
 
-    let mut config = Config::default();
-    config.profile = Profile::Balanced; // Use balanced to allow external process fallback
+    let config = balanced_config();
 
     // Force external process execution by providing explicit engine binary path
     // This bypasses native engine execution to test external process timeout
@@ -455,8 +458,7 @@ fn test_native_engine_missing_binary_error_handling() {
     // Point to a non-existent engine binary
     let nonexistent_engine_path = temp_dir.path().join("nonexistent-franken-engine");
 
-    let mut config = Config::default();
-    config.profile = Profile::Balanced;
+    let config = balanced_config();
 
     let dispatcher = EngineDispatcher::new(
         Some(nonexistent_engine_path.clone()),
@@ -498,8 +500,7 @@ fn test_engine_non_zero_exit_code_error_handling() {
     // Create a mock engine that returns exit code 1
     let failing_engine_path = create_failing_mock_engine_binary(temp_dir.path(), 1);
 
-    let mut config = Config::default();
-    config.profile = Profile::Balanced;
+    let config = balanced_config();
 
     // Force external process execution to test exit code handling
     let dispatcher = EngineDispatcher::new(
@@ -545,8 +546,7 @@ fn test_engine_crash_signal_error_handling() {
     // Create a mock engine that crashes with SIGKILL
     let crashing_engine_path = create_crashing_mock_engine_binary(temp_dir.path());
 
-    let mut config = Config::default();
-    config.profile = Profile::Balanced;
+    let config = balanced_config();
 
     // Force external process execution to test signal handling
     let dispatcher = EngineDispatcher::new(

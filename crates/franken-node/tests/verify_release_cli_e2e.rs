@@ -360,7 +360,7 @@ fn path_scrubbers(paths: &[(&Path, &str)]) -> Vec<(String, String)> {
         .iter()
         .map(|(path, replacement)| (path.display().to_string(), (*replacement).to_string()))
         .collect::<Vec<_>>();
-    scrubbers.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+    scrubbers.sort_by_key(|right| std::cmp::Reverse(right.0.len()));
     scrubbers
 }
 
@@ -445,7 +445,7 @@ fn verify_json_matrix_case(
     let repo_root = repo_root();
     let mut scrubbers = path_scrubbers(&[(&repo_root, "[repo]")]);
     scrubbers.extend(path_scrubbers(scrubbed_paths));
-    scrubbers.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+    scrubbers.sort_by_key(|right| std::cmp::Reverse(right.0.len()));
     scrub_paths_in_json(&mut stdout_json, &scrubbers);
 
     let args = args

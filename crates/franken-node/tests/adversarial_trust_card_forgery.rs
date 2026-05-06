@@ -269,8 +269,7 @@ fn registry_ingestion_rejects_forged_card_in_snapshot() {
     // error variant depends on whether the ingestion path validates per-card
     // hashes or the snapshot signature first; both paths are fail-closed.
     let err = TrustCardRegistry::from_snapshot(snapshot, LEGITIMATE_KEY, NOW_SECS)
-        .err()
-        .expect("snapshot ingestion must reject embedded forged card");
+        .expect_err("snapshot ingestion must reject embedded forged card");
     let acceptable = matches!(
         err,
         TrustCardError::CardHashMismatch(_)
@@ -309,8 +308,7 @@ fn empty_snapshot_signed_by_attacker_key_is_rejected() {
             .expect("attacker can self-sign empty snapshot under their own key");
 
     let err = TrustCardRegistry::from_snapshot(attacker_snapshot, LEGITIMATE_KEY, NOW_SECS)
-        .err()
-        .expect("attacker-signed empty snapshot must be rejected by legitimate ingestion");
+        .expect_err("attacker-signed empty snapshot must be rejected by legitimate ingestion");
     assert!(
         matches!(
             err,

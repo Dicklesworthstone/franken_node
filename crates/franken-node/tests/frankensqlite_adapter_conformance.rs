@@ -3,8 +3,8 @@ mod frankensqlite_adapter_conformance;
 
 use frankenengine_node::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 use frankenengine_node::storage::frankensqlite_adapter::{
-    AdapterError, CallerContext, FrankensqliteAdapter, MAX_STORE_ENTRIES, MAX_STORE_KEY_BYTES,
-    MAX_STORE_VALUE_BYTES, PersistenceClass, event_codes,
+    event_codes, AdapterError, CallerContext, FrankensqliteAdapter, PersistenceClass,
+    MAX_STORE_ENTRIES, MAX_STORE_KEY_BYTES, MAX_STORE_VALUE_BYTES,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -147,7 +147,7 @@ fn checked_in_persistence_matrix_satisfies_contract_tiers_and_replay_rules() {
                     "{domain} is tier_3 and must not claim replay support in the checked-in matrix"
                 );
             }
-            other => assert!(false, "{domain} uses unknown safety tier {other}"),
+            other => panic!("{domain} uses unknown safety tier {other}"),
         }
 
         *tier_counts.entry(safety_tier.to_string()).or_insert(0usize) += 1;
