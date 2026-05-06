@@ -10,6 +10,7 @@ Usage:
 """
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -39,6 +40,17 @@ REQUIRED_REAL_HARNESS_TOKENS = [
     "GateErrorCode::OverrideScopeMismatch",
     "GateErrorCode::OverrideExpired",
 ]
+
+
+def rust_test_command() -> list[str]:
+    toolchain = os.environ.get("RUSTUP_TOOLCHAIN", "nightly")
+    return [
+        "rch", "exec", "--",
+        "env", f"RUSTUP_TOOLCHAIN={toolchain}",
+        "cargo", "test", "-p", "frankenengine-node",
+        "--lib", "--features", "advanced-features",
+        "--", "conformance::protocol_harness",
+    ]
 
 
 def check_harness_impl() -> dict:
@@ -93,7 +105,7 @@ def check_rust_tests() -> dict:
     """HARNESS-TESTS: Rust unit tests pass."""
     try:
         result = subprocess.run(
-            ["rch", "exec", "--", "cargo", "test", "-p", "frankenengine-node", "--", "conformance::protocol_harness"],
+            rust_test_command(),
             capture_output=True, text=True, timeout=3600, cwd=str(ROOT),
         )
         lines = result.stdout.strip().split("\n")

@@ -222,6 +222,7 @@ path = "tests/connector_method_contract_artifact_conformance.rs"
 [[test]]
 name = "connector_protocol_harness"
 path = "../../tests/conformance/connector_protocol_harness.rs"
+required-features = ["advanced-features"]
 
 [[test]]
 name = "atc_verifier_api_routes"

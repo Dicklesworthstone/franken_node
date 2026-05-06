@@ -24,6 +24,15 @@ class TestCheckOverrideSupport(unittest.TestCase):
         self.assertEqual(ch.check_override_support()["status"], "PASS")
 
 
+class TestRustTestCommand(unittest.TestCase):
+    def test_targets_real_feature_gated_protocol_harness_tests(self):
+        command = ch.rust_test_command()
+        self.assertIn("RUSTUP_TOOLCHAIN=nightly", command)
+        self.assertIn("--lib", command)
+        self.assertIn("advanced-features", command)
+        self.assertEqual(command[-1], "conformance::protocol_harness")
+
+
 class TestCheckCIWorkflow(unittest.TestCase):
     def test_passes(self):
         self.assertEqual(ch.check_ci_workflow()["status"], "PASS")
