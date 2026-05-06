@@ -3,11 +3,12 @@
 // Exposes compatibility mode transitions, divergence receipts, and policy gates
 // as programmatic APIs. Every decision produces structured evidence -- no opaque gates.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 
+use super::approval_workflow::ApprovalSignature;
 use super::compat_gates::{
     COMPAT_DIVERGENCE_RECEIPT_DOMAIN, COMPAT_POLICY_PREDICATE_DOMAIN,
     COMPAT_TRANSITION_RECEIPT_DOMAIN, CompatibilityFreshnessState, CompatibilityProofMetadata,
@@ -29,6 +30,8 @@ pub const PCG_002: &str = "PCG-002";
 pub const PCG_003: &str = "PCG-003";
 /// Divergence receipt issued.
 pub const PCG_004: &str = "PCG-004";
+
+const MIN_MODE_ESCALATION_APPROVERS: usize = 2;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -150,6 +153,14 @@ pub struct ModeTransitionRequest {
     pub to_mode: CompatMode,
     pub justification: String,
     pub requestor: String,
+}
+
+/// Approval workflow evidence attached to a risk-increasing mode transition.
+#[derive(Debug, Clone)]
+pub struct ModeTransitionApprovalEvidence {
+    pub proposal_id: String,
+    pub evidence_hash: String,
+    pub approval_signatures: Vec<ApprovalSignature>,
 }
 
 /// A compatibility shim entry in the registry.
@@ -362,6 +373,48 @@ fn predicate_scope_delta(
         })
         .collect();
     validate_scope_attenuation_for_scope(scope_id, &attenuation)
+}
+
+fn is_sha256_evidence_hash(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn normalized_identity(identity: &str) -> String {
+    identity.trim().to_ascii_lowercase()
+}
+
+fn non_requestor_approver_count(
+    requestor: &str,
+    approval: &ModeTransitionApprovalEvidence,
+) -> usize {
+    let requestor = normalized_identity(requestor);
+    let mut approvers = BTreeSet::new();
+
+    for signature in &approval.approval_signatures {
+        let signer = normalized_identity(&signature.signer);
+        if signer.is_empty()
+            || crate::security::constant_time::ct_eq(&signer, &requestor)
+            || signature.signature.trim().is_empty()
+            || signature.signed_at.trim().is_empty()
+        {
+            continue;
+        }
+        approvers.insert(signer);
+    }
+
+    approvers.len()
+}
+
+fn escalation_approval_evidence_is_valid(
+    req: &ModeTransitionRequest,
+    approval: &ModeTransitionApprovalEvidence,
+) -> bool {
+    !approval.proposal_id.trim().is_empty()
+        && is_sha256_evidence_hash(&approval.evidence_hash)
+        && non_requestor_approver_count(&req.requestor, approval) >= MIN_MODE_ESCALATION_APPROVERS
 }
 
 use crate::capacity_defaults::aliases::{MAX_AUDIT_TRAIL_ENTRIES, MAX_RECEIPTS, MAX_SHIMS};
@@ -874,13 +927,10 @@ impl GateEngine {
 
             // Next request should trigger overflow
             let result2 = engine.gate_check(&overflow_request);
-            if result2.is_err() {
-                if let Err(GateEngineError::TraceIdSpaceExhausted) = result2 {
-                    // Expected error for trace ID exhaustion
-                } else {
-                    panic!("Unexpected error type for trace ID overflow");
-                }
-            }
+            assert!(
+                matches!(result2, Ok(_) | Err(GateEngineError::TraceIdSpaceExhausted)),
+                "Unexpected error type for trace ID overflow"
+            );
 
             // Test: Mode risk level boundary attacks
             let mut engine = GateEngine::new(vec![0x42; 32]);
@@ -1332,6 +1382,23 @@ impl GateEngine {
         &mut self,
         req: &ModeTransitionRequest,
     ) -> Result<ModeTransitionReceipt, GateEngineError> {
+        self.request_transition_with_optional_approval(req, None)
+    }
+
+    /// Request a risk-increasing mode transition with approval workflow evidence.
+    pub fn request_transition_with_approval(
+        &mut self,
+        req: &ModeTransitionRequest,
+        approval: &ModeTransitionApprovalEvidence,
+    ) -> Result<ModeTransitionReceipt, GateEngineError> {
+        self.request_transition_with_optional_approval(req, Some(approval))
+    }
+
+    fn request_transition_with_optional_approval(
+        &mut self,
+        req: &ModeTransitionRequest,
+        approval: Option<&ModeTransitionApprovalEvidence>,
+    ) -> Result<ModeTransitionReceipt, GateEngineError> {
         let current = self
             .scope_modes
             .get(&req.scope_id)
@@ -1345,14 +1412,11 @@ impl GateEngine {
             });
         }
 
-        // Escalation check
         let escalating = req.to_mode.risk_level() > req.from_mode.risk_level();
         let approved = if escalating {
-            // In production this goes through bd-sh3 approval workflow.
-            // For now, auto-approve if justification is long enough.
-            req.justification.len() >= 20
+            approval.is_some_and(|evidence| escalation_approval_evidence_is_valid(req, evidence))
         } else {
-            true // de-escalation is auto-approved
+            true
         };
 
         let slot = self.allocate_trace_slot()?;
@@ -1365,31 +1429,73 @@ impl GateEngine {
         }
 
         let rationale = if approved {
-            format!(
-                "Transition {} -> {} approved for scope {}",
-                req.from_mode.label(),
-                req.to_mode.label(),
-                req.scope_id
-            )
+            if escalating {
+                let proposal_id = approval
+                    .map(|evidence| evidence.proposal_id.as_str())
+                    .unwrap_or("missing");
+                format!(
+                    "Transition {} -> {} approved for scope {} via approval proposal {}",
+                    req.from_mode.label(),
+                    req.to_mode.label(),
+                    req.scope_id,
+                    proposal_id
+                )
+            } else {
+                format!(
+                    "Transition {} -> {} approved for scope {}",
+                    req.from_mode.label(),
+                    req.to_mode.label(),
+                    req.scope_id
+                )
+            }
         } else {
             format!(
-                "Transition {} -> {} denied: justification too short for escalation",
+                "Transition {} -> {} denied: escalation requires approval workflow evidence with at least {} non-requestor approvers",
                 req.from_mode.label(),
-                req.to_mode.label()
+                req.to_mode.label(),
+                MIN_MODE_ESCALATION_APPROVERS
             )
         };
+
+        let mut scope_delta = vec![format!("scope={}", req.scope_id)];
+        let mut attenuation_trace = vec![format!(
+            "mode:{}->{}",
+            req.from_mode.label(),
+            req.to_mode.label()
+        )];
+        let mut reason_codes = vec!["POLICY_COMPAT_MODE_TRANSITION".to_string()];
+        let mut recovery_hints = Vec::new();
+
+        if escalating {
+            if let Some(evidence) = approval {
+                scope_delta.push(format!("approval_proposal={}", evidence.proposal_id));
+                scope_delta.push(format!("approval_evidence={}", evidence.evidence_hash));
+                attenuation_trace.push(format!(
+                    "approval_non_requestor_count={}",
+                    non_requestor_approver_count(&req.requestor, evidence)
+                ));
+            }
+            if approved {
+                reason_codes.push("POLICY_COMPAT_ESCALATION_APPROVED_BY_WORKFLOW".to_string());
+            } else {
+                reason_codes
+                    .push("POLICY_COMPAT_ESCALATION_REQUIRES_APPROVAL_WORKFLOW".to_string());
+                recovery_hints.push(
+                    "attach bd-sh3 approval workflow evidence before escalating compatibility risk"
+                        .to_string(),
+                );
+            }
+        } else {
+            reason_codes.push("POLICY_COMPAT_DEESCALATION_AUTO_APPROVED".to_string());
+        }
 
         let proof = build_proof_metadata(
             CompatibilitySignatureAlgorithm::HmacSha256,
             None,
-            vec![format!("scope={}", req.scope_id)],
-            vec![format!(
-                "mode:{}->{}",
-                req.from_mode.label(),
-                req.to_mode.label()
-            )],
-            vec!["POLICY_COMPAT_MODE_TRANSITION".to_string()],
-            vec!["expand the justification if escalation approval is denied".to_string()],
+            scope_delta,
+            attenuation_trace,
+            reason_codes,
+            recovery_hints,
         );
         let mut receipt = ModeTransitionReceipt {
             transition_id: slot.transition_id(),
@@ -1613,6 +1719,26 @@ mod tests {
         engine
     }
 
+    fn approval_signature(signer: &str) -> ApprovalSignature {
+        ApprovalSignature {
+            signer: signer.to_string(),
+            signature: format!("sig-{signer}"),
+            signed_at: "2099-01-01T00:00:00Z".to_string(),
+            comment: Some("mode escalation reviewed".to_string()),
+        }
+    }
+
+    fn mode_transition_approval_evidence() -> ModeTransitionApprovalEvidence {
+        ModeTransitionApprovalEvidence {
+            proposal_id: "policy-proposal-compat-escalation-001".to_string(),
+            evidence_hash: format!("sha256:{}", "a".repeat(64)),
+            approval_signatures: vec![
+                approval_signature("risk-owner"),
+                approval_signature("security-owner"),
+            ],
+        }
+    }
+
     #[test]
     fn gate_engine_uses_configured_receipt_ttl_secs() {
         let config = crate::config::CompatibilityConfig {
@@ -1751,16 +1877,28 @@ mod tests {
     #[test]
     fn test_mode_transition_escalate_approved() {
         let mut engine = test_engine();
+        let req = ModeTransitionRequest {
+            scope_id: "tenant-1".into(),
+            from_mode: CompatMode::Balanced,
+            to_mode: CompatMode::LegacyRisky,
+            justification: "Legacy migration phase requires broader compat".into(),
+            requestor: "admin".into(),
+        };
+        let approval = mode_transition_approval_evidence();
         let receipt = engine
-            .request_transition(&ModeTransitionRequest {
-                scope_id: "tenant-1".into(),
-                from_mode: CompatMode::Balanced,
-                to_mode: CompatMode::LegacyRisky,
-                justification: "Legacy migration phase requires broader compat".into(),
-                requestor: "admin".into(),
-            })
+            .request_transition_with_approval(&req, &approval)
             .unwrap();
         assert!(receipt.approved);
+        assert!(
+            receipt
+                .proof
+                .scope_delta
+                .contains(&format!("approval_proposal={}", approval.proposal_id))
+        );
+        assert_eq!(
+            engine.query_mode("tenant-1").unwrap().mode,
+            CompatMode::LegacyRisky
+        );
     }
 
     #[test]
@@ -1776,6 +1914,31 @@ mod tests {
             })
             .unwrap();
         assert!(!receipt.approved);
+    }
+
+    #[test]
+    fn test_mode_transition_escalate_denied_without_approval_even_with_long_justification() {
+        let mut engine = test_engine();
+        let receipt = engine
+            .request_transition(&ModeTransitionRequest {
+                scope_id: "tenant-1".into(),
+                from_mode: CompatMode::Balanced,
+                to_mode: CompatMode::LegacyRisky,
+                justification: "Legacy migration phase requires broader compat".into(),
+                requestor: "admin".into(),
+            })
+            .unwrap();
+        assert!(!receipt.approved);
+        assert_eq!(
+            engine.query_mode("tenant-1").unwrap().mode,
+            CompatMode::Balanced
+        );
+        assert!(
+            receipt
+                .proof
+                .reason_codes
+                .contains(&"POLICY_COMPAT_ESCALATION_REQUIRES_APPROVAL_WORKFLOW".to_string())
+        );
     }
 
     #[test]
@@ -2265,12 +2428,13 @@ mod tests {
             .set_scope_policy_predicate("missing-scope", predicate)
             .unwrap_err();
 
-        match err {
-            GateEngineError::ScopeNotFound { scope_id } => {
-                assert_eq!(scope_id, "missing-scope");
-            }
-            other => panic!("expected missing scope rejection, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                GateEngineError::ScopeNotFound { ref scope_id } if scope_id == "missing-scope"
+            ),
+            "expected missing scope rejection"
+        );
     }
 
     #[test]
