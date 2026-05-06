@@ -1,7 +1,7 @@
 {
   "event_code": "ASV-001",
   "artifact_name": "bin/franken-node-linux-x64.tar.gz",
-  "key_id": "12345678",
+  "key_id": "8003acb369006cb6",
   "operation": "sign-manifest",
   "result": "success",
   "timestamp": "[TIMESTAMP]"
