@@ -4,13 +4,14 @@ use frankenengine_node::ops::rch_adapter::{
     RchProcessSnapshot, RchTimeoutClass, RchValidationAction, classify_rch_output,
 };
 use frankenengine_node::ops::validation_broker::{
-    CommandSpec, DigestRef, EnvironmentPolicy, FallbackPolicy, InputDigest, InputSet, OutputPolicy,
-    ProofEvidenceSource, ProofStatusKind, QueueState, RECEIPT_SCHEMA_VERSION, RchMode, RchReceipt,
-    ReceiptArtifacts, ReceiptClassifications, ReceiptRequestRef, ReceiptTrust, SourceOnlyReason,
-    TargetDirPolicy, TimeoutClass, ValidationBrokerError, ValidationBrokerQueue,
-    ValidationBrokerRequest, ValidationErrorClass, ValidationExit, ValidationExitKind,
-    ValidationPriority, ValidationProofCacheReuseEvidence, ValidationProofStatus,
-    ValidationReceipt, ValidationTiming, WorkerRequirements, error_codes,
+    CommandSpec, DigestRef, EnvironmentPolicy, FLIGHT_RECORDER_MAX_SNIPPET_BYTES, FallbackPolicy,
+    FlightRecorderRequiredAction, InputDigest, InputSet, OutputPolicy, ProofEvidenceSource,
+    ProofStatusKind, QueueState, RECEIPT_SCHEMA_VERSION, RchMode, RchReceipt, ReceiptArtifacts,
+    ReceiptClassifications, ReceiptRequestRef, ReceiptTrust, SourceOnlyReason, TargetDirPolicy,
+    TimeoutClass, ValidationBrokerError, ValidationBrokerQueue, ValidationBrokerRequest,
+    ValidationErrorClass, ValidationExit, ValidationExitKind, ValidationFlightRecorderAttempt,
+    ValidationFlightRecorderRecovery, ValidationPriority, ValidationProofCacheReuseEvidence,
+    ValidationProofStatus, ValidationReceipt, ValidationTiming, WorkerRequirements, error_codes,
     render_validation_proof_status_json, write_validation_receipt_at,
 };
 use frankenengine_node::ops::validation_closeout::{
@@ -26,6 +27,7 @@ use frankenengine_node::runtime::resource_governor::{
     ObservedValidationProcess, ResourceGovernorDecisionKind, ResourceGovernorObservation,
     ResourceGovernorRequest, ResourceGovernorThresholds, evaluate_resource_governor,
 };
+use frankenengine_node::security::constant_time;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -970,6 +972,207 @@ fn checked_in_bd_tdoga_harness_artifact_covers_acceptance_matrix()
     ] {
         assert!(structured_fields.contains(field), "missing field {field}");
     }
+
+    Ok(())
+}
+
+fn flight_recorder_now() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 5, 6, 8, 0, 3)
+        .single()
+        .expect("valid flight recorder timestamp")
+}
+
+fn flight_recorder_fixture() -> Result<Value, Box<dyn std::error::Error>> {
+    Ok(serde_json::from_str(include_str!(
+        "../../../artifacts/validation_broker/bd-2zn9k/validation_flight_recorder_fixtures.v1.json"
+    ))?)
+}
+
+fn fixture_field<'a>(
+    fixture: &'a Value,
+    field: &'static str,
+) -> Result<&'a Value, Box<dyn std::error::Error>> {
+    fixture
+        .get(field)
+        .ok_or_else(|| format!("missing flight recorder fixture field {field}").into())
+}
+
+fn base_flight_recorder_attempt()
+-> Result<ValidationFlightRecorderAttempt, Box<dyn std::error::Error>> {
+    let fixture = flight_recorder_fixture()?;
+    Ok(serde_json::from_value(
+        fixture_field(&fixture, "base_attempt")?.clone(),
+    )?)
+}
+
+fn base_flight_recorder_recovery()
+-> Result<ValidationFlightRecorderRecovery, Box<dyn std::error::Error>> {
+    let fixture = flight_recorder_fixture()?;
+    Ok(serde_json::from_value(
+        fixture_field(&fixture, "base_recovery")?.clone(),
+    )?)
+}
+
+fn assert_flight_recorder_contract_code(
+    result: Result<(), ValidationBrokerError>,
+    expected: &'static str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let err = match result {
+        Ok(()) => {
+            return Err(format!("flight recorder contract should fail with {expected}").into());
+        }
+        Err(err) => err,
+    };
+    match err {
+        ValidationBrokerError::ContractViolation { code, detail } => {
+            assert!(
+                constant_time::ct_eq(code, expected),
+                "expected {expected}, got {code}: {detail}"
+            );
+            Ok(())
+        }
+        other => Err(format!(
+            "expected flight recorder contract violation {expected}, got {other:?}"
+        )
+        .into()),
+    }
+}
+
+#[test]
+fn flight_recorder_checked_fixture_round_trips_and_validates()
+-> Result<(), Box<dyn std::error::Error>> {
+    let attempt = base_flight_recorder_attempt()?;
+    attempt.validate_at(flight_recorder_now())?;
+
+    let json = serde_json::to_string_pretty(&attempt)?;
+    let parsed: ValidationFlightRecorderAttempt = serde_json::from_str(&json)?;
+    parsed.validate_at(flight_recorder_now())?;
+
+    let recovery = base_flight_recorder_recovery()?;
+    recovery.validate_for_attempt(&parsed, flight_recorder_now())?;
+
+    Ok(())
+}
+
+#[test]
+fn flight_recorder_checked_fixture_declares_required_valid_and_invalid_cases()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = flight_recorder_fixture()?;
+    let valid_cases = fixture
+        .get("valid_cases")
+        .and_then(Value::as_array)
+        .ok_or("missing valid_cases")?
+        .iter()
+        .filter_map(|case| case.get("case").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    for required_case in [
+        "remote_success",
+        "ssh_timeout",
+        "missing_toolchain",
+        "disk_pressure",
+        "local_fallback_refused",
+        "contention_deferred",
+        "stale_progress",
+        "compile_error",
+        "test_failure",
+        "source_only_allowed",
+        "reuse_receipt",
+    ] {
+        assert!(
+            valid_cases.contains(required_case),
+            "missing valid flight recorder case {required_case}"
+        );
+    }
+
+    let invalid_cases = fixture
+        .get("invalid_cases")
+        .and_then(Value::as_array)
+        .ok_or("missing invalid_cases")?
+        .iter()
+        .filter_map(|case| case.get("case").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    for required_case in [
+        "missing_command_digest",
+        "unsupported_timeout_class",
+        "unbounded_output_snippet",
+        "absolute_artifact_path",
+        "missing_next_action",
+        "mismatched_bead_thread",
+        "unredacted_environment",
+        "unsorted_observations",
+    ] {
+        assert!(
+            invalid_cases.contains(required_case),
+            "missing invalid flight recorder case {required_case}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn flight_recorder_model_rejects_invalid_attempts_with_stable_codes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut bad_digest = base_flight_recorder_attempt()?;
+    bad_digest.command.command_digest.hex = "0".repeat(64);
+    assert_flight_recorder_contract_code(
+        bad_digest.validate_at(flight_recorder_now()),
+        error_codes::ERR_VFR_MISSING_COMMAND_DIGEST,
+    )?;
+
+    let mut absolute_path = base_flight_recorder_attempt()?;
+    absolute_path.artifacts.stdout_path = "/tmp/stdout.txt".to_string();
+    assert_flight_recorder_contract_code(
+        absolute_path.validate_at(flight_recorder_now()),
+        error_codes::ERR_VFR_INVALID_ARTIFACT_PATH,
+    )?;
+
+    let mut unredacted = base_flight_recorder_attempt()?;
+    unredacted
+        .environment
+        .captured_env
+        .insert("SECRET_TOKEN".to_string(), "raw-secret".to_string());
+    assert_flight_recorder_contract_code(
+        unredacted.validate_at(flight_recorder_now()),
+        error_codes::ERR_VFR_UNREDACTED_ENVIRONMENT,
+    )?;
+
+    let mut unbounded_snippet = base_flight_recorder_attempt()?;
+    unbounded_snippet.artifacts.stdout_snippet =
+        Some("x".repeat(FLIGHT_RECORDER_MAX_SNIPPET_BYTES + 1));
+    assert_flight_recorder_contract_code(
+        unbounded_snippet.validate_at(flight_recorder_now()),
+        error_codes::ERR_VFR_UNBOUNDED_SNIPPET,
+    )?;
+
+    let mut unsorted = base_flight_recorder_attempt()?;
+    let mut earlier = unsorted
+        .observations
+        .first()
+        .ok_or("base flight recorder attempt should have an observation")?
+        .clone();
+    earlier.observation_id = "vfr-obs-0000".to_string();
+    earlier.observed_at = earlier.observed_at - Duration::seconds(1);
+    unsorted.observations.push(earlier);
+    assert_flight_recorder_contract_code(
+        unsorted.validate_at(flight_recorder_now()),
+        error_codes::ERR_VFR_INVALID_OBSERVATION_ORDER,
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn flight_recorder_recovery_rejects_required_action_mismatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let attempt = base_flight_recorder_attempt()?;
+    let mut recovery = base_flight_recorder_recovery()?;
+    recovery.required_action = FlightRecorderRequiredAction::WaitForCapacity;
+
+    assert_flight_recorder_contract_code(
+        recovery.validate_for_attempt(&attempt, flight_recorder_now()),
+        error_codes::ERR_VFR_INVALID_RECOVERY_DECISION,
+    )?;
 
     Ok(())
 }
