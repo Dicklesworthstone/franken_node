@@ -15,11 +15,12 @@ time -- no randomness, no race conditions, no platform-dependent variance.
 
 ## Entry Triggers
 
-Safe mode activates through four paths, evaluated in strict precedence order:
+Safe mode activates through four runtime paths, evaluated in strict precedence
+order:
 
 | Priority | Trigger | Mechanism |
 |----------|---------|-----------|
-| 1 | Explicit CLI flag | `--safe-mode` flag at startup |
+| 1 | Explicit runtime flag | `--safe-mode` parsed by `OperationFlags` |
 | 2 | Environment variable | `FRANKEN_SAFE_MODE=1` |
 | 3 | Configuration field | `safe_mode: true` in config |
 | 4 | Automatic detection | Trust corruption, crash loop (3+ in 60s), or epoch mismatch |
@@ -28,6 +29,10 @@ When multiple triggers fire simultaneously, the highest-priority trigger is
 recorded as the canonical entry reason.  All active triggers are logged.
 
 ## Operation Flags
+
+These flags are currently modeled by `runtime::safe_mode::OperationFlags` for
+deployment integrations and tests. The top-level `franken-node` CLI does not yet
+ship a standalone `safe-mode` subcommand or global safe-mode startup flag.
 
 | Flag | Effect | Combinable |
 |------|--------|------------|
@@ -76,9 +81,10 @@ All operations in safe mode are logged at TRACE level with full context:
 
 ## Exit Protocol
 
-Leaving safe mode requires explicit operator action (never automatic):
+Leaving safe mode requires explicit operator action through the deployment
+integration that owns `SafeModeController` state (never automatic):
 
-1. Operator issues `franken-node safe-mode exit` command.
+1. Operator requests exit through the embedding/control-plane integration.
 2. Pre-exit verification: trust state consistent, no unresolved incidents,
    evidence ledger intact.
 3. Operator acknowledges transition via confirmation flag or interactive prompt.
@@ -87,7 +93,8 @@ Leaving safe mode requires explicit operator action (never automatic):
 
 ## Status Reporting
 
-`franken-node status --safe-mode` returns structured JSON:
+`SafeModeController::status(...)` returns `SafeModeStatus`, which deployment
+integrations can serialize as structured JSON:
 
 ```json
 {
@@ -155,18 +162,18 @@ Each automatic trigger condition must have a dedicated drill test:
 ## Dependencies
 
 - Trust state model (`state_model.rs`, `fencing.rs`) for corruption detection.
-- Health gate infrastructure (`health_gate.rs`) for safe-mode health endpoint.
-- CLI infrastructure (`cli.rs`) for `--safe-mode` flag and status command.
-- Config system (`config.rs`) for `safe_mode` config field.
+- Health gate infrastructure (`health_gate.rs`) for safe-mode health endpoint integrations.
+- Runtime operation-flag parsing in `safe_mode.rs`; standalone CLI/API operator surfaces are follow-on work.
+- Config plumbing for deployments that map `safe_mode` config into `SafeModeConfig`.
 - Crash loop detector (`runtime/crash_loop_detector.rs`) for crash-loop trigger.
 
 ## Acceptance Criteria
 
-1. `--safe-mode` flag, `FRANKEN_SAFE_MODE=1` env var, and `safe_mode: true` config all deterministically activate safe mode at startup, verified by integration tests.
+1. `--safe-mode` runtime flag, `FRANKEN_SAFE_MODE=1` env var, and `safe_mode: true` config all deterministically map to safe-mode entry reasons in the runtime model.
 2. Automatic safe-mode activation triggers on trust state corruption, crash loop detection (configurable threshold, default 3 crashes in 60 seconds), and epoch mismatch -- each trigger path has a dedicated test.
 3. In safe mode, non-essential extensions are not loaded; attempting to load one returns a structured error with recovery hint.
 4. Trust state re-verification runs on safe-mode entry and produces a persisted receipt with pass/fail status and details of any inconsistencies found.
 5. All safe-mode operations are logged at TRACE level; log output in safe mode is at least 3x more verbose than normal mode for equivalent operations.
 6. Exiting safe mode requires explicit operator action and passes a pre-exit verification checklist; automatic exit is not possible.
-7. `franken_node status --safe-mode` returns structured JSON with entry reason, duration, and suspended capability list.
+7. `SafeModeStatus` serializes structured JSON with entry reason, duration, and suspended capability list; a standalone CLI/API status surface is follow-on work.
 8. A drill test simulates each automatic trigger condition and verifies correct safe-mode entry and behavior.

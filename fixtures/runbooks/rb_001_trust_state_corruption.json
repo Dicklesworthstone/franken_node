@@ -18,9 +18,11 @@
   "required_permissions": ["operator", "security_admin"],
   "steps": {
     "containment": [
-      "Activate safe mode via franken-node safe-mode enter --reason trust_corruption",
-      "Freeze all trust delegation operations",
+      "Freeze all trust delegation operations using deployment controls",
       "Block new trust chain extensions",
+      "Capture current runtime posture with franken-node ops health-check --json",
+      "Run trust re-verification evidence with franken-node trust scan --deep --audit",
+      "If the deployment embeds runtime::safe_mode::SafeModeController, enter safe mode through that deployment integration; standalone franken-node safe-mode CLI and POST /api/v1/control/safe-mode/enter route are not shipped yet",
       "Notify on-call security team via incident channel"
     ],
     "investigation": [
@@ -52,9 +54,9 @@
   "cross_references": ["bd-k6o", "safe_mode.rs", "state_model.rs"],
   "drill_scenario": "Inject trust artifact integrity failure by modifying a trust state entry hash to an invalid value. Verify detection fires within 60 seconds, safe mode activates automatically, and the full containment-through-verification pipeline completes successfully.",
   "command_references": [
-    "franken-node safe-mode enter --reason trust_corruption",
-    "franken-node trust verify --full",
-    "POST /api/v1/control/safe-mode/enter"
+    "franken-node ops health-check --json",
+    "franken-node trust scan --deep --audit",
+    "runtime safe-mode model: crates/franken-node/src/runtime/safe_mode.rs"
   ],
   "coverage_tags": [
     "trust-anchor-compromise",

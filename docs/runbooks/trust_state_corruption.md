@@ -20,10 +20,12 @@
 
 ## Containment
 
-1. Activate safe mode via `POST /api/v1/control/safe-mode/enter` (CLI safe-mode command not yet implemented).
-2. Freeze all trust delegation operations.
-3. Block new trust chain extensions.
-4. Notify on-call security team via incident channel.
+1. Freeze all trust delegation operations using deployment controls.
+2. Block new trust chain extensions.
+3. Capture the current runtime posture with `franken-node ops health-check --json`.
+4. Run trust re-verification evidence with `franken-node trust scan --deep --audit`.
+5. If the deployment embeds `runtime::safe_mode::SafeModeController`, enter safe mode through that deployment integration. The standalone `franken-node safe-mode ...` CLI and `POST /api/v1/control/safe-mode/enter` API route are not shipped in this tree yet.
+6. Notify on-call security team via incident channel.
 
 ## Investigation
 
@@ -65,7 +67,8 @@ pipeline completes successfully in a staging environment.
 
 - `franken-node trust scan --deep --audit`
 - `franken-node ops health-check --json`
-- `POST /api/v1/control/safe-mode/enter`
+- Runtime safe-mode model: `crates/franken-node/src/runtime/safe_mode.rs`
+- Not shipped yet: `franken-node safe-mode ...` and `POST /api/v1/control/safe-mode/enter`
 
 ## Cross-References
 

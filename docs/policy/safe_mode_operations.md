@@ -19,9 +19,10 @@ INV-SMO-RECOVERY) defined in the bd-k6o contract.
 
 Safe mode MUST be entered under any of these conditions:
 
-1. **Explicit operator request**: The `--safe-mode` CLI flag, the
+1. **Explicit operator request**: The runtime operation flag `--safe-mode`, the
    `FRANKEN_SAFE_MODE=1` environment variable, or the `safe_mode: true`
-   configuration field activates safe mode unconditionally.
+   configuration field activates safe mode unconditionally when the deployment
+   integration wires those inputs into `runtime::safe_mode::SafeModeController`.
 
 2. **Trust state corruption**: When the trust re-verification detects
    inconsistencies between the trust state and the evidence ledger, safe
@@ -85,6 +86,17 @@ specific capability but still applies to other write operations.
 - No flag combination is treated as an error.  All flags are applied
   additively.
 
+## Current Shipped Operator Surface
+
+The shipped tree contains the deterministic runtime safe-mode model in
+`crates/franken-node/src/runtime/safe_mode.rs`. It does not currently ship a
+standalone `franken-node safe-mode ...` CLI subcommand or
+`/api/v1/control/safe-mode/*` control-plane route. Operators should use the
+deployment integration that owns the `SafeModeController` state, plus the
+shipped diagnostics `franken-node ops health-check --json` and
+`franken-node trust scan --deep --audit`, until a first-class CLI/API surface is
+implemented.
+
 ## Recovery Procedures
 
 ### Pre-Exit Checklist
@@ -97,12 +109,14 @@ Before exiting safe mode, the following conditions MUST be verified:
    operation are resolved or explicitly acknowledged.
 3. **Evidence ledger intact**: The evidence ledger is complete and hash
    chain is valid.
-4. **Operator confirmation**: The operator explicitly confirms the
-   transition via `franken-node safe-mode exit --confirm`.
+4. **Operator confirmation**: The operator explicitly confirms the transition
+   through the deployment integration that calls
+   `SafeModeController::exit_safe_mode(...)`.
 
 ### Exit Procedure
 
-1. Operator issues exit command.
+1. Operator requests exit through the deployment integration that owns
+   `SafeModeController` state.
 2. System runs pre-exit verification checklist.
 3. If all checks pass, system prompts for confirmation.
 4. Operator confirms.

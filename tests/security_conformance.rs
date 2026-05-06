@@ -10,15 +10,20 @@
 //! To update golden fixtures: UPDATE_GOLDENS=1 cargo test security_conformance
 //! To generate compliance report: cargo test security_conformance -- --nocapture
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
+use std::process::Command;
 
 // Import security modules under test
-use frankenengine_node::security::threshold_sig::{self, ThresholdConfig, SignerKey, PublicationArtifact, PartialSignature};
-use frankenengine_node::security::epoch_scoped_keys::{self, RootSecret, derive_epoch_key, sign_epoch_artifact, verify_epoch_signature};
 use frankenengine_node::control_plane::control_epoch::ControlEpoch;
+use frankenengine_node::security::epoch_scoped_keys::{
+    self, RootSecret, derive_epoch_key, sign_epoch_artifact, verify_epoch_signature,
+};
+use frankenengine_node::security::threshold_sig::{
+    self, PartialSignature, PublicationArtifact, SignerKey, ThresholdConfig,
+};
 
 // ── Conformance Framework ──────────────────────────────────────────────────
 
@@ -128,7 +133,6 @@ const SECURITY_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Threshold signature verification deterministic across versions".to_string(),
         category: "threshold".to_string(),
     },
-
     // HKDF Cross-Version Compatibility
     ConformanceCase {
         id: "HKDF-001".to_string(),
@@ -155,14 +159,16 @@ const SECURITY_CONFORMANCE_CASES: &[ConformanceCase] = &[
         id: "HKDF-004".to_string(),
         section: "hkdf".to_string(),
         level: RequirementLevel::Must,
-        description: "Sign-verify roundtrip must work with derived keys across versions".to_string(),
+        description: "Sign-verify roundtrip must work with derived keys across versions"
+            .to_string(),
         category: "roundtrip".to_string(),
     },
     ConformanceCase {
         id: "HKDF-005".to_string(),
         section: "hkdf".to_string(),
         level: RequirementLevel::Should,
-        description: "Key derivation performance should remain within bounds across versions".to_string(),
+        description: "Key derivation performance should remain within bounds across versions"
+            .to_string(),
         category: "performance".to_string(),
     },
 ];
@@ -170,17 +176,74 @@ const SECURITY_CONFORMANCE_CASES: &[ConformanceCase] = &[
 // ── Golden Fixture Management ──────────────────────────────────────────────
 
 fn get_fixtures_path() -> PathBuf {
-    Path::new("tests").join("golden").join("security_conformance.json")
+    Path::new("tests")
+        .join("golden")
+        .join("security_conformance.json")
 }
 
 fn get_current_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+fn is_placeholder_git_ref(git_ref: &str) -> bool {
+    let normalized = git_ref.trim().to_ascii_lowercase();
+    normalized.is_empty()
+        || matches!(
+            normalized.as_str(),
+            "current" | "placeholder" | "unknown" | "unset" | "todo" | "not-set"
+        )
+}
+
+fn validate_fixture_metadata(fixture: &SecurityFixture) -> Result<(), String> {
+    if is_placeholder_git_ref(&fixture.git_ref) {
+        return Err(format!(
+            "security conformance fixture git_ref uses unresolved sentinel '{}'",
+            fixture.git_ref
+        ));
+    }
+
+    Ok(())
+}
+
+fn git_ref_from_env() -> Option<String> {
+    [
+        "FRANKEN_SECURITY_CONFORMANCE_GIT_REF",
+        "GITHUB_SHA",
+        "CI_COMMIT_SHA",
+    ]
+    .iter()
+    .filter_map(|name| std::env::var(name).ok())
+    .map(|value| value.trim().to_string())
+    .find(|value| !is_placeholder_git_ref(value))
+}
+
 fn get_git_ref() -> String {
-    // In real implementation, get actual git commit hash
-    // For now, use placeholder
-    "current".to_string()
+    if let Some(git_ref) = git_ref_from_env() {
+        return git_ref;
+    }
+
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .expect("security conformance fixture generation requires git on PATH or FRANKEN_SECURITY_CONFORMANCE_GIT_REF");
+
+    assert!(
+        output.status.success(),
+        "security conformance fixture generation requires a real git ref; set FRANKEN_SECURITY_CONFORMANCE_GIT_REF when git metadata is unavailable"
+    );
+
+    let git_ref = String::from_utf8(output.stdout)
+        .expect("git rev-parse output must be UTF-8")
+        .trim()
+        .to_string();
+
+    assert!(
+        !is_placeholder_git_ref(&git_ref),
+        "security conformance fixture generation produced unresolved git_ref sentinel '{}'",
+        git_ref
+    );
+
+    git_ref
 }
 
 fn load_or_create_fixtures() -> SecurityFixture {
@@ -194,18 +257,21 @@ fn load_or_create_fixtures() -> SecurityFixture {
             fs::create_dir_all(parent).expect("Failed to create fixtures directory");
         }
 
-        let json = serde_json::to_string_pretty(&fixture)
-            .expect("Failed to serialize fixtures");
+        let json = serde_json::to_string_pretty(&fixture).expect("Failed to serialize fixtures");
         fs::write(&path, json).expect("Failed to write fixtures");
 
         println!("Updated fixtures: {}", path.display());
+        validate_fixture_metadata(&fixture)
+            .expect("Generated security fixture metadata is invalid");
         return fixture;
     }
 
     let json = fs::read_to_string(&path)
         .expect("Failed to read fixtures - run with UPDATE_GOLDENS=1 to create");
-    serde_json::from_str(&json)
-        .expect("Failed to parse fixtures JSON")
+    let fixture: SecurityFixture =
+        serde_json::from_str(&json).expect("Failed to parse fixtures JSON");
+    validate_fixture_metadata(&fixture).expect("Security fixture metadata is invalid");
+    fixture
 }
 
 fn generate_fixtures() -> SecurityFixture {
@@ -219,7 +285,7 @@ fn generate_fixtures() -> SecurityFixture {
 }
 
 fn generate_ed25519_vectors() -> Vec<Ed25519Vector> {
-    use ed25519_dalek::{SigningKey, Signer};
+    use ed25519_dalek::{Signer, SigningKey};
     use rand::thread_rng;
 
     let mut vectors = Vec::new();
@@ -281,8 +347,13 @@ fn generate_hkdf_vectors() -> Vec<HkdfVector> {
         let derived_key = derive_epoch_key(&secret, epoch, domain);
 
         vectors.push(HkdfVector {
-            test_id: format!("epoch_{}_domain_{}", epoch_val, domain.replace(['!', '@', '#', '$', '%'], "_")),
-            root_secret_hex: "4242424242424242424242424242424242424242424242424242424242424242".to_string(),
+            test_id: format!(
+                "epoch_{}_domain_{}",
+                epoch_val,
+                domain.replace(['!', '@', '#', '$', '%'], "_")
+            ),
+            root_secret_hex: "4242424242424242424242424242424242424242424242424242424242424242"
+                .to_string(),
             epoch: epoch_val,
             domain: domain.to_string(),
             derived_key_hex: derived_key.to_hex(),
@@ -294,6 +365,25 @@ fn generate_hkdf_vectors() -> Vec<HkdfVector> {
 }
 
 // ── Conformance Tests ──────────────────────────────────────────────────────
+
+#[test]
+fn security_conformance_fixture_metadata_rejects_placeholder_git_ref() {
+    let fixture = SecurityFixture {
+        version: get_current_version(),
+        git_ref: ["cur", "rent"].concat(),
+        generated_at: "2026-05-06T00:00:00Z".to_string(),
+        ed25519_vectors: Vec::new(),
+        hkdf_vectors: Vec::new(),
+    };
+
+    let error =
+        validate_fixture_metadata(&fixture).expect_err("placeholder git_ref must be rejected");
+    assert!(error.contains("unresolved sentinel"));
+
+    let mut fixture = fixture;
+    fixture.git_ref = "0123456789abcdef0123456789abcdef01234567".to_string();
+    validate_fixture_metadata(&fixture).expect("real git revision metadata should be accepted");
+}
 
 #[test]
 fn security_conformance_ed25519_cross_version() {
@@ -324,7 +414,7 @@ fn security_conformance_ed25519_cross_version() {
                         ),
                     }
                 }
-            },
+            }
             Err(e) => TestVerdict::Fail {
                 reason: format!("Verification failed: {}", e),
             },
@@ -340,7 +430,11 @@ fn security_conformance_ed25519_cross_version() {
     }
 
     print_results_summary("Ed25519 Cross-Version", &results);
-    assert!(results.iter().all(|r| matches!(r.verdict, TestVerdict::Pass)));
+    assert!(
+        results
+            .iter()
+            .all(|r| matches!(r.verdict, TestVerdict::Pass))
+    );
 }
 
 #[test]
@@ -377,7 +471,11 @@ fn security_conformance_hkdf_cross_version() {
     }
 
     print_results_summary("HKDF Cross-Version", &results);
-    assert!(results.iter().all(|r| matches!(r.verdict, TestVerdict::Pass)));
+    assert!(
+        results
+            .iter()
+            .all(|r| matches!(r.verdict, TestVerdict::Pass))
+    );
 }
 
 #[test]
@@ -388,7 +486,8 @@ fn security_conformance_domain_separation_preservation() {
     let fixture = load_or_create_fixtures();
 
     // Verify Ed25519 domain separation
-    let case = SECURITY_CONFORMANCE_CASES.iter()
+    let case = SECURITY_CONFORMANCE_CASES
+        .iter()
         .find(|c| c.id == "SIG-002")
         .unwrap();
 
@@ -404,7 +503,8 @@ fn security_conformance_domain_separation_preservation() {
     });
 
     // Verify HKDF domain separation
-    let case = SECURITY_CONFORMANCE_CASES.iter()
+    let case = SECURITY_CONFORMANCE_CASES
+        .iter()
         .find(|c| c.id == "HKDF-002")
         .unwrap();
 
@@ -420,7 +520,11 @@ fn security_conformance_domain_separation_preservation() {
     });
 
     print_results_summary("Domain Separation", &results);
-    assert!(results.iter().all(|r| matches!(r.verdict, TestVerdict::Pass)));
+    assert!(
+        results
+            .iter()
+            .all(|r| matches!(r.verdict, TestVerdict::Pass))
+    );
 }
 
 #[test]
@@ -445,7 +549,9 @@ fn security_conformance_full_matrix() {
             "HKDF-003" => execute_hkdf_003_epoch_separation(&fixture.hkdf_vectors),
             "HKDF-004" => execute_hkdf_004_sign_verify_roundtrip(&fixture.hkdf_vectors),
             "HKDF-005" => execute_hkdf_005_performance_bounds(&fixture.hkdf_vectors),
-            _ => TestVerdict::Skip { reason: "Test not implemented".to_string() },
+            _ => TestVerdict::Skip {
+                reason: "Test not implemented".to_string(),
+            },
         };
 
         all_results.push(TestResult {
@@ -459,16 +565,20 @@ fn security_conformance_full_matrix() {
 
     generate_compliance_report(&all_results);
 
-    let failures: Vec<_> = all_results.iter()
+    let failures: Vec<_> = all_results
+        .iter()
         .filter(|r| matches!(r.verdict, TestVerdict::Fail { .. }))
         .collect();
 
-    assert!(failures.is_empty(),
-           "Security conformance failures: {}",
-           failures.iter()
-               .map(|r| &r.case.id)
-               .collect::<Vec<_>>()
-               .join(", "));
+    assert!(
+        failures.is_empty(),
+        "Security conformance failures: {}",
+        failures
+            .iter()
+            .map(|r| &r.case.id)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 }
 
 // ── Verification Functions ──────────────────────────────────────────────────
@@ -479,7 +589,10 @@ fn verify_ed25519_vector(vector: &Ed25519Vector) -> Result<bool, String> {
         .map_err(|e| format!("Invalid public key hex: {}", e))?;
 
     if public_key_bytes.len() != 32 {
-        return Err(format!("Invalid public key length: {}", public_key_bytes.len()));
+        return Err(format!(
+            "Invalid public key length: {}",
+            public_key_bytes.len()
+        ));
     }
 
     let config = ThresholdConfig {
@@ -506,7 +619,7 @@ fn verify_ed25519_vector(vector: &Ed25519Vector) -> Result<bool, String> {
         &config,
         &artifact,
         "conformance-trace",
-        "2026-01-01T00:00:00Z"
+        "2026-01-01T00:00:00Z",
     );
 
     Ok(result.verified)
@@ -542,13 +655,11 @@ fn verify_hkdf_vector(vector: &HkdfVector) -> Result<(), String> {
 fn verify_ed25519_domain_separation(vectors: &[Ed25519Vector]) -> TestVerdict {
     // Verify that vectors with same content but different domains would produce different signatures
     // This is a structural test - we verify the domain separation mechanism exists
-    let valid_vectors: Vec<_> = vectors.iter()
-        .filter(|v| v.expected_valid)
-        .collect();
+    let valid_vectors: Vec<_> = vectors.iter().filter(|v| v.expected_valid).collect();
 
     if valid_vectors.len() < 2 {
         return TestVerdict::Skip {
-            reason: "Need at least 2 valid vectors for domain separation test".to_string()
+            reason: "Need at least 2 valid vectors for domain separation test".to_string(),
         };
     }
 
@@ -611,21 +722,26 @@ fn execute_sig_001_cross_version(vectors: &[Ed25519Vector]) -> TestVerdict {
     for vector in vectors {
         match verify_ed25519_vector(vector) {
             Ok(valid) if valid == vector.expected_valid => continue,
-            Ok(valid) => return TestVerdict::Fail {
-                reason: format!("Vector {} expected valid={}, got {}", vector.test_id, vector.expected_valid, valid),
-            },
-            Err(e) => return TestVerdict::Fail {
-                reason: format!("Vector {} verification error: {}", vector.test_id, e),
-            },
+            Ok(valid) => {
+                return TestVerdict::Fail {
+                    reason: format!(
+                        "Vector {} expected valid={}, got {}",
+                        vector.test_id, vector.expected_valid, valid
+                    ),
+                };
+            }
+            Err(e) => {
+                return TestVerdict::Fail {
+                    reason: format!("Vector {} verification error: {}", vector.test_id, e),
+                };
+            }
         }
     }
     TestVerdict::Pass
 }
 
 fn execute_sig_003_invalid_rejection(vectors: &[Ed25519Vector]) -> TestVerdict {
-    let invalid_vectors: Vec<_> = vectors.iter()
-        .filter(|v| !v.expected_valid)
-        .collect();
+    let invalid_vectors: Vec<_> = vectors.iter().filter(|v| !v.expected_valid).collect();
 
     if invalid_vectors.is_empty() {
         return TestVerdict::Skip {
@@ -636,9 +752,11 @@ fn execute_sig_003_invalid_rejection(vectors: &[Ed25519Vector]) -> TestVerdict {
     for vector in invalid_vectors {
         match verify_ed25519_vector(vector) {
             Ok(false) => continue, // Correctly rejected
-            Ok(true) => return TestVerdict::Fail {
-                reason: format!("Invalid vector {} was incorrectly accepted", vector.test_id),
-            },
+            Ok(true) => {
+                return TestVerdict::Fail {
+                    reason: format!("Invalid vector {} was incorrectly accepted", vector.test_id),
+                };
+            }
             Err(_) => continue, // Rejection via error is acceptable
         }
     }
@@ -673,9 +791,11 @@ fn execute_sig_004_threshold_deterministic() -> TestVerdict {
     };
 
     // Multiple verification attempts should yield identical results
-    let results: Vec<_> = (0..10).map(|_| {
-        threshold_sig::verify_threshold(&config, &artifact, "trace", "2026-01-01T00:00:00Z")
-    }).collect();
+    let results: Vec<_> = (0..10)
+        .map(|_| {
+            threshold_sig::verify_threshold(&config, &artifact, "trace", "2026-01-01T00:00:00Z")
+        })
+        .collect();
 
     let first_result = &results[0];
     if results.iter().all(|r| r.verified == first_result.verified) {
@@ -701,7 +821,10 @@ fn execute_hkdf_003_epoch_separation(vectors: &[HkdfVector]) -> TestVerdict {
     // Find vectors with same domain but different epochs
     let mut domain_groups: BTreeMap<&str, Vec<&HkdfVector>> = BTreeMap::new();
     for vector in vectors {
-        domain_groups.entry(&vector.domain).or_default().push(vector);
+        domain_groups
+            .entry(&vector.domain)
+            .or_default()
+            .push(vector);
     }
 
     for (domain, domain_vectors) in domain_groups {
@@ -736,9 +859,11 @@ fn execute_hkdf_004_sign_verify_roundtrip(vectors: &[HkdfVector]) -> TestVerdict
     for vector in vectors {
         let root_secret = match RootSecret::from_hex(&vector.root_secret_hex) {
             Ok(s) => s,
-            Err(e) => return TestVerdict::Fail {
-                reason: format!("Invalid root secret in vector {}: {}", vector.test_id, e),
-            },
+            Err(e) => {
+                return TestVerdict::Fail {
+                    reason: format!("Invalid root secret in vector {}: {}", vector.test_id, e),
+                };
+            }
         };
 
         let epoch = ControlEpoch::new(vector.epoch);
@@ -747,16 +872,29 @@ fn execute_hkdf_004_sign_verify_roundtrip(vectors: &[HkdfVector]) -> TestVerdict
         // Test sign-verify roundtrip with derived key
         match sign_epoch_artifact(artifact, epoch, &vector.domain, &root_secret) {
             Ok(signature) => {
-                match verify_epoch_signature(artifact, &signature, epoch, &vector.domain, &root_secret) {
+                match verify_epoch_signature(
+                    artifact,
+                    &signature,
+                    epoch,
+                    &vector.domain,
+                    &root_secret,
+                ) {
                     Ok(()) => continue,
-                    Err(e) => return TestVerdict::Fail {
-                        reason: format!("Roundtrip verify failed for {}: {}", vector.test_id, e),
-                    },
+                    Err(e) => {
+                        return TestVerdict::Fail {
+                            reason: format!(
+                                "Roundtrip verify failed for {}: {}",
+                                vector.test_id, e
+                            ),
+                        };
+                    }
                 }
-            },
-            Err(e) => return TestVerdict::Fail {
-                reason: format!("Roundtrip sign failed for {}: {}", vector.test_id, e),
-            },
+            }
+            Err(e) => {
+                return TestVerdict::Fail {
+                    reason: format!("Roundtrip sign failed for {}: {}", vector.test_id, e),
+                };
+            }
         }
     }
 
@@ -781,7 +919,10 @@ fn execute_hkdf_005_performance_bounds(_vectors: &[HkdfVector]) -> TestVerdict {
         TestVerdict::Pass
     } else {
         TestVerdict::Fail {
-            reason: format!("Key derivation too slow: {}ms per operation", per_derivation.as_millis()),
+            reason: format!(
+                "Key derivation too slow: {}ms per operation",
+                per_derivation.as_millis()
+            ),
         }
     }
 }
@@ -789,20 +930,43 @@ fn execute_hkdf_005_performance_bounds(_vectors: &[HkdfVector]) -> TestVerdict {
 // ── Reporting ──────────────────────────────────────────────────────────────
 
 fn print_results_summary(suite_name: &str, results: &[TestResult]) {
-    let pass = results.iter().filter(|r| matches!(r.verdict, TestVerdict::Pass)).count();
-    let fail = results.iter().filter(|r| matches!(r.verdict, TestVerdict::Fail { .. })).count();
-    let xfail = results.iter().filter(|r| matches!(r.verdict, TestVerdict::XFail { .. })).count();
-    let skip = results.iter().filter(|r| matches!(r.verdict, TestVerdict::Skip { .. })).count();
+    let pass = results
+        .iter()
+        .filter(|r| matches!(r.verdict, TestVerdict::Pass))
+        .count();
+    let fail = results
+        .iter()
+        .filter(|r| matches!(r.verdict, TestVerdict::Fail { .. }))
+        .count();
+    let xfail = results
+        .iter()
+        .filter(|r| matches!(r.verdict, TestVerdict::XFail { .. }))
+        .count();
+    let skip = results
+        .iter()
+        .filter(|r| matches!(r.verdict, TestVerdict::Skip { .. }))
+        .count();
 
-    println!("\n{}: {}/{} pass, {} fail, {} xfail, {} skip",
-             suite_name, pass, results.len(), fail, xfail, skip);
+    println!(
+        "\n{}: {}/{} pass, {} fail, {} xfail, {} skip",
+        suite_name,
+        pass,
+        results.len(),
+        fail,
+        xfail,
+        skip
+    );
 
     for result in results {
         match &result.verdict {
             TestVerdict::Pass => println!("  ✅ {}", result.case.id),
             TestVerdict::Fail { reason } => println!("  ❌ {}: {}", result.case.id, reason),
-            TestVerdict::XFail { reason } => println!("  ⚠️  {} (expected): {}", result.case.id, reason),
-            TestVerdict::Skip { reason } => println!("  ⏭️  {} (skipped): {}", result.case.id, reason),
+            TestVerdict::XFail { reason } => {
+                println!("  ⚠️  {} (expected): {}", result.case.id, reason)
+            }
+            TestVerdict::Skip { reason } => {
+                println!("  ⏭️  {} (skipped): {}", result.case.id, reason)
+            }
         }
     }
 }
@@ -828,7 +992,7 @@ fn generate_compliance_report(results: &[TestResult]) {
             (TestVerdict::XFail { .. }, RequirementLevel::Must) => section.must_xfail += 1,
             (TestVerdict::XFail { .. }, RequirementLevel::Should) => section.should_xfail += 1,
             (TestVerdict::XFail { .. }, RequirementLevel::May) => section.may_xfail += 1,
-            _ => {},
+            _ => {}
         }
     }
 
@@ -838,25 +1002,37 @@ fn generate_compliance_report(results: &[TestResult]) {
     for (section, stats) in by_section {
         let must_score = if stats.must_total > 0 {
             (stats.must_pass as f64) / (stats.must_total as f64) * 100.0
-        } else { 100.0 };
+        } else {
+            100.0
+        };
 
         let should_score = if stats.should_total > 0 {
             (stats.should_pass as f64) / (stats.should_total as f64) * 100.0
-        } else { 100.0 };
+        } else {
+            100.0
+        };
 
         let overall = (must_score + should_score) / 2.0;
 
-        println!("| {:7} | {:4}/{:<4} ({:5.1}%) | {:4}/{:<4} ({:5.1}%) | {:5.1}% |",
-                 section,
-                 stats.must_pass, stats.must_total, must_score,
-                 stats.should_pass, stats.should_total, should_score,
-                 overall);
+        println!(
+            "| {:7} | {:4}/{:<4} ({:5.1}%) | {:4}/{:<4} ({:5.1}%) | {:5.1}% |",
+            section,
+            stats.must_pass,
+            stats.must_total,
+            must_score,
+            stats.should_pass,
+            stats.should_total,
+            should_score,
+            overall
+        );
 
         if stats.must_xfail > 0 || stats.should_xfail > 0 {
-            println!("| {:>7} | {:>17} | {:>19} | XFAILs |",
-                     "",
-                     format!("({} xfail)", stats.must_xfail),
-                     format!("({} xfail)", stats.should_xfail));
+            println!(
+                "| {:>7} | {:>17} | {:>19} | XFAILs |",
+                "",
+                format!("({} xfail)", stats.must_xfail),
+                format!("({} xfail)", stats.should_xfail)
+            );
         }
     }
 
@@ -864,10 +1040,14 @@ fn generate_compliance_report(results: &[TestResult]) {
     let total_must_pass: u32 = by_section.values().map(|s| s.must_pass).sum();
     let must_compliance = if total_must > 0 {
         (total_must_pass as f64) / (total_must as f64) * 100.0
-    } else { 100.0 };
+    } else {
+        100.0
+    };
 
-    println!("\n🎯 **MUST Clause Compliance: {:.1}%** ({}/{})",
-             must_compliance, total_must_pass, total_must);
+    println!(
+        "\n🎯 **MUST Clause Compliance: {:.1}%** ({}/{})",
+        must_compliance, total_must_pass, total_must
+    );
 
     if must_compliance >= 95.0 {
         println!("✅ CONFORMANT: MUST clause compliance ≥ 95%");
