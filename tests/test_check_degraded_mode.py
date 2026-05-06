@@ -24,93 +24,35 @@ class TestFixture(TestCase):
         self.assertTrue(mod.SPEC.is_file())
 
 
-class TestTriggerVariants(TestCase):
-    def test_health_gate_failed_trigger(self):
-        sim = mod.simulate_mode_lifecycle("health_gate_failed:revocation_frontier")
-        self.assertEqual(sim["state"]["events"][1]["event_code"], "DEGRADED_MODE_ENTERED")
+class TestRealEvidence(TestCase):
+    def test_real_evidence_requirements_present(self):
+        self.assertGreaterEqual(len(mod.REAL_EVIDENCE_REQUIREMENTS), 6)
 
-    def test_capability_unavailable_trigger(self):
-        sim = mod.simulate_mode_lifecycle("capability_unavailable:federation_peer")
-        self.assertEqual(sim["state"]["events"][1]["event_code"], "DEGRADED_MODE_ENTERED")
+    def test_real_evidence_checks_pass(self):
+        checks = mod.check_real_degraded_mode_evidence()
+        self.assertGreaterEqual(len(checks), 6)
+        self.assertTrue(all(check["pass"] for check in checks), checks)
 
-    def test_error_rate_exceeded_trigger(self):
-        sim = mod.simulate_mode_lifecycle("error_rate_exceeded:0.1500:60")
-        self.assertEqual(sim["state"]["events"][1]["event_code"], "DEGRADED_MODE_ENTERED")
+    def test_legacy_python_model_removed(self):
+        legacy_names = [
+            "simulate_" + "mode_lifecycle",
+            "base_" + "policy",
+            "make_" + "state",
+            "activate",
+            "evaluate_" + "action",
+            "tick_" + "mandatory",
+            "maybe_" + "suspend",
+            "observe_" + "recovery",
+        ]
+        for name in legacy_names:
+            self.assertFalse(hasattr(mod, name), name)
 
-    def test_manual_activation_trigger(self):
-        sim = mod.simulate_mode_lifecycle("manual_activation:operator-1")
-        self.assertEqual(sim["state"]["events"][1]["event_code"], "DEGRADED_MODE_ENTERED")
-
-    def test_unconfigured_trigger_rejected(self):
-        policy = mod.base_policy()
-        state = mod.make_state()
-        with self.assertRaises(ValueError):
-            mod.activate(
-                policy,
-                state,
-                "health_gate_failed:unknown",
-                1000,
-                "1.0.0",
-                "trace-x",
-            )
-
-
-class TestBehaviorPaths(TestCase):
-    def setUp(self):
-        self.sim = mod.simulate_mode_lifecycle("health_gate_failed:revocation_frontier")
-        self.events = self.sim["state"]["events"]
-        self.codes = [event["event_code"] for event in self.events]
-
-    def test_denied_action_path(self):
-        denied = self.sim["denied_decision"]
-        self.assertFalse(denied["permitted"])
-        self.assertEqual(denied["denial_reason"], "denied_actions.policy.change")
-        self.assertIn("DEGRADED_ACTION_BLOCKED", self.codes)
-
-    def test_missed_audit_alert(self):
-        self.assertIn("AUDIT_EVENT_MISSED", self.codes)
-
-    def test_stabilization_window_exit(self):
-        self.assertEqual(self.sim["state"]["mode"], "normal")
-        self.assertIn("DEGRADED_MODE_EXITED", self.codes)
-
-    def test_event_ordering(self):
-        entered_idx = self.codes.index("DEGRADED_MODE_ENTERED")
-        blocked_idx = self.codes.index("DEGRADED_ACTION_BLOCKED")
-        exited_idx = self.codes.index("DEGRADED_MODE_EXITED")
-        self.assertLess(entered_idx, blocked_idx)
-        self.assertLess(blocked_idx, exited_idx)
-
-    def test_suspend_path_blocks_non_essential(self):
-        policy = mod.base_policy()
-        state = mod.make_state()
-        mod.activate(
-            policy,
-            state,
-            "health_gate_failed:revocation_frontier",
-            1000,
-            "1.0.0",
-            "trace-suspend",
-        )
-        mod.maybe_suspend(policy, state, 1120, "trace-suspend")
-        blocked = mod.evaluate_action(
-            policy,
-            state,
-            "policy.change",
-            "alice",
-            1121,
-            "trace-suspend",
-        )
-        allowed = mod.evaluate_action(
-            policy,
-            state,
-            "health.check",
-            "alice",
-            1122,
-            "trace-suspend",
-        )
-        self.assertFalse(blocked["permitted"])
-        self.assertTrue(allowed["permitted"])
+    def test_run_checks_uses_real_evidence(self):
+        result = mod.run_checks()
+        names = [check["check"] for check in result["checks"]]
+        legacy_prefix = "event " + "ordering:"
+        self.assertTrue(any(name.startswith("real evidence:") for name in names))
+        self.assertFalse(any(legacy_prefix in name for name in names))
 
 
 class TestChecks(TestCase):

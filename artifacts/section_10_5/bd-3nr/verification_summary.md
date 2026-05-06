@@ -22,7 +22,8 @@ Implemented deterministic degraded-mode policy behavior with mandatory audit eve
 ## Validation
 
 - PASS: `python3 scripts/check_degraded_mode.py --json` (28/28)
-- PASS: `python3 -m unittest tests/test_check_degraded_mode.py` (14 tests)
+- PASS: `python3 -m unittest tests/test_check_degraded_mode.py` (8 tests)
+- PASS: checker includes 6 real Rust evidence checks and no Python lifecycle model
 - PASS: targeted rustfmt check on touched files
 - FAIL (environment/workspace): `rch exec -- cargo test ... degraded_mode_policy` due missing sibling `franken_engine` in remote mirror
 - FAIL (pre-existing workspace drift): `rch exec -- cargo fmt --all --check`

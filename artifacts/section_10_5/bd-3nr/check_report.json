@@ -121,34 +121,34 @@
       "detail": "found"
     },
     {
-      "check": "event ordering: entered before action audit",
+      "check": "real evidence: trigger variants",
       "pass": true,
-      "detail": "entered_idx=1, action_idx=2"
+      "detail": "exists: crates/franken-node/src/security/degraded_mode_policy.rs"
     },
     {
-      "check": "mandatory audit tick present",
+      "check": "real evidence: trigger rejection stays fail-closed",
       "pass": true,
-      "detail": "expected mandatory periodic event"
+      "detail": "exists: crates/franken-node/src/security/degraded_mode_policy.rs"
     },
     {
-      "check": "missed audit alert present",
+      "check": "real evidence: degraded action auditing",
       "pass": true,
-      "detail": "expected missed-event alert when interval skipped"
+      "detail": "exists: crates/franken-node/src/security/degraded_mode_policy.rs"
     },
     {
-      "check": "denied action path",
+      "check": "real evidence: mandatory audit tick and missed alert",
       "pass": true,
-      "detail": "{'permitted': False, 'degraded_annotation': True, 'denial_reason': 'denied_actions.policy.change'}"
+      "detail": "exists: crates/franken-node/src/security/degraded_mode_policy.rs"
     },
     {
-      "check": "recovery stabilization window",
+      "check": "real evidence: stabilization-window recovery",
       "pass": true,
-      "detail": "exited_idx=7, final_mode=normal"
+      "detail": "exists: crates/franken-node/src/security/degraded_mode_policy.rs"
     },
     {
-      "check": "trigger variants activate degraded mode",
+      "check": "real evidence: suspended-mode gating",
       "pass": true,
-      "detail": "variants=4"
+      "detail": "exists: crates/franken-node/src/security/degraded_mode_policy.rs"
     }
   ]
 }

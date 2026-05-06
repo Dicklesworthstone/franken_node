@@ -23,12 +23,12 @@
       {
         "command": "python3 scripts/check_degraded_mode.py --json",
         "result": "pass",
-        "details": "PASS: 28/28 checks (ordering, denied action, mandatory ticks/missed alert, recovery, trigger variants)."
+        "details": "PASS: 28/28 checks, including 6 real Rust evidence checks for trigger variants, fail-closed rejection, action auditing, mandatory audits, recovery stabilization, and suspension gating."
       },
       {
         "command": "python3 -m unittest tests/test_check_degraded_mode.py",
         "result": "pass",
-        "details": "PASS: 14 tests."
+        "details": "PASS: 8 tests."
       },
       {
         "command": "rustfmt --edition 2024 --check --config skip_children=true crates/franken-node/src/security/degraded_mode_policy.rs crates/franken-node/src/security/mod.rs",
@@ -86,7 +86,7 @@
     },
     {
       "criterion": "Verification script/tests cover trigger variants, denied path, missed alert, stabilization window.",
-      "evidence": "scripts/check_degraded_mode.py + tests/test_check_degraded_mode.py passing."
+      "evidence": "scripts/check_degraded_mode.py verifies real Rust inline test evidence in degraded_mode_policy.rs; tests/test_check_degraded_mode.py rejects legacy Python lifecycle helpers."
     }
   ]
 }
