@@ -1438,7 +1438,7 @@ mod tests {
             justification: "Test quarantine".to_owned(),
             issued_by: "operator-1".to_owned(),
             issued_at: "2026-01-15T00:00:00Z".to_owned(),
-            signature: "sig-placeholder".to_owned(),
+            signature: "sig-fixture-quarantine-order-v1".to_owned(),
             trace_id: "trace-001".to_owned(),
             grace_period_secs: 300,
         }
