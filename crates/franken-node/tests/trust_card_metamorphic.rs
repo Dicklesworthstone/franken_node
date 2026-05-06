@@ -189,7 +189,7 @@ fn generated_trust_card(mut seed: u64) -> TrustCard {
     TrustCard {
         schema_version: "franken-node/trust-card/v1".to_string(),
         trust_card_version: next_seed(&mut seed),
-        previous_version_hash: if next_seed(&mut seed) % 2 == 0 {
+        previous_version_hash: if next_seed(&mut seed).is_multiple_of(2) {
             Some(generated_hash(&mut seed))
         } else {
             None
@@ -225,9 +225,9 @@ fn generated_trust_card(mut seed: u64) -> TrustCard {
             },
         }],
         behavioral_profile: BehavioralProfile {
-            network_access: next_seed(&mut seed) % 2 == 0,
-            filesystem_access: next_seed(&mut seed) % 2 == 0,
-            subprocess_access: next_seed(&mut seed) % 2 == 0,
+            network_access: next_seed(&mut seed).is_multiple_of(2),
+            filesystem_access: next_seed(&mut seed).is_multiple_of(2),
+            subprocess_access: next_seed(&mut seed).is_multiple_of(2),
             profile_summary: format!("Generated profile {:016x}", next_seed(&mut seed)),
         },
         revocation_status: RevocationStatus::Active,
@@ -243,7 +243,7 @@ fn generated_trust_card(mut seed: u64) -> TrustCard {
             1 => ReputationTrend::Stable,
             _ => ReputationTrend::Declining,
         },
-        active_quarantine: next_seed(&mut seed) % 2 == 0,
+        active_quarantine: next_seed(&mut seed).is_multiple_of(2),
         dependency_trust_summary: vec![DependencyTrustStatus {
             dependency_id: format!("npm:dependency-{:x}", next_seed(&mut seed) % 10_000),
             trust_level: "generated".to_string(),

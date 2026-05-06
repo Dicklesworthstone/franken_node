@@ -979,14 +979,19 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
 
 #[must_use]
 pub fn build_rollback_plan(report: &MigrationRewriteReport) -> MigrationRollbackPlan {
-    MigrationRollbackPlan {
+    let plan = MigrationRollbackPlan {
         schema_version: "1.0.0".to_string(),
         project_path: report.project_path.clone(),
         generated_at_utc: chrono::Utc::now().to_rfc3339(),
         apply_mode: report.apply_mode,
         entry_count: report.rollback_entries.len(),
         entries: report.rollback_entries.clone(),
-    }
+    };
+    debug_assert!(
+        validate_rollback_plan(&plan, &default_rollback_validation_policy()).is_ok(),
+        "generated migration rollback plan must satisfy the default validation policy"
+    );
+    plan
 }
 
 #[must_use]
@@ -1181,7 +1186,7 @@ fn select_migration_runtime_smoke_target(
     for (label, entry_path) in manifest_entry_candidates(&manifest) {
         if let Some(target) = build_runtime_smoke_target(
             &project_root,
-            &manifest_dir,
+            manifest_dir,
             &manifest_display,
             &label,
             &entry_path,
@@ -1193,7 +1198,7 @@ fn select_migration_runtime_smoke_target(
     for (script_name, script_rewrite) in preferred_script_entry_candidates(&manifest) {
         if let Some(target) = build_runtime_smoke_target(
             &project_root,
-            &manifest_dir,
+            manifest_dir,
             &manifest_display,
             &format!("scripts.{script_name}"),
             &script_rewrite.entry_path,
@@ -1215,7 +1220,7 @@ fn select_migration_runtime_smoke_target(
     ] {
         if let Some(target) = build_runtime_smoke_target(
             &project_root,
-            &manifest_dir,
+            manifest_dir,
             &manifest_display,
             "default_entry",
             fallback_entry,
@@ -1600,13 +1605,10 @@ fn signal_runtime_smoke_process_group(pid: u32, signal: &str) -> Result<(), std:
         .status()?;
 
     if !status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!(
-                "kill command failed with signal {signal} for process group {pid}: exit code {}",
-                status.code().unwrap_or(-1)
-            ),
-        ));
+        return Err(std::io::Error::other(format!(
+            "kill command failed with signal {signal} for process group {pid}: exit code {}",
+            status.code().unwrap_or(-1)
+        )));
     }
     Ok(())
 }
@@ -1867,10 +1869,7 @@ fn build_migration_report_risk_assessment(
 }
 
 fn bounded_percent_score(value: usize) -> u8 {
-    match u8::try_from(value.min(100)) {
-        Ok(score) => score,
-        Err(_) => 100,
-    }
+    u8::try_from(value.min(100)).unwrap_or(100)
 }
 
 fn migration_report_go_no_go(
@@ -2450,6 +2449,7 @@ fn write_migration_backup(
     // SECURITY: Create backup directories safely to prevent TOCTOU race conditions
     // where symlinks could be placed between validation and directory creation
     create_backup_directory_safe(project_path, &backup_path)?;
+    validate_backup_path_no_symlinks(project_path, &backup_path)?;
 
     match std::fs::read_to_string(&backup_path) {
         Ok(existing) if existing == original_content => return Ok(backup_path),
@@ -2620,10 +2620,10 @@ fn rewrite_commonjs_requires(source: &str) -> CommonJsRewrite {
     for line in source.split_inclusive('\n') {
         let (body, line_ending) = split_line_ending(line);
         if let Some(rewrite) = rewrite_commonjs_line(body) {
-            if let Some(import_line) = rewrite.hoisted_import.as_ref() {
-                if seen_hoisted_imports.insert(import_line.clone()) {
-                    hoisted_imports.push(import_line.clone());
-                }
+            if let Some(import_line) = rewrite.hoisted_import.as_ref()
+                && seen_hoisted_imports.insert(import_line.clone())
+            {
+                hoisted_imports.push(import_line.clone());
             }
             line_rewrites.push((rewrite.replacement_line, line_ending.to_string()));
             rewrite_count = rewrite_count.saturating_add(1);
@@ -3090,11 +3090,11 @@ fn prepend_hoisted_imports(output: &mut String, body: &str, imports: &[String]) 
         return;
     }
     let mut rest = body;
-    if let Some(first_line) = body.split_inclusive('\n').next() {
-        if first_line.starts_with("#!") {
-            output.push_str(first_line);
-            rest = &body[first_line.len()..];
-        }
+    if let Some(first_line) = body.split_inclusive('\n').next()
+        && first_line.starts_with("#!")
+    {
+        output.push_str(first_line);
+        rest = &body[first_line.len()..];
     }
     for import in imports {
         output.push_str(import);
@@ -3398,11 +3398,10 @@ fn contains_js_call_outside_literals(line: &str, function_name: &str) -> bool {
             return false;
         }
         let rest = &line[index..];
-        if rest.starts_with(function_name) {
+        if let Some(after_name) = rest.strip_prefix(function_name) {
             let before = line[..index].chars().next_back();
-            let after_name = &rest[function_name.len()..];
             let after = after_name.chars().next();
-            if before.map_or(true, |candidate| !is_js_identifier_continue(candidate))
+            if before.is_none_or(|candidate| !is_js_identifier_continue(candidate))
                 && after.is_some_and(|candidate| candidate == '(' || candidate.is_whitespace())
                 && after_name.trim_start().starts_with('(')
             {
@@ -4041,7 +4040,7 @@ fn apply_package_script_runtime_replacements(
 ) -> String {
     let mut rewritten = command.to_string();
     let mut sorted = replacements.to_vec();
-    sorted.sort_by(|left, right| right.0.cmp(&left.0));
+    sorted.sort_by_key(|right| std::cmp::Reverse(right.0));
     for (start, end) in sorted {
         if start <= end && end <= rewritten.len() {
             rewritten.replace_range(start..end, "franken-node");

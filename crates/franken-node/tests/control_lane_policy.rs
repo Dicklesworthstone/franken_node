@@ -1,19 +1,6 @@
 #[path = "../../../tests/conformance/control_lane_policy.rs"]
 mod control_lane_policy;
 
-use frankenengine_node::canonical_lock_key;
-
-mod security {
-    pub mod constant_time {
-        pub fn ct_eq(a: &str, b: &str) -> bool {
-            frankenengine_node::security::constant_time::ct_eq(a, b)
-        }
-    }
-}
-
-#[path = "../src/control_plane/root_pointer.rs"]
-mod root_pointer;
-
 use frankenengine_node::control_plane::cancellation_protocol::{
     CancelPhase, CancelProtocolError, CancellationProtocol, DEFAULT_MAX_RECORDS,
 };

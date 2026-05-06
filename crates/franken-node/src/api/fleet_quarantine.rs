@@ -27,8 +27,10 @@ use ed25519_dalek::{Signature, Signer, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[cfg(any(test, feature = "control-plane"))]
+use crate::control_plane::fleet_transport::FleetTargetKind;
 use crate::control_plane::fleet_transport::{
-    FileFleetTransport, FleetAction as PersistedFleetAction, FleetActionRecord, FleetTargetKind,
+    FileFleetTransport, FleetAction as PersistedFleetAction, FleetActionRecord,
     FleetTransport as PersistedFleetTransport, FleetTransportError as PersistedFleetTransportError,
 };
 use crate::push_bounded;
@@ -2060,7 +2062,7 @@ impl FleetControlManager {
     /// let transport = FileFleetTransport::new("/tmp/fleet".into())?;
     /// let manager = FleetControlManager::with_file_transport(transport, None);
     /// ```
-    pub fn with_file_transport(
+    fn with_file_transport(
         mut transport: FileFleetTransport,
         signing_material: Option<FleetDecisionSigningMaterial>,
     ) -> Result<Self, PersistedFleetTransportError> {
@@ -3246,12 +3248,12 @@ pub fn handle_release(
 /// # Ok::<(), ApiError>(())
 /// ```
 pub fn handle_status(
-    identity: &AuthIdentity,
+    _identity: &AuthIdentity,
     trace: &TraceContext,
     zone_id: &str,
 ) -> Result<ApiResponse<FleetStatus>, ApiError> {
     #[cfg(any(test, feature = "control-plane"))]
-    enforce_handler_contract(identity, trace, "GET", "/v1/fleet/status")?;
+    enforce_handler_contract(_identity, trace, "GET", "/v1/fleet/status")?;
     let status = shared_fleet_control_manager().status(trace, zone_id)?;
     Ok(ApiResponse {
         ok: true,

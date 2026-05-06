@@ -72,7 +72,7 @@ fn sort_value(value: Value) -> Value {
         Value::Object(fields) => {
             let mut sorted = Map::new();
             let mut entries: Vec<_> = fields.into_iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(left, _)| left.clone());
             for (key, child) in entries {
                 sorted.insert(key, sort_value(child));
             }

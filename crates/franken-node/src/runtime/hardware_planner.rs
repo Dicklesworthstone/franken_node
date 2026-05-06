@@ -1059,7 +1059,7 @@ impl HardwarePlanner {
         if self
             .active_placements
             .get(workload_id)
-            .map_or(true, |active_target| active_target != target_profile_id)
+            .is_none_or(|active_target| active_target != target_profile_id)
         {
             return Err(HardwarePlannerError::DispatchNotPlaced {
                 workload_id: workload_id.to_string(),
@@ -1104,7 +1104,7 @@ impl HardwarePlanner {
         if self
             .active_placements
             .get(workload_id)
-            .map_or(true, |active_target| active_target != target_profile_id)
+            .is_none_or(|active_target| active_target != target_profile_id)
         {
             return Err(HardwarePlannerError::ReleaseNotPlaced {
                 workload_id: workload_id.to_string(),
@@ -1187,7 +1187,7 @@ impl HardwarePlanner {
             return candidates[0].clone();
         }
 
-        let prefer_lowest_risk = policy.map_or(true, |p| p.prefer_lowest_risk);
+        let prefer_lowest_risk = policy.is_none_or(|p| p.prefer_lowest_risk);
         let prefer_most_capacity = policy.is_some_and(|p| p.prefer_most_capacity);
 
         let mut best = candidates[0].clone();

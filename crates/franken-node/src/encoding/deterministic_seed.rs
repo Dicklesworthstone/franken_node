@@ -501,7 +501,7 @@ fn derive_seed_negative_path_regression_coverage() {
     for i in 0..MAX_BUMP_RECORDS.saturating_add(10) {
         let flood_config =
             ScheduleConfig::new(u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1))
-                .with_param("flood", &format!("version_{}", i));
+                .with_param("flood", format!("version_{}", i));
         let test_domain = &DomainTag::Encoding;
         let flood_hash = ContentHash::from_bytes([i as u8; 32]);
         let _ = deriver.derive_seed(test_domain, &flood_hash, &flood_config);
@@ -567,8 +567,8 @@ fn derive_seed_negative_path_regression_coverage() {
         }), // Single bit set
         ContentHash::from_bytes({
             let mut arr = [0u8; 32];
-            for i in 0..32 {
-                arr[i] = i as u8;
+            for (i, byte) in arr.iter_mut().enumerate() {
+                *byte = i as u8;
             }
             arr
         }), // Incremental pattern
@@ -617,7 +617,7 @@ fn derive_seed_negative_path_regression_coverage() {
     // Test: Config hash length overflow protection
     let mut deriver = DeterministicSeedDeriver::new();
     let overflow_config =
-        ScheduleConfig::new(u32::MAX).with_param(&"K".repeat(1_000_000), &"V".repeat(1_000_000)); // Very large key/value
+        ScheduleConfig::new(u32::MAX).with_param("K".repeat(1_000_000), "V".repeat(1_000_000)); // Very large key/value
     let overflow_hash = ContentHash::from_bytes([0xFF; 32]);
 
     let (overflow_seed, _) =
@@ -1928,10 +1928,11 @@ mod additional_negative_path_tests {
             "Should track all domains"
         );
 
-        // Test boundary condition for maximum domains
-        assert!(
-            final_count <= usize::MAX,
-            "Domain count should not overflow"
+        // Test boundary condition for maximum domains using saturating arithmetic.
+        assert_eq!(
+            final_count.saturating_add(0),
+            final_count,
+            "Domain count should remain stable under saturating arithmetic"
         );
     }
 
@@ -1965,8 +1966,9 @@ mod additional_negative_path_tests {
         // Demonstrate potential overflow scenario with hypothetical large index
         let test_large_index = usize::MAX.saturating_sub(10);
         let safe_increment = test_large_index.saturating_add(1);
-        assert!(
-            safe_increment <= usize::MAX,
+        assert_eq!(
+            safe_increment,
+            usize::MAX.saturating_sub(9),
             "Saturating add should prevent overflow"
         );
 
@@ -1989,7 +1991,10 @@ mod additional_negative_path_tests {
                 // Valid array index for 32-byte hash
                 // Test safe conversion
                 let safe_byte = u8::try_from(index).unwrap_or(u8::MAX);
-                assert!(safe_byte <= u8::MAX, "Safe conversion should not overflow");
+                assert_eq!(
+                    safe_byte, index as u8,
+                    "Safe conversion should preserve in-range byte values"
+                );
 
                 // Create hash with safe byte
                 let mut h = [0u8; 32];
@@ -2032,14 +2037,13 @@ mod additional_negative_path_tests {
         // Test unbounded clear operation on bump records
         // Line 618: self.bump_records.clear() without size/capacity verification
         let mut deriver = DeterministicSeedDeriver::new();
-        let base_config = ScheduleConfig::new(1).with_param("base", "value");
         let content_hash = ContentHash::from_bytes([0xBB; 32]);
 
         // Generate many bump records to stress clear operation
         for i in 0..MAX_BUMP_RECORDS {
             let config_i =
                 ScheduleConfig::new(u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1))
-                    .with_param("iteration", &i.to_string());
+                    .with_param("iteration", i.to_string());
             let (_, _) = deriver.derive_seed(&DomainTag::Encoding, &content_hash, &config_i);
         }
 
@@ -2099,8 +2103,6 @@ mod additional_negative_path_tests {
         // Test hex encoding operations that use .as_slice()
         // Line 347: hex::encode(old_hash.as_slice()) - potential optimization concerns
         let mut deriver = DeterministicSeedDeriver::new();
-        let content_hash = ContentHash::from_bytes([0xCC; 32]);
-
         // Test hex encoding/decoding with various hash patterns
         let hash_patterns = [
             [0x00; 32], // All zeros
@@ -2125,9 +2127,9 @@ mod additional_negative_path_tests {
         for (test_num, pattern) in hash_patterns.iter().enumerate() {
             let test_hash = ContentHash::from_bytes(*pattern);
             let config1 =
-                ScheduleConfig::new(1).with_param("pattern", &format!("test_{}", test_num));
+                ScheduleConfig::new(1).with_param("pattern", format!("test_{}", test_num));
             let config2 =
-                ScheduleConfig::new(2).with_param("pattern", &format!("test_{}", test_num));
+                ScheduleConfig::new(2).with_param("pattern", format!("test_{}", test_num));
 
             // Generate bump record to test hex encoding operations
             let (_, _) = deriver.derive_seed(&DomainTag::Placement, &test_hash, &config1);

@@ -190,12 +190,7 @@ fn encode_string_direct(out: &mut Vec<u8>, value: &str) {
     serde_json::to_writer(out, value).expect("direct string encoding should succeed");
 }
 
-fn write_value_current_like(
-    out: &mut Vec<u8>,
-    value: &Value,
-    field_path: &str,
-    no_float: bool,
-) -> Result<(), ()> {
+fn write_value_current_like(out: &mut Vec<u8>, value: &Value, field_path: &str) -> Result<(), ()> {
     match value {
         Value::Null => out.extend_from_slice(b"null"),
         Value::Bool(true) => out.extend_from_slice(b"true"),
@@ -205,8 +200,6 @@ fn write_value_current_like(
                 out.extend_from_slice(value.to_string().as_bytes());
             } else if let Some(value) = number.as_u64() {
                 out.extend_from_slice(value.to_string().as_bytes());
-            } else if no_float {
-                return Err(());
             } else {
                 return Err(());
             }
@@ -219,14 +212,14 @@ fn write_value_current_like(
                     out.push(b',');
                 }
                 let child_path = format!("{field_path}[{index}]");
-                write_value_current_like(out, item, &child_path, no_float)?;
+                write_value_current_like(out, item, &child_path)?;
             }
             out.push(b']');
         }
         Value::Object(values) => {
             out.push(b'{');
             let mut entries: Vec<_> = values.iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(left, _)| *left);
             for (index, (key, nested_value)) in entries.iter().enumerate() {
                 if index > 0 {
                     out.push(b',');
@@ -234,7 +227,7 @@ fn write_value_current_like(
                 encode_string_alloc(out, key);
                 out.push(b':');
                 let child_path = format!("{field_path}.{key}");
-                write_value_current_like(out, nested_value, &child_path, no_float)?;
+                write_value_current_like(out, nested_value, &child_path)?;
             }
             out.push(b'}');
         }
@@ -242,7 +235,7 @@ fn write_value_current_like(
     Ok(())
 }
 
-fn write_value_no_path_alloc(out: &mut Vec<u8>, value: &Value, no_float: bool) -> Result<(), ()> {
+fn write_value_no_path_alloc(out: &mut Vec<u8>, value: &Value) -> Result<(), ()> {
     match value {
         Value::Null => out.extend_from_slice(b"null"),
         Value::Bool(true) => out.extend_from_slice(b"true"),
@@ -252,8 +245,6 @@ fn write_value_no_path_alloc(out: &mut Vec<u8>, value: &Value, no_float: bool) -
                 out.extend_from_slice(value.to_string().as_bytes());
             } else if let Some(value) = number.as_u64() {
                 out.extend_from_slice(value.to_string().as_bytes());
-            } else if no_float {
-                return Err(());
             } else {
                 return Err(());
             }
@@ -265,21 +256,21 @@ fn write_value_no_path_alloc(out: &mut Vec<u8>, value: &Value, no_float: bool) -
                 if index > 0 {
                     out.push(b',');
                 }
-                write_value_no_path_alloc(out, item, no_float)?;
+                write_value_no_path_alloc(out, item)?;
             }
             out.push(b']');
         }
         Value::Object(values) => {
             out.push(b'{');
             let mut entries: Vec<_> = values.iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(left, _)| *left);
             for (index, (key, nested_value)) in entries.iter().enumerate() {
                 if index > 0 {
                     out.push(b',');
                 }
                 encode_string_alloc(out, key);
                 out.push(b':');
-                write_value_no_path_alloc(out, nested_value, no_float)?;
+                write_value_no_path_alloc(out, nested_value)?;
             }
             out.push(b'}');
         }
@@ -287,7 +278,7 @@ fn write_value_no_path_alloc(out: &mut Vec<u8>, value: &Value, no_float: bool) -
     Ok(())
 }
 
-fn write_value_direct_string(out: &mut Vec<u8>, value: &Value, no_float: bool) -> Result<(), ()> {
+fn write_value_direct_string(out: &mut Vec<u8>, value: &Value) -> Result<(), ()> {
     match value {
         Value::Null => out.extend_from_slice(b"null"),
         Value::Bool(true) => out.extend_from_slice(b"true"),
@@ -297,8 +288,6 @@ fn write_value_direct_string(out: &mut Vec<u8>, value: &Value, no_float: bool) -
                 write!(out, "{value}").expect("int encoding should succeed");
             } else if let Some(value) = number.as_u64() {
                 write!(out, "{value}").expect("uint encoding should succeed");
-            } else if no_float {
-                return Err(());
             } else {
                 return Err(());
             }
@@ -310,21 +299,21 @@ fn write_value_direct_string(out: &mut Vec<u8>, value: &Value, no_float: bool) -
                 if index > 0 {
                     out.push(b',');
                 }
-                write_value_direct_string(out, item, no_float)?;
+                write_value_direct_string(out, item)?;
             }
             out.push(b']');
         }
         Value::Object(values) => {
             out.push(b'{');
             let mut entries: Vec<_> = values.iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(left, _)| *left);
             for (index, (key, nested_value)) in entries.iter().enumerate() {
                 if index > 0 {
                     out.push(b',');
                 }
                 encode_string_direct(out, key);
                 out.push(b':');
-                write_value_direct_string(out, nested_value, no_float)?;
+                write_value_direct_string(out, nested_value)?;
             }
             out.push(b'}');
         }
@@ -347,7 +336,7 @@ fn encode_current_like(schema: &CanonicalSchema, value: &Value) -> Vec<u8> {
         let field_value = object
             .get(field)
             .expect("schema field should exist in sample payload");
-        write_value_current_like(&mut canonical, field_value, field, schema.no_float)
+        write_value_current_like(&mut canonical, field_value, field)
             .expect("benchmark payload should be canonical");
     }
     canonical.push(b'}');
@@ -369,7 +358,7 @@ fn encode_no_path_alloc(schema: &CanonicalSchema, value: &Value) -> Vec<u8> {
         let field_value = object
             .get(field)
             .expect("schema field should exist in sample payload");
-        write_value_no_path_alloc(&mut canonical, field_value, schema.no_float)
+        write_value_no_path_alloc(&mut canonical, field_value)
             .expect("benchmark payload should be canonical");
     }
     canonical.push(b'}');
@@ -391,7 +380,7 @@ fn encode_direct_string(schema: &CanonicalSchema, value: &Value) -> Vec<u8> {
         let field_value = object
             .get(field)
             .expect("schema field should exist in sample payload");
-        write_value_direct_string(&mut canonical, field_value, schema.no_float)
+        write_value_direct_string(&mut canonical, field_value)
             .expect("benchmark payload should be canonical");
     }
     canonical.push(b'}');

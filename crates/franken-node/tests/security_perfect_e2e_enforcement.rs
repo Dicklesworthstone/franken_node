@@ -150,10 +150,10 @@ impl RealEnforcementHarness {
 
     /// Production safety guard - validates we're not in production environment.
     fn validate_test_environment() -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(env) = effective_node_env_for_tests() {
-            if env == "production" {
-                return Err("Cannot run real enforcement tests in production environment".into());
-            }
+        if let Some(env) = effective_node_env_for_tests()
+            && env == "production"
+        {
+            return Err("Cannot run real enforcement tests in production environment".into());
         }
 
         Ok(())

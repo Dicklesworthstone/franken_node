@@ -8,9 +8,9 @@
 //!   - INV-EPOCH-NO-GAP         `epoch_advance` advances by exactly +1
 //!   - INV-EPOCH-SIGNED-EVENT   every `EpochTransition.verify()` returns true
 //!   - INV-EPOCH-DURABLE        `recover(committed)` round-trips state across
-//!                              a simulated restart
+//!     a simulated restart
 //!   - epoch_set: regression to `<= current` is rejected with
-//!                `EpochError::EpochRegression`
+//!     `EpochError::EpochRegression`
 //!   - manifest_hash empty/whitespace → `EpochError::InvalidManifestHash`
 //!   - check_artifact_epoch matrix:
 //!       * current epoch         → accepted

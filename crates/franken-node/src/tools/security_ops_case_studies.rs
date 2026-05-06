@@ -484,7 +484,7 @@ fn validate_case_study(case_study: &CaseStudy) -> Result<(), String> {
             .publication
             .industry_publication_name
             .as_ref()
-            .map_or(true, |name| name.trim().is_empty())
+            .is_none_or(|name| name.trim().is_empty())
     {
         return Err(
             "industry_publication_name required when submitted_to_industry_publication=true"
@@ -506,7 +506,7 @@ fn validate_case_study(case_study: &CaseStudy) -> Result<(), String> {
             .publication
             .reviewed_at
             .as_ref()
-            .map_or(true, |timestamp| timestamp.trim().is_empty())
+            .is_none_or(|timestamp| timestamp.trim().is_empty())
     {
         return Err("reviewed_at required when reviewed_by_featured_org=true".to_string());
     }

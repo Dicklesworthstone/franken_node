@@ -19,7 +19,6 @@ use frankenengine_node::ops::close_condition::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 
 /// Load reference vectors from embedded artifact file.
 const DOCTOR_CLOSE_CONDITION_VECTORS_JSON: &str =
@@ -278,6 +277,10 @@ fn load_conformance_vectors() -> DoctorCloseConditionConformanceVectors {
 #[test]
 fn doctor_close_condition_schema_version_matches_vectors() {
     let vectors = load_conformance_vectors();
+    assert_eq!(
+        vectors.schema_version, "doctor-close-condition-vectors-v1",
+        "Vector artifact schema version should match expected constant"
+    );
     assert_eq!(
         vectors.receipt_schema_version, "oracle-close-condition-receipt/v1",
         "Receipt schema version in vectors should match expected constant"

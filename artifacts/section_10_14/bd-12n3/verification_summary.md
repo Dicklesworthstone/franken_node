@@ -1,7 +1,7 @@
 # bd-12n3 Verification Summary
 
 ## Result
-CONTRACT GATES PASS; bd-177e4 remains blocked by current all-target clippy warning debt and missing refreshed persisted pass logs for the cargo check/focused-test proofs.
+CONTRACT GATES PASS; current `frankenengine-node` all-target clippy warning debt is retired.
 
 ## Delivered
 - `crates/franken-node/src/remote/idempotency.rs`
@@ -30,9 +30,9 @@ CONTRACT GATES PASS; bd-177e4 remains blocked by current all-target clippy warni
 - `rustfmt --edition 2024 sdk/verifier/src/bundle.rs sdk/verifier/src/capsule.rs sdk/verifier/src/lib.rs` -> PASS.
 - `git diff --check -- sdk/verifier/src/bundle.rs sdk/verifier/src/capsule.rs sdk/verifier/src/lib.rs` -> PASS.
 - `RCH_REQUIRE_REMOTE=1 ... cargo +nightly-2026-02-19 check -p frankenengine-node --all-targets` -> PASS recorded in the bd-177e4 Beads thread at 2026-05-05 16:04 UTC: `[RCH] remote vmi1293453 (803.3s)`. The persisted artifact log is still the old 2026-05-03 dependency failure and needs refresh before closeout.
-- `RCH_REQUIRE_REMOTE=1 ... cargo +nightly-2026-02-19 clippy -p frankenengine-node --all-targets -- -D warnings` -> `101`, refreshed by PinkFern on 2026-05-05. The stale `sqlmodel-frankensqlite` blocker is gone; clippy reaches `frankenengine-node` on remote `ts2` and fails with 187 warning-as-error errors across current all-target warning debt.
+- `RCH_REQUIRE_REMOTE=1 ... cargo +nightly-2026-02-19 clippy -p frankenengine-node --all-targets -- -D warnings` -> PASS, refreshed by PinkFern on 2026-05-06 from `/data/projects/franken_node_pinkfern_clean_bd_empw2`: `[RCH] remote vmi1156319 (1649.0s)`.
 - `RCH_REQUIRE_REMOTE=1 ... cargo +nightly-2026-02-19 test -p frankenengine-node --features extended-surfaces --test idempotency_key_derivation -- --nocapture` -> PASS recorded in the bd-177e4 Beads thread at 2026-05-05 16:04 UTC: 6/6 passed on `vmi1293453`. The persisted artifact log is still the old 2026-05-03 dependency failure and needs refresh before closeout.
-- `python3 scripts/check_section_10_14_gate.py --json` -> PASS (`98.08%` coverage, one remaining failing bead: bd-12n3).
+- `python3 scripts/check_section_10_14_gate.py --json` -> PASS (`100.0%` coverage, `0` failing beads).
 
 ## Remaining Blocker
-Remote Cargo is no longer blocked by `/dp/sqlmodel_rust/crates/sqlmodel-frankensqlite/src/connection.rs:79`. The current blocker is broad `cargo clippy -p frankenengine-node --all-targets -- -D warnings` debt: the refreshed RCH log reaches `frankenengine-node` and fails with 187 warning-as-error errors. The first blockers are in `engine_dispatcher.rs`, `rollout_state.rs`, `divergence_gate.rs`, `fleet_transport.rs`, `evidence_ledger.rs`, `remote_cap.rs`, `threshold_sig.rs`, `cli.rs`, and `config.rs`.
+None for current all-target clippy debt. The refreshed RCH log reaches `frankenengine-node` and exits 0 for `cargo +nightly-2026-02-19 clippy -p frankenengine-node --all-targets -- -D warnings`.

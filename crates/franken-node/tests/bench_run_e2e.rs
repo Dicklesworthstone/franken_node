@@ -430,7 +430,7 @@ fn bench_run_successful_execution_logs_expected_events() {
     assert!(
         file_report["scenarios"]
             .as_array()
-            .map_or(false, |scenarios| scenarios.len() == 1),
+            .is_some_and(|scenarios| scenarios.len() == 1),
         "output file must contain exactly one scenario result"
     );
 }

@@ -302,10 +302,10 @@ fn e2e_control_lane_scheduler_starvation_detection() {
     for tick in 0..4 {
         let alerts = scheduler.advance_tick(&by_lane, 200 + tick, "trace-tick");
         for a in &alerts {
-            if let ControlLanePolicyError::Starvation { lane, .. } = a {
-                if *lane == ControlLane::Ready {
-                    ready_starvation_alerts += 1;
-                }
+            if let ControlLanePolicyError::Starvation { lane, .. } = a
+                && *lane == ControlLane::Ready
+            {
+                ready_starvation_alerts += 1;
             }
         }
     }

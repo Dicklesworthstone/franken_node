@@ -296,7 +296,7 @@ fn vef_receipt_chain_checkpoint_capacity_fails_closed_without_eviction() -> Test
     });
 
     for seq in 0..MAX_CHECKPOINTS {
-        let seq_u64 = u64::try_from(seq).unwrap_or_else(|_| {
+        let seq_u64 = u64::try_from(seq).unwrap_or({
             // This should never happen with MAX_CHECKPOINTS=1024, but handle gracefully
             seq as u64 // Use saturating conversion as fallback
         });

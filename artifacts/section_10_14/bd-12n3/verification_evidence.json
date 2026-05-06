@@ -2,8 +2,8 @@
   "bead_id": "bd-12n3",
   "section": "10.14",
   "title": "Idempotency key derivation from request bytes with epoch binding",
-  "generated_at": "2026-05-05T18:40:31Z",
-  "status": "blocked_by_current_all_target_clippy_warning_debt",
+  "generated_at": "2026-05-06T13:21:23Z",
+  "status": "PASS",
   "checks": [
     {
       "name": "implementation_surface_present",
@@ -56,11 +56,11 @@
     },
     {
       "name": "cargo_clippy_all_targets_via_rch",
-      "command": "RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary RCH_PRIORITY=low RCH_TEST_TIMEOUT_SEC=1800 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=2400 rch exec -- env CARGO_TARGET_DIR=/data/tmp/franken_node-pinkfern-bd-177e4-clippy-target CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo +nightly-2026-02-19 clippy -p frankenengine-node --all-targets -- -D warnings",
-      "exit_code": 101,
-      "status": "FAIL_CURRENT_REPO_CLIPPY_WARNING_DEBT",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary RCH_PRIORITY=low RCH_BUILD_TIMEOUT_SEC=7200 RCH_TEST_TIMEOUT_SEC=7200 RCH_SSH_SERVER_ALIVE_INTERVAL_SECS=15 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=8000 rch exec -- env CARGO_TARGET_DIR=.rch-target-pinkfern-bd-empw2-clippy CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo +nightly-2026-02-19 clippy -p frankenengine-node --all-targets -- -D warnings",
+      "exit_code": 0,
+      "status": "PASS",
       "output_path": "artifacts/section_10_14/bd-12n3/rch_cargo_clippy_all_targets.log",
-      "note": "PinkFern refreshed this proof on 2026-05-05. The stale sqlmodel open_with_page_size blocker is gone; clippy reaches frankenengine-node on remote ts2 and fails with 187 warning-as-error errors across existing all-target warning debt. First blockers include engine_dispatcher.rs unused variables/functions, rollout_state.rs dead code, divergence_gate.rs dead constants, cli.rs doc-lazy-continuation, and config.rs needless-borrow warnings."
+      "note": "PinkFern refreshed this proof on 2026-05-06 from /data/projects/franken_node_pinkfern_clean_bd_empw2. rerun10 returned [RCH] remote vmi1156319 (1649.0s), exit 0; the current frankenengine-node all-target clippy warning debt is retired."
     },
     {
       "name": "focused_idempotency_tests_via_rch",
@@ -77,8 +77,8 @@
       "output_path": "artifacts/section_10_14/bd-12n3/check_section_10_14_gate.json",
       "summary": {
         "verdict": "PASS",
-        "coverage_pct": 98.08,
-        "failing_beads": 1
+        "coverage_pct": 100.0,
+        "failing_beads": 0
       }
     }
   ],
@@ -92,9 +92,9 @@
     "spec": "docs/specs/section_10_14/bd-12n3_contract.md"
   },
   "remaining_blocker": {
-    "kind": "current_repo_all_target_clippy_warning_debt",
+    "kind": "none_for_all_target_clippy_warning_debt",
     "path": "artifacts/section_10_14/bd-12n3/rch_cargo_clippy_all_targets.log",
     "line": null,
-    "message": "cargo +nightly-2026-02-19 clippy -p frankenengine-node --all-targets -- -D warnings reaches frankenengine-node and fails with 187 warning-as-error errors; fresh persisted cargo check and focused-test pass logs are still needed before bd-177e4 closeout."
+    "message": "cargo +nightly-2026-02-19 clippy -p frankenengine-node --all-targets -- -D warnings passes on current franken_node after bd-empw2 cleanup."
   }
 }

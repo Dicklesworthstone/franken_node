@@ -8015,16 +8015,26 @@ fn debug_trace_evidence_refs(report: &DoctorPolicyActivationReport) -> Vec<Strin
     refs
 }
 
-fn build_debug_trace_json_report(
-    args: &DebugTraceArgs,
-    policy_path: &Path,
-    input_path: &Path,
-    policy_content: &str,
-    input_content: &str,
-    input_data: &serde_json::Value,
-    policy_config: &DebugTracePolicyConfig,
-    activation: &DoctorPolicyActivationReport,
-) -> serde_json::Value {
+struct DebugTraceReportInputs<'a> {
+    args: &'a DebugTraceArgs,
+    policy_path: &'a Path,
+    input_path: &'a Path,
+    policy_content: &'a str,
+    input_content: &'a str,
+    input_data: &'a serde_json::Value,
+    policy_config: &'a DebugTracePolicyConfig,
+    activation: &'a DoctorPolicyActivationReport,
+}
+
+fn build_debug_trace_json_report(inputs: &DebugTraceReportInputs<'_>) -> serde_json::Value {
+    let args = inputs.args;
+    let policy_path = inputs.policy_path;
+    let input_path = inputs.input_path;
+    let policy_content = inputs.policy_content;
+    let input_content = inputs.input_content;
+    let input_data = inputs.input_data;
+    let policy_config = inputs.policy_config;
+    let activation = inputs.activation;
     let verdict = activation.guardrail_certificate.dominant_verdict;
     let decision_reason = decision_reason_label(&activation.decision_outcome.reason);
     let chosen = activation
@@ -8118,16 +8128,15 @@ fn build_debug_trace_json_report(
     })
 }
 
-fn render_debug_trace_human(
-    args: &DebugTraceArgs,
-    policy_path: &Path,
-    input_path: &Path,
-    policy_content: &str,
-    input_content: &str,
-    input_data: &serde_json::Value,
-    policy_config: &DebugTracePolicyConfig,
-    activation: &DoctorPolicyActivationReport,
-) {
+fn render_debug_trace_human(inputs: &DebugTraceReportInputs<'_>) {
+    let args = inputs.args;
+    let policy_path = inputs.policy_path;
+    let input_path = inputs.input_path;
+    let policy_content = inputs.policy_content;
+    let input_content = inputs.input_content;
+    let input_data = inputs.input_data;
+    let policy_config = inputs.policy_config;
+    let activation = inputs.activation;
     let verdict = activation.guardrail_certificate.dominant_verdict;
     let decision_reason = decision_reason_label(&activation.decision_outcome.reason);
     let chosen = activation
@@ -8800,7 +8809,7 @@ fn evaluate_evidence_artifact_readiness(
 
     for (index, artifact) in artifacts.iter().enumerate() {
         let label = evidence_readiness_label(&artifact.artifact_id, index, "artifact");
-        if artifact.verification_verdict.to_ascii_lowercase() != "pass" {
+        if !artifact.verification_verdict.eq_ignore_ascii_case("pass") {
             failures.push(format!("{label}: verifier verdict is not pass"));
         }
         if !artifact.signature_verified {
@@ -15383,16 +15392,18 @@ fn build_incident_counterfactual_promotion(
     });
     let rollout_digest = incident_counterfactual_json_digest(&rollout_unsigned)?;
     let rollout_signature = sign_incident_counterfactual_contract_receipt(
-        "incident.counterfactual.rollout",
-        operator_id,
-        timestamp,
-        counterfactual_digest,
-        &rollout_digest,
-        &summary.evidence_refs,
-        policy,
-        expected_loss_delta,
-        "operator_abort_or_expected_loss_delta_non_positive",
-        signing_material,
+        &IncidentCounterfactualContractReceiptInput {
+            action_name: "incident.counterfactual.rollout",
+            operator_id,
+            timestamp,
+            input_hash: counterfactual_digest,
+            output_hash: &rollout_digest,
+            evidence_refs: &summary.evidence_refs,
+            policy,
+            expected_loss_delta,
+            rollback_command: "operator_abort_or_expected_loss_delta_non_positive",
+            signing_material,
+        },
     )?;
     let mut rollout_contract = rollout_unsigned;
     rollout_contract
@@ -15407,17 +15418,20 @@ fn build_incident_counterfactual_promotion(
         "operator_id": operator_id,
     });
     let rollback_digest = incident_counterfactual_json_digest(&rollback_unsigned)?;
+    let rollback_command = format!("restore_policy_version:{}", summary.bundle_policy_version);
     let rollback_signature = sign_incident_counterfactual_contract_receipt(
-        "incident.counterfactual.rollback",
-        operator_id,
-        timestamp,
-        counterfactual_digest,
-        &rollback_digest,
-        &summary.evidence_refs,
-        policy,
-        expected_loss_delta,
-        &format!("restore_policy_version:{}", summary.bundle_policy_version),
-        signing_material,
+        &IncidentCounterfactualContractReceiptInput {
+            action_name: "incident.counterfactual.rollback",
+            operator_id,
+            timestamp,
+            input_hash: counterfactual_digest,
+            output_hash: &rollback_digest,
+            evidence_refs: &summary.evidence_refs,
+            policy,
+            expected_loss_delta,
+            rollback_command: &rollback_command,
+            signing_material,
+        },
     )?;
     let mut rollback_contract = rollback_unsigned;
     rollback_contract
@@ -15432,16 +15446,18 @@ fn build_incident_counterfactual_promotion(
     });
     let promotion_contract_digest = incident_counterfactual_json_digest(&promotion_contract)?;
     let promotion_signature = sign_incident_counterfactual_contract_receipt(
-        "incident.counterfactual.promote",
-        operator_id,
-        timestamp,
-        counterfactual_digest,
-        &promotion_contract_digest,
-        &summary.evidence_refs,
-        policy,
-        expected_loss_delta,
-        &format!("restore_policy_version:{}", summary.bundle_policy_version),
-        signing_material,
+        &IncidentCounterfactualContractReceiptInput {
+            action_name: "incident.counterfactual.promote",
+            operator_id,
+            timestamp,
+            input_hash: counterfactual_digest,
+            output_hash: &promotion_contract_digest,
+            evidence_refs: &summary.evidence_refs,
+            policy,
+            expected_loss_delta,
+            rollback_command: &rollback_command,
+            signing_material,
+        },
     )?;
 
     Ok((
@@ -15451,43 +15467,53 @@ fn build_incident_counterfactual_promotion(
     ))
 }
 
-fn sign_incident_counterfactual_contract_receipt(
-    action_name: &str,
-    operator_id: &str,
-    timestamp: &str,
-    input_hash: &str,
-    output_hash: &str,
-    evidence_refs: &[String],
-    policy: &str,
+#[derive(Clone, Copy)]
+struct IncidentCounterfactualContractReceiptInput<'a> {
+    action_name: &'a str,
+    operator_id: &'a str,
+    timestamp: &'a str,
+    input_hash: &'a str,
+    output_hash: &'a str,
+    evidence_refs: &'a [String],
+    policy: &'a str,
     expected_loss_delta: i64,
-    rollback_command: &str,
-    signing_material: &Ed25519SigningMaterial,
+    rollback_command: &'a str,
+    signing_material: &'a Ed25519SigningMaterial,
+}
+
+fn sign_incident_counterfactual_contract_receipt(
+    input: &IncidentCounterfactualContractReceiptInput<'_>,
 ) -> Result<serde_json::Value> {
+    let input = *input;
+    let action_name = input.action_name;
+    let output_hash = input.output_hash;
+    let policy = input.policy;
+    let expected_loss_delta = input.expected_loss_delta;
     let receipt = Receipt {
         receipt_id: incident_counterfactual_receipt_id(action_name, output_hash),
         action_name: action_name.to_string(),
-        actor_identity: operator_id.to_string(),
-        timestamp: timestamp.to_string(),
+        actor_identity: input.operator_id.to_string(),
+        timestamp: input.timestamp.to_string(),
         signature_version: DECISION_RECEIPT_SIGNATURE_VERSION.to_string(),
         nonce: Uuid::now_v7().simple().to_string(),
         audience: "franken-node".to_string(), // audience binding
-        input_hash: input_hash.to_string(),
+        input_hash: input.input_hash.to_string(),
         output_hash: output_hash.to_string(),
         decision: Decision::Approved,
         rationale: format!(
             "signed counterfactual promotion contract for policy {policy}; expected_loss_delta={expected_loss_delta}"
         ),
-        evidence_refs: evidence_refs.to_vec(),
+        evidence_refs: input.evidence_refs.to_vec(),
         policy_rule_chain: vec![
             "INV-LAB-SIGNED-ROLLOUT".to_string(),
             "INV-LAB-ROLLBACK-CONTRACT".to_string(),
             "INV-LAB-LOSS-DELTA-POSITIVE".to_string(),
         ],
         confidence: 1.0,
-        rollback_command: rollback_command.to_string(),
+        rollback_command: input.rollback_command.to_string(),
         previous_receipt_hash: None,
     };
-    let signed = sign_receipt(&receipt, &signing_material.signing_key)
+    let signed = sign_receipt(&receipt, &input.signing_material.signing_key)
         .with_context(|| format!("failed signing {action_name} receipt"))?;
     serde_json::to_value(signed).context("failed serializing counterfactual promotion signature")
 }
@@ -17247,7 +17273,7 @@ fn search_registry_entries<'a>(
         .into_iter()
         .filter(|extension| extension_matches_query(extension, query))
         .map(|extension| (extension_assurance_level(extension), extension))
-        .filter(|(assurance, _)| min_assurance.map_or(true, |minimum| *assurance >= minimum))
+        .filter(|(assurance, _)| min_assurance.is_none_or(|minimum| *assurance >= minimum))
         .collect::<Vec<_>>();
 
     results.sort_by(|left, right| {
@@ -18283,6 +18309,9 @@ fn derive_active_fleet_incidents(
 }
 
 fn count_active_fleet_revocations(state: &FleetSharedState, requested_zone: &str) -> u32 {
+    #[cfg(not(feature = "control-plane"))]
+    let _ = requested_zone;
+
     let active_revocations = state
         .actions
         .iter()
@@ -20839,16 +20868,16 @@ fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
         .iter()
         .map(|row| {
             // Log detailed error for internal audit trail
-            if let Some(detailed_reason) = &row.failure_reason {
-                if !row.passed {
-                    tracing::warn!(
-                        event_code = ASV_003_VERIFICATION_FAILED,
-                        artifact = row.artifact_name,
-                        key_id = row.key_id,
-                        detailed_failure = detailed_reason,
-                        "Release verification failed with detailed error"
-                    );
-                }
+            if let Some(detailed_reason) = &row.failure_reason
+                && !row.passed
+            {
+                tracing::warn!(
+                    event_code = ASV_003_VERIFICATION_FAILED,
+                    artifact = row.artifact_name,
+                    key_id = row.key_id,
+                    detailed_failure = detailed_reason,
+                    "Release verification failed with detailed error"
+                );
             }
 
             // Use sanitized error for external output
@@ -20999,10 +21028,10 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
         expected_prev_hash = Some(evidence_entry_hash_hex(entry));
 
         // Verify signature if verifying key provided
-        if let Some(ref key) = verifying_key {
-            if let Err(e) = verify_evidence_entry(entry, key) {
-                signature_errors.push(format!("Entry {} signature invalid: {}", index, e));
-            }
+        if let Some(ref key) = verifying_key
+            && let Err(e) = verify_evidence_entry(entry, key)
+        {
+            signature_errors.push(format!("Entry {} signature invalid: {}", index, e));
         }
     }
 
@@ -22689,13 +22718,6 @@ fn verify_corpus_string<'a>(value: &'a serde_json::Value, field: &str) -> Option
         .filter(|text| !text.is_empty())
 }
 
-fn verify_corpus_array_len(value: &serde_json::Value, field: &str) -> Option<usize> {
-    value
-        .get(field)
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::len)
-}
-
 fn verify_corpus_usize(value: &serde_json::Value, field: &str) -> Option<usize> {
     value
         .get(field)
@@ -23919,29 +23941,22 @@ fn handle_debug_trace(args: &DebugTraceArgs) -> Result<()> {
         )
     })?;
 
+    let report_inputs = DebugTraceReportInputs {
+        args,
+        policy_path,
+        input_path,
+        policy_content: &policy_content,
+        input_content: &input_content,
+        input_data: &input_data,
+        policy_config: &policy_config,
+        activation: &activation,
+    };
+
     if args.json {
-        let output = build_debug_trace_json_report(
-            args,
-            policy_path,
-            input_path,
-            &policy_content,
-            &input_content,
-            &input_data,
-            &policy_config,
-            &activation,
-        );
+        let output = build_debug_trace_json_report(&report_inputs);
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        render_debug_trace_human(
-            args,
-            policy_path,
-            input_path,
-            &policy_content,
-            &input_content,
-            &input_data,
-            &policy_config,
-            &activation,
-        );
+        render_debug_trace_human(&report_inputs);
     }
 
     Ok(())
@@ -24372,6 +24387,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Init(args) => {
+            args.validate_paths()?;
             let cli::InitArgs {
                 profile,
                 config,
@@ -24491,6 +24507,7 @@ fn main() -> Result<()> {
         }
 
         Command::Run(args) => {
+            args.validate_paths()?;
             let cli::RunArgs {
                 app_path,
                 policy,

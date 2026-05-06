@@ -660,7 +660,7 @@ fn sdk_verifier_public_api_live_contract_invariants() {
     assert_eq!(step.artifact_binding_hash, result.artifact_binding_hash);
     assert!(is_lower_hex_digest(&step.step_signature));
     assert_rfc3339_timestamp(&step.timestamp, "live session_step timestamp");
-    assert_eq!(session.steps(), [step.clone()]);
+    assert_eq!(session.steps(), std::slice::from_ref(&step));
 
     let mut log = Vec::new();
     let entry = sdk

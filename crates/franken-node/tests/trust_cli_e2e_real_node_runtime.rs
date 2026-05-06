@@ -7,7 +7,6 @@
 //! Why no mocks: CLI runtime detection and trust registry behavior can only be validated
 //! against real Node.js binaries and filesystem operations.
 
-use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -71,20 +70,20 @@ impl RealNodeRuntimeTestHarness {
         ];
 
         for candidate in &candidates {
-            if let Ok(output) = Command::new(candidate).arg("--version").output() {
-                if output.status.success() {
-                    return Some(PathBuf::from(candidate));
-                }
+            if let Ok(output) = Command::new(candidate).arg("--version").output()
+                && output.status.success()
+            {
+                return Some(PathBuf::from(candidate));
             }
         }
 
         // Try which command as fallback
-        if let Ok(output) = Command::new("which").arg("node").output() {
-            if output.status.success() {
-                let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path_str.is_empty() && Path::new(&path_str).is_file() {
-                    return Some(PathBuf::from(path_str));
-                }
+        if let Ok(output) = Command::new("which").arg("node").output()
+            && output.status.success()
+        {
+            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path_str.is_empty() && Path::new(&path_str).is_file() {
+                return Some(PathBuf::from(path_str));
             }
         }
 
@@ -218,12 +217,12 @@ fn run_franken_node_with_real_runtime(
     command.current_dir(workspace).args(args);
 
     // Configure PATH to include Node.js binary if found
-    if let Some(node_path) = node_binary {
-        if let Some(node_dir) = node_path.parent() {
-            let current_path = std::env::var_os("PATH").unwrap_or_default();
-            let new_path = format!("{}:{}", node_dir.display(), current_path.to_string_lossy());
-            command.env("PATH", new_path);
-        }
+    if let Some(node_path) = node_binary
+        && let Some(node_dir) = node_path.parent()
+    {
+        let current_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", node_dir.display(), current_path.to_string_lossy());
+        command.env("PATH", new_path);
     }
 
     // Clear engine binaries to test runtime detection
