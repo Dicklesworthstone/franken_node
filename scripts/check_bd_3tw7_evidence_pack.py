@@ -462,19 +462,19 @@ def _materialize_self_test_fixture(root: Path) -> None:
         "\n".join(json.dumps(row, sort_keys=True) for row in issue_export_rows) + "\n",
     )
 
-    placeholder_paths = set(_artifact_paths_from_evidence(evidence))
-    placeholder_paths.update(_source_paths_from_witnesses(witness_matrix))
-    placeholder_paths.update(_excluded_surface_paths(evidence))
+    synthetic_fixture_paths = set(_artifact_paths_from_evidence(evidence))
+    synthetic_fixture_paths.update(_source_paths_from_witnesses(witness_matrix))
+    synthetic_fixture_paths.update(_excluded_surface_paths(evidence))
     already_written = {
         str(VERIFICATION_EVIDENCE.relative_to(ROOT)),
         str(VERIFICATION_SUMMARY.relative_to(ROOT)),
         str(WITNESS_MATRIX.relative_to(ROOT)),
         str(ISSUES_EXPORT.relative_to(ROOT)),
     }
-    for rel in sorted(path for path in placeholder_paths if path):
+    for rel in sorted(path for path in synthetic_fixture_paths if path):
         if rel in already_written:
             continue
-        _write_text(root, rel, "placeholder\n")
+        _write_text(root, rel, "synthetic evidence fixture\n")
 
 
 def self_test() -> dict[str, Any]:

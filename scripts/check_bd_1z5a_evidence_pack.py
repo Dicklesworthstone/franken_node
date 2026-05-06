@@ -667,22 +667,22 @@ def _materialize_self_test_fixture(root: Path) -> None:
     _write_text(root, str(VERIFICATION_SUMMARY.relative_to(ROOT)), verification_summary_text)
     _write_text(root, str(OPERATOR_SUMMARY_MD.relative_to(ROOT)), _expected_summary_markdown(summary_json, bundle))
 
-    placeholder_paths = set(_artifact_paths_from_evidence(evidence))
-    placeholder_paths.update(
+    synthetic_fixture_paths = set(_artifact_paths_from_evidence(evidence))
+    synthetic_fixture_paths.update(
         rel
         for fixture in fixture_index.get("fixtures", [])
         if isinstance(fixture, dict)
         for rel in _fixture_reference_paths(fixture)
     )
-    placeholder_paths.update(bundle.get("replay_inputs", []))
-    placeholder_paths.update(
+    synthetic_fixture_paths.update(bundle.get("replay_inputs", []))
+    synthetic_fixture_paths.update(
         value
         for value in fraud_bundle.get("source_artifacts", {}).values()
         if isinstance(value, str)
     )
-    placeholder_paths.add(bundle.get("summary_path", ""))
-    placeholder_paths.add(bundle.get("structured_log_path", ""))
-    placeholder_paths.update(
+    synthetic_fixture_paths.add(bundle.get("summary_path", ""))
+    synthetic_fixture_paths.add(bundle.get("structured_log_path", ""))
+    synthetic_fixture_paths.update(
         rel
         for stage in bundle.get("stage_results", [])
         if isinstance(stage, dict)
@@ -701,10 +701,10 @@ def _materialize_self_test_fixture(root: Path) -> None:
         str(FRAUD_PROOF_BUNDLE.relative_to(ROOT)),
         str(VERIFICATION_SUMMARY.relative_to(ROOT)),
     }
-    for rel in sorted(path for path in placeholder_paths if isinstance(path, str) and path):
+    for rel in sorted(path for path in synthetic_fixture_paths if isinstance(path, str) and path):
         if rel in already_written:
             continue
-        _write_text(root, rel, "placeholder\n")
+        _write_text(root, rel, "synthetic evidence fixture\n")
 
 
 def self_test() -> dict[str, Any]:
