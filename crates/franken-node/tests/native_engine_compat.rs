@@ -1,12 +1,17 @@
-//! Integration tests for native engine execution compatibility.
+//! Integration tests for EngineDispatcher native-engine compatibility.
 //!
-//! Tests the complete native engine execution pipeline including:
+//! Tests the complete native engine execution pipeline when the `engine`
+//! feature is enabled, plus subprocess edge cases with controlled fixture
+//! binaries when the test needs deterministic success, timeout, exit-code,
+//! or signal behavior.
+//!
+//! Coverage includes:
 //! - Native engine execution with telemetry emission
 //! - Strict profile fallback rejection
 //! - Comprehensive error handling and propagation
 //!
-//! End-to-end validation via EngineDispatcher with real components,
-//! no mocks for critical native execution paths.
+//! A fixture binary proves dispatcher/process handling only; it is not counted
+//! as evidence that a real franken_engine binary executed the application.
 
 use frankenengine_node::{
     config::{Config, PreferredRuntime, Profile},
@@ -32,16 +37,16 @@ fn create_test_app(dir: &Path, filename: &str, content: &str) -> PathBuf {
     app_path
 }
 
-/// Create a mock franken-engine binary for testing
-fn create_mock_engine_binary(dir: &Path) -> PathBuf {
+/// Create a controlled franken-engine fixture binary for subprocess testing.
+fn create_fixture_engine_binary(dir: &Path) -> PathBuf {
     let engine_path = dir.join("franken-engine");
     #[cfg(unix)]
     {
         std::fs::write(
             &engine_path,
-            "#!/bin/bash\necho 'Mock engine output'\nexit 0\n",
+            "#!/bin/bash\necho 'Fixture engine output'\nexit 0\n",
         )
-        .expect("Failed to write mock engine");
+        .expect("Failed to write fixture engine");
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&engine_path)
             .expect("Failed to get metadata")
@@ -54,9 +59,9 @@ fn create_mock_engine_binary(dir: &Path) -> PathBuf {
         let batch_path = dir.join("franken-engine.bat");
         std::fs::write(
             &batch_path,
-            "@echo off\necho Mock engine output\nexit /b 0\n",
+            "@echo off\necho Fixture engine output\nexit /b 0\n",
         )
-        .expect("Failed to write mock engine batch");
+        .expect("Failed to write fixture engine batch");
         batch_path
     }
 
@@ -66,16 +71,16 @@ fn create_mock_engine_binary(dir: &Path) -> PathBuf {
     return batch_path;
 }
 
-/// Create a slow mock franken-engine binary for timeout testing
-fn create_slow_mock_engine_binary(dir: &Path, delay_secs: u64) -> PathBuf {
+/// Create a slow franken-engine fixture binary for timeout testing.
+fn create_slow_fixture_engine_binary(dir: &Path, delay_secs: u64) -> PathBuf {
     let engine_path = dir.join("slow-franken-engine");
     #[cfg(unix)]
     {
         let script = format!(
-            "#!/bin/bash\necho 'Starting slow mock engine'\nsleep {}\necho 'Mock engine output'\nexit 0\n",
+            "#!/bin/bash\necho 'Starting slow fixture engine'\nsleep {}\necho 'Fixture engine output'\nexit 0\n",
             delay_secs
         );
-        std::fs::write(&engine_path, script).expect("Failed to write slow mock engine");
+        std::fs::write(&engine_path, script).expect("Failed to write slow fixture engine");
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&engine_path)
             .expect("Failed to get metadata")
@@ -87,10 +92,10 @@ fn create_slow_mock_engine_binary(dir: &Path, delay_secs: u64) -> PathBuf {
     {
         let batch_path = dir.join("slow-franken-engine.bat");
         let script = format!(
-            "@echo off\necho Starting slow mock engine\ntimeout /t {} /nobreak >nul\necho Mock engine output\nexit /b 0\n",
+            "@echo off\necho Starting slow fixture engine\ntimeout /t {} /nobreak >nul\necho Fixture engine output\nexit /b 0\n",
             delay_secs
         );
-        std::fs::write(&batch_path, script).expect("Failed to write slow mock engine batch");
+        std::fs::write(&batch_path, script).expect("Failed to write slow fixture engine batch");
         batch_path
     }
 
@@ -100,16 +105,16 @@ fn create_slow_mock_engine_binary(dir: &Path, delay_secs: u64) -> PathBuf {
     return batch_path;
 }
 
-/// Create a mock franken-engine binary that fails with non-zero exit code
-fn create_failing_mock_engine_binary(dir: &Path, exit_code: i32) -> PathBuf {
+/// Create a franken-engine fixture binary that fails with a non-zero exit code.
+fn create_failing_fixture_engine_binary(dir: &Path, exit_code: i32) -> PathBuf {
     let engine_path = dir.join("failing-franken-engine");
     #[cfg(unix)]
     {
         let script = format!(
-            "#!/bin/bash\necho 'Mock engine error output' >&2\nexit {}\n",
+            "#!/bin/bash\necho 'Fixture engine error output' >&2\nexit {}\n",
             exit_code
         );
-        std::fs::write(&engine_path, script).expect("Failed to write failing mock engine");
+        std::fs::write(&engine_path, script).expect("Failed to write failing fixture engine");
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&engine_path)
             .expect("Failed to get metadata")
@@ -121,10 +126,10 @@ fn create_failing_mock_engine_binary(dir: &Path, exit_code: i32) -> PathBuf {
     {
         let batch_path = dir.join("failing-franken-engine.bat");
         let script = format!(
-            "@echo off\necho Mock engine error output 1>&2\nexit /b {}\n",
+            "@echo off\necho Fixture engine error output 1>&2\nexit /b {}\n",
             exit_code
         );
-        std::fs::write(&batch_path, script).expect("Failed to write failing mock engine batch");
+        std::fs::write(&batch_path, script).expect("Failed to write failing fixture engine batch");
         batch_path
     }
     #[cfg(unix)]
@@ -133,8 +138,8 @@ fn create_failing_mock_engine_binary(dir: &Path, exit_code: i32) -> PathBuf {
     return batch_path;
 }
 
-/// Create a mock franken-engine binary that crashes/panics
-fn create_crashing_mock_engine_binary(dir: &Path) -> PathBuf {
+/// Create a franken-engine fixture binary that terminates abnormally.
+fn create_crashing_fixture_engine_binary(dir: &Path) -> PathBuf {
     let engine_path = dir.join("crashing-franken-engine");
     #[cfg(unix)]
     {
@@ -143,7 +148,7 @@ fn create_crashing_mock_engine_binary(dir: &Path) -> PathBuf {
             &engine_path,
             "#!/bin/bash\necho 'About to crash'\nkill -9 $$\n",
         )
-        .expect("Failed to write crashing mock engine");
+        .expect("Failed to write crashing fixture engine");
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&engine_path)
             .expect("Failed to get metadata")
@@ -159,7 +164,7 @@ fn create_crashing_mock_engine_binary(dir: &Path) -> PathBuf {
             &batch_path,
             "@echo off\necho About to crash\ntaskkill /f /pid %PID%\n",
         )
-        .expect("Failed to write crashing mock engine batch");
+        .expect("Failed to write crashing fixture engine batch");
         batch_path
     }
     #[cfg(unix)]
@@ -216,7 +221,7 @@ fn test_native_engine_execution_with_telemetry() {
 
 #[test]
 #[cfg(not(feature = "engine"))]
-fn test_strict_profile_rejects_fallback_without_native_engine() {
+fn test_strict_profile_rejects_fixture_fallback_without_native_engine() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let app_path = create_test_app(
         temp_dir.path(),
@@ -224,7 +229,7 @@ fn test_strict_profile_rejects_fallback_without_native_engine() {
         r#"console.log("This should not run on strict profile without native engine");"#,
     );
 
-    let engine_path = create_mock_engine_binary(temp_dir.path());
+    let engine_path = create_fixture_engine_binary(temp_dir.path());
 
     let mut config = Config::default();
     config.profile = Profile::Strict; // Strict profile should reject fallback
@@ -259,7 +264,7 @@ fn test_strict_profile_rejects_fallback_without_native_engine() {
 }
 
 #[test]
-fn test_balanced_profile_allows_external_process_fallback() {
+fn test_balanced_profile_allows_external_process_fixture_fallback() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let app_path = create_test_app(
         temp_dir.path(),
@@ -267,7 +272,7 @@ fn test_balanced_profile_allows_external_process_fallback() {
         r#"console.log("This should run with external process on balanced profile");"#,
     );
 
-    let engine_path = create_mock_engine_binary(temp_dir.path());
+    let engine_path = create_fixture_engine_binary(temp_dir.path());
 
     let config = balanced_config();
 
@@ -348,7 +353,7 @@ fn test_native_engine_error_handling_propagation() {
 }
 
 #[test]
-fn test_engine_timeout_handling() {
+fn test_engine_timeout_handling_with_fixture_binary() {
     // Set a short timeout for testing (5 seconds instead of default 5 minutes)
     unsafe {
         std::env::set_var("FRANKEN_ENGINE_TIMEOUT_SECS", "5");
@@ -365,7 +370,7 @@ fn test_engine_timeout_handling() {
     }
     let _cleanup = EnvCleanup("FRANKEN_ENGINE_TIMEOUT_SECS");
 
-    // Test that engine execution properly handles timeouts by using a slow external engine binary
+    // Test that dispatcher process handling times out a slow external fixture binary.
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let app_path = create_test_app(
         temp_dir.path(),
@@ -373,8 +378,8 @@ fn test_engine_timeout_handling() {
         r#"console.log("This should timeout before completion");"#,
     );
 
-    // Create a slow mock engine that takes 10 seconds to complete (longer than our 5s timeout)
-    let slow_engine_path = create_slow_mock_engine_binary(temp_dir.path(), 10);
+    // Create a slow fixture engine that takes 10 seconds to complete (longer than our 5s timeout)
+    let slow_engine_path = create_slow_fixture_engine_binary(temp_dir.path(), 10);
 
     let config = balanced_config();
 
@@ -488,8 +493,8 @@ fn test_native_engine_missing_binary_error_handling() {
 }
 
 #[test]
-fn test_engine_non_zero_exit_code_error_handling() {
-    // Test boundary condition: engine feature enabled but engine returns non-zero exit
+fn test_engine_non_zero_exit_code_fixture_error_handling() {
+    // Test boundary condition: controlled fixture engine returns non-zero exit.
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let app_path = create_test_app(
         temp_dir.path(),
@@ -497,8 +502,8 @@ fn test_engine_non_zero_exit_code_error_handling() {
         r#"console.log("This should fail due to engine exit code");"#,
     );
 
-    // Create a mock engine that returns exit code 1
-    let failing_engine_path = create_failing_mock_engine_binary(temp_dir.path(), 1);
+    // Create a fixture engine that returns exit code 1
+    let failing_engine_path = create_failing_fixture_engine_binary(temp_dir.path(), 1);
 
     let config = balanced_config();
 
@@ -534,8 +539,8 @@ fn test_engine_non_zero_exit_code_error_handling() {
 }
 
 #[test]
-fn test_engine_crash_signal_error_handling() {
-    // Test boundary condition: engine feature enabled but engine crashes/panics
+fn test_engine_crash_signal_fixture_error_handling() {
+    // Test boundary condition: controlled fixture engine terminates abnormally.
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let app_path = create_test_app(
         temp_dir.path(),
@@ -543,8 +548,8 @@ fn test_engine_crash_signal_error_handling() {
         r#"console.log("This should fail due to engine crash");"#,
     );
 
-    // Create a mock engine that crashes with SIGKILL
-    let crashing_engine_path = create_crashing_mock_engine_binary(temp_dir.path());
+    // Create a fixture engine that crashes with SIGKILL
+    let crashing_engine_path = create_crashing_fixture_engine_binary(temp_dir.path());
 
     let config = balanced_config();
 
@@ -597,9 +602,9 @@ fn test_engine_crash_signal_error_handling() {
 }
 
 #[test]
-fn test_dispatcher_creation_and_configuration() {
+fn test_dispatcher_creation_and_fixture_configuration() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let engine_path = create_mock_engine_binary(temp_dir.path());
+    let engine_path = create_fixture_engine_binary(temp_dir.path());
 
     // Test various dispatcher configurations
     let dispatcher1 = EngineDispatcher::new(None, PreferredRuntime::Auto);
