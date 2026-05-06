@@ -8,10 +8,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 
 pub const REPORT_SCHEMA_VERSION: &str = "franken-node/resource-governor/report/v1";
+pub const ARTIFACT_SCHEMA_VERSION: &str = "franken-node/resource-governor/artifact/v1";
 pub const COMMAND_NAME: &str = "ops resource-governor";
+pub const MAX_ARTIFACT_INVENTORY_ENTRIES: usize = 1_024;
+pub const MAX_ARTIFACT_PATH_BYTES: usize = 4_096;
+pub const MAX_ARTIFACT_FIELD_BYTES: usize = 512;
 
 pub mod event_codes {
     pub const OBSERVATION_RECORDED: &str = "RG-001";
@@ -116,6 +120,242 @@ impl ResourceProcessCounts {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceArtifactKind {
+    CargoTargetDir,
+    RchTargetDir,
+    GeneratedEvidence,
+    TempOutput,
+    CacheEntry,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResourceArtifactSafetyClass {
+    SourceNeverDelete,
+    UserDataNeverDelete,
+    LogsSessionHistoryNeverDelete,
+    BeadsMailNeverDelete,
+    PinnedGeneratedArtifact,
+    GeneratedEvidence,
+    RebuildableBuildOutput,
+    DisposableTempOutput,
+}
+
+impl ResourceArtifactSafetyClass {
+    pub fn allows_cleanup(self) -> bool {
+        matches!(
+            self,
+            Self::GeneratedEvidence | Self::RebuildableBuildOutput | Self::DisposableTempOutput
+        )
+    }
+
+    pub fn is_protected(self) -> bool {
+        !self.allows_cleanup()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceArtifactOpenFileStatus {
+    Unknown,
+    Open,
+    NotOpen,
+}
+
+impl Default for ResourceArtifactOpenFileStatus {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceArtifactPin {
+    pub reason: String,
+    pub owner_agent: Option<String>,
+    pub bead_id: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceArtifactInventoryEntry {
+    pub path: String,
+    pub repo_key: String,
+    pub kind: ResourceArtifactKind,
+    pub safety_class: ResourceArtifactSafetyClass,
+    pub bytes: Option<u64>,
+    pub mtime: Option<DateTime<Utc>>,
+    pub owner_agent: Option<String>,
+    pub bead_id: Option<String>,
+    pub producer_command_digest: Option<String>,
+    pub content_digest: Option<String>,
+    pub pin: Option<ResourceArtifactPin>,
+    #[serde(default)]
+    pub open_file_status: ResourceArtifactOpenFileStatus,
+    pub minimum_age_secs: Option<u64>,
+    pub cleanup_eligible: bool,
+}
+
+impl ResourceArtifactInventoryEntry {
+    pub fn new(
+        path: impl Into<String>,
+        repo_key: impl Into<String>,
+        kind: ResourceArtifactKind,
+        safety_class: ResourceArtifactSafetyClass,
+        bytes: Option<u64>,
+    ) -> Self {
+        let mut entry = Self {
+            path: path.into(),
+            repo_key: repo_key.into(),
+            kind,
+            safety_class,
+            bytes,
+            mtime: None,
+            owner_agent: None,
+            bead_id: None,
+            producer_command_digest: None,
+            content_digest: None,
+            pin: None,
+            open_file_status: ResourceArtifactOpenFileStatus::Unknown,
+            minimum_age_secs: None,
+            cleanup_eligible: false,
+        };
+        entry.cleanup_eligible = entry.derived_cleanup_eligibility();
+        entry
+    }
+
+    pub fn with_pin(mut self, pin: ResourceArtifactPin) -> Self {
+        self.pin = Some(pin);
+        self.cleanup_eligible = self.derived_cleanup_eligibility();
+        self
+    }
+
+    pub fn with_open_file_status(mut self, status: ResourceArtifactOpenFileStatus) -> Self {
+        self.open_file_status = status;
+        self.cleanup_eligible = self.derived_cleanup_eligibility();
+        self
+    }
+
+    fn validated(mut self) -> Result<Self, ResourceArtifactInventoryError> {
+        validate_artifact_string("path", &self.path, MAX_ARTIFACT_PATH_BYTES)?;
+        validate_artifact_string("repo_key", &self.repo_key, MAX_ARTIFACT_PATH_BYTES)?;
+        reject_unsafe_path("path", &self.path)?;
+        reject_unsafe_path("repo_key", &self.repo_key)?;
+        validate_optional_artifact_string("owner_agent", self.owner_agent.as_deref())?;
+        validate_optional_artifact_string("bead_id", self.bead_id.as_deref())?;
+        validate_optional_artifact_string(
+            "producer_command_digest",
+            self.producer_command_digest.as_deref(),
+        )?;
+        validate_optional_artifact_string("content_digest", self.content_digest.as_deref())?;
+        if let Some(pin) = &self.pin {
+            validate_artifact_string("pin.reason", &pin.reason, MAX_ARTIFACT_FIELD_BYTES)?;
+            validate_optional_artifact_string("pin.owner_agent", pin.owner_agent.as_deref())?;
+            validate_optional_artifact_string("pin.bead_id", pin.bead_id.as_deref())?;
+        }
+        if path_is_protected_workspace_state(&self.path) && !self.safety_class.is_protected() {
+            return Err(ResourceArtifactInventoryError::ProtectedPath {
+                field: "path",
+                path: self.path,
+            });
+        }
+        self.cleanup_eligible = self.derived_cleanup_eligibility();
+        Ok(self)
+    }
+
+    fn derived_cleanup_eligibility(&self) -> bool {
+        self.safety_class.allows_cleanup()
+            && self.kind != ResourceArtifactKind::Unknown
+            && self.bytes.is_some()
+            && self.pin.is_none()
+            && self.open_file_status == ResourceArtifactOpenFileStatus::NotOpen
+            && !path_is_protected_workspace_state(&self.path)
+            && !(self.minimum_age_secs.unwrap_or(0) > 0 && self.mtime.is_none())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceArtifactInventory {
+    pub schema_version: String,
+    pub entries: Vec<ResourceArtifactInventoryEntry>,
+}
+
+impl Default for ResourceArtifactInventory {
+    fn default() -> Self {
+        Self {
+            schema_version: ARTIFACT_SCHEMA_VERSION.to_string(),
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl ResourceArtifactInventory {
+    pub fn try_new(
+        entries: Vec<ResourceArtifactInventoryEntry>,
+    ) -> Result<Self, ResourceArtifactInventoryError> {
+        if entries.len() > MAX_ARTIFACT_INVENTORY_ENTRIES {
+            return Err(ResourceArtifactInventoryError::TooManyEntries {
+                count: entries.len(),
+                max: MAX_ARTIFACT_INVENTORY_ENTRIES,
+            });
+        }
+
+        let mut seen_paths = BTreeSet::new();
+        let mut validated_entries = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let entry = entry.validated()?;
+            if !seen_paths.insert(entry.path.clone()) {
+                return Err(ResourceArtifactInventoryError::DuplicatePath { path: entry.path });
+            }
+            validated_entries.push(entry);
+        }
+
+        Ok(Self {
+            schema_version: ARTIFACT_SCHEMA_VERSION.to_string(),
+            entries: validated_entries,
+        })
+    }
+
+    pub fn cleanup_candidates(&self) -> impl Iterator<Item = &ResourceArtifactInventoryEntry> {
+        self.entries.iter().filter(|entry| entry.cleanup_eligible)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResourceArtifactInventoryError {
+    #[error("RG_ARTIFACT_TOO_MANY_ENTRIES: inventory has {count} entries, max {max}")]
+    TooManyEntries { count: usize, max: usize },
+    #[error("RG_ARTIFACT_STRING_TOO_LONG: {field} has {len} bytes, max {max}")]
+    StringTooLong {
+        field: &'static str,
+        len: usize,
+        max: usize,
+    },
+    #[error("RG_ARTIFACT_PATH_CONTAINS_NUL: {field} contains a NUL byte")]
+    PathContainsNul { field: &'static str },
+    #[error("RG_ARTIFACT_PATH_TRAVERSAL: {field} contains parent traversal")]
+    PathTraversal { field: &'static str },
+    #[error("RG_ARTIFACT_PROTECTED_PATH: {field} is protected workspace state: {path}")]
+    ProtectedPath { field: &'static str, path: String },
+    #[error("RG_ARTIFACT_DUPLICATE_PATH: duplicate artifact path {path}")]
+    DuplicatePath { path: String },
+}
+
+impl ResourceArtifactInventoryError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::TooManyEntries { .. } => "RG_ARTIFACT_TOO_MANY_ENTRIES",
+            Self::StringTooLong { .. } => "RG_ARTIFACT_STRING_TOO_LONG",
+            Self::PathContainsNul { .. } => "RG_ARTIFACT_PATH_CONTAINS_NUL",
+            Self::PathTraversal { .. } => "RG_ARTIFACT_PATH_TRAVERSAL",
+            Self::ProtectedPath { .. } => "RG_ARTIFACT_PROTECTED_PATH",
+            Self::DuplicatePath { .. } => "RG_ARTIFACT_DUPLICATE_PATH",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceGovernorThresholds {
     pub stale_observation_after_ms: u64,
@@ -170,6 +410,7 @@ pub struct ResourceGovernorObservation {
     pub target_dir_usage_mb: Option<u64>,
     pub memory_used_mb: Option<u64>,
     pub cpu_load_permyriad: Option<u64>,
+    pub artifact_inventory: ResourceArtifactInventory,
 }
 
 impl ResourceGovernorObservation {
@@ -189,13 +430,14 @@ impl ResourceGovernorObservation {
             target_dir_usage_mb: None,
             memory_used_mb: None,
             cpu_load_permyriad: None,
+            artifact_inventory: ResourceArtifactInventory::default(),
         }
     }
 
     pub fn from_snapshot(
         input: ResourceGovernorSnapshotInput,
         default_observed_at: DateTime<Utc>,
-    ) -> Self {
+    ) -> Result<Self, ResourceArtifactInventoryError> {
         let processes = input
             .processes
             .into_iter()
@@ -222,7 +464,9 @@ impl ResourceGovernorObservation {
             input.memory_used_mb,
             input.cpu_load_permyriad,
         );
-        observation
+        observation.artifact_inventory =
+            ResourceArtifactInventory::try_new(input.artifact_inventory)?;
+        Ok(observation)
     }
 
     pub fn merge_hints(
@@ -259,6 +503,10 @@ impl ResourceGovernorObservation {
             .collect::<BTreeSet<_>>();
         self.active_proof_classes = classes.into_iter().collect();
     }
+
+    pub fn replace_artifact_inventory(&mut self, inventory: ResourceArtifactInventory) {
+        self.artifact_inventory = inventory;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,6 +528,8 @@ pub struct ResourceGovernorSnapshotInput {
     pub target_dir_usage_mb: Option<u64>,
     pub memory_used_mb: Option<u64>,
     pub cpu_load_permyriad: Option<u64>,
+    #[serde(default)]
+    pub artifact_inventory: Vec<ResourceArtifactInventoryEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,10 +654,12 @@ pub fn read_snapshot_file(
             source,
         }
     })?;
-    Ok(ResourceGovernorObservation::from_snapshot(
-        input,
-        default_observed_at,
-    ))
+    ResourceGovernorObservation::from_snapshot(input, default_observed_at).map_err(|source| {
+        ResourceGovernorSnapshotError::InvalidArtifactInventory {
+            path: path.display().to_string(),
+            source,
+        }
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -421,6 +673,11 @@ pub enum ResourceGovernorSnapshotError {
     Parse {
         path: String,
         source: serde_json::Error,
+    },
+    #[error("failed validating resource-governor artifact inventory {path}: {source}")]
+    InvalidArtifactInventory {
+        path: String,
+        source: ResourceArtifactInventoryError,
     },
 }
 
@@ -597,6 +854,55 @@ fn classify_validation_process(command: &str) -> Option<ResourceProcessKind> {
     }
 }
 
+fn validate_artifact_string(
+    field: &'static str,
+    value: &str,
+    max: usize,
+) -> Result<(), ResourceArtifactInventoryError> {
+    let len = value.len();
+    if len > max {
+        Err(ResourceArtifactInventoryError::StringTooLong { field, len, max })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_optional_artifact_string(
+    field: &'static str,
+    value: Option<&str>,
+) -> Result<(), ResourceArtifactInventoryError> {
+    if let Some(value) = value {
+        validate_artifact_string(field, value, MAX_ARTIFACT_FIELD_BYTES)?;
+    }
+    Ok(())
+}
+
+fn reject_unsafe_path(
+    field: &'static str,
+    value: &str,
+) -> Result<(), ResourceArtifactInventoryError> {
+    if value.contains('\0') {
+        return Err(ResourceArtifactInventoryError::PathContainsNul { field });
+    }
+    if Path::new(value)
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return Err(ResourceArtifactInventoryError::PathTraversal { field });
+    }
+    Ok(())
+}
+
+fn path_is_protected_workspace_state(path: &str) -> bool {
+    path.split('/')
+        .any(|component| matches!(component, ".beads" | ".agent-mail" | "agent-mail"))
+        || path.contains("/messages/")
+        || path.contains("/agents/")
+        || path.contains("/sessions/")
+        || path.contains("/memories/")
+        || path.contains("/logs/")
+}
+
 fn decode_proc_cmdline(raw: &[u8]) -> String {
     raw.split(|byte| *byte == 0)
         .filter(|part| !part.is_empty())
@@ -619,4 +925,217 @@ fn usize_to_u64(value: usize) -> u64 {
 
 pub fn process_kind_label(kind: ResourceProcessKind) -> &'static str {
     kind.as_str()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target_entry(path: &str) -> ResourceArtifactInventoryEntry {
+        ResourceArtifactInventoryEntry::new(
+            path,
+            "/data/projects/franken_node",
+            ResourceArtifactKind::CargoTargetDir,
+            ResourceArtifactSafetyClass::RebuildableBuildOutput,
+            Some(1024),
+        )
+        .with_open_file_status(ResourceArtifactOpenFileStatus::NotOpen)
+    }
+
+    fn generated_evidence_entry(path: &str) -> ResourceArtifactInventoryEntry {
+        ResourceArtifactInventoryEntry::new(
+            path,
+            "/data/projects/franken_node",
+            ResourceArtifactKind::GeneratedEvidence,
+            ResourceArtifactSafetyClass::GeneratedEvidence,
+            Some(512),
+        )
+        .with_open_file_status(ResourceArtifactOpenFileStatus::NotOpen)
+    }
+
+    fn pin() -> ResourceArtifactPin {
+        ResourceArtifactPin {
+            reason: "active bead proof".to_string(),
+            owner_agent: Some("DustyDesert".to_string()),
+            bead_id: Some("bd-p9mpd.2".to_string()),
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn empty_artifact_inventory_has_schema_and_no_candidates() {
+        let inventory = ResourceArtifactInventory::try_new(Vec::new()).expect("empty inventory");
+
+        assert_eq!(inventory.schema_version, ARTIFACT_SCHEMA_VERSION);
+        assert_eq!(inventory.cleanup_candidates().count(), 0);
+    }
+
+    #[test]
+    fn valid_artifact_inventory_round_trips_and_marks_cleanup_candidate() {
+        let inventory = ResourceArtifactInventory::try_new(vec![target_entry(
+            "/data/projects/franken_node/target",
+        )])
+        .expect("valid inventory");
+
+        assert_eq!(inventory.cleanup_candidates().count(), 1);
+        let encoded = serde_json::to_string(&inventory).expect("serialize inventory");
+        assert!(encoded.contains("franken-node/resource-governor/artifact/v1"));
+        assert!(encoded.contains("rebuildable-build-output"));
+
+        let decoded =
+            serde_json::from_str::<ResourceArtifactInventory>(&encoded).expect("decode inventory");
+        assert_eq!(decoded.entries.len(), 1);
+        assert!(decoded.entries[0].cleanup_eligible);
+    }
+
+    #[test]
+    fn artifact_inventory_rejects_nul_paths() {
+        let err = ResourceArtifactInventory::try_new(vec![target_entry(
+            "/data/projects/franken_node/\0",
+        )])
+        .expect_err("nul path should fail");
+
+        assert_eq!(err.code(), "RG_ARTIFACT_PATH_CONTAINS_NUL");
+    }
+
+    #[test]
+    fn artifact_inventory_rejects_parent_traversal() {
+        let err = ResourceArtifactInventory::try_new(vec![target_entry(
+            "/data/projects/franken_node/../franken_engine/target",
+        )])
+        .expect_err("parent traversal should fail");
+
+        assert_eq!(err.code(), "RG_ARTIFACT_PATH_TRAVERSAL");
+    }
+
+    #[test]
+    fn artifact_inventory_rejects_duplicate_paths() {
+        let err = ResourceArtifactInventory::try_new(vec![
+            target_entry("/data/projects/franken_node/target"),
+            target_entry("/data/projects/franken_node/target"),
+        ])
+        .expect_err("duplicate path should fail");
+
+        assert_eq!(err.code(), "RG_ARTIFACT_DUPLICATE_PATH");
+    }
+
+    #[test]
+    fn artifact_inventory_caps_entry_count() {
+        let entries = (0..=MAX_ARTIFACT_INVENTORY_ENTRIES)
+            .map(|idx| target_entry(&format!("/data/projects/franken_node/target/{idx}")))
+            .collect::<Vec<_>>();
+        let err = ResourceArtifactInventory::try_new(entries).expect_err("entry cap should fail");
+
+        assert_eq!(err.code(), "RG_ARTIFACT_TOO_MANY_ENTRIES");
+    }
+
+    #[test]
+    fn pinned_generated_output_is_not_cleanup_eligible() {
+        let entry = generated_evidence_entry("/data/projects/franken_node/artifacts/report.json")
+            .with_pin(pin());
+        let inventory = ResourceArtifactInventory::try_new(vec![entry]).expect("pinned inventory");
+
+        assert_eq!(inventory.cleanup_candidates().count(), 0);
+        assert!(!inventory.entries[0].cleanup_eligible);
+    }
+
+    #[test]
+    fn open_generated_output_is_not_cleanup_eligible() {
+        let entry = generated_evidence_entry("/data/projects/franken_node/artifacts/report.json")
+            .with_open_file_status(ResourceArtifactOpenFileStatus::Open);
+        let inventory = ResourceArtifactInventory::try_new(vec![entry]).expect("open inventory");
+
+        assert_eq!(inventory.cleanup_candidates().count(), 0);
+        assert!(!inventory.entries[0].cleanup_eligible);
+    }
+
+    #[test]
+    fn unknown_open_file_status_fails_closed_for_cleanup() {
+        let entry = ResourceArtifactInventoryEntry::new(
+            "/data/projects/franken_node/artifacts/report.json",
+            "/data/projects/franken_node",
+            ResourceArtifactKind::GeneratedEvidence,
+            ResourceArtifactSafetyClass::GeneratedEvidence,
+            Some(512),
+        );
+        let inventory = ResourceArtifactInventory::try_new(vec![entry]).expect("unknown inventory");
+
+        assert_eq!(inventory.cleanup_candidates().count(), 0);
+        assert!(!inventory.entries[0].cleanup_eligible);
+    }
+
+    #[test]
+    fn protected_workspace_paths_cannot_be_marked_rebuildable() {
+        let err = ResourceArtifactInventory::try_new(vec![target_entry(
+            "/data/projects/franken_node/.beads/issues.jsonl",
+        )])
+        .expect_err("beads path should be protected");
+
+        assert_eq!(err.code(), "RG_ARTIFACT_PROTECTED_PATH");
+    }
+
+    #[test]
+    fn protected_safety_classes_are_never_cleanup_candidates() {
+        let entry = ResourceArtifactInventoryEntry::new(
+            "/data/projects/franken_node/src/lib.rs",
+            "/data/projects/franken_node",
+            ResourceArtifactKind::Unknown,
+            ResourceArtifactSafetyClass::SourceNeverDelete,
+            Some(1),
+        );
+        let inventory = ResourceArtifactInventory::try_new(vec![entry]).expect("source inventory");
+
+        assert_eq!(inventory.cleanup_candidates().count(), 0);
+        assert!(!inventory.entries[0].cleanup_eligible);
+    }
+
+    #[test]
+    fn observation_can_carry_artifact_inventory() {
+        let inventory = ResourceArtifactInventory::try_new(vec![target_entry(
+            "/data/projects/franken_node/target",
+        )])
+        .expect("valid inventory");
+        let mut observation = ResourceGovernorObservation::new(Utc::now(), "fixture", Vec::new());
+        observation.replace_artifact_inventory(inventory);
+
+        assert_eq!(observation.artifact_inventory.entries.len(), 1);
+        assert_eq!(
+            observation.artifact_inventory.cleanup_candidates().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn snapshot_input_attaches_valid_artifact_inventory() {
+        let observation = ResourceGovernorObservation::from_snapshot(
+            ResourceGovernorSnapshotInput {
+                artifact_inventory: vec![target_entry("/data/projects/franken_node/target")],
+                ..ResourceGovernorSnapshotInput::default()
+            },
+            Utc::now(),
+        )
+        .expect("valid snapshot inventory");
+
+        assert_eq!(observation.artifact_inventory.entries.len(), 1);
+        assert_eq!(
+            observation.artifact_inventory.cleanup_candidates().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn snapshot_input_rejects_invalid_artifact_inventory() {
+        let err = ResourceGovernorObservation::from_snapshot(
+            ResourceGovernorSnapshotInput {
+                artifact_inventory: vec![target_entry(
+                    "/data/projects/franken_node/.beads/issues.jsonl",
+                )],
+                ..ResourceGovernorSnapshotInput::default()
+            },
+            Utc::now(),
+        )
+        .expect_err("invalid snapshot inventory");
+
+        assert_eq!(err.code(), "RG_ARTIFACT_PROTECTED_PATH");
+    }
 }

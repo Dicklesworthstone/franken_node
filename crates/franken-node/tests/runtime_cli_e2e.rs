@@ -16,10 +16,8 @@ mod cli_golden_helpers;
 
 use cli_golden_helpers::with_scrubbed_snapshot_settings;
 
-const BINARY_UNDER_TEST: &str = env!("CARGO_BIN_EXE_franken-node");
-
 fn franken_node() -> Command {
-    Command::new(BINARY_UNDER_TEST)
+    Command::cargo_bin("franken-node").expect("franken-node test binary")
 }
 
 fn oracle_runtime(id: &str) -> RuntimeEntry {
@@ -198,9 +196,11 @@ fn resource_governor_snapshot_input_sorts_and_counts_hints() {
             target_dir_usage_mb: Some(8192),
             memory_used_mb: Some(64000),
             cpu_load_permyriad: Some(7500),
+            artifact_inventory: Vec::new(),
         },
         rg_ts(1),
-    );
+    )
+    .expect("valid snapshot");
 
     assert_eq!(observation.source, "unit-fixture");
     assert_eq!(observation.process_counts.cargo, 1);
