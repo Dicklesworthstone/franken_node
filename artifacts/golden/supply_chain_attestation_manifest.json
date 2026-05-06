@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0",
+  "package": {
+    "name": "example-extension",
+    "version": "1.2.3",
+    "publisher": "trusted-publisher@example.com",
+    "author": "Example Extension Developer"
+  },
+  "entrypoint": "index.js",
+  "capabilities": [
+    "fs_read",
+    "net_client"
+  ],
+  "behavioral_profile": {
+    "risk_tier": "medium",
+    "summary": "Data processing extension with controlled network access",
+    "declared_network_zones": [
+      "api.example.com",
+      "cdn.example.com"
+    ]
+  },
+  "minimum_runtime_version": "1.0.0",
+  "provenance": {
+    "build_system": "GitHub Actions",
+    "source_repository": "https://github.com/example/example-extension",
+    "source_revision": "abc123def456789abc123def456789abc123def4",
+    "reproducibility_markers": [
+      "HERMETIC_BUILD=true",
+      "BUILD_TIMESTAMP=2026-01-01T00:00:00Z"
+    ],
+    "attestation_chain": [
+      {
+        "id": "attestation-001",
+        "attestation_type": "build_provenance",
+        "digest": "sha256:a1b2c3d4e5f6789a1b2c3d4e5f6789a1b2c3d4e5f6789a1b2c3d4e5f6789a1b2c3d4"
+      },
+      {
+        "id": "attestation-002",
+        "attestation_type": "source_review",
+        "digest": "sha256:f6e5d4c3b2a19876f6e5d4c3b2a19876f6e5d4c3b2a19876f6e5d4c3b2a19876f6e5"
+      }
+    ]
+  },
+  "trust": {
+    "certification_level": "verified",
+    "revocation_status_pointer": "https://trust.example.com/revocation/example-extension",
+    "trust_card_reference": "trust-card-ref-123456"
+  },
+  "signature": {
+    "scheme": "threshold_ed25519",
+    "publisher_key_id": "pub-key-id-abcdef123456",
+    "signature": "aJKWADQBpYEpQ+WF+MHY2a9fkVHBcxspfTW035PGNVVn3LKmDcvpVLeEqXHgbqj3r1xK52hlvtT8y938O3mq0w==",
+    "threshold": {
+      "threshold": 3,
+      "total_signers": 4,
+      "signer_key_ids": [
+        "signer-1-key-id",
+        "signer-2-key-id",
+        "signer-3-key-id",
+        "signer-4-key-id"
+      ]
+    },
+    "signed_at": "2026-01-01T00:00:00Z"
+  }
+}

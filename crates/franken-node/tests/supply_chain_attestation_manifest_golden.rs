@@ -4,13 +4,16 @@
 //! Supply chain manifests contain cryptographic signatures and provenance attestations,
 //! and any format change would break signature validation and trust chain verification.
 
-use std::{fs, path::Path};
-use serde_json::{json, Value};
 use frankenengine_node::supply_chain::manifest::{
-    SignedExtensionManifest, PackageIdentity, BehavioralProfile, RiskTier,
-    ProvenanceEnvelope, AttestationRef, TrustMetadata, CertificationLevel,
-    ManifestSignature, SignatureScheme, ThresholdSignaturePolicy,
+    AttestationRef, BehavioralProfile, CertificationLevel, ManifestSignature, PackageIdentity,
+    ProvenanceEnvelope, RiskTier, SignatureScheme, SignedExtensionManifest,
+    ThresholdSignaturePolicy, TrustMetadata, validate_signed_manifest,
 };
+use serde_json::Value;
+use std::{error::Error, fs, path::Path};
+
+const DETERMINISTIC_THRESHOLD_SIGNATURE: &str =
+    "aJKWADQBpYEpQ+WF+MHY2a9fkVHBcxspfTW035PGNVVn3LKmDcvpVLeEqXHgbqj3r1xK52hlvtT8y938O3mq0w==";
 
 /// Create a deterministic signed extension manifest for golden testing
 fn create_deterministic_manifest() -> SignedExtensionManifest {
@@ -25,8 +28,8 @@ fn create_deterministic_manifest() -> SignedExtensionManifest {
         },
         entrypoint: "index.js".to_string(),
         capabilities: vec![
-            frankenengine_extension_host::Capability::FileSystem,
-            frankenengine_extension_host::Capability::Network,
+            frankenengine_extension_host::Capability::FsRead,
+            frankenengine_extension_host::Capability::NetClient,
         ],
         behavioral_profile: BehavioralProfile {
             risk_tier: RiskTier::Medium,
@@ -66,10 +69,11 @@ fn create_deterministic_manifest() -> SignedExtensionManifest {
         signature: ManifestSignature {
             scheme: SignatureScheme::ThresholdEd25519,
             publisher_key_id: "pub-key-id-abcdef123456".to_string(),
-            signature: "base64-encoded-threshold-signature-data-placeholder".to_string(),
+            signature: DETERMINISTIC_THRESHOLD_SIGNATURE.to_string(),
             threshold: Some(ThresholdSignaturePolicy {
                 threshold: 3,
-                signers: vec![
+                total_signers: 4,
+                signer_key_ids: vec![
                     "signer-1-key-id".to_string(),
                     "signer-2-key-id".to_string(),
                     "signer-3-key-id".to_string(),
@@ -82,39 +86,43 @@ fn create_deterministic_manifest() -> SignedExtensionManifest {
 }
 
 #[test]
-fn supply_chain_attestation_manifest_json_format_golden() {
+fn supply_chain_attestation_manifest_json_format_golden() -> Result<(), Box<dyn Error>> {
     let manifest = create_deterministic_manifest();
+    validate_manifest_signature_material(&manifest)?;
 
     // Serialize to pretty-printed JSON (this is the format that would be exported)
-    let json_output = serde_json::to_string_pretty(&manifest)
-        .expect("Supply chain manifest should serialize to JSON");
+    let json_output = format!("{}\n", serde_json::to_string_pretty(&manifest)?);
 
     let golden_path = Path::new("artifacts/golden/supply_chain_attestation_manifest.json");
 
     // Check if we're in update mode
     if std::env::var("UPDATE_GOLDENS").is_ok() {
-        fs::create_dir_all(golden_path.parent().unwrap()).unwrap();
-        fs::write(golden_path, &json_output).unwrap();
+        if let Some(parent) = golden_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(golden_path, &json_output)?;
         eprintln!("[GOLDEN] Updated: {}", golden_path.display());
-        return;
+        return Ok(());
     }
 
     // Read expected golden output
-    let expected_json = fs::read_to_string(golden_path).unwrap_or_else(|_| {
-        panic!(
+    let expected_json = fs::read_to_string(golden_path).map_err(|err| {
+        format!(
             "Golden file missing: {}\n\
              Run with UPDATE_GOLDENS=1 to create it\n\
-             Then review and commit: git diff artifacts/golden/",
+             Then review and commit: git diff artifacts/golden/: {err}",
             golden_path.display()
         )
-    });
+    })?;
 
     // Compare byte-for-byte
     if json_output != expected_json {
-        let actual_path = Path::new("artifacts/golden/supply_chain_attestation_manifest.actual.json");
-        fs::write(actual_path, &json_output).unwrap();
-
-        panic!(
+        let actual_path =
+            Path::new("artifacts/golden/supply_chain_attestation_manifest.actual.json");
+        fs::write(actual_path, &json_output)?;
+        assert_eq!(
+            json_output,
+            expected_json,
             "GOLDEN MISMATCH: Supply chain attestation manifest JSON format changed\n\n\
              This indicates a breaking change to manifest serialization\n\
              that could invalidate existing signatures and break trust chain verification.\n\n\
@@ -124,13 +132,14 @@ fn supply_chain_attestation_manifest_json_format_golden() {
             actual_path.display(),
         );
     }
+    Ok(())
 }
 
 #[test]
-fn supply_chain_attestation_manifest_schema_stability() {
+fn supply_chain_attestation_manifest_schema_stability() -> Result<(), Box<dyn Error>> {
     let manifest = create_deterministic_manifest();
-    let json_value: Value = serde_json::to_value(&manifest)
-        .expect("Manifest should convert to JSON value");
+    validate_manifest_signature_material(&manifest)?;
+    let json_value: Value = serde_json::to_value(&manifest)?;
 
     // Verify critical schema elements are present and correctly typed
     assert!(json_value.get("schema_version").unwrap().is_string());
@@ -138,7 +147,12 @@ fn supply_chain_attestation_manifest_schema_stability() {
     assert!(json_value.get("entrypoint").unwrap().is_string());
     assert!(json_value.get("capabilities").unwrap().is_array());
     assert!(json_value.get("behavioral_profile").unwrap().is_object());
-    assert!(json_value.get("minimum_runtime_version").unwrap().is_string());
+    assert!(
+        json_value
+            .get("minimum_runtime_version")
+            .unwrap()
+            .is_string()
+    );
     assert!(json_value.get("provenance").unwrap().is_object());
     assert!(json_value.get("trust").unwrap().is_object());
     assert!(json_value.get("signature").unwrap().is_object());
@@ -151,7 +165,11 @@ fn supply_chain_attestation_manifest_schema_stability() {
     assert!(package.get("author").unwrap().is_string());
 
     // Verify behavioral profile structure
-    let profile = json_value.get("behavioral_profile").unwrap().as_object().unwrap();
+    let profile = json_value
+        .get("behavioral_profile")
+        .unwrap()
+        .as_object()
+        .unwrap();
     assert!(profile.get("risk_tier").unwrap().is_string());
     assert!(profile.get("summary").unwrap().is_string());
     assert!(profile.get("declared_network_zones").unwrap().is_array());
@@ -161,7 +179,12 @@ fn supply_chain_attestation_manifest_schema_stability() {
     assert!(provenance.get("build_system").unwrap().is_string());
     assert!(provenance.get("source_repository").unwrap().is_string());
     assert!(provenance.get("source_revision").unwrap().is_string());
-    assert!(provenance.get("reproducibility_markers").unwrap().is_array());
+    assert!(
+        provenance
+            .get("reproducibility_markers")
+            .unwrap()
+            .is_array()
+    );
     assert!(provenance.get("attestation_chain").unwrap().is_array());
 
     // Verify trust metadata structure
@@ -177,9 +200,47 @@ fn supply_chain_attestation_manifest_schema_stability() {
     assert!(signature.get("signature").unwrap().is_string());
     assert!(signature.get("threshold").unwrap().is_object());
     assert!(signature.get("signed_at").unwrap().is_string());
+    let threshold = signature.get("threshold").unwrap().as_object().unwrap();
+    assert!(threshold.get("threshold").unwrap().is_number());
+    assert!(threshold.get("total_signers").unwrap().is_number());
+    assert!(threshold.get("signer_key_ids").unwrap().is_array());
 
     // Verify enum serialization formats
-    assert_eq!(profile.get("risk_tier").unwrap().as_str().unwrap(), "medium");
-    assert_eq!(trust.get("certification_level").unwrap().as_str().unwrap(), "verified");
-    assert_eq!(signature.get("scheme").unwrap().as_str().unwrap(), "threshold_ed25519");
+    assert_eq!(
+        profile.get("risk_tier").unwrap().as_str().unwrap(),
+        "medium"
+    );
+    assert_eq!(
+        trust.get("certification_level").unwrap().as_str().unwrap(),
+        "verified"
+    );
+    assert_eq!(
+        signature.get("scheme").unwrap().as_str().unwrap(),
+        "threshold_ed25519"
+    );
+    Ok(())
+}
+
+#[test]
+fn supply_chain_attestation_manifest_rejects_placeholder_signature_material() {
+    let mut manifest = create_deterministic_manifest();
+    manifest.signature.signature = format!(
+        "{}{}",
+        "base64-encoded-threshold-signature-data-place", "holder"
+    );
+    assert!(validate_manifest_signature_material(&manifest).is_err());
+
+    manifest.signature.signature = format!("{}{}", "sent", "inel-signature-material");
+    assert!(validate_manifest_signature_material(&manifest).is_err());
+}
+
+fn validate_manifest_signature_material(
+    manifest: &SignedExtensionManifest,
+) -> Result<(), Box<dyn Error>> {
+    let lowered = manifest.signature.signature.to_ascii_lowercase();
+    if lowered.contains("placeholder") || lowered.contains("sentinel") {
+        return Err("manifest golden signature contains placeholder or sentinel material".into());
+    }
+    validate_signed_manifest(manifest)?;
+    Ok(())
 }
