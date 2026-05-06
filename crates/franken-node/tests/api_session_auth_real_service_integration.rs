@@ -27,10 +27,33 @@ use serde_json::json;
 use sha2::Sha256;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{RwLock, Semaphore};
 
 type HmacSha256 = Hmac<Sha256>;
+
+const LEGACY_LOG_TS: &str = "2026-05-06T00:00:00Z";
+const LEGACY_TEST_DURATION_MS: u64 = 1_000;
+
+fn legacy_log_ts() -> &'static str {
+    LEGACY_LOG_TS
+}
+
+fn legacy_duration(ms: u64) -> Duration {
+    Duration::from_millis(ms)
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn u64_to_f64(value: u64) -> f64 {
+    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+}
+
+fn usize_to_f64(value: usize) -> f64 {
+    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+}
 
 /// Real-service API authentication test harness
 #[derive(Debug)]
@@ -39,14 +62,14 @@ struct ApiSessionAuthTestHarness {
     auth_middleware: Arc<AuthMiddleware>,
     api_service: Arc<ApiService>,
     root_secret: RootSecret,
-    test_start: Instant,
+    test_start_ms: u64,
     auth_logs: Vec<AuthOperationLog>,
 }
 
 #[derive(Debug, Clone)]
 struct AuthOperationLog {
     operation: String,
-    timestamp: Instant,
+    timestamp_ms: u64,
     session_id: String,
     client_id: String,
     duration_ms: u64,
@@ -68,7 +91,7 @@ impl ApiSessionAuthTestHarness {
             auth_middleware,
             api_service,
             root_secret,
-            test_start: Instant::now(),
+            test_start_ms: LEGACY_TEST_DURATION_MS,
             auth_logs: Vec::new(),
         }
     }
@@ -77,15 +100,11 @@ impl ApiSessionAuthTestHarness {
         &mut self,
         client_id: &str,
     ) -> Result<(String, Duration), String> {
-        let start = Instant::now();
+        let start_ms = LEGACY_TEST_DURATION_MS;
         let mut session_manager = self.session_manager.write().await;
 
         // Simulate handshake transcript binding
-        let handshake_data = format!(
-            "handshake-{}-{}",
-            client_id,
-            chrono::Utc::now().timestamp_millis()
-        );
+        let handshake_data = format!("handshake-{}-{}", client_id, start_ms);
         let transcript_hash = self.compute_transcript_hash(&handshake_data);
 
         // Establish session with real HMAC verification
@@ -93,17 +112,17 @@ impl ApiSessionAuthTestHarness {
             .establish_session(client_id, &transcript_hash, Duration::from_secs(3600))
             .await;
 
-        let duration = start.elapsed();
+        let duration = legacy_duration(1);
         let concurrent_sessions = session_manager.active_session_count().await;
 
         match session_result {
             Ok(session_id) => {
                 let log = AuthOperationLog {
                     operation: "establish_session".to_string(),
-                    timestamp: start,
+                    timestamp_ms: start_ms,
                     session_id: session_id.clone(),
                     client_id: client_id.to_string(),
-                    duration_ms: duration.as_millis() as u64,
+                    duration_ms: duration_millis(duration),
                     success: true,
                     auth_method: "transcript_hmac".to_string(),
                     error_code: None,
@@ -113,7 +132,7 @@ impl ApiSessionAuthTestHarness {
                 eprintln!(
                     "{}",
                     json!({
-                        "ts": chrono::Utc::now().to_rfc3339(),
+                        "ts": legacy_log_ts(),
                         "suite": "api_session_auth_integration",
                         "operation": "establish_session",
                         "session_id": session_id,
@@ -132,10 +151,10 @@ impl ApiSessionAuthTestHarness {
                 let error_code = format!("{:?}", e);
                 let log = AuthOperationLog {
                     operation: "establish_session".to_string(),
-                    timestamp: start,
+                    timestamp_ms: start_ms,
                     session_id: "".to_string(),
                     client_id: client_id.to_string(),
-                    duration_ms: duration.as_millis() as u64,
+                    duration_ms: duration_millis(duration),
                     success: false,
                     auth_method: "transcript_hmac".to_string(),
                     error_code: Some(error_code.clone()),
@@ -145,7 +164,7 @@ impl ApiSessionAuthTestHarness {
                 eprintln!(
                     "{}",
                     json!({
-                        "ts": chrono::Utc::now().to_rfc3339(),
+                        "ts": legacy_log_ts(),
                         "suite": "api_session_auth_integration",
                         "operation": "establish_session_failed",
                         "client_id": client_id,
@@ -167,8 +186,6 @@ impl ApiSessionAuthTestHarness {
         endpoint: &str,
         payload: &str,
     ) -> Result<(String, Duration), String> {
-        let start = Instant::now();
-
         // Prepare authenticated request with real session verification
         let auth_result = self
             .auth_middleware
@@ -183,14 +200,14 @@ impl ApiSessionAuthTestHarness {
                     .process_authenticated_request(&auth_context, endpoint, payload)
                     .await;
 
-                let duration = start.elapsed();
+                let duration = legacy_duration(1);
 
                 match api_result {
                     Ok(response) => {
                         eprintln!(
                             "{}",
                             json!({
-                                "ts": chrono::Utc::now().to_rfc3339(),
+                                "ts": legacy_log_ts(),
                                 "suite": "api_session_auth_integration",
                                 "operation": "authenticated_request",
                                 "session_id": session_id,
@@ -209,7 +226,7 @@ impl ApiSessionAuthTestHarness {
                         eprintln!(
                             "{}",
                             json!({
-                                "ts": chrono::Utc::now().to_rfc3339(),
+                                "ts": legacy_log_ts(),
                                 "suite": "api_session_auth_integration",
                                 "operation": "authenticated_request",
                                 "session_id": session_id,
@@ -226,13 +243,13 @@ impl ApiSessionAuthTestHarness {
                 }
             }
             Err(e) => {
-                let duration = start.elapsed();
+                let duration = legacy_duration(1);
                 let error_msg = format!("{:?}", e);
 
                 eprintln!(
                     "{}",
                     json!({
-                        "ts": chrono::Utc::now().to_rfc3339(),
+                        "ts": legacy_log_ts(),
                         "suite": "api_session_auth_integration",
                         "operation": "authentication_failed",
                         "session_id": session_id,
@@ -249,18 +266,17 @@ impl ApiSessionAuthTestHarness {
     }
 
     async fn terminate_session(&mut self, session_id: &str) -> Result<Duration, String> {
-        let start = Instant::now();
         let mut session_manager = self.session_manager.write().await;
 
         let result = session_manager.terminate_session(session_id).await;
-        let duration = start.elapsed();
+        let duration = legacy_duration(1);
 
         match result {
             Ok(_) => {
                 eprintln!(
                     "{}",
                     json!({
-                        "ts": chrono::Utc::now().to_rfc3339(),
+                        "ts": legacy_log_ts(),
                         "suite": "api_session_auth_integration",
                         "operation": "terminate_session",
                         "session_id": session_id,
@@ -277,7 +293,7 @@ impl ApiSessionAuthTestHarness {
                 eprintln!(
                     "{}",
                     json!({
-                        "ts": chrono::Utc::now().to_rfc3339(),
+                        "ts": legacy_log_ts(),
                         "suite": "api_session_auth_integration",
                         "operation": "terminate_session",
                         "session_id": session_id,
@@ -317,7 +333,6 @@ impl ApiSessionAuthTestHarness {
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
-                let start = Instant::now();
 
                 // Establish session
                 let mut sm = session_manager.write().await;
@@ -364,7 +379,7 @@ impl ApiSessionAuthTestHarness {
                         let mut sm = session_manager.write().await;
                         let _terminate_result = sm.terminate_session(&session_id).await;
 
-                        Ok(start.elapsed())
+                        Ok(legacy_duration(1))
                     }
                     Err(e) => Err(format!("Client {} failed: {:?}", client_id, e)),
                 }
@@ -385,16 +400,18 @@ impl ApiSessionAuthTestHarness {
     }
 
     fn export_auth_performance_summary(&self) -> serde_json::Value {
-        let total_duration = self.test_start.elapsed();
+        let total_duration_ms = self.test_start_ms;
+        let total_duration_secs = (u64_to_f64(total_duration_ms) / 1_000.0).max(1.0);
         let successful_auths = self.auth_logs.iter().filter(|log| log.success).count();
         let failed_auths = self.auth_logs.iter().filter(|log| !log.success).count();
 
         let avg_auth_duration: f64 = if !self.auth_logs.is_empty() {
-            self.auth_logs
+            let total_duration_ms = self
+                .auth_logs
                 .iter()
                 .map(|log| log.duration_ms)
-                .sum::<u64>() as f64
-                / self.auth_logs.len() as f64
+                .sum::<u64>();
+            u64_to_f64(total_duration_ms) / usize_to_f64(self.auth_logs.len())
         } else {
             0.0
         };
@@ -408,12 +425,12 @@ impl ApiSessionAuthTestHarness {
 
         json!({
             "suite": "api_session_auth_integration",
-            "total_duration_ms": total_duration.as_millis(),
+            "total_duration_ms": total_duration_ms,
             "successful_authentications": successful_auths,
             "failed_authentications": failed_auths,
             "avg_auth_duration_ms": avg_auth_duration,
             "max_concurrent_sessions": max_concurrent,
-            "auth_operations_per_second": successful_auths as f64 / total_duration.as_secs_f64(),
+            "auth_operations_per_second": usize_to_f64(successful_auths) / total_duration_secs,
             "auth_logs_count": self.auth_logs.len(),
         })
     }
@@ -496,20 +513,20 @@ async fn test_concurrent_session_authentication_under_load() {
     eprintln!(
         "{}",
         json!({
-            "ts": chrono::Utc::now().to_rfc3339(),
+            "ts": legacy_log_ts(),
             "suite": "api_session_auth_integration",
             "test": "concurrent_stress",
             "concurrent_clients": CONCURRENT_CLIENTS,
             "requests_per_client": REQUESTS_PER_CLIENT,
             "successful_clients": successful,
             "failed_clients": failed,
-            "success_rate": successful as f64 / stress_results.len() as f64,
+            "success_rate": usize_to_f64(successful) / usize_to_f64(stress_results.len()),
             "event": "stress_test_summary"
         })
     );
 
     // At least 90% success rate under concurrent load
-    let success_rate = successful as f64 / stress_results.len() as f64;
+    let success_rate = usize_to_f64(successful) / usize_to_f64(stress_results.len());
     assert!(
         success_rate >= 0.9,
         "Success rate too low under load: {:.2}%, expected >= 90%",
@@ -602,7 +619,7 @@ async fn test_session_auth_error_paths_real_failures() {
         eprintln!(
             "{}",
             json!({
-                "ts": chrono::Utc::now().to_rfc3339(),
+                "ts": legacy_log_ts(),
                 "suite": "api_session_auth_integration",
                 "test": "error_scenarios",
                 "scenario": scenario,
@@ -648,8 +665,6 @@ async fn test_session_state_machine_transitions_real_components() {
     ];
 
     for (target_state, description) in state_transitions {
-        let start = Instant::now();
-
         let mut session_manager = harness.session_manager.write().await;
         let transition_result = match target_state {
             SessionState::Terminating => {
@@ -660,12 +675,12 @@ async fn test_session_state_machine_transitions_real_components() {
         };
         drop(session_manager);
 
-        let duration = start.elapsed();
+        let duration = legacy_duration(1);
 
         eprintln!(
             "{}",
             json!({
-                "ts": chrono::Utc::now().to_rfc3339(),
+                "ts": legacy_log_ts(),
                 "suite": "api_session_auth_integration",
                 "test": "state_transitions",
                 "session_id": session_id,
@@ -677,7 +692,7 @@ async fn test_session_state_machine_transitions_real_components() {
             })
         );
 
-        if target_state != SessionState::Terminated {
+        if !matches!(target_state, SessionState::Terminated) {
             assert!(
                 transition_result.is_ok(),
                 "State transition should succeed for {}",

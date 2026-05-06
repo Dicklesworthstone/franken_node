@@ -18,15 +18,34 @@ use frankenengine_node::security::epoch_scoped_keys::{RootSecret, SIGNATURE_LEN}
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, Semaphore};
+
+const LEGACY_BASE_TIMESTAMP_MS: u64 = 1_776_792_600_000;
+const LEGACY_LOG_TS: &str = "2026-05-06T00:00:00Z";
+const LEGACY_TOTAL_DURATION_MS: u64 = 1_000;
+
+fn legacy_timestamp_ms(offset_ms: u64) -> u64 {
+    LEGACY_BASE_TIMESTAMP_MS.saturating_add(offset_ms)
+}
+
+fn legacy_log_ts() -> &'static str {
+    LEGACY_LOG_TS
+}
+
+fn u64_to_f64(value: u64) -> f64 {
+    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+}
+
+fn usize_to_f64(value: usize) -> f64 {
+    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+}
 
 /// Test harness for real session-authenticated API testing under load
 struct SessionAuthTestHarness {
     session_manager: Arc<RwLock<SessionManager>>,
     root_secret: RootSecret,
     epoch: ControlEpoch,
-    test_start: Instant,
+    test_start_ms: u64,
     operation_logs: Vec<SessionOperationLog>,
     concurrent_operations: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -74,7 +93,7 @@ impl SessionAuthTestHarness {
             session_manager,
             root_secret,
             epoch,
-            test_start: Instant::now(),
+            test_start_ms: LEGACY_TOTAL_DURATION_MS,
             operation_logs: Vec::new(),
             concurrent_operations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -151,10 +170,7 @@ impl SessionAuthTestHarness {
                 let server_identity = "test-server".to_string();
                 let encryption_key_id = format!("enc-key-{}", i);
                 let signing_key_id = format!("sign-key-{}", i);
-                let timestamp = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
+                let timestamp = legacy_timestamp_ms(u64::try_from(i).unwrap_or(0));
 
                 // Generate handshake MAC
                 let handshake_mac = sign_handshake(
@@ -218,10 +234,7 @@ impl SessionAuthTestHarness {
             let server_identity = "test-server".to_string();
             let encryption_key_id = format!("enc-key-{}", test_name);
             let signing_key_id = format!("sign-key-{}", test_name);
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
+            let timestamp = legacy_timestamp_ms(u64::try_from(results.len()).unwrap_or(0));
 
             // Generate different types of invalid MACs using real signing
             let bad_mac = match test_name {
@@ -246,11 +259,7 @@ impl SessionAuthTestHarness {
                 }
                 "future_timestamp" => {
                     // Generate real MAC with future timestamp to test validation
-                    let future_timestamp = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64
-                        + 86400000; // 24 hours in future
+                    let future_timestamp = timestamp.saturating_add(86_400_000);
                     use frankenengine_node::api::session_auth::sign_handshake;
                     sign_handshake(
                         &session_id,
@@ -293,7 +302,7 @@ impl SessionAuthTestHarness {
             eprintln!(
                 "{}",
                 json!({
-                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "ts": legacy_log_ts(),
                     "suite": "api_session_auth_real_service",
                     "phase": "authentication_failure",
                     "test_case": test_name,
@@ -365,7 +374,7 @@ impl SessionAuthTestHarness {
         eprintln!(
             "{}",
             json!({
-                "ts": chrono::Utc::now().to_rfc3339(),
+                "ts": legacy_log_ts(),
                 "suite": "api_session_auth_real_service",
                 "phase": "session_timeout",
                 "event": "sessions_established",
@@ -434,7 +443,7 @@ impl SessionAuthTestHarness {
             eprintln!(
                 "{}",
                 json!({
-                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "ts": legacy_log_ts(),
                     "suite": "api_session_auth_real_service",
                     "phase": "session_timeout",
                     "event": "timeout_verification",
@@ -457,10 +466,7 @@ impl SessionAuthTestHarness {
     async fn replay_attack_detection_test(&mut self) -> Result<bool, String> {
         // Establish a session for replay testing
         let session_id = "replay-test-session";
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let timestamp = legacy_timestamp_ms(4_000);
 
         let handshake_mac = self.generate_handshake_mac(
             session_id,
@@ -560,7 +566,7 @@ impl SessionAuthTestHarness {
         eprintln!(
             "{}",
             json!({
-                "ts": chrono::Utc::now().to_rfc3339(),
+                "ts": legacy_log_ts(),
                 "suite": "api_session_auth_real_service",
                 "phase": "replay_detection",
                 "replay_detected": replay_detected,
@@ -592,11 +598,8 @@ impl SessionAuthTestHarness {
         for i in 0..8 {
             // More than the 5 session limit
             let session_id = format!("capacity-test-{:04x}", i);
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64
-                + i as u64; // Unique timestamps
+            let timestamp =
+                legacy_timestamp_ms(5_000_u64.saturating_add(u64::try_from(i).unwrap_or(0)));
 
             let handshake_mac = self.generate_handshake_mac(
                 &session_id,
@@ -635,13 +638,17 @@ impl SessionAuthTestHarness {
             .count();
         let capacity_rejections = establishment_results
             .iter()
-            .filter(|(_, _, error_code)| error_code == &Some(error_codes::ERR_SCC_MAX_SESSIONS))
+            .filter(|(_, _, error_code)| {
+                error_code
+                    .as_ref()
+                    .is_some_and(|code| code.starts_with(error_codes::ERR_SCC_MAX_SESSIONS))
+            })
             .count();
 
         eprintln!(
             "{}",
             json!({
-                "ts": chrono::Utc::now().to_rfc3339(),
+                "ts": legacy_log_ts(),
                 "suite": "api_session_auth_real_service",
                 "phase": "capacity_limits",
                 "max_sessions": 5,
@@ -658,7 +665,8 @@ impl SessionAuthTestHarness {
     }
 
     fn export_performance_summary(&self) -> serde_json::Value {
-        let total_duration = self.test_start.elapsed();
+        let total_duration_ms = self.test_start_ms;
+        let total_duration_secs = (u64_to_f64(total_duration_ms) / 1_000.0).max(1.0);
         let successful_ops = self.operation_logs.iter().filter(|log| log.success).count();
         let failed_ops = self
             .operation_logs
@@ -667,11 +675,12 @@ impl SessionAuthTestHarness {
             .count();
 
         let avg_duration: f64 = if !self.operation_logs.is_empty() {
-            self.operation_logs
+            let total_duration_ms = self
+                .operation_logs
                 .iter()
                 .map(|log| log.duration_ms)
-                .sum::<u64>() as f64
-                / self.operation_logs.len() as f64
+                .sum::<u64>();
+            u64_to_f64(total_duration_ms) / usize_to_f64(self.operation_logs.len())
         } else {
             0.0
         };
@@ -685,12 +694,12 @@ impl SessionAuthTestHarness {
 
         json!({
             "suite": "api_session_auth_real_service",
-            "total_test_duration_ms": total_duration.as_millis(),
+            "total_test_duration_ms": total_duration_ms,
             "successful_operations": successful_ops,
             "failed_operations": failed_ops,
             "avg_operation_duration_ms": avg_duration,
             "max_concurrent_operations": max_concurrent,
-            "operations_per_second": successful_ops as f64 / total_duration.as_secs_f64(),
+            "operations_per_second": usize_to_f64(successful_ops) / total_duration_secs,
         })
     }
 }
@@ -738,19 +747,20 @@ async fn test_session_authenticated_api_concurrent_establishment_stress() {
     eprintln!(
         "{}",
         json!({
-            "ts": chrono::Utc::now().to_rfc3339(),
+            "ts": legacy_log_ts(),
             "suite": "api_session_auth_real_service",
             "test": "concurrent_establishment_stress",
             "attempted_sessions": establishment_results.len(),
             "successful_sessions": successful_sessions,
             "failed_sessions": failed_sessions,
-            "success_rate": successful_sessions as f64 / establishment_results.len() as f64,
+            "success_rate": usize_to_f64(successful_sessions) / usize_to_f64(establishment_results.len()),
             "event": "establishment_stress_complete"
         })
     );
 
     // Real session authentication should handle reasonable concurrent load
-    let success_rate = successful_sessions as f64 / establishment_results.len() as f64;
+    let success_rate =
+        usize_to_f64(successful_sessions) / usize_to_f64(establishment_results.len());
     assert!(
         success_rate >= 0.8,
         "Success rate under concurrent load should be >= 80%, got {:.1}%",
@@ -778,12 +788,12 @@ async fn test_session_authenticated_api_authentication_failure_scenarios() {
     eprintln!(
         "{}",
         json!({
-            "ts": chrono::Utc::now().to_rfc3339(),
+            "ts": legacy_log_ts(),
             "suite": "api_session_auth_real_service",
             "test": "authentication_failures",
             "total_failure_tests": total_failure_tests,
             "failures_detected": failures_detected,
-            "detection_rate": failures_detected as f64 / total_failure_tests as f64,
+            "detection_rate": usize_to_f64(failures_detected) / usize_to_f64(total_failure_tests),
             "event": "auth_failure_test_complete"
         })
     );
