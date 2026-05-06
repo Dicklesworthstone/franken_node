@@ -115,6 +115,7 @@ uses `proof_source=proof_cache_hit` and includes `proof_cache`.
 | `artifacts` | Object | Yes | stdout, stderr, summary, and receipt artifact paths plus content digests |
 | `trust` | Object | Yes | Generator, git commit, dirty-state policy, freshness, and signature status |
 | `classifications` | Object | Yes | Source-only fallback, doctor readiness, and CI consumption status |
+| `flight_recorder` | Object or null | No | Optional link to `docs/specs/validation_flight_recorder.md` attempt artifact |
 
 ## Required Enumerations
 
@@ -171,6 +172,11 @@ uses `proof_source=proof_cache_hit` and includes `proof_cache`.
   must distinguish fresh execution, source-only fallback, broker queue reuse,
   and proof-cache hits. Proof-cache hits must include the cache key and reused
   receipt path.
+- **INV-VB-FLIGHT-RECORDER-LINKED** - Timeout, source-only, blocked, or
+  retryable worker-infrastructure receipts should link to a validation flight
+  recorder attempt artifact when one exists, so consumers can recover worker,
+  target-dir, output digest, and next-action context without reading chat or
+  terminal history.
 
 ## Error Codes
 
@@ -225,6 +231,8 @@ Doctor readiness reports must derive:
 - Counts by timeout class and error class.
 - Whether source-only fallbacks are fresh enough to unblock documentation-only
   or source-inspection beads.
+- Latest validation flight recorder path, worker ID, retryability, and recovery
+  decision when the broker receipt or proof status links one.
 
 ### CI Gate Consumption
 
@@ -241,5 +249,6 @@ explicitly accepted source-only/blocker class for that gate.
 | Schema catalog | `artifacts/validation_broker/validation_broker_contract.schema.json` |
 | Golden fixtures | `artifacts/validation_broker/validation_broker_fixtures.v1.json` |
 | E2E/stress harness matrix | `artifacts/validation_broker/bd-tdoga/validation_broker_e2e_harness.v1.json` |
+| Flight recorder contract | `docs/specs/validation_flight_recorder.md` |
 | Gate script | `scripts/check_validation_broker_contract.py` |
 | Gate tests | `tests/test_check_validation_broker_contract.py` |

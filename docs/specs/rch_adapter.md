@@ -79,6 +79,24 @@ The stdout and stderr digests are SHA-256 over full output plus bounded snippets
 for human triage. Future validation-broker receipts can embed these fields or
 map them into the broker receipt schema without reading Agent Mail history.
 
+## Flight Recorder Mapping
+
+The validation flight recorder contract in
+`docs/specs/validation_flight_recorder.md` consumes `RchAdapterOutcome` as the
+authoritative output classification for one attempt. The recorder may add
+timeline, target-dir, broker/coalescer, and recovery-plan context, but it must
+not weaken this adapter contract:
+
+- green proof still requires `outcome=passed`, `execution_mode=remote`, and
+  `product_failure=false`;
+- `[RCH-E104] SSH command timed out (no local fallback)` remains
+  `worker_timeout` with `ssh_command`;
+- local fallback refusal, missing toolchain, worker filesystem pressure, and
+  contention deferral remain retryable infrastructure outcomes, not product
+  failures;
+- compile and test failures remain product failures, not retryable worker
+  infrastructure.
+
 ## Fixture Coverage
 
 The Rust tests cover deterministic fixtures for:
