@@ -4,20 +4,15 @@
 //! `frankenengine_node::control_plane::fork_detection` through the full
 //! divergence taxonomy:
 //!
-//!   - `DivergenceDetector::compare`   Converged / Forked / GapDetected /
-//!                                     RollbackDetected,
-//!   - `compare_and_log`               structured `DivergenceLogEvent`
-//!                                     severity matrix (INFO / WARN /
-//!                                     CRITICAL),
-//!   - `suggest_reconciliation`        per-result actionable guidance
-//!                                     (NoAction / FillGap / ResolveConflict
-//!                                     / InvestigateRollback),
-//!   - `RollbackDetector::feed`        chain validation across a forward
-//!                                     sequence + same-epoch rollback
-//!                                     rejection + gap detection +
-//!                                     parent-hash chain break,
-//!   - `operator_reset`                clears the halted bit set by
-//!                                     INV-RFD-HALT-ON-DIVERGENCE.
+//! - `DivergenceDetector::compare`: Converged / Forked / GapDetected /
+//!   RollbackDetected.
+//! - `compare_and_log`: structured `DivergenceLogEvent` severity matrix
+//!   (INFO / WARN / CRITICAL).
+//! - `suggest_reconciliation`: per-result actionable guidance
+//!   (NoAction / FillGap / ResolveConflict / InvestigateRollback).
+//! - `RollbackDetector::feed`: chain validation across a forward sequence,
+//!   same-epoch rollback rejection, gap detection, and parent-hash chain break.
+//! - `operator_reset`: clears the halted bit set by INV-RFD-HALT-ON-DIVERGENCE.
 //!
 //! Bead: bd-19l5s.
 //!
