@@ -31,6 +31,7 @@ from typing import Any
 
 COPILOT_SRC = ROOT / "crates/franken-node/src/security/dgis/update_copilot.rs"
 DGIS_MOD = ROOT / "crates/franken-node/src/security/dgis/mod.rs"
+SPEC_DOC = ROOT / "docs/specs/section_10_20/bd-1f8v_contract.md"
 
 REQUIRED_STRUCTS = [
     "UpdateCopilot",
@@ -167,18 +168,42 @@ def check_containment() -> CheckResult:
 def check_confidence() -> CheckResult:
     if not COPILOT_SRC.exists():
         return CheckResult("confidence", False, "source file missing")
+    if not SPEC_DOC.exists():
+        return CheckResult("confidence", False, "spec file missing")
     content = COPILOT_SRC.read_text()
+    spec = SPEC_DOC.read_text()
+    stale_history_placeholder = "placeholder for real " "history check"
     checks = {
         "confidence_struct": "pub struct ConfidenceOutput" in content,
         "lower_bound": "lower_bound" in content,
         "upper_bound": "upper_bound" in content,
         "data_quality_factors": "data_quality_factors" in content,
         "calibration_note": "calibration_note" in content,
+        "history_depth_factor": '"history_depth"' in content,
+        "history_depth_dep_signal": "transitive_dependency_count as f64" in content,
+        "history_depth_fan_out_signal": "fo.is_finite()" in content
+        and "fo.min(10.0) / 10.0" in content,
+        "spec_removes_history_placeholder": stale_history_placeholder not in spec,
+        "spec_documents_history_formula": "dep_signal = min(transitive_dependency_count, 50) / 50"
+        in spec
+        and "history_depth = clamp((dep_signal + fan_out_signal) / 2, 0.0, 1.0)"
+        in spec,
     }
     failed = [k for k, v in checks.items() if not v]
     if failed:
         return CheckResult("confidence", False, f"missing: {failed}", {"missing": failed})
-    return CheckResult("confidence", True, "confidence output with uncertainty bounds present")
+    return CheckResult(
+        "confidence",
+        True,
+        "confidence output with uncertainty bounds and deterministic history-depth scoring present",
+        {
+            "history_depth": {
+                "dependency_cap": 50,
+                "fan_out_cap": 10,
+                "unavailable_signal": 0.0,
+            }
+        },
+    )
 
 
 def check_acknowledgement_gate() -> CheckResult:

@@ -88,6 +88,17 @@ class TestIndividualChecks:
         check = next(c for c in data["checks"] if c["name"] == "confidence")
         assert check["passed"] is True
 
+    def test_confidence_requires_deterministic_history_depth_contract(self):
+        result = run_script("--json")
+        data = json.loads(result.stdout)
+        check = next(c for c in data["checks"] if c["name"] == "confidence")
+        assert check["passed"] is True
+        assert check["details"]["history_depth"] == {
+            "dependency_cap": 50,
+            "fan_out_cap": 10,
+            "unavailable_signal": 0.0,
+        }
+
     def test_acknowledgement(self):
         result = run_script("--json")
         data = json.loads(result.stdout)

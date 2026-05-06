@@ -85,7 +85,14 @@ Monitoring covers: error_rate, latency_p99, trust_degradation_events.
 Confidence score derived from data quality factors:
 - `provenance_completeness` — 0.8 if transitive deps > 0, else 0.4
 - `metric_calibration` — 0.75 if fan_out > 0, else 0.5
-- `history_depth` — 0.7 (placeholder for real history check)
+- `history_depth` — deterministic signal depth from current topology history:
+  - `dep_signal = min(transitive_dependency_count, 50) / 50`
+  - `fan_out_signal = min(fan_out, 10) / 10` when `fan_out` is finite and positive, else 0.0
+  - `history_depth = clamp((dep_signal + fan_out_signal) / 2, 0.0, 1.0)`
+
+Unavailable, non-finite, or non-positive history inputs contribute 0.0 to the
+history term, so the confidence score degrades explicitly instead of carrying a
+fixed placeholder value.
 
 Uncertainty bounds: `[score - uncertainty*0.5, score + uncertainty*0.5]` clamped to [0, 1].
 
@@ -136,7 +143,7 @@ Every copilot interaction is recorded as a `CopilotInteraction` with:
 
 - 26 Rust inline tests covering: risk delta computation, risk classification, containment recommendations, confidence bounds, policy acknowledgement, mitigation playbooks, interaction logging, JSONL export, summary generation, content hashing, aggregate risk bounds
 - 11 Python verification gate checks
-- 16 Python unit tests
+- 17 Python unit tests
 
 ## Artifacts
 
