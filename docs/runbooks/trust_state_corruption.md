@@ -24,7 +24,7 @@
 2. Block new trust chain extensions.
 3. Capture the current runtime posture with `franken-node ops health-check --json`.
 4. Run trust re-verification evidence with `franken-node trust scan --deep --audit`.
-5. If the deployment embeds `runtime::safe_mode::SafeModeController`, enter safe mode through that deployment integration. The standalone `franken-node safe-mode ...` CLI and `POST /api/v1/control/safe-mode/enter` API route are not shipped in this tree yet.
+5. Enter safe mode with `franken-node safe-mode enter --reason trust-corruption --operator-id <operator-id> --trust-state-hash <current-trust-hash> --json`, or call `POST /api/v1/control/safe-mode/enter` from the control-plane integration that owns the runtime state.
 6. Notify on-call security team via incident channel.
 
 ## Investigation
@@ -67,8 +67,13 @@ pipeline completes successfully in a staging environment.
 
 - `franken-node trust scan --deep --audit`
 - `franken-node ops health-check --json`
+- `franken-node safe-mode enter --reason trust-corruption --operator-id <operator-id> --trust-state-hash <current-trust-hash> --json`
+- `franken-node safe-mode status --json`
+- `franken-node safe-mode exit --operator-id <operator-id> --confirm --trust-state-consistent --no-unresolved-incidents --evidence-ledger-intact --json`
+- `POST /api/v1/control/safe-mode/enter`
+- `GET /api/v1/control/safe-mode/status`
+- `POST /api/v1/control/safe-mode/exit`
 - Runtime safe-mode model: `crates/franken-node/src/runtime/safe_mode.rs`
-- Not shipped yet: `franken-node safe-mode ...` and `POST /api/v1/control/safe-mode/enter`
 
 ## Cross-References
 

@@ -121,6 +121,10 @@ pub enum Command {
     #[command(subcommand)]
     Runtime(RuntimeCommand),
 
+    /// Safe-mode operator lifecycle control.
+    #[command(subcommand, name = "safe-mode")]
+    SafeMode(SafeModeCommand),
+
     /// Migration audit, rewrite, and validation workflows.
     #[command(subcommand)]
     Migrate(MigrateCommand),
@@ -364,6 +368,117 @@ pub struct RuntimeEpochArgs {
     /// Peer control epoch to compare against.
     #[arg(long)]
     pub peer_epoch: Option<u64>,
+
+    /// Emit structured JSON output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+// -- safe-mode --
+
+#[derive(Debug, Subcommand)]
+pub enum SafeModeCommand {
+    /// Enter safe mode and persist operator state.
+    Enter(SafeModeEnterArgs),
+
+    /// Inspect persisted safe-mode state.
+    Status(SafeModeStatusArgs),
+
+    /// Exit safe mode after explicit operator confirmation and pre-exit checks.
+    Exit(SafeModeExitArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct SafeModeEnterArgs {
+    /// Entry reason: explicit-flag, environment-variable, config-field, trust-corruption, crash-loop, or epoch-mismatch.
+    #[arg(long)]
+    pub reason: String,
+
+    /// Operator identity requesting the transition.
+    #[arg(long)]
+    pub operator_id: String,
+
+    /// Trust state hash recorded in the safe-mode entry receipt.
+    #[arg(long)]
+    pub trust_state_hash: String,
+
+    /// Inconsistency found during trust re-verification. Repeat for multiple findings.
+    #[arg(long = "inconsistency")]
+    pub inconsistencies: Vec<String>,
+
+    /// Crash count for --reason crash-loop.
+    #[arg(long)]
+    pub crash_count: Option<u32>,
+
+    /// Crash-loop window in seconds for --reason crash-loop.
+    #[arg(long)]
+    pub crash_window_secs: Option<u64>,
+
+    /// Local epoch for --reason epoch-mismatch.
+    #[arg(long)]
+    pub local_epoch: Option<u64>,
+
+    /// Peer epoch for --reason epoch-mismatch.
+    #[arg(long)]
+    pub peer_epoch: Option<u64>,
+
+    /// RFC3339 timestamp override for deterministic tests.
+    #[arg(long)]
+    pub timestamp: Option<String>,
+
+    /// Directory containing the persisted safe-mode state file.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub state_dir: Option<PathBuf>,
+
+    /// Emit structured JSON output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct SafeModeStatusArgs {
+    /// RFC3339 timestamp override for deterministic duration reporting.
+    #[arg(long)]
+    pub timestamp: Option<String>,
+
+    /// Directory containing the persisted safe-mode state file.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub state_dir: Option<PathBuf>,
+
+    /// Emit structured JSON output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct SafeModeExitArgs {
+    /// Operator identity requesting safe-mode exit.
+    #[arg(long)]
+    pub operator_id: String,
+
+    /// Explicit operator confirmation for the transition.
+    #[arg(long)]
+    pub confirm: bool,
+
+    /// Pre-exit check: trust state is consistent.
+    #[arg(long)]
+    pub trust_state_consistent: bool,
+
+    /// Pre-exit check: no unresolved incidents remain.
+    #[arg(long)]
+    pub no_unresolved_incidents: bool,
+
+    /// Pre-exit check: evidence ledger is intact.
+    #[arg(long)]
+    pub evidence_ledger_intact: bool,
+
+    /// RFC3339 timestamp override for deterministic tests.
+    #[arg(long)]
+    pub timestamp: Option<String>,
+
+    /// Directory containing the persisted safe-mode state file.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub state_dir: Option<PathBuf>,
 
     /// Emit structured JSON output.
     #[arg(long)]
@@ -1841,7 +1956,7 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
-    fn run_parses_lockstep_and_runtime_options() {
+    fn run_parses_lockstep_and_runtime_options() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
             "run",
@@ -1853,20 +1968,22 @@ mod parser_contract_extra_tests {
             "--lockstep-preflight",
             "--json",
         ])
-        .expect("run command should parse");
+        .map_err(|err| err.to_string())?;
 
-        let Command::Run(args) = cli.command else {
-            panic!("expected run command");
+        let args = match cli.command {
+            Command::Run(args) => args,
+            other => return Err(format!("expected run command, got {other:?}")),
         };
         assert_eq!(args.app_path, PathBuf::from("app.js"));
         assert_eq!(args.runtime.as_deref(), Some("node"));
         assert_eq!(args.policy, "strict");
         assert!(args.lockstep_preflight);
         assert!(args.json);
+        Ok(())
     }
 
     #[test]
-    fn fleet_agent_parses_once_mode_with_cycle_limit() {
+    fn fleet_agent_parses_once_mode_with_cycle_limit() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
             "fleet",
@@ -1879,19 +1996,21 @@ mod parser_contract_extra_tests {
             "3",
             "--once",
         ])
-        .expect("fleet agent command should parse");
+        .map_err(|err| err.to_string())?;
 
-        let Command::Fleet(FleetCommand::Agent(args)) = cli.command else {
-            panic!("expected fleet agent command");
+        let args = match cli.command {
+            Command::Fleet(FleetCommand::Agent(args)) => args,
+            other => return Err(format!("expected fleet agent command, got {other:?}")),
         };
         assert_eq!(args.zone, "us-east");
         assert_eq!(args.node_id.as_deref(), Some("node-7"));
         assert_eq!(args.max_cycles, Some(3));
         assert!(args.once);
+        Ok(())
     }
 
     #[test]
-    fn fleet_describe_parses_optional_zone_and_json() {
+    fn fleet_describe_parses_optional_zone_and_json() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
             "fleet",
@@ -1901,29 +2020,98 @@ mod parser_contract_extra_tests {
             "us-east",
             "--json",
         ])
-        .expect("fleet describe command should parse");
+        .map_err(|err| err.to_string())?;
 
-        let Command::Fleet(FleetCommand::Describe(args)) = cli.command else {
-            panic!("expected fleet describe command");
+        let args = match cli.command {
+            Command::Fleet(FleetCommand::Describe(args)) => args,
+            other => return Err(format!("expected fleet describe command, got {other:?}")),
         };
         assert_eq!(args.node_id, "node-7");
         assert_eq!(args.zone.as_deref(), Some("us-east"));
         assert!(args.json);
+        Ok(())
     }
 
     #[test]
-    fn ops_health_check_parses_json_flag() {
-        let cli = parse(&["franken-node", "ops", "health-check", "--json"])
-            .expect("ops health-check command should parse");
+    fn safe_mode_enter_parses_operator_surface() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "safe-mode",
+            "enter",
+            "--reason",
+            "trust-corruption",
+            "--operator-id",
+            "secops-1",
+            "--trust-state-hash",
+            "sha256:abc",
+            "--inconsistency",
+            "ledger hash mismatch",
+            "--state-dir",
+            ".franken-node/safe-mode",
+            "--json",
+        ])
+        .map_err(|err| err.to_string())?;
 
-        let Command::Ops(OpsCommand::HealthCheck(args)) = cli.command else {
-            panic!("expected ops health-check command");
+        let args = match cli.command {
+            Command::SafeMode(SafeModeCommand::Enter(args)) => args,
+            other => return Err(format!("expected safe-mode enter command, got {other:?}")),
+        };
+        assert_eq!(args.reason, "trust-corruption");
+        assert_eq!(args.operator_id, "secops-1");
+        assert_eq!(args.trust_state_hash, "sha256:abc");
+        assert_eq!(args.inconsistencies, vec!["ledger hash mismatch"]);
+        assert_eq!(
+            args.state_dir,
+            Some(PathBuf::from(".franken-node/safe-mode"))
+        );
+        assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn safe_mode_exit_parses_fail_closed_checks() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "safe-mode",
+            "exit",
+            "--operator-id",
+            "secops-1",
+            "--confirm",
+            "--trust-state-consistent",
+            "--no-unresolved-incidents",
+            "--evidence-ledger-intact",
+            "--json",
+        ])
+        .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::SafeMode(SafeModeCommand::Exit(args)) => args,
+            other => return Err(format!("expected safe-mode exit command, got {other:?}")),
+        };
+        assert_eq!(args.operator_id, "secops-1");
+        assert!(args.confirm);
+        assert!(args.trust_state_consistent);
+        assert!(args.no_unresolved_incidents);
+        assert!(args.evidence_ledger_intact);
+        assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn ops_health_check_parses_json_flag() -> Result<(), String> {
+        let cli = parse(&["franken-node", "ops", "health-check", "--json"])
+            .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::Ops(OpsCommand::HealthCheck(args)) => args,
+            other => return Err(format!("expected ops health-check command, got {other:?}")),
         };
         assert!(args.json);
+        Ok(())
     }
 
     #[test]
-    fn ops_resource_governor_parses_snapshot_hints_and_json() {
+    fn ops_resource_governor_parses_snapshot_hints_and_json() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
             "ops",
@@ -1947,10 +2135,15 @@ mod parser_contract_extra_tests {
             "rg-cli-test",
             "--json",
         ])
-        .expect("ops resource-governor command should parse");
+        .map_err(|err| err.to_string())?;
 
-        let Command::Ops(OpsCommand::ResourceGovernor(args)) = cli.command else {
-            std::panic::panic_any("expected ops resource-governor command");
+        let args = match cli.command {
+            Command::Ops(OpsCommand::ResourceGovernor(args)) => args,
+            other => {
+                return Err(format!(
+                    "expected ops resource-governor command, got {other:?}"
+                ));
+            }
         };
         assert_eq!(
             args.process_snapshot,
@@ -1965,10 +2158,11 @@ mod parser_contract_extra_tests {
         assert!(args.source_only_allowed);
         assert_eq!(args.trace_id, "rg-cli-test");
         assert!(args.json);
+        Ok(())
     }
 
     #[test]
-    fn ops_validation_readiness_parses_input_receipts_and_json() {
+    fn ops_validation_readiness_parses_input_receipts_and_json() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
             "ops",
@@ -1983,10 +2177,15 @@ mod parser_contract_extra_tests {
             "vr-cli-test",
             "--json",
         ])
-        .expect("ops validation-readiness command should parse");
+        .map_err(|err| err.to_string())?;
 
-        let Command::Ops(OpsCommand::ValidationReadiness(args)) = cli.command else {
-            std::panic::panic_any("expected ops validation-readiness command");
+        let args = match cli.command {
+            Command::Ops(OpsCommand::ValidationReadiness(args)) => args,
+            other => {
+                return Err(format!(
+                    "expected ops validation-readiness command, got {other:?}"
+                ));
+            }
         };
         assert_eq!(
             args.input,
@@ -2003,10 +2202,11 @@ mod parser_contract_extra_tests {
         );
         assert_eq!(args.trace_id, "vr-cli-test");
         assert!(args.json);
+        Ok(())
     }
 
     #[test]
-    fn ops_validation_closeout_parses_receipt_paths_and_json() {
+    fn ops_validation_closeout_parses_receipt_paths_and_json() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
             "ops",
@@ -2025,10 +2225,15 @@ mod parser_contract_extra_tests {
             "vc-cli-test",
             "--json",
         ])
-        .expect("ops validation-closeout command should parse");
+        .map_err(|err| err.to_string())?;
 
-        let Command::Ops(OpsCommand::ValidationCloseout(args)) = cli.command else {
-            std::panic::panic_any("expected ops validation-closeout command");
+        let args = match cli.command {
+            Command::Ops(OpsCommand::ValidationCloseout(args)) => args,
+            other => {
+                return Err(format!(
+                    "expected ops validation-closeout command, got {other:?}"
+                ));
+            }
         };
         assert_eq!(args.bead_id, "bd-y4mkq");
         assert_eq!(
@@ -2050,10 +2255,11 @@ mod parser_contract_extra_tests {
         assert_eq!(args.max_output_bytes, 128);
         assert_eq!(args.trace_id, "vc-cli-test");
         assert!(args.json);
+        Ok(())
     }
 
     #[test]
-    fn ops_config_audit_parses_profile_config_and_json() {
+    fn ops_config_audit_parses_profile_config_and_json() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
             "ops",
@@ -2066,26 +2272,30 @@ mod parser_contract_extra_tests {
             "--trace-id",
             "ops-config-audit-test",
         ])
-        .expect("ops config-audit command should parse");
+        .map_err(|err| err.to_string())?;
 
-        let Command::Ops(OpsCommand::ConfigAudit(args)) = cli.command else {
-            panic!("expected ops config-audit command");
+        let args = match cli.command {
+            Command::Ops(OpsCommand::ConfigAudit(args)) => args,
+            other => return Err(format!("expected ops config-audit command, got {other:?}")),
         };
         assert_eq!(args.config, Some(PathBuf::from("franken_node.toml")));
         assert_eq!(args.profile.as_deref(), Some("strict"));
         assert!(args.json);
         assert_eq!(args.trace_id, "ops-config-audit-test");
+        Ok(())
     }
 
     #[test]
-    fn ops_metrics_parses_prometheus_format() {
+    fn ops_metrics_parses_prometheus_format() -> Result<(), String> {
         let cli = parse(&["franken-node", "ops", "metrics", "--format", "prometheus"])
-            .expect("ops metrics command should parse");
+            .map_err(|err| err.to_string())?;
 
-        let Command::Ops(OpsCommand::Metrics(args)) = cli.command else {
-            panic!("expected ops metrics command");
+        let args = match cli.command {
+            Command::Ops(OpsCommand::Metrics(args)) => args,
+            other => return Err(format!("expected ops metrics command, got {other:?}")),
         };
         assert_eq!(args.format, OpsMetricsFormat::Prometheus);
+        Ok(())
     }
 }
 

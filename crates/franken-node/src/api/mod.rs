@@ -13,6 +13,7 @@ pub mod fleet_control_routes;
 pub mod fleet_quarantine;
 pub mod middleware;
 pub mod operator_routes;
+pub mod safe_mode_routes;
 pub mod service;
 pub mod session_auth;
 pub mod trust_card_routes;
@@ -127,6 +128,11 @@ mod tests {
         assert_eq!(catalog.len(), service::all_route_metadata().len());
         assert_eq!(report.endpoints.len(), catalog.len());
         assert!(catalog.iter().any(|entry| entry.group == "operator"));
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.path == "/api/v1/control/safe-mode/status")
+        );
         assert!(catalog.iter().any(|entry| entry.group == "verifier"));
         assert!(catalog.iter().any(|entry| entry.group == "fleet_control"));
         assert!(catalog.iter().all(|entry| !entry.policy_hook.is_empty()));

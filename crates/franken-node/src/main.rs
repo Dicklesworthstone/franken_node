@@ -96,8 +96,9 @@ use crate::cli::{
     OpsMetricsFormat, OpsResourceGovernorArgs, OpsValidationCloseoutArgs,
     OpsValidationReadinessArgs, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
     RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand,
-    TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
-    VerifyMigrationArgs, VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
+    SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
+    TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
+    VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
     load_doctor_policy_activation_input,
 };
 use crate::policy::{
@@ -5528,6 +5529,307 @@ fn emit_json_or_human<T: Serialize>(
         println!("{}", human());
     }
     Ok(())
+}
+
+const SAFE_MODE_CLI_SCHEMA_VERSION: &str = "franken-node/safe-mode-cli/v1";
+
+#[derive(Debug, Serialize)]
+struct SafeModeCliReport {
+    schema_version: &'static str,
+    command: &'static str,
+    ok: bool,
+    state_path: String,
+    operator_id: Option<String>,
+    status: runtime::safe_mode::SafeModeStatus,
+    events: Vec<runtime::safe_mode::SafeModeEvent>,
+    entry_receipt: Option<runtime::safe_mode::SafeModeEntryReceipt>,
+}
+
+#[derive(Debug, Serialize)]
+struct SafeModeCliErrorReport {
+    schema_version: &'static str,
+    command: &'static str,
+    ok: bool,
+    state_path: String,
+    error: String,
+    recovery_hint: String,
+}
+
+fn safe_mode_timestamp(timestamp: Option<&str>) -> String {
+    timestamp
+        .map(str::to_string)
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339())
+}
+
+fn safe_mode_state_path(state_dir: Option<&Path>) -> PathBuf {
+    state_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".franken-node/safe-mode"))
+        .join("state.json")
+}
+
+fn reject_nul_field(value: &str, field: &str) -> Result<()> {
+    if value.contains('\0') {
+        anyhow::bail!("{field} must not contain NUL bytes");
+    }
+    Ok(())
+}
+
+fn parse_safe_mode_reason(
+    args: &SafeModeEnterArgs,
+) -> Result<runtime::safe_mode::SafeModeEntryReason> {
+    let normalized = args.reason.trim().replace('_', "-").to_ascii_lowercase();
+    match normalized.as_str() {
+        "explicit-flag" => Ok(runtime::safe_mode::SafeModeEntryReason::ExplicitFlag),
+        "environment-variable" => Ok(runtime::safe_mode::SafeModeEntryReason::EnvironmentVariable),
+        "config-field" => Ok(runtime::safe_mode::SafeModeEntryReason::ConfigField),
+        "trust-corruption" => Ok(runtime::safe_mode::SafeModeEntryReason::TrustCorruption),
+        "crash-loop" => {
+            let crash_count = args
+                .crash_count
+                .ok_or_else(|| anyhow::anyhow!("--reason crash-loop requires --crash-count"))?;
+            let window_secs = args.crash_window_secs.ok_or_else(|| {
+                anyhow::anyhow!("--reason crash-loop requires --crash-window-secs")
+            })?;
+            Ok(runtime::safe_mode::SafeModeEntryReason::CrashLoop {
+                crash_count,
+                window_secs,
+            })
+        }
+        "epoch-mismatch" => {
+            let local_epoch = args
+                .local_epoch
+                .ok_or_else(|| anyhow::anyhow!("--reason epoch-mismatch requires --local-epoch"))?;
+            let peer_epoch = args
+                .peer_epoch
+                .ok_or_else(|| anyhow::anyhow!("--reason epoch-mismatch requires --peer-epoch"))?;
+            Ok(runtime::safe_mode::SafeModeEntryReason::EpochMismatch {
+                local_epoch,
+                peer_epoch,
+            })
+        }
+        _ => anyhow::bail!(
+            "invalid --reason `{}`; expected one of explicit-flag, environment-variable, config-field, trust-corruption, crash-loop, epoch-mismatch",
+            args.reason
+        ),
+    }
+}
+
+fn load_safe_mode_controller(
+    state_path: &Path,
+    missing_as_inactive: bool,
+) -> Result<runtime::safe_mode::SafeModeController> {
+    match std::fs::read(state_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("failed parsing safe-mode state {}", state_path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && missing_as_inactive => {
+            Ok(runtime::safe_mode::SafeModeController::with_default_config())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("safe-mode state is unavailable at {}", state_path.display())
+        }
+        Err(err) => Err(err)
+            .with_context(|| format!("failed reading safe-mode state {}", state_path.display())),
+    }
+}
+
+fn persist_safe_mode_controller(
+    state_path: &Path,
+    controller: &runtime::safe_mode::SafeModeController,
+) -> Result<()> {
+    if let Some(parent) = state_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating safe-mode state dir {}", parent.display()))?;
+    }
+    let bytes =
+        serde_json::to_vec_pretty(controller).context("failed serializing safe-mode state")?;
+    std::fs::write(state_path, bytes)
+        .with_context(|| format!("failed writing safe-mode state {}", state_path.display()))
+}
+
+fn safe_mode_report(
+    command: &'static str,
+    state_path: &Path,
+    operator_id: Option<String>,
+    controller: &runtime::safe_mode::SafeModeController,
+    timestamp: &str,
+) -> SafeModeCliReport {
+    SafeModeCliReport {
+        schema_version: SAFE_MODE_CLI_SCHEMA_VERSION,
+        command,
+        ok: true,
+        state_path: state_path.display().to_string(),
+        operator_id,
+        status: controller.status(timestamp),
+        events: controller.events().to_vec(),
+        entry_receipt: controller.entry_receipt().cloned(),
+    }
+}
+
+fn emit_safe_mode_report(report: &SafeModeCliReport, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+
+    let active = report.status.safe_mode_active;
+    let reason = report
+        .status
+        .entry_reason
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "none".to_string());
+    println!(
+        "{}: active={} reason={} suspended={} state={}",
+        report.command,
+        active,
+        reason,
+        report.status.suspended_capabilities.len(),
+        report.state_path
+    );
+    Ok(())
+}
+
+fn emit_safe_mode_error(
+    command: &'static str,
+    state_path: &Path,
+    json: bool,
+    error: &str,
+    recovery_hint: &str,
+) -> Result<()> {
+    if json {
+        let report = SafeModeCliErrorReport {
+            schema_version: SAFE_MODE_CLI_SCHEMA_VERSION,
+            command,
+            ok: false,
+            state_path: state_path.display().to_string(),
+            error: error.to_string(),
+            recovery_hint: recovery_hint.to_string(),
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        eprintln!("{command} failed: {error}");
+        eprintln!("recovery: {recovery_hint}");
+    }
+    Ok(())
+}
+
+fn handle_safe_mode_enter_command(args: SafeModeEnterArgs) -> Result<()> {
+    let state_path = safe_mode_state_path(args.state_dir.as_deref());
+    let reason = match parse_safe_mode_reason(&args) {
+        Ok(reason) => reason,
+        Err(err) => {
+            let message = err.to_string();
+            emit_safe_mode_error(
+                "safe-mode.enter",
+                &state_path,
+                args.json,
+                &message,
+                "Use --reason explicit-flag, environment-variable, config-field, trust-corruption, crash-loop, or epoch-mismatch with required reason fields",
+            )?;
+            anyhow::bail!(message);
+        }
+    };
+    reject_nul_field(&args.operator_id, "--operator-id")?;
+    reject_nul_field(&args.trust_state_hash, "--trust-state-hash")?;
+    for inconsistency in &args.inconsistencies {
+        reject_nul_field(inconsistency, "--inconsistency")?;
+    }
+
+    let mut controller = runtime::safe_mode::SafeModeController::with_default_config();
+    controller.set_flags(runtime::safe_mode::OperationFlags::safe_mode_only());
+    let timestamp = safe_mode_timestamp(args.timestamp.as_deref());
+    controller.enter_safe_mode(
+        reason,
+        &timestamp,
+        &args.trust_state_hash,
+        args.inconsistencies,
+    );
+    persist_safe_mode_controller(&state_path, &controller)?;
+    let report = safe_mode_report(
+        "safe-mode.enter",
+        &state_path,
+        Some(args.operator_id),
+        &controller,
+        &timestamp,
+    );
+    emit_safe_mode_report(&report, args.json)
+}
+
+fn handle_safe_mode_status_command(args: SafeModeStatusArgs) -> Result<()> {
+    let state_path = safe_mode_state_path(args.state_dir.as_deref());
+    let controller = load_safe_mode_controller(&state_path, true)?;
+    let timestamp = safe_mode_timestamp(args.timestamp.as_deref());
+    let report = safe_mode_report(
+        "safe-mode.status",
+        &state_path,
+        None,
+        &controller,
+        &timestamp,
+    );
+    emit_safe_mode_report(&report, args.json)
+}
+
+fn handle_safe_mode_exit_command(args: SafeModeExitArgs) -> Result<()> {
+    let state_path = safe_mode_state_path(args.state_dir.as_deref());
+    reject_nul_field(&args.operator_id, "--operator-id")?;
+    let mut controller = match load_safe_mode_controller(&state_path, false) {
+        Ok(controller) => controller,
+        Err(err) => {
+            let message = err.to_string();
+            emit_safe_mode_error(
+                "safe-mode.exit",
+                &state_path,
+                args.json,
+                &message,
+                "Run `franken-node safe-mode status --json` to inspect state, then enter safe mode before exit",
+            )?;
+            anyhow::bail!(message);
+        }
+    };
+    let timestamp = safe_mode_timestamp(args.timestamp.as_deref());
+    let verification = runtime::safe_mode::ExitVerification {
+        trust_state_consistent: args.trust_state_consistent,
+        no_unresolved_incidents: args.no_unresolved_incidents,
+        evidence_ledger_intact: args.evidence_ledger_intact,
+        operator_confirmed: args.confirm,
+    };
+
+    match controller.exit_safe_mode(&verification, &args.operator_id, &timestamp) {
+        Ok(()) => {
+            persist_safe_mode_controller(&state_path, &controller)?;
+            let report = safe_mode_report(
+                "safe-mode.exit",
+                &state_path,
+                Some(args.operator_id),
+                &controller,
+                &timestamp,
+            );
+            emit_safe_mode_report(&report, args.json)
+        }
+        Err(err) => {
+            let message = err.to_string();
+            persist_safe_mode_controller(&state_path, &controller)?;
+            emit_safe_mode_error(
+                "safe-mode.exit",
+                &state_path,
+                args.json,
+                &message,
+                "Pass --confirm only after trust-state, incident, and evidence-ledger pre-exit checks are true",
+            )?;
+            anyhow::bail!(message);
+        }
+    }
+}
+
+fn handle_safe_mode_command(command: SafeModeCommand) -> Result<()> {
+    match command {
+        SafeModeCommand::Enter(args) => handle_safe_mode_enter_command(args),
+        SafeModeCommand::Status(args) => handle_safe_mode_status_command(args),
+        SafeModeCommand::Exit(args) => handle_safe_mode_exit_command(args),
+    }
 }
 
 fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
@@ -24634,6 +24936,10 @@ fn main() -> Result<()> {
 
         Command::Runtime(sub) => {
             handle_runtime_command(sub)?;
+        }
+
+        Command::SafeMode(sub) => {
+            handle_safe_mode_command(sub)?;
         }
 
         Command::Migrate(sub) => match sub {

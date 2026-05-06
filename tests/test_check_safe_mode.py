@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import check_safe_mode as checker
+import check_safe_mode as checker  # noqa: E402
 
 
 class TestFileExistence(unittest.TestCase):
@@ -34,6 +35,23 @@ class TestFileExistence(unittest.TestCase):
         result = checker.run_all()
         mod_check = next(c for c in result["checks"] if c["name"] == "module_registered")
         self.assertTrue(mod_check["passed"], mod_check["detail"])
+
+
+class TestOperatorSurface(unittest.TestCase):
+    def test_cli_operator_surface(self):
+        result = checker.run_all()
+        check = next(c for c in result["checks"] if c["name"] == "cli_operator_surface")
+        self.assertTrue(check["passed"], check["detail"])
+
+    def test_api_operator_surface(self):
+        result = checker.run_all()
+        check = next(c for c in result["checks"] if c["name"] == "api_operator_surface")
+        self.assertTrue(check["passed"], check["detail"])
+
+    def test_operator_docs_surface(self):
+        result = checker.run_all()
+        check = next(c for c in result["checks"] if c["name"] == "operator_docs_surface")
+        self.assertTrue(check["passed"], check["detail"])
 
 
 class TestEventCodes(unittest.TestCase):
@@ -247,7 +265,7 @@ class TestSafeRel(unittest.TestCase):
         self.assertIn("safe_mode.rs", rel)
 
     def test_path_outside_root(self):
-        outside = Path("/tmp/something/else.txt")
+        outside = Path(tempfile.gettempdir()) / "something" / "else.txt"
         rel = checker._safe_rel(outside)
         self.assertEqual(rel, str(outside))
 
@@ -271,19 +289,21 @@ class TestJsonOutput(unittest.TestCase):
     def test_cli_json(self):
         proc = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_safe_mode.py"), "--json"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=30, check=True,
         )
         # May not be PASS yet if evidence/summary not written, but should be valid JSON
-        data = json.loads(proc.stdout)
+        try:
+            data = json.JSONDecoder().decode(proc.stdout)
+        except json.JSONDecodeError as exc:
+            self.fail(f"checker did not emit valid JSON: {exc}: {proc.stdout!r}")
         self.assertEqual(data["bead_id"], "bd-k6o")
         self.assertIn("checks", data)
 
     def test_cli_self_test(self):
         proc = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_safe_mode.py"), "--self-test"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=30, check=True,
         )
-        self.assertEqual(proc.returncode, 0)
         self.assertIn("self_test passed", proc.stdout)
 
 

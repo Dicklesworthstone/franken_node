@@ -89,13 +89,20 @@ specific capability but still applies to other write operations.
 ## Current Shipped Operator Surface
 
 The shipped tree contains the deterministic runtime safe-mode model in
-`crates/franken-node/src/runtime/safe_mode.rs`. It does not currently ship a
-standalone `franken-node safe-mode ...` CLI subcommand or
-`/api/v1/control/safe-mode/*` control-plane route. Operators should use the
-deployment integration that owns the `SafeModeController` state, plus the
-shipped diagnostics `franken-node ops health-check --json` and
-`franken-node trust scan --deep --audit`, until a first-class CLI/API surface is
-implemented.
+`crates/franken-node/src/runtime/safe_mode.rs` and first-class operator
+surfaces for the same lifecycle:
+
+- CLI: `franken-node safe-mode enter`, `franken-node safe-mode status`, and
+  `franken-node safe-mode exit`.
+- API catalog/handlers: `POST /api/v1/control/safe-mode/enter`,
+  `GET /api/v1/control/safe-mode/status`, and
+  `POST /api/v1/control/safe-mode/exit`.
+
+Both surfaces use `SafeModeController` rather than a parallel state model. The
+CLI persists controller state under `.franken-node/safe-mode/state.json` by
+default, or under the directory passed with `--state-dir`. Exit requests fail
+closed unless the operator identity, `--confirm`, trust-state consistency,
+incident resolution, and evidence-ledger checks are all present.
 
 ## Recovery Procedures
 
@@ -110,19 +117,19 @@ Before exiting safe mode, the following conditions MUST be verified:
 3. **Evidence ledger intact**: The evidence ledger is complete and hash
    chain is valid.
 4. **Operator confirmation**: The operator explicitly confirms the transition
-   through the deployment integration that calls
-   `SafeModeController::exit_safe_mode(...)`.
+   with `franken-node safe-mode exit --confirm ...` or the matching control-plane
+   exit request.
 
 ### Exit Procedure
 
-1. Operator requests exit through the deployment integration that owns
-   `SafeModeController` state.
+1. Operator requests exit through `franken-node safe-mode exit` or
+   `POST /api/v1/control/safe-mode/exit`.
 2. System runs pre-exit verification checklist.
 3. If all checks pass, system prompts for confirmation.
 4. Operator confirms.
 5. System restores suspended capabilities in deterministic order.
 6. System logs exit event with operator identity and timestamp.
-7. System emits SMO-001 event for the transition.
+7. System emits SMO-005 and SMO-007 events for deactivation and exit clearance.
 
 ### Failed Exit
 

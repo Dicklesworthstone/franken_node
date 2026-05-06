@@ -488,6 +488,139 @@ fn doctor_json_output() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn safe_mode_cli_json_enter_status_exit_round_trip() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    let state_arg = "safe-mode-state";
+
+    let mut enter = Command::cargo_bin("franken-node")?;
+    let enter_assertion = enter
+        .current_dir(temp.path())
+        .args([
+            "safe-mode",
+            "enter",
+            "--reason",
+            "trust-corruption",
+            "--operator-id",
+            "secops-1",
+            "--trust-state-hash",
+            "sha256:trusted",
+            "--timestamp",
+            "2026-05-06T16:00:00Z",
+            "--state-dir",
+            state_arg,
+            "--json",
+        ])
+        .assert()
+        .success();
+    let enter_json = parse_json_stdout("safe-mode enter", &enter_assertion.get_output().stdout)?;
+    assert_eq!(
+        enter_json["schema_version"],
+        json!("franken-node/safe-mode-cli/v1")
+    );
+    assert_eq!(enter_json["command"], json!("safe-mode.enter"));
+    assert_eq!(enter_json["status"]["safe_mode_active"], json!(true));
+
+    let mut status = Command::cargo_bin("franken-node")?;
+    let status_assertion = status
+        .current_dir(temp.path())
+        .args([
+            "safe-mode",
+            "status",
+            "--timestamp",
+            "2026-05-06T16:02:00Z",
+            "--state-dir",
+            state_arg,
+            "--json",
+        ])
+        .assert()
+        .success();
+    let status_json = parse_json_stdout("safe-mode status", &status_assertion.get_output().stdout)?;
+    assert_eq!(status_json["command"], json!("safe-mode.status"));
+    assert_eq!(status_json["status"]["safe_mode_active"], json!(true));
+    assert_eq!(status_json["status"]["duration_seconds"], json!(120));
+
+    let mut exit = Command::cargo_bin("franken-node")?;
+    let exit_assertion = exit
+        .current_dir(temp.path())
+        .args([
+            "safe-mode",
+            "exit",
+            "--operator-id",
+            "secops-1",
+            "--confirm",
+            "--trust-state-consistent",
+            "--no-unresolved-incidents",
+            "--evidence-ledger-intact",
+            "--timestamp",
+            "2026-05-06T16:03:00Z",
+            "--state-dir",
+            state_arg,
+            "--json",
+        ])
+        .assert()
+        .success();
+    let exit_json = parse_json_stdout("safe-mode exit", &exit_assertion.get_output().stdout)?;
+    assert_eq!(exit_json["command"], json!("safe-mode.exit"));
+    assert_eq!(exit_json["status"]["safe_mode_active"], json!(false));
+    Ok(())
+}
+
+#[test]
+fn safe_mode_cli_exit_without_confirmation_fails_closed_json() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    let state_arg = "safe-mode-state";
+
+    Command::cargo_bin("franken-node")?
+        .current_dir(temp.path())
+        .args([
+            "safe-mode",
+            "enter",
+            "--reason",
+            "trust-corruption",
+            "--operator-id",
+            "secops-1",
+            "--trust-state-hash",
+            "sha256:trusted",
+            "--timestamp",
+            "2026-05-06T16:00:00Z",
+            "--state-dir",
+            state_arg,
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let mut exit = Command::cargo_bin("franken-node")?;
+    let exit_assertion = exit
+        .current_dir(temp.path())
+        .args([
+            "safe-mode",
+            "exit",
+            "--operator-id",
+            "secops-1",
+            "--trust-state-consistent",
+            "--no-unresolved-incidents",
+            "--evidence-ledger-intact",
+            "--timestamp",
+            "2026-05-06T16:03:00Z",
+            "--state-dir",
+            state_arg,
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let exit_json = parse_json_stdout("safe-mode exit", &exit_assertion.get_output().stdout)?;
+    assert_eq!(exit_json["ok"], json!(false));
+    assert!(
+        exit_json["error"]
+            .as_str()
+            .expect("error string")
+            .contains("operator_confirmed")
+    );
+    Ok(())
+}
+
+#[test]
 fn cli_json_golden_verify_release_output() -> Result<(), Box<dyn Error>> {
     let temp = TempDir::new()?;
     let release_dir = temp.path().join("release");

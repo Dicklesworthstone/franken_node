@@ -13,16 +13,23 @@ import json
 import re
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 IMPL = ROOT / "crates" / "franken-node" / "src" / "runtime" / "safe_mode.rs"
 MOD_RS = ROOT / "crates" / "franken-node" / "src" / "runtime" / "mod.rs"
+CLI = ROOT / "crates" / "franken-node" / "src" / "cli.rs"
+MAIN = ROOT / "crates" / "franken-node" / "src" / "main.rs"
+API_SAFE_MODE = ROOT / "crates" / "franken-node" / "src" / "api" / "safe_mode_routes.rs"
+API_MOD = ROOT / "crates" / "franken-node" / "src" / "api" / "mod.rs"
+API_SERVICE = ROOT / "crates" / "franken-node" / "src" / "api" / "service.rs"
 SPEC = ROOT / "docs" / "specs" / "section_10_8" / "bd-k6o_contract.md"
 POLICY = ROOT / "docs" / "policy" / "safe_mode_operations.md"
+RUNBOOK = ROOT / "docs" / "runbooks" / "trust_state_corruption.md"
+RUNBOOK_FIXTURE = ROOT / "fixtures" / "runbooks" / "rb_001_trust_state_corruption.json"
 EVIDENCE = ROOT / "artifacts" / "section_10_8" / "bd-k6o" / "verification_evidence.json"
 SUMMARY = ROOT / "artifacts" / "section_10_8" / "bd-k6o" / "verification_summary.md"
 
@@ -239,6 +246,115 @@ def check_policy_exists() -> None:
     _check("policy_exists", ok,
            f"Policy file {'found' if ok else 'MISSING'}: {_safe_rel(POLICY)}")
 
+def check_cli_operator_surface() -> None:
+    missing_files = [p for p in (CLI, MAIN) if not p.is_file()]
+    if missing_files:
+        _check(
+            "cli_operator_surface",
+            False,
+            "missing files: " + ", ".join(_safe_rel(p) for p in missing_files),
+        )
+        return
+    cli_text = CLI.read_text()
+    main_text = MAIN.read_text()
+    required_cli = [
+        "SafeMode(SafeModeCommand)",
+        "pub enum SafeModeCommand",
+        "pub struct SafeModeEnterArgs",
+        "pub struct SafeModeStatusArgs",
+        "pub struct SafeModeExitArgs",
+        "pub reason: String",
+        "pub operator_id: String",
+        "pub trust_state_hash: String",
+        "pub confirm: bool",
+        "pub trust_state_consistent: bool",
+        "pub no_unresolved_incidents: bool",
+        "pub evidence_ledger_intact: bool",
+    ]
+    required_main = [
+        "fn handle_safe_mode_command(",
+        "fn handle_safe_mode_enter_command(",
+        "fn handle_safe_mode_status_command(",
+        "fn handle_safe_mode_exit_command(",
+        "SafeModeController::with_default_config()",
+        "persist_safe_mode_controller",
+        "load_safe_mode_controller",
+        "SAFE_MODE_CLI_SCHEMA_VERSION",
+    ]
+    missing = [needle for needle in required_cli if needle not in cli_text]
+    missing.extend(needle for needle in required_main if needle not in main_text)
+    _check(
+        "cli_operator_surface",
+        not missing,
+        "safe-mode CLI enter/status/exit wired" if not missing else f"missing: {missing}",
+    )
+
+
+def check_api_operator_surface() -> None:
+    missing_files = [p for p in (API_SAFE_MODE, API_MOD, API_SERVICE) if not p.is_file()]
+    if missing_files:
+        _check(
+            "api_operator_surface",
+            False,
+            "missing files: " + ", ".join(_safe_rel(p) for p in missing_files),
+        )
+        return
+    route_text = API_SAFE_MODE.read_text()
+    mod_text = API_MOD.read_text()
+    service_text = API_SERVICE.read_text()
+    required = [
+        "SafeModeEnterRequest",
+        "SafeModeExitRequest",
+        "SafeModeOperatorResult",
+        "enter_safe_mode_route",
+        "safe_mode_status_route",
+        "exit_safe_mode_route",
+        "/api/v1/control/safe-mode/enter",
+        "/api/v1/control/safe-mode/status",
+        "/api/v1/control/safe-mode/exit",
+        "pub mod safe_mode_routes;",
+        "routes.extend(safe_mode_routes::route_metadata())",
+    ]
+    combined = "\n".join([route_text, mod_text, service_text])
+    missing = [needle for needle in required if needle not in combined]
+    _check(
+        "api_operator_surface",
+        not missing,
+        "safe-mode API routes wired" if not missing else f"missing: {missing}",
+    )
+
+
+def check_operator_docs_surface() -> None:
+    files = [SPEC, POLICY, RUNBOOK, RUNBOOK_FIXTURE]
+    missing_files = [p for p in files if not p.is_file()]
+    if missing_files:
+        _check(
+            "operator_docs_surface",
+            False,
+            "missing files: " + ", ".join(_safe_rel(p) for p in missing_files),
+        )
+        return
+    combined = "\n".join(p.read_text() for p in files)
+    stale_claims = [
+        "not shipped yet",
+        "does not currently ship a standalone `franken-node safe-mode",
+        "standalone CLI/API status surface is follow-on work",
+        "standalone CLI/API operator surfaces are follow-on work",
+    ]
+    required = [
+        "franken-node safe-mode enter",
+        "franken-node safe-mode status",
+        "franken-node safe-mode exit",
+        "POST /api/v1/control/safe-mode/enter",
+        "GET /api/v1/control/safe-mode/status",
+        "POST /api/v1/control/safe-mode/exit",
+    ]
+    stale = [needle for needle in stale_claims if needle in combined]
+    missing = [needle for needle in required if needle not in combined]
+    ok = not stale and not missing
+    detail = "docs promote shipped CLI/API surface" if ok else f"stale={stale} missing={missing}"
+    _check("operator_docs_surface", ok, detail)
+
 
 def check_module_registered() -> None:
     if not MOD_RS.is_file():
@@ -449,7 +565,7 @@ def check_verification_evidence() -> None:
                f"Evidence file MISSING: {_safe_rel(EVIDENCE)}")
         return
     try:
-        data = json.loads(EVIDENCE.read_text())
+        data = json.JSONDecoder().decode(EVIDENCE.read_text())
         ok = data.get("bead_id") == "bd-k6o" and data.get("status") == "pass"
         _check("verification_evidence", ok,
                "Evidence file valid" if ok else "Evidence has incorrect bead_id or status")
@@ -469,6 +585,9 @@ ALL_CHECKS = [
     check_impl_exists,
     check_spec_exists,
     check_policy_exists,
+    check_cli_operator_surface,
+    check_api_operator_surface,
+    check_operator_docs_surface,
     check_module_registered,
     check_event_codes_in_impl,
     check_event_codes_in_spec,
@@ -516,23 +635,34 @@ def run_all() -> dict:
 def self_test() -> None:
     """Smoke-test: run all checks and assert the structure is valid."""
     result = run_all()
-    assert isinstance(result, dict)
-    assert result["bead_id"] == "bd-k6o"
-    assert result["section"] == "10.8"
-    assert isinstance(result["checks"], list)
-    assert result["total"] == len(result["checks"])
-    assert result["passed"] <= result["total"]
-    assert result["failed"] == result["total"] - result["passed"]
-    assert result["verdict"] in ("PASS", "FAIL")
+    if not isinstance(result, dict):
+        raise AssertionError("run_all must return a dict")
+    if result["bead_id"] != "bd-k6o":
+        raise AssertionError("unexpected bead_id")
+    if result["section"] != "10.8":
+        raise AssertionError("unexpected section")
+    if not isinstance(result["checks"], list):
+        raise AssertionError("checks must be a list")
+    if result["total"] != len(result["checks"]):
+        raise AssertionError("total must match checks length")
+    if result["passed"] > result["total"]:
+        raise AssertionError("passed count exceeds total")
+    if result["failed"] != result["total"] - result["passed"]:
+        raise AssertionError("failed count does not match total - passed")
+    if result["verdict"] not in ("PASS", "FAIL"):
+        raise AssertionError("unexpected verdict")
     for check in result["checks"]:
-        assert "name" in check
-        assert "passed" in check
-        assert "detail" in check
+        if "name" not in check:
+            raise AssertionError("check missing name")
+        if "passed" not in check:
+            raise AssertionError("check missing passed")
+        if "detail" not in check:
+            raise AssertionError("check missing detail")
     print("self_test passed")
 
 
 def main() -> None:
-    logger = configure_test_logging("check_safe_mode")
+    configure_test_logging("check_safe_mode")
     if "--self-test" in sys.argv:
         self_test()
         return
