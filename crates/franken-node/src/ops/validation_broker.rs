@@ -656,7 +656,7 @@ impl FlightRecorderExit {
                     || self.product_failure
                 {
                     return flight_recorder_err(
-                        error_codes::ERR_VFR_INVALID_TIMEOUT_CLASS,
+                        error_codes::ERR_VB_INVALID_TIMEOUT_CLASS,
                         "timeout exits require transport timeout class and retryable infra flags",
                     );
                 }
