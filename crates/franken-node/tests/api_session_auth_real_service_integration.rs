@@ -1,14 +1,12 @@
-//! Real-service integration tests for session-authenticated API endpoints.
+//! LEGACY-UNREGISTERED-SESSION-AUTH-COVERAGE.
 //!
-//! Tests API endpoints with real session authentication under load,
-//! validates session lifecycle, concurrent authentication, and error paths.
-//! No mocked authentication - tests against real session store and auth logic.
+//! This file is not registered as a Cargo `[[test]]` target while it is being
+//! ported to the current `session_auth` API. Active registered coverage lives in
+//! `session_auth_real_lifecycle`, `session_auth_key_roles`, and
+//! `session_auth_real_lifecycle_structured`.
 //!
-//! Follows anti-mock principles:
-//! - Real session authentication service
-//! - Load testing with concurrent sessions
-//! - Structured logging with auth timing
-//! - Comprehensive error path coverage
+//! Retained as source-only audit material for bd-w5ceo; it must not be cited as
+//! executed mock-free coverage until it is ported and registered.
 
 use frankenengine_node::api::{
     error::ApiError,

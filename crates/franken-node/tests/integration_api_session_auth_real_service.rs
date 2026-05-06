@@ -1,11 +1,12 @@
-//! Real-service integration tests for session-authenticated API error paths under load.
+//! LEGACY-UNREGISTERED-SESSION-AUTH-COVERAGE.
 //!
-//! NO MOCKS: Tests actual session authentication behavior under realistic load conditions
-//! with concurrent sessions, authentication failures, timeouts, and error path validation.
+//! This file is not registered as a Cargo `[[test]]` target while it is being
+//! ported to the current `session_auth` API. Active registered coverage lives in
+//! `session_auth_real_lifecycle`, `session_auth_key_roles`, and
+//! `session_auth_real_lifecycle_structured`.
 //!
-//! Mock Risk Score: 35 (Authentication bypass × Timing/race conditions × Load behavior)
-//! Why no mocks: Session authentication timing, concurrent session limits, timeout behavior,
-//! and cryptographic verification can only be validated against real components.
+//! Retained as source-only audit material for bd-w5ceo; it must not be cited as
+//! executed mock-free coverage until it is ported and registered.
 
 use frankenengine_node::api::session_auth::{
     AuthenticatedSession, MessageDirection, SessionConfig, SessionError, SessionEvent,
@@ -89,8 +90,8 @@ impl SessionAuthTestHarness {
         signing_key_id: &str,
         timestamp: u64,
     ) -> [u8; SIGNATURE_LEN] {
-        // This would normally call the real sign_handshake function
-        // For testing, we'll use a mock implementation that matches the expected format
+        // Use the same signing helper as SessionManager validation; this
+        // legacy file is not an active Cargo target until bd-w5ceo ports it.
         use frankenengine_node::api::session_auth::sign_handshake;
         sign_handshake(
             session_id,
@@ -227,13 +228,13 @@ impl SessionAuthTestHarness {
                 "invalid_handshake_mac" => {
                     // Use all zeros as wrong MAC
                     [0u8; SIGNATURE_LEN]
-                },
+                }
                 "tampered_session_id" => {
                     // Generate real MAC with tampered session ID to test validation
                     let tampered_id = format!("tampered-{}", session_id);
                     use frankenengine_node::api::session_auth::sign_handshake;
                     sign_handshake(
-                        &tampered_id,  // Use tampered ID instead of real session_id
+                        &tampered_id, // Use tampered ID instead of real session_id
                         &client_identity,
                         &server_identity,
                         &encryption_key_id,
@@ -242,7 +243,7 @@ impl SessionAuthTestHarness {
                         timestamp,
                         &self.root_secret,
                     )
-                },
+                }
                 "future_timestamp" => {
                     // Generate real MAC with future timestamp to test validation
                     let future_timestamp = SystemTime::now()
@@ -258,10 +259,10 @@ impl SessionAuthTestHarness {
                         &encryption_key_id,
                         &signing_key_id,
                         self.epoch,
-                        future_timestamp,  // Use future timestamp instead of current
+                        future_timestamp, // Use future timestamp instead of current
                         &self.root_secret,
                     )
-                },
+                }
                 _ => [0u8; SIGNATURE_LEN],
             };
 

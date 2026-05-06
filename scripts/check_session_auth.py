@@ -20,6 +20,7 @@ from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 # ── File paths ─────────────────────────────────────────────────────────────
 
 IMPL_FILE = ROOT / "crates/franken-node/src/api/session_auth.rs"
+CARGO_TOML = ROOT / "crates/franken-node/Cargo.toml"
 SPEC_FILE = ROOT / "docs/specs/section_10_10/bd-oty_contract.md"
 POLICY_FILE = ROOT / "docs/policy/session_authenticated_control.md"
 EVIDENCE_FILE = ROOT / "artifacts/section_10_10/bd-oty/verification_evidence.json"
@@ -107,6 +108,22 @@ KEY_ROLES = [
 DIRECTIONS = [
     "Send",
     "Receive",
+]
+
+REGISTERED_SESSION_AUTH_TEST_TARGETS = {
+    "session_auth_real_lifecycle": "tests/session_auth_real_lifecycle.rs",
+    "session_auth_key_roles": "tests/session_auth_key_roles.rs",
+    "session_auth_real_lifecycle_structured": "tests/session_auth_real_lifecycle_structured.rs",
+}
+
+LEGACY_SESSION_AUTH_MARKER = "LEGACY-UNREGISTERED-SESSION-AUTH-COVERAGE"
+LEGACY_UNREGISTERED_SESSION_AUTH_TESTS = [
+    ROOT / "crates/franken-node/tests/integration_api_session_auth_real_service.rs",
+    ROOT / "crates/franken-node/tests/api_session_auth_real_service_integration.rs",
+]
+LEGACY_ACTIVE_COVERAGE_CLAIMS = [
+    "NO MOCKS",
+    "No mocked authentication",
 ]
 
 REQUIRED_POLICY_CONTENT = [
@@ -454,12 +471,73 @@ def _missing_patterns(path: Path, patterns: list[str]) -> list[str]:
     return [pattern for pattern in patterns if pattern not in content]
 
 
+def _crate_test_path(path: Path) -> str:
+    return path.relative_to(ROOT / "crates/franken-node").as_posix()
+
+
 def check_real_session_auth_evidence() -> list:
     checks = []
     for name, path, patterns in REAL_EVIDENCE_REQUIREMENTS:
         missing = _missing_patterns(path, patterns)
         detail = "ok" if not missing else f"missing in {path.relative_to(ROOT)}: {missing}"
         checks.append(_check(name, not missing, detail))
+    return checks
+
+
+def check_session_auth_test_registration_truth() -> list:
+    cargo = _read(CARGO_TOML)
+    checks = []
+
+    for target_name, target_path in REGISTERED_SESSION_AUTH_TEST_TARGETS.items():
+        target_registered = (
+            f'name = "{target_name}"' in cargo
+            and f'path = "{target_path}"' in cargo
+        )
+        checks.append(_check(
+            f"registered session-auth target: {target_name}",
+            target_registered,
+            target_path,
+        ))
+
+    for path in LEGACY_UNREGISTERED_SESSION_AUTH_TESTS:
+        rel = _crate_test_path(path)
+        content = _read(path)
+        checks.append(_check(
+            f"legacy session-auth file exists: {rel}",
+            path.exists(),
+            rel,
+        ))
+        checks.append(_check(
+            f"legacy session-auth file not registered: {rel}",
+            f'path = "{rel}"' not in cargo,
+            "source-only legacy file",
+        ))
+        checks.append(_check(
+            f"legacy session-auth file marked: {rel}",
+            LEGACY_SESSION_AUTH_MARKER in content,
+            LEGACY_SESSION_AUTH_MARKER,
+        ))
+        missing_targets = [
+            target_name
+            for target_name in REGISTERED_SESSION_AUTH_TEST_TARGETS
+            if target_name not in content
+        ]
+        checks.append(_check(
+            f"legacy session-auth file points to active targets: {rel}",
+            not missing_targets,
+            "ok" if not missing_targets else f"missing target names: {missing_targets}",
+        ))
+        stale_claims = [
+            claim
+            for claim in LEGACY_ACTIVE_COVERAGE_CLAIMS
+            if claim in content
+        ]
+        checks.append(_check(
+            f"legacy session-auth file has no active no-mock claim: {rel}",
+            not stale_claims,
+            "ok" if not stale_claims else f"stale claims: {stale_claims}",
+        ))
+
     return checks
 
 
@@ -483,6 +561,7 @@ def run_checks() -> dict:
     checks.extend(check_policy_content())
     checks.extend(check_acceptance_criteria())
     checks.extend(check_real_session_auth_evidence())
+    checks.extend(check_session_auth_test_registration_truth())
 
     passed = sum(1 for c in checks if c["pass"])
     failed = sum(1 for c in checks if not c["pass"])

@@ -45,6 +45,12 @@ class TestConstants(unittest.TestCase):
     def test_real_evidence_requirements_count(self):
         self.assertGreaterEqual(len(mod.REAL_EVIDENCE_REQUIREMENTS), 7)
 
+    def test_registered_session_auth_targets_count(self):
+        self.assertGreaterEqual(len(mod.REGISTERED_SESSION_AUTH_TEST_TARGETS), 3)
+
+    def test_legacy_session_auth_files_count(self):
+        self.assertEqual(len(mod.LEGACY_UNREGISTERED_SESSION_AUTH_TESTS), 2)
+
 class TestRealRustEvidence(unittest.TestCase):
     def test_real_evidence_checks_pass(self):
         checks = mod.check_real_session_auth_evidence()
@@ -65,6 +71,12 @@ class TestRealRustEvidence(unittest.TestCase):
         script_source = mod.Path(mod.__file__).read_text(encoding="utf-8")
         self.assertFalse(hasattr(mod, removed_name))
         self.assertNotIn(removed_name, script_source)
+
+    def test_legacy_unregistered_session_auth_files_are_truthful(self):
+        checks = mod.check_session_auth_test_registration_truth()
+        self.assertGreaterEqual(len(checks), 13)
+        for check in checks:
+            self.assertTrue(check["pass"], f"{check['check']}: {check['detail']}")
 
 
 class TestRunChecks(unittest.TestCase):
