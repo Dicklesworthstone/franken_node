@@ -26,7 +26,7 @@ CONTRACT GATES PASS; persisted RCH check, clippy, and focused idempotency proofs
 ## Gate Results
 - `python3 scripts/check_idempotency_key_derivation.py --json` -> PASS (`30/30` checks).
 - `python3 scripts/check_idempotency_key_derivation.py --self-test` -> PASS.
-- `python3 -m pytest -q tests/test_check_idempotency_key_derivation.py` -> PASS (`7 passed`).
+- `python3 -m pytest -q tests/test_check_idempotency_key_derivation.py` -> PASS (`9 passed`).
 - `rustfmt --edition 2024 sdk/verifier/src/bundle.rs sdk/verifier/src/capsule.rs sdk/verifier/src/lib.rs` -> PASS.
 - `git diff --check -- sdk/verifier/src/bundle.rs sdk/verifier/src/capsule.rs sdk/verifier/src/lib.rs` -> PASS.
 - `RCH_REQUIRE_REMOTE=1 ... cargo +nightly-2026-02-19 check -p frankenengine-node --all-targets` -> PASS, refreshed by PinkFern on 2026-05-06 from `/data/projects/franken_node`: `[RCH] remote vmi1156319 (1712.3s)`.

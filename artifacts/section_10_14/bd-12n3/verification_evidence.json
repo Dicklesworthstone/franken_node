@@ -37,7 +37,7 @@
       "status": "PASS",
       "output_path": "artifacts/section_10_14/bd-12n3/pytest_check_idempotency_key_derivation.log",
       "summary": {
-        "tests_passed": 7
+        "tests_passed": 9
       }
     },
     {
