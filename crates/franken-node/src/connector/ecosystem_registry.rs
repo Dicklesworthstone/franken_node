@@ -254,7 +254,7 @@ impl EcosystemRegistry {
                 "extension signature must not be empty".to_owned(),
             ));
         }
-        if metadata.signature.trim() != metadata.signature.as_str() {
+        if has_surrounding_whitespace(&metadata.signature) {
             return Err(RegistryError::InvalidMetadata(
                 "extension signature must not include surrounding whitespace".to_owned(),
             ));
@@ -695,6 +695,11 @@ fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
     vec.push(item);
 }
 
+fn has_surrounding_whitespace(value: &str) -> bool {
+    value.chars().next().is_some_and(char::is_whitespace)
+        || value.chars().next_back().is_some_and(char::is_whitespace)
+}
+
 // -- Tests ---------------------------------------------------------------------
 
 #[cfg(test)]
@@ -716,7 +721,7 @@ mod tests {
             status: ExtensionStatus::Active,
             created_at: ts(1),
             updated_at: ts(1),
-            signature: "sig-placeholder".to_owned(),
+            signature: "sig-fixture-ecosystem-registry-v1".to_owned(),
             tags: vec!["test".to_owned()],
         }
     }
@@ -877,7 +882,7 @@ mod tests {
     #[test]
     fn test_register_padded_signature_rejected_without_mutation() {
         let mut metadata = make_metadata("ext-1", "pub-1", "key-1");
-        metadata.signature = " sig-placeholder".to_owned();
+        metadata.signature = " sig-fixture-ecosystem-registry-v1".to_owned();
 
         assert_invalid_metadata_rejected(
             metadata,
