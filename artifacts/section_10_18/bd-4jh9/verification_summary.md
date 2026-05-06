@@ -26,8 +26,10 @@ experiences lag or outage, defining three tiers (`restricted`, `quarantine`,
   recovery trigger, and pipeline health snapshot at recovery time.
 - Action evaluation with three risk levels: HighRisk, LowRisk, HealthCheck.
 - 28 Rust unit tests covering all transition paths, determinism, audit
-  events, recovery receipts, custom SLO configuration, and no-silent-
-  transitions invariant.
+  events, recovery receipts, custom SLO configuration, fail-closed
+  thresholds, and no-silent-transitions invariant.
+- Verification script now checks real Rust implementation/test evidence
+  directly and has no Python lifecycle simulation checks.
 
 ### Specification (`docs/specs/section_10_18/bd-4jh9_contract.md`)
 
@@ -51,9 +53,9 @@ experiences lag or outage, defining three tiers (`restricted`, `quarantine`,
 |--------|-------|
 | Rust tests | 28 |
 | cargo check | PASS (warnings only, no errors) |
-| Verification script checks | 107 (105 PASS before artifacts, 107/107 after) |
-| Python unit tests | 62 passed |
-| Self-test checks | 21 passed |
+| Verification script checks | 100/100, including 6 real Rust evidence checks and 0 simulation checks |
+| Python unit tests | 28 passed |
+| Self-test checks | 100 passed |
 | Transition paths tested | 9 |
 | Event codes implemented | 5 |
 | Invariants verified | 5 |

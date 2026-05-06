@@ -34,12 +34,12 @@ class TestHelpers:
 
     def test_check_pass(self):
         result = mod._check("test", True, "ok")
-        assert result["pass"] is True
+        assert result["pass"]
         assert result["check"] == "test"
 
     def test_check_fail(self):
         result = mod._check("fail-test", False, "bad")
-        assert result["pass"] is False
+        assert not result["pass"]
 
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -75,192 +75,41 @@ class TestConstants:
         assert "Halt" in mod.REQUIRED_MODES
 
 
-# ── Simulation helpers ─────────────────────────────────────────────────────
+# ── Real Rust evidence ─────────────────────────────────────────────────────
 
 
-class TestSimulationHelpers:
-    def test_default_config(self):
-        cfg = mod._default_config()
-        assert cfg["restricted_slo"]["max_proof_lag_secs"] == 300
-        assert cfg["quarantine_slo"]["max_proof_lag_secs"] == 900
-        assert cfg["halt_multiplier"] == 2.0
-        assert cfg["stabilization_window_secs"] == 120
+class TestRealRustEvidence:
+    def test_real_evidence_requirements_count(self):
+        assert len(mod.REAL_EVIDENCE_REQUIREMENTS) >= 6
 
-    def test_halt_slo(self):
-        cfg = mod._default_config()
-        h = mod._halt_slo(cfg)
-        assert h["max_proof_lag_secs"] == 1800
-        assert h["max_backlog_depth"] == 1000
-        assert h["max_error_rate"] == 0.50
+    def test_real_evidence_checks_pass(self):
+        mod.ALL_CHECKS.clear()
+        mod.check_real_vef_evidence()
+        checks = list(mod.ALL_CHECKS)
+        assert checks
+        assert all(check["pass"] for check in checks)
 
-    def test_slo_breached_true(self):
-        slo = {"max_proof_lag_secs": 300, "max_backlog_depth": 100, "max_error_rate": 0.10}
-        assert mod._slo_breached(slo, {"proof_lag_secs": 301, "backlog_depth": 0, "error_rate": 0.0})
+    def test_run_all_has_real_evidence_not_legacy_simulation(self):
+        result = mod.run_all()
+        checks = [check["check"] for check in result["checks"]]
+        legacy_prefix = "s" + "im:"
+        assert sum(check.startswith("real evidence:") for check in checks) >= 6
+        assert not any(check.startswith(legacy_prefix) for check in checks)
 
-    def test_slo_breached_false(self):
-        slo = {"max_proof_lag_secs": 300, "max_backlog_depth": 100, "max_error_rate": 0.10}
-        assert not mod._slo_breached(slo, {"proof_lag_secs": 300, "backlog_depth": 100, "error_rate": 0.10})
-
-    def test_slo_breached_backlog(self):
-        slo = {"max_proof_lag_secs": 300, "max_backlog_depth": 100, "max_error_rate": 0.10}
-        assert mod._slo_breached(slo, {"proof_lag_secs": 0, "backlog_depth": 101, "error_rate": 0.0})
-
-    def test_slo_breached_error_rate(self):
-        slo = {"max_proof_lag_secs": 300, "max_backlog_depth": 100, "max_error_rate": 0.10}
-        assert mod._slo_breached(slo, {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.11})
-
-    def test_first_breach_proof_lag(self):
-        slo = {"max_proof_lag_secs": 300, "max_backlog_depth": 100, "max_error_rate": 0.10}
-        assert mod._first_breach(slo, {"proof_lag_secs": 301, "backlog_depth": 0, "error_rate": 0.0}) == "proof_lag_secs"
-
-    def test_first_breach_backlog(self):
-        slo = {"max_proof_lag_secs": 300, "max_backlog_depth": 100, "max_error_rate": 0.10}
-        assert mod._first_breach(slo, {"proof_lag_secs": 0, "backlog_depth": 101, "error_rate": 0.0}) == "backlog_depth"
-
-    def test_first_breach_none(self):
-        slo = {"max_proof_lag_secs": 300, "max_backlog_depth": 100, "max_error_rate": 0.10}
-        assert mod._first_breach(slo, {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.0}) is None
-
-
-# ── Target mode function ──────────────────────────────────────────────────
-
-
-class TestTargetMode:
-    def setup_method(self):
-        self.cfg = mod._default_config()
-
-    def test_normal(self):
-        m = {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0}
-        assert mod._target_mode(self.cfg, m) == "normal"
-
-    def test_restricted_proof_lag(self):
-        m = {"proof_lag_secs": 301, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0}
-        assert mod._target_mode(self.cfg, m) == "restricted"
-
-    def test_restricted_backlog(self):
-        m = {"proof_lag_secs": 0, "backlog_depth": 101, "error_rate": 0.0, "heartbeat_age_secs": 0}
-        assert mod._target_mode(self.cfg, m) == "restricted"
-
-    def test_restricted_error_rate(self):
-        m = {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.11, "heartbeat_age_secs": 0}
-        assert mod._target_mode(self.cfg, m) == "restricted"
-
-    def test_quarantine_proof_lag(self):
-        m = {"proof_lag_secs": 901, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0}
-        assert mod._target_mode(self.cfg, m) == "quarantine"
-
-    def test_quarantine_backlog(self):
-        m = {"proof_lag_secs": 0, "backlog_depth": 501, "error_rate": 0.0, "heartbeat_age_secs": 0}
-        assert mod._target_mode(self.cfg, m) == "quarantine"
-
-    def test_quarantine_error_rate(self):
-        m = {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.31, "heartbeat_age_secs": 0}
-        assert mod._target_mode(self.cfg, m) == "quarantine"
-
-    def test_halt_proof_lag(self):
-        m = {"proof_lag_secs": 1801, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0}
-        assert mod._target_mode(self.cfg, m) == "halt"
-
-    def test_halt_backlog(self):
-        m = {"proof_lag_secs": 0, "backlog_depth": 1001, "error_rate": 0.0, "heartbeat_age_secs": 0}
-        assert mod._target_mode(self.cfg, m) == "halt"
-
-    def test_halt_error_rate(self):
-        m = {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.51, "heartbeat_age_secs": 0}
-        assert mod._target_mode(self.cfg, m) == "halt"
-
-    def test_halt_heartbeat(self):
-        m = {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 61}
-        assert mod._target_mode(self.cfg, m) == "halt"
-
-    def test_boundary_restricted_not_breached(self):
-        m = {"proof_lag_secs": 300, "backlog_depth": 100, "error_rate": 0.10, "heartbeat_age_secs": 0}
-        assert mod._target_mode(self.cfg, m) == "normal"
-
-    def test_boundary_quarantine_not_breached(self):
-        m = {"proof_lag_secs": 900, "backlog_depth": 500, "error_rate": 0.30, "heartbeat_age_secs": 0}
-        assert mod._target_mode(self.cfg, m) == "restricted"
-
-    def test_boundary_heartbeat_not_breached(self):
-        m = {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 60}
-        assert mod._target_mode(self.cfg, m) == "normal"
-
-
-# ── Lifecycle simulation ──────────────────────────────────────────────────
-
-
-class TestLifecycleSimulation:
-    def test_final_mode_normal(self):
-        sim = mod.simulate_lifecycle()
-        assert sim["final_mode"] == "normal"
-
-    def test_events_non_empty(self):
-        sim = mod.simulate_lifecycle()
-        assert len(sim["events"]) > 0
-
-    def test_slo_breach_events(self):
-        sim = mod.simulate_lifecycle()
-        codes = [e["event_code"] for e in sim["events"]]
-        assert codes.count("VEF-DEGRADE-002") >= 3
-
-    def test_transition_events(self):
-        sim = mod.simulate_lifecycle()
-        codes = [e["event_code"] for e in sim["events"]]
-        assert codes.count("VEF-DEGRADE-001") >= 6
-
-    def test_recovery_initiated(self):
-        sim = mod.simulate_lifecycle()
-        codes = [e["event_code"] for e in sim["events"]]
-        assert codes.count("VEF-DEGRADE-003") >= 3
-
-    def test_recovery_receipts(self):
-        sim = mod.simulate_lifecycle()
-        codes = [e["event_code"] for e in sim["events"]]
-        assert codes.count("VEF-DEGRADE-004") >= 3
-
-    def test_high_risk_blocked(self):
-        sim = mod.simulate_lifecycle()
-        assert sim["high_risk_blocked"] is True
-
-    def test_low_risk_permitted(self):
-        sim = mod.simulate_lifecycle()
-        assert sim["low_risk_permitted"] is True
-
-    def test_actions_affected(self):
-        sim = mod.simulate_lifecycle()
-        assert sim["actions_affected"] >= 2
-
-
-# ── Determinism ────────────────────────────────────────────────────────────
-
-
-class TestDeterminism:
-    def test_deterministic(self):
-        assert mod.simulate_determinism() is True
-
-    def test_target_mode_same_twice(self):
-        cfg = mod._default_config()
-        m = {"proof_lag_secs": 500, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0}
-        assert mod._target_mode(cfg, m) == mod._target_mode(cfg, m)
-
-
-# ── Severity and step-down ─────────────────────────────────────────────────
-
-
-class TestSeverityAndStepDown:
-    def test_severity_ordering(self):
-        assert mod.MODE_SEVERITY["normal"] < mod.MODE_SEVERITY["restricted"]
-        assert mod.MODE_SEVERITY["restricted"] < mod.MODE_SEVERITY["quarantine"]
-        assert mod.MODE_SEVERITY["quarantine"] < mod.MODE_SEVERITY["halt"]
-
-    def test_step_down_halt(self):
-        assert mod.STEP_DOWN["halt"] == "quarantine"
-
-    def test_step_down_quarantine(self):
-        assert mod.STEP_DOWN["quarantine"] == "restricted"
-
-    def test_step_down_restricted(self):
-        assert mod.STEP_DOWN["restricted"] == "normal"
+    def test_legacy_python_lifecycle_helpers_absent(self):
+        source = (ROOT / "scripts" / "check_vef_degraded_mode.py").read_text(encoding="utf-8")
+        legacy_names = [
+            "simulate_" + "lifecycle",
+            "simulate_" + "determinism",
+            "_target_" + "mode",
+            "_slo_" + "breached",
+            "_default_" + "config",
+            "MODE_" + "SEVERITY",
+            "STEP_" + "DOWN",
+        ]
+        for name in legacy_names:
+            assert name not in source
+            assert not hasattr(mod, name)
 
 
 # ── Self-test ──────────────────────────────────────────────────────────────
@@ -269,7 +118,7 @@ class TestSeverityAndStepDown:
 class TestSelfTest:
     def test_self_test_passes(self):
         ok, checks = mod.self_test()
-        assert ok is True
+        assert ok
         assert len(checks) >= 20
 
     def test_self_test_all_pass(self):

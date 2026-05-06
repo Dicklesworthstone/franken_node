@@ -16,9 +16,11 @@
   "checks": {
     "cargo_check": "PASS",
     "rust_unit_tests": 28,
-    "python_verification_checks": 107,
-    "python_unit_tests": 62,
-    "self_test_checks": 21
+    "python_verification_checks": 100,
+    "python_unit_tests": 28,
+    "self_test_checks": 100,
+    "real_rust_evidence_checks": 6,
+    "synthetic_lifecycle_checks": 0
   },
   "coverage": {
     "degraded_mode_tiers": ["normal", "restricted", "quarantine", "halt"],
@@ -50,6 +52,8 @@
     "audit_events_with_required_fields": "PASS",
     "recovery_receipts_with_required_fields": "PASS",
     "no_silent_transitions": "PASS",
-    "mode_enforcement_consistent": "PASS"
+    "mode_enforcement_consistent": "PASS",
+    "real_rust_evidence_checks_replace_python_lifecycle_simulation": "PASS",
+    "legacy_simulation_checks_removed": "PASS"
   }
 }

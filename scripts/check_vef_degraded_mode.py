@@ -10,11 +10,11 @@ Usage:
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
-from typing import Any
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 # ── File paths ─────────────────────────────────────────────────────────────
@@ -84,6 +84,80 @@ REQUIRED_INVARIANTS_SPEC = [
     "INV-VEF-DM-ESCALATE-IMMEDIATE",
     "INV-VEF-DM-DEESCALATE-STABILIZED",
     "INV-VEF-DM-RECOVERY-RECEIPT",
+]
+
+REAL_EVIDENCE_REQUIREMENTS = [
+    (
+        "real evidence: tier escalation paths",
+        IMPL_FILE,
+        [
+            "fn restricted_on_proof_lag_breach",
+            "fn quarantine_on_slo_breach",
+            "fn halt_on_critical_lag",
+            "fn halt_on_heartbeat_timeout",
+            "fn normal_to_restricted_to_quarantine_escalation",
+            "fn skip_to_halt_directly",
+        ],
+    ),
+    (
+        "real evidence: deterministic metric sequences",
+        IMPL_FILE,
+        [
+            "fn deterministic_identical_metric_sequences",
+            "run1.observe_metrics(m, *t, \"det-1\")",
+            "run2.observe_metrics(m, *t, \"det-2\")",
+            "assert_eq!(run1.mode(), run2.mode())",
+            "assert_eq!(e1.code(), e2.code())",
+        ],
+    ),
+    (
+        "real evidence: action gating by mode",
+        IMPL_FILE,
+        [
+            "fn normal_permits_all",
+            "fn restricted_permits_with_annotation",
+            "fn quarantine_blocks_high_risk",
+            "fn halt_blocks_all_except_health_check",
+            "pub fn evaluate_action(",
+            "vef_halt: action",
+        ],
+    ),
+    (
+        "real evidence: stabilization-window deescalation",
+        IMPL_FILE,
+        [
+            "fn deescalation_requires_stabilization_window",
+            "fn deescalation_resets_on_metric_regression",
+            "fn halt_deescalates_through_quarantine_restricted",
+            "engine.observe_metrics(&good, 1169",
+            "engine.observe_metrics(&good, 1170",
+            "stabilization_window_secs",
+        ],
+    ),
+    (
+        "real evidence: recovery receipts and audit events",
+        IMPL_FILE,
+        [
+            "fn escalation_emits_slo_breach_and_transition_events",
+            "fn deescalation_emits_recovery_receipt",
+            "fn transition_event_has_required_fields",
+            "VefDegradedModeEvent::RecoveryComplete",
+            "VEF_DEGRADE_003",
+            "VEF_DEGRADE_004",
+        ],
+    ),
+    (
+        "real evidence: fail-closed thresholds",
+        IMPL_FILE,
+        [
+            "fn nan_error_rate_escalates_engine_to_halt",
+            "fn negative_error_rate_escalates_engine_to_halt",
+            "fn exact_restricted_threshold_escalates_fail_closed",
+            "fn exact_halt_heartbeat_timeout_escalates_fail_closed",
+            "fn nan_halt_error_rate_escalates_engine_to_halt",
+            "fn zero_heartbeat_timeout_escalates_healthy_metrics_to_halt",
+        ],
+    ),
 ]
 
 
@@ -244,186 +318,21 @@ def check_recovery_receipt_fields() -> None:
     _check("receipt: correlation_id", "correlation_id" in src)
 
 
-# ── Simulation ─────────────────────────────────────────────────────────────
-
-def _default_config() -> dict[str, Any]:
-    return {
-        "restricted_slo": {"max_proof_lag_secs": 300, "max_backlog_depth": 100, "max_error_rate": 0.10},
-        "quarantine_slo": {"max_proof_lag_secs": 900, "max_backlog_depth": 500, "max_error_rate": 0.30},
-        "halt_multiplier": 2.0,
-        "halt_error_rate": 0.50,
-        "halt_heartbeat_timeout_secs": 60,
-        "stabilization_window_secs": 120,
-    }
+def _missing_patterns(path: Path, patterns: list[str]) -> list[str]:
+    if not path.is_file():
+        return patterns
+    content = path.read_text(encoding="utf-8")
+    return [pattern for pattern in patterns if pattern not in content]
 
 
-def _halt_slo(config: dict[str, Any]) -> dict[str, Any]:
-    q = config["quarantine_slo"]
-    m = config["halt_multiplier"]
-    return {
-        "max_proof_lag_secs": int(q["max_proof_lag_secs"] * m),
-        "max_backlog_depth": int(q["max_backlog_depth"] * m),
-        "max_error_rate": config["halt_error_rate"],
-    }
-
-
-def _slo_breached(slo: dict[str, Any], metrics: dict[str, Any]) -> bool:
-    return (
-        metrics["proof_lag_secs"] > slo["max_proof_lag_secs"]
-        or metrics["backlog_depth"] > slo["max_backlog_depth"]
-        or metrics["error_rate"] > slo["max_error_rate"]
-    )
-
-
-def _first_breach(slo: dict[str, Any], metrics: dict[str, Any]) -> str | None:
-    if metrics["proof_lag_secs"] > slo["max_proof_lag_secs"]:
-        return "proof_lag_secs"
-    if metrics["backlog_depth"] > slo["max_backlog_depth"]:
-        return "backlog_depth"
-    if metrics["error_rate"] > slo["max_error_rate"]:
-        return "error_rate"
-    return None
-
-
-def _target_mode(config: dict[str, Any], metrics: dict[str, Any]) -> str:
-    halt_slo = _halt_slo(config)
-    if metrics["heartbeat_age_secs"] > config["halt_heartbeat_timeout_secs"] or _slo_breached(halt_slo, metrics):
-        return "halt"
-    if _slo_breached(config["quarantine_slo"], metrics):
-        return "quarantine"
-    if _slo_breached(config["restricted_slo"], metrics):
-        return "restricted"
-    return "normal"
-
-
-MODE_SEVERITY = {"normal": 0, "restricted": 1, "quarantine": 2, "halt": 3}
-
-STEP_DOWN = {"halt": "quarantine", "quarantine": "restricted", "restricted": "normal"}
-
-
-def simulate_lifecycle() -> dict[str, Any]:
-    """Simulate a full degraded-mode lifecycle in Python, mirroring Rust engine."""
-    config = _default_config()
-    mode = "normal"
-    events: list[dict[str, Any]] = []
-    entered_at: int | None = None
-    stab_start: int | None = None
-    actions_affected = 0
-
-    def emit(code: str, ts: int, **kw: Any) -> None:
-        events.append({"event_code": code, "timestamp_secs": ts, **kw})
-
-    # 1) Normal -> Restricted (proof_lag_secs = 301)
-    metrics1 = {"proof_lag_secs": 301, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0}
-    target1 = _target_mode(config, metrics1)
-    assert target1 == "restricted", f"expected restricted, got {target1}"
-    emit("VEF-DEGRADE-002", 1000, metric="proof_lag_secs", value=301, threshold=300, tier=target1)
-    emit("VEF-DEGRADE-001", 1000, from_mode=mode, to_mode=target1)
-    mode = target1
-    entered_at = 1000
-
-    # 2) Restricted -> Quarantine (proof_lag_secs = 901)
-    metrics2 = {"proof_lag_secs": 901, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0}
-    target2 = _target_mode(config, metrics2)
-    assert target2 == "quarantine", f"expected quarantine, got {target2}"
-    emit("VEF-DEGRADE-002", 1100, metric="proof_lag_secs", value=901, threshold=900, tier=target2)
-    emit("VEF-DEGRADE-001", 1100, from_mode=mode, to_mode=target2)
-    mode = target2
-
-    # 3) Evaluate actions in quarantine
-    # High-risk blocked
-    actions_affected += 1
-    high_risk_blocked = True  # quarantine blocks high-risk
-    # Low-risk permitted
-    actions_affected += 1
-    low_risk_permitted = True
-
-    # 4) Quarantine -> Halt (heartbeat timeout)
-    metrics3 = {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 61}
-    target3 = _target_mode(config, metrics3)
-    assert target3 == "halt", f"expected halt, got {target3}"
-    emit("VEF-DEGRADE-002", 1200, metric="heartbeat_age_secs", value=61, threshold=60, tier=target3)
-    emit("VEF-DEGRADE-001", 1200, from_mode=mode, to_mode=target3)
-    mode = target3
-
-    # 5) Recovery: metrics improve to quarantine-level
-    metrics4 = {"proof_lag_secs": 500, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0}
-    target4 = _target_mode(config, metrics4)
-    assert target4 == "restricted", f"expected restricted, got {target4}"
-    # Step down one tier: halt -> quarantine
-    # Start stabilization
-    stab_start = 1300
-    emit("VEF-DEGRADE-003", 1300, from_mode=mode)
-    # After stabilization window
-    emit("VEF-DEGRADE-004", 1420, from_mode=mode, to_mode="quarantine",
-         duration=1420 - entered_at, actions_affected=actions_affected)
-    emit("VEF-DEGRADE-001", 1420, from_mode=mode, to_mode="quarantine")
-    mode = "quarantine"
-
-    # 6) Continue recovery: quarantine -> restricted
-    stab_start = 1450
-    emit("VEF-DEGRADE-003", 1450, from_mode=mode)
-    emit("VEF-DEGRADE-004", 1570, from_mode=mode, to_mode="restricted",
-         duration=1570 - entered_at, actions_affected=actions_affected)
-    emit("VEF-DEGRADE-001", 1570, from_mode=mode, to_mode="restricted")
-    mode = "restricted"
-
-    # 7) Final recovery: restricted -> normal
-    metrics_healthy = {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0}
-    stab_start = 1600
-    emit("VEF-DEGRADE-003", 1600, from_mode=mode)
-    emit("VEF-DEGRADE-004", 1720, from_mode=mode, to_mode="normal",
-         duration=1720 - entered_at, actions_affected=actions_affected)
-    emit("VEF-DEGRADE-001", 1720, from_mode=mode, to_mode="normal")
-    mode = "normal"
-
-    return {
-        "final_mode": mode,
-        "events": events,
-        "high_risk_blocked": high_risk_blocked,
-        "low_risk_permitted": low_risk_permitted,
-        "actions_affected": actions_affected,
-    }
-
-
-def simulate_determinism() -> bool:
-    """Verify that identical metric sequences produce identical traces."""
-    config = _default_config()
-    metrics_seq = [
-        {"proof_lag_secs": 301, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0},
-        {"proof_lag_secs": 901, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0},
-        {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0},
-    ]
-    trace1 = [_target_mode(config, m) for m in metrics_seq]
-    trace2 = [_target_mode(config, m) for m in metrics_seq]
-    return trace1 == trace2
-
-
-def check_simulation() -> None:
-    sim = simulate_lifecycle()
-
-    _check("sim: final mode is normal", sim["final_mode"] == "normal", f"got {sim['final_mode']}")
-
-    codes = [e["event_code"] for e in sim["events"]]
-    _check("sim: SLO breach events (VEF-DEGRADE-002)", codes.count("VEF-DEGRADE-002") >= 3)
-    _check("sim: mode transition events (VEF-DEGRADE-001)", codes.count("VEF-DEGRADE-001") >= 6)
-    _check("sim: recovery initiated (VEF-DEGRADE-003)", codes.count("VEF-DEGRADE-003") >= 3)
-    _check("sim: recovery receipts (VEF-DEGRADE-004)", codes.count("VEF-DEGRADE-004") >= 3)
-    _check("sim: high-risk blocked in quarantine", sim["high_risk_blocked"])
-    _check("sim: low-risk permitted in quarantine", sim["low_risk_permitted"])
-    _check("sim: actions affected tracked", sim["actions_affected"] >= 2)
-
-    # Determinism
-    _check("sim: deterministic target_mode", simulate_determinism())
-
-    # Tier ordering
-    _check("sim: severity ordering", MODE_SEVERITY["normal"] < MODE_SEVERITY["restricted"]
-           < MODE_SEVERITY["quarantine"] < MODE_SEVERITY["halt"])
-
-    # Step-down one tier at a time
-    _check("sim: step-down halt->quarantine", STEP_DOWN["halt"] == "quarantine")
-    _check("sim: step-down quarantine->restricted", STEP_DOWN["quarantine"] == "restricted")
-    _check("sim: step-down restricted->normal", STEP_DOWN["restricted"] == "normal")
+def check_real_vef_evidence() -> None:
+    for name, path, patterns in REAL_EVIDENCE_REQUIREMENTS:
+        missing = _missing_patterns(path, patterns)
+        _check(
+            name,
+            not missing,
+            "ok" if not missing else f"missing in {_safe_rel(path)}: {missing}",
+        )
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
@@ -446,7 +355,7 @@ def run_all() -> dict[str, Any]:
     check_determinism_invariant()
     check_action_evaluation()
     check_recovery_receipt_fields()
-    check_simulation()
+    check_real_vef_evidence()
 
     passed = sum(1 for c in ALL_CHECKS if c["pass"])
     failed = sum(1 for c in ALL_CHECKS if not c["pass"])
@@ -466,53 +375,14 @@ def run_all() -> dict[str, Any]:
 
 
 def self_test() -> tuple[bool, list[dict[str, Any]]]:
-    checks: list[dict[str, Any]] = []
-
-    def st(name: str, ok: bool) -> None:
-        checks.append({"check": name, "pass": ok, "detail": "ok" if ok else "FAIL"})
-
-    # Verify constants non-empty
-    st("REQUIRED_TYPES non-empty", len(REQUIRED_TYPES) >= 13)
-    st("REQUIRED_EVENT_CODES = 5", len(REQUIRED_EVENT_CODES) == 5)
-    st("REQUIRED_MODES = 4", len(REQUIRED_MODES) == 4)
-    st("REQUIRED_FUNCTIONS >= 6", len(REQUIRED_FUNCTIONS) >= 6)
-    st("REQUIRED_METRICS = 4", len(REQUIRED_METRICS) == 4)
-    st("REQUIRED_INVARIANTS_SPEC = 5", len(REQUIRED_INVARIANTS_SPEC) == 5)
-
-    # Verify simulation
-    sim = simulate_lifecycle()
-    st("simulation returns dict", isinstance(sim, dict))
-    st("simulation final_mode = normal", sim["final_mode"] == "normal")
-    st("simulation events non-empty", len(sim["events"]) > 0)
-
-    # Verify determinism simulation
-    st("determinism simulation", simulate_determinism())
-
-    # Verify target_mode function
-    cfg = _default_config()
-    st("target_mode normal", _target_mode(cfg, {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0}) == "normal")
-    st("target_mode restricted", _target_mode(cfg, {"proof_lag_secs": 301, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0}) == "restricted")
-    st("target_mode quarantine", _target_mode(cfg, {"proof_lag_secs": 901, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0}) == "quarantine")
-    st("target_mode halt lag", _target_mode(cfg, {"proof_lag_secs": 1801, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 0}) == "halt")
-    st("target_mode halt heartbeat", _target_mode(cfg, {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.0, "heartbeat_age_secs": 61}) == "halt")
-    st("target_mode halt error", _target_mode(cfg, {"proof_lag_secs": 0, "backlog_depth": 0, "error_rate": 0.51, "heartbeat_age_secs": 0}) == "halt")
-
-    # Verify run_all returns valid structure
     result = run_all()
-    st("run_all bead_id", result.get("bead_id") == "bd-4jh9")
-    st("run_all section", result.get("section") == "10.18")
-    st("run_all has verdict", result.get("verdict") in ("PASS", "FAIL"))
-    st("run_all has checks", isinstance(result.get("checks"), list))
-    st("run_all total > 0", result.get("total", 0) > 0)
-
-    ok = all(c["pass"] for c in checks)
-    return ok, checks
+    return result["verdict"] == "PASS", result["checks"]
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    logger = configure_test_logging("check_vef_degraded_mode")
+    configure_test_logging("check_vef_degraded_mode")
     if "--self-test" in sys.argv:
         ok, checks = self_test()
         passed = sum(1 for c in checks if c["pass"])

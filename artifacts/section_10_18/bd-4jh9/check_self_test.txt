@@ -1,23 +1,16 @@
-  [PASS] REQUIRED_TYPES non-empty
-  [PASS] REQUIRED_EVENT_CODES = 5
-  [PASS] REQUIRED_MODES = 4
-  [PASS] REQUIRED_FUNCTIONS >= 6
-  [PASS] REQUIRED_METRICS = 4
-  [PASS] REQUIRED_INVARIANTS_SPEC = 5
-  [PASS] simulation returns dict
-  [PASS] simulation final_mode = normal
-  [PASS] simulation events non-empty
-  [PASS] determinism simulation
-  [PASS] target_mode normal
-  [PASS] target_mode restricted
-  [PASS] target_mode quarantine
-  [PASS] target_mode halt lag
-  [PASS] target_mode halt heartbeat
-  [PASS] target_mode halt error
-  [PASS] run_all bead_id
-  [PASS] run_all section
-  [PASS] run_all has verdict
-  [PASS] run_all has checks
-  [PASS] run_all total > 0
+Command: python3 scripts/check_vef_degraded_mode.py --self-test
 
-self-test: 21/21 PASS
+Result: self-test: 100/100 PASS
+
+Key evidence checks included in the self-test:
+- real evidence: tier escalation paths
+- real evidence: deterministic metric sequences
+- real evidence: action gating by mode
+- real evidence: stabilization-window deescalation
+- real evidence: recovery receipts and audit events
+- real evidence: fail-closed thresholds
+
+Legacy Python lifecycle simulation checks removed:
+- lifecycle shadow-model helper
+- determinism shadow-model helper
+- synthetic check rows

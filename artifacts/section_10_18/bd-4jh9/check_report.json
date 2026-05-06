@@ -3,8 +3,8 @@
   "title": "VEF degraded-mode policy for proof lag/outage with explicit SLOs",
   "section": "10.18",
   "verdict": "PASS",
-  "total": 107,
-  "passed": 107,
+  "total": 100,
+  "passed": 100,
   "failed": 0,
   "checks": [
     {
@@ -478,67 +478,32 @@
       "detail": "ok"
     },
     {
-      "check": "sim: final mode is normal",
-      "pass": true,
-      "detail": "got normal"
-    },
-    {
-      "check": "sim: SLO breach events (VEF-DEGRADE-002)",
+      "check": "real evidence: tier escalation paths",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: mode transition events (VEF-DEGRADE-001)",
+      "check": "real evidence: deterministic metric sequences",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: recovery initiated (VEF-DEGRADE-003)",
+      "check": "real evidence: action gating by mode",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: recovery receipts (VEF-DEGRADE-004)",
+      "check": "real evidence: stabilization-window deescalation",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: high-risk blocked in quarantine",
+      "check": "real evidence: recovery receipts and audit events",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: low-risk permitted in quarantine",
-      "pass": true,
-      "detail": "ok"
-    },
-    {
-      "check": "sim: actions affected tracked",
-      "pass": true,
-      "detail": "ok"
-    },
-    {
-      "check": "sim: deterministic target_mode",
-      "pass": true,
-      "detail": "ok"
-    },
-    {
-      "check": "sim: severity ordering",
-      "pass": true,
-      "detail": "ok"
-    },
-    {
-      "check": "sim: step-down halt->quarantine",
-      "pass": true,
-      "detail": "ok"
-    },
-    {
-      "check": "sim: step-down quarantine->restricted",
-      "pass": true,
-      "detail": "ok"
-    },
-    {
-      "check": "sim: step-down restricted->normal",
+      "check": "real evidence: fail-closed thresholds",
       "pass": true,
       "detail": "ok"
     }
