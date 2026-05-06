@@ -1,6 +1,7 @@
+#[cfg(all(unix, not(feature = "engine")))]
 use std::path::PathBuf;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(feature = "engine")))]
 #[test]
 fn engine_dispatcher_reaps_descendant_pipe_holders() {
     use frankenengine_node::{
@@ -13,7 +14,9 @@ fn engine_dispatcher_reaps_descendant_pipe_holders() {
     let app_path = temp_dir.path().join("app.js");
     std::fs::write(&app_path, "console.log('app');\n").expect("write app");
 
-    // Use real test-engine binary instead of fake shell script
+    // The external pipe-drain assertion is only meaningful when the engine
+    // feature is disabled. With the default engine feature, dispatch_run uses
+    // the native in-process engine path and does not launch this binary.
     let engine_path = if let Some(exe) = std::env::var_os("CARGO_BIN_EXE_test-engine") {
         PathBuf::from(exe)
     } else {
@@ -49,6 +52,15 @@ fn engine_dispatcher_reaps_descendant_pipe_holders() {
     assert!(
         elapsed < Duration::from_secs(3),
         "dispatcher waited for descendant-held stdout pipe: {elapsed:?}"
+    );
+}
+
+#[cfg(all(unix, feature = "engine"))]
+#[test]
+fn engine_dispatcher_pipe_drain_external_path_requires_no_default_features() {
+    assert!(
+        cfg!(feature = "engine"),
+        "default engine-feature builds use the native dispatch path; run this test target with --no-default-features to exercise external pipe draining"
     );
 }
 
