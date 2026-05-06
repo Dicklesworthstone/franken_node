@@ -1,0 +1,226 @@
+{
+  "schema_version": "franken-node/validation-proof-coalescer/schema-catalog/v1",
+  "json_schema_draft": "https://json-schema.org/draft/2020-12/schema",
+  "work_key_schema_uri": "https://franken-node.local/schemas/validation-proof-coalescer/work-key/v1",
+  "lease_schema_uri": "https://franken-node.local/schemas/validation-proof-coalescer/lease/v1",
+  "decision_schema_uri": "https://franken-node.local/schemas/validation-proof-coalescer/decision/v1",
+  "admission_policy_schema_uri": "https://franken-node.local/schemas/validation-proof-coalescer/admission-policy/v1",
+  "lease_states": [
+    "proposed",
+    "running",
+    "joined",
+    "completed",
+    "stale",
+    "fenced",
+    "rejected",
+    "failed_closed"
+  ],
+  "decision_kinds": [
+    "run_locally_via_rch",
+    "join_existing_proof",
+    "wait_for_receipt",
+    "queued_by_policy",
+    "retry_after_stale_lease",
+    "reject_dirty_policy",
+    "reject_capacity",
+    "repair_state"
+  ],
+  "reason_codes": [
+    "VPCO_RUN_NO_LEASE",
+    "VPCO_JOIN_RUNNING",
+    "VPCO_WAIT_COMPLETION",
+    "VPCO_QUEUE_CAPACITY",
+    "VPCO_RETRY_STALE",
+    "VPCO_REJECT_DIRTY_POLICY",
+    "VPCO_REJECT_CAPACITY",
+    "VPCO_REPAIR_CORRUPTED"
+  ],
+  "required_actions": [
+    "start_rch_validation",
+    "join_existing_lease",
+    "wait_for_receipt",
+    "queue_validation",
+    "retry_with_new_fence",
+    "fail_closed",
+    "repair_state"
+  ],
+  "dirty_state_policies": [
+    "clean_required",
+    "dirty_allowed_with_digest",
+    "source_only_documented"
+  ],
+  "capacity_modes": [
+    "observe_only",
+    "queue_when_busy",
+    "reject_when_busy"
+  ],
+  "event_codes": [
+    "VPCO-001",
+    "VPCO-002",
+    "VPCO-003",
+    "VPCO-004",
+    "VPCO-005",
+    "VPCO-006",
+    "VPCO-007",
+    "VPCO-008",
+    "VPCO-009",
+    "VPCO-010"
+  ],
+  "required_work_key_fields": [
+    "schema_version",
+    "work_key_id",
+    "algorithm",
+    "hex",
+    "canonical_material",
+    "proof_cache_key",
+    "command_digest",
+    "input_digests",
+    "git_commit",
+    "dirty_worktree",
+    "dirty_state_policy",
+    "feature_flags",
+    "cargo_toolchain",
+    "package",
+    "test_target",
+    "environment_policy_id",
+    "target_dir_policy_id"
+  ],
+  "required_lease_fields": [
+    "schema_version",
+    "lease_id",
+    "proof_work_key",
+    "state",
+    "owner_agent",
+    "owner_bead_id",
+    "fencing_token",
+    "created_at",
+    "updated_at",
+    "expires_at",
+    "waiter_agents",
+    "admission_policy_id",
+    "rch_command",
+    "target_dir_policy_id",
+    "receipt_ref",
+    "proof_cache_key",
+    "diagnostics"
+  ],
+  "required_decision_fields": [
+    "schema_version",
+    "decision_id",
+    "proof_work_key",
+    "lease_ref",
+    "bead_id",
+    "agent_name",
+    "trace_id",
+    "decided_at",
+    "decision",
+    "reason_code",
+    "required_action",
+    "diagnostics"
+  ],
+  "required_admission_policy_fields": [
+    "schema_version",
+    "policy_id",
+    "max_running_proofs",
+    "max_waiters_per_lease",
+    "stale_after_seconds",
+    "queue_high_watermark",
+    "min_available_worker_slots",
+    "dirty_state_policy",
+    "capacity_mode"
+  ],
+  "schemas": {
+    "DigestRef": {
+      "type": "object",
+      "required": [
+        "algorithm",
+        "hex",
+        "canonical_material"
+      ]
+    },
+    "InputDigestRef": {
+      "type": "object",
+      "required": [
+        "path",
+        "algorithm",
+        "hex",
+        "canonical_material"
+      ]
+    },
+    "ValidationProofWorkKey": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "work_key_id",
+        "algorithm",
+        "hex",
+        "canonical_material",
+        "proof_cache_key",
+        "command_digest",
+        "input_digests",
+        "git_commit",
+        "dirty_worktree",
+        "dirty_state_policy",
+        "feature_flags",
+        "cargo_toolchain",
+        "package",
+        "test_target",
+        "environment_policy_id",
+        "target_dir_policy_id"
+      ]
+    },
+    "ValidationProofCoalescerLease": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "lease_id",
+        "proof_work_key",
+        "state",
+        "owner_agent",
+        "owner_bead_id",
+        "fencing_token",
+        "created_at",
+        "updated_at",
+        "expires_at",
+        "waiter_agents",
+        "admission_policy_id",
+        "rch_command",
+        "target_dir_policy_id",
+        "receipt_ref",
+        "proof_cache_key",
+        "diagnostics"
+      ]
+    },
+    "ValidationProofCoalescerDecision": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "decision_id",
+        "proof_work_key",
+        "lease_ref",
+        "bead_id",
+        "agent_name",
+        "trace_id",
+        "decided_at",
+        "decision",
+        "reason_code",
+        "required_action",
+        "diagnostics"
+      ]
+    },
+    "ValidationProofCoalescerAdmissionPolicy": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "policy_id",
+        "max_running_proofs",
+        "max_waiters_per_lease",
+        "stale_after_seconds",
+        "queue_high_watermark",
+        "min_available_worker_slots",
+        "dirty_state_policy",
+        "capacity_mode"
+      ]
+    }
+  }
+}

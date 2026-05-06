@@ -1,0 +1,539 @@
+{
+  "schema_version": "franken-node/validation-proof-coalescer/fixtures/v1",
+  "validation_time": "2026-05-06T02:00:00Z",
+  "valid_work_keys": [
+    {
+      "schema_version": "franken-node/validation-proof-coalescer/work-key/v1",
+      "work_key_id": "vpcowork-148b53d1eed1125d",
+      "algorithm": "sha256",
+      "hex": "148b53d1eed1125d65a88e30770f75cfe3f176c5133f63ad91342d0947e085b6",
+      "canonical_material": "command_digest=sha256:c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8\u0000inputs=crates/franken-node/src/ops/validation_proof_coalescer.rs:b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189\u0000git_commit=dc4b4c08\u0000dirty=false\u0000dirty_policy=clean_required\u0000features=engine,external-commands,http-client\u0000toolchain=nightly-2026-02-19\u0000package=frankenengine-node\u0000test_target=validation_proof_coalescer\u0000env_policy=validation-proof-coalescer/env-policy/v1\u0000target_policy=validation-proof-coalescer/target-dir/off-repo/v1",
+      "proof_cache_key": {
+        "algorithm": "sha256",
+        "hex": "148b53d1eed1125d65a88e30770f75cfe3f176c5133f63ad91342d0947e085b6",
+        "canonical_material": "command_digest=sha256:c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8\u0000inputs=crates/franken-node/src/ops/validation_proof_coalescer.rs:b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189\u0000git_commit=dc4b4c08\u0000dirty=false\u0000dirty_policy=clean_required\u0000features=engine,external-commands,http-client\u0000toolchain=nightly-2026-02-19\u0000package=frankenengine-node\u0000test_target=validation_proof_coalescer\u0000env_policy=validation-proof-coalescer/env-policy/v1\u0000target_policy=validation-proof-coalescer/target-dir/off-repo/v1"
+      },
+      "command_digest": {
+        "algorithm": "sha256",
+        "hex": "c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8",
+        "canonical_material": "cargo +nightly-2026-02-19 test -p frankenengine-node --test validation_proof_coalescer -- --nocapture\u0000cwd=/data/projects/franken_node\u0000rch=required\u0000target_dir=off-repo"
+      },
+      "input_digests": [
+        {
+          "path": "crates/franken-node/src/ops/validation_proof_coalescer.rs",
+          "algorithm": "sha256",
+          "hex": "b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189",
+          "canonical_material": "crates/franken-node/src/ops/validation_proof_coalescer.rs\u0000docs/specs/validation_proof_coalescer.md\u0000scripts/check_validation_proof_coalescer_contract.py"
+        }
+      ],
+      "git_commit": "dc4b4c08",
+      "dirty_worktree": false,
+      "dirty_state_policy": "clean_required",
+      "feature_flags": [
+        "engine",
+        "external-commands",
+        "http-client"
+      ],
+      "cargo_toolchain": "nightly-2026-02-19",
+      "package": "frankenengine-node",
+      "test_target": "validation_proof_coalescer",
+      "environment_policy_id": "validation-proof-coalescer/env-policy/v1",
+      "target_dir_policy_id": "validation-proof-coalescer/target-dir/off-repo/v1"
+    }
+  ],
+  "valid_admission_policies": [
+    {
+      "schema_version": "franken-node/validation-proof-coalescer/admission-policy/v1",
+      "policy_id": "validation-proof-coalescer/admission/default/v1",
+      "max_running_proofs": 4,
+      "max_waiters_per_lease": 16,
+      "stale_after_seconds": 1800,
+      "queue_high_watermark": 8,
+      "min_available_worker_slots": 2,
+      "dirty_state_policy": "clean_required",
+      "capacity_mode": "queue_when_busy"
+    }
+  ],
+  "valid_leases": [
+    {
+      "schema_version": "franken-node/validation-proof-coalescer/lease/v1",
+      "lease_id": "vpco-lease-bd-ov7ca-0001",
+      "proof_work_key": {
+        "schema_version": "franken-node/validation-proof-coalescer/work-key/v1",
+        "work_key_id": "vpcowork-148b53d1eed1125d",
+        "algorithm": "sha256",
+        "hex": "148b53d1eed1125d65a88e30770f75cfe3f176c5133f63ad91342d0947e085b6",
+        "canonical_material": "command_digest=sha256:c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8\u0000inputs=crates/franken-node/src/ops/validation_proof_coalescer.rs:b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189\u0000git_commit=dc4b4c08\u0000dirty=false\u0000dirty_policy=clean_required\u0000features=engine,external-commands,http-client\u0000toolchain=nightly-2026-02-19\u0000package=frankenengine-node\u0000test_target=validation_proof_coalescer\u0000env_policy=validation-proof-coalescer/env-policy/v1\u0000target_policy=validation-proof-coalescer/target-dir/off-repo/v1",
+        "proof_cache_key": {
+          "algorithm": "sha256",
+          "hex": "148b53d1eed1125d65a88e30770f75cfe3f176c5133f63ad91342d0947e085b6",
+          "canonical_material": "command_digest=sha256:c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8\u0000inputs=crates/franken-node/src/ops/validation_proof_coalescer.rs:b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189\u0000git_commit=dc4b4c08\u0000dirty=false\u0000dirty_policy=clean_required\u0000features=engine,external-commands,http-client\u0000toolchain=nightly-2026-02-19\u0000package=frankenengine-node\u0000test_target=validation_proof_coalescer\u0000env_policy=validation-proof-coalescer/env-policy/v1\u0000target_policy=validation-proof-coalescer/target-dir/off-repo/v1"
+        },
+        "command_digest": {
+          "algorithm": "sha256",
+          "hex": "c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8",
+          "canonical_material": "cargo +nightly-2026-02-19 test -p frankenengine-node --test validation_proof_coalescer -- --nocapture\u0000cwd=/data/projects/franken_node\u0000rch=required\u0000target_dir=off-repo"
+        },
+        "input_digests": [
+          {
+            "path": "crates/franken-node/src/ops/validation_proof_coalescer.rs",
+            "algorithm": "sha256",
+            "hex": "b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189",
+            "canonical_material": "crates/franken-node/src/ops/validation_proof_coalescer.rs\u0000docs/specs/validation_proof_coalescer.md\u0000scripts/check_validation_proof_coalescer_contract.py"
+          }
+        ],
+        "git_commit": "dc4b4c08",
+        "dirty_worktree": false,
+        "dirty_state_policy": "clean_required",
+        "feature_flags": [
+          "engine",
+          "external-commands",
+          "http-client"
+        ],
+        "cargo_toolchain": "nightly-2026-02-19",
+        "package": "frankenengine-node",
+        "test_target": "validation_proof_coalescer",
+        "environment_policy_id": "validation-proof-coalescer/env-policy/v1",
+        "target_dir_policy_id": "validation-proof-coalescer/target-dir/off-repo/v1"
+      },
+      "state": "running",
+      "owner_agent": "PearlLeopard",
+      "owner_bead_id": "bd-ov7ca",
+      "fencing_token": "vpco-fence-0001",
+      "created_at": "2026-05-06T01:45:00Z",
+      "updated_at": "2026-05-06T01:50:00Z",
+      "expires_at": "2026-05-06T02:45:00Z",
+      "waiter_agents": [
+        "LavenderElk"
+      ],
+      "admission_policy_id": "validation-proof-coalescer/admission/default/v1",
+      "rch_command": {
+        "argv": [
+          "rch",
+          "exec",
+          "--",
+          "cargo",
+          "+nightly-2026-02-19",
+          "test",
+          "-p",
+          "frankenengine-node",
+          "--test",
+          "validation_proof_coalescer",
+          "--",
+          "--nocapture"
+        ],
+        "command_digest": {
+          "algorithm": "sha256",
+          "hex": "c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8",
+          "canonical_material": "cargo +nightly-2026-02-19 test -p frankenengine-node --test validation_proof_coalescer -- --nocapture\u0000cwd=/data/projects/franken_node\u0000rch=required\u0000target_dir=off-repo"
+        }
+      },
+      "target_dir_policy_id": "validation-proof-coalescer/target-dir/off-repo/v1",
+      "receipt_ref": null,
+      "proof_cache_key": {
+        "algorithm": "sha256",
+        "hex": "148b53d1eed1125d65a88e30770f75cfe3f176c5133f63ad91342d0947e085b6",
+        "canonical_material": "command_digest=sha256:c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8\u0000inputs=crates/franken-node/src/ops/validation_proof_coalescer.rs:b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189\u0000git_commit=dc4b4c08\u0000dirty=false\u0000dirty_policy=clean_required\u0000features=engine,external-commands,http-client\u0000toolchain=nightly-2026-02-19\u0000package=frankenengine-node\u0000test_target=validation_proof_coalescer\u0000env_policy=validation-proof-coalescer/env-policy/v1\u0000target_policy=validation-proof-coalescer/target-dir/off-repo/v1"
+      },
+      "diagnostics": {
+        "trace_id": "trace-vpco-bd-ov7ca-0001",
+        "event_code": "VPCO-003",
+        "reason_code": "VPCO_JOIN_RUNNING",
+        "producer_agent": "PearlLeopard",
+        "waiter_agent": "LavenderElk",
+        "message": "Identical work key joined the running proof"
+      }
+    },
+    {
+      "schema_version": "franken-node/validation-proof-coalescer/lease/v1",
+      "lease_id": "vpco-lease-bd-ov7ca-0002",
+      "proof_work_key": {
+        "schema_version": "franken-node/validation-proof-coalescer/work-key/v1",
+        "work_key_id": "vpcowork-148b53d1eed1125d",
+        "algorithm": "sha256",
+        "hex": "148b53d1eed1125d65a88e30770f75cfe3f176c5133f63ad91342d0947e085b6",
+        "canonical_material": "command_digest=sha256:c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8\u0000inputs=crates/franken-node/src/ops/validation_proof_coalescer.rs:b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189\u0000git_commit=dc4b4c08\u0000dirty=false\u0000dirty_policy=clean_required\u0000features=engine,external-commands,http-client\u0000toolchain=nightly-2026-02-19\u0000package=frankenengine-node\u0000test_target=validation_proof_coalescer\u0000env_policy=validation-proof-coalescer/env-policy/v1\u0000target_policy=validation-proof-coalescer/target-dir/off-repo/v1",
+        "proof_cache_key": {
+          "algorithm": "sha256",
+          "hex": "148b53d1eed1125d65a88e30770f75cfe3f176c5133f63ad91342d0947e085b6",
+          "canonical_material": "command_digest=sha256:c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8\u0000inputs=crates/franken-node/src/ops/validation_proof_coalescer.rs:b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189\u0000git_commit=dc4b4c08\u0000dirty=false\u0000dirty_policy=clean_required\u0000features=engine,external-commands,http-client\u0000toolchain=nightly-2026-02-19\u0000package=frankenengine-node\u0000test_target=validation_proof_coalescer\u0000env_policy=validation-proof-coalescer/env-policy/v1\u0000target_policy=validation-proof-coalescer/target-dir/off-repo/v1"
+        },
+        "command_digest": {
+          "algorithm": "sha256",
+          "hex": "c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8",
+          "canonical_material": "cargo +nightly-2026-02-19 test -p frankenengine-node --test validation_proof_coalescer -- --nocapture\u0000cwd=/data/projects/franken_node\u0000rch=required\u0000target_dir=off-repo"
+        },
+        "input_digests": [
+          {
+            "path": "crates/franken-node/src/ops/validation_proof_coalescer.rs",
+            "algorithm": "sha256",
+            "hex": "b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189",
+            "canonical_material": "crates/franken-node/src/ops/validation_proof_coalescer.rs\u0000docs/specs/validation_proof_coalescer.md\u0000scripts/check_validation_proof_coalescer_contract.py"
+          }
+        ],
+        "git_commit": "dc4b4c08",
+        "dirty_worktree": false,
+        "dirty_state_policy": "clean_required",
+        "feature_flags": [
+          "engine",
+          "external-commands",
+          "http-client"
+        ],
+        "cargo_toolchain": "nightly-2026-02-19",
+        "package": "frankenengine-node",
+        "test_target": "validation_proof_coalescer",
+        "environment_policy_id": "validation-proof-coalescer/env-policy/v1",
+        "target_dir_policy_id": "validation-proof-coalescer/target-dir/off-repo/v1"
+      },
+      "state": "completed",
+      "owner_agent": "PearlLeopard",
+      "owner_bead_id": "bd-ov7ca",
+      "fencing_token": "vpco-fence-0002",
+      "created_at": "2026-05-06T01:20:00Z",
+      "updated_at": "2026-05-06T01:55:00Z",
+      "expires_at": "2026-05-06T03:00:00Z",
+      "waiter_agents": [
+        "LavenderElk",
+        "RusticPlateau"
+      ],
+      "admission_policy_id": "validation-proof-coalescer/admission/default/v1",
+      "rch_command": {
+        "argv": [
+          "rch",
+          "exec",
+          "--",
+          "cargo",
+          "+nightly-2026-02-19",
+          "test",
+          "-p",
+          "frankenengine-node",
+          "--test",
+          "validation_proof_coalescer",
+          "--",
+          "--nocapture"
+        ],
+        "command_digest": {
+          "algorithm": "sha256",
+          "hex": "c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8",
+          "canonical_material": "cargo +nightly-2026-02-19 test -p frankenengine-node --test validation_proof_coalescer -- --nocapture\u0000cwd=/data/projects/franken_node\u0000rch=required\u0000target_dir=off-repo"
+        }
+      },
+      "target_dir_policy_id": "validation-proof-coalescer/target-dir/off-repo/v1",
+      "receipt_ref": {
+        "receipt_id": "validation-broker-receipt-bd-ov7ca-0001",
+        "path": "artifacts/validation_broker/receipts/bd-ov7ca/validation-proof-coalescer.json",
+        "bead_id": "bd-ov7ca",
+        "proof_cache_key_hex": "148b53d1eed1125d65a88e30770f75cfe3f176c5133f63ad91342d0947e085b6",
+        "receipt_digest": {
+          "algorithm": "sha256",
+          "hex": "c679cc2b4450ef6646e5e4eac141b3d9b4e009db24b4ced974f3aafba3ed785b",
+          "canonical_material": "lease_id=vpco-lease-bd-ov7ca-0001\u0000receipt_id=validation-broker-receipt-bd-ov7ca-0001\u0000work_key=148b53d1eed1125d65a88e30770f75cfe3f176c5133f63ad91342d0947e085b6\u0000cache_key=148b53d1eed1125d65a88e30770f75cfe3f176c5133f63ad91342d0947e085b6"
+        }
+      },
+      "proof_cache_key": {
+        "algorithm": "sha256",
+        "hex": "148b53d1eed1125d65a88e30770f75cfe3f176c5133f63ad91342d0947e085b6",
+        "canonical_material": "command_digest=sha256:c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8\u0000inputs=crates/franken-node/src/ops/validation_proof_coalescer.rs:b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189\u0000git_commit=dc4b4c08\u0000dirty=false\u0000dirty_policy=clean_required\u0000features=engine,external-commands,http-client\u0000toolchain=nightly-2026-02-19\u0000package=frankenengine-node\u0000test_target=validation_proof_coalescer\u0000env_policy=validation-proof-coalescer/env-policy/v1\u0000target_policy=validation-proof-coalescer/target-dir/off-repo/v1"
+      },
+      "diagnostics": {
+        "trace_id": "trace-vpco-bd-ov7ca-0002",
+        "event_code": "VPCO-010",
+        "reason_code": "VPCO_WAIT_COMPLETION",
+        "producer_agent": "PearlLeopard",
+        "waiter_agent": "RusticPlateau",
+        "receipt_path": "artifacts/validation_broker/receipts/bd-ov7ca/validation-proof-coalescer.json",
+        "message": "Completed receipt handed off to proof cache"
+      }
+    }
+  ],
+  "valid_decisions": [
+    {
+      "schema_version": "franken-node/validation-proof-coalescer/decision/v1",
+      "decision_id": "vpco-decision-bd-ov7ca-run",
+      "proof_work_key_ref": "vpcowork-148b53d1eed1125d",
+      "proof_work_key": {
+        "schema_version": "franken-node/validation-proof-coalescer/work-key/v1",
+        "work_key_id": "vpcowork-148b53d1eed1125d",
+        "algorithm": "sha256",
+        "hex": "148b53d1eed1125d65a88e30770f75cfe3f176c5133f63ad91342d0947e085b6",
+        "canonical_material": "command_digest=sha256:c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8\u0000inputs=crates/franken-node/src/ops/validation_proof_coalescer.rs:b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189\u0000git_commit=dc4b4c08\u0000dirty=false\u0000dirty_policy=clean_required\u0000features=engine,external-commands,http-client\u0000toolchain=nightly-2026-02-19\u0000package=frankenengine-node\u0000test_target=validation_proof_coalescer\u0000env_policy=validation-proof-coalescer/env-policy/v1\u0000target_policy=validation-proof-coalescer/target-dir/off-repo/v1",
+        "proof_cache_key": {
+          "algorithm": "sha256",
+          "hex": "148b53d1eed1125d65a88e30770f75cfe3f176c5133f63ad91342d0947e085b6",
+          "canonical_material": "command_digest=sha256:c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8\u0000inputs=crates/franken-node/src/ops/validation_proof_coalescer.rs:b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189\u0000git_commit=dc4b4c08\u0000dirty=false\u0000dirty_policy=clean_required\u0000features=engine,external-commands,http-client\u0000toolchain=nightly-2026-02-19\u0000package=frankenengine-node\u0000test_target=validation_proof_coalescer\u0000env_policy=validation-proof-coalescer/env-policy/v1\u0000target_policy=validation-proof-coalescer/target-dir/off-repo/v1"
+        },
+        "command_digest": {
+          "algorithm": "sha256",
+          "hex": "c080f9b87ac1d98be76fa1cf4b5f2327690e0da0fb7bd9a926f965ad941f6ce8",
+          "canonical_material": "cargo +nightly-2026-02-19 test -p frankenengine-node --test validation_proof_coalescer -- --nocapture\u0000cwd=/data/projects/franken_node\u0000rch=required\u0000target_dir=off-repo"
+        },
+        "input_digests": [
+          {
+            "path": "crates/franken-node/src/ops/validation_proof_coalescer.rs",
+            "algorithm": "sha256",
+            "hex": "b5eab8364db8274003771d3546261fd1c7f6e06b64f04cddf3a323134ac6b189",
+            "canonical_material": "crates/franken-node/src/ops/validation_proof_coalescer.rs\u0000docs/specs/validation_proof_coalescer.md\u0000scripts/check_validation_proof_coalescer_contract.py"
+          }
+        ],
+        "git_commit": "dc4b4c08",
+        "dirty_worktree": false,
+        "dirty_state_policy": "clean_required",
+        "feature_flags": [
+          "engine",
+          "external-commands",
+          "http-client"
+        ],
+        "cargo_toolchain": "nightly-2026-02-19",
+        "package": "frankenengine-node",
+        "test_target": "validation_proof_coalescer",
+        "environment_policy_id": "validation-proof-coalescer/env-policy/v1",
+        "target_dir_policy_id": "validation-proof-coalescer/target-dir/off-repo/v1"
+      },
+      "lease_ref": null,
+      "bead_id": "bd-ov7ca",
+      "agent_name": "PearlLeopard",
+      "trace_id": "trace-vpco-bd-ov7ca-0003",
+      "decided_at": "2026-05-06T01:46:00Z",
+      "decision": "run_locally_via_rch",
+      "reason_code": "VPCO_RUN_NO_LEASE",
+      "required_action": "start_rch_validation",
+      "diagnostics": {
+        "event_code": "VPCO-002",
+        "producer_agent": "PearlLeopard",
+        "message": "No active lease matched; producer admitted"
+      }
+    }
+  ],
+  "decision_examples": [
+    {
+      "decision": "run_locally_via_rch",
+      "reason_code": "VPCO_RUN_NO_LEASE",
+      "required_action": "start_rch_validation",
+      "event_code": "VPCO-002"
+    },
+    {
+      "decision": "join_existing_proof",
+      "reason_code": "VPCO_JOIN_RUNNING",
+      "required_action": "join_existing_lease",
+      "event_code": "VPCO-003"
+    },
+    {
+      "decision": "wait_for_receipt",
+      "reason_code": "VPCO_WAIT_COMPLETION",
+      "required_action": "wait_for_receipt",
+      "event_code": "VPCO-004"
+    },
+    {
+      "decision": "queued_by_policy",
+      "reason_code": "VPCO_QUEUE_CAPACITY",
+      "required_action": "queue_validation",
+      "event_code": "VPCO-005"
+    },
+    {
+      "decision": "retry_after_stale_lease",
+      "reason_code": "VPCO_RETRY_STALE",
+      "required_action": "retry_with_new_fence",
+      "event_code": "VPCO-006"
+    },
+    {
+      "decision": "reject_dirty_policy",
+      "reason_code": "VPCO_REJECT_DIRTY_POLICY",
+      "required_action": "fail_closed",
+      "event_code": "VPCO-007"
+    },
+    {
+      "decision": "reject_capacity",
+      "reason_code": "VPCO_REJECT_CAPACITY",
+      "required_action": "fail_closed",
+      "event_code": "VPCO-008"
+    },
+    {
+      "decision": "repair_state",
+      "reason_code": "VPCO_REPAIR_CORRUPTED",
+      "required_action": "repair_state",
+      "event_code": "VPCO-009"
+    }
+  ],
+  "invalid_leases": [
+    {
+      "name": "stale_lease_recovery",
+      "patch": {
+        "set": {
+          "state": "stale",
+          "expires_at": "2026-05-06T01:00:00Z",
+          "diagnostics.event_code": "VPCO-006",
+          "diagnostics.reason_code": "VPCO_RETRY_STALE"
+        }
+      },
+      "expected_errors": [
+        "ERR_VPCO_STALE_LEASE"
+      ]
+    },
+    {
+      "name": "fenced_owner_rejection",
+      "patch": {
+        "set": {
+          "state": "fenced",
+          "owner_agent": "PinkFern",
+          "diagnostics.event_code": "VPCO-006",
+          "diagnostics.reason_code": "VPCO_RETRY_STALE",
+          "diagnostics.fencing_owner_mismatch": true
+        }
+      },
+      "expected_errors": [
+        "ERR_VPCO_FENCED_OWNER"
+      ]
+    },
+    {
+      "name": "dirty_policy_rejection",
+      "patch": {
+        "set": {
+          "state": "rejected",
+          "proof_work_key.dirty_worktree": true,
+          "diagnostics.event_code": "VPCO-007",
+          "diagnostics.reason_code": "VPCO_REJECT_DIRTY_POLICY"
+        }
+      },
+      "expected_errors": [
+        "ERR_VPCO_DIRTY_POLICY"
+      ]
+    },
+    {
+      "name": "capacity_rejection",
+      "patch": {
+        "set": {
+          "state": "rejected",
+          "diagnostics.event_code": "VPCO-008",
+          "diagnostics.reason_code": "VPCO_REJECT_CAPACITY"
+        }
+      },
+      "expected_errors": [
+        "ERR_VPCO_CAPACITY_REJECTED"
+      ]
+    },
+    {
+      "name": "corrupted_state_repair",
+      "patch": {
+        "set": {
+          "state": "failed_closed",
+          "diagnostics.event_code": "VPCO-009",
+          "diagnostics.reason_code": "VPCO_REPAIR_CORRUPTED",
+          "diagnostics.corrupted": true
+        }
+      },
+      "expected_errors": [
+        "ERR_VPCO_CORRUPTED_STATE"
+      ]
+    },
+    {
+      "name": "malformed_lease_missing_id",
+      "patch": {
+        "remove": [
+          "lease_id"
+        ]
+      },
+      "expected_errors": [
+        "ERR_VPCO_MALFORMED_LEASE"
+      ]
+    }
+  ],
+  "invalid_decisions": [
+    {
+      "name": "malformed_decision_bad_reason",
+      "patch": {
+        "set": {
+          "reason_code": "VPCO_UNKNOWN"
+        }
+      },
+      "expected_errors": [
+        "ERR_VPCO_MALFORMED_DECISION"
+      ]
+    },
+    {
+      "name": "dirty_policy_rejection_decision",
+      "patch": {
+        "set": {
+          "decision": "reject_dirty_policy",
+          "reason_code": "VPCO_REJECT_DIRTY_POLICY",
+          "required_action": "fail_closed",
+          "diagnostics.event_code": "VPCO-007"
+        }
+      },
+      "expected_errors": [
+        "ERR_VPCO_DIRTY_POLICY"
+      ]
+    },
+    {
+      "name": "capacity_rejection_decision",
+      "patch": {
+        "set": {
+          "decision": "reject_capacity",
+          "reason_code": "VPCO_REJECT_CAPACITY",
+          "required_action": "fail_closed",
+          "diagnostics.event_code": "VPCO-008"
+        }
+      },
+      "expected_errors": [
+        "ERR_VPCO_CAPACITY_REJECTED"
+      ]
+    },
+    {
+      "name": "repair_state_decision",
+      "patch": {
+        "set": {
+          "decision": "repair_state",
+          "reason_code": "VPCO_REPAIR_CORRUPTED",
+          "required_action": "repair_state",
+          "diagnostics.event_code": "VPCO-009"
+        }
+      },
+      "expected_errors": [
+        "ERR_VPCO_CORRUPTED_STATE"
+      ]
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "happy_path_join",
+      "decision": "join_existing_proof",
+      "reason_code": "VPCO_JOIN_RUNNING",
+      "expected_event_code": "VPCO-003"
+    },
+    {
+      "name": "divergent_key_miss",
+      "decision": "run_locally_via_rch",
+      "reason_code": "VPCO_RUN_NO_LEASE",
+      "expected_event_code": "VPCO-002"
+    },
+    {
+      "name": "stale_lease_recovery",
+      "decision": "retry_after_stale_lease",
+      "reason_code": "VPCO_RETRY_STALE",
+      "expected_event_code": "VPCO-006"
+    },
+    {
+      "name": "fenced_owner_rejection",
+      "decision": "retry_after_stale_lease",
+      "reason_code": "VPCO_RETRY_STALE",
+      "expected_event_code": "VPCO-006"
+    },
+    {
+      "name": "dirty_policy_rejection",
+      "decision": "reject_dirty_policy",
+      "reason_code": "VPCO_REJECT_DIRTY_POLICY",
+      "expected_event_code": "VPCO-007"
+    },
+    {
+      "name": "capacity_rejection",
+      "decision": "reject_capacity",
+      "reason_code": "VPCO_REJECT_CAPACITY",
+      "expected_event_code": "VPCO-008"
+    },
+    {
+      "name": "completed_receipt_handoff",
+      "decision": "wait_for_receipt",
+      "reason_code": "VPCO_WAIT_COMPLETION",
+      "expected_event_code": "VPCO-010"
+    }
+  ]
+}
