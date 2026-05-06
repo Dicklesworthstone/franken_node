@@ -1,0 +1,221 @@
+{
+  "schema_version": "franken-node/validation-swarm-scheduler/schema-catalog/v1",
+  "input_schema_version": "franken-node/validation-swarm-scheduler/input/v1",
+  "policy_schema_version": "franken-node/validation-swarm-scheduler/policy/v1",
+  "decision_schema_version": "franken-node/validation-swarm-scheduler/decision/v1",
+  "fixture_schema_version": "franken-node/validation-swarm-scheduler/fixtures/v1",
+  "decision_kinds": [
+    "run_now",
+    "join_existing",
+    "wait_for_capacity",
+    "steal_stale_work",
+    "reject_low_priority",
+    "record_source_only_blocker",
+    "fail_closed_product",
+    "fail_closed_invalid_artifact"
+  ],
+  "reason_codes": [
+    "VSS_RUN_READY",
+    "VSS_JOIN_IDENTICAL",
+    "VSS_WAIT_CAPACITY",
+    "VSS_STEAL_STALE",
+    "VSS_REJECT_LOW_PRIORITY",
+    "VSS_SOURCE_ONLY_BLOCKER",
+    "VSS_FAIL_PRODUCT",
+    "VSS_FAIL_INVALID_ARTIFACT"
+  ],
+  "event_codes": [
+    "VSS-001",
+    "VSS-002",
+    "VSS-003",
+    "VSS-004",
+    "VSS-005",
+    "VSS-006",
+    "VSS-007",
+    "VSS-008"
+  ],
+  "required_actions": [
+    "start_rch_validation",
+    "join_existing_proof",
+    "wait_for_capacity",
+    "steal_with_new_fence",
+    "defer_low_priority",
+    "record_source_only_blocker",
+    "surface_product_failure",
+    "reject_artifact"
+  ],
+  "fairness_buckets": [
+    "emergency",
+    "high",
+    "normal",
+    "low",
+    "aging",
+    "blocked"
+  ],
+  "starvation_risks": [
+    "none",
+    "watch",
+    "elevated",
+    "breached"
+  ],
+  "coalescer_states": [
+    "none",
+    "running",
+    "joined",
+    "completed",
+    "stale",
+    "fenced",
+    "rejected",
+    "failed_closed"
+  ],
+  "flight_recorder_states": [
+    "none",
+    "remote_success",
+    "worker_timeout",
+    "missing_toolchain",
+    "disk_pressure",
+    "contention_deferred",
+    "local_fallback_refused",
+    "source_only_blocker",
+    "product_failure",
+    "invalid_artifact"
+  ],
+  "proof_debt_classes": [
+    "none",
+    "worker_infra",
+    "capacity",
+    "stale_producer",
+    "source_only",
+    "product_failure",
+    "invalid_artifact"
+  ],
+  "target_dir_classes": [
+    "off_repo",
+    "repo_local_guarded",
+    "repo_local_writable",
+    "unwritable",
+    "missing",
+    "unknown"
+  ],
+  "dirty_state_policies": [
+    "clean_required",
+    "dirty_allowed_with_digest",
+    "source_only_documented"
+  ],
+  "required_input_fields": [
+    "schema_version",
+    "input_id",
+    "bead_id",
+    "agent_name",
+    "proof_work_key",
+    "command_digest",
+    "dirty_state_policy",
+    "target_dir_class",
+    "capacity_snapshot",
+    "coalescer_state",
+    "flight_recorder_state",
+    "proof_debt_class",
+    "queue_age_ms",
+    "priority",
+    "timeout_budget_ms",
+    "source_only_allowed",
+    "product_failure",
+    "worker_infra_retryable",
+    "artifact_valid"
+  ],
+  "required_policy_fields": [
+    "schema_version",
+    "policy_id",
+    "max_running_proofs",
+    "max_waiters_per_work_key",
+    "queue_high_watermark",
+    "starvation_after_ms",
+    "aging_step_ms",
+    "min_available_worker_slots",
+    "allow_work_stealing",
+    "fairness_buckets"
+  ],
+  "required_decision_fields": [
+    "schema_version",
+    "decision_id",
+    "input_ref",
+    "bead_id",
+    "agent_name",
+    "trace_id",
+    "decided_at",
+    "freshness_expires_at",
+    "decision",
+    "reason_code",
+    "event_code",
+    "required_action",
+    "fairness_bucket",
+    "starvation_risk",
+    "retryable",
+    "fail_closed",
+    "green_proof_eligible",
+    "operator_message",
+    "diagnostics"
+  ],
+  "schemas": {
+    "ValidationSwarmSchedulerInput": {
+      "required": [
+        "schema_version",
+        "input_id",
+        "bead_id",
+        "agent_name",
+        "proof_work_key",
+        "command_digest",
+        "dirty_state_policy",
+        "target_dir_class",
+        "capacity_snapshot",
+        "coalescer_state",
+        "flight_recorder_state",
+        "proof_debt_class",
+        "queue_age_ms",
+        "priority",
+        "timeout_budget_ms",
+        "source_only_allowed",
+        "product_failure",
+        "worker_infra_retryable",
+        "artifact_valid"
+      ]
+    },
+    "ValidationSwarmSchedulerPolicy": {
+      "required": [
+        "schema_version",
+        "policy_id",
+        "max_running_proofs",
+        "max_waiters_per_work_key",
+        "queue_high_watermark",
+        "starvation_after_ms",
+        "aging_step_ms",
+        "min_available_worker_slots",
+        "allow_work_stealing",
+        "fairness_buckets"
+      ]
+    },
+    "ValidationSwarmSchedulerDecision": {
+      "required": [
+        "schema_version",
+        "decision_id",
+        "input_ref",
+        "bead_id",
+        "agent_name",
+        "trace_id",
+        "decided_at",
+        "freshness_expires_at",
+        "decision",
+        "reason_code",
+        "event_code",
+        "required_action",
+        "fairness_bucket",
+        "starvation_risk",
+        "retryable",
+        "fail_closed",
+        "green_proof_eligible",
+        "operator_message",
+        "diagnostics"
+      ]
+    }
+  }
+}

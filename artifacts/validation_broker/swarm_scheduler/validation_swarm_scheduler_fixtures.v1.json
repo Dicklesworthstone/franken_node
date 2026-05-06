@@ -1,0 +1,323 @@
+{
+  "schema_version": "franken-node/validation-swarm-scheduler/fixtures/v1",
+  "validation_time": "2026-05-06T09:40:00Z",
+  "base_policy": {
+    "schema_version": "franken-node/validation-swarm-scheduler/policy/v1",
+    "policy_id": "validation-swarm-scheduler/policy/default/v1",
+    "max_running_proofs": 8,
+    "max_waiters_per_work_key": 32,
+    "queue_high_watermark": 64,
+    "starvation_after_ms": 900000,
+    "aging_step_ms": 300000,
+    "min_available_worker_slots": 2,
+    "allow_work_stealing": true,
+    "fairness_buckets": [
+      "emergency",
+      "high",
+      "normal",
+      "low",
+      "aging",
+      "blocked"
+    ]
+  },
+  "base_input": {
+    "schema_version": "franken-node/validation-swarm-scheduler/input/v1",
+    "input_id": "vss-input-bd-4iy4h-base",
+    "bead_id": "bd-4iy4h",
+    "agent_name": "PearlLeopard",
+    "proof_work_key": {
+      "algorithm": "sha256",
+      "hex": "bf9e97851f976f3997d99557d86d2c42f8c8f8ed6d96e869d91fcf92735cff9f",
+      "canonical_material": "bead=bd-4iy4h\\0command=cargo test -p frankenengine-node --test validation_swarm_scheduler\\0inputs=validation_swarm_scheduler_contract"
+    },
+    "command_digest": {
+      "algorithm": "sha256",
+      "hex": "3a4a1268ebff64b08a392fd2bbb63d1a9572f1d11a844802cd322788acf0d370",
+      "canonical_material": "cargo test -p frankenengine-node --test validation_swarm_scheduler"
+    },
+    "dirty_state_policy": "dirty_allowed_with_digest",
+    "target_dir_class": "off_repo",
+    "capacity_snapshot": {
+      "snapshot_id": "vss-capacity-healthy",
+      "captured_at": "2026-05-06T09:39:30Z",
+      "workers_total": 3,
+      "workers_healthy": 2,
+      "slots_total": 44,
+      "slots_available": 42,
+      "queue_depth": 0,
+      "stale_active_builds": 0,
+      "disk_pressure_workers": 0
+    },
+    "coalescer_state": "none",
+    "flight_recorder_state": "none",
+    "proof_debt_class": "none",
+    "queue_age_ms": 0,
+    "priority": "P1",
+    "timeout_budget_ms": 1800000,
+    "source_only_allowed": false,
+    "product_failure": false,
+    "worker_infra_retryable": false,
+    "artifact_valid": true
+  },
+  "decision_examples": [
+    {
+      "schema_version": "franken-node/validation-swarm-scheduler/decision/v1",
+      "decision_id": "vss-decision-run-now",
+      "input_ref": "vss-input-bd-4iy4h-base",
+      "bead_id": "bd-4iy4h",
+      "agent_name": "PearlLeopard",
+      "trace_id": "trace-vss-run-now",
+      "decided_at": "2026-05-06T09:39:35Z",
+      "freshness_expires_at": "2026-05-06T09:49:35Z",
+      "decision": "run_now",
+      "reason_code": "VSS_RUN_READY",
+      "event_code": "VSS-001",
+      "required_action": "start_rch_validation",
+      "fairness_bucket": "high",
+      "starvation_risk": "none",
+      "retryable": false,
+      "fail_closed": false,
+      "green_proof_eligible": false,
+      "operator_message": "Run one producer validation through RCH.",
+      "diagnostics": {
+        "proof_work_key_hex": "bf9e97851f976f3997d99557d86d2c42f8c8f8ed6d96e869d91fcf92735cff9f",
+        "queue_age_ms": "0",
+        "worker_slots": "42",
+        "recorder_path": "artifacts/validation_broker/swarm_scheduler/run_now.json",
+        "fencing_token_digest": "e8a6452a0a638df327ffa03e1810792fd5f12291a1469b09ab3a7689e58577d3"
+      }
+    },
+    {
+      "schema_version": "franken-node/validation-swarm-scheduler/decision/v1",
+      "decision_id": "vss-decision-join-existing",
+      "input_ref": "vss-input-bd-4iy4h-base",
+      "bead_id": "bd-4iy4h",
+      "agent_name": "PearlLeopard",
+      "trace_id": "trace-vss-join-existing",
+      "decided_at": "2026-05-06T09:39:36Z",
+      "freshness_expires_at": "2026-05-06T09:49:36Z",
+      "decision": "join_existing",
+      "reason_code": "VSS_JOIN_IDENTICAL",
+      "event_code": "VSS-002",
+      "required_action": "join_existing_proof",
+      "fairness_bucket": "normal",
+      "starvation_risk": "none",
+      "retryable": false,
+      "fail_closed": false,
+      "green_proof_eligible": false,
+      "operator_message": "Join the existing identical proof work key.",
+      "diagnostics": {
+        "coalescer_state": "running",
+        "producer_agent": "PinkFern",
+        "lease_id": "vpco-lease-123",
+        "recorder_path": "artifacts/validation_broker/swarm_scheduler/join_existing.json"
+      }
+    },
+    {
+      "schema_version": "franken-node/validation-swarm-scheduler/decision/v1",
+      "decision_id": "vss-decision-wait-capacity",
+      "input_ref": "vss-input-bd-4iy4h-base",
+      "bead_id": "bd-4iy4h",
+      "agent_name": "PearlLeopard",
+      "trace_id": "trace-vss-wait-capacity",
+      "decided_at": "2026-05-06T09:39:37Z",
+      "freshness_expires_at": "2026-05-06T09:49:37Z",
+      "decision": "wait_for_capacity",
+      "reason_code": "VSS_WAIT_CAPACITY",
+      "event_code": "VSS-003",
+      "required_action": "wait_for_capacity",
+      "fairness_bucket": "aging",
+      "starvation_risk": "watch",
+      "retryable": true,
+      "fail_closed": false,
+      "green_proof_eligible": false,
+      "operator_message": "Wait for worker capacity before starting another producer.",
+      "diagnostics": {
+        "queue_depth": "72",
+        "slots_available": "0",
+        "retry_after_ms": "60000",
+        "recorder_path": "artifacts/validation_broker/swarm_scheduler/wait_capacity.json"
+      }
+    },
+    {
+      "schema_version": "franken-node/validation-swarm-scheduler/decision/v1",
+      "decision_id": "vss-decision-steal-stale",
+      "input_ref": "vss-input-bd-4iy4h-base",
+      "bead_id": "bd-4iy4h",
+      "agent_name": "PearlLeopard",
+      "trace_id": "trace-vss-steal-stale",
+      "decided_at": "2026-05-06T09:39:38Z",
+      "freshness_expires_at": "2026-05-06T09:49:38Z",
+      "decision": "steal_stale_work",
+      "reason_code": "VSS_STEAL_STALE",
+      "event_code": "VSS-004",
+      "required_action": "steal_with_new_fence",
+      "fairness_bucket": "high",
+      "starvation_risk": "elevated",
+      "retryable": true,
+      "fail_closed": false,
+      "green_proof_eligible": false,
+      "operator_message": "Fence the stale producer before retrying proof work.",
+      "diagnostics": {
+        "old_producer_agent": "PinkFern",
+        "new_fencing_token_digest": "e8a6452a0a638df327ffa03e1810792fd5f12291a1469b09ab3a7689e58577d3",
+        "stale_after_ms": "900000",
+        "recorder_path": "artifacts/validation_broker/swarm_scheduler/steal_stale.json"
+      }
+    },
+    {
+      "schema_version": "franken-node/validation-swarm-scheduler/decision/v1",
+      "decision_id": "vss-decision-reject-low",
+      "input_ref": "vss-input-bd-4iy4h-base",
+      "bead_id": "bd-4iy4h",
+      "agent_name": "PearlLeopard",
+      "trace_id": "trace-vss-reject-low",
+      "decided_at": "2026-05-06T09:39:39Z",
+      "freshness_expires_at": "2026-05-06T09:49:39Z",
+      "decision": "reject_low_priority",
+      "reason_code": "VSS_REJECT_LOW_PRIORITY",
+      "event_code": "VSS-005",
+      "required_action": "defer_low_priority",
+      "fairness_bucket": "low",
+      "starvation_risk": "watch",
+      "retryable": true,
+      "fail_closed": false,
+      "green_proof_eligible": false,
+      "operator_message": "Defer low-priority proof work while high-priority work is saturated.",
+      "diagnostics": {
+        "priority": "P4",
+        "queue_depth": "96",
+        "recorder_path": "artifacts/validation_broker/swarm_scheduler/reject_low_priority.json"
+      }
+    },
+    {
+      "schema_version": "franken-node/validation-swarm-scheduler/decision/v1",
+      "decision_id": "vss-decision-source-only",
+      "input_ref": "vss-input-bd-4iy4h-base",
+      "bead_id": "bd-4iy4h",
+      "agent_name": "PearlLeopard",
+      "trace_id": "trace-vss-source-only",
+      "decided_at": "2026-05-06T09:39:40Z",
+      "freshness_expires_at": "2026-05-06T09:49:40Z",
+      "decision": "record_source_only_blocker",
+      "reason_code": "VSS_SOURCE_ONLY_BLOCKER",
+      "event_code": "VSS-006",
+      "required_action": "record_source_only_blocker",
+      "fairness_bucket": "blocked",
+      "starvation_risk": "breached",
+      "retryable": false,
+      "fail_closed": true,
+      "green_proof_eligible": false,
+      "operator_message": "Record source-only blocker evidence; do not count it as green proof.",
+      "diagnostics": {
+        "proof_debt_class": "source_only",
+        "recorder_path": "artifacts/validation_broker/swarm_scheduler/source_only.json"
+      }
+    },
+    {
+      "schema_version": "franken-node/validation-swarm-scheduler/decision/v1",
+      "decision_id": "vss-decision-product-fail",
+      "input_ref": "vss-input-bd-4iy4h-base",
+      "bead_id": "bd-4iy4h",
+      "agent_name": "PearlLeopard",
+      "trace_id": "trace-vss-product-fail",
+      "decided_at": "2026-05-06T09:39:41Z",
+      "freshness_expires_at": "2026-05-06T09:49:41Z",
+      "decision": "fail_closed_product",
+      "reason_code": "VSS_FAIL_PRODUCT",
+      "event_code": "VSS-007",
+      "required_action": "surface_product_failure",
+      "fairness_bucket": "blocked",
+      "starvation_risk": "none",
+      "retryable": false,
+      "fail_closed": true,
+      "green_proof_eligible": false,
+      "operator_message": "Surface product compile/test failure instead of retrying as worker infra.",
+      "diagnostics": {
+        "proof_debt_class": "product_failure",
+        "product_failure": "true",
+        "recorder_path": "artifacts/validation_broker/swarm_scheduler/product_failure.json"
+      }
+    },
+    {
+      "schema_version": "franken-node/validation-swarm-scheduler/decision/v1",
+      "decision_id": "vss-decision-invalid-artifact",
+      "input_ref": "vss-input-bd-4iy4h-base",
+      "bead_id": "bd-4iy4h",
+      "agent_name": "PearlLeopard",
+      "trace_id": "trace-vss-invalid-artifact",
+      "decided_at": "2026-05-06T09:39:42Z",
+      "freshness_expires_at": "2026-05-06T09:49:42Z",
+      "decision": "fail_closed_invalid_artifact",
+      "reason_code": "VSS_FAIL_INVALID_ARTIFACT",
+      "event_code": "VSS-008",
+      "required_action": "reject_artifact",
+      "fairness_bucket": "blocked",
+      "starvation_risk": "none",
+      "retryable": false,
+      "fail_closed": true,
+      "green_proof_eligible": false,
+      "operator_message": "Reject malformed recorder/coalescer/debt artifacts.",
+      "diagnostics": {
+        "proof_debt_class": "invalid_artifact",
+        "artifact_valid": "false",
+        "recorder_path": "artifacts/validation_broker/swarm_scheduler/invalid_artifact.json"
+      }
+    }
+  ],
+  "scenarios": [
+    {"name": "healthy_fleet_run", "expected_decision": "run_now"},
+    {"name": "saturated_fleet_wait", "expected_decision": "wait_for_capacity"},
+    {"name": "degraded_worker_join", "expected_decision": "join_existing"},
+    {"name": "stale_queue_aging", "expected_decision": "reject_low_priority"},
+    {"name": "stale_producer_steal", "expected_decision": "steal_stale_work"},
+    {"name": "proof_cache_hit_join", "expected_decision": "join_existing"},
+    {"name": "source_only_blocker", "expected_decision": "record_source_only_blocker"},
+    {"name": "product_failure", "expected_decision": "fail_closed_product"},
+    {"name": "invalid_artifact", "expected_decision": "fail_closed_invalid_artifact"}
+  ],
+  "invalid_inputs": [
+    {
+      "name": "bad_work_key_digest",
+      "patch": {"set": {"proof_work_key.hex": "0000000000000000000000000000000000000000000000000000000000000000"}},
+      "expected_errors": ["ERR_VSS_BAD_WORK_KEY"]
+    },
+    {
+      "name": "command_digest_mismatch",
+      "patch": {"set": {"command_digest.hex": "1111111111111111111111111111111111111111111111111111111111111111"}},
+      "expected_errors": ["ERR_VSS_COMMAND_DIGEST_MISMATCH"]
+    },
+    {
+      "name": "product_failure_retried_as_infra",
+      "patch": {"set": {"product_failure": true, "worker_infra_retryable": true}},
+      "expected_errors": ["ERR_VSS_PRODUCT_RETRIED_AS_INFRA"]
+    },
+    {
+      "name": "invalid_artifact_accepted",
+      "patch": {"set": {"artifact_valid": false, "proof_debt_class": "none"}},
+      "expected_errors": ["ERR_VSS_INVALID_ARTIFACT_ACCEPTED"]
+    }
+  ],
+  "invalid_decisions": [
+    {
+      "name": "reason_action_mismatch",
+      "patch": {"set": {"required_action": "wait_for_capacity"}},
+      "expected_errors": ["ERR_VSS_MALFORMED_DECISION"]
+    },
+    {
+      "name": "stale_decision",
+      "patch": {"set": {"freshness_expires_at": "2026-05-06T09:00:00Z"}},
+      "expected_errors": ["ERR_VSS_STALE_DECISION"]
+    },
+    {
+      "name": "worker_infra_green",
+      "patch": {"set": {"green_proof_eligible": true, "diagnostics.proof_debt_class": "worker_infra"}},
+      "expected_errors": ["ERR_VSS_WORKER_INFRA_GREEN"]
+    },
+    {
+      "name": "invalid_artifact_not_fail_closed",
+      "patch": {"set": {"decision": "fail_closed_invalid_artifact", "fail_closed": false}},
+      "expected_errors": ["ERR_VSS_MALFORMED_DECISION"]
+    }
+  ]
+}
