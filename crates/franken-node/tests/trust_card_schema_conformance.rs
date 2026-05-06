@@ -10,11 +10,17 @@ use frankenengine_node::supply_chain::trust_card::{
     ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardError,
     compute_card_hash, to_canonical_json, verify_card_signature,
 };
+use hex::FromHex;
+use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use subtle::ConstantTimeEq;
+
+type HmacSha256 = Hmac<Sha256>;
 
 // Schema version for conformance testing
 const TRUST_CARD_SCHEMA_VERSION: &str = "franken-node/trust-card/v1";
@@ -223,7 +229,7 @@ fn assert_golden(test_name: &str, actual: &str) -> TestResult {
 // ============================================================================
 
 fn create_minimal_trust_card() -> TrustCard {
-    TrustCard {
+    sign_conformance_trust_card(TrustCard {
         schema_version: TRUST_CARD_SCHEMA_VERSION.to_string(),
         trust_card_version: 1,
         previous_version_hash: None,
@@ -261,9 +267,9 @@ fn create_minimal_trust_card() -> TrustCard {
         },
         audit_history: vec![],
         derivation_evidence: None,
-        card_hash: "placeholder".to_string(), // Computed later
-        registry_signature: "placeholder".to_string(), // Computed later
-    }
+        card_hash: String::new(),
+        registry_signature: String::new(),
+    })
 }
 
 fn create_maximal_trust_card() -> TrustCard {
@@ -312,6 +318,20 @@ fn create_maximal_trust_card() -> TrustCard {
         trace_id: TEST_TRACE_ID.to_string(),
     }];
 
+    card.card_hash.clear();
+    card.registry_signature.clear();
+    sign_conformance_trust_card(card)
+}
+
+fn sign_conformance_trust_card(mut card: TrustCard) -> TrustCard {
+    card.card_hash = compute_card_hash(&card).expect("conformance card hash should compute");
+    let mut mac = HmacSha256::new_from_slice(TEST_REGISTRY_KEY.as_bytes())
+        .expect("conformance registry key should be valid");
+    mac.update(b"trust_card_registry_sig_v1:");
+    mac.update(card.card_hash.as_bytes());
+    card.registry_signature = hex::encode(mac.finalize().into_bytes());
+    verify_card_signature(&card, TEST_REGISTRY_KEY.as_bytes())
+        .expect("conformance card signature should verify");
     card
 }
 
@@ -327,6 +347,10 @@ fn workspace_path(relative: &str) -> PathBuf {
     workspace_root().join(relative)
 }
 
+fn ct_str_eq(left: &str, right: &str) -> bool {
+    left.as_bytes().ct_eq(right.as_bytes()).into()
+}
+
 fn read_workspace_file(relative: &str) -> Result<String, String> {
     fs::read_to_string(workspace_path(relative))
         .map_err(|err| format!("failed reading workspace file `{relative}`: {err}"))
@@ -339,7 +363,7 @@ fn load_signature_vector(name: &str) -> Result<TrustCardWireVector, String> {
     vectors
         .vectors
         .into_iter()
-        .find(|vector| vector.name == name)
+        .find(|vector| ct_str_eq(&vector.name, name))
         .ok_or_else(|| format!("missing trust card wire vector `{name}`"))
 }
 
@@ -386,7 +410,7 @@ fn test_signature_vector_verification(_card: &TrustCard) -> TestResult {
             Ok(raw) => raw,
             Err(reason) => return TestResult::Fail { reason },
         };
-    let expected_signature_preimage = match hex::decode(expected_signature_preimage_hex.trim())
+    let expected_signature_preimage = match Vec::from_hex(expected_signature_preimage_hex.trim())
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
     {
@@ -408,12 +432,15 @@ fn test_signature_vector_verification(_card: &TrustCard) -> TestResult {
             };
         }
     };
-    if actual_wire != expected_wire.trim_end() {
+    if !ct_str_eq(&actual_wire, expected_wire.trim_end()) {
         return TestResult::Fail {
             reason: "wire fixture canonical JSON diverged from expected artifact".to_string(),
         };
     }
-    if fixture.registry_signature != vector.expected_registry_signature {
+    if !ct_str_eq(
+        &fixture.registry_signature,
+        &vector.expected_registry_signature,
+    ) {
         return TestResult::Fail {
             reason: format!(
                 "fixture registry signature mismatch: expected {} got {}",
@@ -423,7 +450,7 @@ fn test_signature_vector_verification(_card: &TrustCard) -> TestResult {
     }
 
     let expected_preimage = signature_preimage_string(&fixture.card_hash);
-    if expected_preimage != expected_signature_preimage {
+    if !ct_str_eq(&expected_preimage, &expected_signature_preimage) {
         return TestResult::Fail {
             reason: format!(
                 "signature preimage mismatch: expected `{expected_signature_preimage}` got `{expected_preimage}`"
@@ -499,7 +526,7 @@ fn test_card_hash_vector_determinism(_card: &TrustCard) -> TestResult {
             };
         }
     };
-    if computed_hash != vector.expected_card_hash {
+    if !ct_str_eq(&computed_hash, &vector.expected_card_hash) {
         return TestResult::Fail {
             reason: format!(
                 "computed card_hash mismatch: expected {} got {}",
@@ -507,7 +534,7 @@ fn test_card_hash_vector_determinism(_card: &TrustCard) -> TestResult {
             ),
         };
     }
-    if fixture.card_hash != computed_hash {
+    if !ct_str_eq(&fixture.card_hash, &computed_hash) {
         return TestResult::Fail {
             reason: format!(
                 "embedded fixture card_hash mismatch: expected {} got {}",
@@ -523,7 +550,7 @@ fn test_card_hash_vector_determinism(_card: &TrustCard) -> TestResult {
             };
         }
     };
-    if recomputed_hash != computed_hash {
+    if !ct_str_eq(&recomputed_hash, &computed_hash) {
         return TestResult::Fail {
             reason: "card_hash computation was not deterministic across repeated calls".to_string(),
         };
@@ -533,7 +560,7 @@ fn test_card_hash_vector_determinism(_card: &TrustCard) -> TestResult {
         Ok(json) => json,
         Err(reason) => return TestResult::Fail { reason },
     };
-    if actual_hash_preimage != expected_hash_preimage.trim_end() {
+    if !ct_str_eq(&actual_hash_preimage, expected_hash_preimage.trim_end()) {
         return TestResult::Fail {
             reason: "card_hash preimage artifact diverged from canonicalized fixture".to_string(),
         };
@@ -550,7 +577,7 @@ fn test_card_hash_vector_determinism(_card: &TrustCard) -> TestResult {
             };
         }
     };
-    if tampered_hash == computed_hash {
+    if ct_str_eq(&tampered_hash, &computed_hash) {
         return TestResult::Fail {
             reason: "tampering trust-card payload did not change card_hash".to_string(),
         };
@@ -614,6 +641,17 @@ fn test_schema_version_validity(card: &TrustCard) -> TestResult {
 }
 
 fn test_deterministic_serialization(card: &TrustCard) -> TestResult {
+    if card.card_hash.is_empty() || card.registry_signature.is_empty() {
+        return TestResult::Fail {
+            reason: "deterministic serialization fixture must be signed".to_string(),
+        };
+    }
+    if let Err(err) = verify_card_signature(card, TEST_REGISTRY_KEY.as_bytes()) {
+        return TestResult::Fail {
+            reason: format!("deterministic serialization fixture signature failed: {err}"),
+        };
+    }
+
     // Serialize twice and ensure identical output
     let json1 = match to_canonical_json(card) {
         Ok(json) => json,
@@ -829,6 +867,13 @@ fn generate_compliance_report(results: &[(ConformanceCase, TestResult)]) -> Stri
     report
 }
 
+fn assert_test_result_pass(result: TestResult, context: &str) {
+    assert!(
+        matches!(result, TestResult::Pass),
+        "{context} failed: {result:?}"
+    );
+}
+
 // ============================================================================
 // MAIN TEST ENTRY POINTS
 // ============================================================================
@@ -896,31 +941,19 @@ fn trust_card_schema_conformance_full() {
 fn trust_card_round_trip_minimal() {
     let card = create_minimal_trust_card();
     let result = test_round_trip_consistency(&card);
-    match result {
-        TestResult::Pass => {}
-        TestResult::Fail { reason } => panic!("Round-trip test failed: {}", reason),
-        TestResult::ExpectedFailure { reason } => panic!("Unexpected expected failure: {}", reason),
-    }
+    assert_test_result_pass(result, "minimal round-trip");
 }
 
 #[test]
 fn trust_card_round_trip_maximal() {
     let card = create_maximal_trust_card();
     let result = test_round_trip_consistency(&card);
-    match result {
-        TestResult::Pass => {}
-        TestResult::Fail { reason } => panic!("Round-trip test failed: {}", reason),
-        TestResult::ExpectedFailure { reason } => panic!("Unexpected expected failure: {}", reason),
-    }
+    assert_test_result_pass(result, "maximal round-trip");
 }
 
 #[test]
 fn trust_card_deterministic_serialization() {
     let card = create_minimal_trust_card();
     let result = test_deterministic_serialization(&card);
-    match result {
-        TestResult::Pass => {}
-        TestResult::Fail { reason } => panic!("Deterministic serialization failed: {}", reason),
-        TestResult::ExpectedFailure { reason } => panic!("Unexpected expected failure: {}", reason),
-    }
+    assert_test_result_pass(result, "deterministic serialization");
 }
