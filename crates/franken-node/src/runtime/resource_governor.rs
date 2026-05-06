@@ -12,10 +12,17 @@ use std::path::{Component, Path};
 
 pub const REPORT_SCHEMA_VERSION: &str = "franken-node/resource-governor/report/v1";
 pub const ARTIFACT_SCHEMA_VERSION: &str = "franken-node/resource-governor/artifact/v1";
+pub const PRESSURE_SAMPLE_SCHEMA_VERSION: &str =
+    "franken-node/resource-governor/pressure-sample/v1";
 pub const COMMAND_NAME: &str = "ops resource-governor";
 pub const MAX_ARTIFACT_INVENTORY_ENTRIES: usize = 1_024;
 pub const MAX_ARTIFACT_PATH_BYTES: usize = 4_096;
 pub const MAX_ARTIFACT_FIELD_BYTES: usize = 512;
+pub const MAX_PRESSURE_SAMPLE_PROCESSES: usize = 2_048;
+pub const MAX_PRESSURE_SAMPLE_ROOTS: usize = 128;
+pub const MAX_PRESSURE_SAMPLE_RCH_WORKERS: usize = 256;
+pub const MAX_PRESSURE_SAMPLE_NUMA_NODES: usize = 128;
+pub const MAX_PRESSURE_SAMPLE_UNAVAILABLE_SIGNALS: usize = 128;
 
 pub mod event_codes {
     pub const OBSERVATION_RECORDED: &str = "RG-001";
@@ -117,6 +124,400 @@ impl ResourceProcessCounts {
             }
         }
         counts
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceDiskRootKind {
+    Project,
+    Temp,
+    TargetDir,
+    RchTargetDir,
+    CacheRoot,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourcePressureTier {
+    Green,
+    Yellow,
+    Red,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceDiskPressureRoot {
+    pub path: String,
+    pub kind: ResourceDiskRootKind,
+    pub total_bytes: Option<u64>,
+    pub free_bytes: Option<u64>,
+    pub used_bytes: Option<u64>,
+}
+
+impl ResourceDiskPressureRoot {
+    pub fn free_permyriad(&self) -> Option<u64> {
+        let total = self.total_bytes?;
+        if total == 0 {
+            return None;
+        }
+        Some(self.free_bytes?.saturating_mul(10_000) / total)
+    }
+
+    pub fn pressure_tier(&self) -> ResourcePressureTier {
+        match self.free_permyriad() {
+            Some(free) if free >= 1_500 => ResourcePressureTier::Green,
+            Some(free) if free >= 500 => ResourcePressureTier::Yellow,
+            Some(_) => ResourcePressureTier::Red,
+            None => ResourcePressureTier::Unknown,
+        }
+    }
+
+    fn validated(self) -> Result<Self, ResourcePressureSampleError> {
+        validate_artifact_string("disk_root.path", &self.path, MAX_ARTIFACT_PATH_BYTES)
+            .map_err(ResourcePressureSampleError::Artifact)?;
+        reject_unsafe_path("disk_root.path", &self.path)
+            .map_err(ResourcePressureSampleError::Artifact)?;
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourcePressureProcessInput {
+    pub pid: Option<u32>,
+    pub command: String,
+    pub kind: Option<ResourceProcessKind>,
+    #[serde(default)]
+    pub sampler_self: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceRchWorkerState {
+    Available,
+    Busy,
+    Unreachable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceRchWorkerPressure {
+    pub worker_id: String,
+    pub state: ResourceRchWorkerState,
+    pub slots_total: Option<u64>,
+    pub slots_free: Option<u64>,
+}
+
+impl ResourceRchWorkerPressure {
+    fn validated(self) -> Result<Self, ResourcePressureSampleError> {
+        validate_artifact_string(
+            "rch_worker.worker_id",
+            &self.worker_id,
+            MAX_ARTIFACT_FIELD_BYTES,
+        )
+        .map_err(ResourcePressureSampleError::Artifact)?;
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceMemoryPressure {
+    pub total_bytes: Option<u64>,
+    pub available_bytes: Option<u64>,
+    pub used_bytes: Option<u64>,
+    pub swap_total_bytes: Option<u64>,
+    pub swap_used_bytes: Option<u64>,
+    pub swap_used_permyriad: Option<u64>,
+}
+
+impl ResourceMemoryPressure {
+    fn validated(self) -> Result<Self, ResourcePressureSampleError> {
+        if let Some(value) = self.swap_used_permyriad {
+            validate_permyriad("memory.swap_used_permyriad", value)?;
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceCpuPressure {
+    pub load_permyriad: Option<u64>,
+    pub build_job_cap: Option<u64>,
+}
+
+impl ResourceCpuPressure {
+    fn validated(self) -> Result<Self, ResourcePressureSampleError> {
+        if let Some(value) = self.load_permyriad {
+            validate_permyriad("cpu.load_permyriad", value)?;
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceNumaNodePressure {
+    pub node_id: u32,
+    pub total_bytes: Option<u64>,
+    pub available_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceCoordinationHealth {
+    Healthy,
+    Degraded,
+    Corrupt,
+    Unknown,
+}
+
+impl Default for ResourceCoordinationHealth {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ResourceCoordinationPressure {
+    pub agent_mail_health: ResourceCoordinationHealth,
+    pub beads_health: ResourceCoordinationHealth,
+    pub recovery_mode: Option<String>,
+    pub stale_lock_count: u64,
+    pub active_reservation_count: u64,
+}
+
+impl ResourceCoordinationPressure {
+    fn validated(self) -> Result<Self, ResourcePressureSampleError> {
+        validate_optional_artifact_string(
+            "coordination.recovery_mode",
+            self.recovery_mode.as_deref(),
+        )
+        .map_err(ResourcePressureSampleError::Artifact)?;
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourcePressureSignal {
+    Disk,
+    TargetDir,
+    RchQueue,
+    RchWorkers,
+    Memory,
+    Swap,
+    Cpu,
+    Numa,
+    Coordination,
+    Reservations,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceUnavailableSignal {
+    pub signal: ResourcePressureSignal,
+    pub reason_code: String,
+    pub detail: String,
+}
+
+impl ResourceUnavailableSignal {
+    fn validated(self) -> Result<Self, ResourcePressureSampleError> {
+        validate_artifact_string(
+            "unavailable_signal.reason_code",
+            &self.reason_code,
+            MAX_ARTIFACT_FIELD_BYTES,
+        )
+        .map_err(ResourcePressureSampleError::Artifact)?;
+        validate_artifact_string(
+            "unavailable_signal.detail",
+            &self.detail,
+            MAX_ARTIFACT_FIELD_BYTES,
+        )
+        .map_err(ResourcePressureSampleError::Artifact)?;
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ResourcePressureSampleInput {
+    pub observed_at: Option<DateTime<Utc>>,
+    pub source: Option<String>,
+    #[serde(default)]
+    pub processes: Vec<ResourcePressureProcessInput>,
+    #[serde(default)]
+    pub disk_roots: Vec<ResourceDiskPressureRoot>,
+    pub rch_queue_depth: Option<u64>,
+    #[serde(default)]
+    pub rch_workers: Vec<ResourceRchWorkerPressure>,
+    pub memory: Option<ResourceMemoryPressure>,
+    pub cpu: Option<ResourceCpuPressure>,
+    #[serde(default)]
+    pub numa_nodes: Vec<ResourceNumaNodePressure>,
+    #[serde(default)]
+    pub coordination: ResourceCoordinationPressure,
+    #[serde(default)]
+    pub unavailable_signals: Vec<ResourceUnavailableSignal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourcePressureSample {
+    pub schema_version: String,
+    pub observed_at: DateTime<Utc>,
+    pub sample_age_ms: u64,
+    pub source: String,
+    pub processes: Vec<ObservedValidationProcess>,
+    pub process_counts: ResourceProcessCounts,
+    pub ignored_sampler_self_matches: u64,
+    pub disk_roots: Vec<ResourceDiskPressureRoot>,
+    pub target_dir_total_bytes: u64,
+    pub rch_target_dir_total_bytes: u64,
+    pub rch_queue_depth: Option<u64>,
+    pub rch_workers: Vec<ResourceRchWorkerPressure>,
+    pub memory: Option<ResourceMemoryPressure>,
+    pub cpu: Option<ResourceCpuPressure>,
+    pub numa_nodes: Vec<ResourceNumaNodePressure>,
+    pub coordination: ResourceCoordinationPressure,
+    pub unavailable_signals: Vec<ResourceUnavailableSignal>,
+}
+
+impl ResourcePressureSample {
+    pub fn from_input(
+        input: ResourcePressureSampleInput,
+        default_observed_at: DateTime<Utc>,
+    ) -> Result<Self, ResourcePressureSampleError> {
+        validate_artifact_string(
+            "pressure_sample.source",
+            input.source.as_deref().unwrap_or("fixture"),
+            MAX_ARTIFACT_FIELD_BYTES,
+        )
+        .map_err(ResourcePressureSampleError::Artifact)?;
+        if input.processes.len() > MAX_PRESSURE_SAMPLE_PROCESSES {
+            return Err(ResourcePressureSampleError::TooManyItems {
+                field: "processes",
+                count: input.processes.len(),
+                max: MAX_PRESSURE_SAMPLE_PROCESSES,
+            });
+        }
+        if input.disk_roots.len() > MAX_PRESSURE_SAMPLE_ROOTS {
+            return Err(ResourcePressureSampleError::TooManyItems {
+                field: "disk_roots",
+                count: input.disk_roots.len(),
+                max: MAX_PRESSURE_SAMPLE_ROOTS,
+            });
+        }
+        if input.rch_workers.len() > MAX_PRESSURE_SAMPLE_RCH_WORKERS {
+            return Err(ResourcePressureSampleError::TooManyItems {
+                field: "rch_workers",
+                count: input.rch_workers.len(),
+                max: MAX_PRESSURE_SAMPLE_RCH_WORKERS,
+            });
+        }
+        if input.numa_nodes.len() > MAX_PRESSURE_SAMPLE_NUMA_NODES {
+            return Err(ResourcePressureSampleError::TooManyItems {
+                field: "numa_nodes",
+                count: input.numa_nodes.len(),
+                max: MAX_PRESSURE_SAMPLE_NUMA_NODES,
+            });
+        }
+        if input.unavailable_signals.len() > MAX_PRESSURE_SAMPLE_UNAVAILABLE_SIGNALS {
+            return Err(ResourcePressureSampleError::TooManyItems {
+                field: "unavailable_signals",
+                count: input.unavailable_signals.len(),
+                max: MAX_PRESSURE_SAMPLE_UNAVAILABLE_SIGNALS,
+            });
+        }
+
+        let (processes, ignored_sampler_self_matches) =
+            normalize_pressure_processes(input.processes)?;
+        let process_counts = ResourceProcessCounts::from_processes(&processes);
+        let disk_roots = input
+            .disk_roots
+            .into_iter()
+            .map(ResourceDiskPressureRoot::validated)
+            .collect::<Result<Vec<_>, _>>()?;
+        let target_dir_total_bytes = sum_disk_root_used_bytes(&disk_roots, |kind| {
+            matches!(kind, ResourceDiskRootKind::TargetDir)
+        });
+        let rch_target_dir_total_bytes = sum_disk_root_used_bytes(&disk_roots, |kind| {
+            matches!(kind, ResourceDiskRootKind::RchTargetDir)
+        });
+        let rch_workers = input
+            .rch_workers
+            .into_iter()
+            .map(ResourceRchWorkerPressure::validated)
+            .collect::<Result<Vec<_>, _>>()?;
+        let memory = input
+            .memory
+            .map(ResourceMemoryPressure::validated)
+            .transpose()?;
+        let cpu = input.cpu.map(ResourceCpuPressure::validated).transpose()?;
+        let coordination = input.coordination.validated()?;
+        let unavailable_signals = input
+            .unavailable_signals
+            .into_iter()
+            .map(ResourceUnavailableSignal::validated)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let observed_at = input.observed_at.unwrap_or(default_observed_at);
+        Ok(Self {
+            schema_version: PRESSURE_SAMPLE_SCHEMA_VERSION.to_string(),
+            observed_at,
+            sample_age_ms: timestamp_age_ms(default_observed_at, observed_at),
+            source: input.source.unwrap_or_else(|| "fixture".to_string()),
+            processes,
+            process_counts,
+            ignored_sampler_self_matches,
+            disk_roots,
+            target_dir_total_bytes,
+            rch_target_dir_total_bytes,
+            rch_queue_depth: input.rch_queue_depth,
+            rch_workers,
+            memory,
+            cpu,
+            numa_nodes: input.numa_nodes,
+            coordination,
+            unavailable_signals,
+        })
+    }
+
+    pub fn to_governor_observation(&self) -> ResourceGovernorObservation {
+        let mut observation = ResourceGovernorObservation::new(
+            self.observed_at,
+            self.source.clone(),
+            self.processes.clone(),
+        );
+        observation.rch_queue_depth = self.rch_queue_depth;
+        observation.target_dir_usage_mb = Some(bytes_to_mb(self.target_dir_total_bytes));
+        observation.memory_used_mb = self
+            .memory
+            .as_ref()
+            .and_then(|memory| memory.used_bytes)
+            .map(bytes_to_mb);
+        observation.cpu_load_permyriad = self.cpu.as_ref().and_then(|cpu| cpu.load_permyriad);
+        observation
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResourcePressureSampleError {
+    #[error("RG_PRESSURE_TOO_MANY_ITEMS: {field} has {count} items, max {max}")]
+    TooManyItems {
+        field: &'static str,
+        count: usize,
+        max: usize,
+    },
+    #[error("RG_PRESSURE_INVALID_PERMYRIAD: {field} is {value}, max 10000")]
+    InvalidPermyriad { field: &'static str, value: u64 },
+    #[error("{0}")]
+    Artifact(ResourceArtifactInventoryError),
+}
+
+impl ResourcePressureSampleError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::TooManyItems { .. } => "RG_PRESSURE_TOO_MANY_ITEMS",
+            Self::InvalidPermyriad { .. } => "RG_PRESSURE_INVALID_PERMYRIAD",
+            Self::Artifact(source) => source.code(),
+        }
     }
 }
 
@@ -617,27 +1018,145 @@ pub fn evaluate_resource_governor(
     }
 }
 
-pub fn observe_live_validation_processes(now: DateTime<Utc>) -> ResourceGovernorObservation {
-    let mut processes = Vec::new();
-    if let Ok(entries) = fs::read_dir("/proc") {
-        for entry in entries.flatten() {
-            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-                continue;
-            };
-            let cmdline_path = entry.path().join("cmdline");
-            let Ok(raw) = fs::read(&cmdline_path) else {
-                continue;
-            };
-            let command = decode_proc_cmdline(&raw);
-            if command.trim().is_empty() {
-                continue;
-            }
-            if let Some(process) = ObservedValidationProcess::new(Some(pid), command) {
-                processes.push(process);
+pub trait ResourceProcessProbe {
+    fn observe_processes(&self) -> Vec<ObservedValidationProcess>;
+}
+
+pub struct ProcfsResourceProcessProbe;
+
+impl ResourceProcessProbe for ProcfsResourceProcessProbe {
+    fn observe_processes(&self) -> Vec<ObservedValidationProcess> {
+        let mut processes = Vec::new();
+        if let Ok(entries) = fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                    continue;
+                };
+                let cmdline_path = entry.path().join("cmdline");
+                let Ok(raw) = fs::read(&cmdline_path) else {
+                    continue;
+                };
+                let command = decode_proc_cmdline(&raw);
+                if command.trim().is_empty() {
+                    continue;
+                }
+                if let Some(process) = ObservedValidationProcess::new(Some(pid), command) {
+                    processes.push(process);
+                }
             }
         }
+        processes
     }
-    ResourceGovernorObservation::new(now, "procfs", processes)
+}
+
+pub fn observe_live_validation_processes(now: DateTime<Utc>) -> ResourceGovernorObservation {
+    observe_validation_processes_with_probe(now, &ProcfsResourceProcessProbe)
+}
+
+pub fn observe_validation_processes_with_probe(
+    now: DateTime<Utc>,
+    probe: &impl ResourceProcessProbe,
+) -> ResourceGovernorObservation {
+    ResourceGovernorObservation::new(now, "procfs", probe.observe_processes())
+}
+
+pub fn sample_live_process_pressure(now: DateTime<Utc>) -> ResourcePressureSample {
+    let processes = ProcfsResourceProcessProbe
+        .observe_processes()
+        .into_iter()
+        .map(|process| ResourcePressureProcessInput {
+            pid: process.pid,
+            command: process.command,
+            kind: Some(process.kind),
+            sampler_self: false,
+        })
+        .collect::<Vec<_>>();
+    ResourcePressureSample::from_input(
+        ResourcePressureSampleInput {
+            observed_at: Some(now),
+            source: Some("procfs".to_string()),
+            processes,
+            ..ResourcePressureSampleInput::default()
+        },
+        now,
+    )
+    .unwrap_or_else(|_| ResourcePressureSample {
+        schema_version: PRESSURE_SAMPLE_SCHEMA_VERSION.to_string(),
+        observed_at: now,
+        sample_age_ms: 0,
+        source: "procfs".to_string(),
+        processes: Vec::new(),
+        process_counts: ResourceProcessCounts::from_processes(&[]),
+        ignored_sampler_self_matches: 0,
+        disk_roots: Vec::new(),
+        target_dir_total_bytes: 0,
+        rch_target_dir_total_bytes: 0,
+        rch_queue_depth: None,
+        rch_workers: Vec::new(),
+        memory: None,
+        cpu: None,
+        numa_nodes: Vec::new(),
+        coordination: ResourceCoordinationPressure::default(),
+        unavailable_signals: vec![ResourceUnavailableSignal {
+            signal: ResourcePressureSignal::Coordination,
+            reason_code: "RG_PRESSURE_PROCFS_SAMPLE_INVALID".to_string(),
+            detail: "live process sample failed validation".to_string(),
+        }],
+    })
+}
+
+fn normalize_pressure_processes(
+    inputs: Vec<ResourcePressureProcessInput>,
+) -> Result<(Vec<ObservedValidationProcess>, u64), ResourcePressureSampleError> {
+    let mut ignored_sampler_self_matches = 0_u64;
+    let mut processes = Vec::new();
+    for input in inputs {
+        validate_artifact_string(
+            "pressure_process.command",
+            &input.command,
+            MAX_ARTIFACT_PATH_BYTES,
+        )
+        .map_err(ResourcePressureSampleError::Artifact)?;
+        if input.sampler_self {
+            ignored_sampler_self_matches = ignored_sampler_self_matches.saturating_add(1);
+            continue;
+        }
+        let Some(kind) = input
+            .kind
+            .or_else(|| classify_validation_process(&input.command))
+        else {
+            continue;
+        };
+        processes.push(ObservedValidationProcess {
+            pid: input.pid,
+            command: input.command,
+            kind,
+        });
+    }
+    Ok((processes, ignored_sampler_self_matches))
+}
+
+fn sum_disk_root_used_bytes(
+    roots: &[ResourceDiskPressureRoot],
+    matches_kind: impl Fn(ResourceDiskRootKind) -> bool,
+) -> u64 {
+    roots
+        .iter()
+        .filter(|root| matches_kind(root.kind))
+        .filter_map(|root| root.used_bytes)
+        .fold(0, u64::saturating_add)
+}
+
+fn bytes_to_mb(bytes: u64) -> u64 {
+    bytes / (1024 * 1024)
+}
+
+fn validate_permyriad(field: &'static str, value: u64) -> Result<(), ResourcePressureSampleError> {
+    if value > 10_000 {
+        Err(ResourcePressureSampleError::InvalidPermyriad { field, value })
+    } else {
+        Ok(())
+    }
 }
 
 pub fn read_snapshot_file(
@@ -930,6 +1449,13 @@ pub fn process_kind_label(kind: ResourceProcessKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
+    fn sample_ts(second: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, second)
+            .single()
+            .expect("valid timestamp")
+    }
 
     fn target_entry(path: &str) -> ResourceArtifactInventoryEntry {
         ResourceArtifactInventoryEntry::new(
@@ -959,6 +1485,30 @@ mod tests {
             owner_agent: Some("DustyDesert".to_string()),
             bead_id: Some("bd-p9mpd.2".to_string()),
             expires_at: None,
+        }
+    }
+
+    fn disk_root(
+        path: &str,
+        kind: ResourceDiskRootKind,
+        total_bytes: u64,
+        free_bytes: u64,
+    ) -> ResourceDiskPressureRoot {
+        ResourceDiskPressureRoot {
+            path: path.to_string(),
+            kind,
+            total_bytes: Some(total_bytes),
+            free_bytes: Some(free_bytes),
+            used_bytes: Some(total_bytes.saturating_sub(free_bytes)),
+        }
+    }
+
+    fn pressure_process(command: &str) -> ResourcePressureProcessInput {
+        ResourcePressureProcessInput {
+            pid: None,
+            command: command.to_string(),
+            kind: None,
+            sampler_self: false,
         }
     }
 
@@ -1137,5 +1687,322 @@ mod tests {
         .expect_err("invalid snapshot inventory");
 
         assert_eq!(err.code(), "RG_ARTIFACT_PROTECTED_PATH");
+    }
+
+    #[test]
+    fn disk_pressure_roots_classify_green_yellow_red() {
+        assert_eq!(
+            disk_root(
+                "/data/projects/franken_node",
+                ResourceDiskRootKind::Project,
+                1000,
+                200
+            )
+            .pressure_tier(),
+            ResourcePressureTier::Green
+        );
+        assert_eq!(
+            disk_root("/tmp", ResourceDiskRootKind::Temp, 1000, 100).pressure_tier(),
+            ResourcePressureTier::Yellow
+        );
+        assert_eq!(
+            disk_root(
+                "/data/projects/franken_node/target",
+                ResourceDiskRootKind::TargetDir,
+                1000,
+                20
+            )
+            .pressure_tier(),
+            ResourcePressureTier::Red
+        );
+    }
+
+    #[test]
+    fn pressure_sample_fixture_serializes_stable_workspace_signals() {
+        let sample = ResourcePressureSample::from_input(
+            ResourcePressureSampleInput {
+                observed_at: Some(sample_ts(1)),
+                source: Some("fixture".to_string()),
+                processes: vec![
+                    pressure_process("cargo check -p frankenengine-node"),
+                    pressure_process("rustc --crate-name frankenengine_node"),
+                ],
+                disk_roots: vec![
+                    disk_root(
+                        "/data/projects/franken_node",
+                        ResourceDiskRootKind::Project,
+                        100_000,
+                        40_000,
+                    ),
+                    disk_root(
+                        "/data/projects/franken_node/target",
+                        ResourceDiskRootKind::TargetDir,
+                        20_000,
+                        5_000,
+                    ),
+                    disk_root(
+                        "/data/tmp/franken_node-rch-target",
+                        ResourceDiskRootKind::RchTargetDir,
+                        30_000,
+                        10_000,
+                    ),
+                ],
+                rch_queue_depth: Some(2),
+                rch_workers: vec![
+                    ResourceRchWorkerPressure {
+                        worker_id: "worker-a".to_string(),
+                        state: ResourceRchWorkerState::Available,
+                        slots_total: Some(8),
+                        slots_free: Some(4),
+                    },
+                    ResourceRchWorkerPressure {
+                        worker_id: "worker-b".to_string(),
+                        state: ResourceRchWorkerState::Busy,
+                        slots_total: Some(8),
+                        slots_free: Some(0),
+                    },
+                ],
+                memory: Some(ResourceMemoryPressure {
+                    total_bytes: Some(256_000),
+                    available_bytes: Some(96_000),
+                    used_bytes: Some(160_000),
+                    swap_total_bytes: Some(32_000),
+                    swap_used_bytes: Some(8_000),
+                    swap_used_permyriad: Some(2_500),
+                }),
+                cpu: Some(ResourceCpuPressure {
+                    load_permyriad: Some(6_500),
+                    build_job_cap: Some(12),
+                }),
+                numa_nodes: vec![ResourceNumaNodePressure {
+                    node_id: 0,
+                    total_bytes: Some(128_000),
+                    available_bytes: Some(64_000),
+                }],
+                coordination: ResourceCoordinationPressure {
+                    agent_mail_health: ResourceCoordinationHealth::Healthy,
+                    beads_health: ResourceCoordinationHealth::Healthy,
+                    recovery_mode: Some("normal".to_string()),
+                    stale_lock_count: 0,
+                    active_reservation_count: 2,
+                },
+                unavailable_signals: Vec::new(),
+            },
+            sample_ts(3),
+        )
+        .expect("valid pressure sample");
+
+        assert_eq!(sample.schema_version, PRESSURE_SAMPLE_SCHEMA_VERSION);
+        assert_eq!(sample.sample_age_ms, 2_000);
+        assert_eq!(sample.process_counts.cargo, 1);
+        assert_eq!(sample.process_counts.rustc, 1);
+        assert_eq!(sample.target_dir_total_bytes, 15_000);
+        assert_eq!(sample.rch_target_dir_total_bytes, 20_000);
+        assert_eq!(
+            sample
+                .rch_workers
+                .iter()
+                .filter(|worker| worker.state == ResourceRchWorkerState::Busy)
+                .count(),
+            1
+        );
+        let encoded = serde_json::to_string(&sample).expect("serialize pressure sample");
+        assert!(encoded.contains("franken-node/resource-governor/pressure-sample/v1"));
+        assert!(encoded.contains("active_reservation_count"));
+    }
+
+    #[test]
+    fn pressure_sample_normalizes_sampler_self_matches() {
+        let sample = ResourcePressureSample::from_input(
+            ResourcePressureSampleInput {
+                processes: vec![
+                    ResourcePressureProcessInput {
+                        sampler_self: true,
+                        ..pressure_process("cargo grep self-match")
+                    },
+                    pressure_process("cargo test"),
+                    pressure_process("rustc crate-a"),
+                    pressure_process("rch exec -- cargo check"),
+                    pressure_process("not validation"),
+                ],
+                ..ResourcePressureSampleInput::default()
+            },
+            sample_ts(0),
+        )
+        .expect("valid process sample");
+
+        assert_eq!(sample.ignored_sampler_self_matches, 1);
+        assert_eq!(sample.process_counts.cargo, 1);
+        assert_eq!(sample.process_counts.rustc, 1);
+        assert_eq!(sample.process_counts.rch, 1);
+        assert_eq!(sample.process_counts.total_validation_processes, 3);
+    }
+
+    #[test]
+    fn pressure_sample_covers_high_cargo_contention_fixture() {
+        let sample = ResourcePressureSample::from_input(
+            ResourcePressureSampleInput {
+                processes: vec![
+                    pressure_process("cargo check"),
+                    pressure_process("cargo test"),
+                    pressure_process("cargo clippy"),
+                    pressure_process("rustc crate-a"),
+                    pressure_process("rustc crate-b"),
+                    pressure_process("rustc crate-c"),
+                    pressure_process("rch exec -- cargo test"),
+                ],
+                ..ResourcePressureSampleInput::default()
+            },
+            sample_ts(0),
+        )
+        .expect("valid contention sample");
+        let report = evaluate_resource_governor(
+            ResourceGovernorRequest {
+                trace_id: "contention-fixture".to_string(),
+                requested_proof_class: Some("cargo-test".to_string()),
+                source_only_allowed: false,
+            },
+            sample.to_governor_observation(),
+            ResourceGovernorThresholds::default(),
+            sample_ts(1),
+        );
+
+        assert_eq!(sample.process_counts.total_validation_processes, 7);
+        assert_eq!(report.decision.kind, ResourceGovernorDecisionKind::Defer);
+    }
+
+    #[test]
+    fn pressure_sample_rejects_unbounded_disk_roots() {
+        let disk_roots = (0..=MAX_PRESSURE_SAMPLE_ROOTS)
+            .map(|idx| {
+                disk_root(
+                    &format!("/data/projects/franken_node/target/{idx}"),
+                    ResourceDiskRootKind::TargetDir,
+                    1000,
+                    500,
+                )
+            })
+            .collect::<Vec<_>>();
+        let err = ResourcePressureSample::from_input(
+            ResourcePressureSampleInput {
+                disk_roots,
+                ..ResourcePressureSampleInput::default()
+            },
+            sample_ts(0),
+        )
+        .expect_err("disk root cap should fail");
+
+        assert_eq!(err.code(), "RG_PRESSURE_TOO_MANY_ITEMS");
+    }
+
+    #[test]
+    fn pressure_sample_rejects_invalid_permyriad_inputs() {
+        let err = ResourcePressureSample::from_input(
+            ResourcePressureSampleInput {
+                cpu: Some(ResourceCpuPressure {
+                    load_permyriad: Some(10_001),
+                    build_job_cap: Some(1),
+                }),
+                ..ResourcePressureSampleInput::default()
+            },
+            sample_ts(0),
+        )
+        .expect_err("invalid CPU permyriad should fail");
+
+        assert_eq!(err.code(), "RG_PRESSURE_INVALID_PERMYRIAD");
+    }
+
+    #[test]
+    fn pressure_sample_records_missing_numa_without_host_probe() {
+        let sample = ResourcePressureSample::from_input(
+            ResourcePressureSampleInput {
+                unavailable_signals: vec![ResourceUnavailableSignal {
+                    signal: ResourcePressureSignal::Numa,
+                    reason_code: "RG_NUMA_UNAVAILABLE".to_string(),
+                    detail: "fixture host has no NUMA inventory".to_string(),
+                }],
+                ..ResourcePressureSampleInput::default()
+            },
+            sample_ts(0),
+        )
+        .expect("missing numa is an explicit signal");
+
+        assert!(sample.numa_nodes.is_empty());
+        assert_eq!(sample.unavailable_signals.len(), 1);
+        assert_eq!(
+            sample.unavailable_signals[0].signal,
+            ResourcePressureSignal::Numa
+        );
+    }
+
+    #[test]
+    fn pressure_sample_preserves_corrupt_coordination_hint() {
+        let sample = ResourcePressureSample::from_input(
+            ResourcePressureSampleInput {
+                coordination: ResourceCoordinationPressure {
+                    agent_mail_health: ResourceCoordinationHealth::Corrupt,
+                    beads_health: ResourceCoordinationHealth::Degraded,
+                    recovery_mode: Some("corrupt".to_string()),
+                    stale_lock_count: 3,
+                    active_reservation_count: 5,
+                },
+                unavailable_signals: vec![ResourceUnavailableSignal {
+                    signal: ResourcePressureSignal::Coordination,
+                    reason_code: "RG_COORDINATION_CORRUPT".to_string(),
+                    detail: "mail archive and beads locks disagree".to_string(),
+                }],
+                ..ResourcePressureSampleInput::default()
+            },
+            sample_ts(0),
+        )
+        .expect("valid coordination sample");
+
+        assert_eq!(
+            sample.coordination.agent_mail_health,
+            ResourceCoordinationHealth::Corrupt
+        );
+        assert_eq!(sample.coordination.stale_lock_count, 3);
+        assert_eq!(
+            sample.unavailable_signals[0].signal,
+            ResourcePressureSignal::Coordination
+        );
+    }
+
+    #[test]
+    fn pressure_sample_converts_to_existing_governor_observation() {
+        let sample = ResourcePressureSample::from_input(
+            ResourcePressureSampleInput {
+                processes: vec![pressure_process("cargo check")],
+                disk_roots: vec![disk_root(
+                    "/data/projects/franken_node/target",
+                    ResourceDiskRootKind::TargetDir,
+                    4 * 1024 * 1024,
+                    1024 * 1024,
+                )],
+                rch_queue_depth: Some(4),
+                memory: Some(ResourceMemoryPressure {
+                    total_bytes: Some(8 * 1024 * 1024),
+                    available_bytes: Some(2 * 1024 * 1024),
+                    used_bytes: Some(6 * 1024 * 1024),
+                    swap_total_bytes: None,
+                    swap_used_bytes: None,
+                    swap_used_permyriad: None,
+                }),
+                cpu: Some(ResourceCpuPressure {
+                    load_permyriad: Some(7_500),
+                    build_job_cap: Some(2),
+                }),
+                ..ResourcePressureSampleInput::default()
+            },
+            sample_ts(0),
+        )
+        .expect("valid sample");
+        let observation = sample.to_governor_observation();
+
+        assert_eq!(observation.process_counts.cargo, 1);
+        assert_eq!(observation.rch_queue_depth, Some(4));
+        assert_eq!(observation.target_dir_usage_mb, Some(3));
+        assert_eq!(observation.memory_used_mb, Some(6));
+        assert_eq!(observation.cpu_load_permyriad, Some(7_500));
     }
 }
