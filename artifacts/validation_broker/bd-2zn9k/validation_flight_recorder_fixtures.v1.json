@@ -1,0 +1,734 @@
+{
+  "schema_version": "franken-node/validation-flight-recorder/fixtures/v1",
+  "validation_time": "2026-05-06T08:00:00Z",
+  "base_attempt": {
+    "schema_version": "franken-node/validation-flight-recorder/attempt/v1",
+    "attempt_id": "vfr-attempt-bd-2zn9k-remote-success",
+    "trace_id": "trace-bd-2zn9k",
+    "bead_id": "bd-2zn9k",
+    "thread_id": "bd-2zn9k",
+    "request_id": "vbreq-bd-2zn9k-0001",
+    "queue_id": "vbq-bd-2zn9k-0001",
+    "coalescer_lease_id": "vpcl-bd-2zn9k-0001",
+    "proof_cache_key_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": "2026-05-06T08:00:00Z",
+    "started_at": "2026-05-06T08:00:01Z",
+    "finished_at": "2026-05-06T08:00:02Z",
+    "freshness_expires_at": "2030-01-01T00:00:00Z",
+    "command": {
+      "program": "rch",
+      "argv": [
+        "exec",
+        "--",
+        "cargo",
+        "test",
+        "-p",
+        "frankenengine-node",
+        "flight_recorder",
+        "--",
+        "--nocapture"
+      ],
+      "cwd": "/data/projects/franken_node",
+      "command_digest": {
+        "algorithm": "sha256",
+        "hex": "b670926bc7dda182c6565e198361a61939d54b7a4aa1a0450c0e2cdbc83eb2c5",
+        "canonical_material": "program=rch\u0000argv=exec -- cargo test -p frankenengine-node flight_recorder -- --nocapture\u0000cwd=/data/projects/franken_node\u0000env_policy=validation-flight-recorder/env-policy/v1\u0000target_dir_policy=validation-flight-recorder/target-dir/off-repo/v1"
+      },
+      "environment_policy_id": "validation-flight-recorder/env-policy/v1",
+      "target_dir_policy_id": "validation-flight-recorder/target-dir/off-repo/v1"
+    },
+    "environment": {
+      "policy_id": "validation-flight-recorder/env-policy/v1",
+      "allowed_env": [
+        "RCH_REQUIRE_REMOTE",
+        "CARGO_TARGET_DIR"
+      ],
+      "redacted_env": [
+        "SECRET_TOKEN"
+      ],
+      "remote_required": true,
+      "network_policy": "rch-only",
+      "captured_env": {
+        "RCH_REQUIRE_REMOTE": "1",
+        "CARGO_TARGET_DIR": "/data/tmp/franken_node-pearlleopard-bd-2zn9k-target",
+        "SECRET_TOKEN": "<redacted>"
+      }
+    },
+    "target_dir": {
+      "class": "off_repo",
+      "path": "/data/tmp/franken_node-pearlleopard-bd-2zn9k-target",
+      "path_digest": {
+        "algorithm": "sha256",
+        "hex": "41697ad63eefd2677e8984dff2f6db7ef15b8c5e04416249904adc77f0fa3660"
+      },
+      "repo_local": false,
+      "guarded_placeholder": false,
+      "writable_parent": true,
+      "sync_root_digest": {
+        "algorithm": "sha256",
+        "hex": "142f361065e110c488d8512cba50a4ad198165e7b5882c9380f0118334200926"
+      },
+      "diagnostic": "off-repo target dir selected for remote validation"
+    },
+    "input_digests": [
+      {
+        "path": "docs/specs/validation_flight_recorder.md",
+        "algorithm": "sha256",
+        "hex": "c4e6c70852a9bbb39d435058a956b2fc286515ca54c5feacff4ac5ba4bc20cf1",
+        "source": "fixture"
+      }
+    ],
+    "observations": [
+      {
+        "schema_version": "franken-node/validation-flight-recorder/observation/v1",
+        "observation_id": "vfr-obs-0001",
+        "observed_at": "2026-05-06T08:00:02Z",
+        "phase": "adapter_classified",
+        "event_code": "VFR-001",
+        "worker_id": "ts2",
+        "rch_mode": "remote",
+        "queue_state": "completed",
+        "message": "remote RCH command completed successfully",
+        "details": {
+          "adapter_reason_code": "VFR_SUCCESS_REMOTE"
+        }
+      }
+    ],
+    "adapter_outcome": {
+      "outcome": "passed",
+      "execution_mode": "remote",
+      "worker_id": "ts2",
+      "timeout_class": "none",
+      "exit_code": 0,
+      "retryable": false,
+      "product_failure": false,
+      "reason_code": "VFR_SUCCESS_REMOTE",
+      "detail": "remote RCH command completed successfully"
+    },
+    "exit": {
+      "kind": "success",
+      "code": 0,
+      "signal": null,
+      "timeout_class": "none",
+      "error_class": "none",
+      "retryable": false,
+      "product_failure": false
+    },
+    "artifacts": {
+      "attempt_path": "artifacts/validation_broker/bd-2zn9k/flight-recorder/attempt.vfr-attempt-bd-2zn9k-remote-success.json",
+      "stdout_path": "artifacts/validation_broker/bd-2zn9k/flight-recorder/stdout.vfr-attempt-bd-2zn9k-remote-success.txt",
+      "stderr_path": "artifacts/validation_broker/bd-2zn9k/flight-recorder/stderr.vfr-attempt-bd-2zn9k-remote-success.txt",
+      "summary_path": "artifacts/validation_broker/bd-2zn9k/flight-recorder/summary.vfr-attempt-bd-2zn9k-remote-success.md",
+      "recovery_path": "artifacts/validation_broker/bd-2zn9k/flight-recorder/recovery.vfr-attempt-bd-2zn9k-remote-success.json",
+      "stdout_digest": {
+        "algorithm": "sha256",
+        "hex": "63d42d26156fcc761e57da4128e9881d5bdf3bf933f0f6e9c93d6e26b9b90ae7"
+      },
+      "stderr_digest": {
+        "algorithm": "sha256",
+        "hex": "7e6b710b765404cccbad9eedcff7615fc37b269d6db12cd81a58be541d93083c"
+      },
+      "stdout_snippet": "[RCH] remote ts2",
+      "stderr_snippet": ""
+    },
+    "recovery_ref": {
+      "decision_id": "vfr-recovery-bd-2zn9k-remote-success",
+      "path": "artifacts/validation_broker/bd-2zn9k/flight-recorder/recovery.vfr-attempt-bd-2zn9k-remote-success.json",
+      "digest": {
+        "algorithm": "sha256",
+        "hex": "8c585378513f5f7a2e1456ee54042605fdb890392becefadd2ab180fd02fb341"
+      }
+    },
+    "trust": {
+      "generated_by": "validation-flight-recorder-fixture",
+      "agent_name": "PearlLeopard",
+      "git_commit": "00000000",
+      "dirty_worktree": true,
+      "freshness": "fixture",
+      "signature_status": "unsigned-fixture"
+    }
+  },
+  "base_recovery": {
+    "schema_version": "franken-node/validation-flight-recorder/recovery/v1",
+    "decision_id": "vfr-recovery-bd-2zn9k-remote-success",
+    "attempt_id": "vfr-attempt-bd-2zn9k-remote-success",
+    "bead_id": "bd-2zn9k",
+    "thread_id": "bd-2zn9k",
+    "decided_at": "2026-05-06T08:00:03Z",
+    "input_digest": {
+      "algorithm": "sha256",
+      "hex": "4aae73de07d9ac4166e8b4adf8f5ade47f9db4a174ff87776c75d661e758b9a4"
+    },
+    "decision": "accept_success",
+    "reason_code": "VFR_SUCCESS_REMOTE",
+    "event_code": "VFR-001",
+    "required_action": "use_receipt",
+    "fail_closed": false,
+    "retryable": false,
+    "freshness_expires_at": "2030-01-01T00:00:00Z",
+    "operator_message": "fresh remote validation proof can be used",
+    "diagnostics": {
+      "attempt_id": "vfr-attempt-bd-2zn9k-remote-success"
+    }
+  },
+  "valid_cases": [
+    {
+      "case": "remote_success",
+      "matrix_case": "remote_success",
+      "expected_decision": "accept_success"
+    },
+    {
+      "case": "ssh_timeout",
+      "matrix_case": "ssh_timeout",
+      "expected_decision": "retry_remote_different_worker",
+      "patch_attempt": {
+        "set": {
+          "attempt_id": "vfr-attempt-bd-2zn9k-ssh-timeout",
+          "observations": [
+            {
+              "schema_version": "franken-node/validation-flight-recorder/observation/v1",
+              "observation_id": "vfr-obs-0002",
+              "observed_at": "2026-05-06T08:00:02Z",
+              "phase": "adapter_classified",
+              "event_code": "VFR-002",
+              "worker_id": "vmi-timeout",
+              "rch_mode": "unavailable",
+              "queue_state": "failed",
+              "message": "[RCH-E104] SSH command timed out (no local fallback)",
+              "details": {
+                "adapter_reason_code": "VFR_RETRY_SSH_TIMEOUT"
+              }
+            }
+          ],
+          "adapter_outcome": {
+            "outcome": "worker_timeout",
+            "execution_mode": "unavailable",
+            "worker_id": "vmi-timeout",
+            "timeout_class": "ssh_command",
+            "exit_code": null,
+            "retryable": true,
+            "product_failure": false,
+            "reason_code": "VFR_RETRY_SSH_TIMEOUT",
+            "detail": "[RCH-E104] SSH command timed out (no local fallback)"
+          },
+          "exit": {
+            "kind": "timeout",
+            "code": null,
+            "signal": null,
+            "timeout_class": "ssh_command",
+            "error_class": "transport_timeout",
+            "retryable": true,
+            "product_failure": false
+          }
+        }
+      },
+      "patch_recovery": {
+        "set": {
+          "decision_id": "vfr-recovery-bd-2zn9k-ssh-timeout",
+          "attempt_id": "vfr-attempt-bd-2zn9k-ssh-timeout",
+          "decision": "retry_remote_different_worker",
+          "reason_code": "VFR_RETRY_SSH_TIMEOUT",
+          "event_code": "VFR-002",
+          "required_action": "retry_rch_different_worker",
+          "fail_closed": false,
+          "retryable": true,
+          "operator_message": "retry on a different worker after SSH timeout"
+        }
+      }
+    },
+    {
+      "case": "missing_toolchain",
+      "matrix_case": "missing_toolchain",
+      "expected_decision": "retry_remote_different_worker",
+      "patch_attempt": {
+        "set": {
+          "attempt_id": "vfr-attempt-bd-2zn9k-missing-toolchain",
+          "observations.0.event_code": "VFR-003",
+          "observations.0.worker_id": "vmi-toolchain",
+          "observations.0.rch_mode": "remote",
+          "observations.0.queue_state": "failed",
+          "observations.0.message": "requested Rust toolchain is not installed",
+          "adapter_outcome": {
+            "outcome": "worker_missing_toolchain",
+            "execution_mode": "remote",
+            "worker_id": "vmi-toolchain",
+            "timeout_class": "worker_unreachable",
+            "exit_code": null,
+            "retryable": true,
+            "product_failure": false,
+            "reason_code": "VFR_RETRY_MISSING_TOOLCHAIN",
+            "detail": "requested Rust toolchain is not installed"
+          },
+          "exit": {
+            "kind": "worker_infra",
+            "code": null,
+            "signal": null,
+            "timeout_class": "worker_unreachable",
+            "error_class": "worker_infra",
+            "retryable": true,
+            "product_failure": false
+          }
+        }
+      },
+      "patch_recovery": {
+        "set": {
+          "decision_id": "vfr-recovery-bd-2zn9k-missing-toolchain",
+          "attempt_id": "vfr-attempt-bd-2zn9k-missing-toolchain",
+          "decision": "retry_remote_different_worker",
+          "reason_code": "VFR_RETRY_MISSING_TOOLCHAIN",
+          "event_code": "VFR-003",
+          "required_action": "retry_rch_different_worker",
+          "fail_closed": false,
+          "retryable": true
+        }
+      }
+    },
+    {
+      "case": "disk_pressure",
+      "matrix_case": "disk_pressure",
+      "expected_decision": "drain_worker_then_retry",
+      "patch_attempt": {
+        "set": {
+          "attempt_id": "vfr-attempt-bd-2zn9k-disk-pressure",
+          "observations.0.event_code": "VFR-004",
+          "observations.0.worker_id": "vmi-disk",
+          "observations.0.queue_state": "failed",
+          "observations.0.message": "No space left on device",
+          "adapter_outcome": {
+            "outcome": "worker_filesystem_error",
+            "execution_mode": "remote",
+            "worker_id": "vmi-disk",
+            "timeout_class": "none",
+            "exit_code": null,
+            "retryable": true,
+            "product_failure": false,
+            "reason_code": "VFR_RETRY_WORKER_FS",
+            "detail": "No space left on device"
+          },
+          "exit": {
+            "kind": "worker_infra",
+            "code": null,
+            "signal": null,
+            "timeout_class": "none",
+            "error_class": "disk_pressure",
+            "retryable": true,
+            "product_failure": false
+          }
+        }
+      },
+      "patch_recovery": {
+        "set": {
+          "decision_id": "vfr-recovery-bd-2zn9k-disk-pressure",
+          "attempt_id": "vfr-attempt-bd-2zn9k-disk-pressure",
+          "decision": "drain_worker_then_retry",
+          "reason_code": "VFR_RETRY_WORKER_FS",
+          "event_code": "VFR-004",
+          "required_action": "drain_worker",
+          "fail_closed": false,
+          "retryable": true
+        }
+      }
+    },
+    {
+      "case": "local_fallback_refused",
+      "matrix_case": "local_fallback_refused",
+      "expected_decision": "retry_remote_different_worker",
+      "patch_attempt": {
+        "set": {
+          "attempt_id": "vfr-attempt-bd-2zn9k-local-fallback",
+          "observations.0.event_code": "VFR-006",
+          "observations.0.worker_id": "local",
+          "observations.0.rch_mode": "local_fallback",
+          "observations.0.queue_state": "failed",
+          "observations.0.message": "remote proof required but RCH fell back locally",
+          "adapter_outcome": {
+            "outcome": "local_fallback_refused",
+            "execution_mode": "local_fallback",
+            "worker_id": "local",
+            "timeout_class": "none",
+            "exit_code": null,
+            "retryable": true,
+            "product_failure": false,
+            "reason_code": "VFR_REJECT_LOCAL_FALLBACK",
+            "detail": "remote proof required but RCH fell back locally"
+          },
+          "exit": {
+            "kind": "worker_infra",
+            "code": null,
+            "signal": null,
+            "timeout_class": "none",
+            "error_class": "worker_infra",
+            "retryable": true,
+            "product_failure": false
+          }
+        }
+      },
+      "patch_recovery": {
+        "set": {
+          "decision_id": "vfr-recovery-bd-2zn9k-local-fallback",
+          "attempt_id": "vfr-attempt-bd-2zn9k-local-fallback",
+          "decision": "retry_remote_different_worker",
+          "reason_code": "VFR_REJECT_LOCAL_FALLBACK",
+          "event_code": "VFR-006",
+          "required_action": "retry_rch_different_worker",
+          "fail_closed": false,
+          "retryable": true
+        }
+      }
+    },
+    {
+      "case": "contention_deferred",
+      "matrix_case": "contention_deferred",
+      "expected_decision": "queue_until_capacity",
+      "patch_attempt": {
+        "set": {
+          "attempt_id": "vfr-attempt-bd-2zn9k-contention",
+          "observations.0.event_code": "VFR-005",
+          "observations.0.worker_id": null,
+          "observations.0.rch_mode": "not_used",
+          "observations.0.queue_state": "queued",
+          "observations.0.message": "active cargo and rustc process count exceeds policy",
+          "adapter_outcome": {
+            "outcome": "contention_deferred",
+            "execution_mode": "not_used",
+            "worker_id": null,
+            "timeout_class": "queue_wait",
+            "exit_code": null,
+            "retryable": true,
+            "product_failure": false,
+            "reason_code": "VFR_QUEUE_CONTENTION",
+            "detail": "active cargo and rustc process count exceeds policy"
+          },
+          "exit": {
+            "kind": "deferred",
+            "code": null,
+            "signal": null,
+            "timeout_class": "queue_wait",
+            "error_class": "environment_contention",
+            "retryable": true,
+            "product_failure": false
+          }
+        }
+      },
+      "patch_recovery": {
+        "set": {
+          "decision_id": "vfr-recovery-bd-2zn9k-contention",
+          "attempt_id": "vfr-attempt-bd-2zn9k-contention",
+          "decision": "queue_until_capacity",
+          "reason_code": "VFR_QUEUE_CONTENTION",
+          "event_code": "VFR-005",
+          "required_action": "wait_for_capacity",
+          "fail_closed": false,
+          "retryable": true
+        }
+      }
+    },
+    {
+      "case": "stale_progress",
+      "matrix_case": "stale_progress",
+      "expected_decision": "drain_worker_then_retry",
+      "patch_attempt": {
+        "set": {
+          "attempt_id": "vfr-attempt-bd-2zn9k-stale-progress",
+          "observations.0.event_code": "VFR-009",
+          "observations.0.phase": "progress_stale",
+          "observations.0.worker_id": "vmi-stale",
+          "observations.0.rch_mode": "remote",
+          "observations.0.queue_state": "running",
+          "observations.0.message": "worker heartbeat continued but progress was stale",
+          "adapter_outcome": {
+            "outcome": "worker_timeout",
+            "execution_mode": "remote",
+            "worker_id": "vmi-stale",
+            "timeout_class": "process_idle",
+            "exit_code": null,
+            "retryable": true,
+            "product_failure": false,
+            "reason_code": "VFR_STALE_PROGRESS",
+            "detail": "worker heartbeat continued but progress was stale"
+          },
+          "exit": {
+            "kind": "timeout",
+            "code": null,
+            "signal": null,
+            "timeout_class": "process_idle",
+            "error_class": "transport_timeout",
+            "retryable": true,
+            "product_failure": false
+          }
+        }
+      },
+      "patch_recovery": {
+        "set": {
+          "decision_id": "vfr-recovery-bd-2zn9k-stale-progress",
+          "attempt_id": "vfr-attempt-bd-2zn9k-stale-progress",
+          "decision": "drain_worker_then_retry",
+          "reason_code": "VFR_STALE_PROGRESS",
+          "event_code": "VFR-009",
+          "required_action": "drain_worker",
+          "fail_closed": false,
+          "retryable": true
+        }
+      }
+    },
+    {
+      "case": "compile_error",
+      "matrix_case": "compile_error",
+      "expected_decision": "fail_closed_product",
+      "patch_attempt": {
+        "set": {
+          "attempt_id": "vfr-attempt-bd-2zn9k-compile-error",
+          "observations.0.event_code": "VFR-008",
+          "observations.0.queue_state": "failed",
+          "observations.0.message": "cargo validation failed during compilation",
+          "adapter_outcome": {
+            "outcome": "compile_failed",
+            "execution_mode": "remote",
+            "worker_id": "ts2",
+            "timeout_class": "none",
+            "exit_code": 101,
+            "retryable": false,
+            "product_failure": true,
+            "reason_code": "VFR_PRODUCT_FAILURE",
+            "detail": "cargo validation failed during compilation"
+          },
+          "exit": {
+            "kind": "failure",
+            "code": 101,
+            "signal": null,
+            "timeout_class": "none",
+            "error_class": "compile_error",
+            "retryable": false,
+            "product_failure": true
+          }
+        }
+      },
+      "patch_recovery": {
+        "set": {
+          "decision_id": "vfr-recovery-bd-2zn9k-compile-error",
+          "attempt_id": "vfr-attempt-bd-2zn9k-compile-error",
+          "decision": "fail_closed_product",
+          "reason_code": "VFR_PRODUCT_FAILURE",
+          "event_code": "VFR-008",
+          "required_action": "fix_product_failure",
+          "fail_closed": true,
+          "retryable": false
+        }
+      }
+    },
+    {
+      "case": "test_failure",
+      "matrix_case": "test_failure",
+      "expected_decision": "fail_closed_product",
+      "patch_attempt": {
+        "set": {
+          "attempt_id": "vfr-attempt-bd-2zn9k-test-failure",
+          "observations.0.event_code": "VFR-008",
+          "observations.0.queue_state": "failed",
+          "observations.0.message": "cargo test reported failing tests",
+          "adapter_outcome": {
+            "outcome": "test_failed",
+            "execution_mode": "remote",
+            "worker_id": "ts2",
+            "timeout_class": "none",
+            "exit_code": 101,
+            "retryable": false,
+            "product_failure": true,
+            "reason_code": "VFR_PRODUCT_FAILURE",
+            "detail": "cargo test reported failing tests"
+          },
+          "exit": {
+            "kind": "failure",
+            "code": 101,
+            "signal": null,
+            "timeout_class": "none",
+            "error_class": "test_failure",
+            "retryable": false,
+            "product_failure": true
+          }
+        }
+      },
+      "patch_recovery": {
+        "set": {
+          "decision_id": "vfr-recovery-bd-2zn9k-test-failure",
+          "attempt_id": "vfr-attempt-bd-2zn9k-test-failure",
+          "decision": "fail_closed_product",
+          "reason_code": "VFR_PRODUCT_FAILURE",
+          "event_code": "VFR-008",
+          "required_action": "fix_product_failure",
+          "fail_closed": true,
+          "retryable": false
+        }
+      }
+    },
+    {
+      "case": "source_only_allowed",
+      "matrix_case": "source_only_allowed",
+      "expected_decision": "use_source_only_blocker",
+      "patch_attempt": {
+        "set": {
+          "attempt_id": "vfr-attempt-bd-2zn9k-source-only",
+          "observations.0.event_code": "VFR-007",
+          "observations.0.worker_id": null,
+          "observations.0.rch_mode": "unavailable",
+          "observations.0.queue_state": "cancelled",
+          "observations.0.message": "RCH unavailable, explicit source-only blocker recorded",
+          "adapter_outcome": null,
+          "exit": {
+            "kind": "deferred",
+            "code": null,
+            "signal": null,
+            "timeout_class": "none",
+            "error_class": "source_only",
+            "retryable": false,
+            "product_failure": false,
+            "source_only_reason": "rch_unavailable"
+          }
+        }
+      },
+      "patch_recovery": {
+        "set": {
+          "decision_id": "vfr-recovery-bd-2zn9k-source-only",
+          "attempt_id": "vfr-attempt-bd-2zn9k-source-only",
+          "decision": "use_source_only_blocker",
+          "reason_code": "VFR_SOURCE_ONLY_ALLOWED",
+          "event_code": "VFR-007",
+          "required_action": "record_source_only",
+          "fail_closed": true,
+          "retryable": false
+        }
+      }
+    },
+    {
+      "case": "reuse_receipt",
+      "matrix_case": "reuse_receipt",
+      "expected_decision": "reuse_receipt",
+      "patch_attempt": {
+        "set": {
+          "attempt_id": "vfr-attempt-bd-2zn9k-reuse-receipt",
+          "observations.0.event_code": "VFR-011",
+          "observations.0.phase": "receipt_emitted",
+          "observations.0.worker_id": null,
+          "observations.0.rch_mode": "not_used",
+          "observations.0.queue_state": "completed",
+          "observations.0.message": "existing receipt can be reused",
+          "adapter_outcome": null
+        }
+      },
+      "patch_recovery": {
+        "set": {
+          "decision_id": "vfr-recovery-bd-2zn9k-reuse-receipt",
+          "attempt_id": "vfr-attempt-bd-2zn9k-reuse-receipt",
+          "decision": "reuse_receipt",
+          "reason_code": "VFR_REUSE_RECEIPT",
+          "event_code": "VFR-011",
+          "required_action": "reuse_receipt",
+          "fail_closed": false,
+          "retryable": false
+        }
+      }
+    }
+  ],
+  "invalid_cases": [
+    {
+      "case": "missing_command_digest",
+      "expected_error": "ERR_VFR_MISSING_COMMAND_DIGEST",
+      "patch_attempt": {
+        "remove": [
+          "command.command_digest"
+        ]
+      }
+    },
+    {
+      "case": "unsupported_timeout_class",
+      "expected_error": "ERR_VFR_INVALID_TIMEOUT_CLASS",
+      "patch_attempt": {
+        "set": {
+          "adapter_outcome.timeout_class": "not_a_timeout"
+        }
+      }
+    },
+    {
+      "case": "unbounded_output_snippet",
+      "expected_error": "ERR_VFR_UNBOUNDED_SNIPPET",
+      "patch_attempt": {
+        "set": {
+          "artifacts.stdout_snippet": {
+            "repeat": "x",
+            "count": 4097
+          }
+        }
+      }
+    },
+    {
+      "case": "absolute_artifact_path",
+      "expected_error": "ERR_VFR_INVALID_ARTIFACT_PATH",
+      "patch_attempt": {
+        "set": {
+          "artifacts.stdout_path": "/tmp/stdout.txt"
+        }
+      }
+    },
+    {
+      "case": "missing_next_action",
+      "expected_error": "ERR_VFR_INVALID_RECOVERY_DECISION",
+      "patch_recovery": {
+        "remove": [
+          "required_action"
+        ]
+      }
+    },
+    {
+      "case": "mismatched_bead_thread",
+      "expected_error": "ERR_VFR_BEAD_MISMATCH",
+      "patch_recovery": {
+        "set": {
+          "thread_id": "bd-other"
+        }
+      }
+    },
+    {
+      "case": "unredacted_environment",
+      "expected_error": "ERR_VFR_UNREDACTED_ENVIRONMENT",
+      "patch_attempt": {
+        "set": {
+          "environment.captured_env.SECRET_TOKEN": "raw-secret"
+        }
+      }
+    },
+    {
+      "case": "unsorted_observations",
+      "expected_error": "ERR_VFR_INVALID_OBSERVATION_ORDER",
+      "patch_attempt": {
+        "set": {
+          "observations": [
+            {
+              "schema_version": "franken-node/validation-flight-recorder/observation/v1",
+              "observation_id": "vfr-obs-0002",
+              "observed_at": "2026-05-06T08:00:03Z",
+              "phase": "progress_observed",
+              "event_code": "VFR-001",
+              "worker_id": "ts2",
+              "rch_mode": "remote",
+              "queue_state": "running",
+              "message": "later observation",
+              "details": {}
+            },
+            {
+              "schema_version": "franken-node/validation-flight-recorder/observation/v1",
+              "observation_id": "vfr-obs-0001",
+              "observed_at": "2026-05-06T08:00:02Z",
+              "phase": "adapter_classified",
+              "event_code": "VFR-001",
+              "worker_id": "ts2",
+              "rch_mode": "remote",
+              "queue_state": "completed",
+              "message": "earlier observation",
+              "details": {}
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
