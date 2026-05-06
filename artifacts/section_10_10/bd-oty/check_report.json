@@ -3,8 +3,8 @@
   "title": "Session-authenticated control channel integration",
   "section": "10.10",
   "verdict": "PASS",
-  "total": 110,
-  "passed": 110,
+  "total": 108,
+  "passed": 108,
   "failed": 0,
   "checks": [
     {
@@ -348,9 +348,9 @@
       "detail": "ok"
     },
     {
-      "check": "Rust unit tests present (44)",
+      "check": "Rust unit tests present (146)",
       "pass": true,
-      "detail": "44 tests found"
+      "detail": "146 tests found"
     },
     {
       "check": "test: lifecycle tests",
@@ -513,47 +513,37 @@
       "detail": "ok"
     },
     {
-      "check": "sim: strict monotonicity",
+      "check": "real evidence: HMAC transcript authentication",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: windowed out-of-order",
+      "check": "real evidence: strict sequence enforcement",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: replay detection",
+      "check": "real evidence: replay-window rejection",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: terminated rejection",
+      "check": "real evidence: terminated and expired sessions reject",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: independent counters",
+      "check": "real evidence: max-session and duplicate capacity gates",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: max sessions",
+      "check": "real evidence: key-role validation fail-closed",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: role key validation",
-      "pass": true,
-      "detail": "ok"
-    },
-    {
-      "check": "sim: 4 event codes",
-      "pass": true,
-      "detail": "ok"
-    },
-    {
-      "check": "sim: 6 error codes",
+      "check": "real evidence: audited rejection events",
       "pass": true,
       "detail": "ok"
     }

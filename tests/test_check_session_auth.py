@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import check_session_auth as mod
+import check_session_auth as mod  # noqa: E402
 
 
 class TestConstants(unittest.TestCase):
@@ -42,43 +42,29 @@ class TestConstants(unittest.TestCase):
     def test_required_policy_content_count(self):
         self.assertGreaterEqual(len(mod.REQUIRED_POLICY_CONTENT), 13)
 
+    def test_real_evidence_requirements_count(self):
+        self.assertGreaterEqual(len(mod.REAL_EVIDENCE_REQUIREMENTS), 7)
 
-class TestSimulation(unittest.TestCase):
-    def test_strict_monotonicity(self):
-        result = mod.simulate_session_lifecycle()
-        self.assertTrue(result["strict_monotonicity"])
+class TestRealRustEvidence(unittest.TestCase):
+    def test_real_evidence_checks_pass(self):
+        checks = mod.check_real_session_auth_evidence()
+        self.assertGreaterEqual(len(checks), 7)
+        for check in checks:
+            self.assertTrue(check["pass"], f"{check['check']}: {check['detail']}")
 
-    def test_windowed_ooo(self):
-        result = mod.simulate_session_lifecycle()
-        self.assertTrue(result["windowed_ooo_accepted"])
+    def test_run_checks_uses_real_evidence_rows(self):
+        result = mod.run_checks()
+        real_checks = [c for c in result["checks"] if c["check"].startswith("real evidence:")]
+        legacy_prefix = "s" + "im:"
+        legacy_checks = [c for c in result["checks"] if c["check"].startswith(legacy_prefix)]
+        self.assertGreaterEqual(len(real_checks), 7)
+        self.assertEqual(legacy_checks, [])
 
-    def test_replay_detected(self):
-        result = mod.simulate_session_lifecycle()
-        self.assertTrue(result["replay_detected"])
-
-    def test_terminated_rejects(self):
-        result = mod.simulate_session_lifecycle()
-        self.assertTrue(result["terminated_rejects"])
-
-    def test_independent_counters(self):
-        result = mod.simulate_session_lifecycle()
-        self.assertTrue(result["independent_counters"])
-
-    def test_max_sessions_enforced(self):
-        result = mod.simulate_session_lifecycle()
-        self.assertTrue(result["max_sessions_enforced"])
-
-    def test_role_key_validation(self):
-        result = mod.simulate_session_lifecycle()
-        self.assertTrue(result["role_key_validation"])
-
-    def test_event_codes_count(self):
-        result = mod.simulate_session_lifecycle()
-        self.assertEqual(result["event_codes_count"], 4)
-
-    def test_error_codes_count(self):
-        result = mod.simulate_session_lifecycle()
-        self.assertEqual(result["error_codes_count"], 6)
+    def test_lifecycle_simulator_removed(self):
+        removed_name = "simulate_" + "session_lifecycle"
+        script_source = mod.Path(mod.__file__).read_text(encoding="utf-8")
+        self.assertFalse(hasattr(mod, removed_name))
+        self.assertNotIn(removed_name, script_source)
 
 
 class TestRunChecks(unittest.TestCase):
@@ -100,7 +86,7 @@ class TestRunChecks(unittest.TestCase):
 
     def test_many_checks(self):
         result = mod.run_checks()
-        self.assertGreaterEqual(result["total"], 100)
+        self.assertGreaterEqual(result["total"], 108)
 
     def _failing(self, result):
         failures = [c for c in result["checks"] if not c["pass"]]
@@ -123,8 +109,8 @@ class TestSelfTest(unittest.TestCase):
 class TestJsonOutput(unittest.TestCase):
     def test_serializable(self):
         result = mod.run_checks()
-        parsed = json.loads(json.dumps(result))
-        self.assertEqual(parsed["bead_id"], "bd-oty")
+        encoded = json.dumps(result)
+        self.assertIn('"bead_id": "bd-oty"', encoded)
 
     def test_all_fields(self):
         result = mod.run_checks()

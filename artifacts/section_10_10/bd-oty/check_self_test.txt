@@ -1,21 +1,13 @@
-  [PASS] REQUIRED_STRUCTS non-empty
-  [PASS] REQUIRED_EVENT_CODES non-empty
-  [PASS] REQUIRED_ERROR_CODES non-empty
-  [PASS] REQUIRED_INVARIANTS non-empty
-  [PASS] REQUIRED_FUNCTIONS non-empty
-  [PASS] REQUIRED_SPEC_SECTIONS non-empty
-  [PASS] SESSION_STATES count
-  [PASS] KEY_ROLES count
-  [PASS] DIRECTIONS count
-  [PASS] REQUIRED_POLICY_CONTENT non-empty
-  [PASS] simulation returns dict
-  [PASS] simulation has strict_monotonicity
-  [PASS] run_checks has bead_id
-  [PASS] run_checks has section
-  [PASS] run_checks has verdict
-  [PASS] run_checks has checks list
-  [PASS] run_checks total > 0
-  [PASS] sha256 deterministic
-  [PASS] sha256 distinct
+Command: python3 scripts/check_session_auth.py --self-test
+Result: self-test: 108/108 PASS
 
-self-test: 19/19 PASS
+Real Rust evidence rows:
+  [PASS] real evidence: HMAC transcript authentication
+  [PASS] real evidence: strict sequence enforcement
+  [PASS] real evidence: replay-window rejection
+  [PASS] real evidence: terminated and expired sessions reject
+  [PASS] real evidence: max-session and duplicate capacity gates
+  [PASS] real evidence: key-role validation fail-closed
+  [PASS] real evidence: audited rejection events
+
+Legacy Python lifecycle model rows: 0

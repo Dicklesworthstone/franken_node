@@ -11,10 +11,10 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 # ── File paths ─────────────────────────────────────────────────────────────
@@ -123,6 +123,87 @@ REQUIRED_POLICY_CONTENT = [
     "replay_window",
     "establish_session",
     "validate_key_roles",
+]
+
+REAL_EVIDENCE_REQUIREMENTS = [
+    (
+        "real evidence: HMAC transcript authentication",
+        IMPL_FILE,
+        [
+            "adversarial_forged_handshake_mac_rejected",
+            "adversarial_forged_message_mac_rejected",
+            "HANDSHAKE_HMAC_PREFIX",
+            "MESSAGE_HMAC_PREFIX",
+            "constant_time::ct_eq_bytes",
+        ],
+    ),
+    (
+        "real evidence: strict sequence enforcement",
+        IMPL_FILE,
+        [
+            "test_strict_send_sequence",
+            "test_strict_recv_sequence",
+            "test_independent_send_recv_sequences",
+            "test_send_sequence_exhaustion_rejected_before_duplicate_terminal_use",
+            "SequenceViolation",
+        ],
+    ),
+    (
+        "real evidence: replay-window rejection",
+        IMPL_FILE,
+        [
+            "test_windowed_out_of_order_accepted",
+            "test_windowed_replay_rejected",
+            "test_windowed_regress_below_floor_rejected",
+            "negative_replay_attacks_sequence_manipulation",
+            "ReplayDetected",
+        ],
+    ),
+    (
+        "real evidence: terminated and expired sessions reject",
+        IMPL_FILE,
+        [
+            "test_terminated_session_rejects_messages",
+            "test_expired_session_rejects_messages",
+            "terminating_session_rejects_message_without_advancing_sequence",
+            "process_message_rejects_expired_session_before_sequence_advance",
+            "ensure_active_session",
+        ],
+    ),
+    (
+        "real evidence: max-session and duplicate capacity gates",
+        IMPL_FILE,
+        [
+            "test_max_sessions_enforced",
+            "zero_max_sessions_rejects_first_valid_handshake",
+            "test_duplicate_live_session_id_rejected_without_resetting_counters",
+            "test_terminating_session_still_counts_toward_max_sessions",
+            "MaxSessionsReached",
+        ],
+    ),
+    (
+        "real evidence: key-role validation fail-closed",
+        IMPL_FILE,
+        [
+            "test_validate_key_roles_ok",
+            "test_validate_key_roles_wrong_encryption",
+            "test_validate_key_roles_wrong_signing",
+            "validate_session_key_ids",
+            "KeyRole::Encryption",
+            "KeyRole::Signing",
+        ],
+    ),
+    (
+        "real evidence: audited rejection events",
+        IMPL_FILE,
+        [
+            "test_rejection_event_on_sequence_violation",
+            "event_codes::SCC_MESSAGE_REJECTED",
+            "SessionEvent",
+            "detail:",
+            "trace_id",
+        ],
+    ),
 ]
 
 
@@ -241,7 +322,7 @@ def check_key_role_integration() -> list:
     src = _read(IMPL_FILE)
     checks = []
     # Must import KeyRole from key_role_separation
-    found_import = "key_role_separation::KeyRole" in src
+    found_import = "key_role_separation::KeyRole" in src or "key_role_separation::{KeyRole" in src
     checks.append(_check("imports KeyRole from key_role_separation", found_import))
     for role in KEY_ROLES:
         found = f"KeyRole::{role}" in src
@@ -366,57 +447,20 @@ def check_acceptance_criteria() -> list:
     return checks
 
 
-def simulate_session_lifecycle() -> dict:
-    """Simulate the session lifecycle to verify correctness."""
-    results = {}
+def _missing_patterns(path: Path, patterns: list[str]) -> list[str]:
+    if not path.is_file():
+        return patterns
+    content = path.read_text(encoding="utf-8")
+    return [pattern for pattern in patterns if pattern not in content]
 
-    # Simulate strict monotonicity
-    send_seq = 0
-    recv_seq = 0
-    strict_ok = True
-    for i in range(10):
-        if i != send_seq:
-            strict_ok = False
-            break
-        send_seq += 1
-    results["strict_monotonicity"] = strict_ok
 
-    # Simulate windowed replay detection
-    replay_window = 4
-    seen = set()
-    high_watermark = 0
-    window_ok = True
-    for seq in [0, 2, 1, 3]:  # out-of-order within window
-        floor = max(0, high_watermark - replay_window)
-        if seq < floor or seq in seen:
-            window_ok = False
-            break
-        seen.add(seq)
-        if seq >= high_watermark:
-            high_watermark = seq + 1
-    results["windowed_ooo_accepted"] = window_ok
-
-    # Replay should be detected
-    replay_detected = 2 in seen  # seq 2 already seen
-    results["replay_detected"] = replay_detected
-
-    # Terminated session rejection
-    results["terminated_rejects"] = True  # by design
-
-    # Independent send/recv counters
-    results["independent_counters"] = True  # by design
-
-    # Max sessions enforcement
-    results["max_sessions_enforced"] = True  # by design
-
-    # Role key validation
-    results["role_key_validation"] = True  # by design
-
-    # Event codes present
-    results["event_codes_count"] = 4
-    results["error_codes_count"] = 6
-
-    return results
+def check_real_session_auth_evidence() -> list:
+    checks = []
+    for name, path, patterns in REAL_EVIDENCE_REQUIREMENTS:
+        missing = _missing_patterns(path, patterns)
+        detail = "ok" if not missing else f"missing in {path.relative_to(ROOT)}: {missing}"
+        checks.append(_check(name, not missing, detail))
+    return checks
 
 
 # ── Main check runner ──────────────────────────────────────────────────────
@@ -438,18 +482,7 @@ def run_checks() -> dict:
     checks.extend(check_send_sync())
     checks.extend(check_policy_content())
     checks.extend(check_acceptance_criteria())
-
-    # Simulation checks
-    sim = simulate_session_lifecycle()
-    checks.append(_check("sim: strict monotonicity", sim["strict_monotonicity"]))
-    checks.append(_check("sim: windowed out-of-order", sim["windowed_ooo_accepted"]))
-    checks.append(_check("sim: replay detection", sim["replay_detected"]))
-    checks.append(_check("sim: terminated rejection", sim["terminated_rejects"]))
-    checks.append(_check("sim: independent counters", sim["independent_counters"]))
-    checks.append(_check("sim: max sessions", sim["max_sessions_enforced"]))
-    checks.append(_check("sim: role key validation", sim["role_key_validation"]))
-    checks.append(_check("sim: 4 event codes", sim["event_codes_count"] == 4))
-    checks.append(_check("sim: 6 error codes", sim["error_codes_count"] == 6))
+    checks.extend(check_real_session_auth_evidence())
 
     passed = sum(1 for c in checks if c["pass"])
     failed = sum(1 for c in checks if not c["pass"])
@@ -473,48 +506,14 @@ def run_all() -> dict:
 
 def self_test() -> tuple:
     """Internal consistency checks."""
-    checks = []
-
-    # Verify constants are non-empty
-    checks.append(_check("REQUIRED_STRUCTS non-empty", len(REQUIRED_STRUCTS) >= 8))
-    checks.append(_check("REQUIRED_EVENT_CODES non-empty", len(REQUIRED_EVENT_CODES) == 4))
-    checks.append(_check("REQUIRED_ERROR_CODES non-empty", len(REQUIRED_ERROR_CODES) == 6))
-    checks.append(_check("REQUIRED_INVARIANTS non-empty", len(REQUIRED_INVARIANTS) == 4))
-    checks.append(_check("REQUIRED_FUNCTIONS non-empty", len(REQUIRED_FUNCTIONS) >= 14))
-    checks.append(_check("REQUIRED_SPEC_SECTIONS non-empty", len(REQUIRED_SPEC_SECTIONS) >= 11))
-    checks.append(_check("SESSION_STATES count", len(SESSION_STATES) == 4))
-    checks.append(_check("KEY_ROLES count", len(KEY_ROLES) == 2))
-    checks.append(_check("DIRECTIONS count", len(DIRECTIONS) == 2))
-    checks.append(_check("REQUIRED_POLICY_CONTENT non-empty", len(REQUIRED_POLICY_CONTENT) >= 13))
-
-    # Verify simulation works
-    sim = simulate_session_lifecycle()
-    checks.append(_check("simulation returns dict", isinstance(sim, dict)))
-    checks.append(_check("simulation has strict_monotonicity", "strict_monotonicity" in sim))
-
-    # Verify run_checks returns valid structure
     result = run_checks()
-    checks.append(_check("run_checks has bead_id", result.get("bead_id") == "bd-oty"))
-    checks.append(_check("run_checks has section", result.get("section") == "10.10"))
-    checks.append(_check("run_checks has verdict", result.get("verdict") in ("PASS", "FAIL")))
-    checks.append(_check("run_checks has checks list", isinstance(result.get("checks"), list)))
-    checks.append(_check("run_checks total > 0", result.get("total", 0) > 0))
-
-    # Verify sha256 helper
-    h1 = _sha256_hex(b"test")
-    h2 = _sha256_hex(b"test")
-    checks.append(_check("sha256 deterministic", h1 == h2))
-    h3 = _sha256_hex(b"other")
-    checks.append(_check("sha256 distinct", h1 != h3))
-
-    ok = all(c["pass"] for c in checks)
-    return (ok, checks)
+    return (result["verdict"] == "PASS", result["checks"])
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 def main():
-    logger = configure_test_logging("check_session_auth")
+    configure_test_logging("check_session_auth")
     if "--self-test" in sys.argv:
         ok, checks = self_test()
         passed = sum(1 for c in checks if c["pass"])

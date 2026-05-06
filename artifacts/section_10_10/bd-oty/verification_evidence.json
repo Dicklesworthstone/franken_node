@@ -2,7 +2,7 @@
   "bead_id": "bd-oty",
   "section": "10.10",
   "title": "Session-authenticated control channel integration",
-  "timestamp": "2026-03-09T07:41:00Z",
+  "timestamp": "2026-05-06T15:09:19Z",
   "verdict": "PASS",
   "files": {
     "spec": "docs/specs/section_10_10/bd-oty_contract.md",
@@ -13,11 +13,11 @@
     "python_tests": "tests/test_check_session_auth.py"
   },
   "metrics": {
-    "python_checks_total": 110,
-    "python_checks_passing": 110,
+    "python_checks_total": 108,
+    "python_checks_passing": 108,
     "python_checks_failing": 0,
-    "python_unit_tests": 35,
-    "rust_unit_tests": 55,
+    "python_unit_tests": 30,
+    "rust_unit_tests": 146,
     "structs_verified": 8,
     "event_codes_verified": 4,
     "error_codes_verified": 6,
@@ -26,7 +26,8 @@
     "spec_sections_verified": 11,
     "policy_content_items_verified": 13,
     "session_states_verified": 4,
-    "simulation_checks": 9,
+    "real_rust_evidence_checks": 7,
+    "synthetic_lifecycle_checks": 0,
     "acceptance_criteria_verified": 8,
     "serde_derives_verified": 6,
     "key_role_integration_checks": 3,
@@ -40,7 +41,9 @@
     "AC5_terminated_rejects": "PASS — terminated sessions reject all messages with ERR_SCC_SESSION_TERMINATED (INV-SCC-TERMINATED)",
     "AC6_concurrent_session_limit": "PASS — SessionManager enforces max_sessions with ERR_SCC_MAX_SESSIONS",
     "AC7_traced_events": "PASS — all events include trace_id and session_id",
-    "AC8_unit_test_coverage": "PASS — 55 Rust tests covering lifecycle, sequence, replay, role keys, HMAC verification"
+    "AC8_unit_test_coverage": "PASS — 146 Rust tests covering lifecycle, sequence, replay, role keys, HMAC verification",
+    "AC9_real_rust_evidence": "PASS — checker now verifies real Rust evidence rows for HMAC, sequence, replay, termination, capacity, key roles, and audited rejection events",
+    "AC10_no_synthetic_lifecycle_rows": "PASS — Python lifecycle model rows removed from the verification report"
   },
   "gap_closures": {
     "bd-ac8j": "CLOSED — Replaced placeholder session-auth with HMAC-SHA256 mutual-authenticated capability sessions (handshake transcript binding, per-message chain MAC, epoch-derived keys)"

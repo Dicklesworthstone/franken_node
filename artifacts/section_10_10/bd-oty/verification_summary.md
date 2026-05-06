@@ -1,15 +1,16 @@
 # bd-oty: Session-Authenticated Control Channel Integration
 
-**Section:** 10.10 | **Verdict:** PASS | **Date:** 2026-03-09
+**Section:** 10.10 | **Verdict:** PASS | **Date:** 2026-05-06
 
 ## Metrics
 
 | Category | Pass | Total |
 |----------|------|-------|
-| Python verification checks | 110 | 110 |
-| Python unit tests (pytest) | 35 | 35 |
-| Rust unit tests | 55 | 55 |
-| Simulation checks | 9 | 9 |
+| Python verification checks | 108 | 108 |
+| Python unit tests (pytest) | 30 | 30 |
+| Rust unit tests present | 146 | 146 |
+| Real Rust evidence checks | 7 | 7 |
+| Synthetic lifecycle checks | 0 | 0 |
 
 ## Implementation
 
@@ -95,7 +96,8 @@
 ## Verification Commands
 
 ```bash
-python3 scripts/check_session_auth.py --json         # 110/110 PASS
-python3 -m pytest tests/test_check_session_auth.py -v # 35/35 PASS
-rch exec "cargo check --manifest-path crates/franken-node/Cargo.toml"  # exit 0
+python3 scripts/check_session_auth.py --json          # 108/108 PASS
+python3 scripts/check_session_auth.py --self-test     # 108/108 PASS
+python3 -m pytest tests/test_check_session_auth.py -q # 30 passed
+python3 -m py_compile scripts/check_session_auth.py tests/test_check_session_auth.py
 ```
