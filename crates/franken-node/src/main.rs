@@ -13735,39 +13735,85 @@ fn validate_trust_scan_url(url: &str) -> anyhow::Result<()> {
     // Allowlist of trusted domains for trust scanning
     const TRUSTED_DOMAINS: &[&str] = &["api.deps.dev", "registry.npmjs.org"];
 
-    // Parse URL to validate structure
-    let parsed_url =
-        url::Url::parse(url).with_context(|| format!("Invalid URL format: {}", url))?;
-
-    // Ensure HTTPS only
-    if parsed_url.scheme() != "https" {
-        anyhow::bail!(
-            "Only HTTPS URLs allowed, got scheme: {}",
-            parsed_url.scheme()
-        );
-    }
-
-    // Check domain allowlist
-    let host = parsed_url
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("URL missing host: {}", url))?;
-
-    if !TRUSTED_DOMAINS.contains(&host) {
-        anyhow::bail!(
-            "Untrusted domain '{}', allowed domains: {:?}",
-            host,
-            TRUSTED_DOMAINS
-        );
-    }
-
-    // Ensure no credentials in URL
-    if !parsed_url.username().is_empty() || parsed_url.password().is_some() {
-        anyhow::bail!("URL cannot contain credentials");
-    }
-
     // Length sanity check (prevents excessively long URLs)
     if url.len() > 2048 {
         anyhow::bail!("URL too long: {} characters", url.len());
+    }
+
+    #[cfg(not(feature = "http-client"))]
+    {
+        validate_trust_scan_url_without_http_client(url, TRUSTED_DOMAINS)
+    }
+
+    #[cfg(feature = "http-client")]
+    {
+        // Parse URL to validate structure
+        let parsed_url =
+            url::Url::parse(url).with_context(|| format!("Invalid URL format: {}", url))?;
+
+        // Ensure HTTPS only
+        if parsed_url.scheme() != "https" {
+            anyhow::bail!(
+                "Only HTTPS URLs allowed, got scheme: {}",
+                parsed_url.scheme()
+            );
+        }
+
+        // Check domain allowlist
+        let host = parsed_url
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("URL missing host: {}", url))?;
+
+        if !TRUSTED_DOMAINS.contains(&host) {
+            anyhow::bail!(
+                "Untrusted domain '{}', allowed domains: {:?}",
+                host,
+                TRUSTED_DOMAINS
+            );
+        }
+
+        // Ensure no credentials in URL
+        if !parsed_url.username().is_empty() || parsed_url.password().is_some() {
+            anyhow::bail!("URL cannot contain credentials");
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(not(feature = "http-client"))]
+fn validate_trust_scan_url_without_http_client(
+    url: &str,
+    trusted_domains: &[&str],
+) -> anyhow::Result<()> {
+    let Some(rest) = url.strip_prefix("https://") else {
+        anyhow::bail!("Only HTTPS URLs allowed");
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    if authority.is_empty() {
+        anyhow::bail!("URL missing host: {}", url);
+    }
+    if authority.contains('@') {
+        anyhow::bail!("URL cannot contain credentials");
+    }
+
+    let host = authority.split_once(':').map_or(authority, |(host, port)| {
+        if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+            ""
+        } else {
+            host
+        }
+    });
+    if host.is_empty() {
+        anyhow::bail!("Invalid URL authority: {}", authority);
+    }
+
+    if !trusted_domains.contains(&host) {
+        anyhow::bail!(
+            "Untrusted domain '{}', allowed domains: {:?}",
+            host,
+            trusted_domains
+        );
     }
 
     Ok(())
