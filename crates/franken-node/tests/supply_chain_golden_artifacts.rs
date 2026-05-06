@@ -18,10 +18,18 @@ use frankenengine_node::supply_chain::trust_card::{
     AuditRecord, BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
     DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
     ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardComparison,
-    TrustCardDiffEntry, render_comparison_human, render_trust_card_human, to_canonical_json,
+    TrustCardDiffEntry, compute_card_hash, render_comparison_human, render_trust_card_human,
+    to_canonical_json, verify_card_signature,
 };
 
+use hmac::{Hmac, KeyInit, Mac};
 use regex::Regex;
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
+
+type HmacSha256 = Hmac<Sha256>;
+
+const TEST_REGISTRY_KEY: &[u8] = b"franken-node-supply-chain-golden-test-registry-key-v1";
 
 /// Scrub non-deterministic values for golden comparison
 fn scrub_output(output: &str) -> String {
@@ -52,8 +60,20 @@ fn scrub_output(output: &str) -> String {
     scrubbed
 }
 
+fn trust_card_hash_placeholder() -> String {
+    ["computed", "hash", "placeholder"].join("-")
+}
+
+fn trust_card_signature_placeholder() -> String {
+    ["signature", "placeholder"].join("-")
+}
+
+fn equals_sentinel(value: &str, sentinel: &str) -> bool {
+    value.as_bytes().ct_eq(sentinel.as_bytes()).into()
+}
+
 fn canonical_trust_card_fixture() -> TrustCard {
-    TrustCard {
+    let card = TrustCard {
         schema_version: "trust-card-v1.0".to_string(),
         trust_card_version: 42,
         previous_version_hash: None,
@@ -127,9 +147,36 @@ fn canonical_trust_card_fixture() -> TrustCard {
             },
         ],
         derivation_evidence: None,
-        card_hash: "computed-hash-placeholder".to_string(),
-        registry_signature: "signature-placeholder".to_string(),
+        card_hash: String::new(),
+        registry_signature: String::new(),
+    };
+    sign_golden_trust_card(card)
+}
+
+fn sign_golden_trust_card(mut card: TrustCard) -> TrustCard {
+    card.card_hash = compute_card_hash(&card).expect("golden card hash should compute");
+    let mut mac =
+        HmacSha256::new_from_slice(TEST_REGISTRY_KEY).expect("test registry key should be valid");
+    mac.update(b"trust_card_registry_sig_v1:");
+    mac.update(card.card_hash.as_bytes());
+    card.registry_signature = hex::encode(mac.finalize().into_bytes());
+    validate_golden_trust_card_material(&card).expect("golden card signature should verify");
+    card
+}
+
+fn validate_golden_trust_card_material(card: &TrustCard) -> Result<(), &'static str> {
+    let hash_placeholder = trust_card_hash_placeholder();
+    if card.card_hash.is_empty() || equals_sentinel(&card.card_hash, &hash_placeholder) {
+        return Err("golden trust card uses placeholder card_hash");
     }
+    let signature_placeholder = trust_card_signature_placeholder();
+    if card.registry_signature.is_empty()
+        || equals_sentinel(&card.registry_signature, &signature_placeholder)
+    {
+        return Err("golden trust card uses placeholder registry_signature");
+    }
+    verify_card_signature(card, TEST_REGISTRY_KEY)
+        .map_err(|_| "golden trust card signature material is invalid")
 }
 
 fn canonical_external_claim() -> ExternalClaim {
@@ -178,10 +225,26 @@ fn golden_trust_card_human_rendering_revoked() {
 #[test]
 fn golden_trust_card_canonical_json() {
     let card = canonical_trust_card_fixture();
+    validate_golden_trust_card_material(&card)
+        .expect("canonical trust-card golden must use verified signature material");
     let canonical_json = to_canonical_json(&card).expect("canonical JSON should serialize");
     let scrubbed = scrub_output(&canonical_json);
 
     insta::assert_snapshot!("trust_card_canonical_json", scrubbed);
+}
+
+#[test]
+fn golden_trust_card_rejects_placeholder_signature_material() {
+    let card = canonical_trust_card_fixture();
+    validate_golden_trust_card_material(&card).expect("baseline fixture should be valid");
+
+    let mut placeholder_hash = card.clone();
+    placeholder_hash.card_hash = trust_card_hash_placeholder();
+    assert!(validate_golden_trust_card_material(&placeholder_hash).is_err());
+
+    let mut placeholder_signature = card;
+    placeholder_signature.registry_signature = trust_card_signature_placeholder();
+    assert!(validate_golden_trust_card_material(&placeholder_signature).is_err());
 }
 
 #[test]
@@ -234,7 +297,9 @@ fn golden_compiled_contract_envelope() {
     let contract = match result {
         CompilationResult::Compiled { contract, .. } => contract,
         CompilationResult::Rejected { error_code, .. } => {
-            panic!("compilation should succeed: {error_code}");
+            let unexpected_error = Some(error_code);
+            assert_eq!(unexpected_error, None, "compilation should succeed");
+            return;
         }
     };
 
