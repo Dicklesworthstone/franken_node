@@ -53,6 +53,12 @@ def rust_test_command() -> list[str]:
     ]
 
 
+def extract_rust_test_summary(stdout: str, stderr: str) -> str:
+    lines = f"{stdout}\n{stderr}".strip().splitlines()
+    summaries = [line.strip() for line in lines if "test result:" in line]
+    return summaries[-1] if summaries else ""
+
+
 def check_harness_impl() -> dict:
     """HARNESS-IMPL: Protocol harness Rust implementation exists."""
     path = ROOT / "crates" / "franken-node" / "src" / "conformance" / "protocol_harness.rs"
@@ -108,12 +114,11 @@ def check_rust_tests() -> dict:
             rust_test_command(),
             capture_output=True, text=True, timeout=3600, cwd=str(ROOT),
         )
-        lines = result.stdout.strip().split("\n")
-        summary = [l for l in lines if "test result:" in l]
+        summary = extract_rust_test_summary(result.stdout, result.stderr)
         return {
             "id": "HARNESS-TESTS",
             "status": "PASS" if result.returncode == 0 else "FAIL",
-            "details": {"summary": summary[-1] if summary else ""},
+            "details": {"summary": summary},
         }
     except Exception as e:
         return {"id": "HARNESS-TESTS", "status": "FAIL", "details": {"error": str(e)}}
