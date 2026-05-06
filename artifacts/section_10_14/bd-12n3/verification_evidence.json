@@ -2,7 +2,7 @@
   "bead_id": "bd-12n3",
   "section": "10.14",
   "title": "Idempotency key derivation from request bytes with epoch binding",
-  "generated_at": "2026-05-06T13:21:23Z",
+  "generated_at": "2026-05-06T15:03:00Z",
   "status": "PASS",
   "checks": [
     {
@@ -49,10 +49,11 @@
     },
     {
       "name": "cargo_check_all_targets_via_rch",
-      "command": "RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary RCH_PRIORITY=low RCH_TEST_TIMEOUT_SEC=1800 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=2400 rch exec -- env CARGO_TARGET_DIR=/data/tmp/franken_node-rusticplateau-bd-177e4-check-target CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo +nightly-2026-02-19 check -p frankenengine-node --all-targets",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary RCH_PRIORITY=low RCH_BUILD_TIMEOUT_SEC=7200 RCH_TEST_TIMEOUT_SEC=7200 RCH_SSH_SERVER_ALIVE_INTERVAL_SECS=15 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=8000 rch exec -- env CARGO_TARGET_DIR=.rch-target-pinkfern-bd-177e4-check CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo +nightly-2026-02-19 check -p frankenengine-node --all-targets",
       "exit_code": 0,
-      "status": "PASS_RECORDED_IN_BEADS_COMMENT",
-      "note": "RusticPlateau recorded this remote pass in the bd-177e4 Beads thread at 2026-05-05 16:04 UTC: [RCH] remote vmi1293453 (803.3s). The persisted artifact log for this check remains the 2026-05-03 stale dependency failure and must be refreshed before bd-177e4 can close cleanly."
+      "status": "PASS",
+      "output_path": "artifacts/section_10_14/bd-12n3/rch_cargo_check_all_targets.log",
+      "note": "PinkFern refreshed this proof on 2026-05-06 from /data/projects/franken_node. The persisted artifact log returns [RCH] remote vmi1156319 (1712.3s), exit 0."
     },
     {
       "name": "cargo_clippy_all_targets_via_rch",
@@ -64,10 +65,15 @@
     },
     {
       "name": "focused_idempotency_tests_via_rch",
-      "command": "RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary RCH_PRIORITY=low RCH_TEST_TIMEOUT_SEC=1800 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=2400 rch exec -- env CARGO_TARGET_DIR=/data/tmp/franken_node-rusticplateau-bd-177e4-idempotency-target CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo +nightly-2026-02-19 test -p frankenengine-node --features extended-surfaces --test idempotency_key_derivation -- --nocapture",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary RCH_PRIORITY=low RCH_BUILD_TIMEOUT_SEC=7200 RCH_TEST_TIMEOUT_SEC=7200 RCH_SSH_SERVER_ALIVE_INTERVAL_SECS=15 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=8000 rch exec -- env CARGO_TARGET_DIR=.rch-target-pinkfern-bd-177e4-idempotency CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo +nightly-2026-02-19 test -p frankenengine-node --features extended-surfaces --test idempotency_key_derivation -- --nocapture",
       "exit_code": 0,
-      "status": "PASS_RECORDED_IN_BEADS_COMMENT",
-      "note": "RusticPlateau recorded this focused remote pass in the bd-177e4 Beads thread at 2026-05-05 16:04 UTC: 6/6 tests passed on vmi1293453. The persisted artifact log for this focused test remains the 2026-05-03 stale dependency failure and must be refreshed before bd-177e4 can close cleanly."
+      "status": "PASS",
+      "output_path": "artifacts/section_10_14/bd-12n3/rch_cargo_test_idempotency_key_derivation.log",
+      "summary": {
+        "tests_passed": 6,
+        "tests_failed": 0
+      },
+      "note": "PinkFern refreshed this proof on 2026-05-06 from /data/projects/franken_node. The persisted artifact log returns [RCH] remote vmi1156319 (3213.7s), exit 0, with 6/6 idempotency conformance tests passing."
     },
     {
       "name": "section_10_14_gate",
@@ -91,10 +97,5 @@
     "vectors": "artifacts/10.14/idempotency_vectors.json",
     "spec": "docs/specs/section_10_14/bd-12n3_contract.md"
   },
-  "remaining_blocker": {
-    "kind": "none_for_all_target_clippy_warning_debt",
-    "path": "artifacts/section_10_14/bd-12n3/rch_cargo_clippy_all_targets.log",
-    "line": null,
-    "message": "cargo +nightly-2026-02-19 clippy -p frankenengine-node --all-targets -- -D warnings passes on current franken_node after bd-empw2 cleanup."
-  }
+  "remaining_blocker": null
 }
