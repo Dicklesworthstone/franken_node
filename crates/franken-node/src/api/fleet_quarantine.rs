@@ -24,6 +24,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::Duration;
 
 use ed25519_dalek::{Signature, Signer, VerifyingKey};
+use hex::FromHex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -847,13 +848,15 @@ pub fn verify_decision_receipt_signature_with_trust_roots(
         return false;
     }
 
-    let Ok(signature_bytes) = hex::decode(&signature.signature_hex) else {
+    let Ok(receipt_signature_bytes) = Vec::from_hex(&signature.signature_hex) else {
         return false;
     };
-    let Ok(signature) = Signature::from_slice(&signature_bytes) else {
+    let Ok(receipt_signature) = Signature::from_slice(&receipt_signature_bytes) else {
         return false;
     };
-    verifying_key.verify_strict(&payload, &signature).is_ok()
+    verifying_key
+        .verify_strict(&payload, &receipt_signature)
+        .is_ok()
 }
 
 fn trusted_receipt_verifying_key(
@@ -898,8 +901,7 @@ fn trusted_receipt_verifying_key(
 }
 
 fn decode_ed25519_public_key_hex(public_key_hex: &str) -> Option<[u8; 32]> {
-    let public_key_bytes = hex::decode(public_key_hex).ok()?;
-    <[u8; 32]>::try_from(public_key_bytes.as_slice()).ok()
+    <[u8; 32]>::from_hex(public_key_hex).ok()
 }
 
 /// Convergence tracking for fleet propagation.
@@ -1089,7 +1091,7 @@ impl FleetActionEnvelope {
         match &self.action {
             FleetAction::Quarantine { scope, .. } => {
                 validate_zone_id_for_transport(&scope.zone_id)?;
-                if scope.zone_id != self.zone_id {
+                if !crate::security::constant_time::ct_eq(&scope.zone_id, &self.zone_id) {
                     return Err(FleetTransportError::serialization(
                         "quarantine scope zone_id must match envelope zone_id",
                     ));
@@ -1097,7 +1099,7 @@ impl FleetActionEnvelope {
             }
             FleetAction::Revoke { scope, .. } => {
                 validate_zone_id_for_transport(&scope.zone_id)?;
-                if scope.zone_id != self.zone_id {
+                if !crate::security::constant_time::ct_eq(&scope.zone_id, &self.zone_id) {
                     return Err(FleetTransportError::serialization(
                         "revocation scope zone_id must match envelope zone_id",
                     ));
@@ -2197,9 +2199,21 @@ impl FleetControlManager {
     ///
     /// # Examples
     /// ```ignore
-    /// let manager = FleetControlManager::new();
-    /// let receipt: DecisionReceipt = todo!();
+    /// let mut manager = FleetControlManager::new();
+    /// manager.activate();
+    /// let identity = AuthIdentity {
+    ///     principal: "fleet-admin-1".to_string(),
+    ///     method: AuthMethod::MtlsClientCert,
+    ///     roles: vec!["fleet-admin".to_string()],
+    /// };
+    /// let trace = TraceContext {
+    ///     trace_id: "trace-fleet-verify-001".to_string(),
+    ///     span_id: "0000000000000001".to_string(),
+    ///     trace_flags: 1,
+    /// };
+    /// let receipt = manager.reconcile(&identity, &trace)?.receipt;
     /// let _verified = manager.verify_decision_receipt_signature(&receipt);
+    /// # Ok::<(), FleetControlError>(())
     /// ```
     #[must_use]
     pub fn verify_decision_receipt_signature(&self, receipt: &DecisionReceipt) -> bool {
@@ -2220,8 +2234,16 @@ impl FleetControlManager {
     ///     affected_nodes: 8,
     ///     reason: "contain extension drift".to_string(),
     /// };
-    /// let identity: AuthIdentity = todo!();
-    /// let trace: TraceContext = todo!();
+    /// let identity = AuthIdentity {
+    ///     principal: "fleet-admin-1".to_string(),
+    ///     method: AuthMethod::MtlsClientCert,
+    ///     roles: vec!["fleet-admin".to_string()],
+    /// };
+    /// let trace = TraceContext {
+    ///     trace_id: "trace-fleet-quarantine-001".to_string(),
+    ///     span_id: "0000000000000001".to_string(),
+    ///     trace_flags: 1,
+    /// };
     /// let result = manager.quarantine("ext.audit", &scope, &identity, &trace)?;
     /// assert_eq!(result.action_type, "quarantine");
     /// # Ok::<(), FleetControlError>(())
@@ -2359,8 +2381,16 @@ impl FleetControlManager {
     ///     severity: RevocationSeverity::Mandatory,
     ///     reason: "publisher key rotated".to_string(),
     /// };
-    /// let identity: AuthIdentity = todo!();
-    /// let trace: TraceContext = todo!();
+    /// let identity = AuthIdentity {
+    ///     principal: "fleet-admin-1".to_string(),
+    ///     method: AuthMethod::MtlsClientCert,
+    ///     roles: vec!["fleet-admin".to_string()],
+    /// };
+    /// let trace = TraceContext {
+    ///     trace_id: "trace-fleet-revoke-001".to_string(),
+    ///     span_id: "0000000000000001".to_string(),
+    ///     trace_flags: 1,
+    /// };
     /// let result = manager.revoke("ext.audit", &scope, &identity, &trace)?;
     /// assert_eq!(result.action_type, "revoke");
     /// # Ok::<(), FleetControlError>(())
@@ -2382,7 +2412,7 @@ impl FleetControlManager {
         let planned_op_id = planned_slot.operation_id();
         let planned_incident_id = format!("inc-{planned_op_id}");
         let reclaimed_zone_key = self.prepare_zone_status_slot(zone_id)?;
-        let reclaimed_incident_key = if scope.severity == RevocationSeverity::Emergency {
+        let reclaimed_incident_key = if matches!(scope.severity, RevocationSeverity::Emergency) {
             self.prepare_incident_slot(&planned_incident_id)?
         } else {
             None
@@ -2419,7 +2449,7 @@ impl FleetControlManager {
         )?;
 
         // Emergency revocations create incidents
-        if scope.severity == RevocationSeverity::Emergency {
+        if matches!(scope.severity, RevocationSeverity::Emergency) {
             let incident = IncidentHandle {
                 incident_id: incident_id.clone(),
                 extension_id: extension_id.to_string(),
@@ -2456,8 +2486,16 @@ impl FleetControlManager {
     /// ```ignore
     /// let mut manager = FleetControlManager::new();
     /// manager.activate();
-    /// let identity: AuthIdentity = todo!();
-    /// let trace: TraceContext = todo!();
+    /// let identity = AuthIdentity {
+    ///     principal: "fleet-admin-1".to_string(),
+    ///     method: AuthMethod::MtlsClientCert,
+    ///     roles: vec!["fleet-admin".to_string()],
+    /// };
+    /// let trace = TraceContext {
+    ///     trace_id: "trace-fleet-release-001".to_string(),
+    ///     span_id: "0000000000000001".to_string(),
+    ///     trace_flags: 1,
+    /// };
     /// let result = manager.release("inc-op-42", &identity, &trace)?;
     /// assert_eq!(result.action_type, "release");
     /// # Ok::<(), FleetControlError>(())
@@ -2477,7 +2515,7 @@ impl FleetControlManager {
                 FleetControlError::rollback_failed(incident_id, "incident not found")
             })?;
 
-            if incident.status == IncidentStatus::Released {
+            if matches!(incident.status, IncidentStatus::Released) {
                 return Err(FleetControlError::rollback_failed(
                     incident_id,
                     "incident already released",
@@ -2587,8 +2625,16 @@ impl FleetControlManager {
     /// ```ignore
     /// let mut manager = FleetControlManager::new();
     /// manager.activate();
-    /// let identity: AuthIdentity = todo!();
-    /// let trace: TraceContext = todo!();
+    /// let identity = AuthIdentity {
+    ///     principal: "fleet-admin-1".to_string(),
+    ///     method: AuthMethod::MtlsClientCert,
+    ///     roles: vec!["fleet-admin".to_string()],
+    /// };
+    /// let trace = TraceContext {
+    ///     trace_id: "trace-fleet-reconcile-001".to_string(),
+    ///     span_id: "0000000000000001".to_string(),
+    ///     trace_flags: 1,
+    /// };
     /// let result = manager.reconcile(&identity, &trace)?;
     /// assert_eq!(result.action_type, "reconcile");
     /// # Ok::<(), FleetControlError>(())
@@ -2609,7 +2655,7 @@ impl FleetControlManager {
 
         // Clean up released incidents
         self.incidents
-            .retain(|_, inc| inc.status != IncidentStatus::Released);
+            .retain(|_, inc| !matches!(inc.status, IncidentStatus::Released));
         self.incident_convergences
             .retain(|incident_id, _| self.incidents.contains_key(incident_id));
 
@@ -2677,7 +2723,7 @@ impl FleetControlManager {
     pub fn active_incidents(&self) -> Vec<&IncidentHandle> {
         self.incidents
             .values()
-            .filter(|inc| inc.status == IncidentStatus::Active)
+            .filter(|inc| matches!(inc.status, IncidentStatus::Active))
             .collect()
     }
 
@@ -2743,7 +2789,7 @@ impl FleetControlManager {
     fn reclaimable_incident_key(&self) -> Option<String> {
         self.incidents
             .iter()
-            .filter(|(_, incident)| incident.status == IncidentStatus::Released)
+            .filter(|(_, incident)| matches!(incident.status, IncidentStatus::Released))
             .min_by_key(|(incident_id, _)| {
                 incident_operation_slot(incident_id).unwrap_or(OperationSlot {
                     epoch: u64::MAX,
@@ -2769,7 +2815,8 @@ impl FleetControlManager {
     #[cfg(any(test, feature = "control-plane"))]
     fn zone_has_live_incident(&self, zone_id: &str) -> bool {
         self.incidents.values().any(|incident| {
-            incident.zone_id == zone_id && incident.status != IncidentStatus::Released
+            crate::security::constant_time::ct_eq(&incident.zone_id, zone_id)
+                && !matches!(incident.status, IncidentStatus::Released)
         })
     }
 
@@ -2804,8 +2851,8 @@ impl FleetControlManager {
             .iter()
             .filter_map(|(incident_id, convergence)| {
                 let incident = self.incidents.get(incident_id)?;
-                if incident.zone_id != zone_id
-                    || incident.status == IncidentStatus::Released
+                if !crate::security::constant_time::ct_eq(&incident.zone_id, zone_id)
+                    || matches!(incident.status, IncidentStatus::Released)
                     || !crate::security::constant_time::ct_eq(&incident.action_type, "quarantine")
                     || convergence.phase == ConvergencePhase::Converged
                 {
@@ -2846,7 +2893,7 @@ impl FleetControlManager {
                 "zone_id must be at most 128 characters",
             ));
         }
-        if zone_id == "." || zone_id == ".." || zone_id.contains("..") {
+        if matches!(zone_id, "." | "..") || zone_id.contains("..") {
             return Err(FleetControlError::scope_invalid(
                 "zone_id must not include traversal segments",
             ));
@@ -2993,8 +3040,20 @@ impl FleetControlManager {
     /// # Examples
     /// ```ignore
     /// let mut manager = FleetControlManager::new();
-    /// let receipt: DecisionReceipt = todo!();
+    /// manager.activate();
+    /// let identity = AuthIdentity {
+    ///     principal: "fleet-admin-1".to_string(),
+    ///     method: AuthMethod::MtlsClientCert,
+    ///     roles: vec!["fleet-admin".to_string()],
+    /// };
+    /// let trace = TraceContext {
+    ///     trace_id: "trace-fleet-rollback-001".to_string(),
+    ///     span_id: "0000000000000001".to_string(),
+    ///     trace_flags: 1,
+    /// };
+    /// let receipt = manager.reconcile(&identity, &trace)?.receipt;
     /// manager.register_rollback_receipt("inc-op-42", receipt);
+    /// # Ok::<(), FleetControlError>(())
     /// ```
     pub fn register_rollback_receipt(&mut self, incident_id: &str, receipt: DecisionReceipt) {
         self.rollback_receipts
@@ -3125,7 +3184,10 @@ fn enforce_handler_contract(
 ) -> Result<(), ApiError> {
     let route = quarantine_route_metadata()
         .into_iter()
-        .find(|route| route.method == method && route.path == path)
+        .find(|route| {
+            crate::security::constant_time::ct_eq(&route.method, method)
+                && crate::security::constant_time::ct_eq(&route.path, path)
+        })
         .ok_or_else(|| ApiError::Internal {
             detail: format!("missing route metadata for {method} {path}"),
             trace_id: trace.trace_id.clone(),
@@ -3139,8 +3201,16 @@ fn enforce_handler_contract(
 #[cfg(any(test, feature = "control-plane"))]
 /// # Examples
 /// ```ignore
-/// let identity: AuthIdentity = todo!();
-/// let trace: TraceContext = todo!();
+/// let identity = AuthIdentity {
+///     principal: "fleet-admin-1".to_string(),
+///     method: AuthMethod::MtlsClientCert,
+///     roles: vec!["fleet-admin".to_string()],
+/// };
+/// let trace = TraceContext {
+///     trace_id: "trace-fleet-handler-quarantine-001".to_string(),
+///     span_id: "0000000000000001".to_string(),
+///     trace_flags: 1,
+/// };
 /// let request = QuarantineRequest {
 ///     extension_id: "ext.audit".to_string(),
 ///     scope: QuarantineScope {
@@ -3172,8 +3242,16 @@ pub fn handle_quarantine(
 #[cfg(any(test, feature = "control-plane"))]
 /// # Examples
 /// ```ignore
-/// let identity: AuthIdentity = todo!();
-/// let trace: TraceContext = todo!();
+/// let identity = AuthIdentity {
+///     principal: "fleet-admin-1".to_string(),
+///     method: AuthMethod::MtlsClientCert,
+///     roles: vec!["fleet-admin".to_string()],
+/// };
+/// let trace = TraceContext {
+///     trace_id: "trace-fleet-handler-revoke-001".to_string(),
+///     span_id: "0000000000000001".to_string(),
+///     trace_flags: 1,
+/// };
 /// let request = RevokeRequest {
 ///     extension_id: "ext.audit".to_string(),
 ///     scope: RevocationScope {
@@ -3205,8 +3283,16 @@ pub fn handle_revoke(
 ///
 /// # Examples
 /// ```ignore
-/// let identity: AuthIdentity = todo!();
-/// let trace: TraceContext = todo!();
+/// let identity = AuthIdentity {
+///     principal: "fleet-admin-1".to_string(),
+///     method: AuthMethod::MtlsClientCert,
+///     roles: vec!["fleet-admin".to_string()],
+/// };
+/// let trace = TraceContext {
+///     trace_id: "trace-fleet-handler-release-001".to_string(),
+///     span_id: "0000000000000001".to_string(),
+///     trace_flags: 1,
+/// };
 /// let request = ReleaseRequest {
 ///     incident_id: "inc-op-42".to_string(),
 /// };
@@ -3241,8 +3327,16 @@ pub fn handle_release(
 ///
 /// # Examples
 /// ```ignore
-/// let identity: AuthIdentity = todo!();
-/// let trace: TraceContext = todo!();
+/// let identity = AuthIdentity {
+///     principal: "fleet-admin-1".to_string(),
+///     method: AuthMethod::BearerToken,
+///     roles: vec!["operator".to_string()],
+/// };
+/// let trace = TraceContext {
+///     trace_id: "trace-fleet-handler-status-001".to_string(),
+///     span_id: "0000000000000001".to_string(),
+///     trace_flags: 1,
+/// };
 /// let response = handle_status(&identity, &trace, "prod-us-east")?;
 /// assert!(response.ok);
 /// # Ok::<(), ApiError>(())
@@ -3266,8 +3360,16 @@ pub fn handle_status(
 ///
 /// # Examples
 /// ```ignore
-/// let identity: AuthIdentity = todo!();
-/// let trace: TraceContext = todo!();
+/// let identity = AuthIdentity {
+///     principal: "fleet-admin-1".to_string(),
+///     method: AuthMethod::MtlsClientCert,
+///     roles: vec!["fleet-admin".to_string()],
+/// };
+/// let trace = TraceContext {
+///     trace_id: "trace-fleet-handler-reconcile-001".to_string(),
+///     span_id: "0000000000000001".to_string(),
+///     trace_flags: 1,
+/// };
 /// let response = handle_reconcile(&identity, &trace)?;
 /// assert!(response.ok);
 /// # Ok::<(), ApiError>(())
@@ -4230,13 +4332,15 @@ mod tests {
             incident_id,
             detail,
             ..
-        } = err
+        } = &err
         {
-            assert_eq!(incident_id, format!("inc-{}", incidents.operation_id));
+            assert_eq!(incident_id, &format!("inc-{}", incidents.operation_id));
             assert!(detail.contains("convergence rollback receipt not found"));
-        } else {
-            panic!("Expected RollbackUnverified error, got: {:?}", err);
         }
+        assert!(
+            matches!(err, FleetControlError::RollbackUnverified { .. }),
+            "Expected RollbackUnverified error, got: {err:?}"
+        );
     }
 
     #[test]
@@ -4559,7 +4663,10 @@ mod tests {
     #[test]
     fn mutation_routes_require_mtls() {
         let routes = quarantine_route_metadata();
-        let mutations: Vec<_> = routes.iter().filter(|r| r.method == "POST").collect();
+        let mutations: Vec<_> = routes
+            .iter()
+            .filter(|r| crate::security::constant_time::ct_eq(&r.method, "POST"))
+            .collect();
         for route in mutations {
             assert_eq!(
                 route.auth_method,
@@ -4631,10 +4738,10 @@ mod tests {
         let err = owner
             .quarantine(&admin_identity(), &test_trace(), &request)
             .expect_err("broken transport must fail closed");
-        match err {
-            ApiError::Internal { detail, .. } => assert!(detail.contains(FLEET_INTERNAL)),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(&err, ApiError::Internal { detail, .. } if detail.contains(FLEET_INTERNAL)),
+            "unexpected error: {err:?}"
+        );
 
         let guard = owner.inner.lock().expect("owner lock");
         assert_eq!(guard.incident_count(), 0);
@@ -4808,10 +4915,10 @@ mod tests {
         };
         let err = handle_quarantine(&bearer_admin_identity(), &test_trace(), &request)
             .expect_err("quarantine should fail");
-        match err {
-            ApiError::AuthFailed { detail, .. } => assert!(detail.contains("route contract")),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(&err, ApiError::AuthFailed { detail, .. } if detail.contains("route contract")),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
@@ -4819,12 +4926,14 @@ mod tests {
         let _guard = lock_handler_test_state();
         let err = handle_status(&reader_identity(), &test_trace(), "zone-1")
             .expect_err("status should fail");
-        match err {
-            ApiError::PolicyDenied { policy_hook, .. } => {
-                assert_eq!(policy_hook, "fleet.status.read");
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(
+                &err,
+                ApiError::PolicyDenied { policy_hook, .. }
+                    if crate::security::constant_time::ct_eq(policy_hook, "fleet.status.read")
+            ),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
@@ -6656,9 +6765,10 @@ mod tests {
 
         for fake_id in fake_incident_ids {
             let result = mgr.release(fake_id, &admin_identity(), &test_trace());
-            if result.is_ok() {
-                panic!("Release of fake incident {} should not succeed", fake_id);
-            }
+            assert!(
+                result.is_err(),
+                "Release of fake incident {fake_id} should not succeed"
+            );
         }
 
         // Verify incident count hasn't been corrupted by failed releases
