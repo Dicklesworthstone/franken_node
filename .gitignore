@@ -163,3 +163,16 @@ target_*/
 
 # Legacy root path for the swarm orchestrator tick — canonical home is scripts/
 /.swarm-tick.sh
+
+# Agent-generated review/audit notes. Canonical home is docs/reports/agent-reviews/.
+# A bare /reviews/ directory at root is by definition agent skill-output.
+/reviews/
+
+# Loose markdown at artifacts/ top-level. Per-bead evidence belongs under
+# artifacts/section_*/bd-*/, never as a sibling at artifacts/<file>.md.
+/artifacts/*.md
+
+# Bead-restoration session reports. The canonical transplant/ tree only carries
+# the load-bearing schema/format docs and shell scripts; one-off restoration
+# narratives live under docs/reports/.
+/transplant/RESTORATION_REPORT.md
