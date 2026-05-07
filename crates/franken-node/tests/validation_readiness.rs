@@ -6,11 +6,17 @@ use frankenengine_node::ops::validation_broker::{
     ValidationExitKind, ValidationProofStatus, ValidationReceipt, ValidationTiming,
 };
 use frankenengine_node::ops::validation_readiness::{
-    RchWorkerReadiness, ResourceContentionSnapshot, TrackedValidationBead, ValidationBeadState,
+    ProofLaneCapabilityStatus, ProofLaneCommandIntent, ProofLanePressureStatus,
+    ProofLaneRchSnapshot, ProofLaneReadinessDecisionKind, ProofLaneReadinessInput,
+    ProofLaneReadinessProducer, ProofLaneToolchainRequirement, ProofLaneWorkerAuthStatus,
+    ProofLaneWorkerCapability, ProofLaneWorkerSelection, RchWorkerReadiness,
+    ResourceContentionSnapshot, TrackedValidationBead, ValidationBeadState,
     ValidationReadinessFixtureCatalog, ValidationReadinessInput, ValidationReadinessStatus,
-    build_validation_readiness_report, known_check_codes, render_validation_readiness_human,
+    build_validation_readiness_report, classify_proof_lane_readiness, known_check_codes,
+    proof_lane_event_codes, proof_lane_reason_codes, render_validation_readiness_human,
 };
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -155,6 +161,268 @@ fn remote_worker() -> RchWorkerReadiness {
         observed_toolchains: vec!["nightly-2026-02-19".to_string()],
         failure: None,
     }
+}
+
+fn proof_lane_capability() -> ProofLaneWorkerCapability {
+    ProofLaneWorkerCapability {
+        auth_status: ProofLaneWorkerAuthStatus::Ok,
+        capability_status: ProofLaneCapabilityStatus::Fresh,
+        pressure_status: ProofLanePressureStatus::Healthy,
+        observed_at: Some(ts(10)),
+        freshness_expires_at: Some(ts(40)),
+        rustc: Some("rustc 1.97.0-nightly".to_string()),
+        observed_toolchains: vec!["nightly-2026-02-19".to_string()],
+        detail: Some("fresh same-toolchain worker".to_string()),
+    }
+}
+
+fn proof_lane_input() -> ProofLaneReadinessInput {
+    let mut worker_capabilities = BTreeMap::new();
+    worker_capabilities.insert("ts2".to_string(), proof_lane_capability());
+    ProofLaneReadinessInput {
+        capsule_id: "plr-bd-yyl6t-2".to_string(),
+        trace_id: "trace-proof-lane".to_string(),
+        bead_id: "bd-yyl6t.2".to_string(),
+        thread_id: "bd-yyl6t.2".to_string(),
+        created_at: ts(10),
+        freshness_expires_at: ts(40),
+        producer: ProofLaneReadinessProducer {
+            name: "franken-node ops validation-readiness".to_string(),
+            agent_name: "PurpleLeopard".to_string(),
+            git_commit: "7a514dd0".to_string(),
+            dirty_worktree: false,
+        },
+        command: ProofLaneCommandIntent {
+            program: "cargo".to_string(),
+            argv: vec![
+                "test".to_string(),
+                "-p".to_string(),
+                "frankenengine-node".to_string(),
+                "validation_readiness".to_string(),
+            ],
+            cwd: "/data/projects/franken_node".to_string(),
+            digest: DigestRef::sha256(b"cargo test -p frankenengine-node validation_readiness"),
+        },
+        rch: ProofLaneRchSnapshot {
+            daemon_source: "installed".to_string(),
+            daemon_version: "1.0.24".to_string(),
+            socket_path: "/run/user/1000/rch.sock".to_string(),
+            require_remote: true,
+            local_fallback_allowed: false,
+            local_fallback_refused: true,
+        },
+        worker_selection: ProofLaneWorkerSelection {
+            requested_workers: vec!["ts2".to_string()],
+            selected_worker: Some("ts2".to_string()),
+            override_effective: false,
+            selection_source: "dry_run".to_string(),
+            selection_observed_at: Some(ts(11)),
+        },
+        toolchain: ProofLaneToolchainRequirement {
+            local_rustc: "rustc 1.97.0-nightly".to_string(),
+            required_toolchain: "nightly-2026-02-19".to_string(),
+        },
+        worker_capabilities,
+        observed_validation_error_class: None,
+    }
+}
+
+fn assert_proof_lane_decision(
+    input: &ProofLaneReadinessInput,
+    now: DateTime<Utc>,
+    decision: ProofLaneReadinessDecisionKind,
+    reason_code: &str,
+    event_code: &str,
+) {
+    let capsule = classify_proof_lane_readiness(input, now);
+    assert_eq!(capsule.decision.decision, decision);
+    assert_eq!(capsule.decision.reason_code, reason_code);
+    assert_eq!(capsule.decision.event_code, event_code);
+}
+
+#[test]
+fn proof_lane_classifier_allows_healthy_same_toolchain_remote_lane() {
+    let input = proof_lane_input();
+
+    let capsule = classify_proof_lane_readiness(&input, ts(30));
+
+    assert_eq!(
+        capsule.decision.decision,
+        ProofLaneReadinessDecisionKind::ReadyToLaunch
+    );
+    assert_eq!(
+        capsule.decision.reason_code,
+        proof_lane_reason_codes::HEALTHY_SAME_TOOLCHAIN_LANE
+    );
+    assert_eq!(
+        capsule.decision.event_code,
+        proof_lane_event_codes::HEALTHY_SAME_TOOLCHAIN_LANE
+    );
+    assert!(!capsule.decision.fail_closed);
+    assert!(capsule.worker_selection.override_effective);
+    assert!(capsule.toolchain.same_toolchain);
+}
+
+#[test]
+fn proof_lane_classifier_blocks_unhonored_worker_override() {
+    let mut input = proof_lane_input();
+    input
+        .worker_capabilities
+        .insert("vmi1153651".to_string(), proof_lane_capability());
+    input.worker_selection.selected_worker = Some("vmi1153651".to_string());
+
+    let capsule = classify_proof_lane_readiness(&input, ts(30));
+
+    assert_eq!(
+        capsule.decision.decision,
+        ProofLaneReadinessDecisionKind::SourceOnlyBlocker
+    );
+    assert_eq!(
+        capsule.decision.reason_code,
+        proof_lane_reason_codes::OVERRIDE_NOT_HONORED
+    );
+    assert_eq!(
+        capsule.decision.event_code,
+        proof_lane_event_codes::OVERRIDE_NOT_HONORED
+    );
+    assert!(capsule.decision.retryable);
+    assert!(capsule.decision.fail_closed);
+    assert!(!capsule.worker_selection.override_effective);
+}
+
+#[test]
+fn proof_lane_classifier_blocks_selected_worker_toolchain_mismatch() {
+    let mut input = proof_lane_input();
+    let mut capability = proof_lane_capability();
+    capability.rustc = Some("rustc 1.95.0-nightly".to_string());
+    capability.observed_toolchains = vec!["stable".to_string()];
+    input
+        .worker_capabilities
+        .insert("ts2".to_string(), capability);
+
+    assert_proof_lane_decision(
+        &input,
+        ts(30),
+        ProofLaneReadinessDecisionKind::SourceOnlyBlocker,
+        proof_lane_reason_codes::SAME_TOOLCHAIN_MISSING,
+        proof_lane_event_codes::SAME_TOOLCHAIN_MISSING,
+    );
+}
+
+#[test]
+fn proof_lane_classifier_blocks_worker_auth_failure() {
+    let mut input = proof_lane_input();
+    let mut capability = proof_lane_capability();
+    capability.auth_status = ProofLaneWorkerAuthStatus::PermissionDenied;
+    capability.detail = Some("Permission denied (publickey,password)".to_string());
+    input
+        .worker_capabilities
+        .insert("ts2".to_string(), capability);
+
+    assert_proof_lane_decision(
+        &input,
+        ts(30),
+        ProofLaneReadinessDecisionKind::SourceOnlyBlocker,
+        proof_lane_reason_codes::WORKER_AUTH_FAILED,
+        proof_lane_event_codes::WORKER_AUTH_FAILED,
+    );
+}
+
+#[test]
+fn proof_lane_classifier_retries_missing_or_stale_capability_snapshot() {
+    let mut missing = proof_lane_input();
+    missing.worker_capabilities.clear();
+
+    assert_proof_lane_decision(
+        &missing,
+        ts(30),
+        ProofLaneReadinessDecisionKind::RetryPreflight,
+        proof_lane_reason_codes::WORKER_CAPABILITY_UNKNOWN,
+        proof_lane_event_codes::WORKER_CAPABILITY_UNKNOWN,
+    );
+
+    let mut stale = proof_lane_input();
+    let mut capability = proof_lane_capability();
+    capability.capability_status = ProofLaneCapabilityStatus::Stale;
+    capability.freshness_expires_at = Some(ts(20));
+    stale
+        .worker_capabilities
+        .insert("ts2".to_string(), capability);
+
+    assert_proof_lane_decision(
+        &stale,
+        ts(30),
+        ProofLaneReadinessDecisionKind::RetryPreflight,
+        proof_lane_reason_codes::WORKER_CAPABILITY_UNKNOWN,
+        proof_lane_event_codes::WORKER_CAPABILITY_UNKNOWN,
+    );
+}
+
+#[test]
+fn proof_lane_classifier_queues_pressure_blocked_worker() {
+    let mut input = proof_lane_input();
+    let mut capability = proof_lane_capability();
+    capability.pressure_status = ProofLanePressureStatus::Blocked;
+    input
+        .worker_capabilities
+        .insert("ts2".to_string(), capability);
+
+    let capsule = classify_proof_lane_readiness(&input, ts(30));
+
+    assert_eq!(
+        capsule.decision.decision,
+        ProofLaneReadinessDecisionKind::QueueUntilReady
+    );
+    assert_eq!(
+        capsule.decision.reason_code,
+        proof_lane_reason_codes::WORKER_PRESSURE_BLOCKED
+    );
+    assert_eq!(
+        capsule.decision.event_code,
+        proof_lane_event_codes::WORKER_PRESSURE_BLOCKED
+    );
+    assert!(capsule.decision.retryable);
+    assert!(!capsule.decision.fail_closed);
+}
+
+#[test]
+fn proof_lane_classifier_blocks_refused_local_fallback() {
+    let mut input = proof_lane_input();
+    input.worker_selection.selected_worker = None;
+    input.worker_capabilities.clear();
+
+    assert_proof_lane_decision(
+        &input,
+        ts(30),
+        ProofLaneReadinessDecisionKind::SourceOnlyBlocker,
+        proof_lane_reason_codes::LOCAL_FALLBACK_REFUSED,
+        proof_lane_event_codes::LOCAL_FALLBACK_REFUSED,
+    );
+}
+
+#[test]
+fn proof_lane_classifier_rejects_stale_capsules_and_product_failures() {
+    let mut stale = proof_lane_input();
+    stale.freshness_expires_at = ts(20);
+
+    assert_proof_lane_decision(
+        &stale,
+        ts(30),
+        ProofLaneReadinessDecisionKind::FailClosed,
+        proof_lane_reason_codes::STALE_READINESS_CAPSULE,
+        proof_lane_event_codes::STALE_READINESS_CAPSULE,
+    );
+
+    let mut product_failure = proof_lane_input();
+    product_failure.observed_validation_error_class = Some(ValidationErrorClass::TestFailure);
+
+    assert_proof_lane_decision(
+        &product_failure,
+        ts(30),
+        ProofLaneReadinessDecisionKind::FailClosed,
+        proof_lane_reason_codes::MALFORMED_READINESS_INPUT,
+        proof_lane_event_codes::MALFORMED_READINESS_INPUT,
+    );
 }
 
 #[test]

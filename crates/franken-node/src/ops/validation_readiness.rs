@@ -5,12 +5,12 @@
 //! that explains whether validation evidence is trustworthy right now.
 
 use crate::ops::validation_broker::{
-    ProofEvidenceSource, ProofStatusKind, RchMode, SourceOnlyReason, ValidationErrorClass,
-    ValidationExitKind, ValidationProofStatus, ValidationReceipt,
+    DigestRef, ProofEvidenceSource, ProofStatusKind, RchMode, SourceOnlyReason,
+    ValidationErrorClass, ValidationExitKind, ValidationProofStatus, ValidationReceipt,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -20,7 +20,15 @@ pub const VALIDATION_READINESS_REPORT_SCHEMA_VERSION: &str =
     "franken-node/validation-readiness/report/v1";
 pub const VALIDATION_READINESS_FIXTURE_SCHEMA_VERSION: &str =
     "franken-node/validation-readiness/fixtures/v1";
+pub const PROOF_LANE_READINESS_CAPSULE_SCHEMA_VERSION: &str =
+    "franken-node/proof-lane-readiness/capsule/v1";
+pub const PROOF_LANE_READINESS_DECISION_SCHEMA_VERSION: &str =
+    "franken-node/proof-lane-readiness/decision/v1";
 pub const DEFAULT_MAX_RECEIPT_AGE_SECS: u64 = 60 * 60 * 24;
+pub const MAX_PROOF_LANE_WORKERS: usize = 32;
+pub const MAX_PROOF_LANE_ARGS: usize = 64;
+pub const MAX_PROOF_LANE_STRING_BYTES: usize = 512;
+pub const MAX_PROOF_LANE_DETAIL_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -208,6 +216,246 @@ pub enum ValidationFailureDomain {
     Unknown,
 }
 
+pub mod proof_lane_reason_codes {
+    pub const HEALTHY_SAME_TOOLCHAIN_LANE: &str = "PLR_HEALTHY_SAME_TOOLCHAIN_LANE";
+    pub const OVERRIDE_NOT_HONORED: &str = "PLR_OVERRIDE_NOT_HONORED";
+    pub const SAME_TOOLCHAIN_MISSING: &str = "PLR_SAME_TOOLCHAIN_MISSING";
+    pub const WORKER_AUTH_FAILED: &str = "PLR_WORKER_AUTH_FAILED";
+    pub const WORKER_CAPABILITY_UNKNOWN: &str = "PLR_WORKER_CAPABILITY_UNKNOWN";
+    pub const WORKER_PRESSURE_BLOCKED: &str = "PLR_WORKER_PRESSURE_BLOCKED";
+    pub const LOCAL_FALLBACK_REFUSED: &str = "PLR_LOCAL_FALLBACK_REFUSED";
+    pub const STALE_READINESS_CAPSULE: &str = "PLR_STALE_READINESS_CAPSULE";
+    pub const MALFORMED_READINESS_INPUT: &str = "PLR_MALFORMED_READINESS_INPUT";
+}
+
+pub mod proof_lane_event_codes {
+    pub const HEALTHY_SAME_TOOLCHAIN_LANE: &str = "PLR-001";
+    pub const OVERRIDE_NOT_HONORED: &str = "PLR-002";
+    pub const SAME_TOOLCHAIN_MISSING: &str = "PLR-003";
+    pub const WORKER_AUTH_FAILED: &str = "PLR-004";
+    pub const WORKER_CAPABILITY_UNKNOWN: &str = "PLR-005";
+    pub const WORKER_PRESSURE_BLOCKED: &str = "PLR-006";
+    pub const LOCAL_FALLBACK_REFUSED: &str = "PLR-007";
+    pub const STALE_READINESS_CAPSULE: &str = "PLR-008";
+    pub const MALFORMED_READINESS_INPUT: &str = "PLR-009";
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofLaneReadinessDecisionKind {
+    ReadyToLaunch,
+    QueueUntilReady,
+    RetryPreflight,
+    SourceOnlyBlocker,
+    FailClosed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofLaneWorkerAuthStatus {
+    NotChecked,
+    Ok,
+    PermissionDenied,
+    Timeout,
+    Unreachable,
+    Unknown,
+}
+
+impl ProofLaneWorkerAuthStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotChecked => "not_checked",
+            Self::Ok => "ok",
+            Self::PermissionDenied => "permission_denied",
+            Self::Timeout => "timeout",
+            Self::Unreachable => "unreachable",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    const fn blocks_launch(self) -> bool {
+        !matches!(self, Self::Ok)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofLaneCapabilityStatus {
+    Fresh,
+    Stale,
+    Missing,
+    Malformed,
+    Unknown,
+}
+
+impl ProofLaneCapabilityStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Stale => "stale",
+            Self::Missing => "missing",
+            Self::Malformed => "malformed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofLanePressureStatus {
+    Healthy,
+    Warning,
+    Blocked,
+    TelemetryGap,
+    Unknown,
+}
+
+impl ProofLanePressureStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Warning => "warning",
+            Self::Blocked => "blocked",
+            Self::TelemetryGap => "telemetry_gap",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    const fn blocks_launch(self) -> bool {
+        matches!(self, Self::Blocked | Self::TelemetryGap | Self::Unknown)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneReadinessProducer {
+    pub name: String,
+    pub agent_name: String,
+    pub git_commit: String,
+    pub dirty_worktree: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneCommandIntent {
+    pub program: String,
+    #[serde(default)]
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub digest: DigestRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneRchSnapshot {
+    pub daemon_source: String,
+    pub daemon_version: String,
+    pub socket_path: String,
+    pub require_remote: bool,
+    pub local_fallback_allowed: bool,
+    pub local_fallback_refused: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneWorkerSelection {
+    #[serde(default)]
+    pub requested_workers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_worker: Option<String>,
+    pub override_effective: bool,
+    pub selection_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_observed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneToolchainRequirement {
+    pub local_rustc: String,
+    pub required_toolchain: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneWorkerCapability {
+    pub auth_status: ProofLaneWorkerAuthStatus,
+    pub capability_status: ProofLaneCapabilityStatus,
+    pub pressure_status: ProofLanePressureStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness_expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rustc: Option<String>,
+    #[serde(default)]
+    pub observed_toolchains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneToolchainSnapshot {
+    pub local_rustc: String,
+    pub required_toolchain: String,
+    pub selected_worker_rustc: String,
+    pub same_toolchain: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneWorkerAccessSnapshot {
+    pub auth_status: ProofLaneWorkerAuthStatus,
+    pub capability_status: ProofLaneCapabilityStatus,
+    pub pressure_status: ProofLanePressureStatus,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneReadinessInput {
+    pub capsule_id: String,
+    pub trace_id: String,
+    pub bead_id: String,
+    pub thread_id: String,
+    pub created_at: DateTime<Utc>,
+    pub freshness_expires_at: DateTime<Utc>,
+    pub producer: ProofLaneReadinessProducer,
+    pub command: ProofLaneCommandIntent,
+    pub rch: ProofLaneRchSnapshot,
+    pub worker_selection: ProofLaneWorkerSelection,
+    pub toolchain: ProofLaneToolchainRequirement,
+    #[serde(default)]
+    pub worker_capabilities: BTreeMap<String, ProofLaneWorkerCapability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_validation_error_class: Option<ValidationErrorClass>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneReadinessDecision {
+    pub schema_version: String,
+    pub decision: ProofLaneReadinessDecisionKind,
+    pub reason_code: String,
+    pub event_code: String,
+    pub retryable: bool,
+    pub fail_closed: bool,
+    pub required_action: String,
+    pub operator_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneReadinessCapsule {
+    pub schema_version: String,
+    pub capsule_id: String,
+    pub trace_id: String,
+    pub bead_id: String,
+    pub thread_id: String,
+    pub created_at: DateTime<Utc>,
+    pub freshness_expires_at: DateTime<Utc>,
+    pub producer: ProofLaneReadinessProducer,
+    pub command: ProofLaneCommandIntent,
+    pub rch: ProofLaneRchSnapshot,
+    pub worker_selection: ProofLaneWorkerSelection,
+    pub toolchain: ProofLaneToolchainSnapshot,
+    pub worker_access: ProofLaneWorkerAccessSnapshot,
+    pub decision: ProofLaneReadinessDecision,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationReadinessSummary {
     pub tracked_beads: usize,
@@ -293,6 +541,45 @@ pub fn build_validation_readiness_report(
         status_counts,
         checks,
         summary,
+    }
+}
+
+#[must_use]
+pub fn classify_proof_lane_readiness(
+    input: &ProofLaneReadinessInput,
+    now: DateTime<Utc>,
+) -> ProofLaneReadinessCapsule {
+    let selected_worker = normalized_selected_worker(&input.worker_selection.selected_worker);
+    let selected_capability = selected_worker
+        .as_deref()
+        .and_then(|worker_id| input.worker_capabilities.get(worker_id));
+    let worker_selection = proof_lane_worker_selection(input, selected_worker.clone());
+    let toolchain = proof_lane_toolchain(input, selected_capability);
+    let worker_access = proof_lane_worker_access(selected_worker.as_deref(), selected_capability);
+    let decision = classify_proof_lane_decision(
+        input,
+        now,
+        selected_worker.as_deref(),
+        selected_capability,
+        &toolchain,
+        &worker_access,
+    );
+
+    ProofLaneReadinessCapsule {
+        schema_version: PROOF_LANE_READINESS_CAPSULE_SCHEMA_VERSION.to_string(),
+        capsule_id: input.capsule_id.clone(),
+        trace_id: input.trace_id.clone(),
+        bead_id: input.bead_id.clone(),
+        thread_id: input.thread_id.clone(),
+        created_at: input.created_at,
+        freshness_expires_at: input.freshness_expires_at,
+        producer: input.producer.clone(),
+        command: input.command.clone(),
+        rch: input.rch.clone(),
+        worker_selection,
+        toolchain,
+        worker_access,
+        decision,
     }
 }
 
@@ -982,6 +1269,424 @@ fn contention_state(input: &ValidationReadinessInput) -> String {
             }
         },
     )
+}
+
+fn classify_proof_lane_decision(
+    input: &ProofLaneReadinessInput,
+    now: DateTime<Utc>,
+    selected_worker: Option<&str>,
+    selected_capability: Option<&ProofLaneWorkerCapability>,
+    toolchain: &ProofLaneToolchainSnapshot,
+    worker_access: &ProofLaneWorkerAccessSnapshot,
+) -> ProofLaneReadinessDecision {
+    if let Some(reason) = invalid_proof_lane_input(input) {
+        return proof_lane_decision(
+            ProofLaneReadinessDecisionKind::FailClosed,
+            proof_lane_reason_codes::MALFORMED_READINESS_INPUT,
+            proof_lane_event_codes::MALFORMED_READINESS_INPUT,
+            false,
+            true,
+            "fix_readiness_input_schema",
+            format!("Readiness input is malformed: {reason}."),
+        );
+    }
+    if now > input.freshness_expires_at {
+        return proof_lane_decision(
+            ProofLaneReadinessDecisionKind::FailClosed,
+            proof_lane_reason_codes::STALE_READINESS_CAPSULE,
+            proof_lane_event_codes::STALE_READINESS_CAPSULE,
+            true,
+            true,
+            "regenerate_readiness_capsule",
+            format!(
+                "Readiness capsule expired at {}; regenerate before launching proof.",
+                input.freshness_expires_at.to_rfc3339()
+            ),
+        );
+    }
+    if requested_worker_override_missing(&input.worker_selection.requested_workers, selected_worker)
+    {
+        return proof_lane_decision(
+            ProofLaneReadinessDecisionKind::SourceOnlyBlocker,
+            proof_lane_reason_codes::OVERRIDE_NOT_HONORED,
+            proof_lane_event_codes::OVERRIDE_NOT_HONORED,
+            true,
+            true,
+            "fix_rch_worker_selection_or_use_valid_same_toolchain_worker",
+            format!(
+                "RCH selected {} even though {} was requested; do not launch this proof as green evidence.",
+                selected_worker_label(selected_worker),
+                requested_workers_label(&input.worker_selection.requested_workers)
+            ),
+        );
+    }
+    if input.rch.require_remote
+        && selected_worker.is_none()
+        && (!input.rch.local_fallback_allowed || input.rch.local_fallback_refused)
+    {
+        return proof_lane_decision(
+            ProofLaneReadinessDecisionKind::SourceOnlyBlocker,
+            proof_lane_reason_codes::LOCAL_FALLBACK_REFUSED,
+            proof_lane_event_codes::LOCAL_FALLBACK_REFUSED,
+            true,
+            true,
+            "restore_remote_execution_before_cargo_proof",
+            "Remote proof is required, no remote worker was selected, and local fallback is refused.",
+        );
+    }
+    let Some(capability) = selected_capability else {
+        return proof_lane_decision(
+            ProofLaneReadinessDecisionKind::RetryPreflight,
+            proof_lane_reason_codes::WORKER_CAPABILITY_UNKNOWN,
+            proof_lane_event_codes::WORKER_CAPABILITY_UNKNOWN,
+            true,
+            true,
+            "refresh_worker_capabilities",
+            format!(
+                "No fresh capability snapshot exists for selected worker {}; refresh RCH capabilities before proof.",
+                selected_worker_label(selected_worker)
+            ),
+        );
+    };
+    if capability.auth_status.blocks_launch() {
+        return proof_lane_decision(
+            ProofLaneReadinessDecisionKind::SourceOnlyBlocker,
+            proof_lane_reason_codes::WORKER_AUTH_FAILED,
+            proof_lane_event_codes::WORKER_AUTH_FAILED,
+            true,
+            true,
+            "repair_worker_credentials_before_retry",
+            format!(
+                "Selected worker {} has auth_status={}; repair credentials before proof.",
+                selected_worker_label(selected_worker),
+                capability.auth_status.as_str()
+            ),
+        );
+    }
+    if capability_snapshot_unknown_or_stale(capability, now) {
+        return proof_lane_decision(
+            ProofLaneReadinessDecisionKind::RetryPreflight,
+            proof_lane_reason_codes::WORKER_CAPABILITY_UNKNOWN,
+            proof_lane_event_codes::WORKER_CAPABILITY_UNKNOWN,
+            true,
+            true,
+            "refresh_worker_capabilities",
+            format!(
+                "Selected worker {} has capability_status={}; refresh capabilities before proof.",
+                selected_worker_label(selected_worker),
+                capability.capability_status.as_str()
+            ),
+        );
+    }
+    if !toolchain.same_toolchain {
+        return proof_lane_decision(
+            ProofLaneReadinessDecisionKind::SourceOnlyBlocker,
+            proof_lane_reason_codes::SAME_TOOLCHAIN_MISSING,
+            proof_lane_event_codes::SAME_TOOLCHAIN_MISSING,
+            true,
+            true,
+            "sync_toolchain_or_wait_for_matching_worker",
+            format!(
+                "Selected worker {} does not match required toolchain {}; do not launch this proof.",
+                selected_worker_label(selected_worker),
+                input.toolchain.required_toolchain
+            ),
+        );
+    }
+    if worker_access.pressure_status.blocks_launch() {
+        return proof_lane_decision(
+            ProofLaneReadinessDecisionKind::QueueUntilReady,
+            proof_lane_reason_codes::WORKER_PRESSURE_BLOCKED,
+            proof_lane_event_codes::WORKER_PRESSURE_BLOCKED,
+            true,
+            false,
+            "wait_for_pressure_to_clear_or_select_another_valid_worker",
+            format!(
+                "Selected worker {} has pressure_status={}; wait or select another valid worker.",
+                selected_worker_label(selected_worker),
+                worker_access.pressure_status.as_str()
+            ),
+        );
+    }
+
+    proof_lane_decision(
+        ProofLaneReadinessDecisionKind::ReadyToLaunch,
+        proof_lane_reason_codes::HEALTHY_SAME_TOOLCHAIN_LANE,
+        proof_lane_event_codes::HEALTHY_SAME_TOOLCHAIN_LANE,
+        false,
+        false,
+        "launch_remote_proof",
+        format!(
+            "RCH selected {} with fresh capability, valid auth, and matching toolchain; remote proof may launch.",
+            selected_worker_label(selected_worker)
+        ),
+    )
+}
+
+fn proof_lane_worker_selection(
+    input: &ProofLaneReadinessInput,
+    selected_worker: Option<String>,
+) -> ProofLaneWorkerSelection {
+    let mut selection = input.worker_selection.clone();
+    selection.selected_worker = selected_worker;
+    selection.override_effective = selected_worker_override_effective(
+        &selection.requested_workers,
+        selection.selected_worker.as_deref(),
+    );
+    selection
+}
+
+fn proof_lane_toolchain(
+    input: &ProofLaneReadinessInput,
+    selected_capability: Option<&ProofLaneWorkerCapability>,
+) -> ProofLaneToolchainSnapshot {
+    let selected_worker_rustc = selected_capability
+        .and_then(|capability| capability.rustc.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let same_toolchain = selected_capability.is_some_and(|capability| {
+        capability
+            .rustc
+            .as_ref()
+            .is_some_and(|rustc| rustc == &input.toolchain.local_rustc)
+            && capability
+                .observed_toolchains
+                .iter()
+                .any(|toolchain| toolchain == &input.toolchain.required_toolchain)
+    });
+
+    ProofLaneToolchainSnapshot {
+        local_rustc: input.toolchain.local_rustc.clone(),
+        required_toolchain: input.toolchain.required_toolchain.clone(),
+        selected_worker_rustc,
+        same_toolchain,
+    }
+}
+
+fn proof_lane_worker_access(
+    selected_worker: Option<&str>,
+    selected_capability: Option<&ProofLaneWorkerCapability>,
+) -> ProofLaneWorkerAccessSnapshot {
+    selected_capability.map_or_else(
+        || ProofLaneWorkerAccessSnapshot {
+            auth_status: ProofLaneWorkerAuthStatus::Unknown,
+            capability_status: ProofLaneCapabilityStatus::Missing,
+            pressure_status: ProofLanePressureStatus::Unknown,
+            detail: format!(
+                "No capability snapshot exists for selected worker {}.",
+                selected_worker_label(selected_worker)
+            ),
+        },
+        |capability| ProofLaneWorkerAccessSnapshot {
+            auth_status: capability.auth_status,
+            capability_status: capability.capability_status,
+            pressure_status: capability.pressure_status,
+            detail: capability.detail.clone().unwrap_or_else(|| {
+                format!(
+                    "Capability snapshot exists for selected worker {}.",
+                    selected_worker_label(selected_worker)
+                )
+            }),
+        },
+    )
+}
+
+fn proof_lane_decision(
+    decision: ProofLaneReadinessDecisionKind,
+    reason_code: impl Into<String>,
+    event_code: impl Into<String>,
+    retryable: bool,
+    fail_closed: bool,
+    required_action: impl Into<String>,
+    operator_summary: impl Into<String>,
+) -> ProofLaneReadinessDecision {
+    ProofLaneReadinessDecision {
+        schema_version: PROOF_LANE_READINESS_DECISION_SCHEMA_VERSION.to_string(),
+        decision,
+        reason_code: reason_code.into(),
+        event_code: event_code.into(),
+        retryable,
+        fail_closed,
+        required_action: required_action.into(),
+        operator_summary: bounded_operator_summary(operator_summary.into()),
+    }
+}
+
+fn invalid_proof_lane_input(input: &ProofLaneReadinessInput) -> Option<&'static str> {
+    if input.created_at > input.freshness_expires_at {
+        return Some("freshness_expires_at precedes created_at");
+    }
+    if input
+        .observed_validation_error_class
+        .is_some_and(product_validation_error_class)
+    {
+        return Some("product validation failure was supplied to proof-lane readiness");
+    }
+    if !input.command.digest.is_valid_sha256() {
+        return Some("command digest is not a valid sha256 digest");
+    }
+    if !bounded_required(&input.capsule_id)
+        || !bounded_required(&input.trace_id)
+        || !bounded_required(&input.bead_id)
+        || !bounded_required(&input.thread_id)
+        || !bounded_required(&input.producer.name)
+        || !bounded_required(&input.producer.agent_name)
+        || !bounded_required(&input.producer.git_commit)
+        || !bounded_required(&input.command.program)
+        || !bounded_required(&input.command.cwd)
+        || !bounded_required(&input.rch.daemon_source)
+        || !bounded_required(&input.rch.daemon_version)
+        || !bounded_required(&input.rch.socket_path)
+        || !bounded_required(&input.worker_selection.selection_source)
+        || !bounded_required(&input.toolchain.local_rustc)
+        || !bounded_required(&input.toolchain.required_toolchain)
+    {
+        return Some("required string field is empty, too long, or contains NUL");
+    }
+    if input.command.argv.len() > MAX_PROOF_LANE_ARGS
+        || input
+            .command
+            .argv
+            .iter()
+            .any(|arg| !bounded_optional(arg, MAX_PROOF_LANE_STRING_BYTES))
+    {
+        return Some("command argv is unbounded or contains NUL");
+    }
+    if input.worker_selection.requested_workers.len() > MAX_PROOF_LANE_WORKERS
+        || input
+            .worker_selection
+            .requested_workers
+            .iter()
+            .any(|worker_id| !bounded_required(worker_id))
+    {
+        return Some("requested worker list is unbounded or malformed");
+    }
+    if input.worker_capabilities.len() > MAX_PROOF_LANE_WORKERS {
+        return Some("worker capability map is unbounded");
+    }
+    for (worker_id, capability) in &input.worker_capabilities {
+        if !bounded_required(worker_id) {
+            return Some("worker capability key is empty, too long, or contains NUL");
+        }
+        if capability.observed_toolchains.len() > MAX_PROOF_LANE_WORKERS
+            || capability
+                .observed_toolchains
+                .iter()
+                .any(|toolchain| !bounded_required(toolchain))
+        {
+            return Some("worker toolchain list is unbounded or malformed");
+        }
+        if capability
+            .rustc
+            .as_ref()
+            .is_some_and(|rustc| !bounded_required(rustc))
+        {
+            return Some("worker rustc field is empty, too long, or contains NUL");
+        }
+        if capability
+            .detail
+            .as_ref()
+            .is_some_and(|detail| !bounded_optional(detail, MAX_PROOF_LANE_DETAIL_BYTES))
+        {
+            return Some("worker detail is too long or contains NUL");
+        }
+    }
+    if input
+        .worker_selection
+        .selected_worker
+        .as_ref()
+        .is_some_and(|worker_id| !bounded_required(worker_id))
+    {
+        return Some("selected worker is empty, too long, or contains NUL");
+    }
+    None
+}
+
+fn selected_worker_override_effective(
+    requested_workers: &[String],
+    selected_worker: Option<&str>,
+) -> bool {
+    selected_worker.is_some_and(|selected| {
+        requested_workers.is_empty()
+            || requested_workers
+                .iter()
+                .any(|worker_id| worker_id.trim() == selected)
+    })
+}
+
+fn requested_worker_override_missing(
+    requested_workers: &[String],
+    selected_worker: Option<&str>,
+) -> bool {
+    !requested_workers.is_empty()
+        && selected_worker.is_some_and(|selected| {
+            !requested_workers
+                .iter()
+                .any(|worker_id| worker_id.trim() == selected)
+        })
+}
+
+fn capability_snapshot_unknown_or_stale(
+    capability: &ProofLaneWorkerCapability,
+    now: DateTime<Utc>,
+) -> bool {
+    capability.capability_status != ProofLaneCapabilityStatus::Fresh
+        || capability.observed_at.is_none()
+        || capability
+            .freshness_expires_at
+            .is_none_or(|expires_at| now > expires_at)
+}
+
+fn product_validation_error_class(error_class: ValidationErrorClass) -> bool {
+    matches!(
+        error_class,
+        ValidationErrorClass::CompileError
+            | ValidationErrorClass::TestFailure
+            | ValidationErrorClass::ClippyWarning
+            | ValidationErrorClass::FormatFailure
+    )
+}
+
+fn bounded_required(value: &str) -> bool {
+    !value.trim().is_empty() && bounded_optional(value, MAX_PROOF_LANE_STRING_BYTES)
+}
+
+fn bounded_optional(value: &str, max_bytes: usize) -> bool {
+    !value.contains('\0') && value.len() <= max_bytes
+}
+
+fn normalized_selected_worker(selected_worker: &Option<String>) -> Option<String> {
+    selected_worker
+        .as_ref()
+        .map(|worker_id| worker_id.trim())
+        .filter(|worker_id| !worker_id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn selected_worker_label(selected_worker: Option<&str>) -> &str {
+    selected_worker.unwrap_or("none")
+}
+
+fn requested_workers_label(requested_workers: &[String]) -> String {
+    if requested_workers.is_empty() {
+        "no explicit worker".to_string()
+    } else {
+        requested_workers.join(",")
+    }
+}
+
+fn bounded_operator_summary(mut summary: String) -> String {
+    if summary.len() <= MAX_PROOF_LANE_DETAIL_BYTES {
+        return summary;
+    }
+    let cutoff = summary
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .take_while(|idx| *idx <= MAX_PROOF_LANE_DETAIL_BYTES.saturating_sub(3))
+        .last()
+        .unwrap_or_default();
+    summary.truncate(cutoff);
+    summary.push_str("...");
+    summary
 }
 
 fn default_input_schema_version() -> String {
