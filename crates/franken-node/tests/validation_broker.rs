@@ -1341,7 +1341,7 @@ fn flight_recorder_model_rejects_invalid_attempts_with_stable_codes()
         .ok_or("base flight recorder attempt should have an observation")?
         .clone();
     earlier.observation_id = "vfr-obs-0000".to_string();
-    earlier.observed_at = earlier.observed_at - Duration::seconds(1);
+    earlier.observed_at -= Duration::seconds(1);
     unsorted.observations.push(earlier);
     assert_flight_recorder_contract_code(
         unsorted.validate_at(flight_recorder_now()),

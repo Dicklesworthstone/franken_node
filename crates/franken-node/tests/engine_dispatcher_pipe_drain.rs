@@ -58,10 +58,8 @@ fn engine_dispatcher_reaps_descendant_pipe_holders() {
 #[cfg(all(unix, feature = "engine"))]
 #[test]
 fn engine_dispatcher_pipe_drain_external_path_requires_no_default_features() {
-    assert!(
-        cfg!(feature = "engine"),
-        "default engine-feature builds use the native dispatch path; run this test target with --no-default-features to exercise external pipe draining"
-    );
+    // Default engine-feature builds use the native dispatch path; run this
+    // test target with --no-default-features to exercise external pipe draining.
 }
 
 #[cfg(not(unix))]

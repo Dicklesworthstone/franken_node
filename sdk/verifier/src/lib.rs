@@ -3693,7 +3693,7 @@ mod tests {
         assert_eq!(events.len(), 1000);
 
         // Verify all events are independently stored
-        for (_idx, event) in events.iter().enumerate() {
+        for event in &events {
             assert!(event.detail.contains("concurrent_test"));
             let cloned = event.clone();
             assert_eq!(cloned.detail, event.detail);
@@ -3874,7 +3874,7 @@ mod tests {
         }
 
         // Verify all events are still accessible and correct
-        for (_idx, event) in large_events.iter().enumerate() {
+        for event in &large_events {
             assert!(event.detail.starts_with("memory_pressure_test_"));
             assert_eq!(event.event_code, CAPSULE_VERDICT_REPRODUCED);
 
@@ -3945,7 +3945,7 @@ mod tests {
     #[test]
     fn extreme_adversarial_unicode_bidirectional_override_injection_in_event_details() {
         // Extreme: Unicode bidirectional override attacks in event details
-        let bidi_attack_patterns = vec![
+        let bidi_attack_patterns = [
             // Right-to-left override sequences that could manipulate display
             format!("normal{}evil{}", "\u{202E}", "\u{202D}"), // RLE + PDF
             format!("safe{}hidden{}visible", "\u{2066}", "\u{2069}"), // FSI + PDI
@@ -3963,7 +3963,7 @@ mod tests {
             ),
         ];
 
-        for (_i, malicious_detail) in bidi_attack_patterns.iter().enumerate() {
+        for malicious_detail in &bidi_attack_patterns {
             let event = SdkEvent::new(CAPSULE_CREATED, malicious_detail.clone());
 
             // Should store BiDi characters without interpretation or corruption
@@ -4127,8 +4127,8 @@ mod tests {
         // Test edge case: version that could cause saturation
         let saturation_version = format!(
             "vsdk-v{}.{}",
-            std::u64::MAX.saturating_sub(1),
-            std::u64::MAX.saturating_sub(1)
+            u64::MAX.saturating_sub(1),
+            u64::MAX.saturating_sub(1)
         );
         let result = check_sdk_version(&saturation_version);
         assert!(result.is_err());
@@ -4301,12 +4301,12 @@ mod tests {
             "detail\"}/*injection*/,\"evil\":true",
         ];
 
-        for (_i, injection_attempt) in json_injection_patterns.iter().enumerate() {
-            let event = SdkEvent::new(CAPSULE_REPLAY_START, *injection_attempt);
+        for injection_attempt in json_injection_patterns {
+            let event = SdkEvent::new(CAPSULE_REPLAY_START, injection_attempt);
 
             // Event should store injection attempt literally without interpretation
             assert_eq!(event.event_code, CAPSULE_REPLAY_START);
-            assert_eq!(event.detail, *injection_attempt);
+            assert_eq!(event.detail, injection_attempt);
 
             // Simulate JSON serialization (manual since we don't have serde derives)
             let manual_json = format!(

@@ -364,19 +364,19 @@ impl ValidationProofWorkKey {
         let mut feature_flags = parts.feature_flags;
         feature_flags.sort();
         feature_flags.dedup();
-        let canonical_material = canonical_work_key_material(
-            &parts.command_digest,
-            &input_digests,
-            &parts.git_commit,
-            parts.dirty_worktree,
-            parts.dirty_state_policy,
-            &feature_flags,
-            &parts.cargo_toolchain,
-            &parts.package,
-            &parts.test_target,
-            &parts.environment_policy_id,
-            &parts.target_dir_policy_id,
-        );
+        let canonical_material = canonical_work_key_material(CanonicalWorkKeyMaterialParts {
+            command_digest: &parts.command_digest,
+            input_digests: &input_digests,
+            git_commit: &parts.git_commit,
+            dirty_worktree: parts.dirty_worktree,
+            dirty_state_policy: parts.dirty_state_policy,
+            feature_flags: &feature_flags,
+            cargo_toolchain: &parts.cargo_toolchain,
+            package: &parts.package,
+            test_target: &parts.test_target,
+            environment_policy_id: &parts.environment_policy_id,
+            target_dir_policy_id: &parts.target_dir_policy_id,
+        });
         let hex = hex::encode(Sha256::digest(canonical_material.as_bytes()));
         Ok(Self {
             schema_version: WORK_KEY_SCHEMA_VERSION.to_string(),
@@ -1707,38 +1707,41 @@ impl Drop for TempFileGuard {
     }
 }
 
-fn canonical_work_key_material(
-    command_digest: &CommandDigest,
-    input_digests: &[InputDigest],
-    git_commit: &str,
+struct CanonicalWorkKeyMaterialParts<'a> {
+    command_digest: &'a CommandDigest,
+    input_digests: &'a [InputDigest],
+    git_commit: &'a str,
     dirty_worktree: bool,
     dirty_state_policy: DirtyStatePolicy,
-    feature_flags: &[String],
-    cargo_toolchain: &str,
-    package: &str,
-    test_target: &str,
-    environment_policy_id: &str,
-    target_dir_policy_id: &str,
-) -> String {
-    let input_material = input_digests
+    feature_flags: &'a [String],
+    cargo_toolchain: &'a str,
+    package: &'a str,
+    test_target: &'a str,
+    environment_policy_id: &'a str,
+    target_dir_policy_id: &'a str,
+}
+
+fn canonical_work_key_material(parts: CanonicalWorkKeyMaterialParts<'_>) -> String {
+    let input_material = parts
+        .input_digests
         .iter()
         .map(|digest| format!("{}:{}:{}", digest.path, digest.algorithm, digest.hex))
         .collect::<Vec<_>>()
         .join(",");
     format!(
         "schema={WORK_KEY_SCHEMA_VERSION}\0command_digest={}:{}\0inputs={}\0git_commit={}\0dirty={}\0dirty_policy={}\0features={}\0toolchain={}\0package={}\0test_target={}\0env_policy={}\0target_policy={}",
-        command_digest.algorithm,
-        command_digest.hex,
+        parts.command_digest.algorithm,
+        parts.command_digest.hex,
         input_material,
-        git_commit,
-        dirty_worktree,
-        dirty_state_policy.as_str(),
-        feature_flags.join(","),
-        cargo_toolchain,
-        package,
-        test_target,
-        environment_policy_id,
-        target_dir_policy_id
+        parts.git_commit,
+        parts.dirty_worktree,
+        parts.dirty_state_policy.as_str(),
+        parts.feature_flags.join(","),
+        parts.cargo_toolchain,
+        parts.package,
+        parts.test_target,
+        parts.environment_policy_id,
+        parts.target_dir_policy_id
     )
 }
 

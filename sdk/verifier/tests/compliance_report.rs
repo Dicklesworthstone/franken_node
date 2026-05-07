@@ -136,7 +136,7 @@ impl ComplianceReport {
     pub fn to_markdown(&self) -> String {
         let mut report = String::new();
 
-        report.push_str(&format!("# Verifier SDK Compliance Report\n\n"));
+        report.push_str("# Verifier SDK Compliance Report\n\n");
         report.push_str(&format!("**Generated**: {}\n", self.generated_at));
         report.push_str(&format!("**SDK Version**: {}\n", self.sdk_version));
         report.push_str(&format!("**Specification**: {}\n", self.specification));

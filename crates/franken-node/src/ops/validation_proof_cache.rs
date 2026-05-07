@@ -148,19 +148,19 @@ impl ValidationProofCacheKey {
         feature_flags.sort();
         feature_flags.dedup();
 
-        let canonical_material = canonical_key_material(
-            &receipt.command_digest,
-            &input_digests,
-            &request.inputs.git_commit,
-            request.inputs.dirty_worktree,
-            scope.dirty_state_policy,
-            &feature_flags,
-            &scope.cargo_toolchain,
-            &scope.package,
-            &scope.test_target,
-            &receipt.environment_policy.policy_id,
-            &receipt.target_dir_policy.policy_id,
-        );
+        let canonical_material = canonical_key_material(CanonicalKeyMaterialParts {
+            command_digest: &receipt.command_digest,
+            input_digests: &input_digests,
+            git_commit: &request.inputs.git_commit,
+            dirty_worktree: request.inputs.dirty_worktree,
+            dirty_state_policy: scope.dirty_state_policy,
+            feature_flags: &feature_flags,
+            cargo_toolchain: &scope.cargo_toolchain,
+            package: &scope.package,
+            test_target: &scope.test_target,
+            environment_policy_id: &receipt.environment_policy.policy_id,
+            target_dir_policy_id: &receipt.target_dir_policy.policy_id,
+        });
         let hex = hex::encode(Sha256::digest(canonical_material.as_bytes()));
         Ok(Self {
             schema_version: KEY_SCHEMA_VERSION.to_string(),
@@ -383,7 +383,7 @@ pub struct ValidationProofCacheHit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationProofCacheLookup {
     Hit(Box<ValidationProofCacheHit>),
-    Miss(ValidationProofCacheDecision),
+    Miss(Box<ValidationProofCacheDecision>),
 }
 
 pub fn render_validation_proof_cache_decision_json(
@@ -702,11 +702,11 @@ impl ValidationProofCacheStore {
         now: DateTime<Utc>,
     ) -> Result<ValidationProofCacheLookup, ValidationProofCacheError> {
         let Some(entry) = self.read_entry(key)? else {
-            return Ok(ValidationProofCacheLookup::Miss(miss_decision(
+            return Ok(ValidationProofCacheLookup::Miss(Box::new(miss_decision(
                 key.clone(),
                 now,
                 self.relative_entry_path(key),
-            )));
+            ))));
         };
         let receipt_path = self.resolve_artifact_path(&entry.receipt_ref.path)?;
         let receipt_bytes =
@@ -847,19 +847,19 @@ impl ValidationProofCacheStore {
                 ));
                 continue;
             }
-            if let Some(expected_git_commit) = &policy.expected_git_commit {
-                if !string_eq(expected_git_commit, &entry.trust.git_commit) {
-                    rejected_entries.push(gc_entry_from_entry(
-                        &entry,
-                        relative_path,
-                        stored_bytes,
-                        active_bead,
-                        error_codes::ERR_VPC_STALE_ENTRY,
-                        event_codes::STALE_REJECTED,
-                        "proof cache entry git commit is not in the expected validation scope",
-                    ));
-                    continue;
-                }
+            if let Some(expected_git_commit) = &policy.expected_git_commit
+                && !string_eq(expected_git_commit, &entry.trust.git_commit)
+            {
+                rejected_entries.push(gc_entry_from_entry(
+                    &entry,
+                    relative_path,
+                    stored_bytes,
+                    active_bead,
+                    error_codes::ERR_VPC_STALE_ENTRY,
+                    event_codes::STALE_REJECTED,
+                    "proof cache entry git commit is not in the expected validation scope",
+                ));
+                continue;
             }
             if !policy.expected_input_digests.is_empty()
                 && !input_digest_sets_match(
@@ -878,22 +878,22 @@ impl ValidationProofCacheStore {
                 ));
                 continue;
             }
-            if let Some(expected_dirty_state_policy) = policy.expected_dirty_state_policy {
-                if !string_eq(
+            if let Some(expected_dirty_state_policy) = policy.expected_dirty_state_policy
+                && !string_eq(
                     expected_dirty_state_policy.as_str(),
                     entry.cache_key.dirty_state_policy.as_str(),
-                ) {
-                    rejected_entries.push(gc_entry_from_entry(
-                        &entry,
-                        relative_path,
-                        stored_bytes,
-                        active_bead,
-                        error_codes::ERR_VPC_DIRTY_STATE_MISMATCH,
-                        event_codes::POLICY_REJECTED,
-                        "proof cache entry dirty-state policy drifted from the expected validation scope",
-                    ));
-                    continue;
-                }
+                )
+            {
+                rejected_entries.push(gc_entry_from_entry(
+                    &entry,
+                    relative_path,
+                    stored_bytes,
+                    active_bead,
+                    error_codes::ERR_VPC_DIRTY_STATE_MISMATCH,
+                    event_codes::POLICY_REJECTED,
+                    "proof cache entry dirty-state policy drifted from the expected validation scope",
+                ));
+                continue;
             }
             candidates.push(ValidationProofCacheGcCandidate {
                 entry,
@@ -1374,38 +1374,41 @@ fn map_receipt_error(
     })
 }
 
-fn canonical_key_material(
-    command_digest: &CommandDigest,
-    input_digests: &[InputDigest],
-    git_commit: &str,
+struct CanonicalKeyMaterialParts<'a> {
+    command_digest: &'a CommandDigest,
+    input_digests: &'a [InputDigest],
+    git_commit: &'a str,
     dirty_worktree: bool,
     dirty_state_policy: DirtyStatePolicy,
-    feature_flags: &[String],
-    cargo_toolchain: &str,
-    package: &str,
-    test_target: &str,
-    environment_policy_id: &str,
-    target_dir_policy_id: &str,
-) -> String {
-    let input_material = input_digests
+    feature_flags: &'a [String],
+    cargo_toolchain: &'a str,
+    package: &'a str,
+    test_target: &'a str,
+    environment_policy_id: &'a str,
+    target_dir_policy_id: &'a str,
+}
+
+fn canonical_key_material(parts: CanonicalKeyMaterialParts<'_>) -> String {
+    let input_material = parts
+        .input_digests
         .iter()
         .map(|digest| format!("{}:{}:{}", digest.path, digest.algorithm, digest.hex))
         .collect::<Vec<_>>()
         .join(",");
     format!(
         "schema={KEY_SCHEMA_VERSION}\0command={}:{}\0inputs={}\0git_commit={}\0dirty={}\0dirty_policy={}\0features={}\0toolchain={}\0package={}\0test_target={}\0env_policy={}\0target_policy={}",
-        command_digest.algorithm,
-        command_digest.hex,
+        parts.command_digest.algorithm,
+        parts.command_digest.hex,
         input_material,
-        git_commit,
-        dirty_worktree,
-        dirty_state_policy.as_str(),
-        feature_flags.join(","),
-        cargo_toolchain,
-        package,
-        test_target,
-        environment_policy_id,
-        target_dir_policy_id
+        parts.git_commit,
+        parts.dirty_worktree,
+        parts.dirty_state_policy.as_str(),
+        parts.feature_flags.join(","),
+        parts.cargo_toolchain,
+        parts.package,
+        parts.test_target,
+        parts.environment_policy_id,
+        parts.target_dir_policy_id
     )
 }
 

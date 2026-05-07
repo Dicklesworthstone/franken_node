@@ -226,6 +226,57 @@ fn describe_value_kind(value: &Value) -> String {
     }
 }
 
+fn extract_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    extract_value(value, path)?.as_str()
+}
+
+fn extract_nonempty_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    let value = extract_string(value, path)?;
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    bool::from(left.as_bytes().ct_eq(right.as_bytes()))
+}
+
+fn validate_bundle_hash(value: &str) -> Result<(), String> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        Ok(())
+    } else {
+        Err(value.to_string())
+    }
+}
+
+fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, CounterfactualReceiptError> {
+    let canonical = canonicalize_json(value);
+    serde_json::to_vec(&canonical)
+        .map_err(|source| CounterfactualReceiptError::Json(source.to_string()))
+}
+
+fn canonicalize_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for key in keys {
+                out.insert(key.to_string(), canonicalize_json(&map[key]));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonicalize_json).collect()),
+        _ => value.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,56 +864,5 @@ mod tests {
                 actual: format!(" {TEST_BUNDLE_HASH} "),
             }
         );
-    }
-}
-
-fn extract_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
-    extract_value(value, path)?.as_str()
-}
-
-fn extract_nonempty_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
-    let value = extract_string(value, path)?;
-    if value.trim().is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
-fn constant_time_eq(left: &str, right: &str) -> bool {
-    bool::from(left.as_bytes().ct_eq(right.as_bytes()))
-}
-
-fn validate_bundle_hash(value: &str) -> Result<(), String> {
-    if value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        Ok(())
-    } else {
-        Err(value.to_string())
-    }
-}
-
-fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, CounterfactualReceiptError> {
-    let canonical = canonicalize_json(value);
-    serde_json::to_vec(&canonical)
-        .map_err(|source| CounterfactualReceiptError::Json(source.to_string()))
-}
-
-fn canonicalize_json(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
-            keys.sort_unstable();
-            let mut out = serde_json::Map::with_capacity(map.len());
-            for key in keys {
-                out.insert(key.to_string(), canonicalize_json(&map[key]));
-            }
-            Value::Object(out)
-        }
-        Value::Array(items) => Value::Array(items.iter().map(canonicalize_json).collect()),
-        _ => value.clone(),
     }
 }

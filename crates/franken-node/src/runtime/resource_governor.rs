@@ -262,19 +262,14 @@ pub struct ResourceNumaNodePressure {
     pub available_bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceCoordinationHealth {
     Healthy,
     Degraded,
     Corrupt,
+    #[default]
     Unknown,
-}
-
-impl Default for ResourceCoordinationHealth {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -558,18 +553,13 @@ impl ResourceArtifactSafetyClass {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceArtifactOpenFileStatus {
+    #[default]
     Unknown,
     Open,
     NotOpen,
-}
-
-impl Default for ResourceArtifactOpenFileStatus {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

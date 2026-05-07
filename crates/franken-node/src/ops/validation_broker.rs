@@ -916,13 +916,13 @@ impl ValidationFlightRecorderAttempt {
         validate_optional_id(self.request_id.as_deref(), "request_id")?;
         validate_optional_id(self.queue_id.as_deref(), "queue_id")?;
         validate_optional_id(self.coalescer_lease_id.as_deref(), "coalescer_lease_id")?;
-        if let Some(cache_key) = &self.proof_cache_key_hex {
-            if !is_sha256_hex(cache_key) {
-                return flight_recorder_err(
-                    error_codes::ERR_VFR_MALFORMED_ATTEMPT,
-                    "proof_cache_key_hex must be a lowercase SHA-256 digest",
-                );
-            }
+        if let Some(cache_key) = &self.proof_cache_key_hex
+            && !is_sha256_hex(cache_key)
+        {
+            return flight_recorder_err(
+                error_codes::ERR_VFR_MALFORMED_ATTEMPT,
+                "proof_cache_key_hex must be a lowercase SHA-256 digest",
+            );
         }
 
         if !self.command.verifies() {
@@ -2223,21 +2223,21 @@ fn validate_attempt_timestamps(
             "flight recorder attempt freshness has expired",
         );
     }
-    if let Some(started_at) = attempt.started_at {
-        if started_at < attempt.created_at {
-            return flight_recorder_err(
-                error_codes::ERR_VFR_MALFORMED_ATTEMPT,
-                "started_at cannot predate created_at",
-            );
-        }
+    if let Some(started_at) = attempt.started_at
+        && started_at < attempt.created_at
+    {
+        return flight_recorder_err(
+            error_codes::ERR_VFR_MALFORMED_ATTEMPT,
+            "started_at cannot predate created_at",
+        );
     }
-    if let (Some(started_at), Some(finished_at)) = (attempt.started_at, attempt.finished_at) {
-        if finished_at < started_at {
-            return flight_recorder_err(
-                error_codes::ERR_VFR_MALFORMED_ATTEMPT,
-                "finished_at cannot predate started_at",
-            );
-        }
+    if let (Some(started_at), Some(finished_at)) = (attempt.started_at, attempt.finished_at)
+        && finished_at < started_at
+    {
+        return flight_recorder_err(
+            error_codes::ERR_VFR_MALFORMED_ATTEMPT,
+            "finished_at cannot predate started_at",
+        );
     }
     Ok(())
 }

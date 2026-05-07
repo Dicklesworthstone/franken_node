@@ -2141,7 +2141,7 @@ mod tests {
         capsule.inputs.clear();
         capsule.manifest.input_refs.clear();
 
-        let tricky_keys = vec![
+        let tricky_keys = [
             "1".to_string(),
             "10".to_string(),
             "2".to_string(),      // Lexicographic: "1" < "10" < "2"
@@ -3250,7 +3250,7 @@ mod tests {
             for _ in 0..sample_count {
                 // Use a more precise timing method
                 let start = Instant::now();
-                let _result = ct_eq(&reference_string, &test_string);
+                let _result = ct_eq(reference_string, &test_string);
                 let duration = start.elapsed();
                 timings.push(duration.as_nanos());
             }
@@ -3600,8 +3600,8 @@ mod tests {
             "verifier://\t\n\r   \x20".to_string(),
             "verifier://\u{00A0}\u{2000}\u{2001}".to_string(), // Various Unicode spaces
             // Boundary length conditions
-            format!("verifier://{}", "a".repeat(1)), // Minimum
-            format!("verifier://{}", "a".repeat(255)), // Typical domain limit
+            "verifier://a".to_string(),                  // Minimum
+            format!("verifier://{}", "a".repeat(255)),   // Typical domain limit
             format!("verifier://{}", "a".repeat(65535)), // Large but manageable
         ];
 
