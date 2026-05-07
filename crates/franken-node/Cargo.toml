@@ -359,6 +359,10 @@ path = "tests/migration_report_conformance.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "migration_report_schema_golden"
+path = "tests/migration_report_schema_golden.rs"
+
+[[test]]
 name = "migration_e2e_gate_artifacts"
 path = "tests/migration_e2e_gate_artifacts.rs"
 required-features = ["test-support"]
