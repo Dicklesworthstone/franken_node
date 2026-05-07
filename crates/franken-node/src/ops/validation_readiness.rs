@@ -24,6 +24,8 @@ pub const PROOF_LANE_READINESS_CAPSULE_SCHEMA_VERSION: &str =
     "franken-node/proof-lane-readiness/capsule/v1";
 pub const PROOF_LANE_READINESS_DECISION_SCHEMA_VERSION: &str =
     "franken-node/proof-lane-readiness/decision/v1";
+pub const PROOF_LANE_READINESS_FIXTURE_SCHEMA_VERSION: &str =
+    "franken-node/proof-lane-readiness/fixtures/v1";
 pub const DEFAULT_MAX_RECEIPT_AGE_SECS: u64 = 60 * 60 * 24;
 pub const MAX_PROOF_LANE_WORKERS: usize = 32;
 pub const MAX_PROOF_LANE_ARGS: usize = 64;
@@ -1714,6 +1716,19 @@ pub struct ValidationReadinessFixture {
     pub expect_overall_status: ValidationReadinessStatus,
     pub expect_check_codes: Vec<String>,
     pub expect_missing_required_receipts: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneReadinessFixtureCatalog {
+    pub schema_version: String,
+    pub fixtures: Vec<ProofLaneReadinessFixture>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneReadinessFixture {
+    pub name: String,
+    pub input: ProofLaneReadinessInput,
+    pub expected_capsule: ProofLaneReadinessCapsule,
 }
 
 #[must_use]

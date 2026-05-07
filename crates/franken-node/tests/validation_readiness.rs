@@ -6,14 +6,15 @@ use frankenengine_node::ops::validation_broker::{
     ValidationExitKind, ValidationProofStatus, ValidationReceipt, ValidationTiming,
 };
 use frankenengine_node::ops::validation_readiness::{
-    ProofLaneCapabilityStatus, ProofLaneCommandIntent, ProofLanePressureStatus,
-    ProofLaneRchSnapshot, ProofLaneReadinessDecisionKind, ProofLaneReadinessInput,
-    ProofLaneReadinessProducer, ProofLaneToolchainRequirement, ProofLaneWorkerAuthStatus,
-    ProofLaneWorkerCapability, ProofLaneWorkerSelection, RchWorkerReadiness,
-    ResourceContentionSnapshot, TrackedValidationBead, ValidationBeadState,
-    ValidationReadinessFixtureCatalog, ValidationReadinessInput, ValidationReadinessStatus,
-    build_validation_readiness_report, classify_proof_lane_readiness, known_check_codes,
-    proof_lane_event_codes, proof_lane_reason_codes, render_validation_readiness_human,
+    PROOF_LANE_READINESS_FIXTURE_SCHEMA_VERSION, ProofLaneCapabilityStatus, ProofLaneCommandIntent,
+    ProofLanePressureStatus, ProofLaneRchSnapshot, ProofLaneReadinessDecisionKind,
+    ProofLaneReadinessFixtureCatalog, ProofLaneReadinessInput, ProofLaneReadinessProducer,
+    ProofLaneToolchainRequirement, ProofLaneWorkerAuthStatus, ProofLaneWorkerCapability,
+    ProofLaneWorkerSelection, RchWorkerReadiness, ResourceContentionSnapshot,
+    TrackedValidationBead, ValidationBeadState, ValidationReadinessFixtureCatalog,
+    ValidationReadinessInput, ValidationReadinessStatus, build_validation_readiness_report,
+    classify_proof_lane_readiness, known_check_codes, proof_lane_event_codes,
+    proof_lane_reason_codes, render_validation_readiness_human,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -22,6 +23,13 @@ use std::process::Command;
 
 fn ts(seconds: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 5, 5, 12, 0, 0)
+        .single()
+        .expect("valid timestamp")
+        + chrono::Duration::seconds(i64::from(seconds))
+}
+
+fn plr_ts(seconds: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 5, 7, 0, 0, 0)
         .single()
         .expect("valid timestamp")
         + chrono::Duration::seconds(i64::from(seconds))
@@ -423,6 +431,93 @@ fn proof_lane_classifier_rejects_stale_capsules_and_product_failures() {
         proof_lane_reason_codes::MALFORMED_READINESS_INPUT,
         proof_lane_event_codes::MALFORMED_READINESS_INPUT,
     );
+}
+
+#[test]
+fn checked_in_proof_lane_fixture_catalog_matches_golden_capsules() {
+    let catalog: ProofLaneReadinessFixtureCatalog = serde_json::from_str(include_str!(
+        "../../../artifacts/validation_broker/bd-yyl6t/proof_lane_readiness_fixtures.v1.json"
+    ))
+    .expect("proof-lane fixture catalog parses");
+    assert_eq!(
+        catalog.schema_version,
+        PROOF_LANE_READINESS_FIXTURE_SCHEMA_VERSION
+    );
+    assert!(catalog.fixtures.len() >= 7);
+
+    let now = plr_ts(300);
+    for fixture in catalog.fixtures {
+        let actual = classify_proof_lane_readiness(&fixture.input, now);
+        assert_eq!(actual, fixture.expected_capsule, "{} capsule", fixture.name);
+        assert_eq!(
+            serde_json::to_value(&actual).expect("actual capsule serializes"),
+            serde_json::to_value(&fixture.expected_capsule).expect("expected capsule serializes"),
+            "{} serialized capsule",
+            fixture.name
+        );
+        assert!(
+            actual.created_at <= actual.freshness_expires_at,
+            "{} freshness window",
+            fixture.name
+        );
+        assert!(
+            now <= actual.freshness_expires_at,
+            "{} capsule is fresh at replay time",
+            fixture.name
+        );
+        assert!(
+            known_proof_lane_reason_event_pair(
+                &actual.decision.reason_code,
+                &actual.decision.event_code
+            ),
+            "{} known reason/event pair",
+            fixture.name
+        );
+        assert!(
+            actual.worker_access.detail.len() <= 1024,
+            "{} bounded worker detail",
+            fixture.name
+        );
+        assert!(
+            actual.decision.operator_summary.len() <= 1024,
+            "{} bounded operator summary",
+            fixture.name
+        );
+    }
+}
+
+fn known_proof_lane_reason_event_pair(reason_code: &str, event_code: &str) -> bool {
+    matches!(
+        (reason_code, event_code),
+        (
+            proof_lane_reason_codes::HEALTHY_SAME_TOOLCHAIN_LANE,
+            proof_lane_event_codes::HEALTHY_SAME_TOOLCHAIN_LANE
+        ) | (
+            proof_lane_reason_codes::OVERRIDE_NOT_HONORED,
+            proof_lane_event_codes::OVERRIDE_NOT_HONORED
+        ) | (
+            proof_lane_reason_codes::SAME_TOOLCHAIN_MISSING,
+            proof_lane_event_codes::SAME_TOOLCHAIN_MISSING
+        ) | (
+            proof_lane_reason_codes::WORKER_AUTH_FAILED,
+            proof_lane_event_codes::WORKER_AUTH_FAILED
+        ) | (
+            proof_lane_reason_codes::WORKER_CAPABILITY_UNKNOWN,
+            proof_lane_event_codes::WORKER_CAPABILITY_UNKNOWN
+        ) | (
+            proof_lane_reason_codes::WORKER_PRESSURE_BLOCKED,
+            proof_lane_event_codes::WORKER_PRESSURE_BLOCKED
+        ) | (
+            proof_lane_reason_codes::LOCAL_FALLBACK_REFUSED,
+            proof_lane_event_codes::LOCAL_FALLBACK_REFUSED
+        ) | (
+            proof_lane_reason_codes::STALE_READINESS_CAPSULE,
+            proof_lane_event_codes::STALE_READINESS_CAPSULE
+        ) | (
+            proof_lane_reason_codes::MALFORMED_READINESS_INPUT,
+            proof_lane_event_codes::MALFORMED_READINESS_INPUT
+        )
+    )
 }
 
 #[test]

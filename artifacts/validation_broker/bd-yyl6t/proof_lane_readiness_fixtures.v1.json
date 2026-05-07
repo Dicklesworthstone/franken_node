@@ -1,0 +1,925 @@
+{
+  "schema_version": "franken-node/proof-lane-readiness/fixtures/v1",
+  "fixtures": [
+    {
+      "name": "healthy same-toolchain remote lane",
+      "input": {
+        "capsule_id": "plr-healthy-same-toolchain",
+        "trace_id": "trace-plr-healthy",
+        "bead_id": "bd-yyl6t.3",
+        "thread_id": "bd-yyl6t.3",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "selected_worker": "ts2",
+          "override_effective": false,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19"
+        },
+        "worker_capabilities": {
+          "ts2": {
+            "auth_status": "ok",
+            "capability_status": "fresh",
+            "pressure_status": "healthy",
+            "observed_at": "2026-05-07T00:00:05Z",
+            "freshness_expires_at": "2026-05-07T00:30:00Z",
+            "rustc": "rustc 1.97.0-nightly",
+            "observed_toolchains": [
+              "nightly-2026-02-19"
+            ],
+            "detail": "fresh same-toolchain worker"
+          }
+        }
+      },
+      "expected_capsule": {
+        "schema_version": "franken-node/proof-lane-readiness/capsule/v1",
+        "capsule_id": "plr-healthy-same-toolchain",
+        "trace_id": "trace-plr-healthy",
+        "bead_id": "bd-yyl6t.3",
+        "thread_id": "bd-yyl6t.3",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "selected_worker": "ts2",
+          "override_effective": true,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19",
+          "selected_worker_rustc": "rustc 1.97.0-nightly",
+          "same_toolchain": true
+        },
+        "worker_access": {
+          "auth_status": "ok",
+          "capability_status": "fresh",
+          "pressure_status": "healthy",
+          "detail": "fresh same-toolchain worker"
+        },
+        "decision": {
+          "schema_version": "franken-node/proof-lane-readiness/decision/v1",
+          "decision": "ready_to_launch",
+          "reason_code": "PLR_HEALTHY_SAME_TOOLCHAIN_LANE",
+          "event_code": "PLR-001",
+          "retryable": false,
+          "fail_closed": false,
+          "required_action": "launch_remote_proof",
+          "operator_summary": "RCH selected ts2 with fresh capability, valid auth, and matching toolchain; remote proof may launch."
+        }
+      }
+    },
+    {
+      "name": "ts2 auth blocker is not product failure",
+      "input": {
+        "capsule_id": "plr-ts2-auth-blocker",
+        "trace_id": "trace-plr-ts2-auth",
+        "bead_id": "bd-agpdg",
+        "thread_id": "bd-agpdg",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "selected_worker": "ts2",
+          "override_effective": false,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19"
+        },
+        "worker_capabilities": {
+          "ts2": {
+            "auth_status": "permission_denied",
+            "capability_status": "fresh",
+            "pressure_status": "healthy",
+            "observed_at": "2026-05-07T00:00:05Z",
+            "freshness_expires_at": "2026-05-07T00:30:00Z",
+            "rustc": "rustc 1.97.0-nightly",
+            "observed_toolchains": [
+              "nightly-2026-02-19"
+            ],
+            "detail": "Permission denied (publickey,password)"
+          }
+        }
+      },
+      "expected_capsule": {
+        "schema_version": "franken-node/proof-lane-readiness/capsule/v1",
+        "capsule_id": "plr-ts2-auth-blocker",
+        "trace_id": "trace-plr-ts2-auth",
+        "bead_id": "bd-agpdg",
+        "thread_id": "bd-agpdg",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "selected_worker": "ts2",
+          "override_effective": true,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19",
+          "selected_worker_rustc": "rustc 1.97.0-nightly",
+          "same_toolchain": true
+        },
+        "worker_access": {
+          "auth_status": "permission_denied",
+          "capability_status": "fresh",
+          "pressure_status": "healthy",
+          "detail": "Permission denied (publickey,password)"
+        },
+        "decision": {
+          "schema_version": "franken-node/proof-lane-readiness/decision/v1",
+          "decision": "source_only_blocker",
+          "reason_code": "PLR_WORKER_AUTH_FAILED",
+          "event_code": "PLR-004",
+          "retryable": true,
+          "fail_closed": true,
+          "required_action": "repair_worker_credentials_before_retry",
+          "operator_summary": "Selected worker ts2 has auth_status=permission_denied; repair credentials before proof."
+        }
+      }
+    },
+    {
+      "name": "installed daemon override mismatch",
+      "input": {
+        "capsule_id": "plr-override-mismatch",
+        "trace_id": "trace-plr-override",
+        "bead_id": "bd-agpdg",
+        "thread_id": "bd-agpdg",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "selected_worker": "vmi1153651",
+          "override_effective": false,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19"
+        },
+        "worker_capabilities": {
+          "vmi1153651": {
+            "auth_status": "ok",
+            "capability_status": "fresh",
+            "pressure_status": "healthy",
+            "observed_at": "2026-05-07T00:00:05Z",
+            "freshness_expires_at": "2026-05-07T00:30:00Z",
+            "rustc": "rustc 1.97.0-nightly",
+            "observed_toolchains": [
+              "nightly-2026-02-19"
+            ],
+            "detail": "installed daemon selected a worker outside the requested override"
+          }
+        }
+      },
+      "expected_capsule": {
+        "schema_version": "franken-node/proof-lane-readiness/capsule/v1",
+        "capsule_id": "plr-override-mismatch",
+        "trace_id": "trace-plr-override",
+        "bead_id": "bd-agpdg",
+        "thread_id": "bd-agpdg",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "selected_worker": "vmi1153651",
+          "override_effective": false,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19",
+          "selected_worker_rustc": "rustc 1.97.0-nightly",
+          "same_toolchain": true
+        },
+        "worker_access": {
+          "auth_status": "ok",
+          "capability_status": "fresh",
+          "pressure_status": "healthy",
+          "detail": "installed daemon selected a worker outside the requested override"
+        },
+        "decision": {
+          "schema_version": "franken-node/proof-lane-readiness/decision/v1",
+          "decision": "source_only_blocker",
+          "reason_code": "PLR_OVERRIDE_NOT_HONORED",
+          "event_code": "PLR-002",
+          "retryable": true,
+          "fail_closed": true,
+          "required_action": "fix_rch_worker_selection_or_use_valid_same_toolchain_worker",
+          "operator_summary": "RCH selected vmi1153651 even though ts2 was requested; do not launch this proof as green evidence."
+        }
+      }
+    },
+    {
+      "name": "worker missing rust runtime",
+      "input": {
+        "capsule_id": "plr-worker-missing-rust",
+        "trace_id": "trace-plr-missing-rust",
+        "bead_id": "bd-yyl6t.3",
+        "thread_id": "bd-yyl6t.3",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "selected_worker": "ts2",
+          "override_effective": false,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19"
+        },
+        "worker_capabilities": {
+          "ts2": {
+            "auth_status": "ok",
+            "capability_status": "fresh",
+            "pressure_status": "healthy",
+            "observed_at": "2026-05-07T00:00:05Z",
+            "freshness_expires_at": "2026-05-07T00:30:00Z",
+            "observed_toolchains": [],
+            "detail": "worker capability snapshot has no rust runtime"
+          }
+        }
+      },
+      "expected_capsule": {
+        "schema_version": "franken-node/proof-lane-readiness/capsule/v1",
+        "capsule_id": "plr-worker-missing-rust",
+        "trace_id": "trace-plr-missing-rust",
+        "bead_id": "bd-yyl6t.3",
+        "thread_id": "bd-yyl6t.3",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "selected_worker": "ts2",
+          "override_effective": true,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19",
+          "selected_worker_rustc": "unknown",
+          "same_toolchain": false
+        },
+        "worker_access": {
+          "auth_status": "ok",
+          "capability_status": "fresh",
+          "pressure_status": "healthy",
+          "detail": "worker capability snapshot has no rust runtime"
+        },
+        "decision": {
+          "schema_version": "franken-node/proof-lane-readiness/decision/v1",
+          "decision": "source_only_blocker",
+          "reason_code": "PLR_SAME_TOOLCHAIN_MISSING",
+          "event_code": "PLR-003",
+          "retryable": true,
+          "fail_closed": true,
+          "required_action": "sync_toolchain_or_wait_for_matching_worker",
+          "operator_summary": "Selected worker ts2 does not match required toolchain nightly-2026-02-19; do not launch this proof."
+        }
+      }
+    },
+    {
+      "name": "worker toolchain mismatch",
+      "input": {
+        "capsule_id": "plr-worker-toolchain-mismatch",
+        "trace_id": "trace-plr-toolchain-mismatch",
+        "bead_id": "bd-yyl6t.3",
+        "thread_id": "bd-yyl6t.3",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "selected_worker": "ts2",
+          "override_effective": false,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19"
+        },
+        "worker_capabilities": {
+          "ts2": {
+            "auth_status": "ok",
+            "capability_status": "fresh",
+            "pressure_status": "healthy",
+            "observed_at": "2026-05-07T00:00:05Z",
+            "freshness_expires_at": "2026-05-07T00:30:00Z",
+            "rustc": "rustc 1.95.0-nightly",
+            "observed_toolchains": [
+              "stable"
+            ],
+            "detail": "worker has a different Rust runtime and missing nightly lane"
+          }
+        }
+      },
+      "expected_capsule": {
+        "schema_version": "franken-node/proof-lane-readiness/capsule/v1",
+        "capsule_id": "plr-worker-toolchain-mismatch",
+        "trace_id": "trace-plr-toolchain-mismatch",
+        "bead_id": "bd-yyl6t.3",
+        "thread_id": "bd-yyl6t.3",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "selected_worker": "ts2",
+          "override_effective": true,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19",
+          "selected_worker_rustc": "rustc 1.95.0-nightly",
+          "same_toolchain": false
+        },
+        "worker_access": {
+          "auth_status": "ok",
+          "capability_status": "fresh",
+          "pressure_status": "healthy",
+          "detail": "worker has a different Rust runtime and missing nightly lane"
+        },
+        "decision": {
+          "schema_version": "franken-node/proof-lane-readiness/decision/v1",
+          "decision": "source_only_blocker",
+          "reason_code": "PLR_SAME_TOOLCHAIN_MISSING",
+          "event_code": "PLR-003",
+          "retryable": true,
+          "fail_closed": true,
+          "required_action": "sync_toolchain_or_wait_for_matching_worker",
+          "operator_summary": "Selected worker ts2 does not match required toolchain nightly-2026-02-19; do not launch this proof."
+        }
+      }
+    },
+    {
+      "name": "stale capability snapshot",
+      "input": {
+        "capsule_id": "plr-stale-capability",
+        "trace_id": "trace-plr-stale-capability",
+        "bead_id": "bd-yyl6t.3",
+        "thread_id": "bd-yyl6t.3",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "selected_worker": "ts2",
+          "override_effective": false,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19"
+        },
+        "worker_capabilities": {
+          "ts2": {
+            "auth_status": "ok",
+            "capability_status": "stale",
+            "pressure_status": "healthy",
+            "observed_at": "2026-05-07T00:00:05Z",
+            "freshness_expires_at": "2026-05-07T00:00:20Z",
+            "rustc": "rustc 1.97.0-nightly",
+            "observed_toolchains": [
+              "nightly-2026-02-19"
+            ],
+            "detail": "capability observation expired before closeout"
+          }
+        }
+      },
+      "expected_capsule": {
+        "schema_version": "franken-node/proof-lane-readiness/capsule/v1",
+        "capsule_id": "plr-stale-capability",
+        "trace_id": "trace-plr-stale-capability",
+        "bead_id": "bd-yyl6t.3",
+        "thread_id": "bd-yyl6t.3",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "selected_worker": "ts2",
+          "override_effective": true,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19",
+          "selected_worker_rustc": "rustc 1.97.0-nightly",
+          "same_toolchain": true
+        },
+        "worker_access": {
+          "auth_status": "ok",
+          "capability_status": "stale",
+          "pressure_status": "healthy",
+          "detail": "capability observation expired before closeout"
+        },
+        "decision": {
+          "schema_version": "franken-node/proof-lane-readiness/decision/v1",
+          "decision": "retry_preflight",
+          "reason_code": "PLR_WORKER_CAPABILITY_UNKNOWN",
+          "event_code": "PLR-005",
+          "retryable": true,
+          "fail_closed": true,
+          "required_action": "refresh_worker_capabilities",
+          "operator_summary": "Selected worker ts2 has capability_status=stale; refresh capabilities before proof."
+        }
+      }
+    },
+    {
+      "name": "local fallback refused without remote worker",
+      "input": {
+        "capsule_id": "plr-local-fallback-refused",
+        "trace_id": "trace-plr-local-fallback",
+        "bead_id": "bd-yyl6t.3",
+        "thread_id": "bd-yyl6t.3",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "override_effective": false,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19"
+        },
+        "worker_capabilities": {}
+      },
+      "expected_capsule": {
+        "schema_version": "franken-node/proof-lane-readiness/capsule/v1",
+        "capsule_id": "plr-local-fallback-refused",
+        "trace_id": "trace-plr-local-fallback",
+        "bead_id": "bd-yyl6t.3",
+        "thread_id": "bd-yyl6t.3",
+        "created_at": "2026-05-07T00:00:00Z",
+        "freshness_expires_at": "2026-05-07T00:30:00Z",
+        "producer": {
+          "name": "franken-node ops validation-readiness",
+          "agent_name": "PurpleLeopard",
+          "git_commit": "09ad4b9a",
+          "dirty_worktree": false
+        },
+        "command": {
+          "program": "cargo",
+          "argv": [
+            "test",
+            "-p",
+            "frankenengine-node",
+            "validation_readiness"
+          ],
+          "cwd": "/data/projects/franken_node",
+          "digest": {
+            "algorithm": "sha256",
+            "hex": "fa5a31b0f3d28c849268d839070a48090da2515bfa45a9c401bcf946ce8553e9"
+          }
+        },
+        "rch": {
+          "daemon_source": "installed",
+          "daemon_version": "1.0.24",
+          "socket_path": "/run/user/1000/rch.sock",
+          "require_remote": true,
+          "local_fallback_allowed": false,
+          "local_fallback_refused": true
+        },
+        "worker_selection": {
+          "requested_workers": [
+            "ts2"
+          ],
+          "override_effective": false,
+          "selection_source": "dry_run",
+          "selection_observed_at": "2026-05-07T00:00:05Z"
+        },
+        "toolchain": {
+          "local_rustc": "rustc 1.97.0-nightly",
+          "required_toolchain": "nightly-2026-02-19",
+          "selected_worker_rustc": "unknown",
+          "same_toolchain": false
+        },
+        "worker_access": {
+          "auth_status": "unknown",
+          "capability_status": "missing",
+          "pressure_status": "unknown",
+          "detail": "No capability snapshot exists for selected worker none."
+        },
+        "decision": {
+          "schema_version": "franken-node/proof-lane-readiness/decision/v1",
+          "decision": "source_only_blocker",
+          "reason_code": "PLR_LOCAL_FALLBACK_REFUSED",
+          "event_code": "PLR-007",
+          "retryable": true,
+          "fail_closed": true,
+          "required_action": "restore_remote_execution_before_cargo_proof",
+          "operator_summary": "Remote proof is required, no remote worker was selected, and local fallback is refused."
+        }
+      }
+    }
+  ]
+}
