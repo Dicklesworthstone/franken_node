@@ -62,6 +62,49 @@ pub enum SwarmHandoffBlockerKind {
     Unknown,
 }
 
+impl SwarmHandoffBlockerKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CompileError => "compile_error",
+            Self::TestFailure => "test_failure",
+            Self::ReservationConflict => "reservation_conflict",
+            Self::RchInProgress => "rch_in_progress",
+            Self::ToolingUnavailable => "tooling_unavailable",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmHandoffVerificationCommandFamily {
+    CargoCheck,
+    CargoTest,
+    CargoClippy,
+    Rustfmt,
+    PythonGate,
+    Rch,
+    Other,
+    Unknown,
+}
+
+impl SwarmHandoffVerificationCommandFamily {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CargoCheck => "cargo_check",
+            Self::CargoTest => "cargo_test",
+            Self::CargoClippy => "cargo_clippy",
+            Self::Rustfmt => "rustfmt",
+            Self::PythonGate => "python_gate",
+            Self::Rch => "rch",
+            Self::Other => "other",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 pub mod handoff_reason_codes {
     pub const HANDOFF_ACTIVE_RECENT_AGENT: &str = "HANDOFF_ACTIVE_RECENT_AGENT";
     pub const HANDOFF_ACTIVE_OWNER_OTHER_PROJECT: &str = "HANDOFF_ACTIVE_OWNER_OTHER_PROJECT";
@@ -228,7 +271,13 @@ pub struct SwarmHandoffGitActivityEvidence {
 pub struct SwarmHandoffCrossRepoBlockerEvidence {
     pub local_bead_id: String,
     pub sibling_project_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sibling_bead_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subsystem: Option<String>,
     pub blocker_kind: SwarmHandoffBlockerKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_command_family: Option<SwarmHandoffVerificationCommandFamily>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,6 +286,10 @@ pub struct SwarmHandoffCrossRepoBlockerEvidence {
     pub observed_error: Option<String>,
     pub observed_at: DateTime<Utc>,
     pub cleared: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleared_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearing_commit_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,6 +359,7 @@ pub struct SwarmHandoffReadinessReport {
     pub active_reservations: Vec<SwarmHandoffReservationView>,
     pub active_rch_builds: Vec<SwarmHandoffRchBuildView>,
     pub cross_repo_blockers: Vec<SwarmHandoffCrossRepoBlockerView>,
+    pub cleared_cross_repo_blockers: Vec<SwarmHandoffCrossRepoBlockerView>,
     pub stale_candidates: Vec<SwarmHandoffDecisionView>,
     pub safe_reopen_commands: Vec<SwarmHandoffCommandView>,
     pub warnings: Vec<String>,
@@ -401,7 +455,16 @@ pub struct SwarmHandoffRchBuildView {
 pub struct SwarmHandoffCrossRepoBlockerView {
     pub local_bead_id: String,
     pub sibling_project_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sibling_bead_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subsystem: Option<String>,
     pub blocker_kind: SwarmHandoffBlockerKind,
+    pub blocker_kind_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_command_family: Option<SwarmHandoffVerificationCommandFamily>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_command_family_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -409,6 +472,12 @@ pub struct SwarmHandoffCrossRepoBlockerView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_error: Option<String>,
     pub observed_age_secs: i64,
+    pub cleared: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleared_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearing_commit_hash: Option<String>,
+    pub action_summary: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -581,7 +650,9 @@ impl SwarmHandoffEvidenceInput {
             + self
                 .cross_repo_blockers
                 .iter()
-                .filter(|blocker| blocker.blocker_kind == SwarmHandoffBlockerKind::Unknown)
+                .filter(|blocker| {
+                    blocker.blocker_kind == SwarmHandoffBlockerKind::Unknown // ubs:ignore - enum policy label, not secret material
+                })
                 .count()
     }
 
@@ -741,18 +812,17 @@ impl SwarmHandoffEvidenceInput {
 
         if let Some(agent) =
             assignee.and_then(|name| self.agents.iter().find(|agent| agent.agent_name == name))
+            && agent.ack_required_count > 0
         {
-            if agent.ack_required_count > 0 {
-                return policy_outcome(
-                    bead_id,
-                    self.observed_at,
-                    SwarmHandoffPolicyDecision::StaleButContested,
-                    vec![HANDOFF_STALE_ACK_REQUIRED],
-                    vec![agent_pointer(agent)],
-                    "The assignee has pending acknowledgement requests; ask for explicit handoff before reopening.",
-                    None,
-                );
-            }
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::StaleButContested,
+                vec![HANDOFF_STALE_ACK_REQUIRED],
+                vec![agent_pointer(agent)],
+                "The assignee has pending acknowledgement requests; ask for explicit handoff before reopening.",
+                None,
+            );
         }
 
         if self
@@ -861,8 +931,9 @@ impl SwarmHandoffEvidenceInput {
             .iter()
             .find(|blocker| blocker.local_bead_id == bead_id && !blocker.cleared)?;
 
-        let reservation_like = blocker.blocker_kind == SwarmHandoffBlockerKind::ReservationConflict
-            || blocker.holder_agent.is_some();
+        let is_reservation_conflict =
+            blocker.blocker_kind == SwarmHandoffBlockerKind::ReservationConflict; // ubs:ignore - enum policy label, not secret material
+        let reservation_like = is_reservation_conflict || blocker.holder_agent.is_some();
         if reservation_like {
             return Some(policy_outcome(
                 bead_id,
@@ -1036,6 +1107,13 @@ pub fn build_swarm_handoff_readiness_report(
         .take(MAX_HANDOFF_LIST_ITEMS)
         .map(|blocker| cross_repo_blocker_view(input, blocker))
         .collect::<Vec<_>>();
+    let cleared_cross_repo_blockers = input
+        .cross_repo_blockers
+        .iter()
+        .filter(|blocker| blocker.cleared)
+        .take(MAX_HANDOFF_LIST_ITEMS)
+        .map(|blocker| cross_repo_blocker_view(input, blocker))
+        .collect::<Vec<_>>();
     let stale_candidates = decisions
         .iter()
         .filter(|view| {
@@ -1081,6 +1159,7 @@ pub fn build_swarm_handoff_readiness_report(
         active_reservations,
         active_rch_builds,
         cross_repo_blockers,
+        cleared_cross_repo_blockers,
         stale_candidates,
         safe_reopen_commands,
         warnings,
@@ -1118,6 +1197,10 @@ pub fn render_swarm_handoff_readiness_human(report: &SwarmHandoffReadinessReport
         format!(
             "- cross_repo_blockers: {}",
             report.cross_repo_blockers.len()
+        ),
+        format!(
+            "- cleared_cross_repo_blockers: {}",
+            report.cleared_cross_repo_blockers.len()
         ),
         format!("- stale_candidates: {}", report.stale_candidates.len()),
         format!(
@@ -1229,14 +1312,45 @@ pub fn render_swarm_handoff_readiness_human(report: &SwarmHandoffReadinessReport
         lines.push("Cross-repo blockers:".to_string());
         for blocker in &report.cross_repo_blockers {
             lines.push(format!(
-                "- bead=`{}` sibling=`{}` blocker_kind=`{:?}` holder=`{}` file=`{}` observed_age_secs={} error=`{}`",
+                "- bead=`{}` sibling=`{}` sibling_bead=`{}` subsystem=`{}` blocker_kind=`{}` command_family=`{}` holder=`{}` file=`{}` observed_age_secs={} error=`{}` action=`{}`",
                 blocker.local_bead_id,
                 blocker.sibling_project_key,
-                blocker.blocker_kind,
+                blocker.sibling_bead_id.as_deref().unwrap_or(""),
+                blocker.subsystem.as_deref().unwrap_or(""),
+                blocker.blocker_kind_label,
+                blocker
+                    .verification_command_family_label
+                    .as_deref()
+                    .unwrap_or(""),
                 blocker.holder_agent.as_deref().unwrap_or(""),
                 blocker.file_path.as_deref().unwrap_or(""),
                 blocker.observed_age_secs,
-                blocker.observed_error.as_deref().unwrap_or("")
+                blocker.observed_error.as_deref().unwrap_or(""),
+                blocker.action_summary
+            ));
+        }
+    }
+
+    if !report.cleared_cross_repo_blockers.is_empty() {
+        lines.push(String::new());
+        lines.push("Cleared cross-repo blockers:".to_string());
+        for blocker in &report.cleared_cross_repo_blockers {
+            lines.push(format!(
+                "- bead=`{}` sibling=`{}` sibling_bead=`{}` blocker_kind=`{}` command_family=`{}` cleared_at=`{}` clearing_commit=`{}` action=`{}`",
+                blocker.local_bead_id,
+                blocker.sibling_project_key,
+                blocker.sibling_bead_id.as_deref().unwrap_or(""),
+                blocker.blocker_kind_label,
+                blocker
+                    .verification_command_family_label
+                    .as_deref()
+                    .unwrap_or(""),
+                blocker
+                    .cleared_at
+                    .map(|timestamp| timestamp.to_rfc3339())
+                    .unwrap_or_default(),
+                blocker.clearing_commit_hash.as_deref().unwrap_or(""),
+                blocker.action_summary
             ));
         }
     }
@@ -1357,7 +1471,14 @@ fn cross_repo_blocker_view(
     SwarmHandoffCrossRepoBlockerView {
         local_bead_id: blocker.local_bead_id.clone(),
         sibling_project_key: blocker.sibling_project_key.clone(),
+        sibling_bead_id: blocker.sibling_bead_id.clone(),
+        subsystem: blocker.subsystem.clone(),
         blocker_kind: blocker.blocker_kind,
+        blocker_kind_label: blocker.blocker_kind.as_str().to_string(),
+        verification_command_family: blocker.verification_command_family,
+        verification_command_family_label: blocker
+            .verification_command_family
+            .map(|family| family.as_str().to_string()),
         file_path: blocker.file_path.clone(),
         holder_agent: blocker.holder_agent.clone(),
         observed_error: blocker.observed_error.clone(),
@@ -1366,6 +1487,36 @@ fn cross_repo_blocker_view(
             .signed_duration_since(blocker.observed_at)
             .num_seconds()
             .max(0),
+        cleared: blocker.cleared,
+        cleared_at: blocker.cleared_at,
+        clearing_commit_hash: blocker.clearing_commit_hash.clone(),
+        action_summary: cross_repo_blocker_action_summary(blocker).to_string(),
+    }
+}
+
+fn cross_repo_blocker_action_summary(
+    blocker: &SwarmHandoffCrossRepoBlockerEvidence,
+) -> &'static str {
+    if blocker.cleared {
+        return "Sibling blocker is cleared; keep the mirror for audit context and rerun local validation before closing dependent work.";
+    }
+
+    match blocker.blocker_kind {
+        SwarmHandoffBlockerKind::ReservationConflict => {
+            "Coordinate with the sibling reservation holder; do not override the remote holder from this repository."
+        }
+        SwarmHandoffBlockerKind::RchInProgress => {
+            "Wait for the sibling RCH proof or record a worker-infra blocker; do not treat the pending proof as green."
+        }
+        SwarmHandoffBlockerKind::CompileError | SwarmHandoffBlockerKind::TestFailure => {
+            "Keep the local bead blocked on the sibling validation failure until the mirror is cleared with verification evidence."
+        }
+        SwarmHandoffBlockerKind::ToolingUnavailable => {
+            "Record the sibling tooling failure as infrastructure evidence and avoid broadening the local product task."
+        }
+        SwarmHandoffBlockerKind::Unknown => {
+            "Refresh sibling evidence before taking ownership or reopening related local work."
+        }
     }
 }
 
@@ -1624,9 +1775,16 @@ fn git_pointer(activity: &SwarmHandoffGitActivityEvidence) -> String {
 }
 
 fn cross_repo_pointer(blocker: &SwarmHandoffCrossRepoBlockerEvidence) -> String {
+    let command_family = blocker
+        .verification_command_family
+        .map(SwarmHandoffVerificationCommandFamily::as_str)
+        .unwrap_or("unknown");
     format!(
-        "cross_repo:{}:{:?}:{}",
-        blocker.local_bead_id, blocker.blocker_kind, blocker.sibling_project_key
+        "cross_repo:{}:{}:{}:{}",
+        blocker.local_bead_id,
+        blocker.blocker_kind.as_str(),
+        command_family,
+        blocker.sibling_project_key
     )
 }
 
@@ -1790,6 +1948,11 @@ fn validate_cross_repo_blocker(
         "cross_repo_blocker.sibling_project_key",
         &blocker.sibling_project_key,
     )?;
+    require_optional_string(
+        "cross_repo_blocker.sibling_bead_id",
+        blocker.sibling_bead_id.as_deref(),
+    )?;
+    require_optional_string("cross_repo_blocker.subsystem", blocker.subsystem.as_deref())?;
     if let Some(file_path) = &blocker.file_path {
         require_path_pattern("cross_repo_blocker.file_path", file_path)?;
     }
@@ -1800,6 +1963,10 @@ fn validate_cross_repo_blocker(
     require_optional_string(
         "cross_repo_blocker.observed_error",
         blocker.observed_error.as_deref(),
+    )?;
+    require_optional_string(
+        "cross_repo_blocker.clearing_commit_hash",
+        blocker.clearing_commit_hash.as_deref(),
     )?;
     Ok(())
 }

@@ -6,7 +6,8 @@ use frankenengine_node::ops::swarm_handoff::{
     SwarmHandoffEvidenceError, SwarmHandoffEvidenceInput, SwarmHandoffGitActivityEvidence,
     SwarmHandoffIssueEvidence, SwarmHandoffIssueStatus, SwarmHandoffPolicyConfig,
     SwarmHandoffPolicyDecision, SwarmHandoffRchBuildEvidence, SwarmHandoffRchBuildState,
-    SwarmHandoffReservationEvidence, build_swarm_handoff_readiness_report, handoff_reason_codes,
+    SwarmHandoffReservationEvidence, SwarmHandoffVerificationCommandFamily,
+    build_swarm_handoff_readiness_report, handoff_reason_codes,
     render_swarm_handoff_readiness_json,
 };
 use serde_json::Value;
@@ -71,12 +72,17 @@ fn valid_input() -> SwarmHandoffEvidenceInput {
         cross_repo_blockers: vec![SwarmHandoffCrossRepoBlockerEvidence {
             local_bead_id: "bd-v2bb1".to_string(),
             sibling_project_key: "/data/projects/franken_engine".to_string(),
+            sibling_bead_id: Some("bd-v2bb1".to_string()),
+            subsystem: Some("typed persistence models".to_string()),
             blocker_kind: SwarmHandoffBlockerKind::CompileError,
+            verification_command_family: Some(SwarmHandoffVerificationCommandFamily::CargoCheck),
             file_path: Some("crates/franken-engine/src/typed_persistence_models.rs".to_string()),
             holder_agent: Some("LavenderElk".to_string()),
             observed_error: Some("rustc E0599".to_string()),
             observed_at: ts(97),
             cleared: false,
+            cleared_at: None,
+            clearing_commit_hash: None,
         }],
     }
 }
@@ -123,6 +129,30 @@ fn issue(
         dependency_ids: Vec::new(),
         dependent_ids: Vec::new(),
         blocker_summary: None,
+    }
+}
+
+fn cross_repo_blocker(
+    local_bead_id: &str,
+    blocker_kind: SwarmHandoffBlockerKind,
+    command_family: SwarmHandoffVerificationCommandFamily,
+    holder_agent: Option<&str>,
+    cleared: bool,
+) -> SwarmHandoffCrossRepoBlockerEvidence {
+    SwarmHandoffCrossRepoBlockerEvidence {
+        local_bead_id: local_bead_id.to_string(),
+        sibling_project_key: "/data/projects/franken_engine".to_string(),
+        sibling_bead_id: Some("bd-v2bb1".to_string()),
+        subsystem: Some("typed persistence models".to_string()),
+        blocker_kind,
+        verification_command_family: Some(command_family),
+        file_path: Some("crates/franken-engine/src/typed_persistence_models.rs".to_string()),
+        holder_agent: holder_agent.map(str::to_string),
+        observed_error: Some("rustc E0599".to_string()),
+        observed_at: ts(99),
+        cleared,
+        cleared_at: cleared.then(|| ts(100)),
+        clearing_commit_hash: cleared.then(|| "abc1234".to_string()),
     }
 }
 
@@ -425,12 +455,17 @@ fn policy_blocks_on_cross_repo_file_holder() {
     input.cross_repo_blockers = vec![SwarmHandoffCrossRepoBlockerEvidence {
         local_bead_id: "bd-yd91l.1".to_string(),
         sibling_project_key: "/data/projects/franken_engine".to_string(),
+        sibling_bead_id: Some("bd-v2bb1".to_string()),
+        subsystem: Some("typed persistence models".to_string()),
         blocker_kind: SwarmHandoffBlockerKind::ReservationConflict,
+        verification_command_family: Some(SwarmHandoffVerificationCommandFamily::CargoCheck),
         file_path: Some("crates/franken-engine/src/typed_persistence_models.rs".to_string()),
         holder_agent: Some("LavenderElk".to_string()),
         observed_error: Some("reserved by sibling agent".to_string()),
         observed_at: ts(99),
         cleared: false,
+        cleared_at: None,
+        clearing_commit_hash: None,
     }];
 
     let outcome = input.classify_handoff_policy("bd-yd91l.1", &policy_config());
@@ -448,6 +483,170 @@ fn policy_blocks_on_cross_repo_file_holder() {
         outcome
             .required_action
             .contains("Do not override the sibling repository holder")
+    );
+    assert!(
+        outcome.evidence_pointers.contains(
+            &"cross_repo:bd-yd91l.1:reservation_conflict:cargo_check:/data/projects/franken_engine"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn cross_repo_mirror_renders_compile_failure_context_for_agent_mail() {
+    let mut input = policy_input();
+    input.reservations.clear();
+    input.agents.clear();
+    input.cross_repo_blockers = vec![cross_repo_blocker(
+        "bd-yd91l.1",
+        SwarmHandoffBlockerKind::CompileError,
+        SwarmHandoffVerificationCommandFamily::CargoCheck,
+        None,
+        false,
+    )];
+
+    let outcome = input.classify_handoff_policy("bd-yd91l.1", &policy_config());
+    assert_eq!(
+        outcome.decision,
+        SwarmHandoffPolicyDecision::BlockedOnKnownDependency
+    );
+    assert!(
+        outcome
+            .reason_codes
+            .contains(&handoff_reason_codes::HANDOFF_BLOCKED_CROSS_REPO_BLOCKER.to_string())
+    );
+
+    let report = build_swarm_handoff_readiness_report(
+        &input,
+        &policy_config(),
+        "cross-repo-compile",
+        ts(101),
+    );
+    let blocker = report
+        .cross_repo_blockers
+        .first()
+        .expect("active cross-repo blocker should render");
+    assert_eq!(blocker.local_bead_id, "bd-yd91l.1");
+    assert_eq!(blocker.sibling_bead_id.as_deref(), Some("bd-v2bb1"));
+    assert_eq!(
+        blocker.subsystem.as_deref(),
+        Some("typed persistence models")
+    );
+    assert_eq!(blocker.blocker_kind_label, "compile_error");
+    assert_eq!(
+        blocker.verification_command_family_label.as_deref(),
+        Some("cargo_check")
+    );
+    assert!(
+        blocker
+            .action_summary
+            .contains("Keep the local bead blocked")
+    );
+    assert!(
+        report
+            .agent_mail_markdown
+            .contains("command_family=`cargo_check`")
+    );
+    assert!(
+        report
+            .agent_mail_markdown
+            .contains("subsystem=`typed persistence models`")
+    );
+}
+
+#[test]
+fn cross_repo_mirror_keeps_sibling_rch_in_progress_blocked() {
+    let mut input = policy_input();
+    input.reservations.clear();
+    input.agents.clear();
+    input.cross_repo_blockers = vec![cross_repo_blocker(
+        "bd-yd91l.1",
+        SwarmHandoffBlockerKind::RchInProgress,
+        SwarmHandoffVerificationCommandFamily::CargoTest,
+        None,
+        false,
+    )];
+
+    let outcome = input.classify_handoff_policy("bd-yd91l.1", &policy_config());
+    assert_eq!(
+        outcome.decision,
+        SwarmHandoffPolicyDecision::BlockedOnKnownDependency
+    );
+    assert!(!outcome.reopen_allowed);
+    assert!(
+        outcome
+            .required_action
+            .contains("Keep the bead blocked on the sibling validation failure")
+    );
+
+    let report =
+        build_swarm_handoff_readiness_report(&input, &policy_config(), "cross-repo-rch", ts(101));
+    let blocker = report
+        .cross_repo_blockers
+        .first()
+        .expect("active RCH blocker should render");
+    assert_eq!(blocker.blocker_kind_label, "rch_in_progress");
+    assert_eq!(
+        blocker.verification_command_family_label.as_deref(),
+        Some("cargo_test")
+    );
+    assert!(
+        blocker
+            .action_summary
+            .contains("Wait for the sibling RCH proof")
+    );
+}
+
+#[test]
+fn cleared_cross_repo_mirror_surfaces_fix_commit_without_blocking() {
+    let mut input = policy_input();
+    input.reservations.clear();
+    input.agents.clear();
+    let issue = input
+        .issues
+        .first_mut()
+        .expect("fixture includes one issue");
+    issue.assignee = None;
+    input.cross_repo_blockers = vec![cross_repo_blocker(
+        "bd-yd91l.1",
+        SwarmHandoffBlockerKind::CompileError,
+        SwarmHandoffVerificationCommandFamily::CargoCheck,
+        None,
+        true,
+    )];
+
+    let outcome = input.classify_handoff_policy("bd-yd91l.1", &policy_config());
+    assert_eq!(outcome.decision, SwarmHandoffPolicyDecision::ReadyToReopen);
+    assert!(outcome.reopen_allowed);
+
+    let report = build_swarm_handoff_readiness_report(
+        &input,
+        &policy_config(),
+        "cross-repo-cleared",
+        ts(101),
+    );
+    assert!(report.cross_repo_blockers.is_empty());
+    let blocker = report
+        .cleared_cross_repo_blockers
+        .first()
+        .expect("cleared cross-repo blocker should render");
+    assert!(blocker.cleared);
+    assert_eq!(blocker.cleared_at, Some(ts(100)));
+    assert_eq!(blocker.clearing_commit_hash.as_deref(), Some("abc1234"));
+    assert!(
+        blocker
+            .action_summary
+            .contains("Sibling blocker is cleared")
+    );
+    assert!(
+        report
+            .agent_mail_markdown
+            .contains("Cleared cross-repo blockers:")
+    );
+    assert!(
+        report
+            .agent_mail_markdown
+            .contains("clearing_commit=`abc1234`")
     );
 }
 
@@ -630,12 +829,17 @@ fn readiness_report_renders_json_and_human_for_all_policy_decisions()
         cross_repo_blockers: vec![SwarmHandoffCrossRepoBlockerEvidence {
             local_bead_id: "bd-cross-blocked".to_string(),
             sibling_project_key: "/data/projects/franken_engine".to_string(),
+            sibling_bead_id: Some("bd-v2bb1".to_string()),
+            subsystem: Some("typed persistence models".to_string()),
             blocker_kind: SwarmHandoffBlockerKind::CompileError,
+            verification_command_family: Some(SwarmHandoffVerificationCommandFamily::CargoCheck),
             file_path: Some("crates/franken-engine/src/typed_persistence_models.rs".to_string()),
             holder_agent: None,
             observed_error: Some("rustc E0599".to_string()),
             observed_at: ts(99),
             cleared: false,
+            cleared_at: None,
+            clearing_commit_hash: None,
         }],
     };
 
