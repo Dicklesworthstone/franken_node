@@ -1,12 +1,15 @@
 use chrono::{DateTime, TimeZone, Utc};
 use frankenengine_node::ops::swarm_handoff::{
     MAX_HANDOFF_ISSUES, SWARM_HANDOFF_EVIDENCE_SCHEMA_VERSION,
-    SWARM_HANDOFF_SUMMARY_SCHEMA_VERSION, SwarmHandoffAgentEvidence, SwarmHandoffBlockerKind,
-    SwarmHandoffCrossRepoBlockerEvidence, SwarmHandoffEvidenceError, SwarmHandoffEvidenceInput,
-    SwarmHandoffGitActivityEvidence, SwarmHandoffIssueEvidence, SwarmHandoffIssueStatus,
-    SwarmHandoffPolicyConfig, SwarmHandoffPolicyDecision, SwarmHandoffRchBuildEvidence,
-    SwarmHandoffRchBuildState, SwarmHandoffReservationEvidence, handoff_reason_codes,
+    SWARM_HANDOFF_READINESS_SCHEMA_VERSION, SWARM_HANDOFF_SUMMARY_SCHEMA_VERSION,
+    SwarmHandoffAgentEvidence, SwarmHandoffBlockerKind, SwarmHandoffCrossRepoBlockerEvidence,
+    SwarmHandoffEvidenceError, SwarmHandoffEvidenceInput, SwarmHandoffGitActivityEvidence,
+    SwarmHandoffIssueEvidence, SwarmHandoffIssueStatus, SwarmHandoffPolicyConfig,
+    SwarmHandoffPolicyDecision, SwarmHandoffRchBuildEvidence, SwarmHandoffRchBuildState,
+    SwarmHandoffReservationEvidence, build_swarm_handoff_readiness_report, handoff_reason_codes,
+    render_swarm_handoff_readiness_json,
 };
+use serde_json::Value;
 
 fn ts(seconds: i64) -> DateTime<Utc> {
     Utc.timestamp_opt(seconds, 0)
@@ -101,6 +104,26 @@ fn policy_input() -> SwarmHandoffEvidenceInput {
     input.rch_builds.clear();
     input.git_activity.clear();
     input
+}
+
+fn issue(
+    bead_id: &str,
+    title: &str,
+    status: SwarmHandoffIssueStatus,
+    assignee: Option<&str>,
+    updated_at: Option<DateTime<Utc>>,
+) -> SwarmHandoffIssueEvidence {
+    SwarmHandoffIssueEvidence {
+        bead_id: bead_id.to_string(),
+        title: title.to_string(),
+        status,
+        assignee: assignee.map(str::to_string),
+        updated_at,
+        last_comment_at: None,
+        dependency_ids: Vec::new(),
+        dependent_ids: Vec::new(),
+        blocker_summary: None,
+    }
 }
 
 #[test]
@@ -478,4 +501,258 @@ fn policy_fails_closed_on_malformed_evidence() {
             .required_action
             .contains("do not reopen this bead from malformed evidence")
     );
+}
+
+#[test]
+fn readiness_report_renders_json_and_human_for_all_policy_decisions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let input = SwarmHandoffEvidenceInput {
+        schema_version: SWARM_HANDOFF_EVIDENCE_SCHEMA_VERSION.to_string(),
+        observed_at: ts(100),
+        issues: vec![
+            issue(
+                "bd-active",
+                "Fresh owner",
+                SwarmHandoffIssueStatus::InProgress,
+                Some("ActiveAgent"),
+                Some(ts(99)),
+            ),
+            issue(
+                "bd-cross-blocked",
+                "Sibling compile blocker",
+                SwarmHandoffIssueStatus::InProgress,
+                Some("StaleAgent"),
+                Some(ts(60)),
+            ),
+            issue(
+                "bd-reservation-blocked",
+                "Reserved by another holder",
+                SwarmHandoffIssueStatus::InProgress,
+                Some("StaleAgent"),
+                Some(ts(60)),
+            ),
+            issue(
+                "bd-rch-wait",
+                "Live RCH proof",
+                SwarmHandoffIssueStatus::InProgress,
+                Some("StaleAgent"),
+                Some(ts(60)),
+            ),
+            issue(
+                "bd-contested",
+                "Self reservation still active",
+                SwarmHandoffIssueStatus::InProgress,
+                Some("StaleAgent"),
+                Some(ts(60)),
+            ),
+            issue(
+                "bd-abandoned",
+                "No recent signals",
+                SwarmHandoffIssueStatus::InProgress,
+                Some("StaleAgent"),
+                Some(ts(60)),
+            ),
+            issue(
+                "bd-ready",
+                "Expired reservation",
+                SwarmHandoffIssueStatus::InProgress,
+                Some("StaleAgent"),
+                Some(ts(60)),
+            ),
+            issue(
+                "bd-manual",
+                "Unknown issue status",
+                SwarmHandoffIssueStatus::Unknown,
+                Some("StaleAgent"),
+                Some(ts(60)),
+            ),
+        ],
+        agents: vec![
+            SwarmHandoffAgentEvidence {
+                agent_name: "ActiveAgent".to_string(),
+                project_key: "/data/projects/franken_node".to_string(),
+                task_description: Some("active handoff owner".to_string()),
+                last_active_at: Some(ts(99)),
+                contact_policy: Some("auto".to_string()),
+                ack_required_count: 0,
+            },
+            SwarmHandoffAgentEvidence {
+                agent_name: "StaleAgent".to_string(),
+                project_key: "/data/projects/franken_node".to_string(),
+                task_description: Some("stale handoff owner".to_string()),
+                last_active_at: Some(ts(20)),
+                contact_policy: Some("auto".to_string()),
+                ack_required_count: 0,
+            },
+        ],
+        reservations: vec![
+            SwarmHandoffReservationEvidence {
+                holder_agent: "OtherAgent".to_string(),
+                project_key: "/data/projects/franken_node".to_string(),
+                path_pattern: "crates/franken-node/src/ops/swarm_handoff.rs".to_string(),
+                exclusive: true,
+                reason: Some("bd-reservation-blocked".to_string()),
+                expires_at: ts(160),
+                released_at: None,
+            },
+            SwarmHandoffReservationEvidence {
+                holder_agent: "StaleAgent".to_string(),
+                project_key: "/data/projects/franken_node".to_string(),
+                path_pattern: "crates/franken-node/tests/swarm_handoff_evidence.rs".to_string(),
+                exclusive: true,
+                reason: Some("bd-contested".to_string()),
+                expires_at: ts(160),
+                released_at: None,
+            },
+            SwarmHandoffReservationEvidence {
+                holder_agent: "StaleAgent".to_string(),
+                project_key: "/data/projects/franken_node".to_string(),
+                path_pattern: "crates/franken-node/src/ops/*.rs".to_string(),
+                exclusive: true,
+                reason: Some("bd-ready".to_string()),
+                expires_at: ts(80),
+                released_at: None,
+            },
+        ],
+        rch_builds: vec![SwarmHandoffRchBuildEvidence {
+            build_id: "rch-bd-rch-wait".to_string(),
+            project_id: "franken_node-5d919732".to_string(),
+            state: SwarmHandoffRchBuildState::Running,
+            command_digest: Some("sha256:wait".to_string()),
+            worker_id: Some("ts2".to_string()),
+            heartbeat_at: Some(ts(99)),
+            progress_at: Some(ts(99)),
+            detector_progress_stale: false,
+            detector_heartbeat_stale: false,
+            blocker_bead_id: Some("bd-rch-wait".to_string()),
+        }],
+        git_activity: Vec::new(),
+        cross_repo_blockers: vec![SwarmHandoffCrossRepoBlockerEvidence {
+            local_bead_id: "bd-cross-blocked".to_string(),
+            sibling_project_key: "/data/projects/franken_engine".to_string(),
+            blocker_kind: SwarmHandoffBlockerKind::CompileError,
+            file_path: Some("crates/franken-engine/src/typed_persistence_models.rs".to_string()),
+            holder_agent: None,
+            observed_error: Some("rustc E0599".to_string()),
+            observed_at: ts(99),
+            cleared: false,
+        }],
+    };
+
+    let report = build_swarm_handoff_readiness_report(
+        &input,
+        &policy_config(),
+        "swarm-readiness-all-decisions",
+        ts(101),
+    );
+
+    assert_eq!(
+        report.schema_version,
+        SWARM_HANDOFF_READINESS_SCHEMA_VERSION
+    );
+    assert_eq!(report.command, "ops swarm-handoff-readiness");
+    assert_eq!(report.decisions.len(), 8);
+    for decision in [
+        SwarmHandoffPolicyDecision::Active,
+        SwarmHandoffPolicyDecision::BlockedOnKnownDependency,
+        SwarmHandoffPolicyDecision::BlockedOnReservation,
+        SwarmHandoffPolicyDecision::WaitingOnRch,
+        SwarmHandoffPolicyDecision::StaleButContested,
+        SwarmHandoffPolicyDecision::Abandoned,
+        SwarmHandoffPolicyDecision::ReadyToReopen,
+        SwarmHandoffPolicyDecision::ManualReviewRequired,
+    ] {
+        assert!(
+            report
+                .decision_counts
+                .iter()
+                .any(|count| count.decision == decision && count.count == 1),
+            "missing decision count for {decision:?}"
+        );
+    }
+
+    let blocked = report
+        .decisions
+        .iter()
+        .find(|decision| decision.bead_id == "bd-reservation-blocked")
+        .expect("reservation-blocked decision");
+    assert_eq!(blocked.blocker_class, "reservation");
+    assert_eq!(blocked.reservation_holder.as_deref(), Some("OtherAgent"));
+    assert_eq!(blocked.freshness_age_secs, Some(40));
+
+    let cross_repo = report
+        .decisions
+        .iter()
+        .find(|decision| decision.bead_id == "bd-cross-blocked")
+        .expect("cross-repo decision");
+    assert_eq!(cross_repo.blocker_class, "cross_repo_blocker");
+    assert_eq!(report.cross_repo_blockers[0].observed_age_secs, 1);
+
+    let ready = report
+        .safe_reopen_commands
+        .iter()
+        .find(|command| command.bead_id == "bd-ready")
+        .expect("ready reopen command");
+    assert_eq!(
+        ready.command,
+        "br update bd-ready --status open --assignee \"\" --actor <agent>"
+    );
+
+    let human = &report.agent_mail_markdown;
+    assert!(human.contains("bead=`bd-reservation-blocked`"));
+    assert!(human.contains("decision=`blocked_on_reservation`"));
+    assert!(human.contains("agent=`StaleAgent`"));
+    assert!(human.contains("reservation_holder=`OtherAgent`"));
+    assert!(human.contains("blocker_class=`reservation`"));
+    assert!(human.contains("freshness_age_secs=40"));
+    assert!(human.contains("next_action=`Do not override an active file reservation"));
+    assert!(human.contains("Safe reopen commands:"));
+
+    let json: Value = serde_json::from_str(&render_swarm_handoff_readiness_json(&report)?)?;
+    assert_eq!(
+        json["schema_version"],
+        SWARM_HANDOFF_READINESS_SCHEMA_VERSION
+    );
+    assert_eq!(json["decision_counts"][0]["decision"], "active");
+    assert_eq!(json["active_agents"][0]["claimed_issue_count"], 1);
+    assert_eq!(json["active_reservations"][0]["holder_agent"], "OtherAgent");
+    assert_eq!(json["active_rch_builds"][0]["worker_id"], "ts2");
+
+    Ok(())
+}
+
+#[test]
+fn readiness_report_fails_closed_but_still_renders_malformed_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut input = policy_input();
+    input.schema_version = "franken-node/swarm-handoff/evidence/v0".to_string();
+
+    let report =
+        build_swarm_handoff_readiness_report(&input, &policy_config(), "swarm-malformed", ts(101));
+
+    assert!(report.evidence_summary.is_none());
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("evidence validation failed"))
+    );
+    assert_eq!(
+        report.decisions[0].decision,
+        SwarmHandoffPolicyDecision::ManualReviewRequired
+    );
+    assert_eq!(report.decisions[0].blocker_class, "manual_review");
+    assert!(
+        report
+            .agent_mail_markdown
+            .contains("manual_review_required")
+    );
+    let json: Value = serde_json::from_str(&render_swarm_handoff_readiness_json(&report)?)?;
+    assert!(json.get("evidence_summary").is_none());
+    assert_eq!(
+        json["warnings"][0],
+        "evidence validation failed: invalid swarm handoff evidence schema `franken-node/swarm-handoff/evidence/v0`, expected `franken-node/swarm-handoff/evidence/v1`"
+    );
+
+    Ok(())
 }

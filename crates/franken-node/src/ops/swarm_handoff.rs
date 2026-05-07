@@ -12,6 +12,7 @@ use std::fmt;
 pub const SWARM_HANDOFF_EVIDENCE_SCHEMA_VERSION: &str = "franken-node/swarm-handoff/evidence/v1";
 pub const SWARM_HANDOFF_SUMMARY_SCHEMA_VERSION: &str = "franken-node/swarm-handoff/summary/v1";
 pub const SWARM_HANDOFF_POLICY_SCHEMA_VERSION: &str = "franken-node/swarm-handoff/policy/v1";
+pub const SWARM_HANDOFF_READINESS_SCHEMA_VERSION: &str = "franken-node/swarm-handoff/readiness/v1";
 
 pub const MAX_HANDOFF_ISSUES: usize = 256;
 pub const MAX_HANDOFF_AGENTS: usize = 256;
@@ -289,6 +290,135 @@ pub struct SwarmHandoffPolicyOutcome {
     pub operator_message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffReadinessReport {
+    pub schema_version: String,
+    pub command: String,
+    pub trace_id: String,
+    pub generated_at_utc: DateTime<Utc>,
+    pub observed_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_summary: Option<SwarmHandoffEvidenceSummary>,
+    pub decision_counts: Vec<SwarmHandoffDecisionCount>,
+    pub decisions: Vec<SwarmHandoffDecisionView>,
+    pub active_agents: Vec<SwarmHandoffAgentView>,
+    pub claimed_beads: Vec<SwarmHandoffClaimedBeadView>,
+    pub active_reservations: Vec<SwarmHandoffReservationView>,
+    pub active_rch_builds: Vec<SwarmHandoffRchBuildView>,
+    pub cross_repo_blockers: Vec<SwarmHandoffCrossRepoBlockerView>,
+    pub stale_candidates: Vec<SwarmHandoffDecisionView>,
+    pub safe_reopen_commands: Vec<SwarmHandoffCommandView>,
+    pub warnings: Vec<String>,
+    pub agent_mail_markdown: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffDecisionCount {
+    pub decision: SwarmHandoffPolicyDecision,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffDecisionView {
+    pub bead_id: String,
+    pub decision: SwarmHandoffPolicyDecision,
+    pub decision_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_holder: Option<String>,
+    pub blocker_class: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness_age_secs: Option<i64>,
+    pub next_action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_br_command: Option<String>,
+    pub reopen_allowed: bool,
+    pub reason_codes: Vec<String>,
+    pub evidence_pointers: Vec<String>,
+    pub operator_message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffAgentView {
+    pub agent_name: String,
+    pub project_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_age_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_policy: Option<String>,
+    pub ack_required_count: u32,
+    pub claimed_issue_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffClaimedBeadView {
+    pub bead_id: String,
+    pub title: String,
+    pub status: SwarmHandoffIssueStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_age_secs: Option<i64>,
+    pub dependency_count: usize,
+    pub dependent_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffReservationView {
+    pub holder_agent: String,
+    pub project_key: String,
+    pub path_pattern: String,
+    pub exclusive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub expires_at: DateTime<Utc>,
+    pub expires_in_secs: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffRchBuildView {
+    pub build_id: String,
+    pub project_id: String,
+    pub state: SwarmHandoffRchBuildState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker_bead_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_age_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_age_secs: Option<i64>,
+    pub detector_progress_stale: bool,
+    pub detector_heartbeat_stale: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffCrossRepoBlockerView {
+    pub local_bead_id: String,
+    pub sibling_project_key: String,
+    pub blocker_kind: SwarmHandoffBlockerKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_error: Option<String>,
+    pub observed_age_secs: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffCommandView {
+    pub bead_id: String,
+    pub command: String,
+    pub reopen_allowed: bool,
+    pub reason_codes: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SwarmHandoffEvidenceError {
     InvalidSchemaVersion {
@@ -344,6 +474,18 @@ impl fmt::Display for SwarmHandoffEvidenceError {
 impl Error for SwarmHandoffEvidenceError {}
 
 pub type SwarmHandoffEvidenceResult<T> = Result<T, SwarmHandoffEvidenceError>;
+
+const SWARM_HANDOFF_READINESS_COMMAND: &str = "ops swarm-handoff-readiness";
+const POLICY_DECISION_ORDER: [SwarmHandoffPolicyDecision; 8] = [
+    SwarmHandoffPolicyDecision::Active,
+    SwarmHandoffPolicyDecision::BlockedOnKnownDependency,
+    SwarmHandoffPolicyDecision::BlockedOnReservation,
+    SwarmHandoffPolicyDecision::WaitingOnRch,
+    SwarmHandoffPolicyDecision::StaleButContested,
+    SwarmHandoffPolicyDecision::Abandoned,
+    SwarmHandoffPolicyDecision::ReadyToReopen,
+    SwarmHandoffPolicyDecision::ManualReviewRequired,
+];
 
 impl SwarmHandoffEvidenceInput {
     /// Validate scanner evidence and return deterministic aggregate counts.
@@ -807,6 +949,583 @@ impl SwarmHandoffEvidenceInput {
             })
             .map(|activity| (HANDOFF_ACTIVE_RECENT_GIT_ACTIVITY, git_pointer(activity)))
     }
+}
+
+#[must_use]
+pub fn build_swarm_handoff_readiness_report(
+    input: &SwarmHandoffEvidenceInput,
+    config: &SwarmHandoffPolicyConfig,
+    trace_id: impl Into<String>,
+    generated_at_utc: DateTime<Utc>,
+) -> SwarmHandoffReadinessReport {
+    let evidence_summary = input.validate_and_summarize();
+    let mut warnings = evidence_summary
+        .as_ref()
+        .err()
+        .map(|error| vec![format!("evidence validation failed: {error}")])
+        .unwrap_or_default();
+    let evidence_summary = evidence_summary.ok();
+
+    let decisions = input
+        .issues
+        .iter()
+        .take(MAX_HANDOFF_LIST_ITEMS)
+        .map(|issue| {
+            let outcome = input.classify_handoff_policy(&issue.bead_id, config);
+            decision_view(input, issue, &outcome)
+        })
+        .collect::<Vec<_>>();
+
+    for decision in &decisions {
+        match decision.decision {
+            SwarmHandoffPolicyDecision::ManualReviewRequired => warnings.push(format!(
+                "{} requires manual review before any handoff action",
+                decision.bead_id
+            )),
+            SwarmHandoffPolicyDecision::StaleButContested => warnings.push(format!(
+                "{} is stale but contested; do not override without acknowledgement",
+                decision.bead_id
+            )),
+            _ => {}
+        }
+    }
+
+    let decision_counts = POLICY_DECISION_ORDER
+        .iter()
+        .map(|decision| SwarmHandoffDecisionCount {
+            decision: *decision,
+            count: decisions
+                .iter()
+                .filter(|view| view.decision == *decision)
+                .count(),
+        })
+        .collect::<Vec<_>>();
+    let active_agents = input
+        .agents
+        .iter()
+        .take(MAX_HANDOFF_LIST_ITEMS)
+        .map(|agent| agent_view(input, agent))
+        .collect::<Vec<_>>();
+    let claimed_beads = input
+        .issues
+        .iter()
+        .filter(|issue| {
+            issue.assignee.is_some() || issue.status == SwarmHandoffIssueStatus::InProgress
+        })
+        .take(MAX_HANDOFF_LIST_ITEMS)
+        .map(|issue| claimed_bead_view(input, issue))
+        .collect::<Vec<_>>();
+    let active_reservations = input
+        .reservations
+        .iter()
+        .filter(|reservation| reservation_is_active(reservation, input.observed_at))
+        .take(MAX_HANDOFF_LIST_ITEMS)
+        .map(|reservation| reservation_view(input, reservation))
+        .collect::<Vec<_>>();
+    let active_rch_builds = input
+        .rch_builds
+        .iter()
+        .filter(|build| build.state.is_active())
+        .take(MAX_HANDOFF_LIST_ITEMS)
+        .map(|build| rch_build_view(input, build))
+        .collect::<Vec<_>>();
+    let cross_repo_blockers = input
+        .cross_repo_blockers
+        .iter()
+        .filter(|blocker| !blocker.cleared)
+        .take(MAX_HANDOFF_LIST_ITEMS)
+        .map(|blocker| cross_repo_blocker_view(input, blocker))
+        .collect::<Vec<_>>();
+    let stale_candidates = decisions
+        .iter()
+        .filter(|view| {
+            matches!(
+                view.decision,
+                SwarmHandoffPolicyDecision::StaleButContested
+                    | SwarmHandoffPolicyDecision::Abandoned
+                    | SwarmHandoffPolicyDecision::ReadyToReopen
+                    | SwarmHandoffPolicyDecision::ManualReviewRequired
+            )
+        })
+        .take(MAX_HANDOFF_LIST_ITEMS)
+        .cloned()
+        .collect::<Vec<_>>();
+    let safe_reopen_commands = decisions
+        .iter()
+        .filter(|view| view.reopen_allowed)
+        .filter_map(|view| {
+            view.required_br_command
+                .as_ref()
+                .map(|command| SwarmHandoffCommandView {
+                    bead_id: view.bead_id.clone(),
+                    command: command.clone(),
+                    reopen_allowed: view.reopen_allowed,
+                    reason_codes: view.reason_codes.clone(),
+                })
+        })
+        .take(MAX_HANDOFF_LIST_ITEMS)
+        .collect::<Vec<_>>();
+
+    let trace_id = truncate_policy_string(&trace_id.into());
+    let mut report = SwarmHandoffReadinessReport {
+        schema_version: SWARM_HANDOFF_READINESS_SCHEMA_VERSION.to_string(),
+        command: SWARM_HANDOFF_READINESS_COMMAND.to_string(),
+        trace_id,
+        generated_at_utc,
+        observed_at: input.observed_at,
+        evidence_summary,
+        decision_counts,
+        decisions,
+        active_agents,
+        claimed_beads,
+        active_reservations,
+        active_rch_builds,
+        cross_repo_blockers,
+        stale_candidates,
+        safe_reopen_commands,
+        warnings,
+        agent_mail_markdown: String::new(),
+    };
+    report.agent_mail_markdown = render_swarm_handoff_readiness_human(&report);
+    report
+}
+
+pub fn render_swarm_handoff_readiness_json(
+    report: &SwarmHandoffReadinessReport,
+) -> serde_json::Result<String> {
+    serde_json::to_string_pretty(report)
+}
+
+#[must_use]
+pub fn render_swarm_handoff_readiness_human(report: &SwarmHandoffReadinessReport) -> String {
+    let mut lines = vec![
+        format!(
+            "`{}` swarm handoff readiness: trace=`{}`",
+            report.command, report.trace_id
+        ),
+        String::new(),
+        format!("- schema: `{}`", report.schema_version),
+        format!("- observed_at: `{}`", report.observed_at.to_rfc3339()),
+        format!("- generated_at: `{}`", report.generated_at_utc.to_rfc3339()),
+        format!("- decisions: {}", render_decision_count_summary(report)),
+        format!("- active_agents: {}", report.active_agents.len()),
+        format!("- claimed_beads: {}", report.claimed_beads.len()),
+        format!(
+            "- active_reservations: {}",
+            report.active_reservations.len()
+        ),
+        format!("- active_rch_builds: {}", report.active_rch_builds.len()),
+        format!(
+            "- cross_repo_blockers: {}",
+            report.cross_repo_blockers.len()
+        ),
+        format!("- stale_candidates: {}", report.stale_candidates.len()),
+        format!(
+            "- safe_reopen_commands: {}",
+            report.safe_reopen_commands.len()
+        ),
+    ];
+
+    if let Some(summary) = &report.evidence_summary {
+        lines.push(format!(
+            "- evidence_summary: issues={} agents={} reservations={} active_rch={} cross_repo_uncleared={} unknown_signals={}",
+            summary.issue_count,
+            summary.agent_count,
+            summary.reservation_count,
+            summary.active_rch_build_count,
+            summary.uncleared_cross_repo_blocker_count,
+            summary.unknown_signal_count
+        ));
+    }
+
+    if report.warnings.is_empty() {
+        lines.push("- warnings: none".to_string());
+    } else {
+        lines.push("- warnings:".to_string());
+        for warning in &report.warnings {
+            lines.push(format!("  - {warning}"));
+        }
+    }
+
+    if !report.decisions.is_empty() {
+        lines.push(String::new());
+        lines.push("Decisions:".to_string());
+        for decision in &report.decisions {
+            lines.push(format!(
+                "- bead=`{}` decision=`{}` agent=`{}` reservation_holder=`{}` blocker_class=`{}` freshness_age_secs={} next_action=`{}`",
+                decision.bead_id,
+                decision.decision_label,
+                decision.assignee.as_deref().unwrap_or(""),
+                decision.reservation_holder.as_deref().unwrap_or(""),
+                decision.blocker_class,
+                render_optional_i64(decision.freshness_age_secs),
+                decision.next_action
+            ));
+            if let Some(command) = &decision.required_br_command {
+                lines.push(format!("  - br_command: `{command}`"));
+            }
+            lines.push(format!(
+                "  - reason_codes: `{}`",
+                decision.reason_codes.join(",")
+            ));
+            lines.push(format!(
+                "  - evidence_pointers: `{}`",
+                decision.evidence_pointers.join(",")
+            ));
+        }
+    }
+
+    if !report.active_agents.is_empty() {
+        lines.push(String::new());
+        lines.push("Active agents:".to_string());
+        for agent in &report.active_agents {
+            lines.push(format!(
+                "- agent=`{}` project=`{}` last_active_age_secs={} ack_required={} claimed_issues={} task=`{}`",
+                agent.agent_name,
+                agent.project_key,
+                render_optional_i64(agent.last_active_age_secs),
+                agent.ack_required_count,
+                agent.claimed_issue_count,
+                agent.task_description.as_deref().unwrap_or("")
+            ));
+        }
+    }
+
+    if !report.active_reservations.is_empty() {
+        lines.push(String::new());
+        lines.push("Active reservations:".to_string());
+        for reservation in &report.active_reservations {
+            lines.push(format!(
+                "- holder=`{}` path=`{}` reason=`{}` expires_in_secs={} exclusive={}",
+                reservation.holder_agent,
+                reservation.path_pattern,
+                reservation.reason.as_deref().unwrap_or(""),
+                reservation.expires_in_secs,
+                reservation.exclusive
+            ));
+        }
+    }
+
+    if !report.active_rch_builds.is_empty() {
+        lines.push(String::new());
+        lines.push("Active RCH builds:".to_string());
+        for build in &report.active_rch_builds {
+            lines.push(format!(
+                "- build=`{}` bead=`{}` worker=`{}` state=`{:?}` heartbeat_age_secs={} progress_age_secs={} stale_progress={} stale_heartbeat={}",
+                build.build_id,
+                build.blocker_bead_id.as_deref().unwrap_or(""),
+                build.worker_id.as_deref().unwrap_or(""),
+                build.state,
+                render_optional_i64(build.heartbeat_age_secs),
+                render_optional_i64(build.progress_age_secs),
+                build.detector_progress_stale,
+                build.detector_heartbeat_stale
+            ));
+        }
+    }
+
+    if !report.cross_repo_blockers.is_empty() {
+        lines.push(String::new());
+        lines.push("Cross-repo blockers:".to_string());
+        for blocker in &report.cross_repo_blockers {
+            lines.push(format!(
+                "- bead=`{}` sibling=`{}` blocker_kind=`{:?}` holder=`{}` file=`{}` observed_age_secs={} error=`{}`",
+                blocker.local_bead_id,
+                blocker.sibling_project_key,
+                blocker.blocker_kind,
+                blocker.holder_agent.as_deref().unwrap_or(""),
+                blocker.file_path.as_deref().unwrap_or(""),
+                blocker.observed_age_secs,
+                blocker.observed_error.as_deref().unwrap_or("")
+            ));
+        }
+    }
+
+    if !report.safe_reopen_commands.is_empty() {
+        lines.push(String::new());
+        lines.push("Safe reopen commands:".to_string());
+        for command in &report.safe_reopen_commands {
+            lines.push(format!(
+                "- bead=`{}` command=`{}` reason_codes=`{}`",
+                command.bead_id,
+                command.command,
+                command.reason_codes.join(",")
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn decision_view(
+    input: &SwarmHandoffEvidenceInput,
+    issue: &SwarmHandoffIssueEvidence,
+    outcome: &SwarmHandoffPolicyOutcome,
+) -> SwarmHandoffDecisionView {
+    SwarmHandoffDecisionView {
+        bead_id: outcome.bead_id.clone(),
+        decision: outcome.decision,
+        decision_label: outcome.decision.as_str().to_string(),
+        assignee: issue.assignee.clone(),
+        reservation_holder: decision_reservation_holder(input, issue),
+        blocker_class: decision_blocker_class(outcome).to_string(),
+        freshness_age_secs: freshness_age_secs(input, issue),
+        next_action: outcome.required_action.clone(),
+        required_br_command: outcome.required_br_command.clone(),
+        reopen_allowed: outcome.reopen_allowed,
+        reason_codes: outcome.reason_codes.clone(),
+        evidence_pointers: outcome.evidence_pointers.clone(),
+        operator_message: outcome.operator_message.clone(),
+    }
+}
+
+fn agent_view(
+    input: &SwarmHandoffEvidenceInput,
+    agent: &SwarmHandoffAgentEvidence,
+) -> SwarmHandoffAgentView {
+    SwarmHandoffAgentView {
+        agent_name: agent.agent_name.clone(),
+        project_key: agent.project_key.clone(),
+        task_description: agent.task_description.clone(),
+        last_active_at: agent.last_active_at,
+        last_active_age_secs: age_secs(input.observed_at, agent.last_active_at),
+        contact_policy: agent.contact_policy.clone(),
+        ack_required_count: agent.ack_required_count,
+        claimed_issue_count: input
+            .issues
+            .iter()
+            .filter(|issue| issue.assignee.as_deref() == Some(agent.agent_name.as_str()))
+            .count(),
+    }
+}
+
+fn claimed_bead_view(
+    input: &SwarmHandoffEvidenceInput,
+    issue: &SwarmHandoffIssueEvidence,
+) -> SwarmHandoffClaimedBeadView {
+    SwarmHandoffClaimedBeadView {
+        bead_id: issue.bead_id.clone(),
+        title: issue.title.clone(),
+        status: issue.status,
+        assignee: issue.assignee.clone(),
+        updated_age_secs: age_secs(input.observed_at, issue.updated_at),
+        dependency_count: issue.dependency_ids.len(),
+        dependent_count: issue.dependent_ids.len(),
+    }
+}
+
+fn reservation_view(
+    input: &SwarmHandoffEvidenceInput,
+    reservation: &SwarmHandoffReservationEvidence,
+) -> SwarmHandoffReservationView {
+    SwarmHandoffReservationView {
+        holder_agent: reservation.holder_agent.clone(),
+        project_key: reservation.project_key.clone(),
+        path_pattern: reservation.path_pattern.clone(),
+        exclusive: reservation.exclusive,
+        reason: reservation.reason.clone(),
+        expires_at: reservation.expires_at,
+        expires_in_secs: reservation
+            .expires_at
+            .signed_duration_since(input.observed_at)
+            .num_seconds()
+            .max(0),
+    }
+}
+
+fn rch_build_view(
+    input: &SwarmHandoffEvidenceInput,
+    build: &SwarmHandoffRchBuildEvidence,
+) -> SwarmHandoffRchBuildView {
+    SwarmHandoffRchBuildView {
+        build_id: build.build_id.clone(),
+        project_id: build.project_id.clone(),
+        state: build.state,
+        worker_id: build.worker_id.clone(),
+        blocker_bead_id: build.blocker_bead_id.clone(),
+        heartbeat_age_secs: age_secs(input.observed_at, build.heartbeat_at),
+        progress_age_secs: age_secs(input.observed_at, build.progress_at),
+        detector_progress_stale: build.detector_progress_stale,
+        detector_heartbeat_stale: build.detector_heartbeat_stale,
+    }
+}
+
+fn cross_repo_blocker_view(
+    input: &SwarmHandoffEvidenceInput,
+    blocker: &SwarmHandoffCrossRepoBlockerEvidence,
+) -> SwarmHandoffCrossRepoBlockerView {
+    SwarmHandoffCrossRepoBlockerView {
+        local_bead_id: blocker.local_bead_id.clone(),
+        sibling_project_key: blocker.sibling_project_key.clone(),
+        blocker_kind: blocker.blocker_kind,
+        file_path: blocker.file_path.clone(),
+        holder_agent: blocker.holder_agent.clone(),
+        observed_error: blocker.observed_error.clone(),
+        observed_age_secs: input
+            .observed_at
+            .signed_duration_since(blocker.observed_at)
+            .num_seconds()
+            .max(0),
+    }
+}
+
+fn decision_reservation_holder(
+    input: &SwarmHandoffEvidenceInput,
+    issue: &SwarmHandoffIssueEvidence,
+) -> Option<String> {
+    input
+        .cross_repo_blockers
+        .iter()
+        .find(|blocker| blocker.local_bead_id == issue.bead_id && !blocker.cleared)
+        .and_then(|blocker| blocker.holder_agent.clone())
+        .or_else(|| {
+            input
+                .matching_reservations(&issue.bead_id, issue, false)
+                .first()
+                .map(|reservation| reservation.holder_agent.clone())
+        })
+}
+
+fn decision_blocker_class(outcome: &SwarmHandoffPolicyOutcome) -> &'static str {
+    if outcome
+        .reason_codes
+        .iter()
+        .any(|code| code == handoff_reason_codes::HANDOFF_BLOCKED_CROSS_REPO_RESERVATION)
+    {
+        "cross_repo_reservation"
+    } else if outcome
+        .reason_codes
+        .iter()
+        .any(|code| code == handoff_reason_codes::HANDOFF_BLOCKED_CROSS_REPO_BLOCKER)
+    {
+        "cross_repo_blocker"
+    } else if outcome
+        .reason_codes
+        .iter()
+        .any(|code| code == handoff_reason_codes::HANDOFF_BLOCKED_RESERVATION_ACTIVE)
+    {
+        "reservation"
+    } else if outcome
+        .reason_codes
+        .iter()
+        .any(|code| code == handoff_reason_codes::HANDOFF_BLOCKED_DEPENDENCY_OPEN)
+    {
+        "dependency"
+    } else if outcome
+        .reason_codes
+        .iter()
+        .any(|code| code == handoff_reason_codes::HANDOFF_WAITING_RCH_ACTIVE)
+    {
+        "rch"
+    } else if outcome
+        .reason_codes
+        .iter()
+        .any(|code| code == handoff_reason_codes::HANDOFF_STALE_CONTESTED_RCH_STALE)
+    {
+        "rch_stale"
+    } else if outcome.reason_codes.iter().any(|code| {
+        code == handoff_reason_codes::HANDOFF_STALE_CONTESTED_RESERVATION
+            || code == handoff_reason_codes::HANDOFF_READY_EXPIRED_RESERVATION
+    }) {
+        "reservation"
+    } else if outcome
+        .reason_codes
+        .iter()
+        .any(|code| code == handoff_reason_codes::HANDOFF_STALE_ACK_REQUIRED)
+    {
+        "agent_mail_ack"
+    } else if outcome
+        .reason_codes
+        .iter()
+        .any(|code| code == handoff_reason_codes::HANDOFF_ABANDONED_NO_RECENT_SIGNALS)
+    {
+        "stale_claim"
+    } else if outcome
+        .reason_codes
+        .iter()
+        .any(|code| code == handoff_reason_codes::HANDOFF_READY_UNASSIGNED)
+    {
+        "unassigned"
+    } else if outcome
+        .reason_codes
+        .iter()
+        .any(|code| code.starts_with("HANDOFF_MANUAL_REVIEW_"))
+    {
+        "manual_review"
+    } else if outcome.decision == SwarmHandoffPolicyDecision::Active {
+        "owner_activity"
+    } else {
+        "unknown"
+    }
+}
+
+fn freshness_age_secs(
+    input: &SwarmHandoffEvidenceInput,
+    issue: &SwarmHandoffIssueEvidence,
+) -> Option<i64> {
+    let mut latest = issue
+        .updated_at
+        .into_iter()
+        .chain(issue.last_comment_at)
+        .max();
+    if let Some(assignee) = issue.assignee.as_deref() {
+        latest = latest.max(
+            input
+                .agents
+                .iter()
+                .filter(|agent| agent.agent_name == assignee)
+                .filter_map(|agent| agent.last_active_at)
+                .max(),
+        );
+    }
+    latest = latest.max(
+        input
+            .git_activity
+            .iter()
+            .filter(|activity| git_activity_matches_issue(activity, issue))
+            .map(|activity| activity.authored_at)
+            .max(),
+    );
+    latest = latest.max(
+        input
+            .matching_rch_builds(&issue.bead_id)
+            .into_iter()
+            .flat_map(|build| [build.heartbeat_at, build.progress_at])
+            .flatten()
+            .max(),
+    );
+    latest = latest.max(
+        input
+            .cross_repo_blockers
+            .iter()
+            .filter(|blocker| blocker.local_bead_id == issue.bead_id && !blocker.cleared)
+            .map(|blocker| blocker.observed_at)
+            .max(),
+    );
+    age_secs(input.observed_at, latest)
+}
+
+fn age_secs(observed_at: DateTime<Utc>, timestamp: Option<DateTime<Utc>>) -> Option<i64> {
+    timestamp.map(|timestamp| {
+        observed_at
+            .signed_duration_since(timestamp)
+            .num_seconds()
+            .max(0)
+    })
+}
+
+fn render_decision_count_summary(report: &SwarmHandoffReadinessReport) -> String {
+    report
+        .decision_counts
+        .iter()
+        .filter(|count| count.count > 0)
+        .map(|count| format!("{}={}", count.decision.as_str(), count.count))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn render_optional_i64(value: Option<i64>) -> String {
+    value.map_or_else(|| "unknown".to_string(), |value| value.to_string())
 }
 
 fn default_evidence_schema_version() -> String {
