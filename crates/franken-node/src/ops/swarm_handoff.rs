@@ -355,6 +355,8 @@ pub struct SwarmHandoffReadinessReport {
     pub decision_counts: Vec<SwarmHandoffDecisionCount>,
     pub decisions: Vec<SwarmHandoffDecisionView>,
     pub decision_logs: Vec<SwarmHandoffDecisionLogEntry>,
+    pub runbook_goldens: Vec<SwarmHandoffRunbookGoldenEntry>,
+    pub audit_ledger: Vec<SwarmHandoffAuditLedgerEntry>,
     pub active_agents: Vec<SwarmHandoffAgentView>,
     pub claimed_beads: Vec<SwarmHandoffClaimedBeadView>,
     pub active_reservations: Vec<SwarmHandoffReservationView>,
@@ -406,6 +408,33 @@ pub struct SwarmHandoffDecisionLogEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_freshness_age_secs: Option<i64>,
     pub required_action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffRunbookGoldenEntry {
+    pub bead_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_holder: Option<String>,
+    pub reservation_or_blocker_evidence: Vec<String>,
+    pub decision_code: String,
+    pub required_action: String,
+    pub must_not_do: String,
+    pub evidence_pointers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffAuditLedgerEntry {
+    pub sequence: usize,
+    pub trace_id: String,
+    pub bead_id: String,
+    pub decision_code: String,
+    pub evidence_pointers: Vec<String>,
+    pub required_action: String,
+    pub must_not_do: String,
+    pub no_files_deleted: bool,
+    pub reservations_overridden: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1164,6 +1193,15 @@ pub fn build_swarm_handoff_readiness_report(
         .iter()
         .map(|decision| decision_log_entry(&trace_id, decision))
         .collect::<Vec<_>>();
+    let runbook_goldens = decisions
+        .iter()
+        .map(runbook_golden_entry)
+        .collect::<Vec<_>>();
+    let audit_ledger = runbook_goldens
+        .iter()
+        .enumerate()
+        .map(|(idx, entry)| audit_ledger_entry(idx + 1, &trace_id, entry))
+        .collect::<Vec<_>>();
     let mut report = SwarmHandoffReadinessReport {
         schema_version: SWARM_HANDOFF_READINESS_SCHEMA_VERSION.to_string(),
         command: SWARM_HANDOFF_READINESS_COMMAND.to_string(),
@@ -1174,6 +1212,8 @@ pub fn build_swarm_handoff_readiness_report(
         decision_counts,
         decisions,
         decision_logs,
+        runbook_goldens,
+        audit_ledger,
         active_agents,
         claimed_beads,
         active_reservations,
@@ -1223,6 +1263,8 @@ pub fn render_swarm_handoff_readiness_human(report: &SwarmHandoffReadinessReport
             report.cleared_cross_repo_blockers.len()
         ),
         format!("- decision_logs: {}", report.decision_logs.len()),
+        format!("- runbook_goldens: {}", report.runbook_goldens.len()),
+        format!("- audit_ledger: {}", report.audit_ledger.len()),
         format!("- stale_candidates: {}", report.stale_candidates.len()),
         format!(
             "- safe_reopen_commands: {}",
@@ -1277,6 +1319,9 @@ pub fn render_swarm_handoff_readiness_human(report: &SwarmHandoffReadinessReport
                 decision.evidence_pointers.join(",")
             ));
         }
+    } else {
+        lines.push(String::new());
+        lines.push("No handoff actions required.".to_string());
     }
 
     if !report.decision_logs.is_empty() {
@@ -1292,6 +1337,43 @@ pub fn render_swarm_handoff_readiness_human(report: &SwarmHandoffReadinessReport
                 log.blocker_class,
                 render_optional_i64(log.evidence_freshness_age_secs),
                 log.required_action
+            ));
+        }
+    }
+
+    if !report.runbook_goldens.is_empty() {
+        lines.push(String::new());
+        lines.push("Runbook goldens:".to_string());
+        for entry in &report.runbook_goldens {
+            lines.push(format!(
+                "- bead=`{}` agent=`{}` reservation_holder=`{}` decision_code=`{}` evidence=`{}` required_action=`{}` must_not_do=`{}` evidence_pointers=`{}`",
+                entry.bead_id,
+                entry.agent.as_deref().unwrap_or(""),
+                entry.reservation_holder.as_deref().unwrap_or(""),
+                entry.decision_code,
+                entry.reservation_or_blocker_evidence.join(","),
+                entry.required_action,
+                entry.must_not_do,
+                entry.evidence_pointers.join(",")
+            ));
+        }
+    }
+
+    if !report.audit_ledger.is_empty() {
+        lines.push(String::new());
+        lines.push("Audit ledger:".to_string());
+        for entry in &report.audit_ledger {
+            lines.push(format!(
+                "- sequence={} trace=`{}` bead=`{}` decision_code=`{}` no_files_deleted={} reservations_overridden={} evidence_pointers=`{}` required_action=`{}` must_not_do=`{}`",
+                entry.sequence,
+                entry.trace_id,
+                entry.bead_id,
+                entry.decision_code,
+                entry.no_files_deleted,
+                entry.reservations_overridden,
+                entry.evidence_pointers.join(","),
+                entry.required_action,
+                entry.must_not_do
             ));
         }
     }
@@ -1446,6 +1528,37 @@ fn decision_log_entry(
     }
 }
 
+fn runbook_golden_entry(decision: &SwarmHandoffDecisionView) -> SwarmHandoffRunbookGoldenEntry {
+    SwarmHandoffRunbookGoldenEntry {
+        bead_id: decision.bead_id.clone(),
+        agent: decision.assignee.clone(),
+        reservation_holder: decision.reservation_holder.clone(),
+        reservation_or_blocker_evidence: decision_evidence_summary(decision),
+        decision_code: decision.decision_label.clone(),
+        required_action: decision.next_action.clone(),
+        must_not_do: decision_prohibited_action(decision.decision),
+        evidence_pointers: decision.evidence_pointers.clone(),
+    }
+}
+
+fn audit_ledger_entry(
+    sequence: usize,
+    trace_id: &str,
+    entry: &SwarmHandoffRunbookGoldenEntry,
+) -> SwarmHandoffAuditLedgerEntry {
+    SwarmHandoffAuditLedgerEntry {
+        sequence,
+        trace_id: trace_id.to_string(),
+        bead_id: entry.bead_id.clone(),
+        decision_code: entry.decision_code.clone(),
+        evidence_pointers: entry.evidence_pointers.clone(),
+        required_action: entry.required_action.clone(),
+        must_not_do: entry.must_not_do.clone(),
+        no_files_deleted: true,
+        reservations_overridden: false,
+    }
+}
+
 fn agent_view(
     input: &SwarmHandoffEvidenceInput,
     agent: &SwarmHandoffAgentEvidence,
@@ -1588,6 +1701,46 @@ fn decision_reservation_holder(
                 .first()
                 .map(|reservation| reservation.holder_agent.clone())
         })
+}
+
+fn decision_evidence_summary(decision: &SwarmHandoffDecisionView) -> Vec<String> {
+    let mut evidence = Vec::new();
+    if let Some(holder) = &decision.reservation_holder {
+        evidence.push(format!("reservation_holder:{holder}"));
+    }
+    evidence.push(format!("blocker_class:{}", decision.blocker_class));
+    evidence.extend(decision.evidence_pointers.iter().cloned());
+    evidence.into_iter().take(MAX_HANDOFF_LIST_ITEMS).collect()
+}
+
+fn decision_prohibited_action(decision: SwarmHandoffPolicyDecision) -> String {
+    match decision {
+        SwarmHandoffPolicyDecision::Active => {
+            "Do not reopen; request an explicit handoff acknowledgement from the current owner first."
+        }
+        SwarmHandoffPolicyDecision::BlockedOnKnownDependency => {
+            "Do not reopen or close the local bead until blocker evidence is cleared and reproduced."
+        }
+        SwarmHandoffPolicyDecision::BlockedOnReservation => {
+            "Do not override or release another agent's reservation."
+        }
+        SwarmHandoffPolicyDecision::WaitingOnRch => {
+            "Do not treat a pending RCH proof as green or close dependent work."
+        }
+        SwarmHandoffPolicyDecision::StaleButContested => {
+            "Do not override the active reservation without an acknowledgement from the holder."
+        }
+        SwarmHandoffPolicyDecision::Abandoned => {
+            "Do not delete files or assume ownership without an explicit Beads transition."
+        }
+        SwarmHandoffPolicyDecision::ReadyToReopen => {
+            "Do not delete files, override reservations, or skip the explicit reopen command."
+        }
+        SwarmHandoffPolicyDecision::ManualReviewRequired => {
+            "Do not reopen from malformed, unknown, or incomplete evidence."
+        }
+    }
+    .to_string()
 }
 
 fn decision_blocker_class(outcome: &SwarmHandoffPolicyOutcome) -> &'static str {

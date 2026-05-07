@@ -19,6 +19,8 @@ use std::{
 
 const SWARM_HANDOFF_REPLAY_FIXTURE_SCHEMA_VERSION: &str =
     "franken-node/swarm-handoff/replay-fixtures/v1";
+const SWARM_HANDOFF_RUNBOOK_FIXTURE_SCHEMA_VERSION: &str =
+    "franken-node/swarm-handoff/runbook-goldens/v1";
 
 fn ts(seconds: i64) -> DateTime<Utc> {
     Utc.timestamp_opt(seconds, 0)
@@ -232,13 +234,69 @@ struct SwarmHandoffReplayExpectedLog {
     required_action_contains: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SwarmHandoffRunbookFixtureCatalog {
+    schema_version: String,
+    cases: Vec<SwarmHandoffRunbookFixtureCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SwarmHandoffRunbookFixtureCase {
+    case_id: String,
+    trace_id: String,
+    generated_at_utc: DateTime<Utc>,
+    evidence: SwarmHandoffReplayFixtureEvidence,
+    expected: SwarmHandoffRunbookExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct SwarmHandoffRunbookExpected {
+    runbook_goldens: Vec<SwarmHandoffRunbookExpectedGolden>,
+    audit_ledger: Vec<SwarmHandoffRunbookExpectedLedger>,
+    human_contains: Vec<String>,
+    human_must_not_contain: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SwarmHandoffRunbookExpectedGolden {
+    bead_id: String,
+    agent: Option<String>,
+    reservation_holder: Option<String>,
+    decision_code: String,
+    required_action_contains: String,
+    must_not_do: String,
+    evidence_pointer_contains: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SwarmHandoffRunbookExpectedLedger {
+    sequence: usize,
+    bead_id: String,
+    decision_code: String,
+    no_files_deleted: bool,
+    reservations_overridden: bool,
+    evidence_pointer_contains: String,
+}
+
 fn replay_fixture_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/swarm_handoff_replay_e2e.json")
+}
+
+fn runbook_fixture_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/swarm_handoff_runbook_goldens.json")
 }
 
 fn load_replay_fixture_catalog(
     path: &Path,
 ) -> Result<SwarmHandoffReplayFixtureCatalog, Box<dyn std::error::Error>> {
+    let fixture = fs::read_to_string(path)?;
+    let catalog = serde_json::from_str(&fixture)?;
+    Ok(catalog)
+}
+
+fn load_runbook_fixture_catalog(
+    path: &Path,
+) -> Result<SwarmHandoffRunbookFixtureCatalog, Box<dyn std::error::Error>> {
     let fixture = fs::read_to_string(path)?;
     let catalog = serde_json::from_str(&fixture)?;
     Ok(catalog)
@@ -1177,6 +1235,196 @@ fn fixture_replay_e2e_parses_artifacts_and_logs_decisions() -> Result<(), Box<dy
                 .expect("decision_logs should render as an array")
                 .len(),
             report.decision_logs.len()
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn runbook_goldens_freeze_audit_ledger() -> Result<(), Box<dyn std::error::Error>> {
+    let catalog = load_runbook_fixture_catalog(&runbook_fixture_path())?;
+    assert_eq!(
+        catalog.schema_version,
+        SWARM_HANDOFF_RUNBOOK_FIXTURE_SCHEMA_VERSION
+    );
+
+    for case in catalog.cases {
+        let SwarmHandoffRunbookFixtureCase {
+            case_id,
+            trace_id,
+            generated_at_utc,
+            evidence,
+            expected,
+        } = case;
+        let input = evidence.into_input();
+        let report = build_swarm_handoff_readiness_report(
+            &input,
+            &policy_config(),
+            trace_id.clone(),
+            generated_at_utc,
+        );
+
+        assert_eq!(
+            report.runbook_goldens.len(),
+            expected.runbook_goldens.len(),
+            "{case_id}: runbook golden count changed"
+        );
+        assert_eq!(
+            report.audit_ledger.len(),
+            expected.audit_ledger.len(),
+            "{case_id}: audit ledger count changed"
+        );
+        assert_eq!(
+            report.audit_ledger.len(),
+            report.runbook_goldens.len(),
+            "{case_id}: ledger must mirror runbook entries"
+        );
+
+        for (idx, entry) in report.audit_ledger.iter().enumerate() {
+            assert_eq!(
+                entry.sequence,
+                idx + 1,
+                "{case_id}: ledger sequence must be append-friendly and deterministic"
+            );
+            assert_eq!(entry.trace_id, trace_id, "{case_id}: ledger trace drifted");
+            assert!(
+                entry.no_files_deleted,
+                "{case_id}: ledger must record that no files were deleted"
+            );
+            assert!(
+                !entry.reservations_overridden,
+                "{case_id}: ledger must record that reservations were not overridden"
+            );
+            assert!(
+                !entry.evidence_pointers.is_empty(),
+                "{case_id}: ledger entry for {} omitted reproducible evidence",
+                entry.bead_id
+            );
+        }
+
+        for expected_golden in expected.runbook_goldens {
+            let Some(golden) = report
+                .runbook_goldens
+                .iter()
+                .find(|golden| golden.bead_id == expected_golden.bead_id)
+            else {
+                return Err(format!(
+                    "{case_id}: missing runbook golden for {}",
+                    expected_golden.bead_id
+                )
+                .into());
+            };
+            assert_eq!(
+                golden.agent, expected_golden.agent,
+                "{case_id}: runbook agent mismatch for {}",
+                expected_golden.bead_id
+            );
+            assert_eq!(
+                golden.reservation_holder, expected_golden.reservation_holder,
+                "{case_id}: runbook reservation holder mismatch for {}",
+                expected_golden.bead_id
+            );
+            assert_eq!(
+                golden.decision_code, expected_golden.decision_code,
+                "{case_id}: runbook decision code mismatch for {}",
+                expected_golden.bead_id
+            );
+            assert!(
+                golden
+                    .required_action
+                    .contains(&expected_golden.required_action_contains),
+                "{case_id}: runbook required action for {} did not contain `{}`; got `{}`",
+                expected_golden.bead_id,
+                expected_golden.required_action_contains,
+                golden.required_action
+            );
+            assert_eq!(
+                golden.must_not_do, expected_golden.must_not_do,
+                "{case_id}: runbook prohibited action mismatch for {}",
+                expected_golden.bead_id
+            );
+            assert!(
+                golden
+                    .evidence_pointers
+                    .iter()
+                    .any(|pointer| pointer.contains(&expected_golden.evidence_pointer_contains)),
+                "{case_id}: runbook evidence for {} omitted `{}`",
+                expected_golden.bead_id,
+                expected_golden.evidence_pointer_contains
+            );
+        }
+
+        for expected_ledger in expected.audit_ledger {
+            let Some(ledger) = report
+                .audit_ledger
+                .iter()
+                .find(|ledger| ledger.bead_id == expected_ledger.bead_id)
+            else {
+                return Err(format!(
+                    "{case_id}: missing audit ledger entry for {}",
+                    expected_ledger.bead_id
+                )
+                .into());
+            };
+            assert_eq!(
+                ledger.sequence, expected_ledger.sequence,
+                "{case_id}: audit sequence mismatch for {}",
+                expected_ledger.bead_id
+            );
+            assert_eq!(
+                ledger.decision_code, expected_ledger.decision_code,
+                "{case_id}: audit decision code mismatch for {}",
+                expected_ledger.bead_id
+            );
+            assert_eq!(
+                ledger.no_files_deleted, expected_ledger.no_files_deleted,
+                "{case_id}: file deletion audit flag mismatch for {}",
+                expected_ledger.bead_id
+            );
+            assert_eq!(
+                ledger.reservations_overridden, expected_ledger.reservations_overridden,
+                "{case_id}: reservation override audit flag mismatch for {}",
+                expected_ledger.bead_id
+            );
+            assert!(
+                ledger
+                    .evidence_pointers
+                    .iter()
+                    .any(|pointer| pointer.contains(&expected_ledger.evidence_pointer_contains)),
+                "{case_id}: audit evidence for {} omitted `{}`",
+                expected_ledger.bead_id,
+                expected_ledger.evidence_pointer_contains
+            );
+        }
+
+        for needle in expected.human_contains {
+            assert!(
+                report.agent_mail_markdown.contains(&needle),
+                "{case_id}: human output did not contain `{needle}`"
+            );
+        }
+        for forbidden in expected.human_must_not_contain {
+            assert!(
+                !report.agent_mail_markdown.contains(&forbidden),
+                "{case_id}: human output overclaimed forbidden text `{forbidden}`"
+            );
+        }
+
+        let json: Value = serde_json::from_str(&render_swarm_handoff_readiness_json(&report)?)?;
+        assert_eq!(
+            json["runbook_goldens"]
+                .as_array()
+                .expect("runbook_goldens should render as an array")
+                .len(),
+            report.runbook_goldens.len()
+        );
+        assert_eq!(
+            json["audit_ledger"]
+                .as_array()
+                .expect("audit_ledger should render as an array")
+                .len(),
+            report.audit_ledger.len()
         );
     }
 
