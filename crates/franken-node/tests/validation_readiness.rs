@@ -14,7 +14,7 @@ use frankenengine_node::ops::validation_readiness::{
     TrackedValidationBead, ValidationBeadState, ValidationReadinessFixtureCatalog,
     ValidationReadinessInput, ValidationReadinessStatus, build_validation_readiness_report,
     classify_proof_lane_readiness, known_check_codes, proof_lane_event_codes,
-    proof_lane_reason_codes, render_validation_readiness_human,
+    proof_lane_reason_codes, render_validation_readiness_human, render_validation_readiness_json,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -248,6 +248,13 @@ fn assert_proof_lane_decision(
     assert_eq!(capsule.decision.event_code, event_code);
 }
 
+fn proof_lane_fixture_catalog() -> ProofLaneReadinessFixtureCatalog {
+    serde_json::from_str(include_str!(
+        "../../../artifacts/validation_broker/bd-yyl6t/proof_lane_readiness_fixtures.v1.json"
+    ))
+    .expect("proof-lane fixture catalog parses")
+}
+
 #[test]
 fn proof_lane_classifier_allows_healthy_same_toolchain_remote_lane() {
     let input = proof_lane_input();
@@ -435,10 +442,7 @@ fn proof_lane_classifier_rejects_stale_capsules_and_product_failures() {
 
 #[test]
 fn checked_in_proof_lane_fixture_catalog_matches_golden_capsules() {
-    let catalog: ProofLaneReadinessFixtureCatalog = serde_json::from_str(include_str!(
-        "../../../artifacts/validation_broker/bd-yyl6t/proof_lane_readiness_fixtures.v1.json"
-    ))
-    .expect("proof-lane fixture catalog parses");
+    let catalog = proof_lane_fixture_catalog();
     assert_eq!(
         catalog.schema_version,
         PROOF_LANE_READINESS_FIXTURE_SCHEMA_VERSION
@@ -484,6 +488,197 @@ fn checked_in_proof_lane_fixture_catalog_matches_golden_capsules() {
             fixture.name
         );
     }
+}
+
+#[test]
+fn proof_lane_capsules_are_reported_in_readiness_json_and_human_output() {
+    let catalog = proof_lane_fixture_catalog();
+    let mut capsules = catalog
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.expected_capsule.clone())
+        .collect::<Vec<_>>();
+    let mut stale_input = proof_lane_input();
+    stale_input.freshness_expires_at = ts(20);
+    capsules.push(classify_proof_lane_readiness(&stale_input, ts(30)));
+    let input = ValidationReadinessInput {
+        proof_lane_readiness: capsules,
+        rch_workers: vec![remote_worker()],
+        resource_governor: Some(allow_resource_snapshot()),
+        ..ValidationReadinessInput::default()
+    };
+
+    let report = build_validation_readiness_report(&input, "vr-proof-lane-summary", ts(30));
+
+    assert_eq!(report.overall_status, ValidationReadinessStatus::Fail);
+    assert_eq!(report.summary.proof_lane_readiness.len(), 8);
+    assert_eq!(report.summary.product_failure_count, 0);
+    let proof_lane_check = report
+        .checks
+        .iter()
+        .find(|check| check.code == "VR-PROOF-LANE-008")
+        .expect("proof-lane readiness check");
+    assert_eq!(proof_lane_check.status, ValidationReadinessStatus::Fail);
+    assert!(
+        proof_lane_check
+            .message
+            .contains(proof_lane_reason_codes::WORKER_AUTH_FAILED)
+    );
+
+    let report_json = render_validation_readiness_json(&report).expect("report serializes");
+    let report_value: Value = serde_json::from_str(&report_json).expect("report JSON parses");
+    let summaries = report_value
+        .get("summary")
+        .and_then(|summary| summary.get("proof_lane_readiness"))
+        .and_then(Value::as_array)
+        .expect("proof-lane summaries");
+    assert_eq!(summaries.len(), 8);
+    let find_summary = |reason_code: &str| {
+        summaries
+            .iter()
+            .find(|entry| entry.get("reason_code").and_then(Value::as_str) == Some(reason_code))
+            .expect("proof-lane summary")
+    };
+
+    let healthy = find_summary(proof_lane_reason_codes::HEALTHY_SAME_TOOLCHAIN_LANE);
+    assert_eq!(
+        healthy.get("decision").and_then(Value::as_str),
+        Some("ready_to_launch")
+    );
+    assert_eq!(
+        healthy.get("requested_worker").and_then(Value::as_str),
+        Some("ts2")
+    );
+    assert_eq!(
+        healthy.get("selected_worker").and_then(Value::as_str),
+        Some("ts2")
+    );
+    assert_eq!(
+        healthy
+            .get("same_toolchain_available")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        healthy.get("auth_status").and_then(Value::as_str),
+        Some("ok")
+    );
+    assert_eq!(
+        healthy.get("capability_freshness").and_then(Value::as_str),
+        Some("fresh")
+    );
+    assert_eq!(
+        healthy
+            .get("local_fallback_allowed")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        healthy
+            .get("local_fallback_refused")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(healthy.get("capsule_path").is_some_and(Value::is_null));
+    assert_eq!(
+        healthy.get("freshness_expires_at").and_then(Value::as_str),
+        Some("2026-05-07T00:30:00Z")
+    );
+    assert_eq!(
+        healthy.get("required_action").and_then(Value::as_str),
+        Some("launch_remote_proof")
+    );
+
+    let auth = find_summary(proof_lane_reason_codes::WORKER_AUTH_FAILED);
+    assert_eq!(
+        auth.get("decision").and_then(Value::as_str),
+        Some("source_only_blocker")
+    );
+    assert_eq!(
+        auth.get("auth_status").and_then(Value::as_str),
+        Some("permission_denied")
+    );
+    assert_eq!(
+        auth.get("required_action").and_then(Value::as_str),
+        Some("repair_worker_credentials_before_retry")
+    );
+    assert_eq!(auth.get("fail_closed").and_then(Value::as_bool), Some(true));
+
+    let override_mismatch = find_summary(proof_lane_reason_codes::OVERRIDE_NOT_HONORED);
+    assert_eq!(
+        override_mismatch
+            .get("requested_worker")
+            .and_then(Value::as_str),
+        Some("ts2")
+    );
+    assert_eq!(
+        override_mismatch
+            .get("selected_worker")
+            .and_then(Value::as_str),
+        Some("vmi1153651")
+    );
+
+    let missing_toolchain = find_summary(proof_lane_reason_codes::SAME_TOOLCHAIN_MISSING);
+    assert_eq!(
+        missing_toolchain
+            .get("same_toolchain_available")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        missing_toolchain
+            .get("required_action")
+            .and_then(Value::as_str),
+        Some("sync_toolchain_or_wait_for_matching_worker")
+    );
+
+    let stale_capability = find_summary(proof_lane_reason_codes::WORKER_CAPABILITY_UNKNOWN);
+    assert_eq!(
+        stale_capability.get("decision").and_then(Value::as_str),
+        Some("retry_preflight")
+    );
+    assert_eq!(
+        stale_capability
+            .get("capability_freshness")
+            .and_then(Value::as_str),
+        Some("stale")
+    );
+
+    let local_fallback = find_summary(proof_lane_reason_codes::LOCAL_FALLBACK_REFUSED);
+    assert!(
+        local_fallback
+            .get("selected_worker")
+            .is_some_and(Value::is_null)
+    );
+    assert_eq!(
+        local_fallback
+            .get("local_fallback_refused")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        local_fallback
+            .get("required_action")
+            .and_then(Value::as_str),
+        Some("restore_remote_execution_before_cargo_proof")
+    );
+
+    let stale_capsule = find_summary(proof_lane_reason_codes::STALE_READINESS_CAPSULE);
+    assert_eq!(
+        stale_capsule.get("decision").and_then(Value::as_str),
+        Some("fail_closed")
+    );
+    assert_eq!(
+        stale_capsule.get("required_action").and_then(Value::as_str),
+        Some("regenerate_readiness_capsule")
+    );
+
+    let human = render_validation_readiness_human(&report);
+    assert!(human.contains("proof_lane_readiness=8 preflight_capsules"));
+    assert!(human.contains("reason_code=PLR_WORKER_AUTH_FAILED"));
+    assert!(human.contains("selected_worker=none"));
+    assert!(human.contains("capsule_path=none"));
+    assert!(human.contains("required_action=regenerate_readiness_capsule"));
 }
 
 fn known_proof_lane_reason_event_pair(reason_code: &str, event_code: &str) -> bool {

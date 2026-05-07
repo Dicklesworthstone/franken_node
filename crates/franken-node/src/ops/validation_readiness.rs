@@ -159,6 +159,8 @@ pub struct ValidationReadinessInput {
     #[serde(default)]
     pub rch_workers: Vec<RchWorkerReadiness>,
     #[serde(default)]
+    pub proof_lane_readiness: Vec<ProofLaneReadinessCapsule>,
+    #[serde(default)]
     pub resource_governor: Option<ResourceContentionSnapshot>,
     #[serde(default = "default_max_receipt_age_secs")]
     pub max_receipt_age_secs: u64,
@@ -172,6 +174,7 @@ impl Default for ValidationReadinessInput {
             proof_statuses: Vec::new(),
             receipts: Vec::new(),
             rch_workers: Vec::new(),
+            proof_lane_readiness: Vec::new(),
             resource_governor: None,
             max_receipt_age_secs: DEFAULT_MAX_RECEIPT_AGE_SECS,
         }
@@ -250,6 +253,19 @@ pub enum ProofLaneReadinessDecisionKind {
     RetryPreflight,
     SourceOnlyBlocker,
     FailClosed,
+}
+
+impl ProofLaneReadinessDecisionKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadyToLaunch => "ready_to_launch",
+            Self::QueueUntilReady => "queue_until_ready",
+            Self::RetryPreflight => "retry_preflight",
+            Self::SourceOnlyBlocker => "source_only_blocker",
+            Self::FailClosed => "fail_closed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -444,6 +460,8 @@ pub struct ProofLaneReadinessDecision {
 pub struct ProofLaneReadinessCapsule {
     pub schema_version: String,
     pub capsule_id: String,
+    #[serde(default)]
+    pub capsule_path: Option<String>,
     pub trace_id: String,
     pub bead_id: String,
     pub thread_id: String,
@@ -456,6 +474,32 @@ pub struct ProofLaneReadinessCapsule {
     pub toolchain: ProofLaneToolchainSnapshot,
     pub worker_access: ProofLaneWorkerAccessSnapshot,
     pub decision: ProofLaneReadinessDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofLaneReadinessSummary {
+    pub capsule_id: String,
+    pub capsule_path: Option<String>,
+    pub trace_id: String,
+    pub bead_id: String,
+    pub thread_id: String,
+    pub decision: ProofLaneReadinessDecisionKind,
+    pub reason_code: String,
+    pub event_code: String,
+    pub requested_worker: String,
+    pub selected_worker: Option<String>,
+    pub same_toolchain_available: bool,
+    pub auth_status: ProofLaneWorkerAuthStatus,
+    pub capability_freshness: ProofLaneCapabilityStatus,
+    pub pressure_status: ProofLanePressureStatus,
+    pub local_fallback_allowed: bool,
+    pub local_fallback_refused: bool,
+    pub retryable: bool,
+    pub fail_closed: bool,
+    pub created_at: DateTime<Utc>,
+    pub freshness_expires_at: DateTime<Utc>,
+    pub required_action: String,
+    pub operator_summary: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -475,6 +519,8 @@ pub struct ValidationReadinessSummary {
     pub rch_remote_missing_worker_id: usize,
     pub last_successful_cargo_proof_at: Option<DateTime<Utc>>,
     pub contention_state: String,
+    #[serde(default)]
+    pub proof_lane_readiness: Vec<ProofLaneReadinessSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -530,6 +576,7 @@ pub fn build_validation_readiness_report(
         evaluate_receipt_freshness_check(input, &summary, now),
         evaluate_proof_status_check(input, &summary),
         evaluate_rch_worker_check(input, &summary),
+        evaluate_proof_lane_readiness_check(&summary),
         evaluate_resource_contention_check(input),
     ];
     let (status_counts, overall_status) = summarize_check_statuses(&checks);
@@ -570,6 +617,7 @@ pub fn classify_proof_lane_readiness(
     ProofLaneReadinessCapsule {
         schema_version: PROOF_LANE_READINESS_CAPSULE_SCHEMA_VERSION.to_string(),
         capsule_id: input.capsule_id.clone(),
+        capsule_path: None,
         trace_id: input.trace_id.clone(),
         bead_id: input.bead_id.clone(),
         thread_id: input.thread_id.clone(),
@@ -658,6 +706,36 @@ pub fn render_validation_readiness_human(report: &ValidationReadinessReport) -> 
         format!("  last_successful_cargo_proof_at={last_success}"),
         format!("  contention_state={}", report.summary.contention_state),
     ];
+
+    if report.summary.proof_lane_readiness.is_empty() {
+        lines.push("  proof_lane_readiness=none".to_string());
+    } else {
+        lines.push(format!(
+            "  proof_lane_readiness={} preflight_capsules",
+            report.summary.proof_lane_readiness.len()
+        ));
+        for capsule in &report.summary.proof_lane_readiness {
+            lines.push(format!(
+                "    capsule_id={} decision={} reason_code={} event_code={} requested_worker={} selected_worker={} same_toolchain_available={} auth_status={} capability_freshness={} pressure_status={} local_fallback_allowed={} local_fallback_refused={} freshness_expires_at={} capsule_path={} required_action={} operator_summary={}",
+                capsule.capsule_id,
+                capsule.decision.as_str(),
+                capsule.reason_code,
+                capsule.event_code,
+                capsule.requested_worker,
+                capsule.selected_worker.as_deref().unwrap_or("none"),
+                capsule.same_toolchain_available,
+                capsule.auth_status.as_str(),
+                capsule.capability_freshness.as_str(),
+                capsule.pressure_status.as_str(),
+                capsule.local_fallback_allowed,
+                capsule.local_fallback_refused,
+                capsule.freshness_expires_at.to_rfc3339(),
+                capsule.capsule_path.as_deref().unwrap_or("none"),
+                capsule.required_action,
+                capsule.operator_summary
+            ));
+        }
+    }
 
     for check in &report.checks {
         lines.push(format!(
@@ -782,6 +860,38 @@ fn summarize_validation_readiness(
         rch_remote_missing_worker_id,
         last_successful_cargo_proof_at,
         contention_state: contention_state(input),
+        proof_lane_readiness: input
+            .proof_lane_readiness
+            .iter()
+            .map(summarize_proof_lane_capsule)
+            .collect(),
+    }
+}
+
+fn summarize_proof_lane_capsule(capsule: &ProofLaneReadinessCapsule) -> ProofLaneReadinessSummary {
+    ProofLaneReadinessSummary {
+        capsule_id: capsule.capsule_id.clone(),
+        capsule_path: capsule.capsule_path.clone(),
+        trace_id: capsule.trace_id.clone(),
+        bead_id: capsule.bead_id.clone(),
+        thread_id: capsule.thread_id.clone(),
+        decision: capsule.decision.decision,
+        reason_code: capsule.decision.reason_code.clone(),
+        event_code: capsule.decision.event_code.clone(),
+        requested_worker: requested_workers_label(&capsule.worker_selection.requested_workers),
+        selected_worker: capsule.worker_selection.selected_worker.clone(),
+        same_toolchain_available: capsule.toolchain.same_toolchain,
+        auth_status: capsule.worker_access.auth_status,
+        capability_freshness: capsule.worker_access.capability_status,
+        pressure_status: capsule.worker_access.pressure_status,
+        local_fallback_allowed: capsule.rch.local_fallback_allowed,
+        local_fallback_refused: capsule.rch.local_fallback_refused,
+        retryable: capsule.decision.retryable,
+        fail_closed: capsule.decision.fail_closed,
+        created_at: capsule.created_at,
+        freshness_expires_at: capsule.freshness_expires_at,
+        required_action: capsule.decision.required_action.clone(),
+        operator_summary: capsule.decision.operator_summary.clone(),
     }
 }
 
@@ -1085,6 +1195,73 @@ fn evaluate_rch_worker_check(
         ValidationReadinessStatus::Pass,
         "RCH worker readiness supports remote validation.",
         "No action required.",
+    )
+}
+
+fn evaluate_proof_lane_readiness_check(
+    summary: &ValidationReadinessSummary,
+) -> ValidationReadinessCheck {
+    if summary.proof_lane_readiness.is_empty() {
+        return check(
+            "VR-PROOF-LANE-008",
+            "PLR-001",
+            "proof_lane_readiness.preflight",
+            ValidationReadinessStatus::Pass,
+            "No proof-lane readiness capsules were supplied.",
+            "No action required.",
+        );
+    }
+
+    let mut fail_closed = summary
+        .proof_lane_readiness
+        .iter()
+        .filter(|capsule| capsule.fail_closed);
+    if let Some(first_blocker) = fail_closed.next() {
+        let mut blockers = vec![proof_lane_blocker_label(first_blocker)];
+        blockers.extend(fail_closed.map(proof_lane_blocker_label));
+        let blockers = blockers.join(",");
+        return check(
+            "VR-PROOF-LANE-008",
+            first_blocker.event_code.clone(),
+            "proof_lane_readiness.preflight",
+            ValidationReadinessStatus::Fail,
+            format!("Proof-lane readiness refuses launch for {blockers}."),
+            "Follow each proof-lane required_action before counting cargo proof output as green evidence.",
+        );
+    }
+
+    let mut retryable = summary
+        .proof_lane_readiness
+        .iter()
+        .filter(|capsule| capsule.decision != ProofLaneReadinessDecisionKind::ReadyToLaunch);
+    if let Some(first_retryable) = retryable.next() {
+        let mut queued = vec![proof_lane_blocker_label(first_retryable)];
+        queued.extend(retryable.map(proof_lane_blocker_label));
+        let queued = queued.join(",");
+        return check(
+            "VR-PROOF-LANE-008",
+            first_retryable.event_code.clone(),
+            "proof_lane_readiness.preflight",
+            ValidationReadinessStatus::Warn,
+            format!("Proof-lane readiness is not launch-ready for {queued}."),
+            "Refresh readiness or wait for worker pressure to clear before launching cargo proof.",
+        );
+    }
+
+    check(
+        "VR-PROOF-LANE-008",
+        "PLR-001",
+        "proof_lane_readiness.preflight",
+        ValidationReadinessStatus::Pass,
+        "Proof-lane readiness permits remote cargo proof launch.",
+        "No action required.",
+    )
+}
+
+fn proof_lane_blocker_label(capsule: &ProofLaneReadinessSummary) -> String {
+    format!(
+        "{}:{}:{}",
+        capsule.capsule_id, capsule.reason_code, capsule.required_action
     )
 }
 
