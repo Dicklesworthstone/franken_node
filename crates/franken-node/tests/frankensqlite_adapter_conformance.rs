@@ -3,8 +3,8 @@ mod frankensqlite_adapter_conformance;
 
 use frankenengine_node::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 use frankenengine_node::storage::frankensqlite_adapter::{
-    event_codes, AdapterError, CallerContext, FrankensqliteAdapter, PersistenceClass,
-    MAX_STORE_ENTRIES, MAX_STORE_KEY_BYTES, MAX_STORE_VALUE_BYTES,
+    AdapterError, CallerContext, FrankensqliteAdapter, MAX_STORE_ENTRIES, MAX_STORE_KEY_BYTES,
+    MAX_STORE_VALUE_BYTES, PersistenceClass, event_codes,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
