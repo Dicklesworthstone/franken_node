@@ -1,7 +1,8 @@
 //! Read-only evidence model for stale-work and handoff decisions.
 //!
-//! This module intentionally stops at evidence capture and validation. Policy
-//! decisions live in a later layer so scanners can stay side-effect free.
+//! Scanners feed this module with already-collected Beads, Agent Mail, RCH, git,
+//! and sibling-repo signals. The policy layer stays deterministic and read-only:
+//! it emits recommended Beads commands, but never mutates issue state itself.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,7 @@ use std::fmt;
 
 pub const SWARM_HANDOFF_EVIDENCE_SCHEMA_VERSION: &str = "franken-node/swarm-handoff/evidence/v1";
 pub const SWARM_HANDOFF_SUMMARY_SCHEMA_VERSION: &str = "franken-node/swarm-handoff/summary/v1";
+pub const SWARM_HANDOFF_POLICY_SCHEMA_VERSION: &str = "franken-node/swarm-handoff/policy/v1";
 
 pub const MAX_HANDOFF_ISSUES: usize = 256;
 pub const MAX_HANDOFF_AGENTS: usize = 256;
@@ -57,6 +59,90 @@ pub enum SwarmHandoffBlockerKind {
     RchInProgress,
     ToolingUnavailable,
     Unknown,
+}
+
+pub mod handoff_reason_codes {
+    pub const HANDOFF_ACTIVE_RECENT_AGENT: &str = "HANDOFF_ACTIVE_RECENT_AGENT";
+    pub const HANDOFF_ACTIVE_OWNER_OTHER_PROJECT: &str = "HANDOFF_ACTIVE_OWNER_OTHER_PROJECT";
+    pub const HANDOFF_ACTIVE_RECENT_ISSUE_ACTIVITY: &str = "HANDOFF_ACTIVE_RECENT_ISSUE_ACTIVITY";
+    pub const HANDOFF_ACTIVE_RECENT_GIT_ACTIVITY: &str = "HANDOFF_ACTIVE_RECENT_GIT_ACTIVITY";
+    pub const HANDOFF_BLOCKED_DEPENDENCY_OPEN: &str = "HANDOFF_BLOCKED_DEPENDENCY_OPEN";
+    pub const HANDOFF_BLOCKED_DEPENDENCY_UNKNOWN: &str = "HANDOFF_BLOCKED_DEPENDENCY_UNKNOWN";
+    pub const HANDOFF_BLOCKED_RESERVATION_ACTIVE: &str = "HANDOFF_BLOCKED_RESERVATION_ACTIVE";
+    pub const HANDOFF_BLOCKED_CROSS_REPO_RESERVATION: &str =
+        "HANDOFF_BLOCKED_CROSS_REPO_RESERVATION";
+    pub const HANDOFF_BLOCKED_CROSS_REPO_BLOCKER: &str = "HANDOFF_BLOCKED_CROSS_REPO_BLOCKER";
+    pub const HANDOFF_WAITING_RCH_ACTIVE: &str = "HANDOFF_WAITING_RCH_ACTIVE";
+    pub const HANDOFF_STALE_CONTESTED_RESERVATION: &str = "HANDOFF_STALE_CONTESTED_RESERVATION";
+    pub const HANDOFF_STALE_CONTESTED_RCH_STALE: &str = "HANDOFF_STALE_CONTESTED_RCH_STALE";
+    pub const HANDOFF_STALE_ACK_REQUIRED: &str = "HANDOFF_STALE_ACK_REQUIRED";
+    pub const HANDOFF_ABANDONED_NO_RECENT_SIGNALS: &str = "HANDOFF_ABANDONED_NO_RECENT_SIGNALS";
+    pub const HANDOFF_READY_EXPIRED_RESERVATION: &str = "HANDOFF_READY_EXPIRED_RESERVATION";
+    pub const HANDOFF_READY_UNASSIGNED: &str = "HANDOFF_READY_UNASSIGNED";
+    pub const HANDOFF_MANUAL_REVIEW_MALFORMED_EVIDENCE: &str =
+        "HANDOFF_MANUAL_REVIEW_MALFORMED_EVIDENCE";
+    pub const HANDOFF_MANUAL_REVIEW_ISSUE_NOT_FOUND: &str = "HANDOFF_MANUAL_REVIEW_ISSUE_NOT_FOUND";
+    pub const HANDOFF_MANUAL_REVIEW_UNKNOWN_ISSUE_STATUS: &str =
+        "HANDOFF_MANUAL_REVIEW_UNKNOWN_ISSUE_STATUS";
+    pub const HANDOFF_MANUAL_REVIEW_CLOSED_ISSUE: &str = "HANDOFF_MANUAL_REVIEW_CLOSED_ISSUE";
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmHandoffPolicyDecision {
+    Active,
+    BlockedOnKnownDependency,
+    BlockedOnReservation,
+    WaitingOnRch,
+    StaleButContested,
+    Abandoned,
+    ReadyToReopen,
+    ManualReviewRequired,
+}
+
+impl SwarmHandoffPolicyDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::BlockedOnKnownDependency => "blocked_on_known_dependency",
+            Self::BlockedOnReservation => "blocked_on_reservation",
+            Self::WaitingOnRch => "waiting_on_rch",
+            Self::StaleButContested => "stale_but_contested",
+            Self::Abandoned => "abandoned",
+            Self::ReadyToReopen => "ready_to_reopen",
+            Self::ManualReviewRequired => "manual_review_required",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwarmHandoffPolicyConfig {
+    pub local_project_key: Option<String>,
+    pub agent_activity_grace_secs: u64,
+    pub issue_activity_grace_secs: u64,
+    pub git_activity_grace_secs: u64,
+    pub rch_activity_grace_secs: u64,
+}
+
+impl Default for SwarmHandoffPolicyConfig {
+    fn default() -> Self {
+        Self {
+            local_project_key: None,
+            agent_activity_grace_secs: 30 * 60,
+            issue_activity_grace_secs: 30 * 60,
+            git_activity_grace_secs: 60 * 60,
+            rch_activity_grace_secs: 15 * 60,
+        }
+    }
+}
+
+impl SwarmHandoffPolicyConfig {
+    #[must_use]
+    pub fn with_local_project_key(mut self, project_key: impl Into<String>) -> Self {
+        self.local_project_key = Some(project_key.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +272,21 @@ pub struct SwarmHandoffEvidenceSummary {
     pub cross_repo_blocker_count: usize,
     pub uncleared_cross_repo_blocker_count: usize,
     pub unknown_signal_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffPolicyOutcome {
+    pub schema_version: String,
+    pub bead_id: String,
+    pub observed_at: DateTime<Utc>,
+    pub decision: SwarmHandoffPolicyDecision,
+    pub reason_codes: Vec<String>,
+    pub evidence_pointers: Vec<String>,
+    pub required_action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_br_command: Option<String>,
+    pub reopen_allowed: bool,
+    pub operator_message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,10 +442,564 @@ impl SwarmHandoffEvidenceInput {
                 .filter(|blocker| blocker.blocker_kind == SwarmHandoffBlockerKind::Unknown)
                 .count()
     }
+
+    #[must_use]
+    pub fn classify_handoff_policy(
+        &self,
+        bead_id: &str,
+        config: &SwarmHandoffPolicyConfig,
+    ) -> SwarmHandoffPolicyOutcome {
+        use handoff_reason_codes::{
+            HANDOFF_ABANDONED_NO_RECENT_SIGNALS, HANDOFF_ACTIVE_OWNER_OTHER_PROJECT,
+            HANDOFF_BLOCKED_RESERVATION_ACTIVE, HANDOFF_MANUAL_REVIEW_CLOSED_ISSUE,
+            HANDOFF_MANUAL_REVIEW_ISSUE_NOT_FOUND, HANDOFF_MANUAL_REVIEW_MALFORMED_EVIDENCE,
+            HANDOFF_MANUAL_REVIEW_UNKNOWN_ISSUE_STATUS, HANDOFF_READY_EXPIRED_RESERVATION,
+            HANDOFF_READY_UNASSIGNED, HANDOFF_STALE_ACK_REQUIRED,
+            HANDOFF_STALE_CONTESTED_RCH_STALE, HANDOFF_STALE_CONTESTED_RESERVATION,
+            HANDOFF_WAITING_RCH_ACTIVE,
+        };
+
+        if let Err(error) = self.validate_and_summarize() {
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::ManualReviewRequired,
+                vec![HANDOFF_MANUAL_REVIEW_MALFORMED_EVIDENCE],
+                vec![format!("evidence.validation_error:{error}")],
+                "Fix scanner evidence and rerun handoff classification; do not reopen this bead from malformed evidence.",
+                None,
+            );
+        }
+
+        let Some(issue) = self.issues.iter().find(|issue| issue.bead_id == bead_id) else {
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::ManualReviewRequired,
+                vec![HANDOFF_MANUAL_REVIEW_ISSUE_NOT_FOUND],
+                vec![format!("issue:{bead_id}:missing")],
+                "Refresh Beads evidence before making a handoff decision.",
+                None,
+            );
+        };
+
+        match issue.status {
+            SwarmHandoffIssueStatus::Closed => {
+                return policy_outcome(
+                    bead_id,
+                    self.observed_at,
+                    SwarmHandoffPolicyDecision::ManualReviewRequired,
+                    vec![HANDOFF_MANUAL_REVIEW_CLOSED_ISSUE],
+                    vec![issue_pointer(issue)],
+                    "Closed beads must not be reopened by stale-work policy without a separate explicit reopen review.",
+                    None,
+                );
+            }
+            SwarmHandoffIssueStatus::Unknown => {
+                return policy_outcome(
+                    bead_id,
+                    self.observed_at,
+                    SwarmHandoffPolicyDecision::ManualReviewRequired,
+                    vec![HANDOFF_MANUAL_REVIEW_UNKNOWN_ISSUE_STATUS],
+                    vec![issue_pointer(issue)],
+                    "Refresh Beads status evidence; unknown issue status is fail-closed.",
+                    None,
+                );
+            }
+            SwarmHandoffIssueStatus::Open
+            | SwarmHandoffIssueStatus::InProgress
+            | SwarmHandoffIssueStatus::Blocked => {}
+        }
+
+        if let Some(outcome) = self.classify_dependency_blockers(issue) {
+            return outcome;
+        }
+
+        if let Some(outcome) = self.classify_cross_repo_blockers(bead_id) {
+            return outcome;
+        }
+
+        let assignee = issue.assignee.as_deref();
+        let active_reservations = self.matching_reservations(bead_id, issue, true);
+        if let Some(reservation) = active_reservations
+            .iter()
+            .find(|reservation| Some(reservation.holder_agent.as_str()) != assignee)
+        {
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::BlockedOnReservation,
+                vec![HANDOFF_BLOCKED_RESERVATION_ACTIVE],
+                vec![reservation_pointer(reservation)],
+                "Do not override an active file reservation; contact the holder or wait for expiry.",
+                None,
+            );
+        }
+
+        if let Some((reason_code, pointer)) = self.recent_owner_signal(issue, config) {
+            let required_action = if reason_code == HANDOFF_ACTIVE_OWNER_OTHER_PROJECT {
+                "Do not reopen; the assignee is recently active in another project, so request a handoff acknowledgement first."
+            } else {
+                "Do not reopen; owner activity is still inside the configured freshness grace window."
+            };
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::Active,
+                vec![reason_code],
+                vec![pointer],
+                required_action,
+                None,
+            );
+        }
+
+        if let Some(build) = self
+            .matching_rch_builds(bead_id)
+            .into_iter()
+            .find(|build| rch_build_is_recently_active(build, self.observed_at, config))
+        {
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::WaitingOnRch,
+                vec![HANDOFF_WAITING_RCH_ACTIVE],
+                vec![rch_pointer(build)],
+                "Do not mark validation green or reopen while a live RCH proof is still running.",
+                None,
+            );
+        }
+
+        if let Some(reservation) = active_reservations.first() {
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::StaleButContested,
+                vec![HANDOFF_STALE_CONTESTED_RESERVATION],
+                vec![reservation_pointer(reservation)],
+                "The owner looks stale but still holds an active reservation; request acknowledgement or wait for expiry before reopening.",
+                None,
+            );
+        }
+
+        if let Some(build) = self
+            .matching_rch_builds(bead_id)
+            .into_iter()
+            .find(|build| build.state.is_active())
+        {
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::StaleButContested,
+                vec![HANDOFF_STALE_CONTESTED_RCH_STALE],
+                vec![rch_pointer(build)],
+                "RCH evidence is stale or incomplete; record the worker-infra blocker instead of treating validation as green.",
+                None,
+            );
+        }
+
+        if let Some(agent) =
+            assignee.and_then(|name| self.agents.iter().find(|agent| agent.agent_name == name))
+        {
+            if agent.ack_required_count > 0 {
+                return policy_outcome(
+                    bead_id,
+                    self.observed_at,
+                    SwarmHandoffPolicyDecision::StaleButContested,
+                    vec![HANDOFF_STALE_ACK_REQUIRED],
+                    vec![agent_pointer(agent)],
+                    "The assignee has pending acknowledgement requests; ask for explicit handoff before reopening.",
+                    None,
+                );
+            }
+        }
+
+        if self
+            .matching_reservations(bead_id, issue, false)
+            .into_iter()
+            .any(|reservation| reservation_is_expired(reservation, self.observed_at))
+        {
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::ReadyToReopen,
+                vec![HANDOFF_READY_EXPIRED_RESERVATION],
+                vec![issue_pointer(issue)],
+                "Evidence supports an explicit reopen; clear the stale assignee before a new agent claims the bead.",
+                Some(reopen_command(bead_id)),
+            );
+        }
+
+        if assignee.is_none() {
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::ReadyToReopen,
+                vec![HANDOFF_READY_UNASSIGNED],
+                vec![issue_pointer(issue)],
+                "The bead has no assignee and no active blockers; a new agent may claim it normally.",
+                Some(format!("br update {bead_id} --claim --actor <agent>")),
+            );
+        }
+
+        policy_outcome(
+            bead_id,
+            self.observed_at,
+            SwarmHandoffPolicyDecision::Abandoned,
+            vec![HANDOFF_ABANDONED_NO_RECENT_SIGNALS],
+            vec![issue_pointer(issue)],
+            "No recent Agent Mail, Beads, RCH, reservation, or git activity supports the stale claim; reopen only via explicit br update.",
+            Some(reopen_command(bead_id)),
+        )
+    }
+
+    fn classify_dependency_blockers(
+        &self,
+        issue: &SwarmHandoffIssueEvidence,
+    ) -> Option<SwarmHandoffPolicyOutcome> {
+        use handoff_reason_codes::{
+            HANDOFF_BLOCKED_DEPENDENCY_OPEN, HANDOFF_BLOCKED_DEPENDENCY_UNKNOWN,
+        };
+
+        for dependency_id in &issue.dependency_ids {
+            let Some(dependency) = self
+                .issues
+                .iter()
+                .find(|candidate| candidate.bead_id == *dependency_id)
+            else {
+                return Some(policy_outcome(
+                    &issue.bead_id,
+                    self.observed_at,
+                    SwarmHandoffPolicyDecision::ManualReviewRequired,
+                    vec![HANDOFF_BLOCKED_DEPENDENCY_UNKNOWN],
+                    vec![format!("dependency:{dependency_id}:missing")],
+                    "Refresh dependency evidence before reopening stale work.",
+                    None,
+                ));
+            };
+
+            match dependency.status {
+                SwarmHandoffIssueStatus::Closed => {}
+                SwarmHandoffIssueStatus::Unknown => {
+                    return Some(policy_outcome(
+                        &issue.bead_id,
+                        self.observed_at,
+                        SwarmHandoffPolicyDecision::ManualReviewRequired,
+                        vec![HANDOFF_BLOCKED_DEPENDENCY_UNKNOWN],
+                        vec![issue_pointer(dependency)],
+                        "Dependency status is unknown; handoff policy fails closed.",
+                        None,
+                    ));
+                }
+                SwarmHandoffIssueStatus::Open
+                | SwarmHandoffIssueStatus::InProgress
+                | SwarmHandoffIssueStatus::Blocked => {
+                    return Some(policy_outcome(
+                        &issue.bead_id,
+                        self.observed_at,
+                        SwarmHandoffPolicyDecision::BlockedOnKnownDependency,
+                        vec![HANDOFF_BLOCKED_DEPENDENCY_OPEN],
+                        vec![issue_pointer(dependency)],
+                        "Keep the bead blocked until the dependency closes or a human changes the dependency graph.",
+                        None,
+                    ));
+                }
+            }
+        }
+
+        None
+    }
+
+    fn classify_cross_repo_blockers(&self, bead_id: &str) -> Option<SwarmHandoffPolicyOutcome> {
+        use handoff_reason_codes::{
+            HANDOFF_BLOCKED_CROSS_REPO_BLOCKER, HANDOFF_BLOCKED_CROSS_REPO_RESERVATION,
+        };
+
+        let blocker = self
+            .cross_repo_blockers
+            .iter()
+            .find(|blocker| blocker.local_bead_id == bead_id && !blocker.cleared)?;
+
+        let reservation_like = blocker.blocker_kind == SwarmHandoffBlockerKind::ReservationConflict
+            || blocker.holder_agent.is_some();
+        if reservation_like {
+            return Some(policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::BlockedOnReservation,
+                vec![HANDOFF_BLOCKED_CROSS_REPO_RESERVATION],
+                vec![cross_repo_pointer(blocker)],
+                "Do not override the sibling repository holder; coordinate with that agent or wait for the blocker mirror to clear.",
+                None,
+            ));
+        }
+
+        Some(policy_outcome(
+            bead_id,
+            self.observed_at,
+            SwarmHandoffPolicyDecision::BlockedOnKnownDependency,
+            vec![HANDOFF_BLOCKED_CROSS_REPO_BLOCKER],
+            vec![cross_repo_pointer(blocker)],
+            "Keep the bead blocked on the sibling validation failure; do not treat worker or compile failures as product success.",
+            None,
+        ))
+    }
+
+    fn matching_reservations(
+        &self,
+        bead_id: &str,
+        issue: &SwarmHandoffIssueEvidence,
+        active_only: bool,
+    ) -> Vec<&SwarmHandoffReservationEvidence> {
+        self.reservations
+            .iter()
+            .filter(|reservation| {
+                reservation_matches_bead(reservation, bead_id, issue)
+                    && (!active_only || reservation_is_active(reservation, self.observed_at))
+            })
+            .collect()
+    }
+
+    fn matching_rch_builds(&self, bead_id: &str) -> Vec<&SwarmHandoffRchBuildEvidence> {
+        self.rch_builds
+            .iter()
+            .filter(|build| build.blocker_bead_id.as_deref() == Some(bead_id))
+            .collect()
+    }
+
+    fn recent_owner_signal(
+        &self,
+        issue: &SwarmHandoffIssueEvidence,
+        config: &SwarmHandoffPolicyConfig,
+    ) -> Option<(&'static str, String)> {
+        use handoff_reason_codes::{
+            HANDOFF_ACTIVE_OWNER_OTHER_PROJECT, HANDOFF_ACTIVE_RECENT_AGENT,
+            HANDOFF_ACTIVE_RECENT_GIT_ACTIVITY, HANDOFF_ACTIVE_RECENT_ISSUE_ACTIVITY,
+        };
+
+        if issue_timestamp_is_recent(issue.updated_at, self.observed_at, config)
+            || issue_timestamp_is_recent(issue.last_comment_at, self.observed_at, config)
+        {
+            return Some((HANDOFF_ACTIVE_RECENT_ISSUE_ACTIVITY, issue_pointer(issue)));
+        }
+
+        let assignee = issue.assignee.as_deref()?;
+        if let Some(agent) = self.agents.iter().find(|agent| {
+            agent.agent_name == assignee
+                && agent_timestamp_is_recent(agent.last_active_at, self.observed_at, config)
+        }) {
+            let reason = if config
+                .local_project_key
+                .as_deref()
+                .is_some_and(|local| local != agent.project_key.as_str())
+            {
+                HANDOFF_ACTIVE_OWNER_OTHER_PROJECT
+            } else {
+                HANDOFF_ACTIVE_RECENT_AGENT
+            };
+            return Some((reason, agent_pointer(agent)));
+        }
+
+        self.git_activity
+            .iter()
+            .find(|activity| {
+                git_activity_matches_issue(activity, issue)
+                    && git_timestamp_is_recent(activity.authored_at, self.observed_at, config)
+            })
+            .map(|activity| (HANDOFF_ACTIVE_RECENT_GIT_ACTIVITY, git_pointer(activity)))
+    }
 }
 
 fn default_evidence_schema_version() -> String {
     SWARM_HANDOFF_EVIDENCE_SCHEMA_VERSION.to_string()
+}
+
+fn policy_outcome(
+    bead_id: &str,
+    observed_at: DateTime<Utc>,
+    decision: SwarmHandoffPolicyDecision,
+    reason_codes: Vec<&'static str>,
+    evidence_pointers: Vec<String>,
+    required_action: &str,
+    required_br_command: Option<String>,
+) -> SwarmHandoffPolicyOutcome {
+    let reason_codes = reason_codes
+        .into_iter()
+        .take(MAX_HANDOFF_LIST_ITEMS)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let evidence_pointers = evidence_pointers
+        .into_iter()
+        .take(MAX_HANDOFF_LIST_ITEMS)
+        .map(|pointer| truncate_policy_string(&pointer))
+        .collect::<Vec<_>>();
+    let required_action = truncate_policy_string(required_action);
+    let operator_message = truncate_policy_string(&format!(
+        "{bead_id}: handoff_decision={} reason_codes={} required_action={}",
+        decision.as_str(),
+        reason_codes.join(","),
+        required_action
+    ));
+    SwarmHandoffPolicyOutcome {
+        schema_version: SWARM_HANDOFF_POLICY_SCHEMA_VERSION.to_string(),
+        bead_id: bead_id.to_string(),
+        observed_at,
+        decision,
+        reason_codes,
+        evidence_pointers,
+        required_action,
+        required_br_command,
+        reopen_allowed: decision == SwarmHandoffPolicyDecision::ReadyToReopen,
+        operator_message,
+    }
+}
+
+fn truncate_policy_string(value: &str) -> String {
+    if value.len() <= MAX_HANDOFF_SUMMARY_BYTES {
+        value.to_string()
+    } else {
+        value
+            .chars()
+            .scan(0usize, |bytes, ch| {
+                let next = bytes.saturating_add(ch.len_utf8());
+                if next > MAX_HANDOFF_SUMMARY_BYTES {
+                    None
+                } else {
+                    *bytes = next;
+                    Some(ch)
+                }
+            })
+            .collect()
+    }
+}
+
+fn reopen_command(bead_id: &str) -> String {
+    format!("br update {bead_id} --status open --assignee \"\" --actor <agent>")
+}
+
+fn issue_pointer(issue: &SwarmHandoffIssueEvidence) -> String {
+    format!("issue:{}", issue.bead_id)
+}
+
+fn agent_pointer(agent: &SwarmHandoffAgentEvidence) -> String {
+    format!("agent:{}@{}", agent.agent_name, agent.project_key)
+}
+
+fn reservation_pointer(reservation: &SwarmHandoffReservationEvidence) -> String {
+    format!(
+        "reservation:{}:{}:expires={}",
+        reservation.holder_agent,
+        reservation.path_pattern,
+        reservation.expires_at.to_rfc3339()
+    )
+}
+
+fn rch_pointer(build: &SwarmHandoffRchBuildEvidence) -> String {
+    format!("rch:{}:{:?}", build.build_id, build.state)
+}
+
+fn git_pointer(activity: &SwarmHandoffGitActivityEvidence) -> String {
+    match activity.commit_hash.as_deref() {
+        Some(commit) => format!("git:{commit}:{}", activity.authored_at.to_rfc3339()),
+        None => format!("git:{}", activity.authored_at.to_rfc3339()),
+    }
+}
+
+fn cross_repo_pointer(blocker: &SwarmHandoffCrossRepoBlockerEvidence) -> String {
+    format!(
+        "cross_repo:{}:{:?}:{}",
+        blocker.local_bead_id, blocker.blocker_kind, blocker.sibling_project_key
+    )
+}
+
+fn reservation_matches_bead(
+    reservation: &SwarmHandoffReservationEvidence,
+    bead_id: &str,
+    issue: &SwarmHandoffIssueEvidence,
+) -> bool {
+    reservation.reason.as_deref().is_some_and(|reason| {
+        reason.contains(bead_id)
+            || issue
+                .assignee
+                .as_deref()
+                .is_some_and(|assignee| reason.contains(assignee))
+    })
+}
+
+fn reservation_is_active(
+    reservation: &SwarmHandoffReservationEvidence,
+    observed_at: DateTime<Utc>,
+) -> bool {
+    reservation.released_at.is_none() && reservation.expires_at > observed_at
+}
+
+fn reservation_is_expired(
+    reservation: &SwarmHandoffReservationEvidence,
+    observed_at: DateTime<Utc>,
+) -> bool {
+    reservation.released_at.is_none() && reservation.expires_at <= observed_at
+}
+
+fn rch_build_is_recently_active(
+    build: &SwarmHandoffRchBuildEvidence,
+    observed_at: DateTime<Utc>,
+    config: &SwarmHandoffPolicyConfig,
+) -> bool {
+    build.state.is_active()
+        && !build.detector_progress_stale
+        && !build.detector_heartbeat_stale
+        && (timestamp_is_recent(
+            build.heartbeat_at,
+            observed_at,
+            config.rch_activity_grace_secs,
+        ) || timestamp_is_recent(
+            build.progress_at,
+            observed_at,
+            config.rch_activity_grace_secs,
+        ))
+}
+
+fn issue_timestamp_is_recent(
+    timestamp: Option<DateTime<Utc>>,
+    observed_at: DateTime<Utc>,
+    config: &SwarmHandoffPolicyConfig,
+) -> bool {
+    timestamp_is_recent(timestamp, observed_at, config.issue_activity_grace_secs)
+}
+
+fn agent_timestamp_is_recent(
+    timestamp: Option<DateTime<Utc>>,
+    observed_at: DateTime<Utc>,
+    config: &SwarmHandoffPolicyConfig,
+) -> bool {
+    timestamp_is_recent(timestamp, observed_at, config.agent_activity_grace_secs)
+}
+
+fn git_timestamp_is_recent(
+    timestamp: DateTime<Utc>,
+    observed_at: DateTime<Utc>,
+    config: &SwarmHandoffPolicyConfig,
+) -> bool {
+    timestamp_is_recent(Some(timestamp), observed_at, config.git_activity_grace_secs)
+}
+
+fn timestamp_is_recent(
+    timestamp: Option<DateTime<Utc>>,
+    observed_at: DateTime<Utc>,
+    grace_secs: u64,
+) -> bool {
+    let Some(timestamp) = timestamp else {
+        return false;
+    };
+    let age_secs = observed_at.signed_duration_since(timestamp).num_seconds();
+    age_secs >= 0 && u64::try_from(age_secs).is_ok_and(|age| age <= grace_secs)
+}
+
+fn git_activity_matches_issue(
+    activity: &SwarmHandoffGitActivityEvidence,
+    issue: &SwarmHandoffIssueEvidence,
+) -> bool {
+    activity.agent_name.as_deref() == issue.assignee.as_deref()
+        || activity.summary.contains(&issue.bead_id)
 }
 
 fn validate_schema(schema_version: &str) -> SwarmHandoffEvidenceResult<()> {
