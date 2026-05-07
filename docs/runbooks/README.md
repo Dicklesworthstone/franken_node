@@ -13,6 +13,16 @@ This index tracks high-severity trust-incident runbooks for Section 10.8 (`bd-nr
 | RB-005 | Evidence Ledger Divergence | `docs/runbooks/evidence_ledger_divergence.md` | `fixtures/runbooks/rb_005_evidence_ledger_divergence.json` | high | P2 | 45m | 2026-02-21 | per_release_cycle | `control-plane-split-brain` |
 | RB-006 | Proof Pipeline Outage | `docs/runbooks/proof_pipeline_outage.md` | `fixtures/runbooks/rb_006_proof_pipeline_outage.json` | high | P2 | 30m | 2026-02-21 | per_release_cycle | `malicious-extension-detection` |
 
+## Validation Source-Only Runbooks
+
+These runbooks handle validation-proof preflight blockers. They do not replace
+the Section 10.8 incident fixtures above, and they do not count source-only
+readiness records as green cargo proof.
+
+| Runbook ID | Scenario | Markdown | Related Spec | Last Reviewed | Cadence |
+|---|---|---|---|---|---|
+| VAL-001 | Proof-lane readiness blockers | `docs/runbooks/proof_lane_readiness_blockers.md` | `docs/specs/proof_lane_readiness.md` | 2026-05-07 | per_release_cycle |
+
 ## Required Category Coverage
 
 The following high-severity categories must be covered at minimum:
