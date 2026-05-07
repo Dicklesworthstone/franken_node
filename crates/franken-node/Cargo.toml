@@ -156,6 +156,10 @@ name = "validation_readiness"
 path = "tests/validation_readiness.rs"
 
 [[test]]
+name = "swarm_handoff_evidence"
+path = "tests/swarm_handoff_evidence.rs"
+
+[[test]]
 name = "cli_arg_validation"
 path = "tests/cli_arg_validation.rs"
 
