@@ -1826,6 +1826,7 @@ mod tests {
                 stdout_digest: DigestRef::sha256(b"stdout"),
                 stderr_digest: DigestRef::sha256(b"stderr"),
             },
+            readiness_ref: None,
             trust: ReceiptTrust {
                 generated_by: "validation-broker".to_string(),
                 agent_name: "LavenderElk".to_string(),

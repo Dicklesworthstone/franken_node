@@ -172,6 +172,7 @@ fn receipt_with_expiry(freshness_expires_at: DateTime<Utc>) -> ValidationReceipt
             stdout_digest: DigestRef::sha256(b"stdout"),
             stderr_digest: DigestRef::sha256(b"stderr"),
         },
+        readiness_ref: None,
         trust: ReceiptTrust {
             generated_by: "validation-broker".to_string(),
             agent_name: "LavenderElk".to_string(),

@@ -5,13 +5,15 @@ use frankenengine_node::ops::rch_adapter::{
 };
 use frankenengine_node::ops::validation_broker::{
     CommandSpec, DigestRef, EnvironmentPolicy, FLIGHT_RECORDER_MAX_SNIPPET_BYTES, FallbackPolicy,
-    FlightRecorderRequiredAction, InputDigest, InputSet, OutputPolicy, ProofEvidenceSource,
-    ProofStatusKind, QueueState, RECEIPT_SCHEMA_VERSION, RchMode, RchReceipt, ReceiptArtifacts,
+    FlightRecorderExit, FlightRecorderExitKind, FlightRecorderRequiredAction, InputDigest,
+    InputSet, OutputPolicy, ProofEvidenceSource, ProofStatusKind, QueueState,
+    READINESS_REF_SCHEMA_VERSION, RECEIPT_SCHEMA_VERSION, RchMode, RchReceipt, ReceiptArtifacts,
     ReceiptClassifications, ReceiptRequestRef, ReceiptTrust, SourceOnlyReason, TargetDirPolicy,
     TimeoutClass, ValidationBrokerError, ValidationBrokerQueue, ValidationBrokerRequest,
     ValidationErrorClass, ValidationExit, ValidationExitKind, ValidationFlightRecorderAttempt,
     ValidationFlightRecorderRecovery, ValidationPriority, ValidationProofCacheReuseEvidence,
-    ValidationProofStatus, ValidationReceipt, ValidationTiming, WorkerRequirements, error_codes,
+    ValidationProofStatus, ValidationReadinessRef, ValidationReceipt, ValidationTiming,
+    WorkerRequirements, error_codes, readiness_ref_reason_codes,
     render_validation_proof_status_json, write_validation_receipt_at,
 };
 use frankenengine_node::ops::validation_closeout::{
@@ -214,6 +216,7 @@ fn receipt_for_bead(
             stdout_digest: DigestRef::sha256(b"stdout"),
             stderr_digest: DigestRef::sha256(b"stderr"),
         },
+        readiness_ref: None,
         trust: ReceiptTrust {
             generated_by: "validation-broker".to_string(),
             agent_name: "RusticPlateau".to_string(),
@@ -249,6 +252,65 @@ fn receipt() -> ValidationReceipt {
         Some("ts2"),
         None,
     )
+}
+
+fn readiness_ref(reason_code: &str) -> ValidationReadinessRef {
+    ValidationReadinessRef {
+        schema_version: READINESS_REF_SCHEMA_VERSION.to_string(),
+        path: "artifacts/validation_broker/bd-yyl6t/proof_lane_readiness_fixtures.v1.json"
+            .to_string(),
+        digest: DigestRef::sha256(b"proof-lane-readiness-capsule"),
+        generated_at: ts(2),
+        freshness_expires_at: ts(10),
+        reason_code: reason_code.to_string(),
+        event_code: "PLR-002".to_string(),
+        required_action: "record_source_only_blocker".to_string(),
+    }
+}
+
+fn proof_lane_source_only_receipt(
+    reason: SourceOnlyReason,
+    readiness_ref: Option<ValidationReadinessRef>,
+) -> ValidationReceipt {
+    let mut receipt = receipt_for_bead(
+        "bd-yyl6t.4",
+        ts(1),
+        ts(2),
+        ts(10),
+        ValidationExitKind::SourceOnly,
+        ValidationErrorClass::SourceOnly,
+        TimeoutClass::None,
+        RchMode::NotUsed,
+        None,
+        Some(reason),
+    );
+    receipt.classifications.doctor_readiness = "proof_lane_readiness_blocked".to_string();
+    receipt.readiness_ref = readiness_ref;
+    receipt
+}
+
+fn assert_broker_contract_code(
+    result: Result<(), ValidationBrokerError>,
+    expected: &'static str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let err = match result {
+        Ok(()) => {
+            return Err(format!("broker contract should fail with {expected}").into());
+        }
+        Err(err) => err,
+    };
+    match err {
+        ValidationBrokerError::ContractViolation { code, detail } => {
+            assert!(
+                constant_time::ct_eq(code, expected),
+                "expected {expected}, got {code}: {detail}"
+            );
+            Ok(())
+        }
+        other => {
+            Err(format!("expected broker contract violation {expected}, got {other:?}").into())
+        }
+    }
 }
 
 fn remote_worker(worker_id: &str) -> RchWorkerReadiness {
@@ -515,6 +577,133 @@ fn malformed_receipts_fail_closed() {
             ..
         }
     ));
+}
+
+#[test]
+fn proof_lane_source_only_readiness_ref_surfaces_in_status_and_closeout()
+-> Result<(), Box<dyn std::error::Error>> {
+    let receipt = proof_lane_source_only_receipt(
+        SourceOnlyReason::ProofLaneWorkerAuthFailed,
+        Some(readiness_ref(
+            readiness_ref_reason_codes::WORKER_AUTH_FAILED,
+        )),
+    );
+
+    receipt.validate_at(ts(3))?;
+    let status = ValidationProofStatus::from_receipt(&receipt, ts(3))?;
+    assert_eq!(status.status, ProofStatusKind::SourceOnly);
+    assert_eq!(
+        status
+            .readiness_ref
+            .as_ref()
+            .ok_or("status readiness_ref")?
+            .reason_code,
+        readiness_ref_reason_codes::WORKER_AUTH_FAILED
+    );
+
+    let closeout = build_validation_closeout_report(
+        &receipt,
+        &ValidationCloseoutOptions::new(&receipt.bead_id, "bd-yyl6t.4-closeout"),
+        ts(3),
+    )?;
+    assert_eq!(closeout.status, ValidationCloseoutStatus::SourceOnly);
+    assert!(closeout.close_reason.contains("readiness_ref="));
+    assert!(
+        closeout
+            .close_reason
+            .contains(readiness_ref_reason_codes::WORKER_AUTH_FAILED)
+    );
+    let closeout_json = render_validation_closeout_json(&closeout)?;
+    assert!(closeout_json.contains("\"readiness_ref\""));
+    assert!(closeout_json.contains(readiness_ref_reason_codes::WORKER_AUTH_FAILED));
+
+    Ok(())
+}
+
+#[test]
+fn readiness_ref_rejects_missing_stale_malformed_and_product_rewrites()
+-> Result<(), Box<dyn std::error::Error>> {
+    let missing = proof_lane_source_only_receipt(SourceOnlyReason::ProofLaneWorkerAuthFailed, None);
+    assert_broker_contract_code(
+        missing.validate_at(ts(3)),
+        error_codes::ERR_VB_INVALID_READINESS_REF,
+    )?;
+
+    let mut stale_ref = readiness_ref(readiness_ref_reason_codes::WORKER_AUTH_FAILED);
+    stale_ref.freshness_expires_at = ts(2);
+    let stale = proof_lane_source_only_receipt(
+        SourceOnlyReason::ProofLaneWorkerAuthFailed,
+        Some(stale_ref),
+    );
+    assert_broker_contract_code(
+        stale.validate_at(ts(3)),
+        error_codes::ERR_VB_STALE_READINESS_REF,
+    )?;
+
+    for bad_path in [
+        "../capsule.json",
+        "artifacts/validation_broker/bd-yyl6t/\0capsule.json",
+    ] {
+        let mut bad_ref = readiness_ref(readiness_ref_reason_codes::WORKER_AUTH_FAILED);
+        bad_ref.path = bad_path.to_string();
+        let bad_receipt = proof_lane_source_only_receipt(
+            SourceOnlyReason::ProofLaneWorkerAuthFailed,
+            Some(bad_ref),
+        );
+        assert_broker_contract_code(
+            bad_receipt.validate_at(ts(3)),
+            error_codes::ERR_VB_INVALID_READINESS_REF,
+        )?;
+    }
+
+    let mut bad_digest_ref = readiness_ref(readiness_ref_reason_codes::WORKER_AUTH_FAILED);
+    bad_digest_ref.digest.hex = "not-a-sha256".to_string();
+    let bad_digest = proof_lane_source_only_receipt(
+        SourceOnlyReason::ProofLaneWorkerAuthFailed,
+        Some(bad_digest_ref),
+    );
+    assert_broker_contract_code(
+        bad_digest.validate_at(ts(3)),
+        error_codes::ERR_VB_INVALID_READINESS_REF,
+    )?;
+
+    let mut product_failure = receipt_for_bead(
+        "bd-yyl6t-product",
+        ts(1),
+        ts(2),
+        ts(10),
+        ValidationExitKind::Failed,
+        ValidationErrorClass::TestFailure,
+        TimeoutClass::None,
+        RchMode::Remote,
+        Some("ts2"),
+        None,
+    );
+    product_failure.readiness_ref = Some(readiness_ref(
+        readiness_ref_reason_codes::WORKER_AUTH_FAILED,
+    ));
+    assert_broker_contract_code(
+        product_failure.validate_at(ts(3)),
+        error_codes::ERR_VB_INVALID_READINESS_REF,
+    )?;
+
+    let mut mismatch = proof_lane_source_only_receipt(
+        SourceOnlyReason::ProofLaneOverrideNotHonored,
+        Some(readiness_ref(
+            readiness_ref_reason_codes::WORKER_AUTH_FAILED,
+        )),
+    );
+    assert_broker_contract_code(
+        mismatch.validate_at(ts(3)),
+        error_codes::ERR_VB_INVALID_READINESS_REF,
+    )?;
+
+    mismatch.readiness_ref = Some(readiness_ref(
+        readiness_ref_reason_codes::OVERRIDE_NOT_HONORED,
+    ));
+    mismatch.validate_at(ts(3))?;
+
+    Ok(())
 }
 
 #[test]
@@ -1157,6 +1346,43 @@ fn flight_recorder_model_rejects_invalid_attempts_with_stable_codes()
     assert_flight_recorder_contract_code(
         unsorted.validate_at(flight_recorder_now()),
         error_codes::ERR_VFR_INVALID_OBSERVATION_ORDER,
+    )?;
+
+    let mut infra_readiness = base_flight_recorder_attempt()?;
+    infra_readiness.adapter_outcome = None;
+    infra_readiness.exit = FlightRecorderExit {
+        kind: FlightRecorderExitKind::WorkerInfra,
+        code: None,
+        signal: None,
+        timeout_class: TimeoutClass::None,
+        error_class: ValidationErrorClass::WorkerInfra,
+        retryable: true,
+        product_failure: false,
+    };
+    infra_readiness.readiness_ref = Some(readiness_ref(
+        readiness_ref_reason_codes::SAME_TOOLCHAIN_MISSING,
+    ));
+    infra_readiness.validate_at(flight_recorder_now())?;
+
+    let mut product_rewrite = base_flight_recorder_attempt()?;
+    product_rewrite.readiness_ref = Some(readiness_ref(
+        readiness_ref_reason_codes::WORKER_AUTH_FAILED,
+    ));
+    assert_flight_recorder_contract_code(
+        product_rewrite.validate_at(flight_recorder_now()),
+        error_codes::ERR_VFR_INVALID_READINESS_REF,
+    )?;
+
+    let mut bad_ref = infra_readiness;
+    bad_ref
+        .readiness_ref
+        .as_mut()
+        .ok_or("flight recorder readiness_ref")?
+        .digest
+        .hex = "bad-digest".to_string();
+    assert_flight_recorder_contract_code(
+        bad_ref.validate_at(flight_recorder_now()),
+        error_codes::ERR_VFR_INVALID_READINESS_REF,
     )?;
 
     Ok(())

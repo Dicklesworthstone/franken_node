@@ -183,6 +183,7 @@ mod tests {
                 exit: None,
                 reason: None,
                 proof_cache: None,
+                readiness_ref: None,
                 observed_at: chrono::Utc::now(),
             }],
             rch_workers: vec![RchWorkerReadiness {

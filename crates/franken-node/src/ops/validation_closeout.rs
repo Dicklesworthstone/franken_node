@@ -5,7 +5,7 @@
 
 use crate::ops::validation_broker::{
     ProofEvidenceSource, RchMode, ValidationBrokerError, ValidationErrorClass, ValidationExitKind,
-    ValidationProofCacheReuseEvidence, ValidationReceipt, error_codes,
+    ValidationProofCacheReuseEvidence, ValidationReadinessRef, ValidationReceipt, error_codes,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -94,6 +94,8 @@ pub struct ValidationCloseoutReport {
     pub proof_source: ProofEvidenceSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proof_cache: Option<ValidationProofCacheReuseEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_ref: Option<ValidationReadinessRef>,
     pub close_reason: String,
     pub agent_mail_markdown: String,
     pub receipt: ValidationCloseoutReceiptSummary,
@@ -115,6 +117,7 @@ pub struct ValidationCloseoutReceiptSummary {
     pub rch_worker_id: Option<String>,
     pub rch_remote_required: bool,
     pub source_only_reason: Option<String>,
+    pub readiness_ref: Option<ValidationReadinessRef>,
     pub artifact_stdout_path: String,
     pub artifact_stderr_path: String,
     pub artifact_summary_path: String,
@@ -219,6 +222,7 @@ pub fn build_validation_closeout_report(
         status_label: status.as_str().to_string(),
         proof_source,
         proof_cache: options.proof_cache.clone(),
+        readiness_ref: receipt.readiness_ref.clone(),
         close_reason,
         agent_mail_markdown,
         receipt: summary,
@@ -358,6 +362,7 @@ fn receipt_summary(receipt: &ValidationReceipt) -> ValidationCloseoutReceiptSumm
             .classifications
             .source_only_reason
             .map(|reason| reason.as_str().to_string()),
+        readiness_ref: receipt.readiness_ref.clone(),
         artifact_stdout_path: receipt.artifacts.stdout_path.clone(),
         artifact_stderr_path: receipt.artifacts.stderr_path.clone(),
         artifact_summary_path: receipt.artifacts.summary_path.clone(),
@@ -416,8 +421,19 @@ fn render_close_reason(
             cache.cache_key_hex, cache.receipt_path, cache.entry_path
         )
     });
+    let readiness_suffix = receipt.readiness_ref.as_ref().map_or_else(String::new, |ref_| {
+        format!(
+            " readiness_ref={} readiness_digest={}:{} readiness_reason={} readiness_action={} readiness_fresh_until={}",
+            ref_.path,
+            ref_.digest.algorithm,
+            ref_.digest.hex,
+            ref_.reason_code,
+            ref_.required_action,
+            ref_.freshness_expires_at.to_rfc3339()
+        )
+    });
     format!(
-        "{} validation receipt {} status={} proof_source={} exit={} error_class={} worker={} command=\"{}\" artifacts={}{}{}",
+        "{} validation receipt {} status={} proof_source={} exit={} error_class={} worker={} command=\"{}\" artifacts={}{}{}{}",
         receipt.bead_id,
         receipt.receipt_id,
         status.as_str(),
@@ -428,6 +444,7 @@ fn render_close_reason(
         command,
         receipt.artifacts.summary_path,
         cache_suffix,
+        readiness_suffix,
         warning_suffix
     )
 }
@@ -478,6 +495,22 @@ fn render_agent_mail_markdown(
         lines.push(format!(
             "- proof_cache_reason: `{}` action=`{}` event=`{}`",
             cache.reason_code, cache.required_action, cache.event_code
+        ));
+    }
+
+    if let Some(readiness_ref) = &summary.readiness_ref {
+        lines.push(format!("- readiness_ref: `{}`", readiness_ref.path));
+        lines.push(format!(
+            "- readiness_digest: `{}:{}`",
+            readiness_ref.digest.algorithm, readiness_ref.digest.hex
+        ));
+        lines.push(format!(
+            "- readiness_reason: `{}` action=`{}` event=`{}`",
+            readiness_ref.reason_code, readiness_ref.required_action, readiness_ref.event_code
+        ));
+        lines.push(format!(
+            "- readiness_fresh_until: `{}`",
+            readiness_ref.freshness_expires_at.to_rfc3339()
         ));
     }
 

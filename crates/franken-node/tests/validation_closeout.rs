@@ -1,10 +1,11 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use frankenengine_node::ops::validation_broker::{
     CommandSpec, DigestRef, EnvironmentPolicy, FallbackPolicy, InputDigest, InputSet, OutputPolicy,
-    RECEIPT_SCHEMA_VERSION, RchMode, RchReceipt, ReceiptArtifacts, ReceiptClassifications,
-    ReceiptRequestRef, ReceiptTrust, SourceOnlyReason, TargetDirPolicy, TimeoutClass,
-    ValidationBrokerRequest, ValidationErrorClass, ValidationExit, ValidationExitKind,
-    ValidationPriority, ValidationReceipt, ValidationTiming,
+    READINESS_REF_SCHEMA_VERSION, RECEIPT_SCHEMA_VERSION, RchMode, RchReceipt, ReceiptArtifacts,
+    ReceiptClassifications, ReceiptRequestRef, ReceiptTrust, SourceOnlyReason, TargetDirPolicy,
+    TimeoutClass, ValidationBrokerRequest, ValidationErrorClass, ValidationExit,
+    ValidationExitKind, ValidationPriority, ValidationReadinessRef, ValidationReceipt,
+    ValidationTiming, readiness_ref_reason_codes,
 };
 use frankenengine_node::ops::validation_closeout::{
     ValidationCloseoutError, ValidationCloseoutOptions, ValidationCloseoutStatus,
@@ -152,6 +153,7 @@ fn receipt(
             stdout_digest: DigestRef::sha256(b"stdout"),
             stderr_digest: DigestRef::sha256(b"stderr"),
         },
+        readiness_ref: None,
         trust: ReceiptTrust {
             generated_by: "validation-broker".to_string(),
             agent_name: "RusticPlateau".to_string(),
@@ -166,6 +168,19 @@ fn receipt(
             doctor_readiness: "ready".to_string(),
             ci_consumable: true,
         },
+    }
+}
+
+fn readiness_ref(reason_code: &str) -> ValidationReadinessRef {
+    ValidationReadinessRef {
+        schema_version: READINESS_REF_SCHEMA_VERSION.to_string(),
+        path: "artifacts/validation_broker/bd-y4mkq/proof-lane/readiness.json".to_string(),
+        digest: DigestRef::sha256(b"validation-closeout-readiness-ref"),
+        generated_at: ts(1),
+        freshness_expires_at: ts(60),
+        reason_code: reason_code.to_string(),
+        event_code: "PLR-002".to_string(),
+        required_action: "record_source_only_blocker".to_string(),
     }
 }
 
@@ -216,6 +231,45 @@ fn source_only_receipt_warns_with_explicit_caveat() {
             .any(|warning| warning.contains("source-only fallback"))
     );
     assert!(report.close_reason.contains("status=SOURCE_ONLY"));
+}
+
+#[test]
+fn source_only_closeout_cites_readiness_ref() -> Result<(), Box<dyn std::error::Error>> {
+    let now = ts(1);
+    let mut receipt = receipt(
+        "bd-y4mkq",
+        now,
+        ValidationExitKind::SourceOnly,
+        ValidationErrorClass::SourceOnly,
+        TimeoutClass::None,
+        ts(60),
+    );
+    receipt.classifications.source_only_reason = Some(SourceOnlyReason::ProofLaneWorkerAuthFailed);
+    receipt.readiness_ref = Some(readiness_ref(
+        readiness_ref_reason_codes::WORKER_AUTH_FAILED,
+    ));
+    let options = ValidationCloseoutOptions::new("bd-y4mkq", "vc-readiness-ref");
+
+    let report = build_validation_closeout_report(&receipt, &options, ts(2))?;
+
+    assert_eq!(report.status, ValidationCloseoutStatus::SourceOnly);
+    assert!(report.close_reason.contains("readiness_ref="));
+    assert!(
+        report
+            .agent_mail_markdown
+            .contains("- readiness_reason: `PLR_WORKER_AUTH_FAILED`")
+    );
+    let json = serde_json::to_value(&report)?;
+    assert_eq!(
+        json["readiness_ref"]["reason_code"],
+        readiness_ref_reason_codes::WORKER_AUTH_FAILED
+    );
+    assert_eq!(
+        json["receipt"]["readiness_ref"]["required_action"],
+        "record_source_only_blocker"
+    );
+
+    Ok(())
 }
 
 #[test]

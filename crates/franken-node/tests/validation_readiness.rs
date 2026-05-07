@@ -132,6 +132,7 @@ fn receipt(
             stdout_digest: DigestRef::sha256(b"stdout"),
             stderr_digest: DigestRef::sha256(b"stderr"),
         },
+        readiness_ref: None,
         trust: ReceiptTrust {
             generated_by: "validation-broker".to_string(),
             agent_name: "RusticPlateau".to_string(),
@@ -811,6 +812,7 @@ fn worker_timeout_is_warn_not_product_failure() {
             exit: None,
             reason: Some("worker timeout".to_string()),
             proof_cache: None,
+            readiness_ref: None,
             observed_at: ts(30),
         }],
         receipts: vec![receipt(
@@ -864,6 +866,7 @@ fn failed_status_with_product_exit_fails_readiness() {
             }),
             reason: Some("test failure".to_string()),
             proof_cache: None,
+            readiness_ref: None,
             observed_at: ts(30),
         }],
         rch_workers: vec![remote_worker()],

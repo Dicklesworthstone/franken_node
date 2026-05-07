@@ -18,6 +18,7 @@ pub const REQUEST_SCHEMA_VERSION: &str = "franken-node/validation-broker/request
 pub const QUEUE_SCHEMA_VERSION: &str = "franken-node/validation-broker/queue/v1";
 pub const RECEIPT_SCHEMA_VERSION: &str = "franken-node/validation-broker/receipt/v1";
 pub const STATUS_SCHEMA_VERSION: &str = "franken-node/validation-broker/status/v1";
+pub const READINESS_REF_SCHEMA_VERSION: &str = "franken-node/validation-broker/readiness-ref/v1";
 pub const FLIGHT_RECORDER_ATTEMPT_SCHEMA_VERSION: &str =
     "franken-node/validation-flight-recorder/attempt/v1";
 pub const FLIGHT_RECORDER_OBSERVATION_SCHEMA_VERSION: &str =
@@ -52,6 +53,8 @@ pub mod error_codes {
     pub const ERR_VB_INVALID_TIMEOUT_CLASS: &str = "ERR_VB_INVALID_TIMEOUT_CLASS";
     pub const ERR_VB_MISSING_ARTIFACT_PATH: &str = "ERR_VB_MISSING_ARTIFACT_PATH";
     pub const ERR_VB_UNDECLARED_SOURCE_ONLY: &str = "ERR_VB_UNDECLARED_SOURCE_ONLY";
+    pub const ERR_VB_INVALID_READINESS_REF: &str = "ERR_VB_INVALID_READINESS_REF";
+    pub const ERR_VB_STALE_READINESS_REF: &str = "ERR_VB_STALE_READINESS_REF";
     pub const ERR_VFR_INVALID_SCHEMA_VERSION: &str = "ERR_VFR_INVALID_SCHEMA_VERSION";
     pub const ERR_VFR_MALFORMED_ATTEMPT: &str = "ERR_VFR_MALFORMED_ATTEMPT";
     pub const ERR_VFR_BEAD_MISMATCH: &str = "ERR_VFR_BEAD_MISMATCH";
@@ -62,6 +65,15 @@ pub mod error_codes {
     pub const ERR_VFR_UNBOUNDED_SNIPPET: &str = "ERR_VFR_UNBOUNDED_SNIPPET";
     pub const ERR_VFR_UNREDACTED_ENVIRONMENT: &str = "ERR_VFR_UNREDACTED_ENVIRONMENT";
     pub const ERR_VFR_INVALID_RECOVERY_DECISION: &str = "ERR_VFR_INVALID_RECOVERY_DECISION";
+    pub const ERR_VFR_INVALID_READINESS_REF: &str = "ERR_VFR_INVALID_READINESS_REF";
+    pub const ERR_VFR_STALE_READINESS_REF: &str = "ERR_VFR_STALE_READINESS_REF";
+}
+
+pub mod readiness_ref_reason_codes {
+    pub const WORKER_AUTH_FAILED: &str = "PLR_WORKER_AUTH_FAILED";
+    pub const OVERRIDE_NOT_HONORED: &str = "PLR_OVERRIDE_NOT_HONORED";
+    pub const SAME_TOOLCHAIN_MISSING: &str = "PLR_SAME_TOOLCHAIN_MISSING";
+    pub const LOCAL_FALLBACK_REFUSED: &str = "PLR_LOCAL_FALLBACK_REFUSED";
 }
 
 pub mod flight_recorder_event_codes {
@@ -177,6 +189,10 @@ pub enum SourceOnlyReason {
     ReservedSurface,
     NoCargoRequested,
     DocsOnly,
+    ProofLaneWorkerAuthFailed,
+    ProofLaneOverrideNotHonored,
+    ProofLaneSameToolchainMissing,
+    ProofLaneLocalFallbackRefused,
 }
 
 impl SourceOnlyReason {
@@ -190,6 +206,10 @@ impl SourceOnlyReason {
             Self::ReservedSurface => "reserved_surface",
             Self::NoCargoRequested => "no_cargo_requested",
             Self::DocsOnly => "docs_only",
+            Self::ProofLaneWorkerAuthFailed => "proof_lane_worker_auth_failed",
+            Self::ProofLaneOverrideNotHonored => "proof_lane_override_not_honored",
+            Self::ProofLaneSameToolchainMissing => "proof_lane_same_toolchain_missing",
+            Self::ProofLaneLocalFallbackRefused => "proof_lane_local_fallback_refused",
         }
     }
 }
@@ -253,6 +273,75 @@ pub struct ValidationProofCacheReuseEvidence {
     pub event_code: String,
     pub required_action: String,
     pub diagnostic: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationReadinessRef {
+    pub schema_version: String,
+    pub path: String,
+    pub digest: DigestRef,
+    pub generated_at: DateTime<Utc>,
+    pub freshness_expires_at: DateTime<Utc>,
+    pub reason_code: String,
+    pub event_code: String,
+    pub required_action: String,
+}
+
+impl ValidationReadinessRef {
+    pub fn validate_for_receipt_at(&self, now: DateTime<Utc>) -> Result<(), ValidationBrokerError> {
+        self.validate_at(
+            now,
+            error_codes::ERR_VB_INVALID_READINESS_REF,
+            error_codes::ERR_VB_STALE_READINESS_REF,
+        )
+    }
+
+    pub fn validate_for_flight_recorder_at(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<(), ValidationBrokerError> {
+        self.validate_at(
+            now,
+            error_codes::ERR_VFR_INVALID_READINESS_REF,
+            error_codes::ERR_VFR_STALE_READINESS_REF,
+        )
+    }
+
+    fn validate_at(
+        &self,
+        now: DateTime<Utc>,
+        invalid_code: &'static str,
+        stale_code: &'static str,
+    ) -> Result<(), ValidationBrokerError> {
+        if !constant_time::ct_eq(&self.schema_version, READINESS_REF_SCHEMA_VERSION) {
+            return contract_err(
+                invalid_code,
+                format!(
+                    "unsupported readiness_ref schema_version={}",
+                    self.schema_version
+                ),
+            );
+        }
+        validate_repo_relative_path_with_code(&self.path, "readiness_ref path", invalid_code)?;
+        validate_digest_with_code(&self.digest, "readiness_ref digest", invalid_code)?;
+        validate_non_empty_field(&self.reason_code, "readiness_ref reason_code", invalid_code)?;
+        validate_non_empty_field(&self.event_code, "readiness_ref event_code", invalid_code)?;
+        validate_non_empty_field(
+            &self.required_action,
+            "readiness_ref required_action",
+            invalid_code,
+        )?;
+        if self.freshness_expires_at < self.generated_at {
+            return contract_err(
+                invalid_code,
+                "readiness_ref freshness_expires_at cannot predate generated_at",
+            );
+        }
+        if self.freshness_expires_at < now {
+            return contract_err(stale_code, "readiness_ref freshness has expired");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -806,6 +895,8 @@ pub struct ValidationFlightRecorderAttempt {
     pub exit: FlightRecorderExit,
     pub artifacts: FlightRecorderArtifacts,
     pub recovery_ref: Option<FlightRecorderRecoveryRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_ref: Option<ValidationReadinessRef>,
     pub trust: FlightRecorderTrust,
 }
 
@@ -864,6 +955,7 @@ impl ValidationFlightRecorderAttempt {
         if let Some(recovery_ref) = &self.recovery_ref {
             recovery_ref.validate()?;
         }
+        validate_flight_recorder_readiness_ref(self, now)?;
         self.trust.validate()?;
 
         Ok(())
@@ -1288,6 +1380,8 @@ pub struct ValidationProofStatus {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof_cache: Option<ValidationProofCacheReuseEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_ref: Option<ValidationReadinessRef>,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -1310,6 +1404,7 @@ impl ValidationProofStatus {
             exit: None,
             reason: Some("no validation broker request or receipt matched".to_string()),
             proof_cache: None,
+            readiness_ref: None,
             observed_at,
         }
     }
@@ -1344,6 +1439,7 @@ impl ValidationProofStatus {
             exit: None,
             reason: None,
             proof_cache: None,
+            readiness_ref: None,
             observed_at,
         }
     }
@@ -1380,6 +1476,7 @@ impl ValidationProofStatus {
                 .source_only_reason
                 .map(|reason| reason.as_str().to_string()),
             proof_cache: None,
+            readiness_ref: receipt.readiness_ref.clone(),
             observed_at,
         })
     }
@@ -1414,6 +1511,7 @@ impl ValidationProofStatus {
             exit: Some(receipt.exit.clone()),
             reason: Some(format!("proof cache hit: {}", proof_cache.reason_code)),
             proof_cache: Some(proof_cache),
+            readiness_ref: receipt.readiness_ref.clone(),
             observed_at,
         })
     }
@@ -1751,6 +1849,8 @@ pub struct ValidationReceipt {
     pub timing: ValidationTiming,
     pub exit: ValidationExit,
     pub artifacts: ReceiptArtifacts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_ref: Option<ValidationReadinessRef>,
     pub trust: ReceiptTrust,
     pub classifications: ReceiptClassifications,
 }
@@ -1837,6 +1937,7 @@ impl ValidationReceipt {
                 detail: "source-only fallback requires an allowed reason".to_string(),
             });
         }
+        validate_receipt_readiness_ref(self, now)?;
 
         Ok(())
     }
@@ -1897,6 +1998,13 @@ fn flight_recorder_err<T>(
     code: &'static str,
     detail: impl Into<String>,
 ) -> Result<T, ValidationBrokerError> {
+    contract_err(code, detail)
+}
+
+fn contract_err<T>(
+    code: &'static str,
+    detail: impl Into<String>,
+) -> Result<T, ValidationBrokerError> {
     Err(ValidationBrokerError::ContractViolation {
         code,
         detail: detail.into(),
@@ -1931,23 +2039,47 @@ fn validate_no_nul(
     Ok(())
 }
 
-fn validate_digest(digest: &DigestRef, field: &str) -> Result<(), ValidationBrokerError> {
-    if !digest.is_valid_sha256() {
-        return flight_recorder_err(
-            error_codes::ERR_VFR_MALFORMED_ATTEMPT,
-            format!("{field} must be a SHA-256 digest"),
+fn validate_non_empty_field(
+    value: &str,
+    field: &str,
+    code: &'static str,
+) -> Result<(), ValidationBrokerError> {
+    if value.trim().is_empty() || value.contains('\0') {
+        return contract_err(
+            code,
+            format!("{field} must be non-empty and free of NUL bytes"),
         );
     }
     Ok(())
 }
 
+fn validate_digest(digest: &DigestRef, field: &str) -> Result<(), ValidationBrokerError> {
+    validate_digest_with_code(digest, field, error_codes::ERR_VFR_MALFORMED_ATTEMPT)
+}
+
+fn validate_digest_with_code(
+    digest: &DigestRef,
+    field: &str,
+    code: &'static str,
+) -> Result<(), ValidationBrokerError> {
+    if !digest.is_valid_sha256() {
+        return contract_err(code, format!("{field} must be a SHA-256 digest"));
+    }
+    Ok(())
+}
+
 fn validate_repo_relative_path(path: &str, field: &str) -> Result<(), ValidationBrokerError> {
-    validate_no_nul(path, error_codes::ERR_VFR_INVALID_ARTIFACT_PATH, field)?;
+    validate_repo_relative_path_with_code(path, field, error_codes::ERR_VFR_INVALID_ARTIFACT_PATH)
+}
+
+fn validate_repo_relative_path_with_code(
+    path: &str,
+    field: &str,
+    code: &'static str,
+) -> Result<(), ValidationBrokerError> {
+    validate_no_nul(path, code, field)?;
     if path.trim().is_empty() {
-        return flight_recorder_err(
-            error_codes::ERR_VFR_INVALID_ARTIFACT_PATH,
-            format!("{field} must be non-empty"),
-        );
+        return contract_err(code, format!("{field} must be non-empty"));
     }
 
     let parsed = Path::new(path);
@@ -1959,13 +2091,116 @@ fn validate_repo_relative_path(path: &str, field: &str) -> Result<(), Validation
             )
         })
     {
-        return flight_recorder_err(
-            error_codes::ERR_VFR_INVALID_ARTIFACT_PATH,
+        return contract_err(
+            code,
             format!("{field} must be repo-relative without traversal"),
         );
     }
 
     Ok(())
+}
+
+fn validate_receipt_readiness_ref(
+    receipt: &ValidationReceipt,
+    now: DateTime<Utc>,
+) -> Result<(), ValidationBrokerError> {
+    let requires_readiness_ref = receipt
+        .classifications
+        .source_only_reason
+        .is_some_and(SourceOnlyReason::requires_readiness_ref);
+    match (
+        &receipt.readiness_ref,
+        receipt.classifications.source_only_reason,
+    ) {
+        (Some(readiness_ref), Some(reason)) if reason.requires_readiness_ref() => {
+            readiness_ref.validate_for_receipt_at(now)?;
+            if receipt.exit.kind != ValidationExitKind::SourceOnly
+                || !receipt.classifications.source_only_fallback
+                || receipt.exit.error_class != ValidationErrorClass::SourceOnly
+            {
+                return contract_err(
+                    error_codes::ERR_VB_INVALID_READINESS_REF,
+                    "readiness_ref is only valid for source-only proof-lane blockers",
+                );
+            }
+            if !readiness_ref_reason_matches_source_only(reason, readiness_ref) {
+                return contract_err(
+                    error_codes::ERR_VB_INVALID_READINESS_REF,
+                    "readiness_ref reason_code does not match source_only_reason",
+                );
+            }
+        }
+        (Some(_), _) => {
+            return contract_err(
+                error_codes::ERR_VB_INVALID_READINESS_REF,
+                "readiness_ref requires a proof-lane source_only_reason",
+            );
+        }
+        (None, _) if requires_readiness_ref => {
+            return contract_err(
+                error_codes::ERR_VB_INVALID_READINESS_REF,
+                "proof-lane source-only closeout requires readiness_ref",
+            );
+        }
+        (None, _) => {}
+    }
+    Ok(())
+}
+
+fn validate_flight_recorder_readiness_ref(
+    attempt: &ValidationFlightRecorderAttempt,
+    now: DateTime<Utc>,
+) -> Result<(), ValidationBrokerError> {
+    if let Some(readiness_ref) = &attempt.readiness_ref {
+        readiness_ref.validate_for_flight_recorder_at(now)?;
+        if !matches!(
+            attempt.exit.kind,
+            FlightRecorderExitKind::WorkerInfra | FlightRecorderExitKind::Deferred
+        ) {
+            return contract_err(
+                error_codes::ERR_VFR_INVALID_READINESS_REF,
+                "flight recorder readiness_ref is only valid for worker-infra or deferred attempts",
+            );
+        }
+    }
+    Ok(())
+}
+
+impl SourceOnlyReason {
+    const fn requires_readiness_ref(self) -> bool {
+        matches!(
+            self,
+            Self::ProofLaneWorkerAuthFailed
+                | Self::ProofLaneOverrideNotHonored
+                | Self::ProofLaneSameToolchainMissing
+                | Self::ProofLaneLocalFallbackRefused
+        )
+    }
+}
+
+fn readiness_ref_reason_matches_source_only(
+    reason: SourceOnlyReason,
+    readiness_ref: &ValidationReadinessRef,
+) -> bool {
+    match reason {
+        SourceOnlyReason::ProofLaneWorkerAuthFailed => constant_time::ct_eq(
+            &readiness_ref.reason_code,
+            readiness_ref_reason_codes::WORKER_AUTH_FAILED,
+        ),
+        SourceOnlyReason::ProofLaneOverrideNotHonored => constant_time::ct_eq(
+            &readiness_ref.reason_code,
+            readiness_ref_reason_codes::OVERRIDE_NOT_HONORED,
+        ),
+        SourceOnlyReason::ProofLaneSameToolchainMissing => constant_time::ct_eq(
+            &readiness_ref.reason_code,
+            readiness_ref_reason_codes::SAME_TOOLCHAIN_MISSING,
+        ),
+        SourceOnlyReason::ProofLaneLocalFallbackRefused => constant_time::ct_eq(
+            &readiness_ref.reason_code,
+            readiness_ref_reason_codes::LOCAL_FALLBACK_REFUSED,
+        ),
+        _ => false,
+    }
 }
 
 fn validate_bounded_snippet(value: &str, field: &str) -> Result<(), ValidationBrokerError> {
@@ -2538,6 +2773,7 @@ mod tests {
                 stdout_digest: DigestRef::sha256(b"stdout"),
                 stderr_digest: DigestRef::sha256(b"stderr"),
             },
+            readiness_ref: None,
             trust: ReceiptTrust {
                 generated_by: "validation-broker".to_string(),
                 agent_name: "PinkFern".to_string(),
@@ -2940,6 +3176,7 @@ mod tests {
                 path: "artifacts/validation_broker/bd-yn4xb/flight-recorder/recovery.vfr-attempt-bd-yn4xb.json".to_string(),
                 digest: DigestRef::sha256(b"recovery"),
             }),
+            readiness_ref: None,
             trust: FlightRecorderTrust {
                 generated_by: "validation-flight-recorder".to_string(),
                 agent_name: "PearlLeopard".to_string(),

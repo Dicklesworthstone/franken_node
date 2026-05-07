@@ -562,6 +562,7 @@ mod tests {
                 exit: None,
                 reason: None,
                 proof_cache: None,
+                readiness_ref: None,
                 observed_at: now(),
             }],
             rch_workers: vec![degraded_worker()],
