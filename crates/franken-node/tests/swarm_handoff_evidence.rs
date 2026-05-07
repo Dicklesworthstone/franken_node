@@ -10,7 +10,15 @@ use frankenengine_node::ops::swarm_handoff::{
     build_swarm_handoff_readiness_report, handoff_reason_codes,
     render_swarm_handoff_readiness_json,
 };
+use serde::Deserialize;
 use serde_json::Value;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+const SWARM_HANDOFF_REPLAY_FIXTURE_SCHEMA_VERSION: &str =
+    "franken-node/swarm-handoff/replay-fixtures/v1";
 
 fn ts(seconds: i64) -> DateTime<Utc> {
     Utc.timestamp_opt(seconds, 0)
@@ -154,6 +162,86 @@ fn cross_repo_blocker(
         cleared_at: cleared.then(|| ts(100)),
         clearing_commit_hash: cleared.then(|| "abc1234".to_string()),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct SwarmHandoffReplayFixtureCatalog {
+    schema_version: String,
+    cases: Vec<SwarmHandoffReplayFixtureCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SwarmHandoffReplayFixtureCase {
+    case_id: String,
+    trace_id: String,
+    generated_at_utc: DateTime<Utc>,
+    evidence: SwarmHandoffReplayFixtureEvidence,
+    expected: SwarmHandoffReplayFixtureExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct SwarmHandoffReplayFixtureEvidence {
+    schema_version: String,
+    observed_at: DateTime<Utc>,
+    beads_json: Vec<SwarmHandoffIssueEvidence>,
+    agent_mail_profiles: Vec<SwarmHandoffAgentEvidence>,
+    agent_mail_reservations: Vec<SwarmHandoffReservationEvidence>,
+    rch_queue_snapshot: Vec<SwarmHandoffRchBuildEvidence>,
+    git_activity_summary: Vec<SwarmHandoffGitActivityEvidence>,
+    sibling_blocker_mirrors: Vec<SwarmHandoffCrossRepoBlockerEvidence>,
+}
+
+impl SwarmHandoffReplayFixtureEvidence {
+    fn into_input(self) -> SwarmHandoffEvidenceInput {
+        SwarmHandoffEvidenceInput {
+            schema_version: self.schema_version,
+            observed_at: self.observed_at,
+            issues: self.beads_json,
+            agents: self.agent_mail_profiles,
+            reservations: self.agent_mail_reservations,
+            rch_builds: self.rch_queue_snapshot,
+            git_activity: self.git_activity_summary,
+            cross_repo_blockers: self.sibling_blocker_mirrors,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SwarmHandoffReplayFixtureExpected {
+    decisions: Vec<SwarmHandoffReplayExpectedDecision>,
+    safe_reopen_commands: Vec<String>,
+    human_contains: Vec<String>,
+    log_assertions: Vec<SwarmHandoffReplayExpectedLog>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SwarmHandoffReplayExpectedDecision {
+    bead_id: String,
+    decision: SwarmHandoffPolicyDecision,
+    blocker_class: String,
+    reopen_allowed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SwarmHandoffReplayExpectedLog {
+    bead_id: String,
+    current_owner: Option<String>,
+    reservation_holder: Option<String>,
+    blocker_class: String,
+    evidence_freshness_age_secs: Option<i64>,
+    required_action_contains: String,
+}
+
+fn replay_fixture_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/swarm_handoff_replay_e2e.json")
+}
+
+fn load_replay_fixture_catalog(
+    path: &Path,
+) -> Result<SwarmHandoffReplayFixtureCatalog, Box<dyn std::error::Error>> {
+    let fixture = fs::read_to_string(path)?;
+    let catalog = serde_json::from_str(&fixture)?;
+    Ok(catalog)
 }
 
 #[test]
@@ -957,6 +1045,140 @@ fn readiness_report_fails_closed_but_still_renders_malformed_evidence()
         json["warnings"][0],
         "evidence validation failed: invalid swarm handoff evidence schema `franken-node/swarm-handoff/evidence/v0`, expected `franken-node/swarm-handoff/evidence/v1`"
     );
+
+    Ok(())
+}
+
+#[test]
+fn fixture_replay_e2e_parses_artifacts_and_logs_decisions() -> Result<(), Box<dyn std::error::Error>>
+{
+    let catalog = load_replay_fixture_catalog(&replay_fixture_path())?;
+    assert_eq!(
+        catalog.schema_version,
+        SWARM_HANDOFF_REPLAY_FIXTURE_SCHEMA_VERSION
+    );
+
+    for case in catalog.cases {
+        let SwarmHandoffReplayFixtureCase {
+            case_id,
+            trace_id,
+            generated_at_utc,
+            evidence,
+            expected,
+        } = case;
+        let input = evidence.into_input();
+        let report = build_swarm_handoff_readiness_report(
+            &input,
+            &policy_config(),
+            trace_id.clone(),
+            generated_at_utc,
+        );
+
+        assert_eq!(
+            report.decision_logs.len(),
+            report.decisions.len(),
+            "{case_id}: every decision should have a structured log entry"
+        );
+
+        for expected_decision in expected.decisions {
+            let Some(decision) = report
+                .decisions
+                .iter()
+                .find(|decision| decision.bead_id == expected_decision.bead_id)
+            else {
+                return Err(format!(
+                    "{case_id}: missing expected decision for {}",
+                    expected_decision.bead_id
+                )
+                .into());
+            };
+            assert_eq!(
+                decision.decision, expected_decision.decision,
+                "{case_id}: decision mismatch for {}",
+                expected_decision.bead_id
+            );
+            assert_eq!(
+                decision.blocker_class, expected_decision.blocker_class,
+                "{case_id}: blocker class mismatch for {}",
+                expected_decision.bead_id
+            );
+            assert_eq!(
+                decision.reopen_allowed, expected_decision.reopen_allowed,
+                "{case_id}: reopen flag mismatch for {}",
+                expected_decision.bead_id
+            );
+        }
+
+        let safe_reopen_beads = report
+            .safe_reopen_commands
+            .iter()
+            .map(|command| command.bead_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            safe_reopen_beads, expected.safe_reopen_commands,
+            "{case_id}: safe reopen command list changed"
+        );
+
+        for expected_log in expected.log_assertions {
+            let Some(log) = report
+                .decision_logs
+                .iter()
+                .find(|log| log.bead_id == expected_log.bead_id)
+            else {
+                return Err(format!(
+                    "{case_id}: missing expected log for {}",
+                    expected_log.bead_id
+                )
+                .into());
+            };
+            assert_eq!(log.trace_id, trace_id, "{case_id}: trace id mismatch");
+            assert_eq!(
+                log.current_owner, expected_log.current_owner,
+                "{case_id}: current owner mismatch for {}",
+                expected_log.bead_id
+            );
+            assert_eq!(
+                log.reservation_holder, expected_log.reservation_holder,
+                "{case_id}: reservation holder mismatch for {}",
+                expected_log.bead_id
+            );
+            assert_eq!(
+                log.blocker_class, expected_log.blocker_class,
+                "{case_id}: log blocker class mismatch for {}",
+                expected_log.bead_id
+            );
+            assert_eq!(
+                log.evidence_freshness_age_secs, expected_log.evidence_freshness_age_secs,
+                "{case_id}: freshness age mismatch for {}",
+                expected_log.bead_id
+            );
+            assert!(
+                log.required_action
+                    .contains(&expected_log.required_action_contains),
+                "{case_id}: required action for {} did not contain `{}`; got `{}`",
+                expected_log.bead_id,
+                expected_log.required_action_contains,
+                log.required_action
+            );
+        }
+
+        for needle in expected.human_contains {
+            assert!(
+                report.agent_mail_markdown.contains(&needle),
+                "{case_id}: human output did not contain `{needle}`"
+            );
+        }
+
+        let json: Value = serde_json::from_str(&render_swarm_handoff_readiness_json(&report)?)?;
+        assert_eq!(json["trace_id"], trace_id);
+        assert_eq!(
+            json["decision_logs"]
+                .as_array()
+                .expect("decision_logs should render as an array")
+                .len(),
+            report.decision_logs.len()
+        );
+    }
 
     Ok(())
 }

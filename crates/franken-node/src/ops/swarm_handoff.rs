@@ -354,6 +354,7 @@ pub struct SwarmHandoffReadinessReport {
     pub evidence_summary: Option<SwarmHandoffEvidenceSummary>,
     pub decision_counts: Vec<SwarmHandoffDecisionCount>,
     pub decisions: Vec<SwarmHandoffDecisionView>,
+    pub decision_logs: Vec<SwarmHandoffDecisionLogEntry>,
     pub active_agents: Vec<SwarmHandoffAgentView>,
     pub claimed_beads: Vec<SwarmHandoffClaimedBeadView>,
     pub active_reservations: Vec<SwarmHandoffReservationView>,
@@ -391,6 +392,20 @@ pub struct SwarmHandoffDecisionView {
     pub reason_codes: Vec<String>,
     pub evidence_pointers: Vec<String>,
     pub operator_message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffDecisionLogEntry {
+    pub trace_id: String,
+    pub bead_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_holder: Option<String>,
+    pub blocker_class: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_freshness_age_secs: Option<i64>,
+    pub required_action: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1145,6 +1160,10 @@ pub fn build_swarm_handoff_readiness_report(
         .collect::<Vec<_>>();
 
     let trace_id = truncate_policy_string(&trace_id.into());
+    let decision_logs = decisions
+        .iter()
+        .map(|decision| decision_log_entry(&trace_id, decision))
+        .collect::<Vec<_>>();
     let mut report = SwarmHandoffReadinessReport {
         schema_version: SWARM_HANDOFF_READINESS_SCHEMA_VERSION.to_string(),
         command: SWARM_HANDOFF_READINESS_COMMAND.to_string(),
@@ -1154,6 +1173,7 @@ pub fn build_swarm_handoff_readiness_report(
         evidence_summary,
         decision_counts,
         decisions,
+        decision_logs,
         active_agents,
         claimed_beads,
         active_reservations,
@@ -1202,6 +1222,7 @@ pub fn render_swarm_handoff_readiness_human(report: &SwarmHandoffReadinessReport
             "- cleared_cross_repo_blockers: {}",
             report.cleared_cross_repo_blockers.len()
         ),
+        format!("- decision_logs: {}", report.decision_logs.len()),
         format!("- stale_candidates: {}", report.stale_candidates.len()),
         format!(
             "- safe_reopen_commands: {}",
@@ -1254,6 +1275,23 @@ pub fn render_swarm_handoff_readiness_human(report: &SwarmHandoffReadinessReport
             lines.push(format!(
                 "  - evidence_pointers: `{}`",
                 decision.evidence_pointers.join(",")
+            ));
+        }
+    }
+
+    if !report.decision_logs.is_empty() {
+        lines.push(String::new());
+        lines.push("Decision logs:".to_string());
+        for log in &report.decision_logs {
+            lines.push(format!(
+                "- trace=`{}` bead=`{}` current_owner=`{}` reservation_holder=`{}` blocker_class=`{}` evidence_freshness_age_secs={} required_action=`{}`",
+                log.trace_id,
+                log.bead_id,
+                log.current_owner.as_deref().unwrap_or(""),
+                log.reservation_holder.as_deref().unwrap_or(""),
+                log.blocker_class,
+                render_optional_i64(log.evidence_freshness_age_secs),
+                log.required_action
             ));
         }
     }
@@ -1390,6 +1428,21 @@ fn decision_view(
         reason_codes: outcome.reason_codes.clone(),
         evidence_pointers: outcome.evidence_pointers.clone(),
         operator_message: outcome.operator_message.clone(),
+    }
+}
+
+fn decision_log_entry(
+    trace_id: &str,
+    decision: &SwarmHandoffDecisionView,
+) -> SwarmHandoffDecisionLogEntry {
+    SwarmHandoffDecisionLogEntry {
+        trace_id: trace_id.to_string(),
+        bead_id: decision.bead_id.clone(),
+        current_owner: decision.assignee.clone(),
+        reservation_holder: decision.reservation_holder.clone(),
+        blocker_class: decision.blocker_class.clone(),
+        evidence_freshness_age_secs: decision.freshness_age_secs,
+        required_action: decision.next_action.clone(),
     }
 }
 

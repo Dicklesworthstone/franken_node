@@ -1,0 +1,332 @@
+{
+  "schema_version": "franken-node/swarm-handoff/replay-fixtures/v1",
+  "cases": [
+    {
+      "case_id": "all-decision-classes",
+      "trace_id": "fixture-replay-all-decisions",
+      "generated_at_utc": "1970-01-01T00:01:41Z",
+      "evidence": {
+        "schema_version": "franken-node/swarm-handoff/evidence/v1",
+        "observed_at": "1970-01-01T00:01:40Z",
+        "beads_json": [
+          {
+            "bead_id": "bd-active",
+            "title": "Active owner with fresh reservation",
+            "status": "in_progress",
+            "assignee": "ActiveAgent",
+            "updated_at": "1970-01-01T00:01:39Z",
+            "last_comment_at": "1970-01-01T00:01:38Z",
+            "dependency_ids": [],
+            "dependent_ids": [],
+            "blocker_summary": null
+          },
+          {
+            "bead_id": "bd-cross-blocked",
+            "title": "Sibling compile failure",
+            "status": "in_progress",
+            "assignee": "StaleAgent",
+            "updated_at": "1970-01-01T00:01:00Z",
+            "last_comment_at": null,
+            "dependency_ids": [],
+            "dependent_ids": [],
+            "blocker_summary": null
+          },
+          {
+            "bead_id": "bd-reservation-blocked",
+            "title": "Reserved by another holder",
+            "status": "in_progress",
+            "assignee": "StaleAgent",
+            "updated_at": "1970-01-01T00:01:00Z",
+            "last_comment_at": null,
+            "dependency_ids": [],
+            "dependent_ids": [],
+            "blocker_summary": null
+          },
+          {
+            "bead_id": "bd-rch-wait",
+            "title": "Live RCH proof",
+            "status": "in_progress",
+            "assignee": "StaleAgent",
+            "updated_at": "1970-01-01T00:01:00Z",
+            "last_comment_at": null,
+            "dependency_ids": [],
+            "dependent_ids": [],
+            "blocker_summary": null
+          },
+          {
+            "bead_id": "bd-contested",
+            "title": "Self reservation still active",
+            "status": "in_progress",
+            "assignee": "StaleAgent",
+            "updated_at": "1970-01-01T00:01:00Z",
+            "last_comment_at": null,
+            "dependency_ids": [],
+            "dependent_ids": [],
+            "blocker_summary": null
+          },
+          {
+            "bead_id": "bd-abandoned",
+            "title": "No recent signals",
+            "status": "in_progress",
+            "assignee": "StaleAgent",
+            "updated_at": "1970-01-01T00:01:00Z",
+            "last_comment_at": null,
+            "dependency_ids": [],
+            "dependent_ids": [],
+            "blocker_summary": null
+          },
+          {
+            "bead_id": "bd-ready",
+            "title": "Expired reservation",
+            "status": "in_progress",
+            "assignee": "StaleAgent",
+            "updated_at": "1970-01-01T00:01:00Z",
+            "last_comment_at": null,
+            "dependency_ids": [],
+            "dependent_ids": [],
+            "blocker_summary": null
+          }
+        ],
+        "agent_mail_profiles": [
+          {
+            "agent_name": "ActiveAgent",
+            "project_key": "/data/projects/franken_node",
+            "task_description": "fresh fixture owner",
+            "last_active_at": "1970-01-01T00:01:39Z",
+            "contact_policy": "auto",
+            "ack_required_count": 0
+          },
+          {
+            "agent_name": "StaleAgent",
+            "project_key": "/data/projects/franken_node",
+            "task_description": "stale fixture owner",
+            "last_active_at": "1970-01-01T00:00:20Z",
+            "contact_policy": "auto",
+            "ack_required_count": 0
+          }
+        ],
+        "agent_mail_reservations": [
+          {
+            "holder_agent": "ActiveAgent",
+            "project_key": "/data/projects/franken_node",
+            "path_pattern": "crates/franken-node/src/ops/swarm_handoff.rs",
+            "exclusive": true,
+            "reason": "bd-active",
+            "expires_at": "1970-01-01T00:02:40Z",
+            "released_at": null
+          },
+          {
+            "holder_agent": "OtherAgent",
+            "project_key": "/data/projects/franken_node",
+            "path_pattern": "crates/franken-node/src/ops/swarm_handoff.rs",
+            "exclusive": true,
+            "reason": "bd-reservation-blocked",
+            "expires_at": "1970-01-01T00:02:40Z",
+            "released_at": null
+          },
+          {
+            "holder_agent": "StaleAgent",
+            "project_key": "/data/projects/franken_node",
+            "path_pattern": "crates/franken-node/tests/swarm_handoff_evidence.rs",
+            "exclusive": true,
+            "reason": "bd-contested",
+            "expires_at": "1970-01-01T00:02:40Z",
+            "released_at": null
+          },
+          {
+            "holder_agent": "StaleAgent",
+            "project_key": "/data/projects/franken_node",
+            "path_pattern": "crates/franken-node/src/ops/*.rs",
+            "exclusive": true,
+            "reason": "bd-ready",
+            "expires_at": "1970-01-01T00:01:20Z",
+            "released_at": null
+          }
+        ],
+        "rch_queue_snapshot": [
+          {
+            "build_id": "rch-bd-rch-wait",
+            "project_id": "franken_node-5d919732",
+            "state": "running",
+            "command_digest": "sha256:wait",
+            "worker_id": "ts2",
+            "heartbeat_at": "1970-01-01T00:01:39Z",
+            "progress_at": "1970-01-01T00:01:39Z",
+            "detector_progress_stale": false,
+            "detector_heartbeat_stale": false,
+            "blocker_bead_id": "bd-rch-wait"
+          }
+        ],
+        "git_activity_summary": [
+          {
+            "project_key": "/data/projects/franken_node",
+            "agent_name": "ActiveAgent",
+            "commit_hash": "abc1001",
+            "summary": "bd-active fixture owner proof",
+            "authored_at": "1970-01-01T00:01:38Z"
+          }
+        ],
+        "sibling_blocker_mirrors": [
+          {
+            "local_bead_id": "bd-cross-blocked",
+            "sibling_project_key": "/data/projects/franken_engine",
+            "sibling_bead_id": "bd-v2bb1",
+            "subsystem": "typed persistence models",
+            "blocker_kind": "compile_error",
+            "verification_command_family": "cargo_check",
+            "file_path": "crates/franken-engine/src/typed_persistence_models.rs",
+            "holder_agent": null,
+            "observed_error": "rustc E0599",
+            "observed_at": "1970-01-01T00:01:39Z",
+            "cleared": false,
+            "cleared_at": null,
+            "clearing_commit_hash": null
+          }
+        ]
+      },
+      "expected": {
+        "decisions": [
+          {
+            "bead_id": "bd-active",
+            "decision": "active",
+            "blocker_class": "owner_activity",
+            "reopen_allowed": false
+          },
+          {
+            "bead_id": "bd-cross-blocked",
+            "decision": "blocked_on_known_dependency",
+            "blocker_class": "cross_repo_blocker",
+            "reopen_allowed": false
+          },
+          {
+            "bead_id": "bd-reservation-blocked",
+            "decision": "blocked_on_reservation",
+            "blocker_class": "reservation",
+            "reopen_allowed": false
+          },
+          {
+            "bead_id": "bd-rch-wait",
+            "decision": "waiting_on_rch",
+            "blocker_class": "rch",
+            "reopen_allowed": false
+          },
+          {
+            "bead_id": "bd-contested",
+            "decision": "stale_but_contested",
+            "blocker_class": "reservation",
+            "reopen_allowed": false
+          },
+          {
+            "bead_id": "bd-abandoned",
+            "decision": "abandoned",
+            "blocker_class": "stale_claim",
+            "reopen_allowed": false
+          },
+          {
+            "bead_id": "bd-ready",
+            "decision": "ready_to_reopen",
+            "blocker_class": "reservation",
+            "reopen_allowed": true
+          }
+        ],
+        "safe_reopen_commands": ["bd-ready"],
+        "human_contains": [
+          "trace=`fixture-replay-all-decisions`",
+          "Decision logs:",
+          "bead=`bd-cross-blocked` decision=`blocked_on_known_dependency`",
+          "bead=`bd-ready` command=`br update bd-ready --status open --assignee \"\" --actor <agent>`",
+          "Cross-repo blockers:",
+          "command_family=`cargo_check`"
+        ],
+        "log_assertions": [
+          {
+            "bead_id": "bd-cross-blocked",
+            "current_owner": "StaleAgent",
+            "reservation_holder": null,
+            "blocker_class": "cross_repo_blocker",
+            "evidence_freshness_age_secs": 1,
+            "required_action_contains": "Keep the bead blocked on the sibling validation failure"
+          },
+          {
+            "bead_id": "bd-reservation-blocked",
+            "current_owner": "StaleAgent",
+            "reservation_holder": "OtherAgent",
+            "blocker_class": "reservation",
+            "evidence_freshness_age_secs": 40,
+            "required_action_contains": "Do not override an active file reservation"
+          },
+          {
+            "bead_id": "bd-ready",
+            "current_owner": "StaleAgent",
+            "reservation_holder": "StaleAgent",
+            "blocker_class": "reservation",
+            "evidence_freshness_age_secs": 40,
+            "required_action_contains": "Evidence supports an explicit reopen"
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "malformed-agent-mail-profile",
+      "trace_id": "fixture-replay-malformed-mail",
+      "generated_at_utc": "1970-01-01T00:01:41Z",
+      "evidence": {
+        "schema_version": "franken-node/swarm-handoff/evidence/v1",
+        "observed_at": "1970-01-01T00:01:40Z",
+        "beads_json": [
+          {
+            "bead_id": "bd-malformed-mail",
+            "title": "Malformed mail evidence",
+            "status": "in_progress",
+            "assignee": "BrokenAgent",
+            "updated_at": "1970-01-01T00:01:00Z",
+            "last_comment_at": null,
+            "dependency_ids": [],
+            "dependent_ids": [],
+            "blocker_summary": null
+          }
+        ],
+        "agent_mail_profiles": [
+          {
+            "agent_name": "",
+            "project_key": "/data/projects/franken_node",
+            "task_description": "malformed profile",
+            "last_active_at": "1970-01-01T00:01:39Z",
+            "contact_policy": "auto",
+            "ack_required_count": 0
+          }
+        ],
+        "agent_mail_reservations": [],
+        "rch_queue_snapshot": [],
+        "git_activity_summary": [],
+        "sibling_blocker_mirrors": []
+      },
+      "expected": {
+        "decisions": [
+          {
+            "bead_id": "bd-malformed-mail",
+            "decision": "manual_review_required",
+            "blocker_class": "manual_review",
+            "reopen_allowed": false
+          }
+        ],
+        "safe_reopen_commands": [],
+        "human_contains": [
+          "trace=`fixture-replay-malformed-mail`",
+          "evidence validation failed",
+          "manual_review_required"
+        ],
+        "log_assertions": [
+          {
+            "bead_id": "bd-malformed-mail",
+            "current_owner": "BrokenAgent",
+            "reservation_holder": null,
+            "blocker_class": "manual_review",
+            "evidence_freshness_age_secs": 40,
+            "required_action_contains": "Fix scanner evidence and rerun handoff classification"
+          }
+        ]
+      }
+    }
+  ]
+}
