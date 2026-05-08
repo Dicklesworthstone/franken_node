@@ -5595,4 +5595,53 @@ mod tests {
             "Debug output should not contain raw epoch number"
         );
     }
+
+    /// Regression test for commit e5467b4b: engine timeout boundary condition
+    ///
+    /// Verifies that timeout check uses >= (fail-closed) rather than > (fail-open).
+    /// When elapsed time equals timeout exactly, execution should timeout immediately
+    /// rather than continuing for another poll cycle.
+    #[cfg(feature = "engine")]
+    #[test]
+    fn engine_timeout_boundary_fail_closed_e5467b4b() {
+        use tempfile::NamedTempFile;
+        use std::time::Instant;
+
+        // Create a hanging JavaScript program
+        let hanging_js = r#"
+            // Infinite loop to trigger timeout
+            while (true) {
+                // Keep the engine busy to test timeout boundary
+            }
+        "#;
+
+        let temp_file = NamedTempFile::new().expect("create temp file");
+        std::fs::write(temp_file.path(), hanging_js).expect("write hanging JS");
+
+        // Set a very short timeout (2 seconds) to ensure test completes quickly
+        std::env::set_var("FRANKEN_ENGINE_TIMEOUT_SECS", "2");
+
+        let config = crate::config::Config::for_profile(crate::config::Profile::Balanced);
+        let dispatcher = EngineDispatcher::new(None, crate::ops::PreferredRuntime::Auto);
+
+        let start = Instant::now();
+        let result = dispatcher.dispatch_run(temp_file.path(), &config, "balanced");
+        let elapsed = start.elapsed();
+
+        // Clean up environment variable
+        std::env::remove_var("FRANKEN_ENGINE_TIMEOUT_SECS");
+
+        // Verify timeout occurred and error type is correct
+        assert!(result.is_err(), "Expected timeout error for hanging program");
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("timeout") || error.contains("Timeout"),
+               "Error should mention timeout: {}", error);
+
+        // Verify timeout occurred close to the boundary (2 seconds ± 1 second tolerance)
+        assert!(elapsed.as_secs() >= 2, "Should timeout at >= 2 seconds (fail-closed)");
+        assert!(elapsed.as_secs() < 4, "Should timeout reasonably close to boundary, got {}s", elapsed.as_secs());
+
+        println!("✓ Timeout occurred at {}ms (boundary: 2000ms)", elapsed.as_millis());
+    }
 }

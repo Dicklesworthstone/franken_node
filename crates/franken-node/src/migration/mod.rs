@@ -18,6 +18,28 @@ use tree_sitter::{Language, Node, Parser as JsParser};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+/// Maximum allowed file size for migration operations to prevent DoS via parser bombs.
+/// External package.json, source files, etc. could be maliciously crafted as large files.
+/// 10MB should be more than sufficient for any reasonable package manifest or source file.
+const MAX_MIGRATION_FILE_BYTES: u64 = 10 << 20; // 10 MiB
+
+/// Read file with size limits to prevent DoS via oversized files.
+fn read_file_bounded(path: &Path) -> Result<String, io::Error> {
+    // Check file size before reading to prevent DoS via oversized migration files
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > MAX_MIGRATION_FILE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Migration file too large: {} bytes (limit: {} bytes)",
+                metadata.len(),
+                MAX_MIGRATION_FILE_BYTES
+            ),
+        ));
+    }
+    std::fs::read_to_string(path)
+}
+
 #[cfg(any(test, feature = "admin-tools"))]
 #[allow(dead_code)]
 pub mod bpet_migration_gate;
@@ -704,7 +726,7 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
 
         if is_package_manifest {
             package_manifests_scanned = package_manifests_scanned.saturating_add(1);
-            let raw = match std::fs::read_to_string(&path) {
+            let raw = match read_file_bounded(&path) {
                 Ok(content) => content,
                 Err(err) => {
                     manual_review_items = manual_review_items.saturating_add(1);
@@ -841,7 +863,7 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
             continue;
         }
 
-        let raw = match std::fs::read_to_string(&path) {
+        let raw = match read_file_bounded(&path) {
             Ok(content) => content,
             Err(err) => {
                 manual_review_items = manual_review_items.saturating_add(1);
@@ -1168,7 +1190,7 @@ fn select_migration_runtime_smoke_target(
     let manifest_path =
         canonicalize_project_package_manifest_path(&project_root, &manifest_path, "runtime smoke")?;
     let manifest_dir = manifest_path.parent().unwrap_or(project_root.as_path());
-    let manifest_raw = std::fs::read_to_string(&manifest_path).map_err(|err| {
+    let manifest_raw = read_file_bounded(&manifest_path).map_err(|err| {
         anyhow::anyhow!(
             "failed reading package manifest {} for runtime smoke target: {err}",
             manifest_path.display()
@@ -1635,7 +1657,7 @@ fn verify_franken_node_smoke_receipt_round_trip(output: &Output) -> anyhow::Resu
         .get("receipt_path")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("franken-node smoke output omitted receipt_path"))?;
-    let persisted = std::fs::read_to_string(receipt_path).map_err(|err| {
+    let persisted = read_file_bounded(Path::new(receipt_path)).map_err(|err| {
         anyhow::anyhow!("failed reading franken-node smoke receipt {receipt_path}: {err}")
     })?;
     let persisted_receipt: serde_json::Value = serde_json::from_str(&persisted).map_err(|err| {
@@ -2300,7 +2322,7 @@ fn package_manifest_declares_module_type(project_root: &Path, directory: &Path) 
     else {
         return Some(false);
     };
-    let Ok(raw) = std::fs::read_to_string(manifest_path) else {
+    let Ok(raw) = read_file_bounded(&manifest_path) else {
         return Some(false);
     };
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -2451,7 +2473,7 @@ fn write_migration_backup(
     create_backup_directory_safe(project_path, &backup_path)?;
     validate_backup_path_no_symlinks(project_path, &backup_path)?;
 
-    match std::fs::read_to_string(&backup_path) {
+    match read_file_bounded(&backup_path) {
         Ok(existing) if existing == original_content => return Ok(backup_path),
         Ok(_) => {
             anyhow::bail!(
@@ -3503,7 +3525,7 @@ fn inspect_package_manifest(
     scripts_flagged: &mut usize,
     engine_gaps: &mut usize,
 ) {
-    let raw = match std::fs::read_to_string(manifest_path) {
+    let raw = match read_file_bounded(manifest_path) {
         Ok(content) => content,
         Err(err) => {
             push_bounded(findings, MigrationAuditFinding {
@@ -4192,7 +4214,7 @@ fn collect_module_graph_files(project_path: &Path, entry_path: &Path) -> Vec<Str
             continue;
         }
 
-        let Ok(source) = std::fs::read_to_string(&path) else {
+        let Ok(source) = read_file_bounded(&path) else {
             continue;
         };
         let base_dir = path.parent().unwrap_or(&project_root);
@@ -6513,5 +6535,32 @@ mod tests {
         assert!(!rollback_path_has_unsafe_separator(""));
         assert!(!rollback_path_has_unsafe_separator("a"));
         assert!(!rollback_path_has_unsafe_separator("/"));
+    }
+
+    #[test]
+    fn read_file_bounded_rejects_oversized_files() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let oversized_path = temp_dir.path().join("oversized.json");
+
+        // Create a file larger than MAX_MIGRATION_FILE_BYTES (10 MiB)
+        let large_content = "{}".repeat(6_000_000); // ~12 MiB of JSON
+        std::fs::write(&oversized_path, large_content).expect("write oversized file");
+
+        // Verify file is actually oversized
+        let metadata = std::fs::metadata(&oversized_path).expect("get metadata");
+        assert!(metadata.len() > MAX_MIGRATION_FILE_BYTES,
+            "Test file should exceed size limit: {} > {}",
+            metadata.len(), MAX_MIGRATION_FILE_BYTES);
+
+        // Bounded read should fail with size error
+        let result = read_file_bounded(&oversized_path);
+        assert!(result.is_err(), "Oversized migration file should be rejected");
+
+        // Check that error message mentions size limit
+        let error = result.unwrap_err();
+        let error_msg = format!("{}", error);
+        assert!(error_msg.contains("too large"), "Error should mention size limit: {}", error_msg);
+        assert!(error_msg.contains("bytes"), "Error should include byte counts: {}", error_msg);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "Error should be InvalidData");
     }
 }
