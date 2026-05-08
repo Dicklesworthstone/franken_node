@@ -696,7 +696,11 @@ mod tests {
         let mut receipts = Vec::new();
 
         for i in 0..5 {
-            let mut receipt = create_test_receipt(&format!("test_{:03}", i), "test_actor", CleanupMode::Execute);
+            let mut receipt = create_test_receipt(
+                &format!("test_{:03}", i),
+                "test_actor",
+                CleanupMode::Execute,
+            );
             receipt.initiated_at = base_time - chrono::Duration::minutes(i as i64 * 10);
             receipt.completed_at = receipt.initiated_at + chrono::Duration::minutes(1);
             receipts.push(receipt);
@@ -714,12 +718,16 @@ mod tests {
         let results = storage.search_receipts(&filter);
 
         // Verify count matches expected (all 5 receipts)
-        assert_eq!(results.len(), 5, "Search should return all matching receipts");
+        assert_eq!(
+            results.len(),
+            5,
+            "Search should return all matching receipts"
+        );
 
         // Verify ordering is newest-first by timestamp
         for i in 1..results.len() {
             assert!(
-                results[i-1].initiated_at >= results[i].initiated_at,
+                results[i - 1].initiated_at >= results[i].initiated_at,
                 "Results should be ordered newest-first by initiated_at timestamp"
             );
         }

@@ -11,7 +11,7 @@
 //! - 33b5cc4c: frankensqlite String key allocation elimination
 //! - 752cbf6a: trace digest hex encoding defer to boundary
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 /// Benchmark SignaturePreimage hash throughput (b238c0ee win)
 fn signature_preimage_hash_throughput(c: &mut Criterion) {
@@ -20,19 +20,21 @@ fn signature_preimage_hash_throughput(c: &mut Criterion) {
     let preimage = SignaturePreimage::build(
         1,
         [0xDE, 0xAD],
-        b"representative_payload_for_signature_preimage_benchmark_testing".repeat(10).to_vec()
+        b"representative_payload_for_signature_preimage_benchmark_testing"
+            .repeat(10)
+            .to_vec(),
     );
 
     c.bench_function("signature_preimage_hash_throughput", |b| {
-        b.iter(|| {
-            black_box(preimage.content_hash_prefix())
-        })
+        b.iter(|| black_box(preimage.content_hash_prefix()))
     });
 }
 
 /// Benchmark transparency verify_inclusion with 256-step audit path (dfd95547 win)
 fn transparency_verify_inclusion_path256(c: &mut Criterion) {
-    use frankenengine_node::supply_chain::transparency_verifier::{verify_inclusion, InclusionProof};
+    use frankenengine_node::supply_chain::transparency_verifier::{
+        InclusionProof, verify_inclusion,
+    };
 
     // Create a representative inclusion proof with substantial audit path
     let proof = InclusionProof {
@@ -43,15 +45,15 @@ fn transparency_verify_inclusion_path256(c: &mut Criterion) {
     };
 
     c.bench_function("transparency_verify_inclusion_path256", |b| {
-        b.iter(|| {
-            black_box(verify_inclusion(&proof).is_ok())
-        })
+        b.iter(|| black_box(verify_inclusion(&proof).is_ok()))
     });
 }
 
 /// Benchmark lane scheduler task assignment throughput (985c38af TaskId win)
 fn lane_scheduler_assign_throughput(c: &mut Criterion) {
-    use frankenengine_node::runtime::lane_scheduler::{LaneScheduler, LaneMappingPolicy, LaneConfig, SchedulerLane, TaskClass};
+    use frankenengine_node::runtime::lane_scheduler::{
+        LaneConfig, LaneMappingPolicy, LaneScheduler, SchedulerLane, TaskClass,
+    };
 
     let mut policy = LaneMappingPolicy::new();
     policy.add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 10000));
@@ -59,10 +61,22 @@ fn lane_scheduler_assign_throughput(c: &mut Criterion) {
     policy.add_lane(LaneConfig::new(SchedulerLane::Maintenance, 60, 2000));
     policy.add_lane(LaneConfig::new(SchedulerLane::Background, 40, 1000));
 
-    policy.add_rule(&TaskClass::new("control.epoch"), SchedulerLane::ControlCritical);
-    policy.add_rule(&TaskClass::new("remote.compute"), SchedulerLane::RemoteEffect);
-    policy.add_rule(&TaskClass::new("maintenance.gc"), SchedulerLane::Maintenance);
-    policy.add_rule(&TaskClass::new("background.telemetry"), SchedulerLane::Background);
+    policy.add_rule(
+        &TaskClass::new("control.epoch"),
+        SchedulerLane::ControlCritical,
+    );
+    policy.add_rule(
+        &TaskClass::new("remote.compute"),
+        SchedulerLane::RemoteEffect,
+    );
+    policy.add_rule(
+        &TaskClass::new("maintenance.gc"),
+        SchedulerLane::Maintenance,
+    );
+    policy.add_rule(
+        &TaskClass::new("background.telemetry"),
+        SchedulerLane::Background,
+    );
 
     c.bench_function("lane_scheduler_assign_throughput", |b| {
         b.iter(|| {
@@ -79,7 +93,9 @@ fn lane_scheduler_assign_throughput(c: &mut Criterion) {
 
 /// Benchmark frankensqlite read/write throughput (33b5cc4c win)
 fn frankensqlite_read_throughput(c: &mut Criterion) {
-    use frankenengine_node::storage::frankensqlite_adapter::{FrankensqliteAdapter, CallerContext, PersistenceClass};
+    use frankenengine_node::storage::frankensqlite_adapter::{
+        CallerContext, FrankensqliteAdapter, PersistenceClass,
+    };
 
     let caller = CallerContext::new_system();
 
@@ -92,7 +108,8 @@ fn frankensqlite_read_throughput(c: &mut Criterion) {
                 let key = format!("benchmark.key.{}", i);
                 let value = format!("benchmark_value_{}", i).into_bytes();
 
-                let _ = black_box(adapter.write(&caller, PersistenceClass::ControlState, &key, &value));
+                let _ =
+                    black_box(adapter.write(&caller, PersistenceClass::ControlState, &key, &value));
                 let _ = black_box(adapter.read(&caller, PersistenceClass::ControlState, &key));
             }
         })
@@ -101,7 +118,9 @@ fn frankensqlite_read_throughput(c: &mut Criterion) {
 
 /// Benchmark trace digest computation throughput (752cbf6a win)
 fn trace_digest_throughput(c: &mut Criterion) {
-    use frankenengine_node::replay::time_travel_engine::{EnvironmentSnapshot, TraceStep, WorkflowTrace};
+    use frankenengine_node::replay::time_travel_engine::{
+        EnvironmentSnapshot, TraceStep, WorkflowTrace,
+    };
 
     let environment = EnvironmentSnapshot {
         franken_node_version: "1.0.0".to_string(),
@@ -112,13 +131,15 @@ fn trace_digest_throughput(c: &mut Criterion) {
         environment_variables: vec![],
     };
 
-    let steps: Vec<TraceStep> = (0..100).map(|i| TraceStep {
-        seq: i,
-        timestamp_ns: 1000000 + i,
-        input: format!("input_data_{}", i).into_bytes(),
-        output: format!("output_result_{}", i).into_bytes(),
-        side_effects: vec![],
-    }).collect();
+    let steps: Vec<TraceStep> = (0..100)
+        .map(|i| TraceStep {
+            seq: i,
+            timestamp_ns: 1000000 + i,
+            input: format!("input_data_{}", i).into_bytes(),
+            output: format!("output_result_{}", i).into_bytes(),
+            side_effects: vec![],
+        })
+        .collect();
 
     c.bench_function("trace_digest_throughput", |b| {
         b.iter(|| {
@@ -127,7 +148,7 @@ fn trace_digest_throughput(c: &mut Criterion) {
                 "benchmark-workflow",
                 &steps,
                 &environment,
-                "v1"
+                "v1",
             ))
         })
     });
