@@ -1,4 +1,5 @@
 pub mod close_condition;
+pub mod doctor;
 pub mod engine_dispatcher;
 #[cfg(feature = "admin-tools")]
 pub mod mitigation_synthesis;
@@ -16,6 +17,8 @@ pub mod validation_proof_coalescer;
 pub mod validation_readiness;
 pub mod workspace_pressure_policy;
 
+#[cfg(test)]
+mod doctor_integration_tests;
 #[cfg(test)]
 mod ops_conformance_tests;
 

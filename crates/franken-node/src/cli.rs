@@ -1700,6 +1700,10 @@ pub enum DoctorCommand {
     /// Report whether generated evidence is ready for operator trust.
     #[command(name = "evidence-readiness")]
     EvidenceReadiness(DoctorEvidenceReadinessArgs),
+
+    /// Analyze workspace pressure and resource usage.
+    #[command(name = "workspace-pressure")]
+    WorkspacePressure(DoctorWorkspacePressureArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -1722,6 +1726,29 @@ pub struct DoctorEvidenceReadinessArgs {
     /// Emit evidence-readiness report JSON to stdout.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct DoctorWorkspacePressureArgs {
+    /// Output path for JSON report (default: stdout).
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub output: Option<PathBuf>,
+
+    /// Output path for human-readable report.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub human_output: Option<PathBuf>,
+
+    /// Emit workspace pressure report JSON to stdout.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Use conservative pressure thresholds.
+    #[arg(long)]
+    pub conservative: bool,
+
+    /// Use permissive pressure thresholds.
+    #[arg(long)]
+    pub permissive: bool,
 }
 
 #[derive(Debug, Parser)]

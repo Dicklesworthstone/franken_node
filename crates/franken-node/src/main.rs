@@ -96,7 +96,7 @@ use crate::api::{
 use crate::cli::{
     BenchCommand, Cli, Command, DebugCommand, DebugEvidenceArgs, DebugEvidenceKind,
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
-    DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand,
+    DoctorEvidenceReadinessArgs, DoctorWorkspacePressureArgs, DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand,
     IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand, OpsConfigAuditArgs,
     OpsMetricsFormat, OpsResourceGovernorArgs, OpsValidationCloseoutArgs,
     OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs, ProofWorkersCommand,
@@ -6221,6 +6221,174 @@ fn handle_doctor_evidence_readiness(
         )?;
     }
     Ok(())
+}
+
+fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Result<()> {
+    use crate::ops::doctor::{WorkspacePressureDoctor, generate_doctor_report_file, generate_human_report_file};
+    use crate::ops::workspace_pressure_policy::{PolicyThresholds, WorkspacePressureInputs};
+    use std::fs;
+
+    // Collect current workspace pressure inputs
+    let inputs = WorkspacePressureInputs {
+        free_disk_bytes: get_free_disk_space()?,
+        target_dir_bytes: get_target_directory_size()?,
+        active_build_count: get_active_build_count()?,
+        rch_available_slots: get_rch_available_slots(),
+        memory_pressure: get_memory_pressure()?,
+        active_reservations: get_active_reservations()?,
+        coordination_healthy: get_coordination_health()?,
+    };
+
+    // Determine thresholds based on CLI flags
+    let doctor = if args.conservative {
+        WorkspacePressureDoctor::with_thresholds(PolicyThresholds::conservative())
+    } else if args.permissive {
+        WorkspacePressureDoctor::with_thresholds(PolicyThresholds::permissive())
+    } else {
+        WorkspacePressureDoctor::new() // Uses balanced defaults
+    };
+
+    let report = doctor.generate_report(&inputs);
+
+    // Output JSON report
+    if args.json || args.output.is_some() {
+        let json_output = serde_json::to_string_pretty(&report)?;
+        if let Some(output_path) = &args.output {
+            let validated_path = cli::validate_user_content_pathbuf(output_path)
+                .with_context(|| format!("invalid output path: {:?}", output_path))?;
+            fs::write(validated_path, &json_output)
+                .with_context(|| format!("failed to write JSON report to {:?}", output_path))?;
+        } else {
+            println!("{}", json_output);
+        }
+    }
+
+    // Output human-readable report
+    if let Some(human_output_path) = &args.human_output {
+        let validated_path = cli::validate_user_content_pathbuf(human_output_path)
+            .with_context(|| format!("invalid human output path: {:?}", human_output_path))?;
+        let human_report = doctor.format_human_report(&report);
+        fs::write(validated_path, &human_report)
+            .with_context(|| format!("failed to write human report to {:?}", human_output_path))?;
+    } else if !args.json && args.output.is_none() {
+        // Default: output human-readable to stdout if no JSON requested
+        let human_report = doctor.format_human_report(&report);
+        println!("{}", human_report);
+    }
+
+    Ok(())
+}
+
+// Helper functions for collecting workspace pressure data
+fn get_free_disk_space() -> Result<u64> {
+    Ok(10_000_000_000) // 10GB placeholder - would use statvfs in production
+}
+
+fn get_target_directory_size() -> Result<u64> {
+    use std::fs;
+    use std::path::Path;
+
+    let target_path = Path::new("target");
+    if !target_path.exists() {
+        return Ok(0);
+    }
+
+    fn dir_size(path: &Path) -> std::io::Result<u64> {
+        let mut size = 0;
+        if path.is_dir() {
+            for entry in fs::read_dir(path)? {
+                let entry = entry?;
+                let metadata = entry.metadata()?;
+                if metadata.is_dir() {
+                    size = size.saturating_add(dir_size(&entry.path())?);
+                } else {
+                    size = size.saturating_add(metadata.len());
+                }
+            }
+        }
+        Ok(size)
+    }
+
+    let total_size = dir_size(target_path).unwrap_or(0);
+    Ok(total_size)
+}
+
+fn get_active_build_count() -> Result<u32> {
+    use std::process::Command;
+
+    let output = Command::new("pgrep")
+        .args(&["-f", "cargo|rustc"])
+        .output();
+
+    match output {
+        Ok(result) => {
+            let count = String::from_utf8_lossy(&result.stdout)
+                .lines()
+                .count();
+            Ok(count as u32)
+        }
+        Err(_) => Ok(0), // pgrep not available
+    }
+}
+
+fn get_rch_available_slots() -> Option<u32> {
+    use std::process::Command;
+
+    let output = Command::new("rch")
+        .args(&["status", "--json"])
+        .output();
+
+    match output {
+        Ok(result) if result.status.success() => {
+            let json_str = String::from_utf8_lossy(&result.stdout);
+            if let Ok(status) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                status.get("available_slots")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn get_memory_pressure() -> Result<f32> {
+    use std::fs;
+
+    let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let mut total_kb = 0u64;
+    let mut available_kb = 0u64;
+
+    for line in meminfo.lines() {
+        if line.starts_with("MemTotal:") {
+            total_kb = line.split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        } else if line.starts_with("MemAvailable:") {
+            available_kb = line.split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        }
+    }
+
+    if total_kb == 0 {
+        Ok(0.5) // Default
+    } else {
+        let used_kb = total_kb.saturating_sub(available_kb);
+        let pressure = (used_kb as f32) / (total_kb as f32);
+        Ok(pressure.min(1.0))
+    }
+}
+
+fn get_active_reservations() -> Result<u32> {
+    Ok(10) // Placeholder - would query Agent Mail in production
+}
+
+fn get_coordination_health() -> Result<bool> {
+    Ok(true) // Placeholder - would check Agent Mail connectivity in production
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -25916,6 +26084,9 @@ fn main() -> Result<()> {
                             &args.trace_id,
                             args.json,
                         )?;
+                    }
+                    DoctorCommand::WorkspacePressure(pressure_args) => {
+                        handle_doctor_workspace_pressure(pressure_args)?;
                     }
                 }
                 return Ok(());

@@ -1,0 +1,162 @@
+{
+  "description": "Doctor output format golden artifacts for workspace pressure",
+  "human_format_validation": {
+    "optional_sections": [
+      "\ud83d\udd27 Recommended Actions",
+      "\ud83d\udd0d Diagnostics"
+    ],
+    "required_resource_lines": [
+      "Free Disk:",
+      "Target Dir:",
+      "Active Builds:",
+      "Memory Pressure:",
+      "RCH Status:",
+      "File Reservations:",
+      "Coordination:"
+    ],
+    "required_sections": [
+      "Workspace Pressure Report",
+      "\ud83d\udcca Resource Summary",
+      "\ud83c\udfaf Policy Decisions"
+    ]
+  },
+  "scenarios": {
+    "critical": {
+      "expected_policy_decisions": 6,
+      "expected_recommendations_count": 3,
+      "expected_status": "critical",
+      "expected_summary_contains": [
+        "Critical",
+        "immediate"
+      ],
+      "inputs": {
+        "active_build_count": 12,
+        "active_reservations": 80,
+        "coordination_healthy": false,
+        "free_disk_bytes": 80000000,
+        "memory_pressure": 0.96,
+        "rch_available_slots": null,
+        "target_dir_bytes": 15000000000
+      }
+    },
+    "degraded": {
+      "expected_policy_decisions": 6,
+      "expected_recommendations_count": 2,
+      "expected_status": "degraded",
+      "expected_summary_contains": [
+        "Significant",
+        "pressure"
+      ],
+      "inputs": {
+        "active_build_count": 6,
+        "active_reservations": 35,
+        "coordination_healthy": true,
+        "free_disk_bytes": 800000000,
+        "memory_pressure": 0.85,
+        "rch_available_slots": 2,
+        "target_dir_bytes": 8000000000
+      }
+    },
+    "healthy": {
+      "expected_policy_decisions": 6,
+      "expected_recommendations_count": 0,
+      "expected_status": "healthy",
+      "expected_summary_contains": [
+        "low",
+        "normal"
+      ],
+      "inputs": {
+        "active_build_count": 1,
+        "active_reservations": 3,
+        "coordination_healthy": true,
+        "free_disk_bytes": 10000000000,
+        "memory_pressure": 0.2,
+        "rch_available_slots": 8,
+        "target_dir_bytes": 500000000
+      }
+    },
+    "warning": {
+      "expected_policy_decisions": 6,
+      "expected_recommendations_count": 1,
+      "expected_status": "warning",
+      "expected_summary_contains": [
+        "pressure",
+        "monitor"
+      ],
+      "inputs": {
+        "active_build_count": 3,
+        "active_reservations": 15,
+        "coordination_healthy": true,
+        "free_disk_bytes": 2000000000,
+        "memory_pressure": 0.65,
+        "rch_available_slots": 5,
+        "target_dir_bytes": 3000000000
+      }
+    }
+  },
+  "schema_version": "franken-node/doctor/workspace-pressure-golden/v1",
+  "structure_validation": {
+    "expected_schema_version": "franken-node/doctor/workspace-pressure/v1",
+    "required_policy_decision_fields": [
+      "work_class",
+      "admission",
+      "reason_code",
+      "summary",
+      "confidence",
+      "cleanup_candidates_count"
+    ],
+    "required_rch_status_fields": [
+      "available",
+      "available_slots",
+      "status_desc"
+    ],
+    "required_recommended_action_fields": [
+      "priority",
+      "action",
+      "explanation",
+      "command",
+      "impact"
+    ],
+    "required_resource_fields": [
+      "free_disk_bytes",
+      "free_disk_human",
+      "target_dir_bytes",
+      "target_dir_human",
+      "active_builds",
+      "memory_pressure",
+      "rch_status",
+      "active_reservations",
+      "coordination_healthy"
+    ],
+    "required_root_fields": [
+      "schema_version",
+      "timestamp",
+      "status",
+      "summary",
+      "resources",
+      "policy_decisions",
+      "recommended_actions",
+      "diagnostics",
+      "metadata"
+    ],
+    "valid_priority_values": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "valid_status_values": [
+      "healthy",
+      "warning",
+      "degraded",
+      "critical"
+    ],
+    "valid_work_classes": [
+      "SourceOnly",
+      "DocsGate",
+      "Validation",
+      "Benchmark",
+      "Fuzzing",
+      "Cleanup"
+    ]
+  }
+}
