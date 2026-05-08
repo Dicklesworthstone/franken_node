@@ -180,7 +180,7 @@ impl fmt::Display for ProofFailure {
 /// hex encoding allocations.
 fn recompute_root_bytes(proof: &InclusionProof) -> [u8; 32] {
     // Decode the hex leaf hash to bytes
-    let mut current = hex::decode(&proof.leaf_hash)
+    let mut current: [u8; 32] = hex::decode(&proof.leaf_hash)
         .expect("leaf_hash should be valid hex")
         .try_into()
         .expect("leaf_hash should be 32 bytes");

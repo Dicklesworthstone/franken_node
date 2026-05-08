@@ -180,7 +180,7 @@ impl MetricsRegistry {
             )
             .expect("render prometheus TYPE line");
             // Write metric name
-            output.push_str(metric.name);
+            output.push_str(&metric.name);
             // Write labels directly to output buffer (no intermediate allocation)
             render_labels_to_buffer(&metric.labels, &mut output);
             output.push(' ');
