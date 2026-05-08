@@ -870,3 +870,7 @@ required-features = ["advanced-features"]
 [[bench]]
 name = "threshold_sig_verify_bench"
 harness = false
+
+[[bench]]
+name = "perf_wins"
+harness = false
