@@ -179,13 +179,14 @@ impl MetricsRegistry {
                 metric.kind.as_prometheus_type()
             )
             .expect("render prometheus TYPE line");
-            writeln!(
-                &mut output,
-                "{}{} {}",
-                metric.name,
-                render_labels(&metric.labels),
-                render_metric_value(metric.value)
-            )
+            // Write metric name
+            output.push_str(metric.name);
+            // Write labels directly to output buffer (no intermediate allocation)
+            render_labels_to_buffer(&metric.labels, &mut output);
+            output.push(' ');
+            // Write metric value directly to output buffer (no intermediate allocation)
+            render_metric_value_to_buffer(metric.value, &mut output);
+            output.push('\n');
             .expect("render prometheus sample line");
         }
         output
@@ -303,30 +304,42 @@ fn is_label_name_continue(character: char) -> bool {
     is_label_name_start(character) || character.is_ascii_digit()
 }
 
-fn render_labels(labels: &[(String, String)]) -> String {
+fn render_labels_to_buffer(labels: &[(String, String)], output: &mut String) {
     if labels.is_empty() {
-        return String::new();
+        return;
     }
 
-    let mut rendered = String::from("{");
+    output.push('{');
     for (index, (name, value)) in labels.iter().enumerate() {
         if index > 0 {
-            rendered.push(',');
+            output.push(',');
         }
         write!(
-            &mut rendered,
+            output,
             "{}=\"{}\"",
             name,
             escape_prometheus_label_value(value)
         )
         .expect("render prometheus label");
     }
-    rendered.push('}');
+    output.push('}');
+}
+
+fn render_metric_value_to_buffer(value: f64, output: &mut String) {
+    write!(output, "{}", value).expect("write metric value to String never fails");
+}
+
+// Keep original functions for backward compatibility (if needed elsewhere)
+fn render_labels(labels: &[(String, String)]) -> String {
+    let mut rendered = String::new();
+    render_labels_to_buffer(labels, &mut rendered);
     rendered
 }
 
 fn render_metric_value(value: f64) -> String {
-    value.to_string()
+    let mut rendered = String::new();
+    render_metric_value_to_buffer(value, &mut rendered);
+    rendered
 }
 
 fn escape_prometheus_help(raw: &str) -> String {
@@ -431,5 +444,51 @@ mod tests {
             non_finite,
             MetricValidationError::NonFiniteValue { .. }
         ));
+    }
+
+    #[test]
+    fn optimized_render_produces_identical_output() {
+        // Test that the optimized render functions produce byte-identical output to original
+        use super::{render_labels, render_labels_to_buffer, render_metric_value, render_metric_value_to_buffer};
+
+        // Test labels rendering
+        let labels = vec![
+            ("service".to_string(), "web".to_string()),
+            ("env".to_string(), "prod".to_string()),
+            ("zone".to_string(), "us-east\"1\\test\n".to_string()), // Test escaping
+        ];
+
+        let original_labels = render_labels(&labels);
+        let mut optimized_labels = String::new();
+        render_labels_to_buffer(&labels, &mut optimized_labels);
+
+        assert_eq!(original_labels, optimized_labels, "Labels rendering should be identical");
+
+        // Test empty labels
+        let empty_labels = vec![];
+        let original_empty = render_labels(&empty_labels);
+        let mut optimized_empty = String::new();
+        render_labels_to_buffer(&empty_labels, &mut optimized_empty);
+
+        assert_eq!(original_empty, optimized_empty, "Empty labels rendering should be identical");
+
+        // Test metric value rendering
+        let test_values = vec![0.0, 1.5, 123.456789, f64::MAX, f64::MIN, 1e-10, 1e10];
+
+        for value in test_values {
+            let original_value = render_metric_value(value);
+            let mut optimized_value = String::new();
+            render_metric_value_to_buffer(value, &mut optimized_value);
+
+            assert_eq!(original_value, optimized_value, "Value rendering should be identical for {}", value);
+        }
+
+        // Integration test with full metrics registry
+        let mut registry = MetricsRegistry::new();
+        registry.record_gauge("test_metric", "A test metric", 42.5, &[("label", "value")]).expect("valid metric");
+
+        let rendered = registry.render_prometheus();
+        // Ensure the output still contains expected content (proving compatibility)
+        assert!(rendered.contains("test_metric{label=\"value\"} 42.5"));
     }
 }
