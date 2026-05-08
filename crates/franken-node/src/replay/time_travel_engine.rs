@@ -677,7 +677,13 @@ impl WorkflowTrace {
         environment: &EnvironmentSnapshot,
         schema_version: &str,
     ) -> String {
-        hex::encode(Self::compute_digest_bytes(trace_id, workflow_name, steps, environment, schema_version))
+        hex::encode(Self::compute_digest_bytes(
+            trace_id,
+            workflow_name,
+            steps,
+            environment,
+            schema_version,
+        ))
     }
 
     /// Recompute the digest that seals the current trace metadata, environment, and steps.
@@ -877,7 +883,7 @@ impl TraceBuilder {
                     &mut self.audit_log,
                     AuditEntry::new(
                         event_codes::TTR_003,
-                        &self.trace_id,
+                        &trace.trace_id,
                         &format!(
                             "Capture completed: {} steps, digest={}",
                             trace.steps.len(),
@@ -891,7 +897,7 @@ impl TraceBuilder {
                     &mut self.audit_log,
                     AuditEntry::new(
                         event_codes::TTR_009,
-                        &self.trace_id,
+                        &trace.trace_id,
                         "Trace integrity check passed",
                         0,
                     ),
@@ -904,7 +910,7 @@ impl TraceBuilder {
                     &mut self.audit_log,
                     AuditEntry::new(
                         event_codes::TTR_010,
-                        &self.trace_id,
+                        &trace.trace_id,
                         &format!("Trace integrity check failed: {e}"),
                         0,
                     ),
@@ -1496,7 +1502,10 @@ mod tests {
         // Common attack characters
         let attack_chars = "inject\nlog\rlines\ttabs\0nulls\\backslashes";
         let result_attack = sanitize_log_identifier(attack_chars);
-        assert_eq!(result_attack, "inject\\nlog\\rlines\\ttabs\\0nulls\\\\backslashes");
+        assert_eq!(
+            result_attack,
+            "inject\\nlog\\rlines\\ttabs\\0nulls\\\\backslashes"
+        );
 
         // Control characters (unicode escaping)
         let control_chars = "bell\x07alarm\x1B[31mred";
@@ -5118,7 +5127,11 @@ mod tests {
             update_hash_len_prefixed(&mut hasher, &trace_step.output);
             hex::encode(hasher.finalize())
         };
-        assert_eq!(trace_step.output_digest(), output_digest_old, "TraceStep output_digest should be bit-identical");
+        assert_eq!(
+            trace_step.output_digest(),
+            output_digest_old,
+            "TraceStep output_digest should be bit-identical"
+        );
 
         let side_effects_digest_old = {
             let mut hasher = Sha256::new();
@@ -5126,7 +5139,11 @@ mod tests {
             update_side_effects_hash_len_prefixed(&mut hasher, &trace_step.side_effects);
             hex::encode(hasher.finalize())
         };
-        assert_eq!(trace_step.side_effects_digest(), side_effects_digest_old, "TraceStep side_effects_digest should be bit-identical");
+        assert_eq!(
+            trace_step.side_effects_digest(),
+            side_effects_digest_old,
+            "TraceStep side_effects_digest should be bit-identical"
+        );
 
         // Test WorkflowTrace compute_digest produces identical results
         let steps = vec![trace_step];
@@ -5148,7 +5165,13 @@ mod tests {
             hex::encode(hasher.finalize())
         };
         assert_eq!(
-            WorkflowTrace::compute_digest("test-trace", "test-workflow", &steps, &environment, SCHEMA_VERSION),
+            WorkflowTrace::compute_digest(
+                "test-trace",
+                "test-workflow",
+                &steps,
+                &environment,
+                SCHEMA_VERSION
+            ),
             trace_digest_old,
             "WorkflowTrace compute_digest should be bit-identical"
         );
