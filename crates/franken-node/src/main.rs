@@ -8383,7 +8383,6 @@ fn count_active_fleet_quarantines(fleet_state_dir: &Path) -> Result<u64> {
         }
         // Parse with depth limit to prevent JSON parser bomb DoS
         let mut deserializer = serde_json::Deserializer::from_str(&line);
-        deserializer.disable_recursion_limit();
         let record: PersistedFleetActionRecord = serde::Deserialize::deserialize(
             &mut deserializer.recursion_limit(64)
         ).with_context(|| {
@@ -22299,7 +22298,6 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
 
         // Parse with depth limit to prevent JSON parser bomb DoS
         let mut deserializer = serde_json::Deserializer::from_str(&line);
-        deserializer.disable_recursion_limit();
         let entry: EvidenceEntry = serde::Deserialize::deserialize(
             &mut deserializer.recursion_limit(64)
         ).with_context(|| format!("Invalid JSON at line {}: {}", line_number, line))?;

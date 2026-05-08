@@ -16,6 +16,8 @@ use crate::supply_chain::trust_card::{
 #[cfg(any(test, feature = "control-plane"))]
 use crate::supply_chain::trust_card::{TrustCardInput, TrustCardMutation};
 
+use super::middleware::{AuthIdentity, TraceContext, enforce_handler_contract};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
 pub struct Pagination {
     pub page: usize,
@@ -92,12 +94,15 @@ fn paged_response<T: Clone>(
 /// Returns `TrustCardError` if the input is invalid, required evidence is missing,
 /// signing fails, or the registry cannot derive the next version safely.
 pub fn create_trust_card(
+    identity: &AuthIdentity,
+    trace: &TraceContext,
     registry: &mut TrustCardRegistry,
     input: TrustCardInput,
     now_secs: u64,
-    trace_id: &str,
 ) -> Result<ApiResponse<TrustCard>, TrustCardError> {
-    let card = registry.create(input, now_secs, trace_id)?;
+    enforce_handler_contract(identity, trace, "POST", "/api/v1/trust-cards")
+        .map_err(|e| TrustCardError::AuthenticationFailed(format!("create_trust_card auth failed: {}", e)))?;
+    let card = registry.create(input, now_secs, &trace.trace_id)?;
     Ok(ApiResponse {
         ok: true,
         data: card,
@@ -122,13 +127,16 @@ pub fn create_trust_card(
 /// Returns `TrustCardError` if the card does not exist, the mutation violates
 /// trust-card invariants, required upgrade evidence is absent, or signing fails.
 pub fn update_trust_card(
+    identity: &AuthIdentity,
+    trace: &TraceContext,
     registry: &mut TrustCardRegistry,
     extension_id: &str,
     mutation: TrustCardMutation,
     now_secs: u64,
-    trace_id: &str,
 ) -> Result<ApiResponse<TrustCard>, TrustCardError> {
-    let card = registry.update(extension_id, mutation, now_secs, trace_id)?;
+    enforce_handler_contract(identity, trace, "PUT", "/api/v1/trust-cards/{extension_id}")
+        .map_err(|e| TrustCardError::AuthenticationFailed(format!("update_trust_card auth failed: {}", e)))?;
+    let card = registry.update(extension_id, mutation, now_secs, &trace.trace_id)?;
     Ok(ApiResponse {
         ok: true,
         data: card,
@@ -152,12 +160,15 @@ pub fn update_trust_card(
 /// Returns `TrustCardError` if cache or source verification fails while reading
 /// the latest card.
 pub fn get_trust_card(
+    identity: &AuthIdentity,
+    trace: &TraceContext,
     registry: &mut TrustCardRegistry,
     extension_id: &str,
     now_secs: u64,
-    trace_id: &str,
 ) -> Result<ApiResponse<Option<TrustCard>>, TrustCardError> {
-    let card = registry.read(extension_id, now_secs, trace_id)?;
+    enforce_handler_contract(identity, trace, "GET", "/api/v1/trust-cards/{extension_id}")
+        .map_err(|e| TrustCardError::AuthenticationFailed(format!("get_trust_card auth failed: {}", e)))?;
+    let card = registry.read(extension_id, now_secs, &trace.trace_id)?;
     Ok(ApiResponse {
         ok: true,
         data: card,
@@ -181,13 +192,16 @@ pub fn get_trust_card(
 /// Returns `TrustCardError` if pagination is invalid or any matched card fails
 /// signature verification during listing.
 pub fn list_trust_cards(
+    identity: &AuthIdentity,
+    trace: &TraceContext,
     registry: &mut TrustCardRegistry,
     filter: &TrustCardListFilter,
     now_secs: u64,
-    trace_id: &str,
     pagination: Pagination,
 ) -> Result<ApiResponse<Vec<TrustCard>>, TrustCardError> {
-    let all = registry.list(filter, trace_id, now_secs)?;
+    enforce_handler_contract(identity, trace, "GET", "/api/v1/trust-cards")
+        .map_err(|e| TrustCardError::AuthenticationFailed(format!("list_trust_cards auth failed: {}", e)))?;
+    let all = registry.list(filter, &trace.trace_id, now_secs)?;
     paged_response(&all, pagination)
 }
 
