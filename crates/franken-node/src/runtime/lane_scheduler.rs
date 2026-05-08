@@ -27,6 +27,8 @@ pub const DEFAULT_STARVATION_WINDOW_MS: u64 = 5_000;
 pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
 /// Default maximum number of pending task identities retained per lane.
 pub const DEFAULT_MAX_QUEUED_TASKS_PER_LANE: usize = 4_096;
+/// Default maximum number of active tasks across all lanes to prevent memory exhaustion DoS.
+pub const DEFAULT_MAX_TOTAL_ACTIVE_TASKS: usize = 16_384;
 
 // ---- Event codes ----
 
@@ -57,6 +59,7 @@ pub mod error_codes {
     pub const ERR_LANE_STARVATION: &str = "ERR_LANE_STARVATION";
     pub const ERR_LANE_TASK_NOT_FOUND: &str = "ERR_LANE_TASK_NOT_FOUND";
     pub const ERR_LANE_TASK_ID_EXHAUSTED: &str = "ERR_LANE_TASK_ID_EXHAUSTED";
+    pub const ERR_LANE_GLOBAL_CAP_EXCEEDED: &str = "ERR_LANE_GLOBAL_CAP_EXCEEDED";
     pub const ERR_LANE_INVALID_WEIGHT: &str = "ERR_LANE_INVALID_WEIGHT";
 }
 
@@ -500,6 +503,8 @@ pub enum LaneSchedulerError {
     TaskNotFound { task_id: String },
     /// Task ID allocator exhausted the u64 counter space.
     TaskIdExhausted { last_counter: u64 },
+    /// Global active task capacity exceeded across all lanes.
+    GlobalTaskCapExceeded { current: usize, max: usize },
     /// Invalid priority weight.
     InvalidWeight { lane: SchedulerLane, weight: u32 },
 }
@@ -551,6 +556,11 @@ impl std::fmt::Debug for LaneSchedulerError {
                 .debug_struct("TaskIdExhausted")
                 .field("last_counter", last_counter)
                 .finish(),
+            LaneSchedulerError::GlobalTaskCapExceeded { current, max } => f
+                .debug_struct("GlobalTaskCapExceeded")
+                .field("current", current)
+                .field("max", max)
+                .finish(),
             LaneSchedulerError::InvalidWeight { lane, weight } => f
                 .debug_struct("InvalidWeight")
                 .field("lane", lane)
@@ -571,6 +581,7 @@ impl LaneSchedulerError {
             Self::Starvation { .. } => error_codes::ERR_LANE_STARVATION,
             Self::TaskNotFound { .. } => error_codes::ERR_LANE_TASK_NOT_FOUND,
             Self::TaskIdExhausted { .. } => error_codes::ERR_LANE_TASK_ID_EXHAUSTED,
+            Self::GlobalTaskCapExceeded { .. } => error_codes::ERR_LANE_GLOBAL_CAP_EXCEEDED,
             Self::InvalidWeight { .. } => error_codes::ERR_LANE_INVALID_WEIGHT,
         }
     }
@@ -633,6 +644,15 @@ impl fmt::Display for LaneSchedulerError {
                     "{}: task id counter exhausted at {}",
                     self.code(),
                     last_counter
+                )
+            }
+            Self::GlobalTaskCapExceeded { current, max } => {
+                write!(
+                    f,
+                    "{}: global active task capacity {} exceeded (current {})",
+                    self.code(),
+                    max,
+                    current
                 )
             }
             Self::InvalidWeight { lane, weight } => {
@@ -890,6 +910,7 @@ pub struct LaneScheduler {
     audit_log: Vec<LaneAuditRecord>,
     max_audit_log_entries: usize,
     max_queued_tasks_per_lane: usize,
+    max_total_active_tasks: usize,
     task_counter: u64,
 }
 
@@ -906,6 +927,7 @@ impl fmt::Debug for LaneScheduler {
             .field("audit_log_count", &self.audit_log.len())
             .field("max_audit_log_entries", &self.max_audit_log_entries)
             .field("max_queued_tasks_per_lane", &self.max_queued_tasks_per_lane)
+            .field("max_total_active_tasks", &self.max_total_active_tasks)
             .field("task_counter", &self.task_counter)
             .finish()
     }
@@ -944,6 +966,7 @@ impl LaneScheduler {
             audit_log: Vec::new(),
             max_audit_log_entries: max_audit_log_entries.max(1),
             max_queued_tasks_per_lane: DEFAULT_MAX_QUEUED_TASKS_PER_LANE,
+            max_total_active_tasks: DEFAULT_MAX_TOTAL_ACTIVE_TASKS,
             task_counter: 0,
         })
     }
@@ -1087,6 +1110,15 @@ impl LaneScheduler {
                     lane: lane.to_string(),
                 }
             })?;
+
+            // Check global active task capacity before insertion
+            if self.active_tasks.len() >= self.max_total_active_tasks {
+                return Err(LaneSchedulerError::GlobalTaskCapExceeded {
+                    current: self.active_tasks.len(),
+                    max: self.max_total_active_tasks,
+                });
+            }
+
             counters.active_count = counters.active_count.saturating_add(1);
             self.active_tasks.insert(queued.task_id, assignment);
             self.push_audit_record(LaneAuditRecord {
@@ -1154,6 +1186,14 @@ impl LaneScheduler {
         }
 
         let task_id = self.next_task_id()?;
+
+        // Check global active task capacity before insertion
+        if self.active_tasks.len() >= self.max_total_active_tasks {
+            return Err(LaneSchedulerError::GlobalTaskCapExceeded {
+                current: self.active_tasks.len(),
+                max: self.max_total_active_tasks,
+            });
+        }
 
         let counters = self.counters.get_mut(lane.as_str()).ok_or_else(|| {
             LaneSchedulerError::UnknownLane {
