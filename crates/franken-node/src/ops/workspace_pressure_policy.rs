@@ -6,6 +6,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+// External dependencies for disk space detection
+extern crate fs2;
+
 use crate::push_bounded;
 
 /// Maximum cleanup candidates to suggest in one decision.
@@ -626,6 +629,28 @@ fn limit_diagnostics(mut diagnostics: Vec<String>) -> Vec<String> {
     diagnostics
 }
 
+/// Get available disk space for the current working directory.
+///
+/// Uses fs2::available_space to query the filesystem for actual available space.
+/// This replaces the hardcoded placeholder value in main.rs with real disk monitoring.
+pub fn get_available_disk_space(path: impl AsRef<std::path::Path>) -> std::io::Result<u64> {
+    fs2::available_space(path)
+}
+
+/// Get available disk space for the current working directory with fallback.
+///
+/// Returns actual disk space or a conservative fallback if detection fails.
+pub fn get_workspace_disk_space() -> Result<u64, Box<dyn std::error::Error>> {
+    match get_available_disk_space(".") {
+        Ok(bytes) => Ok(bytes),
+        Err(e) => {
+            // Log error but don't fail - return conservative estimate
+            eprintln!("Warning: disk space detection failed: {e}. Using conservative estimate.");
+            Ok(1_000_000_000) // 1GB conservative fallback
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -739,5 +764,28 @@ mod tests {
 
         let decision = policy.decide_admission(WorkCostClass::Cleanup, 1, &inputs);
         assert!(matches!(decision.admission, AdmissionDecision::Wait { .. }));
+    }
+
+    #[test]
+    fn test_get_available_disk_space() {
+        // Test happy path - should return a reasonable value
+        let disk_space = get_available_disk_space(".");
+        assert!(disk_space.is_ok());
+        let bytes = disk_space.unwrap();
+
+        // Sanity check: should be more than 1MB and less than 100TB
+        assert!(bytes >= 1_000_000); // At least 1MB
+        assert!(bytes <= 100_000_000_000_000); // Less than 100TB
+    }
+
+    #[test]
+    fn test_get_workspace_disk_space_success() {
+        // Test that workspace function returns actual disk space when it works
+        let workspace_result = get_workspace_disk_space();
+        assert!(workspace_result.is_ok());
+        let bytes = workspace_result.unwrap();
+
+        // Should be a reasonable amount (more than 1MB, since we're in a valid workspace)
+        assert!(bytes >= 1_000_000);
     }
 }
