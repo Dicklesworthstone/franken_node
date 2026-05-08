@@ -1154,23 +1154,40 @@ impl EvidenceLedger {
             replay_signature = Some(signature_bytes);
         }
 
-        let expected_prev_hash = self
-            .last_entry_hash
-            .as_ref()
-            .map(encode_entry_hash)
-            .unwrap_or_default();
-
         // SECURITY: Validate hash chain integrity if client provided prev_entry_hash
-        if !entry.prev_entry_hash.is_empty()
-            && !crate::security::constant_time::ct_eq(
-                expected_prev_hash.as_str(),
-                &entry.prev_entry_hash,
-            )
-        {
-            return Err(LedgerError::HashChainBroken {
-                expected_hash: expected_prev_hash,
-                provided_hash: entry.prev_entry_hash.clone(),
-            });
+        if !entry.prev_entry_hash.is_empty() {
+            match &self.last_entry_hash {
+                Some(expected_bytes) => {
+                    // Decode provided hex to bytes for constant-time comparison
+                    match hex::decode(&entry.prev_entry_hash) {
+                        Ok(provided_bytes) if provided_bytes.len() == SHA256_DIGEST_BYTES => {
+                            // SECURITY: Use constant-time byte comparison to prevent timing attacks
+                            if !crate::security::constant_time::ct_eq_bytes(expected_bytes, &provided_bytes) {
+                                return Err(LedgerError::HashChainBroken {
+                                    expected_hash: encode_entry_hash(expected_bytes),
+                                    provided_hash: entry.prev_entry_hash.clone(),
+                                });
+                            }
+                        }
+                        _ => {
+                            // Invalid hex or wrong length
+                            return Err(LedgerError::HashChainBroken {
+                                expected_hash: encode_entry_hash(expected_bytes),
+                                provided_hash: entry.prev_entry_hash.clone(),
+                            });
+                        }
+                    }
+                }
+                None => {
+                    // No previous hash expected but one was provided
+                    if !entry.prev_entry_hash.is_empty() {
+                        return Err(LedgerError::HashChainBroken {
+                            expected_hash: String::new(),
+                            provided_hash: entry.prev_entry_hash.clone(),
+                        });
+                    }
+                }
+            }
         }
 
         let epoch_id = entry.epoch_id;
@@ -4342,6 +4359,47 @@ mod tests {
 
             let snapshot = ledger.snapshot();
             assert_eq!(snapshot.entries.len(), 2);
+        }
+
+        #[test]
+        fn test_append_validation_optimized_byte_identical() {
+            // Test that optimized append validation produces identical results
+            // to the original hex string approach
+            let mut ledger = EvidenceLedger::new(LedgerCapacity::new(100, 1_000_000));
+
+            // Append first entry to establish hash chain
+            let first_entry = test_entry("first-decision", 1);
+            let result1 = ledger.append(first_entry);
+            assert!(result1.is_ok());
+
+            // Get the hash of the first entry for the second entry's prev_hash
+            let snapshot = ledger.snapshot();
+            let first_hash = evidence_entry_hash_hex(&snapshot.entries[0]);
+
+            // Create second entry with correct prev_entry_hash
+            let mut second_entry = test_entry("second-decision", 2);
+            second_entry.prev_entry_hash = first_hash.clone();
+
+            // Append should succeed with correct hash chain
+            let result2 = ledger.append(second_entry.clone());
+            assert!(result2.is_ok(), "Append with correct hash should succeed");
+
+            // Create third entry with wrong prev_entry_hash to test error case
+            let mut third_entry = test_entry("third-decision", 3);
+            third_entry.prev_entry_hash = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+
+            // Append should fail with incorrect hash chain
+            let result3 = ledger.append(third_entry);
+            assert!(result3.is_err(), "Append with incorrect hash should fail");
+
+            match result3.unwrap_err() {
+                LedgerError::HashChainBroken { expected_hash, provided_hash } => {
+                    // Verify error contains correct expected hash
+                    assert_eq!(expected_hash, first_hash);
+                    assert_eq!(provided_hash, "0000000000000000000000000000000000000000000000000000000000000000");
+                }
+                other => panic!("Expected HashChainBroken error, got: {:?}", other),
+            }
         }
 
         // ── NEGATIVE-PATH TESTS: Security & Robustness ──────────────────
