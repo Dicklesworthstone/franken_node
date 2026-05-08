@@ -43,6 +43,31 @@ pub(crate) fn bounded_read_to_string(path: &std::path::Path, max_bytes: u64) -> 
     Ok(content)
 }
 
+/// Read file with size limits to prevent DoS via parser bombs.
+/// Returns file content as Vec<u8> if within size limit, error otherwise.
+pub(crate) fn bounded_read(path: &std::path::Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+    use std::fs::File;
+    use std::io::Read;
+
+    // Open file and check size atomically to prevent TOCTOU file swapping
+    let mut file = File::open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "File too large: {} bytes (limit: {} bytes)",
+                metadata.len(),
+                max_bytes
+            ),
+        ));
+    }
+
+    let mut content = Vec::new();
+    file.read_to_end(&mut content)?;
+    Ok(content)
+}
+
 /// Derive one stable process-local mutex key for a file-backed lock path.
 ///
 /// Use this for in-memory lock registries that protect a durable file or

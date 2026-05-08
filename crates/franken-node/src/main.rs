@@ -9,6 +9,7 @@ const MAX_MANIFEST_FILE_BYTES: u64 = 5 << 20;   // 5 MiB for manifest files
 const MAX_POLICY_FILE_BYTES: u64 = 2 << 20;     // 2 MiB for policy files
 const MAX_LOCKFILE_BYTES: u64 = 1 << 20;        // 1 MiB for lockfiles
 const MAX_GENERAL_FILE_BYTES: u64 = 10 << 20;   // 10 MiB for general CLI input files
+const MAX_SIGNING_KEY_BYTES: u64 = 64 << 10;    // 64 KiB for signing keys
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
@@ -5019,7 +5020,7 @@ fn load_ed25519_signing_material_from_path(
         anyhow::bail!("{label} must point to a file: {}", path.display());
     }
 
-    let raw = std::fs::read(path)
+    let raw = crate::bounded_read(path, MAX_SIGNING_KEY_BYTES)
         .with_context(|| format!("failed reading {label} {}", path.display()))?;
     let Some(signing_key) = parse_signing_key_from_blob(&raw) else {
         anyhow::bail!("failed decoding Ed25519 {label} from {}", path.display());
@@ -5141,7 +5142,7 @@ fn load_replay_trust_anchor(path: &Path) -> Result<ed25519_dalek::VerifyingKey> 
         );
     }
 
-    let raw = std::fs::read(path).with_context(|| {
+    let raw = crate::bounded_read(path, MAX_SIGNING_KEY_BYTES).with_context(|| {
         format!(
             "failed reading trusted replay public key {}",
             path.display()
@@ -5635,13 +5636,8 @@ fn load_safe_mode_controller(
     // Prevent DoS via oversized state files - 16 MiB should be more than sufficient for state
     const MAX_STATE_FILE_BYTES: u64 = 16 << 20; // 16 MiB
 
-    match std::fs::read(state_path) {
+    match crate::bounded_read(state_path, MAX_STATE_FILE_BYTES) {
         Ok(bytes) => {
-            // Check size after read but before JSON parsing to prevent parser bombs
-            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_STATE_FILE_BYTES {
-                anyhow::bail!("Safe-mode state file too large: {} bytes (limit: {} bytes)",
-                             bytes.len(), MAX_STATE_FILE_BYTES);
-            }
             serde_json::from_slice(&bytes)
                 .with_context(|| format!("failed parsing safe-mode state {}", state_path.display()))
         },
@@ -6046,12 +6042,8 @@ fn load_remotecap_cli_state() -> Result<RemoteCapCliState> {
     const MAX_CLI_STATE_BYTES: u64 = 4 << 20; // 4 MiB
 
     let path = remotecap_cli_state_path();
-    match std::fs::read(&path) {
+    match crate::bounded_read(&path, MAX_CLI_STATE_BYTES) {
         Ok(raw) => {
-            if u64::try_from(raw.len()).unwrap_or(u64::MAX) > MAX_CLI_STATE_BYTES {
-                anyhow::bail!("RemoteCap CLI state file too large: {} bytes (limit: {} bytes)",
-                             raw.len(), MAX_CLI_STATE_BYTES);
-            }
             serde_json::from_slice(&raw)
                 .with_context(|| format!("failed parsing remotecap state {}", path.display()))
         },
@@ -6078,13 +6070,8 @@ fn read_remotecap_token(path: &Path) -> Result<RemoteCap> {
     // Prevent DoS via oversized token files - 1 MiB should be more than sufficient for tokens
     const MAX_TOKEN_FILE_BYTES: u64 = 1 << 20; // 1 MiB
 
-    let raw = std::fs::read(path)
+    let raw = crate::bounded_read(path, MAX_TOKEN_FILE_BYTES)
         .with_context(|| format!("failed reading remotecap token {}", path.display()))?;
-
-    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > MAX_TOKEN_FILE_BYTES {
-        anyhow::bail!("RemoteCap token file too large: {} bytes (limit: {} bytes)",
-                     raw.len(), MAX_TOKEN_FILE_BYTES);
-    }
 
     let value: serde_json::Value = serde_json::from_slice(&raw)
         .with_context(|| format!("failed parsing remotecap token JSON {}", path.display()))?;
@@ -17817,7 +17804,7 @@ fn inspect_local_registry_artifact(
         };
     }
 
-    let package_bytes = match std::fs::read(&artifact_path) {
+    let package_bytes = match crate::bounded_read(&artifact_path, MAX_MANIFEST_FILE_BYTES) {
         Ok(bytes) => bytes,
         Err(error) => {
             return RegistryArtifactVerification {
@@ -18692,7 +18679,7 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
         );
     }
 
-    let package_bytes = std::fs::read(&args.package_path)
+    let package_bytes = crate::bounded_read(&args.package_path, MAX_MANIFEST_FILE_BYTES)
         .with_context(|| format!("failed reading package {}", args.package_path.display()))?;
     let content_hash = compute_registry_artifact_sha256(&package_bytes);
     let signing_key_path = args
@@ -21903,7 +21890,7 @@ fn load_verifying_keys(key_dir: &Path) -> Result<Vec<ed25519_dalek::VerifyingKey
     let mut keys = Vec::new();
     for path in paths {
         let raw =
-            std::fs::read(&path).with_context(|| format!("failed reading {}", path.display()))?;
+            crate::bounded_read(&path, MAX_SIGNING_KEY_BYTES).with_context(|| format!("failed reading {}", path.display()))?;
         if let Some(key) = parse_verifying_key_from_blob(&raw) {
             keys.push(key);
         }
@@ -22036,7 +22023,7 @@ fn load_release_verification_context(
             anyhow::bail!("{reason}");
         }
     }
-    let manifest_signature_raw = std::fs::read(&manifest_signature_path)
+    let manifest_signature_raw = crate::bounded_read(&manifest_signature_path, MAX_SIGNING_KEY_BYTES)
         .with_context(|| format!("failed reading {}", manifest_signature_path.display()))?;
     let manifest_signature = decode_signature_blob(&manifest_signature_raw);
 
@@ -22087,7 +22074,7 @@ fn load_release_verification_context(
         let artifact_path = release_dir.join(artifact_name);
         match inspect_release_entry_path(release_dir, &artifact_path)? {
             ReleaseEntryState::File => {
-                let artifact_bytes = std::fs::read(&artifact_path)
+                let artifact_bytes = crate::bounded_read(&artifact_path, MAX_MANIFEST_FILE_BYTES)
                     .with_context(|| format!("failed reading {}", artifact_path.display()))?;
                 artifacts.insert(artifact_name.clone(), artifact_bytes);
             }
@@ -22100,7 +22087,7 @@ fn load_release_verification_context(
         let signature_path = release_dir.join(format!("{artifact_name}.sig"));
         match inspect_release_entry_path(release_dir, &signature_path)? {
             ReleaseEntryState::File => {
-                let detached_bytes = std::fs::read(&signature_path)
+                let detached_bytes = crate::bounded_read(&signature_path, MAX_SIGNING_KEY_BYTES)
                     .with_context(|| format!("failed reading {}", signature_path.display()))?;
                 detached_signatures.insert(
                     artifact_name.clone(),
@@ -22325,7 +22312,7 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
 
     // Load verifying key if provided
     let verifying_key = if let Some(key_path) = &args.public_key {
-        let raw = std::fs::read(key_path)
+        let raw = crate::bounded_read(key_path, MAX_SIGNING_KEY_BYTES)
             .with_context(|| format!("failed reading verifying key {}", key_path.display()))?;
         Some(parse_verifying_key_from_blob(&raw).ok_or_else(|| {
             anyhow::anyhow!(
@@ -25746,7 +25733,7 @@ fn handle_debug_explain(args: &DebugExplainArgs) -> Result<()> {
             return emit_explain_steps(&steps, args.json, false);
         }
     };
-    let receipt_bytes = match fs::read(receipt_path) {
+    let receipt_bytes = match crate::bounded_read(receipt_path, MAX_GENERAL_FILE_BYTES) {
         Ok(b) => {
             steps.push(ExplainStep::ok(
                 "read",
