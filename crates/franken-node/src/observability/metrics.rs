@@ -2,6 +2,11 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt::{self, Write as _};
 
+use crate::push_bounded;
+
+/// Maximum metrics per registry to prevent memory exhaustion DoS attacks.
+const MAX_METRICS_PER_REGISTRY: usize = 10_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetricKind {
     Counter,
@@ -121,8 +126,9 @@ impl MetricsRegistry {
         self.metrics.iter()
     }
 
+    /// Record a metric snapshot with bounded capacity to prevent DoS attacks.
     pub fn record(&mut self, metric: MetricSnapshot) {
-        self.metrics.push(metric);
+        push_bounded(&mut self.metrics, metric, MAX_METRICS_PER_REGISTRY);
     }
 
     pub fn record_counter(
