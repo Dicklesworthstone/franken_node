@@ -454,13 +454,22 @@ impl QuarantineController {
             &decision.signed_evidence.evidence_hash,
         );
         let scope_matches = constant_time::ct_eq(&decision.scope, &decision.signed_evidence.scope);
-        let action_matches = decision.action == decision.signed_evidence.action;
-        let posterior_matches =
-            decision.posterior.to_bits() == decision.signed_evidence.posterior.to_bits();
-        let threshold_matches =
-            decision.threshold.to_bits() == decision.signed_evidence.threshold.to_bits();
-        let evidence_count_matches =
-            decision.evidence_count == decision.signed_evidence.evidence_count;
+        let action_matches = constant_time::ct_eq(
+            &decision.action.to_string(),
+            &decision.signed_evidence.action.to_string(),
+        );
+        let posterior_matches = constant_time::ct_eq(
+            &decision.posterior.to_bits().to_string(),
+            &decision.signed_evidence.posterior.to_bits().to_string(),
+        );
+        let threshold_matches = constant_time::ct_eq(
+            &decision.threshold.to_bits().to_string(),
+            &decision.signed_evidence.threshold.to_bits().to_string(),
+        );
+        let evidence_count_matches = constant_time::ct_eq(
+            &decision.evidence_count.to_string(),
+            &decision.signed_evidence.evidence_count.to_string(),
+        );
         if !principal_matches
             || !action_matches
             || !posterior_matches
