@@ -19,7 +19,7 @@ pub const VALIDATION_PROOF_ECONOMICS_SCHEMA_VERSION: &str =
     "franken-node/validation-proof-economics/v1";
 
 /// Deterministic validation proof economics and SLO report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidationProofEconomicsReport {
     pub schema_version: String,
     pub generated_at: DateTime<Utc>,
@@ -62,7 +62,7 @@ pub struct EconomicsSummary {
 }
 
 /// SLO compliance status for validation proof work.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SloComplianceStatus {
     /// Overall SLO compliance health.
     pub overall_status: SloStatus,
@@ -92,7 +92,7 @@ pub struct SloMetricStatus {
 }
 
 /// Economics breakdown by various dimensions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EconomicsBreakdown {
     /// Savings from proof coalescing/reuse by evidence source.
     pub savings_by_evidence_source: BTreeMap<String, EconomicsSavings>,
@@ -131,7 +131,7 @@ pub struct FailureClassMetrics {
 }
 
 /// Stable groupings for economics analysis.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EconomicsGroupings {
     /// Economics grouped by bead ID.
     pub by_bead_id: BTreeMap<String, BeadEconomicsGroup>,
