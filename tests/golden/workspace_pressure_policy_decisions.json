@@ -17,98 +17,98 @@
       "work_class": "DocsGate"
     },
     {
-      "decision": "AllowLocal",
+      "decision": "RequireRch",
       "has_cleanup_candidates": false,
       "priority": 1,
-      "reason_code": "ADMIT_LOCAL",
+      "reason_code": "REQUIRE_RCH",
       "scenario": "healthy",
       "work_class": "Validation"
     },
     {
-      "decision": "AllowLocal",
+      "decision": "RequireRch",
       "has_cleanup_candidates": false,
       "priority": 1,
-      "reason_code": "ADMIT_LOCAL",
+      "reason_code": "REQUIRE_RCH",
       "scenario": "healthy",
       "work_class": "Benchmark"
     },
     {
-      "decision": "AllowLocal",
+      "decision": "RequireRch",
       "has_cleanup_candidates": false,
       "priority": 1,
-      "reason_code": "ADMIT_LOCAL",
+      "reason_code": "REQUIRE_RCH",
       "scenario": "healthy",
       "work_class": "Fuzzing"
     },
     {
-      "decision": "AllowLocal",
+      "decision": "RequireRch",
       "has_cleanup_candidates": false,
       "priority": 3,
-      "reason_code": "ADMIT_LOCAL",
+      "reason_code": "REQUIRE_RCH",
       "scenario": "healthy",
       "work_class": "Cleanup"
     },
     {
-      "decision": "AllowLocal",
+      "decision": "RequireRch",
       "has_cleanup_candidates": true,
       "priority": 2,
-      "reason_code": "ADMIT_LOCAL",
+      "reason_code": "REQUIRE_RCH",
       "scenario": "disk_pressure",
       "work_class": "SourceOnly"
     },
     {
-      "decision": "AllowLocal",
+      "decision": "RefuseLocalFallback",
       "has_cleanup_candidates": true,
       "priority": 2,
-      "reason_code": "ADMIT_LOCAL",
+      "reason_code": "REFUSE_CRITICAL",
       "scenario": "disk_pressure",
       "work_class": "DocsGate"
     },
     {
-      "decision": "AllowLocal",
+      "decision": "RefuseLocalFallback",
       "has_cleanup_candidates": true,
       "priority": 1,
-      "reason_code": "ADMIT_LOCAL",
+      "reason_code": "REFUSE_CRITICAL",
       "scenario": "disk_pressure",
       "work_class": "Validation"
     },
     {
-      "decision": "Queue",
+      "decision": "RefuseLocalFallback",
       "has_cleanup_candidates": true,
       "priority": 1,
-      "reason_code": "QUEUE_PRESSURE",
+      "reason_code": "REFUSE_CRITICAL",
       "scenario": "disk_pressure",
       "work_class": "Benchmark"
     },
     {
-      "decision": "Queue",
+      "decision": "RefuseLocalFallback",
       "has_cleanup_candidates": true,
       "priority": 1,
-      "reason_code": "QUEUE_PRESSURE",
+      "reason_code": "REFUSE_CRITICAL",
       "scenario": "disk_pressure",
       "work_class": "Fuzzing"
     },
     {
-      "decision": "AllowLocal",
+      "decision": "RefuseLocalFallback",
       "has_cleanup_candidates": true,
       "priority": 3,
-      "reason_code": "ADMIT_LOCAL",
+      "reason_code": "REFUSE_CRITICAL",
       "scenario": "disk_pressure",
       "work_class": "Cleanup"
     },
     {
-      "decision": "AllowLocal",
+      "decision": "RequireRch",
       "has_cleanup_candidates": false,
       "priority": 2,
-      "reason_code": "ADMIT_LOCAL",
+      "reason_code": "REQUIRE_RCH",
       "scenario": "build_pressure",
       "work_class": "SourceOnly"
     },
     {
-      "decision": "AllowLocal",
+      "decision": "RequireRch",
       "has_cleanup_candidates": false,
       "priority": 2,
-      "reason_code": "ADMIT_LOCAL",
+      "reason_code": "REQUIRE_RCH",
       "scenario": "build_pressure",
       "work_class": "DocsGate"
     },
@@ -137,10 +137,10 @@
       "work_class": "Fuzzing"
     },
     {
-      "decision": "AllowLocal",
+      "decision": "RequireRch",
       "has_cleanup_candidates": false,
       "priority": 3,
-      "reason_code": "ADMIT_LOCAL",
+      "reason_code": "REQUIRE_RCH",
       "scenario": "build_pressure",
       "work_class": "Cleanup"
     },
@@ -217,18 +217,18 @@
       "work_class": "Validation"
     },
     {
-      "decision": "AllowLocal",
+      "decision": "RefuseLocalFallback",
       "has_cleanup_candidates": false,
       "priority": 1,
-      "reason_code": "ADMIT_LOCAL",
+      "reason_code": "REFUSE_CRITICAL",
       "scenario": "coordination_degraded",
       "work_class": "Benchmark"
     },
     {
-      "decision": "AllowLocal",
+      "decision": "RefuseLocalFallback",
       "has_cleanup_candidates": false,
       "priority": 1,
-      "reason_code": "ADMIT_LOCAL",
+      "reason_code": "REFUSE_CRITICAL",
       "scenario": "coordination_degraded",
       "work_class": "Fuzzing"
     },
@@ -242,7 +242,7 @@
     },
     {
       "decision": "AllowLocal",
-      "has_cleanup_candidates": false,
+      "has_cleanup_candidates": true,
       "priority": 2,
       "reason_code": "ADMIT_LOCAL",
       "scenario": "critical",
@@ -309,16 +309,16 @@
           "reason_code": "REQUIRE_RCH"
         },
         "Cleanup": {
-          "admission": "AllowLocal",
+          "admission": "RequireRch",
           "cleanup_candidates": [],
-          "confidence": 0.9,
-          "reason_code": "ADMIT_LOCAL"
+          "confidence": 0.85,
+          "reason_code": "REQUIRE_RCH"
         },
         "DocsGate": {
-          "admission": "AllowLocal",
+          "admission": "RequireRch",
           "cleanup_candidates": [],
-          "confidence": 0.9,
-          "reason_code": "ADMIT_LOCAL"
+          "confidence": 0.85,
+          "reason_code": "REQUIRE_RCH"
         },
         "Fuzzing": {
           "admission": "RequireRch",
@@ -327,10 +327,10 @@
           "reason_code": "REQUIRE_RCH"
         },
         "SourceOnly": {
-          "admission": "AllowLocal",
+          "admission": "RequireRch",
           "cleanup_candidates": [],
-          "confidence": 0.9,
-          "reason_code": "ADMIT_LOCAL"
+          "confidence": 0.85,
+          "reason_code": "REQUIRE_RCH"
         },
         "Validation": {
           "admission": "RequireRch",
@@ -347,15 +347,15 @@
         "coordination_healthy": false,
         "free_disk_bytes": 1000000000,
         "memory_pressure": 0.5,
-        "rch_available_slots": 3,
+        "rch_available_slots": null,
         "target_dir_bytes": 4000000000
       },
       "work_decisions": {
         "Benchmark": {
-          "admission": "AllowLocal",
+          "admission": "RefuseLocalFallback",
           "cleanup_candidates": [],
-          "confidence": 0.9,
-          "reason_code": "ADMIT_LOCAL"
+          "confidence": 0.8,
+          "reason_code": "REFUSE_CRITICAL"
         },
         "Cleanup": {
           "admission": "Wait",
@@ -370,10 +370,10 @@
           "reason_code": "ADMIT_LOCAL"
         },
         "Fuzzing": {
-          "admission": "AllowLocal",
+          "admission": "RefuseLocalFallback",
           "cleanup_candidates": [],
-          "confidence": 0.9,
-          "reason_code": "ADMIT_LOCAL"
+          "confidence": 0.8,
+          "reason_code": "REFUSE_CRITICAL"
         },
         "SourceOnly": {
           "admission": "AllowLocal",
@@ -405,8 +405,8 @@
           "cleanup_candidates": [
             {
               "path": "target",
-              "reason": "Large target directory",
-              "size_bytes": 5000000000
+              "reason": "Large target directory detected",
+              "size_bytes": 10000000000
             }
           ],
           "confidence": 0.95,
@@ -417,8 +417,8 @@
           "cleanup_candidates": [
             {
               "path": "target",
-              "reason": "Large target directory",
-              "size_bytes": 5000000000
+              "reason": "Large target directory detected",
+              "size_bytes": 10000000000
             }
           ],
           "confidence": 0.95,
@@ -429,8 +429,8 @@
           "cleanup_candidates": [
             {
               "path": "target",
-              "reason": "Large target directory",
-              "size_bytes": 5000000000
+              "reason": "Large target directory detected",
+              "size_bytes": 10000000000
             }
           ],
           "confidence": 0.95,
@@ -441,8 +441,8 @@
           "cleanup_candidates": [
             {
               "path": "target",
-              "reason": "Large target directory",
-              "size_bytes": 5000000000
+              "reason": "Large target directory detected",
+              "size_bytes": 10000000000
             }
           ],
           "confidence": 0.95,
@@ -450,8 +450,14 @@
         },
         "SourceOnly": {
           "admission": "AllowLocal",
-          "cleanup_candidates": [],
-          "confidence": 0.9,
+          "cleanup_candidates": [
+            {
+              "path": "target",
+              "reason": "Large target directory detected",
+              "size_bytes": 10000000000
+            }
+          ],
+          "confidence": 0.7,
           "reason_code": "ADMIT_LOCAL"
         },
         "Validation": {
@@ -459,8 +465,8 @@
           "cleanup_candidates": [
             {
               "path": "target",
-              "reason": "Large target directory",
-              "size_bytes": 5000000000
+              "reason": "Large target directory detected",
+              "size_bytes": 10000000000
             }
           ],
           "confidence": 0.95,
@@ -476,80 +482,80 @@
         "free_disk_bytes": 200000000,
         "memory_pressure": 0.4,
         "rch_available_slots": 5,
-        "target_dir_bytes": 8000000000
+        "target_dir_bytes": 12000000000
       },
       "work_decisions": {
         "Benchmark": {
-          "admission": "Queue",
+          "admission": "RefuseLocalFallback",
           "cleanup_candidates": [
             {
               "path": "target",
-              "reason": "Target directory cleanup",
-              "size_bytes": 3000000000
+              "reason": "Large target directory detected",
+              "size_bytes": 7000000000
             }
           ],
-          "confidence": 0.8,
-          "reason_code": "QUEUE_PRESSURE"
+          "confidence": 0.95,
+          "reason_code": "REFUSE_CRITICAL"
         },
         "Cleanup": {
-          "admission": "AllowLocal",
+          "admission": "RefuseLocalFallback",
           "cleanup_candidates": [
             {
               "path": "target",
-              "reason": "Target directory cleanup",
-              "size_bytes": 3000000000
+              "reason": "Large target directory detected",
+              "size_bytes": 7000000000
             }
           ],
-          "confidence": 0.8,
-          "reason_code": "ADMIT_LOCAL"
+          "confidence": 0.95,
+          "reason_code": "REFUSE_CRITICAL"
         },
         "DocsGate": {
-          "admission": "AllowLocal",
+          "admission": "RefuseLocalFallback",
           "cleanup_candidates": [
             {
               "path": "target",
-              "reason": "Target directory cleanup",
-              "size_bytes": 3000000000
+              "reason": "Large target directory detected",
+              "size_bytes": 7000000000
             }
           ],
-          "confidence": 0.8,
-          "reason_code": "ADMIT_LOCAL"
+          "confidence": 0.95,
+          "reason_code": "REFUSE_CRITICAL"
         },
         "Fuzzing": {
-          "admission": "Queue",
+          "admission": "RefuseLocalFallback",
           "cleanup_candidates": [
             {
               "path": "target",
-              "reason": "Target directory cleanup",
-              "size_bytes": 3000000000
+              "reason": "Large target directory detected",
+              "size_bytes": 7000000000
             }
           ],
-          "confidence": 0.8,
-          "reason_code": "QUEUE_PRESSURE"
+          "confidence": 0.95,
+          "reason_code": "REFUSE_CRITICAL"
         },
         "SourceOnly": {
-          "admission": "AllowLocal",
+          "admission": "RequireRch",
           "cleanup_candidates": [
             {
               "path": "target",
-              "reason": "Target directory cleanup",
-              "size_bytes": 3000000000
+              "reason": "Large target directory detected",
+              "size_bytes": 7000000000
             }
           ],
-          "confidence": 0.8,
-          "reason_code": "ADMIT_LOCAL"
+          "confidence": 0.85,
+          "reason_code": "REQUIRE_RCH"
         },
         "Validation": {
-          "admission": "AllowLocal",
+          "admission": "RefuseLocalFallback",
           "cleanup_candidates": [
             {
               "path": "target",
-              "reason": "Target directory cleanup",
-              "size_bytes": 3000000000
+              "reason": "Large target directory detected",
+              "size_bytes": 7000000000
             }
           ],
-          "confidence": 0.8,
-          "reason_code": "ADMIT_LOCAL"
+          "confidence": 0.95,
+          "reason_code": "REFUSE_CRITICAL"
         }
       }
     },
@@ -565,16 +571,16 @@
       },
       "work_decisions": {
         "Benchmark": {
-          "admission": "AllowLocal",
+          "admission": "RequireRch",
           "cleanup_candidates": [],
-          "confidence": 0.9,
-          "reason_code": "ADMIT_LOCAL"
+          "confidence": 0.85,
+          "reason_code": "REQUIRE_RCH"
         },
         "Cleanup": {
-          "admission": "AllowLocal",
+          "admission": "RequireRch",
           "cleanup_candidates": [],
-          "confidence": 0.9,
-          "reason_code": "ADMIT_LOCAL"
+          "confidence": 0.85,
+          "reason_code": "REQUIRE_RCH"
         },
         "DocsGate": {
           "admission": "AllowLocal",
@@ -583,10 +589,10 @@
           "reason_code": "ADMIT_LOCAL"
         },
         "Fuzzing": {
-          "admission": "AllowLocal",
+          "admission": "RequireRch",
           "cleanup_candidates": [],
-          "confidence": 0.9,
-          "reason_code": "ADMIT_LOCAL"
+          "confidence": 0.85,
+          "reason_code": "REQUIRE_RCH"
         },
         "SourceOnly": {
           "admission": "AllowLocal",
@@ -595,10 +601,10 @@
           "reason_code": "ADMIT_LOCAL"
         },
         "Validation": {
-          "admission": "AllowLocal",
+          "admission": "RequireRch",
           "cleanup_candidates": [],
-          "confidence": 0.9,
-          "reason_code": "ADMIT_LOCAL"
+          "confidence": 0.85,
+          "reason_code": "REQUIRE_RCH"
         }
       }
     },
@@ -622,13 +628,13 @@
         "Cleanup": {
           "admission": "AllowLocal",
           "cleanup_candidates": [],
-          "confidence": 0.9,
+          "confidence": 0.7,
           "reason_code": "ADMIT_LOCAL"
         },
         "DocsGate": {
           "admission": "AllowLocal",
           "cleanup_candidates": [],
-          "confidence": 0.9,
+          "confidence": 0.7,
           "reason_code": "ADMIT_LOCAL"
         },
         "Fuzzing": {
@@ -640,13 +646,13 @@
         "SourceOnly": {
           "admission": "AllowLocal",
           "cleanup_candidates": [],
-          "confidence": 0.9,
+          "confidence": 0.7,
           "reason_code": "ADMIT_LOCAL"
         },
         "Validation": {
           "admission": "AllowLocal",
           "cleanup_candidates": [],
-          "confidence": 0.9,
+          "confidence": 0.7,
           "reason_code": "ADMIT_LOCAL"
         }
       }
