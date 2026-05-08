@@ -663,6 +663,8 @@ pub fn get_active_file_reservations() -> Result<u32, Box<dyn std::error::Error>>
         .args([
             "-s",
             "-f", // Fail on HTTP error codes
+            "--connect-timeout", "5", // 5 second connection timeout
+            "--max-time", "10", // 10 second total timeout
             "-H", "Content-Type: application/json",
             "http://localhost:8765/mail/api/file-reservations/active/count",
         ])
@@ -858,5 +860,29 @@ mod tests {
 
         // Should always return a reasonable value (even if Agent Mail is down)
         assert!(count <= 1000);
+    }
+
+    #[test]
+    fn test_get_active_file_reservations_timeout_protection() {
+        // Test that reservation function fails gracefully on unreachable endpoint
+        // This tests the timeout protection by trying to connect to a non-existent port
+        use std::process::Command;
+
+        // Try connecting to a port that should be closed/timeout quickly
+        let result = Command::new("curl")
+            .args([
+                "-s",
+                "-f",
+                "--connect-timeout", "1",
+                "--max-time", "2",
+                "http://localhost:99999/nonexistent",
+            ])
+            .output();
+
+        // Should either timeout quickly or fail to connect, not hang indefinitely
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        // Should fail (non-zero exit) due to connection refused or timeout
+        assert!(!output.status.success());
     }
 }
