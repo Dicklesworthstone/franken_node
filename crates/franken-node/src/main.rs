@@ -15684,12 +15684,12 @@ fn build_trust_scan_evidence_ref(
 ) -> VerifiedEvidenceRef {
     let mut hasher = sha2::Sha256::new();
     hasher.update(b"trust_scan_manifest_admission_v1:");
-    hasher.update((dependency.extension_id.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(dependency.extension_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(dependency.extension_id.as_bytes());
-    hasher.update((version.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(version.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(version.as_bytes());
     for artifact_hash in artifact_hashes {
-        hasher.update((artifact_hash.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(artifact_hash.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(artifact_hash.as_bytes());
     }
 
