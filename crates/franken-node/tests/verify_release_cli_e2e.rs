@@ -719,6 +719,49 @@ fn verify_migration_reads_state_record_and_checks_post_conditions() {
 }
 
 #[test]
+fn verify_migration_fails_when_post_conditions_are_only_self_declared() {
+    let temp = TempDir::new().expect("temp dir");
+    write_text_fixture(
+        &temp.path().join("evidence/rewrite-validation.json"),
+        "{\"validated\":true}\n",
+    );
+    write_authoritative_migration_record(
+        temp.path(),
+        "rewrite",
+        serde_json::json!({
+            "schema_version": "franken-node/migration-evidence/v1",
+            "migration_id": "rewrite",
+            "project_root": temp.path().display().to_string(),
+            "status": "applied",
+            "post_conditions_met": true,
+            "validation_record_path": "evidence/rewrite-validation.json"
+        }),
+    );
+
+    let output = run_cli_in_dir(temp.path(), &["verify", "migration", "rewrite", "--json"]);
+    assert!(
+        !output.status.success(),
+        "verify migration should fail when post_conditions_met is self-declared without concrete post-conditions"
+    );
+
+    let payload = parse_json_stdout(&output);
+    assert_eq!(payload["verdict"], "FAIL");
+    assert_eq!(payload["details"]["authority"], "invalid");
+    assert_eq!(payload["details"]["post_conditions_met"], true);
+    assert_eq!(
+        payload["details"]["invariant_failures"][0]["invariant_id"],
+        "MIGRATION_EVIDENCE_POST_CONDITIONS_MISSING"
+    );
+    assert!(
+        payload["details"]["missing_fields"]
+            .as_array()
+            .expect("missing_fields")
+            .iter()
+            .any(|field| field == "post_conditions")
+    );
+}
+
+#[test]
 fn verify_migration_fails_when_post_condition_is_missing() {
     let temp = TempDir::new().expect("temp dir");
     write_text_fixture(

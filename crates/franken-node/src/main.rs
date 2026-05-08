@@ -22828,15 +22828,15 @@ fn build_verify_migration_record_output(
         );
     }
 
-    if post_conditions.is_empty() && declared_post_conditions_met != Some(true) {
+    if post_conditions.is_empty() {
         missing_fields.push("post_conditions");
         push_verify_migration_invariant_failure(
             &mut failures,
             "MIGRATION_EVIDENCE_POST_CONDITIONS_MISSING",
             "post_conditions",
             serde_json::Value::Null,
-            "post_conditions array or post_conditions_met=true",
-            "record validated post-conditions or an explicit post_conditions_met=true result",
+            "non-empty post_conditions array",
+            "record at least one concrete post-condition instead of relying on post_conditions_met alone",
         );
     }
 
