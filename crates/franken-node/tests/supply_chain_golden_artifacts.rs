@@ -73,7 +73,7 @@ fn trust_card_signature_placeholder() -> String {
 }
 
 fn constant_time_str_eq(value: &str, expected: &str) -> bool {
-    value.as_bytes().ct_eq(sentinel.as_bytes()).into()
+    value.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
 fn canonical_trust_card_fixture() -> TrustCard {
@@ -170,14 +170,20 @@ fn sign_golden_trust_card(mut card: TrustCard) -> TrustCard {
 
 fn validate_golden_trust_card_material(card: &TrustCard) -> Result<(), &'static str> {
     let hash_placeholder = trust_card_hash_placeholder();
-    if card.card_hash.is_empty() || equals_sentinel(&card.card_hash, &hash_placeholder) {
+    if card.card_hash.is_empty() || constant_time_str_eq(&card.card_hash, &hash_placeholder) {
         return Err("golden trust card uses placeholder card_hash");
     }
     let signature_placeholder = trust_card_signature_placeholder();
     if card.registry_signature.is_empty()
-        || equals_sentinel(&card.registry_signature, &signature_placeholder)
+        || constant_time_str_eq(&card.registry_signature, &signature_placeholder)
     {
         return Err("golden trust card uses placeholder registry_signature");
+    }
+    if !constant_time_str_eq(&card.card_hash, EXPECTED_TRUST_CARD_HASH) {
+        return Err("golden trust card hash drifted from deterministic fixture");
+    }
+    if !constant_time_str_eq(&card.registry_signature, EXPECTED_TRUST_CARD_SIGNATURE) {
+        return Err("golden trust card signature drifted from deterministic fixture");
     }
     verify_card_signature(card, TEST_REGISTRY_KEY)
         .map_err(|_| "golden trust card signature material is invalid")
