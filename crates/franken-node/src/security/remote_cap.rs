@@ -5913,3 +5913,161 @@ mod remote_cap_comprehensive_negative_tests {
                 "Debug output should indicate hidden fields with '..'");
     }
 }
+
+// ── TOCTOU race condition regression tests (bd-oken4) ─────────────────
+
+#[cfg(test)]
+mod toctou_concurrency_regression_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier, atomic::{AtomicUsize, Ordering}};
+    use std::thread;
+    use tempfile::TempDir;
+
+    /// Regression test for commit 1aa36dc4: Remote capability single-use replay TOCTOU race
+    ///
+    /// Tests concurrent threads attempting to validate and consume the same single-use capability.
+    /// Verifies that exactly one thread succeeds due to atomic check-and-consume.
+    #[test]
+    fn single_use_capability_replay_race_1aa36dc4() {
+        const NUM_THREADS: usize = 4;
+
+        let provider = CapabilityProvider::new("test-secret").expect("provider");
+        let scope = RemoteScope::new(
+            vec![RemoteOperation::TelemetryExport],
+            vec!["https://example.com".to_string()],
+        );
+
+        // Create a single-use capability
+        let (cap, _) = provider.issue(
+            "test-operator",
+            scope,
+            1_700_000_000,
+            3600,
+            true,  // single_use = true
+            false,
+            "toctou-test",
+        ).expect("issue capability");
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let gate = CapabilityGate::with_durable_replay_store("test-key", temp_dir.path())
+            .expect("gate");
+        let gate = Arc::new(gate);
+
+        // Barrier to synchronize thread start for maximum race probability
+        let barrier = Arc::new(Barrier::new(NUM_THREADS));
+        let success_count = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..NUM_THREADS)
+            .map(|i| {
+                let gate = gate.clone();
+                let cap = cap.clone();
+                let barrier = barrier.clone();
+                let success_count = success_count.clone();
+
+                thread::spawn(move || {
+                    // Wait for all threads to be ready
+                    barrier.wait();
+
+                    // All threads simultaneously try to validate and consume the same single-use capability
+                    let result = gate.validate_capability(
+                        &cap,
+                        RemoteOperation::TelemetryExport,
+                        "https://example.com",
+                        true, // consume_single_use = true
+                        &format!("trace-{}", i),
+                        1_700_000_001,
+                    );
+
+                    if result.is_ok() {
+                        success_count.fetch_add(1, Ordering::SeqCst);
+                        true
+                    } else {
+                        false
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let final_success_count = success_count.load(Ordering::SeqCst);
+
+        // CRITICAL ASSERTION: Exactly one thread should succeed due to atomic check-and-consume
+        assert_eq!(final_success_count, 1,
+                  "Expected exactly 1 success due to single-use constraint, got {}. Results: {:?}",
+                  final_success_count, results);
+
+        // Verify the successful thread count matches the boolean results
+        let bool_success_count = results.iter().filter(|&&success| success).count();
+        assert_eq!(bool_success_count, 1,
+                  "Boolean success count should match atomic count");
+
+        println!("✓ Single-use capability race test: {} threads, {} succeeded (expected: 1)",
+                NUM_THREADS, final_success_count);
+    }
+
+    /// Regression test for commit 1aa36dc4: Test with memory-only replay store
+    #[test]
+    fn single_use_capability_memory_replay_race_1aa36dc4() {
+        const NUM_THREADS: usize = 3;
+
+        let provider = CapabilityProvider::new("test-secret").expect("provider");
+        let scope = RemoteScope::new(
+            vec![RemoteOperation::TelemetryExport],
+            vec!["https://example.com".to_string()],
+        );
+
+        let (cap, _) = provider.issue(
+            "test-operator",
+            scope,
+            1_700_000_000,
+            3600,
+            true,
+            false,
+            "memory-toctou-test",
+        ).expect("issue capability");
+
+        // Use memory-only gate (no durable store)
+        let gate = Arc::new(CapabilityGate::try_new("test-key").expect("gate"));
+        let barrier = Arc::new(Barrier::new(NUM_THREADS));
+        let success_count = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..NUM_THREADS)
+            .map(|i| {
+                let gate = gate.clone();
+                let cap = cap.clone();
+                let barrier = barrier.clone();
+                let success_count = success_count.clone();
+
+                thread::spawn(move || {
+                    barrier.wait();
+
+                    let result = gate.validate_capability(
+                        &cap,
+                        RemoteOperation::TelemetryExport,
+                        "https://example.com",
+                        true,
+                        &format!("memory-trace-{}", i),
+                        1_700_000_001,
+                    );
+
+                    if result.is_ok() {
+                        success_count.fetch_add(1, Ordering::SeqCst);
+                    }
+
+                    result.is_ok()
+                })
+            })
+            .collect();
+
+        let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let final_success_count = success_count.load(Ordering::SeqCst);
+
+        assert_eq!(final_success_count, 1,
+                  "Memory-only store: Expected exactly 1 success, got {}. Results: {:?}",
+                  final_success_count, results);
+
+        println!("✓ Memory-only capability race test: {} threads, {} succeeded",
+                NUM_THREADS, final_success_count);
+    }
+}

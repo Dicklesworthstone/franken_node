@@ -1416,6 +1416,161 @@ mod tests {
         assert_eq!(mesh.events().len(), events_before);
     }
 
+    // TOCTOU concurrency regression tests for commit 1aa36dc4
+    mod toctou_concurrency_regression_tests {
+        use super::*;
+        use std::sync::{atomic::AtomicUsize, atomic::Ordering, Arc, Barrier};
+        use std::thread;
+
+        #[test]
+        fn rail_capacity_elevation_race_1aa36dc4() {
+            // Regression test for TOCTOU race in rail capacity check-and-reserve
+            // At capacity-1, spawn 2 threads at a Barrier, both elevate_workload
+            // Assert exactly ONE succeeds (single slot available)
+            let mesh = Arc::new(std::sync::Mutex::new(
+                IsolationMesh::new(test_topology()).expect("mesh")
+            ));
+
+            // Set up: fill hw-1 rail to capacity-1 (1 slot remaining)
+            // hw-1 has capacity=1, so 0 slots remaining after placing w1
+            mesh.lock().unwrap()
+                .place_workload("w1", "hw-1", permissive_policy(), 1)
+                .expect("place w1 to fill hw-1");
+
+            // Create 2 workloads to race for the remaining capacity
+            mesh.lock().unwrap()
+                .place_workload("racer1", "shared-1", permissive_policy(), 2)
+                .expect("place racer1");
+            mesh.lock().unwrap()
+                .place_workload("racer2", "shared-1", permissive_policy(), 3)
+                .expect("place racer2");
+
+            const NUM_RACERS: usize = 2;
+            let barrier = Arc::new(Barrier::new(NUM_RACERS));
+            let success_count = Arc::new(AtomicUsize::new(0));
+            let mut handles = Vec::new();
+
+            for racer_id in 1..=NUM_RACERS {
+                let mesh_clone = Arc::clone(&mesh);
+                let barrier_clone = Arc::clone(&barrier);
+                let success_count_clone = Arc::clone(&success_count);
+
+                let handle = thread::spawn(move || {
+                    // Wait for all threads to be ready
+                    barrier_clone.wait();
+
+                    // Try to elevate to hw-1 (which should have 0 capacity left)
+                    let workload_name = format!("racer{}", racer_id);
+                    let result = mesh_clone.lock().unwrap()
+                        .elevate_workload(&workload_name, "hw-1", 10 + racer_id as u64);
+
+                    if result.is_ok() {
+                        success_count_clone.fetch_add(1, Ordering::SeqCst);
+                    }
+
+                    result.is_ok()
+                });
+
+                handles.push(handle);
+            }
+
+            // Collect results
+            let results: Vec<bool> = handles.into_iter()
+                .map(|h| h.join().unwrap())
+                .collect();
+
+            // CRITICAL: Exactly ZERO should succeed because hw-1 is at capacity
+            // hw-1 capacity=1, w1 is already there, so no room for racers
+            let final_success_count = success_count.load(Ordering::SeqCst);
+            assert_eq!(final_success_count, 0,
+                "Expected 0 successes because hw-1 is at capacity, got {}", final_success_count);
+
+            // Verify both racers failed
+            assert_eq!(results, vec![false, false],
+                "Both racers should fail when target rail is at capacity");
+
+            // Verify capacity accounting is correct
+            let mesh_guard = mesh.lock().unwrap();
+            assert_eq!(mesh_guard.rail_states().get("hw-1").unwrap().active_count, 1,
+                "hw-1 should still have only w1 (active_count=1)");
+            assert_eq!(mesh_guard.rail_states().get("shared-1").unwrap().active_count, 2,
+                "shared-1 should still have both racers");
+        }
+
+        #[test]
+        fn rail_capacity_race_with_available_slot_1aa36dc4() {
+            // Test race when there IS actually 1 slot available
+            // Use proc-1 (capacity=2), place 1 workload, race 2 elevators for the last slot
+            let mesh = Arc::new(std::sync::Mutex::new(
+                IsolationMesh::new(test_topology()).expect("mesh")
+            ));
+
+            // Set up: fill proc-1 rail to capacity-1 (1 slot remaining)
+            // proc-1 has capacity=2, so 1 slot remaining after placing w1
+            mesh.lock().unwrap()
+                .place_workload("w1", "proc-1", permissive_policy(), 1)
+                .expect("place w1 to occupy 1/2 proc-1 slots");
+
+            // Create 2 workloads to race for the remaining 1 slot
+            mesh.lock().unwrap()
+                .place_workload("racer1", "shared-1", permissive_policy(), 2)
+                .expect("place racer1");
+            mesh.lock().unwrap()
+                .place_workload("racer2", "shared-1", permissive_policy(), 3)
+                .expect("place racer2");
+
+            const NUM_RACERS: usize = 2;
+            let barrier = Arc::new(Barrier::new(NUM_RACERS));
+            let success_count = Arc::new(AtomicUsize::new(0));
+            let mut handles = Vec::new();
+
+            for racer_id in 1..=NUM_RACERS {
+                let mesh_clone = Arc::clone(&mesh);
+                let barrier_clone = Arc::clone(&barrier);
+                let success_count_clone = Arc::clone(&success_count);
+
+                let handle = thread::spawn(move || {
+                    // Wait for all threads to be ready
+                    barrier_clone.wait();
+
+                    // Try to elevate to proc-1 (which should have 1 capacity left)
+                    let workload_name = format!("racer{}", racer_id);
+                    let result = mesh_clone.lock().unwrap()
+                        .elevate_workload(&workload_name, "proc-1", 10 + racer_id as u64);
+
+                    if result.is_ok() {
+                        success_count_clone.fetch_add(1, Ordering::SeqCst);
+                    }
+
+                    result.is_ok()
+                });
+
+                handles.push(handle);
+            }
+
+            // Collect results
+            let results: Vec<bool> = handles.into_iter()
+                .map(|h| h.join().unwrap())
+                .collect();
+
+            // CRITICAL: Exactly ONE should succeed (1 slot available)
+            let final_success_count = success_count.load(Ordering::SeqCst);
+            assert_eq!(final_success_count, 1,
+                "Expected exactly 1 success for 1 available slot, got {}", final_success_count);
+
+            // Verify exactly one racer succeeded
+            let success_results: Vec<bool> = results.into_iter().filter(|&x| x).collect();
+            assert_eq!(success_results.len(), 1, "Exactly one racer should succeed");
+
+            // Verify capacity accounting is correct
+            let mesh_guard = mesh.lock().unwrap();
+            assert_eq!(mesh_guard.rail_states().get("proc-1").unwrap().active_count, 2,
+                "proc-1 should be at full capacity (w1 + 1 racer = 2/2)");
+            assert_eq!(mesh_guard.rail_states().get("shared-1").unwrap().active_count, 1,
+                "shared-1 should have 1 racer remaining (the one that failed)");
+        }
+    }
+
     #[test]
     fn remove_unknown_workload_does_not_emit_remove_event_or_change_counts() {
         let mut mesh = IsolationMesh::new(test_topology()).expect("mesh");
