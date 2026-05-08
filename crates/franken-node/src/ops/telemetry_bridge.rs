@@ -433,7 +433,7 @@ impl TelemetryRuntimeHandle {
 
     /// Current lifecycle state.
     pub fn lifecycle_state(&self) -> BridgeLifecycleState {
-        BridgeLifecycleState::from_u8(self.lifecycle.load(Ordering::SeqCst))
+        BridgeLifecycleState::from_u8(self.lifecycle.load(Ordering::Acquire))
     }
 
     /// Signal the bridge to stop accepting new work and begin draining.
@@ -442,7 +442,7 @@ impl TelemetryRuntimeHandle {
             ShutdownReason::EngineExit { .. } => reason_codes::ENGINE_EXIT,
             ShutdownReason::Requested => reason_codes::SHUTDOWN_REQUESTED,
         };
-        self.stop_flag.store(true, Ordering::SeqCst);
+        self.stop_flag.store(true, Ordering::Release);
         self.transition_state(BridgeLifecycleState::Draining);
         TelemetryBridge::with_state(&self.state, |metrics| {
             metrics.record_event(
@@ -486,7 +486,7 @@ impl TelemetryRuntimeHandle {
             );
         }
 
-        if self.connection_worker_panicked.load(Ordering::SeqCst) {
+        if self.connection_worker_panicked.load(Ordering::Acquire) {
             self.mark_join_failed(
                 &mut join_error,
                 "telemetry connection worker panicked while joining runtime",
@@ -497,7 +497,7 @@ impl TelemetryRuntimeHandle {
         let remaining_for_connections = deadline.saturating_sub(drain_start.elapsed());
         if let Err(err) = self.join_connection_workers(remaining_for_connections) {
             self.connection_worker_panicked
-                .store(true, Ordering::SeqCst);
+                .store(true, Ordering::Release);
             self.mark_join_failed(&mut join_error, &err.0);
         }
 
@@ -524,7 +524,7 @@ impl TelemetryRuntimeHandle {
 
             if timed_out {
                 self.transition_state(BridgeLifecycleState::Failed);
-                self.persistence_abort.store(true, Ordering::SeqCst);
+                self.persistence_abort.store(true, Ordering::Release);
                 TelemetryBridge::with_state(&self.state, |metrics| {
                     metrics.record_event(
                         event_codes::DRAIN_TIMEOUT,
@@ -606,7 +606,7 @@ impl TelemetryRuntimeHandle {
             // Check if we've exceeded the deadline
             if join_start.elapsed() >= deadline {
                 // Signal shutdown to remaining workers by setting stop flag
-                self.stop_flag.store(true, Ordering::SeqCst);
+                self.stop_flag.store(true, Ordering::Release);
                 worker_timed_out = true;
 
                 // CRITICAL: Give worker brief grace period to notice stop flag and exit cleanly
@@ -646,7 +646,7 @@ impl TelemetryRuntimeHandle {
                 if timed_out {
                     // Connection worker exceeded deadline; signal shutdown but
                     // still join it so no background worker outlives join().
-                    self.stop_flag.store(true, Ordering::SeqCst);
+                    self.stop_flag.store(true, Ordering::Release);
                     worker_timed_out = true;
                 }
             }
@@ -684,7 +684,7 @@ impl TelemetryRuntimeHandle {
     }
 
     fn transition_state(&self, new_state: BridgeLifecycleState) {
-        let old = self.lifecycle.swap(new_state as u8, Ordering::SeqCst);
+        let old = self.lifecycle.swap(new_state as u8, Ordering::AcqRel);
         TelemetryBridge::with_state(&self.state, |metrics| {
             metrics.record_event(
                 event_codes::STATE_TRANSITION,
@@ -750,14 +750,14 @@ impl TelemetryBridge {
     pub fn start(self) -> Result<TelemetryRuntimeHandle> {
         if self
             .started
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
             anyhow::bail!("telemetry bridge listener already started");
         }
 
         self.lifecycle
-            .store(BridgeLifecycleState::Starting as u8, Ordering::SeqCst);
+            .store(BridgeLifecycleState::Starting as u8, Ordering::Release);
 
         let socket_path = self.socket_path.clone();
         let state = Arc::clone(&self.state);
@@ -785,7 +785,7 @@ impl TelemetryBridge {
         let socket_path_buf = PathBuf::from(&socket_path);
         if socket_path_buf.exists() {
             if is_socket_live(&socket_path_buf) {
-                lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::SeqCst);
+                lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::Release);
                 return Err(anyhow::anyhow!(
                     "cannot start telemetry bridge: live socket already exists at {}",
                     socket_path
@@ -796,7 +796,7 @@ impl TelemetryBridge {
                 Ok(()) => {}
                 Err(err) if err.kind() == ErrorKind::NotFound => {}
                 Err(err) => {
-                    lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::SeqCst);
+                    lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::Release);
                     return Err(err.into());
                 }
             }
@@ -805,14 +805,14 @@ impl TelemetryBridge {
         let listener = match UnixListener::bind(&socket_path) {
             Ok(listener) => listener,
             Err(err) => {
-                lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::SeqCst);
+                lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::Release);
                 return Err(err.into());
             }
         };
 
         // Set non-blocking so the accept loop can check the stop flag
         listener.set_nonblocking(true).inspect_err(|_| {
-            lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::SeqCst);
+            lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::Release);
         })?;
 
         // Only spawn the persistence owner after listener setup succeeds so a
@@ -838,7 +838,7 @@ impl TelemetryBridge {
             );
         });
 
-        lifecycle.store(BridgeLifecycleState::Running as u8, Ordering::SeqCst);
+        lifecycle.store(BridgeLifecycleState::Running as u8, Ordering::Release);
 
         // Listener owner thread
         let listener_state = Arc::clone(&state);
@@ -884,7 +884,7 @@ impl TelemetryBridge {
     ) {
         loop {
             // Check stop flag
-            if stop_flag.load(Ordering::SeqCst) {
+            if stop_flag.load(Ordering::Acquire) {
                 break;
             }
 
@@ -892,8 +892,8 @@ impl TelemetryBridge {
                 &connection_handles,
                 &connection_worker_panicked,
             ) {
-                lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::SeqCst);
-                stop_flag.store(true, Ordering::SeqCst);
+                lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::Release);
+                stop_flag.store(true, Ordering::Release);
                 break;
             }
 
@@ -918,7 +918,7 @@ impl TelemetryBridge {
                     }
 
                     // Check stop flag again after accept
-                    if stop_flag.load(Ordering::SeqCst) {
+                    if stop_flag.load(Ordering::Acquire) {
                         drop(stream);
                         break;
                     }
@@ -956,8 +956,8 @@ impl TelemetryBridge {
                         &connection_handles,
                         &connection_worker_panicked,
                     ) {
-                        lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::SeqCst);
-                        stop_flag.store(true, Ordering::SeqCst);
+                        lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::Release);
+                        stop_flag.store(true, Ordering::Release);
                         let _ = handle.join();
                         break;
                     }
@@ -965,9 +965,9 @@ impl TelemetryBridge {
                     if let Ok(mut handles) = connection_handles.lock() {
                         push_bounded(&mut handles, handle, MAX_ACTIVE_CONNECTIONS);
                     } else {
-                        connection_worker_panicked.store(true, Ordering::SeqCst);
-                        lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::SeqCst);
-                        stop_flag.store(true, Ordering::SeqCst);
+                        connection_worker_panicked.store(true, Ordering::Release);
+                        lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::Release);
+                        stop_flag.store(true, Ordering::Release);
                         let _ = handle.join();
                         break;
                     }
@@ -987,9 +987,9 @@ impl TelemetryBridge {
                         );
                     });
                     // Move to Degraded if we're still Running
-                    let current = lifecycle.load(Ordering::SeqCst);
+                    let current = lifecycle.load(Ordering::Acquire);
                     if current == BridgeLifecycleState::Running as u8 {
-                        lifecycle.store(BridgeLifecycleState::Degraded as u8, Ordering::SeqCst);
+                        lifecycle.store(BridgeLifecycleState::Degraded as u8, Ordering::Release);
                     }
                 }
             }
@@ -997,8 +997,8 @@ impl TelemetryBridge {
 
         if !Self::reap_finished_connection_workers(&connection_handles, &connection_worker_panicked)
         {
-            lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::SeqCst);
-            stop_flag.store(true, Ordering::SeqCst);
+            lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::Release);
+            stop_flag.store(true, Ordering::Release);
         }
 
         // Drop sender to signal persistence thread to drain and exit
@@ -1011,7 +1011,7 @@ impl TelemetryBridge {
     ) -> bool {
         let finished = {
             let Ok(mut handles) = connection_handles.lock() else {
-                connection_worker_panicked.store(true, Ordering::SeqCst);
+                connection_worker_panicked.store(true, Ordering::Release);
                 return false;
             };
             let mut finished = Vec::new();
@@ -1029,7 +1029,7 @@ impl TelemetryBridge {
         let mut worker_panicked = false;
         for handle in finished {
             if handle.join().is_err() {
-                connection_worker_panicked.store(true, Ordering::SeqCst);
+                connection_worker_panicked.store(true, Ordering::Release);
                 worker_panicked = true;
             }
         }
@@ -1069,7 +1069,7 @@ impl TelemetryBridge {
 
         loop {
             // Stop flag check: refuse new events during drain
-            if stop_flag.load(Ordering::SeqCst) {
+            if stop_flag.load(Ordering::Acquire) {
                 break;
             }
 
@@ -1289,7 +1289,7 @@ impl TelemetryBridge {
         abort_flag: Arc<AtomicBool>,
     ) {
         loop {
-            if abort_flag.load(Ordering::SeqCst) {
+            if abort_flag.load(Ordering::Acquire) {
                 Self::abort_pending_persistence(None, &receiver, &state);
                 break;
             }
@@ -1302,13 +1302,13 @@ impl TelemetryBridge {
                 Err(_) => break,
             };
 
-            if abort_flag.load(Ordering::SeqCst) {
+            if abort_flag.load(Ordering::Acquire) {
                 Self::abort_pending_persistence(Some(envelope), &receiver, &state);
                 break;
             }
 
             let batch = Self::recv_persistence_batch(envelope, &receiver, &abort_flag);
-            if abort_flag.load(Ordering::SeqCst) {
+            if abort_flag.load(Ordering::Acquire) {
                 Self::abort_pending_persistence_batch(batch, &receiver, &state);
                 break;
             }
@@ -1338,7 +1338,7 @@ impl TelemetryBridge {
         batch.push(first);
 
         while batch.len() < PERSIST_BATCH_MAX {
-            if abort_flag.load(Ordering::SeqCst) {
+            if abort_flag.load(Ordering::Acquire) {
                 break;
             }
 
@@ -1493,7 +1493,7 @@ fn assert_timed_out_connection_join_does_not_detach_worker_impl() {
     let state_for_connection = Arc::clone(&state);
     let stop_for_connection = Arc::clone(&stop_flag);
     let connection_worker = thread::spawn(move || {
-        while !stop_for_connection.load(Ordering::SeqCst) {
+        while !stop_for_connection.load(Ordering::Acquire) {
             thread::sleep(Duration::from_millis(1));
         }
         drop(state_for_connection);
@@ -1879,7 +1879,7 @@ mod tests {
             Arc::new(Mutex::new(FrankensqliteAdapter::default())),
         );
         assert_eq!(
-            BridgeLifecycleState::from_u8(bridge.lifecycle.load(Ordering::SeqCst)),
+            BridgeLifecycleState::from_u8(bridge.lifecycle.load(Ordering::Acquire)),
             BridgeLifecycleState::Cold,
         );
     }
@@ -1933,7 +1933,7 @@ mod tests {
         let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
 
         // Mark as already started
-        bridge.started.store(true, Ordering::SeqCst);
+        bridge.started.store(true, Ordering::Release);
         let result = bridge.start();
         assert!(result.is_err());
     }
@@ -2210,7 +2210,7 @@ mod tests {
         let state_for_worker = Arc::clone(&state);
         let abort_for_worker = Arc::clone(&persistence_abort);
         let worker = thread::spawn(move || {
-            while !abort_for_worker.load(Ordering::SeqCst) {
+            while !abort_for_worker.load(Ordering::Acquire) {
                 thread::sleep(Duration::from_millis(1));
             }
             drop(state_for_worker);
@@ -2388,7 +2388,7 @@ mod tests {
             "join error should report persistence panic"
         );
         assert_eq!(
-            BridgeLifecycleState::from_u8(lifecycle.load(Ordering::SeqCst)),
+            BridgeLifecycleState::from_u8(lifecycle.load(Ordering::Acquire)),
             BridgeLifecycleState::Failed,
             "persistence join panic must mark the runtime failed"
         );
@@ -2444,7 +2444,7 @@ mod tests {
             "panicked connection workers should fail the reap pass"
         );
         assert!(
-            connection_worker_panicked.load(Ordering::SeqCst),
+            connection_worker_panicked.load(Ordering::Acquire),
             "reap should surface the panic to the runtime"
         );
         assert_eq!(
@@ -4266,7 +4266,7 @@ mod tests {
                 thread::sleep(Duration::from_millis(10));
                 if i == MAX_ACTIVE_CONNECTIONS - 1 {
                     // Last worker signals completion
-                    completed.store(true, Ordering::SeqCst);
+                    completed.store(true, Ordering::Release);
                 }
             });
             push_bounded(&mut handles, handle, MAX_ACTIVE_CONNECTIONS);
@@ -4284,7 +4284,7 @@ mod tests {
         let final_signal = Arc::clone(&final_completed);
         let evicting_handle = thread::spawn(move || {
             thread::sleep(Duration::from_millis(5));
-            final_signal.store(true, Ordering::SeqCst);
+            final_signal.store(true, Ordering::Release);
         });
 
         push_bounded(&mut handles, evicting_handle, MAX_ACTIVE_CONNECTIONS);
@@ -4298,7 +4298,7 @@ mod tests {
 
         // Wait for workers to complete and verify no handles are left orphaned
         let start = std::time::Instant::now();
-        while !workers_completed.load(Ordering::SeqCst) || !final_completed.load(Ordering::SeqCst) {
+        while !workers_completed.load(Ordering::Acquire) || !final_completed.load(Ordering::Acquire) {
             assert!(
                 start.elapsed() <= Duration::from_secs(1),
                 "Workers did not complete within timeout - possible handle leak"
@@ -4317,5 +4317,54 @@ mod tests {
         // 1. push_bounded properly evicts old handles when at capacity
         // 2. Evicted handles are implicitly joined (no orphaned threads)
         // 3. No detached workers remain after the operation
+    }
+
+    #[test]
+    fn test_relaxed_atomic_ordering_coordination() {
+        // Test that Release/Acquire ordering provides proper coordination for stop signaling
+        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let lifecycle = Arc::new(AtomicU8::new(BridgeLifecycleState::Cold as u8));
+        let work_completed = Arc::new(AtomicBool::new(false));
+
+        let stop_flag_clone = Arc::clone(&stop_flag);
+        let lifecycle_clone = Arc::clone(&lifecycle);
+        let work_completed_clone = Arc::clone(&work_completed);
+
+        // Simulate worker thread that checks stop_flag and lifecycle
+        let worker = thread::spawn(move || {
+            // Simulate some initial work
+            thread::sleep(Duration::from_millis(10));
+
+            // Worker checks stop flag (should use Acquire ordering)
+            while !stop_flag_clone.load(Ordering::Acquire) {
+                let state = BridgeLifecycleState::from_u8(lifecycle_clone.load(Ordering::Acquire));
+                if state == BridgeLifecycleState::Draining {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+
+            // Mark work as completed
+            work_completed_clone.store(true, Ordering::Release);
+        });
+
+        // Give worker time to start
+        thread::sleep(Duration::from_millis(5));
+
+        // Main thread signals shutdown (should use Release ordering)
+        lifecycle.store(BridgeLifecycleState::Draining as u8, Ordering::Release);
+        stop_flag.store(true, Ordering::Release);
+
+        // Wait for worker to complete
+        worker.join().expect("worker thread should complete successfully");
+
+        // Verify work was completed (should use Acquire ordering)
+        assert!(work_completed.load(Ordering::Acquire),
+            "Worker should complete after stop signaling");
     }
 }
