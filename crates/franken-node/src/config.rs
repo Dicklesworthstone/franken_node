@@ -1979,6 +1979,12 @@ impl Config {
                 )));
             }
         }
+        // SECURITY: Validate that authorized_api_keys is explicitly configured
+        if self.security.authorized_api_keys.is_empty() {
+            return Err(ConfigError::ValidationFailed(
+                "security.authorized_api_keys must be explicitly configured (fail-closed security boundary)".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -2885,9 +2891,9 @@ pub enum SsrfEnforcementMode {
     /// No SSRF protection - all requests allowed.
     None,
     /// Monitor mode - violations are logged but requests proceed.
-    #[default]
     Monitor,
     /// Block mode - violations terminate the runtime process.
+    #[default]
     Block,
 }
 
@@ -2935,7 +2941,7 @@ fn default_true() -> bool {
 impl Default for NetworkPolicyConfig {
     fn default() -> Self {
         Self {
-            ssrf_enforcement: SsrfEnforcementMode::Monitor,
+            ssrf_enforcement: SsrfEnforcementMode::Block,  // Fail-closed: block by default
             ssrf_protection_enabled: true,
             block_cloud_metadata: true,
             allowlist: Vec::new(),
@@ -5337,5 +5343,36 @@ min_quality_score = "0.8"
 
         let registry = config.verifier_economy_registry();
         assert_eq!(registry.replay_capsule_freshness_secs(), 321);
+    }
+
+    #[test]
+    fn security_config_default_ssrf_enforcement_is_block() {
+        // Test that deserializing without explicit mode produces Block mode (fail-closed)
+        let raw = r#"
+max_degraded_duration_secs = 3600
+max_merge_decisions = 100
+authorized_api_keys = ["test-key"]
+"#;
+        let config: SecurityConfig = toml::from_str(raw).expect("parse security config");
+        assert_eq!(config.network_policy.ssrf_enforcement, SsrfEnforcementMode::Block);
+        assert!(config.network_policy.ssrf_protection_enabled);
+        assert!(config.network_policy.block_cloud_metadata);
+    }
+
+    #[test]
+    fn security_config_default_requires_explicit_api_keys() {
+        // Test that deserializing without authorized_api_keys fails validation
+        let raw = r#"
+max_degraded_duration_secs = 3600
+max_merge_decisions = 100
+"#;
+        let config: SecurityConfig = toml::from_str(raw).expect("parse security config");
+        assert!(config.authorized_api_keys.is_empty());
+
+        // Full config validation should catch this and error
+        let full_config = Config::for_profile(Profile::Balanced);
+        let validation_result = full_config.validate();
+        assert!(validation_result.is_err());
+        assert!(validation_result.unwrap_err().to_string().contains("authorized_api_keys"));
     }
 }
