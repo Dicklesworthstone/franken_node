@@ -599,7 +599,6 @@ pub struct LaneTelemetrySnapshot {
 }
 
 /// The lane-aware scheduler.
-#[derive(Debug)]
 /// Multi-lane task scheduler with policy-based lane assignment and starvation detection.
 ///
 /// The `LaneScheduler` manages concurrent task execution across multiple scheduler lanes,
@@ -762,6 +761,21 @@ pub struct LaneScheduler {
     max_audit_log_entries: usize,
     max_queued_tasks_per_lane: usize,
     task_counter: u64,
+}
+
+impl fmt::Debug for LaneScheduler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LaneScheduler")
+            .field("policy", &self.policy)
+            .field("counters", &self.counters)
+            .field("active_tasks_count", &self.active_tasks.len())
+            .field("queued_tasks_count", &self.queued_tasks.values().map(|q| q.len()).sum::<usize>())
+            .field("audit_log_count", &self.audit_log.len())
+            .field("max_audit_log_entries", &self.max_audit_log_entries)
+            .field("max_queued_tasks_per_lane", &self.max_queued_tasks_per_lane)
+            .field("task_counter", &self.task_counter)
+            .finish()
+    }
 }
 
 impl LaneScheduler {
