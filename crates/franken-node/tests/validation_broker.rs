@@ -311,7 +311,7 @@ fn base_receipt() -> Result<ValidationReceipt, Box<dyn std::error::Error>> {
         "bd-base",
         ts(0),
         ts(10),
-        ts(3_600),
+        ts(10) + Duration::seconds(3_600),
         ValidationExitKind::Success,
         ValidationErrorClass::None,
         TimeoutClass::None,
