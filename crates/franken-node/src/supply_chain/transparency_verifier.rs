@@ -181,16 +181,16 @@ impl fmt::Display for ProofFailure {
 fn recompute_root_bytes(proof: &InclusionProof) -> [u8; 32] {
     // Decode the hex leaf hash to bytes
     let mut current: [u8; 32] = hex::decode(&proof.leaf_hash)
-        .expect("leaf_hash should be valid hex")
+        .unwrap_or_else(|e| panic!("Invalid leaf hash hex: {}", e))
         .try_into()
-        .expect("leaf_hash should be 32 bytes");
+        .unwrap_or_else(|_| panic!("Leaf hash must be exactly 32 bytes"));
     let mut index = proof.leaf_index;
 
     for sibling in &proof.audit_path {
         let sibling_bytes: [u8; 32] = hex::decode(sibling)
-            .expect("audit path entry should be valid hex")
+            .unwrap_or_else(|e| panic!("Invalid audit path hex: {}", e))
             .try_into()
-            .expect("audit path entry should be 32 bytes");
+            .unwrap_or_else(|_| panic!("Audit path entry must be exactly 32 bytes"));
 
         if index.is_multiple_of(2) {
             current = hash_pair_bytes(&current[..], &sibling_bytes[..]);
