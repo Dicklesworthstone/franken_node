@@ -46,9 +46,20 @@ const KNOWN_WEAK_SECRET_MATERIAL: &[&str] = &[
     "1234567890",
 ];
 
-#[derive(Debug)]
 struct ReplayTokenSet {
     inner: Arc<Mutex<ReplayTokenSetInner>>,
+}
+
+impl std::fmt::Debug for ReplayTokenSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let token_count = match self.inner.try_lock() {
+            Ok(guard) => guard.ids.len(),
+            Err(_) => 0, // Avoid blocking on poisoned/contested mutex in debug formatting
+        };
+        f.debug_struct("ReplayTokenSet")
+            .field("token_count", &token_count)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -964,7 +975,7 @@ fn endpoint_matches_prefix(endpoint: &str, prefix: &str) -> bool {
 ///
 /// The token has no public constructor; issuance must happen through
 /// `CapabilityProvider`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteCap {
     token_id: String,
     issuer_identity: String,
@@ -973,6 +984,20 @@ pub struct RemoteCap {
     scope: RemoteScope,
     signature: String,
     single_use: bool,
+}
+
+impl std::fmt::Debug for RemoteCap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteCap")
+            .field("token_id", &self.token_id)
+            .field("issuer_identity", &self.issuer_identity)
+            .field("issued_at_epoch_secs", &self.issued_at_epoch_secs)
+            .field("expires_at_epoch_secs", &self.expires_at_epoch_secs)
+            .field("scope", &self.scope)
+            .field("signature", &"<redacted>")
+            .field("single_use", &self.single_use)
+            .finish()
+    }
 }
 
 impl RemoteCap {
@@ -5808,5 +5833,75 @@ mod remote_cap_comprehensive_negative_tests {
             audit_log[0].trace_id, "trace-seeded-audit",
             "contention must not erase previously recorded audit state"
         );
+    }
+
+    /// Test that RemoteCap Debug output redacts sensitive signature material
+    #[test]
+    fn redacted_debug_output_for_remote_cap() {
+        let provider = CapabilityProvider::new("test-secret-key").expect("valid provider");
+        let scope = RemoteScope::new(
+            vec![RemoteOperation::FederationSync],
+            vec!["https://test.example.com".to_string()],
+        );
+
+        let (cap, _) = provider
+            .issue("test@example.com", scope, 1000, 60, false, false, "debug-test")
+            .expect("capability issuance should succeed");
+
+        let debug_output = format!("{:?}", cap);
+
+        // Ensure signature field is redacted
+        assert!(debug_output.contains("signature: \"<redacted>\""),
+                "Debug output should redact signature: {}", debug_output);
+
+        // Ensure safe fields are still visible
+        assert!(debug_output.contains("token_id"), "Debug should show token_id");
+        assert!(debug_output.contains("issuer_identity"), "Debug should show issuer_identity");
+        assert!(debug_output.contains("test@example.com"), "Debug should show issuer value");
+
+        // Ensure actual signature value is not present (it would be base64-encoded)
+        // Get the actual signature to ensure it's not in debug output
+        let signature_bytes = cap.signature.as_bytes();
+        assert!(!signature_bytes.is_empty(), "Signature should not be empty");
+        for chunk in signature_bytes.chunks(4) {
+            let chunk_str = String::from_utf8_lossy(chunk);
+            if chunk_str.len() >= 3 {
+                assert!(!debug_output.contains(&chunk_str),
+                        "Debug output should not contain signature chunks: {}", chunk_str);
+            }
+        }
+    }
+
+    /// Test that ReplayTokenSet Debug output redacts token IDs to prevent pattern analysis
+    #[test]
+    fn redacted_debug_output_for_replay_token_set() {
+        let mut replay_set = ReplayTokenSet::default();
+
+        // Insert some test token IDs
+        let test_tokens = vec![
+            "token-12345-abcdef".to_string(),
+            "token-67890-fedcba".to_string(),
+            "sensitive-replay-id".to_string(),
+        ];
+
+        for token in &test_tokens {
+            replay_set.insert_if_new(token.clone());
+        }
+
+        let debug_output = format!("{:?}", replay_set);
+
+        // Ensure token count is shown
+        assert!(debug_output.contains("token_count: 3"),
+                "Debug output should show token count: {}", debug_output);
+
+        // Ensure actual token IDs are not exposed
+        for token in &test_tokens {
+            assert!(!debug_output.contains(token),
+                    "Debug output should not contain token ID '{}': {}", token, debug_output);
+        }
+
+        // Should use finish_non_exhaustive() pattern
+        assert!(debug_output.contains(".."),
+                "Debug output should indicate hidden fields with '..'");
     }
 }
