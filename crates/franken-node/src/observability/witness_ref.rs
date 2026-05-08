@@ -229,7 +229,7 @@ impl fmt::Display for WitnessKind {
 /// - **Replay capability**: Bundle locators enable full audit trail reconstruction
 /// - **Traceability**: Stable witness IDs link decisions to supporting evidence
 /// - **Content verification**: Hash can be verified against actual witness content
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WitnessRef {
     /// Stable identifier for this witness.
     pub witness_id: WitnessId,
@@ -239,6 +239,17 @@ pub struct WitnessRef {
     pub replay_bundle_locator: Option<String>,
     /// SHA-256 hash of the witness content for tamper detection.
     pub integrity_hash: [u8; 32],
+}
+
+impl std::fmt::Debug for WitnessRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WitnessRef")
+            .field("witness_id", &self.witness_id)
+            .field("witness_kind", &self.witness_kind)
+            .field("replay_bundle_locator", &self.replay_bundle_locator)
+            .field("integrity_hash", &"[REDACTED; 32 bytes]")
+            .finish()
+    }
 }
 
 impl WitnessRef {
@@ -2278,6 +2289,41 @@ mod tests {
                 4,
                 "total witness kind count should remain stable"
             );
+        }
+
+        /// Test that WitnessRef Debug output redacts integrity_hash to prevent hash exposure
+        #[test]
+        fn redacted_debug_output_for_witness_ref() {
+            // Create a WitnessRef with a non-zero integrity hash
+            let test_hash = [0x42u8; 32]; // Non-zero test hash
+            let witness = WitnessRef {
+                witness_id: WitnessId::new("test-witness-001"),
+                witness_kind: WitnessKind::ProofArtifact,
+                replay_bundle_locator: Some("bundle-loc-123".to_string()),
+                integrity_hash: test_hash,
+            };
+
+            let debug_output = format!("{:?}", witness);
+
+            // Ensure integrity_hash field is redacted
+            assert!(debug_output.contains("integrity_hash: \"[REDACTED; 32 bytes]\""),
+                    "Debug output should redact integrity_hash: {}", debug_output);
+
+            // Ensure safe fields are still visible
+            assert!(debug_output.contains("witness_id"), "Debug should show witness_id");
+            assert!(debug_output.contains("test-witness-001"), "Debug should show witness_id value");
+            assert!(debug_output.contains("ProofArtifact"), "Debug should show witness_kind");
+            assert!(debug_output.contains("bundle-loc-123"), "Debug should show replay_bundle_locator");
+
+            // Ensure actual hash bytes do not appear in debug output
+            // Check for hex representation of test hash bytes
+            assert!(!debug_output.contains("42424242"),
+                    "Debug output should not contain hex of hash bytes: {}", debug_output);
+            assert!(!debug_output.contains(&format!("{:02x}", test_hash[0])),
+                    "Debug output should not contain individual hash bytes: {}", debug_output);
+
+            // Verify the actual hash is what we expect (sanity check)
+            assert_eq!(witness.integrity_hash, test_hash, "Test hash should match expected value");
         }
     }
 }
