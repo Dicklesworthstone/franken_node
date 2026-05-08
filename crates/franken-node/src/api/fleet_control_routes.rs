@@ -279,11 +279,10 @@ impl FleetLeaseState {
     }
 
     fn active_leases(&self) -> Vec<Lease> {
-        let mut leases: Vec<Lease> = self
-            .leases
-            .values()
-            .map(|stored| stored.lease.clone())
-            .collect();
+        let mut leases = Vec::with_capacity(self.leases.len());
+        for stored in self.leases.values() {
+            leases.push(stored.lease.clone());
+        }
         leases.sort_by(|left, right| {
             left.acquired_at
                 .cmp(&right.acquired_at)
@@ -688,6 +687,65 @@ mod tests {
     fn reset_fleet_lease_state() {
         let mut state = fleet_lease_state().lock().expect("state lock");
         *state = FleetLeaseState::default();
+    }
+
+    #[test]
+    fn test_lease_operations_optimized_response_identical() {
+        // Test that optimized lease operations produce identical JSON responses
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+
+        let admin = admin_identity();
+        let trace = test_trace();
+
+        // Acquire a lease to have data to list
+        let acquire_request = LeaseAcquireRequest {
+            resource: "test-resource-1".to_string(),
+            ttl_seconds: 300,
+        };
+
+        let acquire_response = acquire_lease(&admin, &trace, &acquire_request);
+        assert!(acquire_response.is_ok(), "Failed to acquire lease: {:?}", acquire_response);
+
+        let acquired_lease = acquire_response.unwrap();
+        assert!(acquired_lease.ok);
+        assert_eq!(acquired_lease.data.resource, "test-resource-1");
+        assert!(acquired_lease.data.lease_id.starts_with("lease-"));
+        assert_eq!(acquired_lease.data.holder, admin.principal);
+
+        // Test list_leases response structure and content
+        let list_response = list_leases(&admin, &trace);
+        assert!(list_response.is_ok(), "Failed to list leases: {:?}", list_response);
+
+        let lease_list = list_response.unwrap();
+        assert!(lease_list.ok);
+        assert_eq!(lease_list.data.len(), 1);
+        assert!(lease_list.page.is_none());
+
+        // Verify response contains the same lease data
+        let listed_lease = &lease_list.data[0];
+        assert_eq!(listed_lease.lease_id, acquired_lease.data.lease_id);
+        assert_eq!(listed_lease.resource, acquired_lease.data.resource);
+        assert_eq!(listed_lease.holder, acquired_lease.data.holder);
+        assert_eq!(listed_lease.acquired_at, acquired_lease.data.acquired_at);
+        assert_eq!(listed_lease.expires_at, acquired_lease.data.expires_at);
+        assert_eq!(listed_lease.fencing_token, acquired_lease.data.fencing_token);
+
+        // Test JSON serialization produces consistent structure
+        let acquire_json = serde_json::to_string(&acquired_lease).unwrap();
+        let list_json = serde_json::to_string(&lease_list).unwrap();
+
+        // Verify JSON structure contains expected fields
+        assert!(acquire_json.contains("\"ok\":true"));
+        assert!(acquire_json.contains("\"lease_id\":"));
+        assert!(acquire_json.contains("\"resource\":"));
+        assert!(acquire_json.contains("\"holder\":"));
+        assert!(acquire_json.contains("\"acquired_at\":"));
+        assert!(acquire_json.contains("\"expires_at\":"));
+        assert!(acquire_json.contains("\"fencing_token\":"));
+
+        assert!(list_json.contains("\"ok\":true"));
+        assert!(list_json.contains("\"data\":["));
     }
 
     #[test]
