@@ -6,18 +6,14 @@
 //! artifacts to report economics and SLO compliance.
 
 use crate::ops::validation_broker::{
-    ValidationProofStatus, ProofStatusKind, ProofEvidenceSource, QueueState,
-    TimeoutClass, ValidationErrorClass, ValidationExitKind,
-};
-use crate::ops::validation_proof_coalescer::{
-    ValidationProofCoalescerDecisionKind, ValidationProofCoalescerOutcome,
+    ValidationProofStatus, ProofEvidenceSource,
 };
 use crate::ops::validation_proof_debt_ledger::{
     ValidationProofDebtLedger, ValidationProofDebtClass, ValidationProofDebtState,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub const VALIDATION_PROOF_ECONOMICS_SCHEMA_VERSION: &str =
     "franken-node/validation-proof-economics/v1";
@@ -85,7 +81,7 @@ pub enum SloStatus {
 }
 
 /// Individual SLO metric compliance status.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SloMetricStatus {
     pub metric_name: String,
     pub target_value: f64,
@@ -116,7 +112,7 @@ pub struct EconomicsSavings {
 }
 
 /// Debt metrics for a specific blocker class.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DebtClassMetrics {
     pub blocked_count: usize,
     pub retryable_count: usize,
@@ -160,7 +156,7 @@ pub struct BeadEconomicsGroup {
 }
 
 /// Economics metrics grouped by proof work key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProofWorkKeyEconomicsGroup {
     pub proof_work_key: String,
     pub execution_count: usize,
@@ -171,7 +167,7 @@ pub struct ProofWorkKeyEconomicsGroup {
 }
 
 /// Economics metrics grouped by agent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentEconomicsGroup {
     pub agent: String,
     pub requests_submitted: usize,
@@ -182,7 +178,7 @@ pub struct AgentEconomicsGroup {
 }
 
 /// Economics metrics grouped by decision class.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecisionClassEconomicsGroup {
     pub decision_class: String,
     pub decision_count: usize,
@@ -245,13 +241,13 @@ impl ValidationProofEconomicsGenerator {
         let generated_at = Utc::now();
 
         // Calculate summary metrics
-        let summary = self.calculate_summary(proof_statuses, debt_ledger);
+        let summary = self.calculate_summary(proof_statuses, debt_ledger, generated_at);
 
         // Check SLO compliance
         let slo_compliance = self.calculate_slo_compliance(&summary, proof_statuses);
 
         // Generate economics breakdown
-        let economics_breakdown = self.calculate_economics_breakdown(proof_statuses, debt_ledger);
+        let economics_breakdown = self.calculate_economics_breakdown(proof_statuses, debt_ledger, generated_at);
 
         // Generate stable groupings
         let groupings = self.calculate_groupings(proof_statuses, debt_ledger);
@@ -271,6 +267,7 @@ impl ValidationProofEconomicsGenerator {
         &self,
         proof_statuses: &[ValidationProofStatus],
         debt_ledger: &ValidationProofDebtLedger,
+        generated_at: DateTime<Utc>,
     ) -> EconomicsSummary {
         let mut duplicate_proofs_avoided = 0usize;
         let mut worker_time_saved_seconds = 0u64;
@@ -290,10 +287,10 @@ impl ValidationProofEconomicsGenerator {
 
             // Count failures by type
             match status.proof_source {
-                ProofEvidenceSource::ProductFailure => {
+                ProofEvidenceSource::CoalescerRejected => {
                     product_failure_count = product_failure_count.saturating_add(1);
                 }
-                ProofEvidenceSource::WorkerInfraFailure => {
+                ProofEvidenceSource::Unknown => {
                     retryable_worker_infra_failure_count =
                         retryable_worker_infra_failure_count.saturating_add(1);
                 }
@@ -313,7 +310,8 @@ impl ValidationProofEconomicsGenerator {
             }
 
             // Check for starvation risk (debt older than threshold)
-            if entry.age_seconds > self.slo_targets.max_debt_age_seconds as u64 {
+            let age_seconds = (generated_at - entry.observed_at).num_seconds().max(0) as u64;
+            if age_seconds > self.slo_targets.max_debt_age_seconds as u64 {
                 starvation_risk_count = starvation_risk_count.saturating_add(1);
             }
         }
@@ -408,6 +406,7 @@ impl ValidationProofEconomicsGenerator {
         &self,
         proof_statuses: &[ValidationProofStatus],
         debt_ledger: &ValidationProofDebtLedger,
+        generated_at: DateTime<Utc>,
     ) -> EconomicsBreakdown {
         let mut savings_by_evidence_source = BTreeMap::new();
         let mut debt_by_blocker_class = BTreeMap::new();
@@ -433,10 +432,10 @@ impl ValidationProofEconomicsGenerator {
             }
 
             match status.proof_source {
-                ProofEvidenceSource::CacheReuse => {
+                ProofEvidenceSource::ProofCacheHit => {
                     savings.reuse_count = savings.reuse_count.saturating_add(1);
                 }
-                ProofEvidenceSource::Coalescing => {
+                ProofEvidenceSource::CoalescedCompleted => {
                     savings.coalescing_count = savings.coalescing_count.saturating_add(1);
                 }
                 _ => {}
@@ -468,7 +467,8 @@ impl ValidationProofEconomicsGenerator {
                 ValidationProofDebtState::Informational => {}
             }
 
-            if entry.age_seconds > self.slo_targets.max_debt_age_seconds as u64 {
+            let age_seconds = (generated_at - entry.observed_at).num_seconds().max(0) as u64;
+            if age_seconds > self.slo_targets.max_debt_age_seconds as u64 {
                 metrics.starvation_risk = true;
             }
         }
@@ -478,9 +478,10 @@ impl ValidationProofEconomicsGenerator {
             let class_key = entry.debt_class.as_str().to_string();
             if let Some(metrics) = debt_by_blocker_class.get_mut(&class_key) {
                 if metrics.total_debt > 0 {
+                    let age_seconds = (generated_at - entry.observed_at).num_seconds().max(0) as f64;
                     metrics.average_age_seconds =
                         (metrics.average_age_seconds * (metrics.total_debt.saturating_sub(1)) as f64
-                         + entry.age_seconds as f64) / metrics.total_debt as f64;
+                         + age_seconds) / metrics.total_debt as f64;
                 }
             }
         }
@@ -524,7 +525,7 @@ impl ValidationProofEconomicsGenerator {
             }
 
             match status.proof_source {
-                ProofEvidenceSource::ProductFailure | ProofEvidenceSource::WorkerInfraFailure => {
+                ProofEvidenceSource::CoalescerRejected | ProofEvidenceSource::Unknown => {
                     group.failure_count = group.failure_count.saturating_add(1);
                 }
                 _ => {}
@@ -604,23 +605,61 @@ mod tests {
             entries: vec![
                 ValidationProofDebtLedgerEntry {
                     bead_id: "test-bead-1".to_string(),
-                    debt_id: "debt-1".to_string(),
+                    thread_id: "thread-1".to_string(),
+                    request_id: Some("req-1".to_string()),
+                    queue_id: Some("queue-1".to_string()),
+                    owner_agent: Some("agent-1".to_string()),
+                    producer_bead_id: None,
                     debt_class: ValidationProofDebtClass::CargoContention,
                     debt_state: ValidationProofDebtState::Blocked,
-                    age_seconds: 3600,
-                    reason: "cargo lock contention".to_string(),
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    freshness: crate::ops::validation_proof_debt_ledger::ValidationProofDebtFreshness::Fresh,
+                    status: "blocked".to_string(),
+                    proof_source: "fresh_execution".to_string(),
+                    queue_state: Some("waiting".to_string()),
+                    deduplicated: false,
+                    retryable: true,
+                    product_failure: false,
+                    blocks_other_bead: false,
+                    command_digest_hex: Some("abcd".to_string()),
+                    latest_recorder_path: Some("/tmp/recorder.log".to_string()),
+                    receipt_path: None,
+                    cache_key_hex: None,
+                    worker_id: Some("worker-1".to_string()),
+                    reason_code: Some("cargo_contention".to_string()),
+                    event_code: Some("lock_wait".to_string()),
+                    required_action: "retry_later".to_string(),
+                    diagnostic: "cargo lock contention".to_string(),
+                    freshness_expires_at: None,
+                    observed_at: Utc::now() - chrono::Duration::seconds(3600),
                 },
                 ValidationProofDebtLedgerEntry {
                     bead_id: "test-bead-2".to_string(),
-                    debt_id: "debt-2".to_string(),
+                    thread_id: "thread-2".to_string(),
+                    request_id: Some("req-2".to_string()),
+                    queue_id: Some("queue-2".to_string()),
+                    owner_agent: Some("agent-2".to_string()),
+                    producer_bead_id: None,
                     debt_class: ValidationProofDebtClass::WorkerInfra,
                     debt_state: ValidationProofDebtState::Retryable,
-                    age_seconds: 900,
-                    reason: "worker ssh timeout".to_string(),
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    freshness: crate::ops::validation_proof_debt_ledger::ValidationProofDebtFreshness::Fresh,
+                    status: "retryable".to_string(),
+                    proof_source: "worker_failure".to_string(),
+                    queue_state: Some("retry_queue".to_string()),
+                    deduplicated: false,
+                    retryable: true,
+                    product_failure: false,
+                    blocks_other_bead: false,
+                    command_digest_hex: Some("efgh".to_string()),
+                    latest_recorder_path: Some("/tmp/recorder2.log".to_string()),
+                    receipt_path: None,
+                    cache_key_hex: None,
+                    worker_id: Some("worker-2".to_string()),
+                    reason_code: Some("worker_timeout".to_string()),
+                    event_code: Some("ssh_timeout".to_string()),
+                    required_action: "retry_with_backoff".to_string(),
+                    diagnostic: "worker ssh timeout".to_string(),
+                    freshness_expires_at: None,
+                    observed_at: Utc::now() - chrono::Duration::seconds(900),
                 },
             ],
         }
@@ -643,9 +682,9 @@ mod tests {
         let generator = ValidationProofEconomicsGenerator::new();
 
         let proof_statuses = vec![
-            sample_proof_status("test-bead-1", true, ProofEvidenceSource::Coalescing),
-            sample_proof_status("test-bead-2", false, ProofEvidenceSource::ProductFailure),
-            sample_proof_status("test-bead-3", true, ProofEvidenceSource::CacheReuse),
+            sample_proof_status("test-bead-1", true, ProofEvidenceSource::CoalescedCompleted),
+            sample_proof_status("test-bead-2", false, ProofEvidenceSource::CoalescerRejected),
+            sample_proof_status("test-bead-3", true, ProofEvidenceSource::ProofCacheHit),
         ];
 
         let debt_ledger = sample_debt_ledger();
@@ -674,7 +713,7 @@ mod tests {
         });
 
         let proof_statuses = vec![
-            sample_proof_status("test-bead-1", false, ProofEvidenceSource::ProductFailure),
+            sample_proof_status("test-bead-1", false, ProofEvidenceSource::CoalescerRejected),
         ];
 
         let debt_ledger = sample_debt_ledger(); // Has 2 entries
@@ -704,8 +743,8 @@ mod tests {
         let generator = ValidationProofEconomicsGenerator::new();
 
         let proof_statuses = vec![
-            sample_proof_status("test-bead-1", true, ProofEvidenceSource::Coalescing),
-            sample_proof_status("test-bead-2", false, ProofEvidenceSource::CacheReuse),
+            sample_proof_status("test-bead-1", true, ProofEvidenceSource::CoalescedCompleted),
+            sample_proof_status("test-bead-2", false, ProofEvidenceSource::ProofCacheHit),
         ];
 
         let debt_ledger = sample_debt_ledger();
@@ -742,9 +781,9 @@ mod tests {
         let generator = ValidationProofEconomicsGenerator::new();
 
         let proof_statuses = vec![
-            sample_proof_status("bead-a", true, ProofEvidenceSource::Coalescing),
-            sample_proof_status("bead-a", false, ProofEvidenceSource::Fresh),
-            sample_proof_status("bead-b", true, ProofEvidenceSource::CacheReuse),
+            sample_proof_status("bead-a", true, ProofEvidenceSource::CoalescedCompleted),
+            sample_proof_status("bead-a", false, ProofEvidenceSource::FreshExecution),
+            sample_proof_status("bead-b", true, ProofEvidenceSource::ProofCacheHit),
         ];
 
         let debt_ledger = sample_debt_ledger();
