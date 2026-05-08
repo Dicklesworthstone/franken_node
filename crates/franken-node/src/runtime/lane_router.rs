@@ -237,7 +237,7 @@ impl LaneRouterConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct QueuedOperation {
     operation_id: String,
     enqueued_at_ms: u64,
@@ -246,7 +246,19 @@ struct QueuedOperation {
     principal: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for QueuedOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueuedOperation")
+            .field("operation_id", &"<redacted>")
+            .field("enqueued_at_ms", &self.enqueued_at_ms)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("cx_id", &"<redacted>")
+            .field("principal", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 struct ActiveOperation {
     operation_id: String,
     lane: ProductLane,
@@ -256,10 +268,32 @@ struct ActiveOperation {
     principal: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for ActiveOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActiveOperation")
+            .field("operation_id", &"<redacted>")
+            .field("lane", &self.lane)
+            .field("permit_id", &"<redacted>")
+            .field("assigned_at_ms", &self.assigned_at_ms)
+            .field("cx_id", &"<redacted>")
+            .field("principal", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 struct LaneState {
     metrics: LaneMetrics,
     queue: VecDeque<QueuedOperation>,
+}
+
+impl std::fmt::Debug for LaneState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaneState")
+            .field("metrics", &self.metrics)
+            .field("queue_length", &self.queue.len())
+            .finish()
+    }
 }
 
 impl LaneState {
@@ -408,7 +442,6 @@ impl fmt::Display for LaneRouterError {
 
 impl std::error::Error for LaneRouterError {}
 
-#[derive(Debug)]
 pub struct LaneRouter {
     config: LaneRouterConfig,
     bulkhead: GlobalBulkhead,
@@ -417,6 +450,20 @@ pub struct LaneRouter {
     queued_operation_ids: BTreeSet<String>,
     events: Vec<LaneEvent>,
     unknown_lane_default_count: u64,
+}
+
+impl std::fmt::Debug for LaneRouter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaneRouter")
+            .field("config", &self.config)
+            .field("bulkhead", &self.bulkhead)
+            .field("lanes_count", &self.lanes.len())
+            .field("active_operations_count", &self.active.len())
+            .field("queued_operation_ids_count", &self.queued_operation_ids.len())
+            .field("events_count", &self.events.len())
+            .field("unknown_lane_default_count", &self.unknown_lane_default_count)
+            .finish()
+    }
 }
 
 impl LaneRouter {
@@ -2772,5 +2819,47 @@ mod tests {
             dup_result.unwrap_err().code(),
             error_codes::OPERATION_DUPLICATE
         );
+    }
+
+    #[test]
+    fn debug_output_redacts_sensitive_data() {
+        // Test that Debug implementations properly redact sensitive operational data
+        // This test verifies the fix for bd-5bnz3
+
+        // Test QueuedOperation debug redaction
+        let queued_op = QueuedOperation {
+            operation_id: "sensitive-op-123".to_string(),
+            enqueued_at_ms: 1000,
+            expires_at_ms: 2000,
+            cx_id: "sensitive-ctx-456".to_string(),
+            principal: "sensitive-user-789".to_string(),
+        };
+
+        let debug_output = format!("{:?}", queued_op);
+        assert!(debug_output.contains("<redacted>"));
+        assert!(!debug_output.contains("sensitive-op-123"));
+        assert!(!debug_output.contains("sensitive-ctx-456"));
+        assert!(!debug_output.contains("sensitive-user-789"));
+        assert!(debug_output.contains("1000")); // timestamps should remain
+        assert!(debug_output.contains("2000"));
+
+        // Test ActiveOperation debug redaction
+        let active_op = ActiveOperation {
+            operation_id: "sensitive-active-123".to_string(),
+            lane: ProductLane::Scoring,
+            permit_id: "sensitive-permit-456".to_string(),
+            assigned_at_ms: 3000,
+            cx_id: "sensitive-ctx-789".to_string(),
+            principal: "sensitive-principal-abc".to_string(),
+        };
+
+        let debug_output = format!("{:?}", active_op);
+        assert!(debug_output.contains("<redacted>"));
+        assert!(!debug_output.contains("sensitive-active-123"));
+        assert!(!debug_output.contains("sensitive-permit-456"));
+        assert!(!debug_output.contains("sensitive-ctx-789"));
+        assert!(!debug_output.contains("sensitive-principal-abc"));
+        assert!(debug_output.contains("3000")); // timestamp should remain
+        assert!(debug_output.contains("Scoring")); // lane should remain
     }
 }
