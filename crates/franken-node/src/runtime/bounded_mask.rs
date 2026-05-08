@@ -56,11 +56,21 @@ thread_local! {
 }
 
 /// Capability context required to invoke bounded masking.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityContext {
     pub cx_id: String,
     pub principal: String,
     pub scopes: BTreeSet<String>,
+}
+
+impl std::fmt::Debug for CapabilityContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CapabilityContext")
+            .field("cx_id", &"<redacted>")
+            .field("principal", &"<redacted>")
+            .field("scopes", &self.scopes)
+            .finish()
+    }
 }
 
 impl CapabilityContext {

@@ -305,11 +305,21 @@ impl LaneState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssignmentOutcome {
     pub operation_id: String,
     pub lane: ProductLane,
     pub queued: bool,
+}
+
+impl std::fmt::Debug for AssignmentOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AssignmentOutcome")
+            .field("operation_id", &"<redacted>")
+            .field("lane", &self.lane)
+            .field("queued", &self.queued)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

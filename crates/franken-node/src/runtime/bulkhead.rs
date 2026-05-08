@@ -60,11 +60,21 @@ pub struct BulkheadEvent {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BulkheadPermit {
     pub permit_id: String,
     pub issued_at_ms: u64,
     pub max_in_flight_snapshot: usize,
+}
+
+impl std::fmt::Debug for BulkheadPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BulkheadPermit")
+            .field("permit_id", &"<redacted>")
+            .field("issued_at_ms", &self.issued_at_ms)
+            .field("max_in_flight_snapshot", &self.max_in_flight_snapshot)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
