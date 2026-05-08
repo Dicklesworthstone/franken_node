@@ -413,7 +413,7 @@ impl ValidationProofEconomicsGenerator {
 
         // Analyze savings by evidence source
         for status in proof_statuses {
-            let source_key = format!("{:?}", status.proof_source);
+            let source_key = status.proof_source.as_str().to_string();
             let savings = savings_by_evidence_source
                 .entry(source_key)
                 .or_insert_with(|| EconomicsSavings {
