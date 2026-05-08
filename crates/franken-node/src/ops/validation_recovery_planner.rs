@@ -9,23 +9,23 @@
 //! snapshot, dirty-state policy, and timeout budget, then emits stable decisions
 //! that are deterministic for identical inputs.
 
-use crate::ops::rch_adapter::{
-    RchAdapterOutcome, RchExecutionMode, RchOutcomeClass, RchTimeoutClass,
-};
+use crate::ops::rch_adapter::{RchAdapterOutcome, RchOutcomeClass, RchTimeoutClass};
 use crate::ops::validation_broker::{
-    FlightRecorderAdapterOutcome, FlightRecorderAdapterOutcomeClass, FlightRecorderObservation,
+    FlightRecorderObservation, ProofEvidenceSource, ValidationProofCacheReuseEvidence,
+    ValidationProofCoalescerEvidence,
 };
-use crate::security::constant_time;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 
 pub const RECOVERY_PLANNER_SCHEMA_VERSION: &str = "franken-node/validation-recovery-planner/v1";
 pub const DEFAULT_MAX_RETRY_ATTEMPTS: u32 = 3;
 pub const DEFAULT_MAX_WORKER_DIVERSITY: u32 = 2;
 pub const DEFAULT_TIMEOUT_BUDGET_MS: u64 = 1_800_000; // 30 minutes
 pub const DEFAULT_MAX_QUEUE_AGE_MS: u64 = 3_600_000; // 1 hour
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
 
 pub mod event_codes {
     pub const RECOVERY_PLAN_GENERATED: &str = "VRP-001";
@@ -41,6 +41,8 @@ pub mod reason_codes {
     pub const QUEUE_UNTIL_CAPACITY: &str = "QUEUE_UNTIL_CAPACITY";
     pub const DRAIN_WORKER_THEN_RETRY: &str = "DRAIN_WORKER_THEN_RETRY";
     pub const WAIT_FOR_EXISTING_PROOF: &str = "WAIT_FOR_EXISTING_PROOF";
+    pub const RETRY_WITH_NEW_FENCE: &str = "RETRY_WITH_NEW_FENCE";
+    pub const REUSE_RECEIPT: &str = "REUSE_RECEIPT";
     pub const USE_SOURCE_ONLY_BLOCKER: &str = "USE_SOURCE_ONLY_BLOCKER";
     pub const FAIL_CLOSED: &str = "FAIL_CLOSED";
     pub const NO_RECOVERY_NEEDED: &str = "NO_RECOVERY_NEEDED";
@@ -59,6 +61,10 @@ pub enum RecoveryAction {
     DrainWorkerThenRetry,
     /// Wait for existing equivalent proof to complete
     WaitForExistingProof,
+    /// Retry stale proof work with a fresh coalescer fencing token
+    RetryWithNewFence,
+    /// Reuse a completed proof receipt instead of executing duplicate work
+    ReuseReceipt,
     /// Use source-only blocker (no remote validation possible)
     UseSourceOnlyBlocker,
     /// Fail closed (unrecoverable failure)
@@ -76,6 +82,8 @@ impl RecoveryAction {
             Self::QueueUntilCapacity => "queue_until_capacity",
             Self::DrainWorkerThenRetry => "drain_worker_then_retry",
             Self::WaitForExistingProof => "wait_for_existing_proof",
+            Self::RetryWithNewFence => "retry_with_new_fence",
+            Self::ReuseReceipt => "reuse_receipt",
             Self::UseSourceOnlyBlocker => "use_source_only_blocker",
             Self::FailClosed => "fail_closed",
             Self::NoRecoveryNeeded => "no_recovery_needed",
@@ -86,7 +94,9 @@ impl RecoveryAction {
     pub const fn is_retry(self) -> bool {
         matches!(
             self,
-            Self::RetryRemoteSameWorker | Self::RetryRemoteDifferentWorker
+            Self::RetryRemoteSameWorker
+                | Self::RetryRemoteDifferentWorker
+                | Self::RetryWithNewFence
         )
     }
 
@@ -94,7 +104,10 @@ impl RecoveryAction {
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::FailClosed | Self::NoRecoveryNeeded | Self::UseSourceOnlyBlocker
+            Self::FailClosed
+                | Self::NoRecoveryNeeded
+                | Self::ReuseReceipt
+                | Self::UseSourceOnlyBlocker
         )
     }
 }
@@ -150,6 +163,9 @@ pub struct RecoveryPlannerInput {
     pub trace_id: String,
     pub rch_outcome: RchAdapterOutcome,
     pub flight_recorder_observations: Vec<FlightRecorderObservation>,
+    pub proof_source: ProofEvidenceSource,
+    pub proof_coalescer: Option<ValidationProofCoalescerEvidence>,
+    pub proof_cache: Option<ValidationProofCacheReuseEvidence>,
     pub proof_priority: ProofPriority,
     pub capacity_snapshot: Option<CapacitySnapshot>,
     pub attempt_count: u32,
@@ -200,15 +216,16 @@ impl RecoveryDecision {
     ) -> Result<Self, RecoveryPlannerError> {
         let event_code = match action {
             RecoveryAction::NoRecoveryNeeded => event_codes::RECOVERY_PLAN_GENERATED,
-            RecoveryAction::RetryRemoteSameWorker | RecoveryAction::RetryRemoteDifferentWorker => {
-                event_codes::RECOVERY_PLAN_RETRY_SCHEDULED
-            }
+            RecoveryAction::RetryRemoteSameWorker
+            | RecoveryAction::RetryRemoteDifferentWorker
+            | RecoveryAction::RetryWithNewFence => event_codes::RECOVERY_PLAN_RETRY_SCHEDULED,
             RecoveryAction::QueueUntilCapacity | RecoveryAction::WaitForExistingProof => {
                 event_codes::RECOVERY_PLAN_QUEUE_DEFERRED
             }
             RecoveryAction::FailClosed => event_codes::RECOVERY_PLAN_FAIL_CLOSED,
             RecoveryAction::UseSourceOnlyBlocker => event_codes::RECOVERY_PLAN_SOURCE_ONLY_BLOCKER,
             RecoveryAction::DrainWorkerThenRetry => event_codes::RECOVERY_PLAN_RETRY_SCHEDULED,
+            RecoveryAction::ReuseReceipt => event_codes::RECOVERY_PLAN_GENERATED,
         };
 
         let fail_closed = matches!(action, RecoveryAction::FailClosed);
@@ -301,6 +318,10 @@ impl ValidationRecoveryPlanner {
             );
         }
 
+        if let Some(coalesced_decision) = self.plan_from_proof_coalescing(input)? {
+            return Ok(coalesced_decision);
+        }
+
         // Check bounds first - fail closed if exceeded
         if self.should_fail_closed_on_bounds(input) {
             return self.create_fail_closed_decision(input, "Retry bounds exceeded");
@@ -356,6 +377,149 @@ impl ValidationRecoveryPlanner {
             || input.worker_diversity_count >= self.config.max_worker_diversity
             || input.timeout_budget_remaining_ms == 0
             || input.queue_age_ms >= self.config.max_queue_age_ms
+    }
+
+    fn plan_from_proof_coalescing(
+        &self,
+        input: &RecoveryPlannerInput,
+    ) -> Result<Option<RecoveryDecision>, RecoveryPlannerError> {
+        if let Some(cache) = &input.proof_cache {
+            return RecoveryDecision::new(
+                input,
+                RecoveryAction::ReuseReceipt,
+                reason_codes::REUSE_RECEIPT,
+                format!(
+                    "Proof cache hit {} has reusable receipt {}",
+                    cache.cache_key_hex, cache.receipt_path
+                ),
+                "Reuse completed proof receipt".to_string(),
+                None,
+                None,
+            )
+            .map(Some);
+        }
+
+        let Some(coalescer) = &input.proof_coalescer else {
+            return Ok(None);
+        };
+
+        match coalescer.required_action.as_str() {
+            "wait_for_receipt" | "join_existing_lease" => {
+                if coalescer.receipt_path.is_some() {
+                    return self.reuse_coalesced_receipt(input, coalescer).map(Some);
+                }
+                return RecoveryDecision::new(
+                    input,
+                    RecoveryAction::WaitForExistingProof,
+                    reason_codes::WAIT_FOR_EXISTING_PROOF,
+                    format!(
+                        "Proof work is already coalesced on lease {} from producer {}",
+                        coalescer.lease_id, coalescer.producer_agent
+                    ),
+                    "Wait for existing proof receipt".to_string(),
+                    Some(60_000),
+                    None,
+                )
+                .map(Some);
+            }
+            "retry_with_new_fence" => {
+                return RecoveryDecision::new(
+                    input,
+                    RecoveryAction::RetryWithNewFence,
+                    reason_codes::RETRY_WITH_NEW_FENCE,
+                    format!(
+                        "Stale proof lease {} requires a fresh fencing token before retry",
+                        coalescer.lease_id
+                    ),
+                    "Retry with new coalescer fencing token".to_string(),
+                    Some(15_000),
+                    input.rch_outcome.worker_id.clone(),
+                )
+                .map(Some);
+            }
+            "fail_closed" | "repair_state" => {
+                return self
+                    .create_fail_closed_decision(
+                        input,
+                        &format!(
+                            "Proof coalescer rejected recovery for lease {}: {}",
+                            coalescer.lease_id, coalescer.diagnostic
+                        ),
+                    )
+                    .map(Some);
+            }
+            _ => {}
+        }
+
+        if coalescer.receipt_path.is_some()
+            || matches!(
+                input.proof_source,
+                ProofEvidenceSource::ProofCacheHit | ProofEvidenceSource::CoalescedCompleted
+            )
+        {
+            return self.reuse_coalesced_receipt(input, coalescer).map(Some);
+        }
+
+        if matches!(
+            input.proof_source,
+            ProofEvidenceSource::CoalescedInflight | ProofEvidenceSource::CoalescedWaiter
+        ) || matches!(
+            coalescer.lease_state.as_str(),
+            "running" | "joined" | "proposed"
+        ) {
+            return RecoveryDecision::new(
+                input,
+                RecoveryAction::WaitForExistingProof,
+                reason_codes::WAIT_FOR_EXISTING_PROOF,
+                format!(
+                    "Proof work is already in flight on lease {} from producer {}",
+                    coalescer.lease_id, coalescer.producer_agent
+                ),
+                "Wait for existing proof receipt".to_string(),
+                Some(60_000),
+                None,
+            )
+            .map(Some);
+        }
+
+        if matches!(input.proof_source, ProofEvidenceSource::CoalescerRejected)
+            || coalescer.lease_state == "failed_closed"
+        {
+            return self
+                .create_fail_closed_decision(
+                    input,
+                    &format!(
+                        "Proof coalescer state is fail-closed for lease {}: {}",
+                        coalescer.lease_id, coalescer.diagnostic
+                    ),
+                )
+                .map(Some);
+        }
+
+        Ok(None)
+    }
+
+    fn reuse_coalesced_receipt(
+        &self,
+        input: &RecoveryPlannerInput,
+        coalescer: &ValidationProofCoalescerEvidence,
+    ) -> Result<RecoveryDecision, RecoveryPlannerError> {
+        let receipt_path = coalescer
+            .receipt_path
+            .as_deref()
+            .unwrap_or("coalesced receipt");
+        RecoveryDecision::new(
+            input,
+            RecoveryAction::ReuseReceipt,
+            reason_codes::REUSE_RECEIPT,
+            format!(
+                "Coalesced proof lease {} has reusable receipt {}",
+                coalescer.lease_id, receipt_path
+            ),
+            "Reuse completed proof receipt".to_string(),
+            None,
+            None,
+        )
     }
 
     fn create_fail_closed_decision(
@@ -610,7 +774,7 @@ fn compute_decision_digest(
 
     let mut hasher = Sha256::new();
     hasher.update(b"validation_recovery_planner_v1:");
-    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(len_to_u64(bytes.len()).to_le_bytes());
     hasher.update(&bytes);
     let digest = hasher.finalize();
     Ok(format!("sha256:{}", hex::encode(digest)))
@@ -621,7 +785,7 @@ fn compute_decision_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::rch_adapter::{RchArtifactDigest, RchValidationAction};
+    use crate::ops::rch_adapter::{RchArtifactDigest, RchExecutionMode, RchValidationAction};
 
     const NOW_MS: u64 = 1_701_000_000_000;
 
@@ -632,6 +796,9 @@ mod tests {
             trace_id: "trace-test-001".to_string(),
             rch_outcome: successful_rch_outcome(),
             flight_recorder_observations: vec![],
+            proof_source: ProofEvidenceSource::FreshExecution,
+            proof_coalescer: None,
+            proof_cache: None,
             proof_priority: ProofPriority {
                 bead_priority: 2,
                 proof_priority: 2,
@@ -678,6 +845,46 @@ mod tests {
                 snippet: "".to_string(),
             },
             duration_ms: 1000,
+        }
+    }
+
+    fn coalescer_evidence(
+        required_action: &str,
+        lease_state: &str,
+        receipt_path: Option<&str>,
+    ) -> ValidationProofCoalescerEvidence {
+        ValidationProofCoalescerEvidence {
+            decision_id: "decision-coalesced-001".to_string(),
+            proof_work_key_hex: "a".repeat(64),
+            lease_id: "lease-coalesced-001".to_string(),
+            lease_path: "artifacts/validation/proof-coalescer/lease.json".to_string(),
+            lease_state: lease_state.to_string(),
+            producer_agent: "PearlLeopard".to_string(),
+            producer_bead_id: "bd-producer".to_string(),
+            waiter_agent: Some("RedGlen".to_string()),
+            trace_id: "trace-coalesced-001".to_string(),
+            receipt_id: receipt_path.map(|_| "receipt-coalesced-001".to_string()),
+            receipt_path: receipt_path.map(str::to_string),
+            proof_cache_key_hex: "b".repeat(64),
+            reason_code: "COALESCER_TEST".to_string(),
+            event_code: "VPCO-TEST".to_string(),
+            required_action: required_action.to_string(),
+            diagnostic: "coalescer test diagnostic".to_string(),
+        }
+    }
+
+    fn proof_cache_evidence() -> ValidationProofCacheReuseEvidence {
+        ValidationProofCacheReuseEvidence {
+            decision_id: "cache-decision-001".to_string(),
+            cache_key_hex: "c".repeat(64),
+            entry_id: "cache-entry-001".to_string(),
+            entry_path: "artifacts/validation/proof-cache/entry.json".to_string(),
+            receipt_id: "cache-receipt-001".to_string(),
+            receipt_path: "artifacts/validation/proof-cache/receipt.json".to_string(),
+            reason_code: "CACHE_HIT".to_string(),
+            event_code: "VPCACHE-001".to_string(),
+            required_action: "reuse_receipt".to_string(),
+            diagnostic: "proof cache hit".to_string(),
         }
     }
 
@@ -751,6 +958,90 @@ mod tests {
         assert_eq!(decision.reason_code, reason_codes::FAIL_CLOSED);
         assert!(decision.fail_closed);
         assert!(decision.retry_after_ms.is_none());
+    }
+
+    #[test]
+    fn proof_cache_hit_reuses_receipt_instead_of_retrying() {
+        let planner = ValidationRecoveryPlanner::new(RecoveryPlannerConfig::default());
+        let mut input = default_input();
+        input.rch_outcome.outcome = RchOutcomeClass::WorkerTimeout;
+        input.rch_outcome.timeout_class = RchTimeoutClass::ProcessWall;
+        input.proof_source = ProofEvidenceSource::ProofCacheHit;
+        input.proof_cache = Some(proof_cache_evidence());
+
+        let decision = planner.plan_recovery(&input).unwrap();
+        assert_eq!(decision.action, RecoveryAction::ReuseReceipt);
+        assert_eq!(decision.reason_code, reason_codes::REUSE_RECEIPT);
+        assert!(decision.retry_after_ms.is_none());
+        assert!(decision.operator_message.contains("reusable receipt"));
+    }
+
+    #[test]
+    fn coalesced_inflight_proof_waits_instead_of_retrying() {
+        let planner = ValidationRecoveryPlanner::new(RecoveryPlannerConfig::default());
+        let mut input = default_input();
+        input.rch_outcome.outcome = RchOutcomeClass::WorkerTimeout;
+        input.rch_outcome.timeout_class = RchTimeoutClass::CargoTestTimeout;
+        input.proof_source = ProofEvidenceSource::CoalescedWaiter;
+        input.proof_coalescer = Some(coalescer_evidence("join_existing_lease", "running", None));
+
+        let decision = planner.plan_recovery(&input).unwrap();
+        assert_eq!(decision.action, RecoveryAction::WaitForExistingProof);
+        assert_eq!(decision.reason_code, reason_codes::WAIT_FOR_EXISTING_PROOF);
+        assert_eq!(decision.retry_after_ms, Some(60_000));
+    }
+
+    #[test]
+    fn stale_coalesced_lease_requires_new_fencing_token() {
+        let planner = ValidationRecoveryPlanner::new(RecoveryPlannerConfig::default());
+        let mut input = default_input();
+        input.rch_outcome.outcome = RchOutcomeClass::WorkerTimeout;
+        input.rch_outcome.timeout_class = RchTimeoutClass::ProcessIdle;
+        input.proof_source = ProofEvidenceSource::CoalescedInflight;
+        input.proof_coalescer = Some(coalescer_evidence("retry_with_new_fence", "running", None));
+
+        let decision = planner.plan_recovery(&input).unwrap();
+        assert_eq!(decision.action, RecoveryAction::RetryWithNewFence);
+        assert_eq!(decision.reason_code, reason_codes::RETRY_WITH_NEW_FENCE);
+        assert_eq!(decision.retry_after_ms, Some(15_000));
+        assert_eq!(decision.worker_preference, input.rch_outcome.worker_id);
+    }
+
+    #[test]
+    fn completed_coalesced_receipt_is_reused() {
+        let planner = ValidationRecoveryPlanner::new(RecoveryPlannerConfig::default());
+        let mut input = default_input();
+        input.rch_outcome.outcome = RchOutcomeClass::ContentionDeferred;
+        input.proof_source = ProofEvidenceSource::CoalescedCompleted;
+        input.proof_coalescer = Some(coalescer_evidence(
+            "wait_for_receipt",
+            "completed",
+            Some("artifacts/validation/proof-coalescer/receipt.json"),
+        ));
+
+        let decision = planner.plan_recovery(&input).unwrap();
+        assert_eq!(decision.action, RecoveryAction::ReuseReceipt);
+        assert_eq!(decision.reason_code, reason_codes::REUSE_RECEIPT);
+        assert!(decision.operator_message.contains("Coalesced proof lease"));
+    }
+
+    #[test]
+    fn coalescer_fail_closed_state_remains_fail_closed() {
+        let planner = ValidationRecoveryPlanner::new(RecoveryPlannerConfig::default());
+        let mut input = default_input();
+        input.rch_outcome.outcome = RchOutcomeClass::WorkerFilesystemError;
+        input.proof_source = ProofEvidenceSource::CoalescerRejected;
+        input.proof_coalescer = Some(coalescer_evidence("fail_closed", "failed_closed", None));
+
+        let decision = planner.plan_recovery(&input).unwrap();
+        assert_eq!(decision.action, RecoveryAction::FailClosed);
+        assert_eq!(decision.reason_code, reason_codes::FAIL_CLOSED);
+        assert!(decision.fail_closed);
+        assert!(
+            decision
+                .operator_message
+                .contains("Proof coalescer rejected")
+        );
     }
 
     #[test]
