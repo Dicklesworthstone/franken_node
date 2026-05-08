@@ -19079,10 +19079,10 @@ fn quarantine_trust_cards(
             .map_err(|err| anyhow::anyhow!(err.to_string()))?
             .into_iter()
             .filter(|card| {
-                card.provenance_summary
-                    .artifact_hashes
-                    .iter()
-                    .any(|hash| crate::security::constant_time::ct_eq(hash, &prefix) || hash.starts_with(&prefix))
+                card.provenance_summary.artifact_hashes.iter().any(|hash| {
+                    crate::security::constant_time::ct_eq(hash, &prefix)
+                        || hash.starts_with(&prefix)
+                })
             })
             .map(|card| card.extension.extension_id)
             .collect();
@@ -20375,10 +20375,9 @@ fn resolve_fleet_agent_action_targets(
         .map_err(|err| anyhow::anyhow!(err.to_string()))?
         .into_iter()
         .filter(|card| {
-            card.provenance_summary
-                .artifact_hashes
-                .iter()
-                .any(|hash| crate::security::constant_time::ct_eq(hash, &prefix) || hash.starts_with(&prefix))
+            card.provenance_summary.artifact_hashes.iter().any(|hash| {
+                crate::security::constant_time::ct_eq(hash, &prefix) || hash.starts_with(&prefix)
+            })
         })
         .map(|card| card.extension.extension_id)
         .collect::<Vec<_>>();
@@ -22456,12 +22455,9 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
 
 fn handle_verify_recovery_runbook(args: &VerifyRecoveryRunbookArgs) -> Result<()> {
     use crate::ops::validation_readiness::{
-        FailedAttemptSummary, RecoveryPlanSummary, ValidationReadinessInput,
-        summarize_validation_readiness_report,
+        ValidationReadinessInput, build_validation_readiness_report,
     };
-    use crate::ops::validation_recovery_planner::{RecoveryAction, reason_codes};
     use chrono::{DateTime, Utc};
-    use std::collections::BTreeMap;
 
     // Parse fixed timestamp if provided, otherwise use current time
     let timestamp = if let Some(ts_str) = &args.fixed_timestamp {
@@ -22491,12 +22487,8 @@ fn handle_verify_recovery_runbook(args: &VerifyRecoveryRunbookArgs) -> Result<()
     };
 
     // Generate the recovery runbook report
-    let report = summarize_validation_readiness_report(
-        &input,
-        "recovery-runbook".to_string(),
-        "trace-recovery-runbook".to_string(),
-        timestamp,
-    );
+    let report =
+        build_validation_readiness_report(&input, "trace-recovery-runbook".to_string(), timestamp);
 
     // Output the runbook
     if args.json {
@@ -22513,238 +22505,252 @@ fn generate_test_scenario(
     timestamp: DateTime<Utc>,
 ) -> Result<ValidationReadinessInput> {
     use crate::ops::validation_broker::{
-        ProofStatusKind, RchMode, ValidationExitCode, ValidationExitKind,
-        ValidationFlightRecorderRef, ValidationProofStatus, ValidationReceipt,
+        DigestRef, FlightRecorderAdapterOutcomeClass, ProofEvidenceSource, ProofStatusKind,
+        RchMode, TimeoutClass, ValidationErrorClass, ValidationExit, ValidationExitKind,
+        ValidationFlightRecorderRef, ValidationProofStatus,
     };
-    use std::collections::BTreeMap;
 
-    let (proof_statuses, receipts) = match scenario {
+    fn flight_ref(
+        reason_code: &str,
+        path: &str,
+        outcome_class: FlightRecorderAdapterOutcomeClass,
+        execution_mode: RchMode,
+        worker_id: Option<&str>,
+        timestamp: DateTime<Utc>,
+    ) -> ValidationFlightRecorderRef {
+        ValidationFlightRecorderRef {
+            schema_version: "franken-node/validation-flight-recorder-ref/v1".to_string(),
+            attempt_path: path.to_string(),
+            attempt_digest: DigestRef::sha256(reason_code.as_bytes()),
+            attempt_id: format!("{reason_code}-attempt"),
+            generated_at: timestamp,
+            freshness_expires_at: timestamp + chrono::Duration::hours(1),
+            outcome_class,
+            execution_mode,
+            worker_id: worker_id.map(str::to_string),
+            reason_code: reason_code.to_string(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn proof_status(
+        bead_id: &str,
+        proof_thread: &str,
+        status: ProofStatusKind,
+        proof_source: ProofEvidenceSource,
+        flight_recorder_ref: Option<ValidationFlightRecorderRef>,
+        exit_kind: ValidationExitKind,
+        code: Option<i32>,
+        timeout_class: TimeoutClass,
+        error_class: ValidationErrorClass,
+        retryable: bool,
+        reason: &str,
+        timestamp: DateTime<Utc>,
+    ) -> ValidationProofStatus {
+        ValidationProofStatus {
+            schema_version: "franken-node/validation-broker/status/v1".to_string(),
+            bead_id: bead_id.to_string(),
+            thread_id: proof_thread.to_string(),
+            request_id: Some(format!("{bead_id}-request")),
+            queue_id: None,
+            status,
+            proof_source,
+            queue_state: None,
+            deduplicated: false,
+            queue_depth: 0,
+            artifact_paths: None,
+            command_digest: Some(DigestRef::sha256(
+                format!("{bead_id}/{proof_thread}").as_bytes(),
+            )),
+            exit: Some(ValidationExit {
+                kind: exit_kind,
+                code,
+                signal: None,
+                timeout_class,
+                error_class,
+                retryable,
+            }),
+            reason: Some(reason.to_string()),
+            proof_coalescer: None,
+            proof_cache: None,
+            readiness_ref: None,
+            flight_recorder_ref,
+            observed_at: timestamp,
+        }
+    }
+
+    let proof_statuses = match scenario {
         "green_remote_proof" => {
-            let status = ValidationProofStatus {
-                proof_kind: "cargo_test".to_string(),
-                status: ProofStatusKind::Passed,
-                flight_recorder_ref: None,
-                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
-                    started_at: timestamp,
-                    finished_at: timestamp,
-                },
-                exit: Some(crate::ops::validation_broker::ValidationExit {
-                    kind: ValidationExitKind::ProcessExit,
-                    code: ValidationExitCode::Zero,
-                    signal: None,
-                    description: "Success".to_string(),
-                }),
-                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
-                proof_cache: None,
-                rch: crate::ops::validation_broker::RchSnapshot {
-                    mode: RchMode::Remote,
-                    worker_id: Some("worker-001".to_string()),
-                },
-            };
-            (vec![status], vec![])
+            vec![proof_status(
+                "bead-green-remote",
+                "cargo_test",
+                ProofStatusKind::Passed,
+                ProofEvidenceSource::FreshExecution,
+                None,
+                ValidationExitKind::Success,
+                Some(0),
+                TimeoutClass::None,
+                ValidationErrorClass::None,
+                false,
+                "success",
+                timestamp,
+            )]
         }
         "rch_e104_retry" => {
-            let flight_ref = ValidationFlightRecorderRef {
-                attempt_path: Some("/tmp/flight_rec_rch_e104.json".to_string()),
-                attempt_digest: Some("bead-rch-e104".to_string()),
-                outcome_class: "infrastructure_failure".to_string(),
-                execution_mode: "remote".to_string(),
-                worker_id: Some("worker-002".to_string()),
-                reason_code: "RCH_E104_WORKER_TIMEOUT".to_string(),
-            };
-            let status = ValidationProofStatus {
-                proof_kind: "cargo_build".to_string(),
-                status: ProofStatusKind::Failed,
-                flight_recorder_ref: Some(flight_ref),
-                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
-                    started_at: timestamp,
-                    finished_at: timestamp,
-                },
-                exit: Some(crate::ops::validation_broker::ValidationExit {
-                    kind: ValidationExitKind::ProcessExit,
-                    code: ValidationExitCode::NonZero(124),
-                    signal: None,
-                    description: "Worker timeout".to_string(),
-                }),
-                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
-                proof_cache: None,
-                rch: crate::ops::validation_broker::RchSnapshot {
-                    mode: RchMode::Remote,
-                    worker_id: Some("worker-002".to_string()),
-                },
-            };
-            (vec![status], vec![])
+            let recorder = flight_ref(
+                "RCH_E104_WORKER_TIMEOUT",
+                "/tmp/flight_rec_rch_e104.json",
+                FlightRecorderAdapterOutcomeClass::WorkerTimeout,
+                RchMode::Remote,
+                Some("worker-002"),
+                timestamp,
+            );
+            vec![proof_status(
+                "bead-rch-e104",
+                "cargo_build",
+                ProofStatusKind::Failed,
+                ProofEvidenceSource::FreshExecution,
+                Some(recorder),
+                ValidationExitKind::Timeout,
+                Some(124),
+                TimeoutClass::WorkerUnreachable,
+                ValidationErrorClass::WorkerInfra,
+                true,
+                "worker timeout",
+                timestamp,
+            )]
         }
         "worker_drain_recommendation" => {
-            let flight_ref = ValidationFlightRecorderRef {
-                attempt_path: Some("/tmp/flight_rec_worker_drain.json".to_string()),
-                attempt_digest: Some("bead-worker-drain".to_string()),
-                outcome_class: "resource_exhaustion".to_string(),
-                execution_mode: "remote".to_string(),
-                worker_id: Some("worker-003".to_string()),
-                reason_code: "MEMORY_PRESSURE".to_string(),
-            };
-            let status = ValidationProofStatus {
-                proof_kind: "cargo_test".to_string(),
-                status: ProofStatusKind::Failed,
-                flight_recorder_ref: Some(flight_ref),
-                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
-                    started_at: timestamp,
-                    finished_at: timestamp,
-                },
-                exit: Some(crate::ops::validation_broker::ValidationExit {
-                    kind: ValidationExitKind::ProcessExit,
-                    code: ValidationExitCode::NonZero(137),
-                    signal: Some(9),
-                    description: "Out of memory".to_string(),
-                }),
-                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
-                proof_cache: None,
-                rch: crate::ops::validation_broker::RchSnapshot {
-                    mode: RchMode::Remote,
-                    worker_id: Some("worker-003".to_string()),
-                },
-            };
-            (vec![status], vec![])
+            let recorder = flight_ref(
+                "MEMORY_PRESSURE",
+                "/tmp/flight_rec_worker_drain.json",
+                FlightRecorderAdapterOutcomeClass::WorkerFilesystemError,
+                RchMode::Remote,
+                Some("worker-003"),
+                timestamp,
+            );
+            vec![proof_status(
+                "bead-worker-drain",
+                "cargo_test",
+                ProofStatusKind::Failed,
+                ProofEvidenceSource::FreshExecution,
+                Some(recorder),
+                ValidationExitKind::Failed,
+                Some(137),
+                TimeoutClass::None,
+                ValidationErrorClass::WorkerInfra,
+                true,
+                "out of memory",
+                timestamp,
+            )]
         }
         "missing_toolchain" => {
-            let flight_ref = ValidationFlightRecorderRef {
-                attempt_path: Some("/tmp/flight_rec_missing_toolchain.json".to_string()),
-                attempt_digest: Some("bead-missing-toolchain".to_string()),
-                outcome_class: "configuration_error".to_string(),
-                execution_mode: "local".to_string(),
-                worker_id: None,
-                reason_code: "MISSING_RUST_TOOLCHAIN".to_string(),
-            };
-            let status = ValidationProofStatus {
-                proof_kind: "cargo_check".to_string(),
-                status: ProofStatusKind::Failed,
-                flight_recorder_ref: Some(flight_ref),
-                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
-                    started_at: timestamp,
-                    finished_at: timestamp,
-                },
-                exit: Some(crate::ops::validation_broker::ValidationExit {
-                    kind: ValidationExitKind::ProcessExit,
-                    code: ValidationExitCode::NonZero(101),
-                    signal: None,
-                    description: "rustc not found".to_string(),
-                }),
-                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
-                proof_cache: None,
-                rch: crate::ops::validation_broker::RchSnapshot {
-                    mode: RchMode::Local,
-                    worker_id: None,
-                },
-            };
-            (vec![status], vec![])
+            let recorder = flight_ref(
+                "MISSING_RUST_TOOLCHAIN",
+                "/tmp/flight_rec_missing_toolchain.json",
+                FlightRecorderAdapterOutcomeClass::WorkerMissingToolchain,
+                RchMode::LocalFallback,
+                None,
+                timestamp,
+            );
+            vec![proof_status(
+                "bead-missing-toolchain",
+                "cargo_check",
+                ProofStatusKind::Failed,
+                ProofEvidenceSource::FreshExecution,
+                Some(recorder),
+                ValidationExitKind::Failed,
+                Some(101),
+                TimeoutClass::None,
+                ValidationErrorClass::WorkerInfra,
+                true,
+                "rustc not found",
+                timestamp,
+            )]
         }
         "disk_pressure" => {
-            let flight_ref = ValidationFlightRecorderRef {
-                attempt_path: Some("/tmp/flight_rec_disk_pressure.json".to_string()),
-                attempt_digest: Some("bead-disk-pressure".to_string()),
-                outcome_class: "resource_exhaustion".to_string(),
-                execution_mode: "remote".to_string(),
-                worker_id: Some("worker-004".to_string()),
-                reason_code: "DISK_FULL".to_string(),
-            };
-            let status = ValidationProofStatus {
-                proof_kind: "cargo_build".to_string(),
-                status: ProofStatusKind::Failed,
-                flight_recorder_ref: Some(flight_ref),
-                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
-                    started_at: timestamp,
-                    finished_at: timestamp,
-                },
-                exit: Some(crate::ops::validation_broker::ValidationExit {
-                    kind: ValidationExitKind::ProcessExit,
-                    code: ValidationExitCode::NonZero(28),
-                    signal: None,
-                    description: "No space left on device".to_string(),
-                }),
-                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
-                proof_cache: None,
-                rch: crate::ops::validation_broker::RchSnapshot {
-                    mode: RchMode::Remote,
-                    worker_id: Some("worker-004".to_string()),
-                },
-            };
-            (vec![status], vec![])
+            let recorder = flight_ref(
+                "DISK_FULL",
+                "/tmp/flight_rec_disk_pressure.json",
+                FlightRecorderAdapterOutcomeClass::WorkerFilesystemError,
+                RchMode::Remote,
+                Some("worker-004"),
+                timestamp,
+            );
+            vec![proof_status(
+                "bead-disk-pressure",
+                "cargo_build",
+                ProofStatusKind::Failed,
+                ProofEvidenceSource::FreshExecution,
+                Some(recorder),
+                ValidationExitKind::Failed,
+                Some(28),
+                TimeoutClass::None,
+                ValidationErrorClass::DiskPressure,
+                true,
+                "no space left on device",
+                timestamp,
+            )]
         }
         "source_only_blocker" => {
-            let flight_ref = ValidationFlightRecorderRef {
-                attempt_path: Some("/tmp/flight_rec_source_only_blocker.json".to_string()),
-                attempt_digest: Some("bead-source-only-blocker".to_string()),
-                outcome_class: "source_analysis_required".to_string(),
-                execution_mode: "local".to_string(),
-                worker_id: None,
-                reason_code: "SOURCE_ONLY_ANALYSIS_BLOCKER".to_string(),
-            };
-            let status = ValidationProofStatus {
-                proof_kind: "cargo_audit".to_string(),
-                status: ProofStatusKind::Failed,
-                flight_recorder_ref: Some(flight_ref),
-                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
-                    started_at: timestamp,
-                    finished_at: timestamp,
-                },
-                exit: Some(crate::ops::validation_broker::ValidationExit {
-                    kind: ValidationExitKind::ProcessExit,
-                    code: ValidationExitCode::NonZero(3),
-                    signal: None,
-                    description: "Source-only analysis required".to_string(),
-                }),
-                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
-                proof_cache: None,
-                rch: crate::ops::validation_broker::RchSnapshot {
-                    mode: RchMode::Local,
-                    worker_id: None,
-                },
-            };
-            (vec![status], vec![])
+            let recorder = flight_ref(
+                "SOURCE_ONLY_ANALYSIS_BLOCKER",
+                "/tmp/flight_rec_source_only_blocker.json",
+                FlightRecorderAdapterOutcomeClass::ContentionDeferred,
+                RchMode::LocalFallback,
+                None,
+                timestamp,
+            );
+            vec![proof_status(
+                "bead-source-only-blocker",
+                "cargo_audit",
+                ProofStatusKind::Failed,
+                ProofEvidenceSource::SourceOnlyFallback,
+                Some(recorder),
+                ValidationExitKind::SourceOnly,
+                None,
+                TimeoutClass::None,
+                ValidationErrorClass::SourceOnly,
+                false,
+                "source-only analysis required",
+                timestamp,
+            )]
         }
         "product_compile_failure" => {
-            let flight_ref = ValidationFlightRecorderRef {
-                attempt_path: Some("/tmp/flight_rec_product_compile_failure.json".to_string()),
-                attempt_digest: Some("bead-product-compile-failure".to_string()),
-                outcome_class: "product_failure".to_string(),
-                execution_mode: "remote".to_string(),
-                worker_id: Some("worker-005".to_string()),
-                reason_code: "PRODUCT_COMPILE_ERROR".to_string(),
-            };
-            let status = ValidationProofStatus {
-                proof_kind: "cargo_build".to_string(),
-                status: ProofStatusKind::Failed,
-                flight_recorder_ref: Some(flight_ref),
-                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
-                    started_at: timestamp,
-                    finished_at: timestamp,
-                },
-                exit: Some(crate::ops::validation_broker::ValidationExit {
-                    kind: ValidationExitKind::ProcessExit,
-                    code: ValidationExitCode::NonZero(101),
-                    signal: None,
-                    description: "Compilation failed".to_string(),
-                }),
-                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
-                proof_cache: None,
-                rch: crate::ops::validation_broker::RchSnapshot {
-                    mode: RchMode::Remote,
-                    worker_id: Some("worker-005".to_string()),
-                },
-            };
-            (vec![status], vec![])
+            let recorder = flight_ref(
+                "PRODUCT_COMPILE_ERROR",
+                "/tmp/flight_rec_product_compile_failure.json",
+                FlightRecorderAdapterOutcomeClass::CompileFailed,
+                RchMode::Remote,
+                Some("worker-005"),
+                timestamp,
+            );
+            vec![proof_status(
+                "bead-product-compile-failure",
+                "cargo_build",
+                ProofStatusKind::Failed,
+                ProofEvidenceSource::FreshExecution,
+                Some(recorder),
+                ValidationExitKind::Failed,
+                Some(101),
+                TimeoutClass::None,
+                ValidationErrorClass::CompileError,
+                false,
+                "compilation failed",
+                timestamp,
+            )]
         }
         _ => return Err(anyhow::anyhow!("Unknown scenario: {}", scenario)),
     };
 
     Ok(ValidationReadinessInput {
-        schema_version: "test".to_string(),
+        schema_version: "franken-node/validation-readiness/input/v1".to_string(),
         tracked_beads: vec![],
         proof_statuses,
-        receipts,
+        receipts: vec![],
         rch_workers: vec![],
         proof_lane_readiness: vec![],
+        swarm_scheduler_decisions: vec![],
         resource_governor: None,
         max_receipt_age_secs: 3600,
     })
@@ -22756,7 +22762,7 @@ fn emit_recovery_runbook_human(
     println!("# RCH Validation Recovery Runbook");
     println!();
 
-    match report.summary.status {
+    match report.overall_status {
         crate::ops::validation_readiness::ValidationReadinessStatus::Pass => {
             println!("✅ **Status**: PASS - All validation evidence is ready");
         }
@@ -28661,7 +28667,11 @@ mod run_trust_gate_tests {
                         // But all should decode back to the same data
                         if let Ok(decoded1) = engines[i].decode(encoded1) {
                             if let Ok(decoded2) = engines[j].decode(encoded2) {
-                                if crate::security::constant_time::ct_eq_bytes(&decoded1, test_data) && crate::security::constant_time::ct_eq_bytes(&decoded2, test_data) {
+                                if crate::security::constant_time::ct_eq_bytes(&decoded1, test_data)
+                                    && crate::security::constant_time::ct_eq_bytes(
+                                        &decoded2, test_data,
+                                    )
+                                {
                                     // Both decoded correctly to original data
                                     continue;
                                 }
@@ -28793,7 +28803,8 @@ mod run_trust_gate_tests {
             for test_data in consistency_test_data {
                 // Hex consistency
                 let hex_encoded = hex::encode(&test_data);
-                let hex_decoded = hex::decode(&hex_encoded).unwrap_or_else(|e| panic!("Hex round-trip failed: {}", e));
+                let hex_decoded = hex::decode(&hex_encoded)
+                    .unwrap_or_else(|e| panic!("Hex round-trip failed: {}", e));
                 assert_eq!(test_data, hex_decoded, "Hex encoding should be consistent");
 
                 // Base64 consistency across engines
@@ -28827,7 +28838,8 @@ mod run_trust_gate_tests {
                     size
                 );
 
-                let hex_decoded = hex::decode(&hex_encoded).unwrap_or_else(|e| panic!("Large hex decode failed: {}", e));
+                let hex_decoded = hex::decode(&hex_encoded)
+                    .unwrap_or_else(|e| panic!("Large hex decode failed: {}", e));
                 assert_eq!(large_data, hex_decoded, "Large hex should round-trip");
 
                 // Base64 encoding/decoding performance

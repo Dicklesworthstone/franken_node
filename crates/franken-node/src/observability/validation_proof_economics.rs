@@ -560,6 +560,10 @@ impl Default for ValidationProofEconomicsGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops::validation_broker::{
+        DigestRef, ProofStatusKind, QueueState, TimeoutClass, ValidationErrorClass, ValidationExit,
+        ValidationExitKind,
+    };
     use crate::ops::validation_proof_debt_ledger::{
         ValidationProofDebtLedgerEntry, ValidationProofDebtLedgerSummary,
     };
@@ -575,24 +579,26 @@ mod tests {
             thread_id: "test-thread".to_string(),
             request_id: Some("test-request".to_string()),
             queue_id: Some("test-queue".to_string()),
-            status: ProofStatusKind::Complete,
+            status: ProofStatusKind::Passed,
             proof_source: source,
             queue_state: Some(QueueState::Completed),
             deduplicated,
-            timeout_class: TimeoutClass::None,
-            validation_error_class: ValidationErrorClass::None,
-            exit_kind: ValidationExitKind::Success,
-            exit_code: Some(0),
-            created_at: Utc::now(),
-            observed_at: Utc::now(),
-            completed_at: Some(Utc::now()),
-            command_digest: None,
-            exit: None,
+            artifact_paths: None,
+            command_digest: Some(DigestRef::sha256(bead_id.as_bytes())),
+            exit: Some(ValidationExit {
+                kind: ValidationExitKind::Success,
+                code: Some(0),
+                signal: None,
+                timeout_class: TimeoutClass::None,
+                error_class: ValidationErrorClass::None,
+                retryable: false,
+            }),
             reason: None,
             proof_coalescer: None,
             proof_cache: None,
             readiness_ref: None,
             flight_recorder_ref: None,
+            observed_at: Utc::now(),
         }
     }
 

@@ -7,8 +7,7 @@
 //! - structured audit events for issuance/consumption/denials
 
 use std::collections::BTreeSet;
-use std::fmt;
-use std::fmt::Write;
+use std::fmt::{self, Write as _};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
