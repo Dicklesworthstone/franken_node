@@ -5,6 +5,10 @@
 //! exact command and input digests that define a validation attempt, and writes
 //! final receipts through an atomic filesystem path.
 
+use crate::ops::validation_proof_coalescer::{
+    ValidationProofCoalescerDecisionKind, ValidationProofCoalescerOutcome,
+    ValidationProofLeaseState,
+};
 use crate::security::constant_time;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -106,6 +110,10 @@ pub mod flight_recorder_reason_codes {
     pub const STALE_LEASE_FENCE: &str = "VFR_STALE_LEASE_FENCE";
     pub const REUSE_RECEIPT: &str = "VFR_REUSE_RECEIPT";
     pub const INVALID_ARTIFACT: &str = "VFR_INVALID_ARTIFACT";
+}
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,6 +248,23 @@ pub enum ProofStatusKind {
     Cancelled,
 }
 
+impl ProofStatusKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Queued => "queued",
+            Self::Leased => "leased",
+            Self::Running => "running",
+            Self::Reused => "reused",
+            Self::Failed => "failed",
+            Self::Passed => "passed",
+            Self::SourceOnly => "source_only",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProofEvidenceSource {
@@ -248,6 +273,10 @@ pub enum ProofEvidenceSource {
     FreshExecution,
     SourceOnlyFallback,
     ProofCacheHit,
+    CoalescedInflight,
+    CoalescedWaiter,
+    CoalescedCompleted,
+    CoalescerRejected,
 }
 
 impl ProofEvidenceSource {
@@ -259,6 +288,10 @@ impl ProofEvidenceSource {
             Self::FreshExecution => "fresh_execution",
             Self::SourceOnlyFallback => "source_only_fallback",
             Self::ProofCacheHit => "proof_cache_hit",
+            Self::CoalescedInflight => "coalesced_inflight",
+            Self::CoalescedWaiter => "coalesced_waiter",
+            Self::CoalescedCompleted => "coalesced_completed",
+            Self::CoalescerRejected => "coalescer_rejected",
         }
     }
 }
@@ -271,6 +304,26 @@ pub struct ValidationProofCacheReuseEvidence {
     pub entry_path: String,
     pub receipt_id: String,
     pub receipt_path: String,
+    pub reason_code: String,
+    pub event_code: String,
+    pub required_action: String,
+    pub diagnostic: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofCoalescerEvidence {
+    pub decision_id: String,
+    pub proof_work_key_hex: String,
+    pub lease_id: String,
+    pub lease_path: String,
+    pub lease_state: String,
+    pub producer_agent: String,
+    pub producer_bead_id: String,
+    pub waiter_agent: Option<String>,
+    pub trace_id: String,
+    pub receipt_id: Option<String>,
+    pub receipt_path: Option<String>,
+    pub proof_cache_key_hex: String,
     pub reason_code: String,
     pub event_code: String,
     pub required_action: String,
@@ -1386,20 +1439,98 @@ impl InputSet {
         feature_flags.sort();
         feature_flags.dedup();
 
-        let digest_material = content_digests
-            .iter()
-            .map(|digest| format!("{}:{}:{}", digest.path, digest.algorithm, digest.hex))
-            .collect::<Vec<_>>()
-            .join(",");
+        // Use length-prefixed construction to prevent hash collisions
+        let mut result = String::from("input_set_v1:");
 
-        format!(
-            "git_commit={}\0dirty={}\0changed={}\0digests={}\0features={}",
-            self.git_commit,
-            self.dirty_worktree,
-            changed_paths.join(","),
-            digest_material,
-            feature_flags.join(",")
-        )
+        // Git commit (length-prefixed)
+        result.push_str(&format!("git_commit:{}:", len_to_u64(self.git_commit.len())));
+        result.push_str(&self.git_commit);
+
+        // Dirty worktree flag
+        result.push_str(&format!("dirty:{}", self.dirty_worktree));
+
+        // Changed paths (each length-prefixed)
+        result.push_str(&format!("changed_count:{}", len_to_u64(changed_paths.len())));
+        for path in &changed_paths {
+            result.push_str(&format!("path:{}:", len_to_u64(path.len())));
+            result.push_str(path);
+        }
+
+        // Content digests (each field length-prefixed)
+        result.push_str(&format!("digest_count:{}", len_to_u64(content_digests.len())));
+        for digest in &content_digests {
+            result.push_str(&format!("digest_path:{}:", len_to_u64(digest.path.len())));
+            result.push_str(&digest.path);
+            result.push_str(&format!("digest_algo:{}:", len_to_u64(digest.algorithm.len())));
+            result.push_str(&digest.algorithm);
+            result.push_str(&format!("digest_hex:{}:", len_to_u64(digest.hex.len())));
+            result.push_str(&digest.hex);
+        }
+
+        // Feature flags (each length-prefixed)
+        result.push_str(&format!("flag_count:{}", len_to_u64(feature_flags.len())));
+        for flag in &feature_flags {
+            result.push_str(&format!("flag:{}:", len_to_u64(flag.len())));
+            result.push_str(flag);
+        }
+
+        result
+    }
+
+    /// Test that the length-prefixed canonical material construction prevents hash collisions
+    #[cfg(test)]
+    #[test]
+    fn test_canonical_material_collision_resistance() {
+        // Test case 1: Different digest paths with colons
+        let mut input1 = InputSet {
+            git_commit: "abc123".to_string(),
+            dirty_worktree: false,
+            changed_paths: vec![],
+            content_digests: vec![InputDigest {
+                path: "a:b".to_string(),
+                algorithm: "sha256".to_string(),
+                hex: "deadbeef".to_string(),
+            }],
+            feature_flags: vec![],
+        };
+
+        let mut input2 = InputSet {
+            git_commit: "abc123".to_string(),
+            dirty_worktree: false,
+            changed_paths: vec![],
+            content_digests: vec![InputDigest {
+                path: "a".to_string(),
+                algorithm: "b:sha256".to_string(),
+                hex: "deadbeef".to_string(),
+            }],
+            feature_flags: vec![],
+        };
+
+        let material1 = input1.canonical_material();
+        let material2 = input2.canonical_material();
+        assert_ne!(material1, material2, "Different digest structures should not collide");
+
+        // Test case 2: Different changed paths with commas
+        input1.content_digests.clear();
+        input1.changed_paths = vec!["a,b".to_string(), "c".to_string()];
+
+        input2.content_digests.clear();
+        input2.changed_paths = vec!["a".to_string(), "b,c".to_string()];
+
+        let material1 = input1.canonical_material();
+        let material2 = input2.canonical_material();
+        assert_ne!(material1, material2, "Different path structures should not collide");
+
+        // Test case 3: Different feature flag structures
+        input1.changed_paths.clear();
+        input1.feature_flags = vec!["flag,one".to_string(), "two".to_string()];
+
+        input2.changed_paths.clear();
+        input2.feature_flags = vec!["flag".to_string(), "one,two".to_string()];
+
+        let material1 = input1.canonical_material();
+        let material2 = input2.canonical_material();
+        assert_ne!(material1, material2, "Different feature flag structures should not collide");
     }
 }
 
@@ -1596,6 +1727,8 @@ pub struct ValidationProofStatus {
     pub exit: Option<ValidationExit>,
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof_coalescer: Option<ValidationProofCoalescerEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof_cache: Option<ValidationProofCacheReuseEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness_ref: Option<ValidationReadinessRef>,
@@ -1622,6 +1755,7 @@ impl ValidationProofStatus {
             command_digest: None,
             exit: None,
             reason: Some("no validation broker request or receipt matched".to_string()),
+            proof_coalescer: None,
             proof_cache: None,
             readiness_ref: None,
             flight_recorder_ref: None,
@@ -1658,6 +1792,7 @@ impl ValidationProofStatus {
             )),
             exit: None,
             reason: None,
+            proof_coalescer: None,
             proof_cache: None,
             readiness_ref: None,
             flight_recorder_ref: None,
@@ -1696,6 +1831,7 @@ impl ValidationProofStatus {
                 .classifications
                 .source_only_reason
                 .map(|reason| reason.as_str().to_string()),
+            proof_coalescer: None,
             proof_cache: None,
             readiness_ref: receipt.readiness_ref.clone(),
             flight_recorder_ref: receipt.flight_recorder_ref.clone(),
@@ -1732,11 +1868,101 @@ impl ValidationProofStatus {
             }),
             exit: Some(receipt.exit.clone()),
             reason: Some(format!("proof cache hit: {}", proof_cache.reason_code)),
+            proof_coalescer: None,
             proof_cache: Some(proof_cache),
             readiness_ref: receipt.readiness_ref.clone(),
             flight_recorder_ref: receipt.flight_recorder_ref.clone(),
             observed_at,
         })
+    }
+
+    #[must_use]
+    pub fn from_coalescer_outcome(
+        outcome: &ValidationProofCoalescerOutcome,
+        observed_at: DateTime<Utc>,
+    ) -> Self {
+        let decision = &outcome.decision;
+        let evidence = ValidationProofCoalescerEvidence::from_outcome(outcome);
+        Self {
+            schema_version: STATUS_SCHEMA_VERSION.to_string(),
+            bead_id: decision.bead_id.clone(),
+            thread_id: decision.bead_id.clone(),
+            request_id: Some(decision.decision_id.clone()),
+            queue_id: Some(evidence.lease_id.clone()),
+            status: proof_status_from_coalescer_decision(
+                decision.decision,
+                outcome.lease.as_ref().map(|lease| lease.state),
+            ),
+            proof_source: proof_source_from_coalescer_decision(
+                decision.decision,
+                outcome.lease.as_ref().map(|lease| lease.state),
+            ),
+            queue_state: None,
+            deduplicated: matches!(
+                decision.decision,
+                ValidationProofCoalescerDecisionKind::JoinExistingProof
+                    | ValidationProofCoalescerDecisionKind::WaitForReceipt
+            ),
+            queue_depth: 0,
+            artifact_paths: None,
+            command_digest: Some(DigestRef::from_command_digest(
+                &decision.proof_work_key.command_digest,
+            )),
+            exit: None,
+            reason: Some(decision.diagnostics.message.clone()),
+            proof_coalescer: Some(evidence),
+            proof_cache: None,
+            readiness_ref: None,
+            flight_recorder_ref: None,
+            observed_at,
+        }
+    }
+}
+
+impl ValidationProofCoalescerEvidence {
+    #[must_use]
+    pub fn from_outcome(outcome: &ValidationProofCoalescerOutcome) -> Self {
+        let decision = &outcome.decision;
+        let lease_ref = decision.lease_ref.as_ref();
+        let lease = outcome.lease.as_ref();
+        let receipt_ref = lease.and_then(|lease| lease.receipt_ref.as_ref());
+        let lease_state = lease
+            .map(|lease| lease.state)
+            .or_else(|| lease_ref.map(|lease_ref| lease_ref.state))
+            .unwrap_or(ValidationProofLeaseState::FailedClosed);
+        let lease_path = lease_ref
+            .map(|lease_ref| lease_ref.path.clone())
+            .unwrap_or_else(|| outcome.lease_path.display().to_string());
+
+        Self {
+            decision_id: decision.decision_id.clone(),
+            proof_work_key_hex: decision.proof_work_key.hex.clone(),
+            lease_id: lease_ref
+                .map(|lease_ref| lease_ref.lease_id.clone())
+                .or_else(|| lease.map(|lease| lease.lease_id.clone()))
+                .unwrap_or_else(|| "none".to_string()),
+            lease_path,
+            lease_state: lease_state.as_str().to_string(),
+            producer_agent: lease
+                .map(|lease| lease.owner_agent.clone())
+                .or_else(|| lease_ref.map(|lease_ref| lease_ref.owner_agent.clone()))
+                .unwrap_or_else(|| decision.agent_name.clone()),
+            producer_bead_id: lease
+                .map(|lease| lease.owner_bead_id.clone())
+                .or_else(|| lease_ref.map(|lease_ref| lease_ref.owner_bead_id.clone()))
+                .unwrap_or_else(|| decision.bead_id.clone()),
+            waiter_agent: coalescer_waiter_agent(decision.decision, &decision.agent_name),
+            trace_id: decision.trace_id.clone(),
+            receipt_id: receipt_ref.map(|receipt_ref| receipt_ref.receipt_id.clone()),
+            receipt_path: receipt_ref.map(|receipt_ref| receipt_ref.path.clone()),
+            proof_cache_key_hex: receipt_ref
+                .map(|receipt_ref| receipt_ref.proof_cache_key_hex.clone())
+                .unwrap_or_else(|| decision.proof_work_key.proof_cache_key.hex.clone()),
+            reason_code: decision.reason_code.clone(),
+            event_code: decision.diagnostics.event_code.clone(),
+            required_action: decision.required_action.as_str().to_string(),
+            diagnostic: decision.diagnostics.message.clone(),
+        }
     }
 }
 
@@ -2190,6 +2416,32 @@ pub fn render_validation_proof_status_json(
     status: &ValidationProofStatus,
 ) -> Result<String, ValidationBrokerError> {
     serde_json::to_string_pretty(status).map_err(ValidationBrokerError::Json)
+}
+
+#[must_use]
+pub fn render_validation_proof_status_human(status: &ValidationProofStatus) -> String {
+    let coalescer = status.proof_coalescer.as_ref().map_or_else(String::new, |evidence| {
+        format!(
+            " coalescer_decision={} producer={} producer_bead={} waiter={} lease={} lease_state={} trace={} receipt={} cache_key={}",
+            evidence.decision_id,
+            evidence.producer_agent,
+            evidence.producer_bead_id,
+            evidence.waiter_agent.as_deref().unwrap_or("none"),
+            evidence.lease_path,
+            evidence.lease_state,
+            evidence.trace_id,
+            evidence.receipt_path.as_deref().unwrap_or("none"),
+            evidence.proof_cache_key_hex
+        )
+    });
+    format!(
+        "{} validation proof status={} proof_source={} reason={}{}",
+        status.bead_id,
+        status.status.as_str(),
+        status.proof_source.as_str(),
+        status.reason.as_deref().unwrap_or("none"),
+        coalescer
+    )
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2793,6 +3045,27 @@ fn proof_status_from_exit(exit_kind: ValidationExitKind) -> ProofStatusKind {
     }
 }
 
+fn proof_status_from_coalescer_decision(
+    decision: ValidationProofCoalescerDecisionKind,
+    lease_state: Option<ValidationProofLeaseState>,
+) -> ProofStatusKind {
+    if lease_state == Some(ValidationProofLeaseState::Completed)
+        || decision == ValidationProofCoalescerDecisionKind::WaitForReceipt
+    {
+        return ProofStatusKind::Reused;
+    }
+    match decision {
+        ValidationProofCoalescerDecisionKind::RunLocallyViaRch
+        | ValidationProofCoalescerDecisionKind::JoinExistingProof => ProofStatusKind::Running,
+        ValidationProofCoalescerDecisionKind::QueuedByPolicy => ProofStatusKind::Queued,
+        ValidationProofCoalescerDecisionKind::RetryAfterStaleLease
+        | ValidationProofCoalescerDecisionKind::RejectDirtyPolicy
+        | ValidationProofCoalescerDecisionKind::RejectCapacity
+        | ValidationProofCoalescerDecisionKind::RepairState => ProofStatusKind::Failed,
+        ValidationProofCoalescerDecisionKind::WaitForReceipt => ProofStatusKind::Reused,
+    }
+}
+
 const fn default_proof_evidence_source() -> ProofEvidenceSource {
     ProofEvidenceSource::Unknown
 }
@@ -2805,6 +3078,47 @@ fn proof_source_from_receipt(receipt: &ValidationReceipt) -> ProofEvidenceSource
     } else {
         ProofEvidenceSource::FreshExecution
     }
+}
+
+fn proof_source_from_coalescer_decision(
+    decision: ValidationProofCoalescerDecisionKind,
+    lease_state: Option<ValidationProofLeaseState>,
+) -> ProofEvidenceSource {
+    if lease_state == Some(ValidationProofLeaseState::Completed)
+        || decision == ValidationProofCoalescerDecisionKind::WaitForReceipt
+    {
+        return ProofEvidenceSource::CoalescedCompleted;
+    }
+    match decision {
+        ValidationProofCoalescerDecisionKind::RunLocallyViaRch
+        | ValidationProofCoalescerDecisionKind::QueuedByPolicy => {
+            ProofEvidenceSource::CoalescedInflight
+        }
+        ValidationProofCoalescerDecisionKind::JoinExistingProof => {
+            ProofEvidenceSource::CoalescedWaiter
+        }
+        ValidationProofCoalescerDecisionKind::RetryAfterStaleLease
+        | ValidationProofCoalescerDecisionKind::RejectDirtyPolicy
+        | ValidationProofCoalescerDecisionKind::RejectCapacity
+        | ValidationProofCoalescerDecisionKind::RepairState => {
+            ProofEvidenceSource::CoalescerRejected
+        }
+        ValidationProofCoalescerDecisionKind::WaitForReceipt => {
+            ProofEvidenceSource::CoalescedCompleted
+        }
+    }
+}
+
+fn coalescer_waiter_agent(
+    decision: ValidationProofCoalescerDecisionKind,
+    agent_name: &str,
+) -> Option<String> {
+    matches!(
+        decision,
+        ValidationProofCoalescerDecisionKind::JoinExistingProof
+            | ValidationProofCoalescerDecisionKind::WaitForReceipt
+    )
+    .then(|| agent_name.to_string())
 }
 
 fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<(), ValidationBrokerError> {
