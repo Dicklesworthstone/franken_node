@@ -197,6 +197,7 @@ fn resource_governor_snapshot_input_sorts_and_counts_hints() {
             memory_used_mb: Some(64000),
             cpu_load_permyriad: Some(7500),
             artifact_inventory: Vec::new(),
+            ..ResourceGovernorSnapshotInput::default()
         },
         rg_ts(1),
     )

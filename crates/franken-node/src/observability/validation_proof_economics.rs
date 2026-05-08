@@ -5,11 +5,9 @@
 //! status, proof coalescer decisions, debt ledger entries, and flight recorder
 //! artifacts to report economics and SLO compliance.
 
-use crate::ops::validation_broker::{
-    ValidationProofStatus, ProofEvidenceSource,
-};
+use crate::ops::validation_broker::{ProofEvidenceSource, ValidationProofStatus};
 use crate::ops::validation_proof_debt_ledger::{
-    ValidationProofDebtLedger, ValidationProofDebtClass, ValidationProofDebtState,
+    ValidationProofDebtClass, ValidationProofDebtLedger, ValidationProofDebtState,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -208,10 +206,10 @@ impl Default for SloTargets {
     fn default() -> Self {
         Self {
             max_queue_depth: 100,
-            max_average_wait_time_seconds: 300.0,  // 5 minutes
-            max_failure_rate: 0.05,  // 5%
-            max_debt_age_seconds: 1800.0,  // 30 minutes
-            min_coalescing_efficiency: 0.20,  // 20% savings
+            max_average_wait_time_seconds: 300.0, // 5 minutes
+            max_failure_rate: 0.05,               // 5%
+            max_debt_age_seconds: 1800.0,         // 30 minutes
+            min_coalescing_efficiency: 0.20,      // 20% savings
         }
     }
 }
@@ -247,7 +245,8 @@ impl ValidationProofEconomicsGenerator {
         let slo_compliance = self.calculate_slo_compliance(&summary, proof_statuses);
 
         // Generate economics breakdown
-        let economics_breakdown = self.calculate_economics_breakdown(proof_statuses, debt_ledger, generated_at);
+        let economics_breakdown =
+            self.calculate_economics_breakdown(proof_statuses, debt_ledger, generated_at);
 
         // Generate stable groupings
         let groupings = self.calculate_groupings(proof_statuses, debt_ledger);
@@ -410,7 +409,7 @@ impl ValidationProofEconomicsGenerator {
     ) -> EconomicsBreakdown {
         let mut savings_by_evidence_source = BTreeMap::new();
         let mut debt_by_blocker_class = BTreeMap::new();
-        let mut failures_by_error_class = BTreeMap::new();
+        let failures_by_error_class = BTreeMap::new();
 
         // Analyze savings by evidence source
         for status in proof_statuses {
@@ -445,15 +444,16 @@ impl ValidationProofEconomicsGenerator {
         // Analyze debt by blocker class
         for entry in &debt_ledger.entries {
             let class_key = entry.debt_class.as_str().to_string();
-            let metrics = debt_by_blocker_class
-                .entry(class_key)
-                .or_insert_with(|| DebtClassMetrics {
-                    blocked_count: 0,
-                    retryable_count: 0,
-                    total_debt: 0,
-                    average_age_seconds: 0.0,
-                    starvation_risk: false,
-                });
+            let metrics =
+                debt_by_blocker_class
+                    .entry(class_key)
+                    .or_insert_with(|| DebtClassMetrics {
+                        blocked_count: 0,
+                        retryable_count: 0,
+                        total_debt: 0,
+                        average_age_seconds: 0.0,
+                        starvation_risk: false,
+                    });
 
             metrics.total_debt = metrics.total_debt.saturating_add(1);
 
@@ -478,10 +478,12 @@ impl ValidationProofEconomicsGenerator {
             let class_key = entry.debt_class.as_str().to_string();
             if let Some(metrics) = debt_by_blocker_class.get_mut(&class_key) {
                 if metrics.total_debt > 0 {
-                    let age_seconds = (generated_at - entry.observed_at).num_seconds().max(0) as f64;
-                    metrics.average_age_seconds =
-                        (metrics.average_age_seconds * (metrics.total_debt.saturating_sub(1)) as f64
-                         + age_seconds) / metrics.total_debt as f64;
+                    let age_seconds =
+                        (generated_at - entry.observed_at).num_seconds().max(0) as f64;
+                    metrics.average_age_seconds = (metrics.average_age_seconds
+                        * (metrics.total_debt.saturating_sub(1)) as f64
+                        + age_seconds)
+                        / metrics.total_debt as f64;
                 }
             }
         }
@@ -499,23 +501,24 @@ impl ValidationProofEconomicsGenerator {
         debt_ledger: &ValidationProofDebtLedger,
     ) -> EconomicsGroupings {
         let mut by_bead_id = BTreeMap::new();
-        let mut by_proof_work_key = BTreeMap::new();
-        let mut by_agent = BTreeMap::new();
-        let mut by_decision_class = BTreeMap::new();
+        let by_proof_work_key = BTreeMap::new();
+        let by_agent = BTreeMap::new();
+        let by_decision_class = BTreeMap::new();
 
         // Group by bead ID
         for status in proof_statuses {
-            let group = by_bead_id
-                .entry(status.bead_id.clone())
-                .or_insert_with(|| BeadEconomicsGroup {
-                    bead_id: status.bead_id.clone(),
-                    proof_count: 0,
-                    duplicate_avoided: 0,
-                    time_saved_seconds: 0,
-                    debt_count: 0,
-                    failure_count: 0,
-                    slo_breach_count: 0,
-                });
+            let group =
+                by_bead_id
+                    .entry(status.bead_id.clone())
+                    .or_insert_with(|| BeadEconomicsGroup {
+                        bead_id: status.bead_id.clone(),
+                        proof_count: 0,
+                        duplicate_avoided: 0,
+                        time_saved_seconds: 0,
+                        debt_count: 0,
+                        failure_count: 0,
+                        slo_breach_count: 0,
+                    });
 
             group.proof_count = group.proof_count.saturating_add(1);
 
@@ -561,7 +564,11 @@ mod tests {
         ValidationProofDebtLedgerEntry, ValidationProofDebtLedgerSummary,
     };
 
-    fn sample_proof_status(bead_id: &str, deduplicated: bool, source: ProofEvidenceSource) -> ValidationProofStatus {
+    fn sample_proof_status(
+        bead_id: &str,
+        deduplicated: bool,
+        source: ProofEvidenceSource,
+    ) -> ValidationProofStatus {
         ValidationProofStatus {
             schema_version: "test-v1".to_string(),
             bead_id: bead_id.to_string(),
@@ -697,7 +704,10 @@ mod tests {
 
         let report = generator.generate_report(&proof_statuses, &debt_ledger, reporting_period);
 
-        assert_eq!(report.schema_version, VALIDATION_PROOF_ECONOMICS_SCHEMA_VERSION);
+        assert_eq!(
+            report.schema_version,
+            VALIDATION_PROOF_ECONOMICS_SCHEMA_VERSION
+        );
         assert_eq!(report.summary.duplicate_proofs_avoided, 2);
         assert_eq!(report.summary.worker_time_saved_seconds, 120); // 2 * 60 seconds
         assert_eq!(report.summary.queue_debt_count, 2);
@@ -712,9 +722,11 @@ mod tests {
             ..SloTargets::default()
         });
 
-        let proof_statuses = vec![
-            sample_proof_status("test-bead-1", false, ProofEvidenceSource::CoalescerRejected),
-        ];
+        let proof_statuses = vec![sample_proof_status(
+            "test-bead-1",
+            false,
+            ProofEvidenceSource::CoalescerRejected,
+        )];
 
         let debt_ledger = sample_debt_ledger(); // Has 2 entries
 
@@ -729,7 +741,9 @@ mod tests {
         // Queue depth should be in breach (2 > 1)
         assert_eq!(report.slo_compliance.overall_status, SloStatus::Breach);
 
-        let queue_depth_metric = report.slo_compliance.slo_metrics
+        let queue_depth_metric = report
+            .slo_compliance
+            .slo_metrics
             .iter()
             .find(|m| m.metric_name == "queue_depth")
             .expect("queue_depth metric should exist");
@@ -758,16 +772,18 @@ mod tests {
         let report = generator.generate_report(&proof_statuses, &debt_ledger, reporting_period);
 
         // Check savings by evidence source
-        let coalescing_savings = report.economics_breakdown
+        let coalescing_savings = report
+            .economics_breakdown
             .savings_by_evidence_source
-            .get("Coalescing")
+            .get("CoalescedCompleted")
             .expect("Coalescing savings should exist");
 
         assert_eq!(coalescing_savings.duplicate_proofs_avoided, 1);
         assert_eq!(coalescing_savings.coalescing_count, 1);
 
         // Check debt by blocker class
-        let cargo_contention_debt = report.economics_breakdown
+        let cargo_contention_debt = report
+            .economics_breakdown
             .debt_by_blocker_class
             .get("cargo_contention")
             .expect("CargoContention debt should exist");
@@ -797,7 +813,8 @@ mod tests {
         let report = generator.generate_report(&proof_statuses, &debt_ledger, reporting_period);
 
         // Check bead-a grouping
-        let bead_a_group = report.groupings
+        let bead_a_group = report
+            .groupings
             .by_bead_id
             .get("bead-a")
             .expect("bead-a group should exist");
@@ -807,7 +824,8 @@ mod tests {
         assert_eq!(bead_a_group.time_saved_seconds, 60);
 
         // Check bead-b grouping
-        let bead_b_group = report.groupings
+        let bead_b_group = report
+            .groupings
             .by_bead_id
             .get("bead-b")
             .expect("bead-b group should exist");
