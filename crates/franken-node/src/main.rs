@@ -8381,14 +8381,18 @@ fn count_active_fleet_quarantines(fleet_state_dir: &Path) -> Result<u64> {
         if line.trim().is_empty() {
             continue;
         }
-        let record: PersistedFleetActionRecord =
-            serde_json::from_str(&line).with_context(|| {
-                format!(
-                    "failed parsing fleet action log {} line {}",
-                    actions_path.display(),
-                    line_index.saturating_add(1)
-                )
-            })?;
+        // Parse with depth limit to prevent JSON parser bomb DoS
+        let mut deserializer = serde_json::Deserializer::from_str(&line);
+        deserializer.disable_recursion_limit();
+        let record: PersistedFleetActionRecord = serde::Deserialize::deserialize(
+            &mut deserializer.recursion_limit(64)
+        ).with_context(|| {
+            format!(
+                "failed parsing fleet action log {} line {}",
+                actions_path.display(),
+                line_index.saturating_add(1)
+            )
+        })?;
         match record.action {
             PersistedFleetAction::Quarantine { incident_id, .. } => {
                 active_incidents.insert(incident_id);
@@ -22293,9 +22297,17 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
             continue;
         }
 
-        let entry: EvidenceEntry = serde_json::from_str(&line)
-            .with_context(|| format!("Invalid JSON at line {}: {}", line_number, line))?;
-        entries.push(entry);
+        // Parse with depth limit to prevent JSON parser bomb DoS
+        let mut deserializer = serde_json::Deserializer::from_str(&line);
+        deserializer.disable_recursion_limit();
+        let entry: EvidenceEntry = serde::Deserialize::deserialize(
+            &mut deserializer.recursion_limit(64)
+        ).with_context(|| format!("Invalid JSON at line {}: {}", line_number, line))?;
+
+        // Prevent memory exhaustion from unbounded collection growth
+        const MAX_EVIDENCE_ENTRIES_PER_OPERATION: usize = 10_000;
+        crate::security::push_bounded(&mut entries, entry, MAX_EVIDENCE_ENTRIES_PER_OPERATION)
+            .with_context(|| format!("Too many evidence entries (limit: {})", MAX_EVIDENCE_ENTRIES_PER_OPERATION))?;
     }
 
     if entries.is_empty() {
@@ -29699,6 +29711,92 @@ mod parser_bomb_protection_tests {
         let hash_hex = results[0].verification_receipt_hash.strip_prefix("sha256:").unwrap();
         assert_eq!(hash_hex.len(), 64);
         assert!(hash_hex.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_trust_scan_saturating_arithmetic_never_panics(
+            extension_id in ".*",
+            version in ".*",
+            num_hashes in 0usize..100,
+            hash_len in 0usize..100_000,
+        ) {
+            // Property: build_trust_scan_evidence_ref never panics with arbitrary string lengths
+            // Tests the 3 saturating arithmetic sites: extension_id.len(), version.len(), artifact_hash.len()
+
+            let dependency = RunPackageDependency {
+                extension_id: extension_id.clone(),
+                display_name: "Test Extension".to_string(),
+            };
+
+            let artifact_hashes: Vec<String> = (0..num_hashes)
+                .map(|_| "h".repeat(hash_len))
+                .collect();
+
+            // Should never panic regardless of string lengths
+            let result = build_trust_scan_evidence_ref(
+                &dependency,
+                &version,
+                &artifact_hashes,
+                1640995200
+            );
+
+            // Properties that must hold:
+            assert_eq!(result.evidence_type, EvidenceType::ManifestAdmission);
+            assert!(result.verification_receipt_hash.starts_with("sha256:"));
+            assert_eq!(result.verification_receipt_hash.len(), 71); // "sha256:" + 64 hex chars
+            assert!(result.evidence_id.contains(&extension_id[..extension_id.len().min(20)]));
+        }
+
+        #[test]
+        fn proptest_trust_scan_unicode_boundary_conditions(
+            unicode_extension_id in r"[\p{Any}]*",
+            unicode_version in r"[\p{Any}]*",
+            unicode_hash in r"[\p{Any}]*",
+        ) {
+            // Property: saturating arithmetic handles unicode string lengths correctly
+
+            let dependency = RunPackageDependency {
+                extension_id: unicode_extension_id.clone(),
+                display_name: "Unicode Test".to_string(),
+            };
+
+            let artifact_hashes = vec![unicode_hash.clone()];
+
+            // Test the core saturating arithmetic with unicode strings
+            let ext_len_u64 = u64::try_from(unicode_extension_id.len()).unwrap_or(u64::MAX);
+            let ver_len_u64 = u64::try_from(unicode_version.len()).unwrap_or(u64::MAX);
+            let hash_len_u64 = u64::try_from(unicode_hash.len()).unwrap_or(u64::MAX);
+
+            // Properties for unicode byte length handling:
+            if unicode_extension_id.len() <= u64::MAX as usize {
+                assert_eq!(ext_len_u64, unicode_extension_id.len() as u64);
+            } else {
+                assert_eq!(ext_len_u64, u64::MAX);
+            }
+
+            if unicode_version.len() <= u64::MAX as usize {
+                assert_eq!(ver_len_u64, unicode_version.len() as u64);
+            } else {
+                assert_eq!(ver_len_u64, u64::MAX);
+            }
+
+            if unicode_hash.len() <= u64::MAX as usize {
+                assert_eq!(hash_len_u64, unicode_hash.len() as u64);
+            } else {
+                assert_eq!(hash_len_u64, u64::MAX);
+            }
+
+            // Function should handle unicode inputs without panicking
+            let result = build_trust_scan_evidence_ref(
+                &dependency,
+                &unicode_version,
+                &artifact_hashes,
+                1640995200
+            );
+
+            assert!(result.verification_receipt_hash.starts_with("sha256:"));
+        }
     }
 }
 

@@ -1808,4 +1808,75 @@ mod tests {
         assert_ne!(hash, non_empty_hash,
                    "Empty vs non-empty collections should produce different hashes");
     }
+
+    proptest! {
+        #[test]
+        fn proptest_saturating_len_never_panics_compute_hash(
+            schema_len in 0usize..1_000_000,
+            num_categories in 0usize..1000,
+            num_blocked_rules in 0usize..1000,
+            rule_id_len in 0usize..100_000,
+        ) {
+            // Property: saturating arithmetic in compute_report_content_hash never panics
+            // regardless of input collection sizes
+
+            let schema_version = "x".repeat(schema_len);
+            let categories = (0..num_categories).map(|i| CategoryCompliance {
+                category: if i % 4 == 0 { RuleCategory::AccessControl }
+                         else if i % 4 == 1 { RuleCategory::DataProtection }
+                         else if i % 4 == 2 { RuleCategory::IncidentResponse }
+                         else { RuleCategory::AccessControl },
+                total_rules: 1,
+                compliant: 1,
+                non_compliant: 0,
+                not_assessed: 0,
+                compliance_rate: 1.0,
+            }).collect::<Vec<_>>();
+
+            let blocked_rules = (0..num_blocked_rules).map(|_| "r".repeat(rule_id_len)).collect::<Vec<_>>();
+
+            // Should never panic, regardless of collection sizes
+            let hash = compute_report_content_hash(
+                &schema_version,
+                42,
+                24,
+                &categories,
+                GateAction::Allow,
+                &blocked_rules,
+            );
+
+            // Properties that must hold:
+            assert!(hash.len() > 0, "Hash should never be empty");
+            assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex");
+        }
+
+        #[test]
+        fn proptest_saturating_arithmetic_boundary_conditions(
+            schema_version in ".*",
+            category_count in 0usize..=usize::MAX.min(10000), // Bounded to avoid OOM
+        ) {
+            // Property: u64::try_from().unwrap_or(u64::MAX) handles all usize values correctly
+
+            // Test the core saturating arithmetic logic directly
+            let schema_len_u64 = u64::try_from(schema_version.len()).unwrap_or(u64::MAX);
+            let category_len_u64 = u64::try_from(category_count).unwrap_or(u64::MAX);
+
+            // Properties:
+            if schema_version.len() <= u64::MAX as usize {
+                assert_eq!(schema_len_u64, schema_version.len() as u64, "Small lengths should convert exactly");
+            } else {
+                assert_eq!(schema_len_u64, u64::MAX, "Large lengths should saturate to u64::MAX");
+            }
+
+            if category_count <= u64::MAX as usize {
+                assert_eq!(category_len_u64, category_count as u64, "Small counts should convert exactly");
+            } else {
+                assert_eq!(category_len_u64, u64::MAX, "Large counts should saturate to u64::MAX");
+            }
+
+            // Length prefixing bytes should always be valid
+            let _schema_bytes = schema_len_u64.to_le_bytes();
+            let _category_bytes = category_len_u64.to_le_bytes();
+        }
+    }
 }

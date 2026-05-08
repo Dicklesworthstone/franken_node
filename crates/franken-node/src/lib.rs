@@ -1433,6 +1433,106 @@ mod tests {
         let result = bounded_read_to_string(empty_file.path(), u64::MAX);
         assert!(result.is_ok());
     }
+
+    proptest! {
+        #[test]
+        fn proptest_bounded_read_never_panics_on_arbitrary_limits(
+            max_bytes in 0u64..=u64::MAX,
+            file_content in ".*"
+        ) {
+            // Property: bounded_read_to_string never panics regardless of limit or content size
+            // Tests DoS protection bounds checking
+
+            use tempfile::NamedTempFile;
+            use std::io::Write;
+            use super::bounded_read_to_string;
+
+            let mut temp_file = NamedTempFile::new().expect("create temp file");
+            temp_file.write_all(file_content.as_bytes()).expect("write content");
+            temp_file.flush().expect("flush content");
+
+            // Should never panic, regardless of max_bytes value or file content size
+            let result = bounded_read_to_string(temp_file.path(), max_bytes);
+
+            // Properties that must hold:
+            match result {
+                Ok(content) => {
+                    // If successful, content should match and be within bounds
+                    assert_eq!(content, file_content);
+                    assert!(content.len() as u64 <= max_bytes, "Content should be within bounds");
+                },
+                Err(e) => {
+                    // If failed, should be due to size limit (not panic)
+                    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+                    assert!(file_content.len() as u64 > max_bytes, "Should only fail when over limit");
+                }
+            }
+        }
+
+        #[test]
+        fn proptest_bounded_read_unicode_and_binary_safety(
+            unicode_content in r"[\p{Any}]*",
+            max_bytes in 0u64..=1_000_000u64, // Bounded to avoid excessive test runtime
+        ) {
+            // Property: bounded_read_to_string safely handles unicode and binary content
+
+            use tempfile::NamedTempFile;
+            use std::io::Write;
+            use super::bounded_read_to_string;
+
+            let mut temp_file = NamedTempFile::new().expect("create temp file");
+            temp_file.write_all(unicode_content.as_bytes()).expect("write unicode content");
+            temp_file.flush().expect("flush content");
+
+            // Test the size comparison logic with unicode byte lengths
+            let content_byte_len = unicode_content.as_bytes().len() as u64;
+
+            let result = bounded_read_to_string(temp_file.path(), max_bytes);
+
+            // Properties for unicode content:
+            if content_byte_len <= max_bytes {
+                assert!(result.is_ok(), "Small unicode content should succeed");
+                if let Ok(read_content) = result {
+                    assert_eq!(read_content, unicode_content, "Unicode content should be preserved");
+                }
+            } else {
+                assert!(result.is_err(), "Large unicode content should be rejected");
+                assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+            }
+        }
+
+        #[test]
+        fn proptest_bounded_read_edge_case_limits(
+            content_size in 0usize..=100_000,
+        ) {
+            // Property: boundary conditions around specific limit values work correctly
+
+            use tempfile::NamedTempFile;
+            use std::io::Write;
+            use super::bounded_read_to_string;
+
+            let content = "x".repeat(content_size);
+            let mut temp_file = NamedTempFile::new().expect("create temp file");
+            temp_file.write_all(content.as_bytes()).expect("write content");
+            temp_file.flush().expect("flush content");
+
+            let content_len = content.len() as u64;
+
+            // Test exact boundary: limit = content size (should succeed)
+            let exact_result = bounded_read_to_string(temp_file.path(), content_len);
+            assert!(exact_result.is_ok(), "Exact size limit should succeed");
+
+            // Test one under boundary: limit = content size - 1 (should fail if content > 0)
+            if content_len > 0 {
+                let under_result = bounded_read_to_string(temp_file.path(), content_len - 1);
+                assert!(under_result.is_err(), "Under-limit should fail for non-empty content");
+            }
+
+            // Test one over boundary: limit = content size + 1 (should succeed)
+            let over_result = bounded_read_to_string(temp_file.path(), content_len + 1);
+            assert!(over_result.is_ok(), "Over-limit should succeed");
+        }
+    }
 }
 
 #[cfg(feature = "control-plane")]
