@@ -204,7 +204,7 @@ impl ConfidenceOutput {
 // ---------------------------------------------------------------------------
 
 /// Signed acknowledgement receipt for high-risk updates.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcknowledgementReceipt {
     pub receipt_id: String,
     pub proposal_id: String,
@@ -213,6 +213,20 @@ pub struct AcknowledgementReceipt {
     pub reason: String,
     pub timestamp: String,
     pub signature_hex: String,
+}
+
+impl std::fmt::Debug for AcknowledgementReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcknowledgementReceipt")
+            .field("receipt_id", &self.receipt_id)
+            .field("proposal_id", &self.proposal_id)
+            .field("operator_identity", &self.operator_identity)
+            .field("decision", &self.decision)
+            .field("reason", &self.reason)
+            .field("timestamp", &self.timestamp)
+            .field("signature_hex", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

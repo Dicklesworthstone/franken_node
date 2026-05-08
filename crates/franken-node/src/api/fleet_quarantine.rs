@@ -542,7 +542,7 @@ impl DecisionReceiptScope {
 }
 
 /// Ed25519 signature envelope for fleet decision receipts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecisionReceiptSignature {
     /// Signature algorithm.
     pub algorithm: String,
@@ -560,6 +560,21 @@ pub struct DecisionReceiptSignature {
     pub signed_payload_sha256: String,
     /// Hex-encoded Ed25519 signature.
     pub signature_hex: String,
+}
+
+impl std::fmt::Debug for DecisionReceiptSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecisionReceiptSignature")
+            .field("algorithm", &self.algorithm)
+            .field("public_key_hex", &self.public_key_hex)
+            .field("key_id", &self.key_id)
+            .field("key_source", &self.key_source)
+            .field("signing_identity", &self.signing_identity)
+            .field("trust_scope", &self.trust_scope)
+            .field("signed_payload_sha256", &self.signed_payload_sha256)
+            .field("signature_hex", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Trusted fleet decision-receipt verification root.
@@ -6929,5 +6944,32 @@ mod tests {
         assert!(!constant_time::ct_eq(action_quarantine, ""));
         assert!(!constant_time::ct_eq("", action_quarantine));
         assert!(constant_time::ct_eq("", ""));
+    }
+
+    #[test]
+    fn redacted_debug_output_for_decision_receipt_signature() {
+        let signature = DecisionReceiptSignature {
+            algorithm: "ed25519".to_string(),
+            public_key_hex: "deadbeef".repeat(8),
+            key_id: "test-key-id".to_string(),
+            key_source: "test-source".to_string(),
+            signing_identity: "test-signer".to_string(),
+            trust_scope: "fleet_decision".to_string(),
+            signed_payload_sha256: "abcd1234".repeat(8),
+            signature_hex: "sensitive_signature_data_abcdef".to_string(),
+        };
+
+        let debug_output = format!("{:?}", signature);
+
+        // Critical: Verify signature_hex is redacted in debug output
+        assert!(debug_output.contains("[REDACTED]"), "signature_hex must be redacted in debug output");
+        assert!(!debug_output.contains("sensitive_signature_data_abcdef"),
+                "actual signature hex must not appear in debug output");
+
+        // Verify other fields are still visible
+        assert!(debug_output.contains("test-key-id"));
+        assert!(debug_output.contains("test-source"));
+        assert!(debug_output.contains("test-signer"));
+        assert!(debug_output.contains("fleet_decision"));
     }
 }

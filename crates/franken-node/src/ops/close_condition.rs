@@ -95,7 +95,7 @@ pub struct CloseConditionSigningMaterial<'a> {
     pub signing_identity: &'a str,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct CloseConditionReceiptSignature {
     pub algorithm: String,
     pub public_key_hex: String,
@@ -105,6 +105,21 @@ pub struct CloseConditionReceiptSignature {
     pub trust_scope: String,
     pub signed_payload_sha256: String,
     pub signature_hex: String,
+}
+
+impl std::fmt::Debug for CloseConditionReceiptSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CloseConditionReceiptSignature")
+            .field("algorithm", &self.algorithm)
+            .field("public_key_hex", &self.public_key_hex)
+            .field("key_id", &self.key_id)
+            .field("key_source", &self.key_source)
+            .field("signing_identity", &self.signing_identity)
+            .field("trust_scope", &self.trust_scope)
+            .field("signed_payload_sha256", &self.signed_payload_sha256)
+            .field("signature_hex", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

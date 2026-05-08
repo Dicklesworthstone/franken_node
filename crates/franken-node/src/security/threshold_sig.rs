@@ -316,13 +316,23 @@ impl VerifyingKeyLookup for PreparedThresholdKeys<'_> {
 }
 
 /// A partial signature from one signer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartialSignature {
     /// Logical signer identity. This must match `key_id` for the signature
     /// to count toward quorum, otherwise the signer identity is unauthenticated.
     pub signer_id: String,
     pub key_id: String,
     pub signature_hex: String,
+}
+
+impl std::fmt::Debug for PartialSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PartialSignature")
+            .field("signer_id", &self.signer_id)
+            .field("key_id", &self.key_id)
+            .field("signature_hex", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// A publication artifact with collected signatures.

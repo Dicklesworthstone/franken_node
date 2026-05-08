@@ -357,7 +357,7 @@ pub struct ReplayBundleSigningMaterial<'a> {
     pub signing_identity: &'a str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayBundleSignature {
     pub algorithm: String,
     pub public_key_hex: String,
@@ -367,6 +367,21 @@ pub struct ReplayBundleSignature {
     pub trust_scope: String,
     pub signed_payload_sha256: String,
     pub signature_hex: String,
+}
+
+impl std::fmt::Debug for ReplayBundleSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplayBundleSignature")
+            .field("algorithm", &self.algorithm)
+            .field("public_key_hex", &self.public_key_hex)
+            .field("key_id", &self.key_id)
+            .field("key_source", &self.key_source)
+            .field("signing_identity", &self.signing_identity)
+            .field("trust_scope", &self.trust_scope)
+            .field("signed_payload_sha256", &self.signed_payload_sha256)
+            .field("signature_hex", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
