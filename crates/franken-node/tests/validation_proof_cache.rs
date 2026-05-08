@@ -17,6 +17,19 @@ use frankenengine_node::ops::validation_proof_cache::{
     error_codes, render_validation_proof_cache_decision_human,
     render_validation_proof_cache_decision_json, validation_proof_cache_rejection_decision,
 };
+use frankenengine_node::ops::validation_proof_coalescer::{
+    CAPACITY_SNAPSHOT_SCHEMA_VERSION, CompleteLeaseRequest, CreateLeaseRequest,
+    FenceStaleLeaseRequest, ValidationProofAdmissionDecision, ValidationProofAdmissionInput,
+    ValidationProofAdmissionPolicy, ValidationProofCoalescerDecision,
+    ValidationProofCoalescerDecisionKind, ValidationProofCoalescerOutcome,
+    ValidationProofCoalescerReceiptRef, ValidationProofCoalescerRequiredAction,
+    ValidationProofCoalescerStore, ValidationProofLeaseState, ValidationProofPriority,
+    ValidationProofRchCapacitySnapshot, ValidationProofRchCommand,
+    ValidationProofRchWorkerCapacity, ValidationProofTargetDirClass, ValidationProofWorkKey,
+    ValidationProofWorkKeyParts, decide_validation_proof_admission,
+    error_codes as coalescer_error_codes, event_codes as coalescer_event_codes,
+    reason_codes as coalescer_reason_codes,
+};
 use frankenengine_node::ops::validation_readiness::{
     TrackedValidationBead, ValidationBeadState, ValidationReadinessInput,
     ValidationReadinessStatus, build_validation_readiness_report,
@@ -25,6 +38,7 @@ use frankenengine_node::ops::validation_readiness::{
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use tempfile::TempDir;
@@ -35,6 +49,9 @@ const FIXTURE_JSON: &str = include_str!(
 const E2E_MATRIX_JSON: &str = include_str!(
     "../../../artifacts/validation_broker/proof_cache/validation_proof_cache_e2e_matrix.v1.json"
 );
+const COALESCER_STRESS_MATRIX_JSON: &str = include_str!(
+    "../../../artifacts/validation_broker/proof_coalescer/validation_proof_coalescer_stress_matrix.v1.json"
+);
 const REQUIRED_LOG_FIELDS: [&str; 7] = [
     "trace_id",
     "cache_key",
@@ -43,6 +60,26 @@ const REQUIRED_LOG_FIELDS: [&str; 7] = [
     "receipt_path",
     "producer_agent",
     "bead_id",
+];
+const COALESCER_STRESS_ATTEMPTS: usize = 32;
+const COALESCER_STRESS_BEAD: &str = "bd-co196";
+const COALESCER_STRESS_RECEIPT_PATH: &str = "receipts/bd-co196-producer.json";
+const REQUIRED_COALESCER_LOG_FIELDS: [&str; 15] = [
+    "trace_id",
+    "proof_work_key",
+    "proof_cache_key",
+    "lease_id",
+    "decision",
+    "reason_code",
+    "event_code",
+    "producer_agent",
+    "waiter_agent",
+    "bead_id",
+    "receipt_path",
+    "cache_key",
+    "fencing_token",
+    "target_dir_policy_id",
+    "dirty_state_policy",
 ];
 
 fn ts(second: u32) -> DateTime<Utc> {
@@ -173,6 +210,7 @@ fn receipt_with_expiry(freshness_expires_at: DateTime<Utc>) -> ValidationReceipt
             stderr_digest: DigestRef::sha256(b"stderr"),
         },
         readiness_ref: None,
+        flight_recorder_ref: None,
         trust: ReceiptTrust {
             generated_by: "validation-broker".to_string(),
             agent_name: "LavenderElk".to_string(),
@@ -428,6 +466,714 @@ fn assert_log_event_fields(event: &serde_json::Value) {
             "missing structured log field {field}: {event}"
         );
     }
+}
+
+fn coalescer_command() -> CommandSpec {
+    CommandSpec {
+        program: "rch".to_string(),
+        argv: vec![
+            "exec".to_string(),
+            "--".to_string(),
+            "env".to_string(),
+            "CARGO_TARGET_DIR=/tmp/rch_target_franken_node_pane_7".to_string(),
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "frankenengine-node".to_string(),
+            "--test".to_string(),
+            "validation_proof_cache".to_string(),
+        ],
+        cwd: "/data/projects/franken_node".to_string(),
+        environment_policy_id: "validation-proof-coalescer/env-policy/rch-only/v1".to_string(),
+        target_dir_policy_id: "validation-proof-coalescer/target-dir/off-repo/v1".to_string(),
+    }
+}
+
+fn coalescer_work_key(seed: &str) -> ValidationProofWorkKey {
+    let command = coalescer_command();
+    ValidationProofWorkKey::from_parts(ValidationProofWorkKeyParts {
+        command_digest: command.digest(),
+        input_digests: vec![InputDigest::new(
+            format!("crates/franken-node/tests/validation_proof_cache.rs::{seed}"),
+            seed.as_bytes(),
+            "coalescer-stress",
+        )],
+        git_commit: format!("commit-bd-co196-{seed}"),
+        dirty_worktree: false,
+        dirty_state_policy: DirtyStatePolicy::CleanRequired,
+        feature_flags: vec!["external-commands".to_string(), "http-client".to_string()],
+        cargo_toolchain: "nightly-2026-02-19".to_string(),
+        package: "frankenengine-node".to_string(),
+        test_target: "validation_proof_cache".to_string(),
+        environment_policy_id: command.environment_policy_id,
+        target_dir_policy_id: command.target_dir_policy_id,
+    })
+    .expect("valid coalescer stress work key")
+}
+
+fn coalescer_create_request(
+    seed: &str,
+    agent: &str,
+    bead_id: &str,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+) -> CreateLeaseRequest {
+    let work_key = coalescer_work_key(seed);
+    CreateLeaseRequest {
+        rch_command: ValidationProofRchCommand {
+            argv: coalescer_command().argv,
+            command_digest: work_key.command_digest.clone(),
+        },
+        proof_work_key: work_key,
+        owner_agent: agent.to_string(),
+        owner_bead_id: bead_id.to_string(),
+        trace_id: format!("trace-{bead_id}-{seed}-{agent}"),
+        fencing_token: format!("fence-{bead_id}-{seed}-{agent}"),
+        created_at,
+        expires_at,
+        admission_policy_id: "validation-proof-coalescer/admission/default/v1".to_string(),
+    }
+}
+
+fn coalescer_receipt_ref(
+    seed: &str,
+    bead_id: &str,
+    path: &str,
+) -> ValidationProofCoalescerReceiptRef {
+    let work_key = coalescer_work_key(seed);
+    ValidationProofCoalescerReceiptRef {
+        receipt_id: format!("vpco-receipt-{bead_id}-{seed}"),
+        path: path.to_string(),
+        bead_id: bead_id.to_string(),
+        proof_cache_key_hex: work_key.proof_cache_key.hex,
+    }
+}
+
+fn coalescer_capacity_snapshot(
+    available_slots: u16,
+    queue_depth: u16,
+    degraded: bool,
+    disk_pressure_warning: bool,
+) -> ValidationProofRchCapacitySnapshot {
+    ValidationProofRchCapacitySnapshot {
+        schema_version: CAPACITY_SNAPSHOT_SCHEMA_VERSION.to_string(),
+        observed_at: ts(30),
+        workers: vec![ValidationProofRchWorkerCapacity {
+            worker_id: "rch-worker-stress-1".to_string(),
+            total_slots: available_slots.max(1),
+            available_slots,
+            queue_depth,
+            degraded,
+        }],
+        queue_depth,
+        oldest_queued_age_seconds: Some(30),
+        disk_pressure_warning,
+    }
+}
+
+fn coalescer_admission_input(
+    trace_id: &str,
+    available_slots: u16,
+    queue_depth: u16,
+    proof_priority: ValidationProofPriority,
+    bead_priority: u8,
+    timeout_budget_seconds: u64,
+) -> ValidationProofAdmissionInput {
+    ValidationProofAdmissionInput {
+        trace_id: trace_id.to_string(),
+        capacity_snapshot: coalescer_capacity_snapshot(available_slots, queue_depth, false, false),
+        proof_priority,
+        bead_priority,
+        dirty_worktree: false,
+        dirty_state_policy: DirtyStatePolicy::CleanRequired,
+        target_dir_class: ValidationProofTargetDirClass::OffRepo,
+        timeout_budget_seconds,
+        current_queue_depth: 0,
+    }
+}
+
+fn write_coalescer_receipt_with_subprocess(
+    root: &Path,
+    relative_path: &str,
+    payload: &serde_json::Value,
+) -> PathBuf {
+    let path = root.join(relative_path);
+    let parent = path.parent().expect("receipt parent");
+    let bytes = serde_json::to_string_pretty(payload).expect("receipt payload json");
+    fs::create_dir_all(parent).expect("receipt directory");
+    let mut child = Command::new("tee")
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("receipt subprocess launched");
+    child
+        .stdin
+        .as_mut()
+        .expect("receipt subprocess stdin")
+        .write_all(bytes.as_bytes())
+        .expect("receipt subprocess stdin write");
+    let status = child.wait().expect("receipt subprocess wait");
+    assert!(status.success(), "receipt subprocess failed: {status:?}");
+    assert!(path.is_file(), "receipt subprocess did not create {path:?}");
+    path
+}
+
+fn count_coalescer_lease_files(root: &Path) -> usize {
+    fn visit(path: &Path, count: &mut usize) {
+        for entry in fs::read_dir(path).expect("read coalescer lease directory") {
+            let entry = entry.expect("coalescer lease directory entry");
+            let file_type = entry.file_type().expect("coalescer lease entry file type");
+            if file_type.is_dir() {
+                visit(&entry.path(), count);
+            } else if file_type.is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension == "json")
+            {
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+
+    let leases = root.join("leases");
+    if !leases.exists() {
+        return 0;
+    }
+    let mut count = 0;
+    visit(&leases, &mut count);
+    count
+}
+
+fn coalescer_decision_log_event(
+    decision: &ValidationProofCoalescerDecision,
+    receipt_path: &str,
+) -> serde_json::Value {
+    let lease_ref = decision.lease_ref.as_ref();
+    let producer_agent = lease_ref
+        .map(|lease| lease.owner_agent.as_str())
+        .unwrap_or(decision.agent_name.as_str());
+    let waiter_agent = if matches!(
+        decision.decision,
+        ValidationProofCoalescerDecisionKind::JoinExistingProof
+            | ValidationProofCoalescerDecisionKind::WaitForReceipt
+            | ValidationProofCoalescerDecisionKind::RetryAfterStaleLease
+            | ValidationProofCoalescerDecisionKind::RepairState
+    ) {
+        decision.agent_name.as_str()
+    } else {
+        "none"
+    };
+    serde_json::json!({
+        "trace_id": decision.trace_id.as_str(),
+        "proof_work_key": decision.proof_work_key.hex.as_str(),
+        "proof_cache_key": decision.proof_work_key.proof_cache_key.hex.as_str(),
+        "lease_id": lease_ref
+            .map(|lease| lease.lease_id.as_str())
+            .unwrap_or("no-lease"),
+        "decision": decision.decision.as_str(),
+        "reason_code": decision.reason_code.as_str(),
+        "event_code": decision.diagnostics.event_code.as_str(),
+        "producer_agent": producer_agent,
+        "waiter_agent": waiter_agent,
+        "bead_id": decision.bead_id.as_str(),
+        "receipt_path": receipt_path,
+        "cache_key": decision.proof_work_key.proof_cache_key.hex.as_str(),
+        "fencing_token": lease_ref
+            .map(|lease| lease.fencing_token.as_str())
+            .unwrap_or("no-fence"),
+        "target_dir_policy_id": decision.proof_work_key.target_dir_policy_id.as_str(),
+        "dirty_state_policy": decision.proof_work_key.dirty_state_policy.as_str(),
+    })
+}
+
+fn coalescer_admission_log_event(
+    decision: &ValidationProofAdmissionDecision,
+    work_key: &ValidationProofWorkKey,
+    receipt_path: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "trace_id": decision.diagnostics.trace_id.as_str(),
+        "proof_work_key": work_key.hex.as_str(),
+        "proof_cache_key": work_key.proof_cache_key.hex.as_str(),
+        "lease_id": "admission-only",
+        "decision": decision.decision.as_str(),
+        "reason_code": decision.reason_code.as_str(),
+        "event_code": decision.diagnostics.event_code.as_str(),
+        "producer_agent": "admission-policy",
+        "waiter_agent": "none",
+        "bead_id": COALESCER_STRESS_BEAD,
+        "receipt_path": receipt_path,
+        "cache_key": work_key.proof_cache_key.hex.as_str(),
+        "fencing_token": "admission-only",
+        "target_dir_policy_id": work_key.target_dir_policy_id.as_str(),
+        "dirty_state_policy": work_key.dirty_state_policy.as_str(),
+    })
+}
+
+fn assert_coalescer_log_event_fields(event: &serde_json::Value) {
+    for field in REQUIRED_COALESCER_LOG_FIELDS {
+        assert!(
+            event
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+            "missing coalescer structured log field {field}: {event}"
+        );
+    }
+}
+
+#[derive(Debug)]
+struct CoalescerStressAttempt {
+    agent: String,
+    outcome: ValidationProofCoalescerOutcome,
+}
+
+#[test]
+fn mock_free_e2e_concurrent_proof_attempts_coalesce_and_handoff_receipt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let store_root = Arc::new(dir.path().to_path_buf());
+    let log_path = dir.path().join("proof-coalescer-stress.ndjson");
+    let barrier = Arc::new(Barrier::new(COALESCER_STRESS_ATTEMPTS));
+    let attempts = Arc::new(Mutex::new(Vec::<CoalescerStressAttempt>::new()));
+
+    thread::scope(|thread_scope| {
+        for idx in 0..COALESCER_STRESS_ATTEMPTS {
+            let root = Arc::clone(&store_root);
+            let barrier = Arc::clone(&barrier);
+            let attempts = Arc::clone(&attempts);
+
+            thread_scope.spawn(move || {
+                let agent = format!("stress-agent-{idx:02}");
+                let request = coalescer_create_request(
+                    "stress-equivalent",
+                    &agent,
+                    COALESCER_STRESS_BEAD,
+                    ts(10),
+                    ts(50),
+                );
+                let store = ValidationProofCoalescerStore::new(root.as_path());
+                barrier.wait();
+                let outcome = store.create_or_join(request).expect("coalescer attempt");
+                attempts
+                    .lock()
+                    .expect("attempts lock")
+                    .push(CoalescerStressAttempt { agent, outcome });
+            });
+        }
+    });
+
+    let mut attempts = Arc::try_unwrap(attempts)
+        .expect("attempt refs released")
+        .into_inner()
+        .expect("attempts lock released");
+    attempts.sort_by(|left, right| left.agent.cmp(&right.agent));
+    for attempt in &attempts {
+        append_log_event(
+            &log_path,
+            &coalescer_decision_log_event(&attempt.outcome.decision, COALESCER_STRESS_RECEIPT_PATH),
+        );
+    }
+
+    let producer_count = attempts
+        .iter()
+        .filter(|attempt| {
+            matches!(
+                attempt.outcome.decision.decision,
+                ValidationProofCoalescerDecisionKind::RunLocallyViaRch
+            )
+        })
+        .count();
+    let waiter_count = attempts
+        .iter()
+        .filter(|attempt| {
+            matches!(
+                attempt.outcome.decision.decision,
+                ValidationProofCoalescerDecisionKind::JoinExistingProof
+            )
+        })
+        .count();
+    assert_eq!(
+        producer_count, 1,
+        "exactly one producer may launch RCH proof"
+    );
+    assert_eq!(
+        waiter_count,
+        COALESCER_STRESS_ATTEMPTS - 1,
+        "equivalent attempts must join the in-flight proof"
+    );
+    assert_eq!(
+        count_coalescer_lease_files(dir.path()),
+        1,
+        "equivalent attempts must persist one coalesced lease"
+    );
+
+    let producer = attempts
+        .iter()
+        .find(|attempt| {
+            matches!(
+                attempt.outcome.decision.decision,
+                ValidationProofCoalescerDecisionKind::RunLocallyViaRch
+            )
+        })
+        .expect("producer outcome");
+    let producer_lease = producer
+        .outcome
+        .lease
+        .as_ref()
+        .expect("producer lease")
+        .clone();
+    assert!(producer.outcome.lease_path.is_file());
+    let store = ValidationProofCoalescerStore::new(dir.path());
+    let stored = store
+        .read_lease(&producer_lease.proof_work_key)?
+        .expect("stored coalesced lease");
+    assert_eq!(stored.lease_id, producer_lease.lease_id);
+    assert_eq!(stored.proof_work_key.hex, producer_lease.proof_work_key.hex);
+
+    let receipt_payload = serde_json::json!({
+        "bead_id": COALESCER_STRESS_BEAD,
+        "lease_id": producer_lease.lease_id.as_str(),
+        "producer_agent": producer_lease.owner_agent.as_str(),
+        "proof_work_key": producer_lease.proof_work_key.hex.as_str(),
+        "cache_key": producer_lease.proof_cache_key.hex.as_str(),
+    });
+    let receipt_path = write_coalescer_receipt_with_subprocess(
+        dir.path(),
+        COALESCER_STRESS_RECEIPT_PATH,
+        &receipt_payload,
+    );
+    let completed = store.complete_lease(CompleteLeaseRequest {
+        proof_work_key: producer_lease.proof_work_key.clone(),
+        owner_agent: producer_lease.owner_agent.clone(),
+        owner_bead_id: producer_lease.owner_bead_id.clone(),
+        fencing_token: producer_lease.fencing_token.clone(),
+        completed_at: ts(51),
+        receipt_ref: coalescer_receipt_ref(
+            "stress-equivalent",
+            COALESCER_STRESS_BEAD,
+            COALESCER_STRESS_RECEIPT_PATH,
+        ),
+    })?;
+    assert_eq!(completed.state, ValidationProofLeaseState::Completed);
+    assert_eq!(
+        completed
+            .receipt_ref
+            .as_ref()
+            .expect("completed receipt ref")
+            .path,
+        COALESCER_STRESS_RECEIPT_PATH
+    );
+    assert_eq!(
+        completed
+            .receipt_ref
+            .as_ref()
+            .expect("completed receipt ref")
+            .proof_cache_key_hex,
+        completed.proof_cache_key.hex
+    );
+    append_log_event(
+        &log_path,
+        &serde_json::json!({
+            "trace_id": completed.diagnostics.trace_id.as_str(),
+            "proof_work_key": completed.proof_work_key.hex.as_str(),
+            "proof_cache_key": completed.proof_cache_key.hex.as_str(),
+            "lease_id": completed.lease_id.as_str(),
+            "decision": "coalesced_completed",
+            "reason_code": completed.diagnostics.reason_code.as_str(),
+            "event_code": completed.diagnostics.event_code.as_str(),
+            "producer_agent": completed.owner_agent.as_str(),
+            "waiter_agent": "none",
+            "bead_id": completed.owner_bead_id.as_str(),
+            "receipt_path": COALESCER_STRESS_RECEIPT_PATH,
+            "cache_key": completed.proof_cache_key.hex.as_str(),
+            "fencing_token": completed.fencing_token.as_str(),
+            "target_dir_policy_id": completed.target_dir_policy_id.as_str(),
+            "dirty_state_policy": completed.proof_work_key.dirty_state_policy.as_str(),
+        }),
+    );
+    let receipt_json: serde_json::Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+    assert_eq!(
+        receipt_json
+            .get("lease_id")
+            .and_then(serde_json::Value::as_str),
+        Some(completed.lease_id.as_str())
+    );
+
+    let waiter_after_completion = store.create_or_join(coalescer_create_request(
+        "stress-equivalent",
+        "stress-agent-after-complete",
+        COALESCER_STRESS_BEAD,
+        ts(52),
+        ts(59),
+    ))?;
+    assert_eq!(
+        waiter_after_completion.decision.decision,
+        ValidationProofCoalescerDecisionKind::WaitForReceipt
+    );
+    assert_eq!(
+        waiter_after_completion.decision.required_action,
+        ValidationProofCoalescerRequiredAction::WaitForReceipt
+    );
+    append_log_event(
+        &log_path,
+        &coalescer_decision_log_event(
+            &waiter_after_completion.decision,
+            COALESCER_STRESS_RECEIPT_PATH,
+        ),
+    );
+
+    let changed = store.create_or_join(coalescer_create_request(
+        "stress-changed",
+        "stress-agent-changed",
+        COALESCER_STRESS_BEAD,
+        ts(20),
+        ts(55),
+    ))?;
+    assert_eq!(
+        changed.decision.decision,
+        ValidationProofCoalescerDecisionKind::RunLocallyViaRch
+    );
+    assert_ne!(changed.lease_path, producer.outcome.lease_path);
+    assert_eq!(
+        count_coalescer_lease_files(dir.path()),
+        2,
+        "changed work key must allocate a separate lease"
+    );
+    append_log_event(
+        &log_path,
+        &coalescer_decision_log_event(&changed.decision, "receipts/bd-co196-changed.json"),
+    );
+
+    let stale_owner = store.create_or_join(coalescer_create_request(
+        "stress-stale",
+        "stress-agent-stale-owner",
+        COALESCER_STRESS_BEAD,
+        ts(1),
+        ts(5),
+    ))?;
+    append_log_event(
+        &log_path,
+        &coalescer_decision_log_event(&stale_owner.decision, "receipts/bd-co196-stale.json"),
+    );
+    let stale_waiter = store.create_or_join(coalescer_create_request(
+        "stress-stale",
+        "stress-agent-stale-waiter",
+        COALESCER_STRESS_BEAD,
+        ts(10),
+        ts(55),
+    ))?;
+    assert_eq!(
+        stale_waiter.decision.decision,
+        ValidationProofCoalescerDecisionKind::RetryAfterStaleLease
+    );
+    assert!(stale_waiter.decision.diagnostics.fail_closed);
+    append_log_event(
+        &log_path,
+        &coalescer_decision_log_event(&stale_waiter.decision, "receipts/bd-co196-stale.json"),
+    );
+
+    let stale_lease = stale_owner
+        .lease
+        .as_ref()
+        .expect("stale owner lease")
+        .clone();
+    let fenced = store.fence_stale_lease(FenceStaleLeaseRequest {
+        proof_work_key: stale_lease.proof_work_key.clone(),
+        owner_agent: "stress-agent-new-owner".to_string(),
+        owner_bead_id: COALESCER_STRESS_BEAD.to_string(),
+        trace_id: "trace-bd-co196-stale-fence".to_string(),
+        fencing_token: format!("fence-{COALESCER_STRESS_BEAD}-stale-new-owner"),
+        fenced_at: ts(11),
+        expires_at: ts(55),
+    })?;
+    assert_eq!(
+        fenced.decision.decision,
+        ValidationProofCoalescerDecisionKind::RetryAfterStaleLease
+    );
+    assert_eq!(
+        fenced.decision.required_action,
+        ValidationProofCoalescerRequiredAction::RetryWithNewFence
+    );
+    append_log_event(
+        &log_path,
+        &coalescer_decision_log_event(&fenced.decision, "receipts/bd-co196-stale.json"),
+    );
+
+    let fenced_error = store
+        .complete_lease(CompleteLeaseRequest {
+            proof_work_key: stale_lease.proof_work_key.clone(),
+            owner_agent: stale_lease.owner_agent.clone(),
+            owner_bead_id: stale_lease.owner_bead_id.clone(),
+            fencing_token: stale_lease.fencing_token.clone(),
+            completed_at: ts(12),
+            receipt_ref: coalescer_receipt_ref(
+                "stress-stale",
+                COALESCER_STRESS_BEAD,
+                "receipts/bd-co196-stale.json",
+            ),
+        })
+        .expect_err("old owner must be fenced after stale takeover");
+    assert_eq!(
+        fenced_error.code(),
+        coalescer_error_codes::ERR_VPCO_FENCED_OWNER
+    );
+
+    let corrupt_key = coalescer_work_key("stress-corrupt");
+    let corrupt_path = store.lease_path(&corrupt_key);
+    fs::create_dir_all(corrupt_path.parent().expect("corrupt lease parent"))?;
+    fs::write(&corrupt_path, b"{not-json")?;
+    let corrupt = store.create_or_join(coalescer_create_request(
+        "stress-corrupt",
+        "stress-agent-corrupt",
+        COALESCER_STRESS_BEAD,
+        ts(13),
+        ts(55),
+    ))?;
+    assert_eq!(
+        corrupt.decision.decision,
+        ValidationProofCoalescerDecisionKind::RepairState
+    );
+    assert!(corrupt.decision.diagnostics.fail_closed);
+    append_log_event(
+        &log_path,
+        &coalescer_decision_log_event(&corrupt.decision, "receipts/bd-co196-corrupt.json"),
+    );
+
+    let policy = ValidationProofAdmissionPolicy::default_policy(
+        "validation-proof-coalescer/stress-policy/v1",
+    );
+    let queued_input = coalescer_admission_input(
+        "trace-bd-co196-capacity-queued",
+        0,
+        0,
+        ValidationProofPriority::Low,
+        4,
+        1_000,
+    );
+    let queued = decide_validation_proof_admission(&policy, &queued_input)?;
+    assert_eq!(
+        queued.decision,
+        ValidationProofCoalescerDecisionKind::QueuedByPolicy
+    );
+    assert_eq!(queued.reason_code, coalescer_reason_codes::QUEUE_CAPACITY);
+    append_log_event(
+        &log_path,
+        &coalescer_admission_log_event(
+            &queued,
+            &coalescer_work_key("stress-capacity-queued"),
+            "receipts/bd-co196-capacity.json",
+        ),
+    );
+
+    let high_priority_input = coalescer_admission_input(
+        "trace-bd-co196-capacity-admitted",
+        1,
+        0,
+        ValidationProofPriority::High,
+        1,
+        600,
+    );
+    let admitted = decide_validation_proof_admission(&policy, &high_priority_input)?;
+    assert_eq!(
+        admitted.decision,
+        ValidationProofCoalescerDecisionKind::RunLocallyViaRch
+    );
+    assert_eq!(
+        admitted.required_action,
+        ValidationProofCoalescerRequiredAction::StartRchValidation
+    );
+    append_log_event(
+        &log_path,
+        &coalescer_admission_log_event(
+            &admitted,
+            &coalescer_work_key("stress-capacity-admitted"),
+            "receipts/bd-co196-capacity.json",
+        ),
+    );
+
+    let rejected_input = coalescer_admission_input(
+        "trace-bd-co196-capacity-rejected",
+        1,
+        16,
+        ValidationProofPriority::High,
+        1,
+        600,
+    );
+    let rejected = decide_validation_proof_admission(&policy, &rejected_input)?;
+    assert_eq!(
+        rejected.decision,
+        ValidationProofCoalescerDecisionKind::RejectCapacity
+    );
+    assert_eq!(
+        rejected.reason_code,
+        coalescer_reason_codes::REJECT_CAPACITY
+    );
+    assert!(rejected.diagnostics.fail_closed);
+    append_log_event(
+        &log_path,
+        &coalescer_admission_log_event(
+            &rejected,
+            &coalescer_work_key("stress-capacity-rejected"),
+            "receipts/bd-co196-capacity.json",
+        ),
+    );
+
+    let events = read_log_events(&log_path);
+    assert!(
+        events.len() >= COALESCER_STRESS_ATTEMPTS + 10,
+        "stress harness should log every coalescer assertion"
+    );
+    for event in &events {
+        assert_coalescer_log_event_fields(event);
+    }
+
+    let matrix: serde_json::Value =
+        serde_json::from_str(COALESCER_STRESS_MATRIX_JSON).expect("coalescer stress matrix json");
+    assert_eq!(
+        matrix.get("attempts").and_then(serde_json::Value::as_u64),
+        Some(COALESCER_STRESS_ATTEMPTS as u64)
+    );
+    let matrix_fields = matrix["required_log_fields"]
+        .as_array()
+        .expect("coalescer matrix fields");
+    for field in REQUIRED_COALESCER_LOG_FIELDS {
+        assert!(
+            matrix_fields
+                .iter()
+                .any(|value| value.as_str() == Some(field)),
+            "coalescer matrix missing required log field {field}"
+        );
+    }
+    for scenario in matrix["scenarios"]
+        .as_array()
+        .expect("coalescer matrix scenarios")
+    {
+        let name = scenario
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .expect("coalescer matrix scenario name");
+        let expected_decision = scenario
+            .get("expected_decision")
+            .and_then(serde_json::Value::as_str)
+            .expect("coalescer matrix expected decision");
+        let expected_event_code = scenario
+            .get("expected_event_code")
+            .and_then(serde_json::Value::as_str)
+            .expect("coalescer matrix expected event code");
+        assert!(
+            events.iter().any(|event| {
+                event.get("decision").and_then(serde_json::Value::as_str) == Some(expected_decision)
+                    && event.get("event_code").and_then(serde_json::Value::as_str)
+                        == Some(expected_event_code)
+            }),
+            "missing coalescer stress scenario {name}: decision={expected_decision} event_code={expected_event_code}"
+        );
+    }
+    Ok(())
 }
 
 #[test]

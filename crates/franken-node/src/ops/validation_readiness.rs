@@ -5,12 +5,11 @@
 //! that explains whether validation evidence is trustworthy right now.
 
 use crate::ops::validation_broker::{
-    DigestRef, ProofEvidenceSource, ProofStatusKind, RchMode, SourceOnlyReason,
-    ValidationErrorClass, ValidationExitKind, ValidationProofStatus, ValidationReceipt,
+    DigestRef, FlightRecorderAdapterOutcomeClass, ProofEvidenceSource, ProofStatusKind, RchMode,
+    SourceOnlyReason, TimeoutClass, ValidationErrorClass, ValidationExit, ValidationExitKind,
+    ValidationProofStatus, ValidationReceipt,
 };
-use crate::ops::validation_recovery_planner::{
-    recovery_decision_for_exit, RecoveryDecision, RecoveryAction,
-};
+use crate::ops::validation_recovery_planner::{RecoveryAction, reason_codes};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -886,40 +885,38 @@ fn summarize_validation_readiness(
 
                 // Determine if this failure is retryable based on recovery planner
                 let (retryable, recovery_plan) = if let Some(ref exit) = status.exit {
-                    let decision = recovery_decision_for_exit(exit, status.proof_kind);
-                    let is_retryable = matches!(decision.action, RecoveryAction::RetryLocal | RecoveryAction::RetryRemote | RecoveryAction::RetryRemotePreferWorker(_));
+                    let decision = recovery_decision_for_exit(exit, status.thread_id.as_str());
+                    let is_retryable = recovery_action_is_retryable(decision.action);
                     (is_retryable, Some(decision))
                 } else {
                     (false, None)
                 };
 
                 failed_attempt_details.push(FailedAttemptSummary {
-                    bead_id: flight_ref.attempt_digest.clone().unwrap_or_else(|| "unknown".to_string()),
-                    thread_id: status.proof_kind.clone(),
-                    flight_recorder_path: flight_ref.attempt_path.clone(),
-                    outcome_class: flight_ref.outcome_class.clone(),
-                    execution_mode: flight_ref.execution_mode.clone(),
+                    bead_id: status.bead_id.clone(),
+                    thread_id: status.thread_id.clone(),
+                    flight_recorder_path: Some(flight_ref.attempt_path.clone()),
+                    outcome_class: flight_outcome_class_as_str(flight_ref.outcome_class)
+                        .to_string(),
+                    execution_mode: rch_mode_as_str(flight_ref.execution_mode).to_string(),
                     worker_id: flight_ref.worker_id.clone(),
                     reason_code: flight_ref.reason_code.clone(),
                     retryable,
                     product_failure: domain == ValidationFailureDomain::Product,
-                    last_attempt_at: status.timing.finished_at,
+                    last_attempt_at: status.observed_at,
                 });
 
                 // Add recovery plan if retryable
                 if let Some(recovery) = recovery_plan {
                     if retryable {
                         pending_recoveries.push(RecoveryPlanSummary {
-                            bead_id: flight_ref.attempt_digest.clone().unwrap_or_else(|| "unknown".to_string()),
-                            thread_id: status.proof_kind.clone(),
+                            bead_id: status.bead_id.clone(),
+                            thread_id: status.thread_id.clone(),
                             action: format!("{:?}", recovery.action),
                             reason_code: recovery.reason_code,
                             required_action: recovery.required_action,
                             retry_after_ms: recovery.retry_after_ms,
-                            worker_preference: match recovery.action {
-                                RecoveryAction::RetryRemotePreferWorker(worker_id) => Some(worker_id),
-                                _ => None,
-                            },
+                            worker_preference: recovery.worker_preference,
                             fail_closed: matches!(recovery.action, RecoveryAction::FailClosed),
                         });
                     }
@@ -938,17 +935,19 @@ fn summarize_validation_readiness(
                 let domain = failure_domain_for_receipt(receipt);
 
                 let (retryable, recovery_plan) = {
-                    let decision = recovery_decision_for_exit(&receipt.exit, receipt.proof_kind.clone());
-                    let is_retryable = matches!(decision.action, RecoveryAction::RetryLocal | RecoveryAction::RetryRemote | RecoveryAction::RetryRemotePreferWorker(_));
+                    let decision =
+                        recovery_decision_for_exit(&receipt.exit, receipt.thread_id.as_str());
+                    let is_retryable = recovery_action_is_retryable(decision.action);
                     (is_retryable, Some(decision))
                 };
 
                 failed_attempt_details.push(FailedAttemptSummary {
-                    bead_id: flight_ref.attempt_digest.clone().unwrap_or_else(|| "unknown".to_string()),
-                    thread_id: receipt.proof_kind.clone(),
-                    flight_recorder_path: flight_ref.attempt_path.clone(),
-                    outcome_class: flight_ref.outcome_class.clone(),
-                    execution_mode: flight_ref.execution_mode.clone(),
+                    bead_id: receipt.bead_id.clone(),
+                    thread_id: receipt.thread_id.clone(),
+                    flight_recorder_path: Some(flight_ref.attempt_path.clone()),
+                    outcome_class: flight_outcome_class_as_str(flight_ref.outcome_class)
+                        .to_string(),
+                    execution_mode: rch_mode_as_str(flight_ref.execution_mode).to_string(),
                     worker_id: flight_ref.worker_id.clone(),
                     reason_code: flight_ref.reason_code.clone(),
                     retryable,
@@ -960,16 +959,13 @@ fn summarize_validation_readiness(
                 if let Some(recovery) = recovery_plan {
                     if retryable {
                         pending_recoveries.push(RecoveryPlanSummary {
-                            bead_id: flight_ref.attempt_digest.clone().unwrap_or_else(|| "unknown".to_string()),
-                            thread_id: receipt.proof_kind.clone(),
+                            bead_id: receipt.bead_id.clone(),
+                            thread_id: receipt.thread_id.clone(),
                             action: format!("{:?}", recovery.action),
                             reason_code: recovery.reason_code,
                             required_action: recovery.required_action,
                             retry_after_ms: recovery.retry_after_ms,
-                            worker_preference: match recovery.action {
-                                RecoveryAction::RetryRemotePreferWorker(worker_id) => Some(worker_id),
-                                _ => None,
-                            },
+                            worker_preference: recovery.worker_preference,
                             fail_closed: matches!(recovery.action, RecoveryAction::FailClosed),
                         });
                     }
@@ -1521,13 +1517,179 @@ fn proof_kind_for_receipt(receipt: &ValidationReceipt) -> ProofStatusKind {
     }
 }
 
+fn flight_outcome_class_as_str(outcome_class: FlightRecorderAdapterOutcomeClass) -> &'static str {
+    match outcome_class {
+        FlightRecorderAdapterOutcomeClass::Passed => "passed",
+        FlightRecorderAdapterOutcomeClass::CommandFailed => "command_failed",
+        FlightRecorderAdapterOutcomeClass::CompileFailed => "compile_failed",
+        FlightRecorderAdapterOutcomeClass::TestFailed => "test_failed",
+        FlightRecorderAdapterOutcomeClass::WorkerTimeout => "worker_timeout",
+        FlightRecorderAdapterOutcomeClass::WorkerMissingToolchain => "worker_missing_toolchain",
+        FlightRecorderAdapterOutcomeClass::WorkerFilesystemError => "worker_filesystem_error",
+        FlightRecorderAdapterOutcomeClass::LocalFallbackRefused => "local_fallback_refused",
+        FlightRecorderAdapterOutcomeClass::ContentionDeferred => "contention_deferred",
+        FlightRecorderAdapterOutcomeClass::BrokerInternalError => "broker_internal_error",
+    }
+}
+
+fn rch_mode_as_str(mode: RchMode) -> &'static str {
+    match mode {
+        RchMode::Remote => "remote",
+        RchMode::LocalFallback => "local_fallback",
+        RchMode::NotUsed => "not_used",
+        RchMode::Unavailable => "unavailable",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadinessRecoveryDecision {
+    action: RecoveryAction,
+    reason_code: String,
+    required_action: String,
+    retry_after_ms: Option<u64>,
+    worker_preference: Option<String>,
+}
+
+fn recovery_decision_for_exit(
+    exit: &ValidationExit,
+    _proof_kind: &str,
+) -> ReadinessRecoveryDecision {
+    match exit.kind {
+        ValidationExitKind::Success => readiness_recovery_decision(
+            RecoveryAction::NoRecoveryNeeded,
+            reason_codes::NO_RECOVERY_NEEDED,
+            "continue proof verification",
+            None,
+        ),
+        ValidationExitKind::SourceOnly => readiness_recovery_decision(
+            RecoveryAction::UseSourceOnlyBlocker,
+            reason_codes::USE_SOURCE_ONLY_BLOCKER,
+            "keep source-only validation blocker",
+            None,
+        ),
+        ValidationExitKind::Cancelled => readiness_recovery_decision(
+            RecoveryAction::FailClosed,
+            reason_codes::FAIL_CLOSED,
+            "manual intervention required for cancelled validation",
+            None,
+        ),
+        ValidationExitKind::Timeout => recovery_decision_for_timeout(exit.timeout_class),
+        ValidationExitKind::Failed => recovery_decision_for_error(exit),
+    }
+}
+
+fn recovery_decision_for_timeout(timeout_class: TimeoutClass) -> ReadinessRecoveryDecision {
+    match timeout_class {
+        TimeoutClass::QueueWait => readiness_recovery_decision(
+            RecoveryAction::QueueUntilCapacity,
+            reason_codes::QUEUE_UNTIL_CAPACITY,
+            "queue validation until worker capacity is available",
+            Some(120_000),
+        ),
+        TimeoutClass::CargoTestTimeout | TimeoutClass::ProcessWall => readiness_recovery_decision(
+            RecoveryAction::RetryRemoteSameWorker,
+            reason_codes::RETRY_REMOTE_SAME_WORKER,
+            "retry remote validation",
+            Some(60_000),
+        ),
+        TimeoutClass::ProcessIdle => readiness_recovery_decision(
+            RecoveryAction::DrainWorkerThenRetry,
+            reason_codes::DRAIN_WORKER_THEN_RETRY,
+            "drain worker and retry validation",
+            Some(120_000),
+        ),
+        TimeoutClass::None
+        | TimeoutClass::RchDispatch
+        | TimeoutClass::SshCommand
+        | TimeoutClass::WorkerUnreachable
+        | TimeoutClass::Unknown => readiness_recovery_decision(
+            RecoveryAction::RetryRemoteDifferentWorker,
+            reason_codes::RETRY_REMOTE_DIFFERENT_WORKER,
+            "retry validation on a different worker",
+            Some(45_000),
+        ),
+    }
+}
+
+fn recovery_decision_for_error(exit: &ValidationExit) -> ReadinessRecoveryDecision {
+    match exit.error_class {
+        ValidationErrorClass::CompileError
+        | ValidationErrorClass::TestFailure
+        | ValidationErrorClass::ClippyWarning
+        | ValidationErrorClass::FormatFailure => readiness_recovery_decision(
+            RecoveryAction::FailClosed,
+            reason_codes::FAIL_CLOSED,
+            "fix product validation failure before retrying",
+            None,
+        ),
+        ValidationErrorClass::TransportTimeout | ValidationErrorClass::WorkerInfra => {
+            readiness_recovery_decision(
+                RecoveryAction::RetryRemoteDifferentWorker,
+                reason_codes::RETRY_REMOTE_DIFFERENT_WORKER,
+                "retry validation on a different worker",
+                Some(45_000),
+            )
+        }
+        ValidationErrorClass::EnvironmentContention => readiness_recovery_decision(
+            RecoveryAction::QueueUntilCapacity,
+            reason_codes::QUEUE_UNTIL_CAPACITY,
+            "queue validation until capacity is available",
+            Some(120_000),
+        ),
+        ValidationErrorClass::DiskPressure
+        | ValidationErrorClass::SourceOnly
+        | ValidationErrorClass::None => readiness_recovery_decision(
+            RecoveryAction::UseSourceOnlyBlocker,
+            reason_codes::USE_SOURCE_ONLY_BLOCKER,
+            "use source-only validation blocker",
+            None,
+        ),
+        ValidationErrorClass::Unknown if exit.retryable => readiness_recovery_decision(
+            RecoveryAction::RetryRemoteDifferentWorker,
+            reason_codes::RETRY_REMOTE_DIFFERENT_WORKER,
+            "retry unknown validation failure on a different worker",
+            Some(45_000),
+        ),
+        ValidationErrorClass::Unknown => readiness_recovery_decision(
+            RecoveryAction::FailClosed,
+            reason_codes::FAIL_CLOSED,
+            "manual intervention required for unknown validation failure",
+            None,
+        ),
+    }
+}
+
+fn readiness_recovery_decision(
+    action: RecoveryAction,
+    reason_code: &str,
+    required_action: &str,
+    retry_after_ms: Option<u64>,
+) -> ReadinessRecoveryDecision {
+    ReadinessRecoveryDecision {
+        action,
+        reason_code: reason_code.to_string(),
+        required_action: required_action.to_string(),
+        retry_after_ms,
+        worker_preference: None,
+    }
+}
+
+fn recovery_action_is_retryable(action: RecoveryAction) -> bool {
+    matches!(
+        action,
+        RecoveryAction::RetryRemoteSameWorker
+            | RecoveryAction::RetryRemoteDifferentWorker
+            | RecoveryAction::QueueUntilCapacity
+            | RecoveryAction::DrainWorkerThenRetry
+            | RecoveryAction::WaitForExistingProof
+    )
+}
+
 fn failure_domain_for_receipt(receipt: &ValidationReceipt) -> ValidationFailureDomain {
     failure_domain_for_exit(&receipt.exit)
 }
 
-fn failure_domain_for_exit(
-    exit: &crate::ops::validation_broker::ValidationExit,
-) -> ValidationFailureDomain {
+fn failure_domain_for_exit(exit: &ValidationExit) -> ValidationFailureDomain {
     match exit.kind {
         ValidationExitKind::Success | ValidationExitKind::SourceOnly => {
             ValidationFailureDomain::None

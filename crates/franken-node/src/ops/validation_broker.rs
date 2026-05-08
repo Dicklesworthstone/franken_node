@@ -1443,25 +1443,37 @@ impl InputSet {
         let mut result = String::from("input_set_v1:");
 
         // Git commit (length-prefixed)
-        result.push_str(&format!("git_commit:{}:", len_to_u64(self.git_commit.len())));
+        result.push_str(&format!(
+            "git_commit:{}:",
+            len_to_u64(self.git_commit.len())
+        ));
         result.push_str(&self.git_commit);
 
         // Dirty worktree flag
         result.push_str(&format!("dirty:{}", self.dirty_worktree));
 
         // Changed paths (each length-prefixed)
-        result.push_str(&format!("changed_count:{}", len_to_u64(changed_paths.len())));
+        result.push_str(&format!(
+            "changed_count:{}",
+            len_to_u64(changed_paths.len())
+        ));
         for path in &changed_paths {
             result.push_str(&format!("path:{}:", len_to_u64(path.len())));
             result.push_str(path);
         }
 
         // Content digests (each field length-prefixed)
-        result.push_str(&format!("digest_count:{}", len_to_u64(content_digests.len())));
+        result.push_str(&format!(
+            "digest_count:{}",
+            len_to_u64(content_digests.len())
+        ));
         for digest in &content_digests {
             result.push_str(&format!("digest_path:{}:", len_to_u64(digest.path.len())));
             result.push_str(&digest.path);
-            result.push_str(&format!("digest_algo:{}:", len_to_u64(digest.algorithm.len())));
+            result.push_str(&format!(
+                "digest_algo:{}:",
+                len_to_u64(digest.algorithm.len())
+            ));
             result.push_str(&digest.algorithm);
             result.push_str(&format!("digest_hex:{}:", len_to_u64(digest.hex.len())));
             result.push_str(&digest.hex);
@@ -1508,7 +1520,10 @@ impl InputSet {
 
         let material1 = input1.canonical_material();
         let material2 = input2.canonical_material();
-        assert_ne!(material1, material2, "Different digest structures should not collide");
+        assert_ne!(
+            material1, material2,
+            "Different digest structures should not collide"
+        );
 
         // Test case 2: Different changed paths with commas
         input1.content_digests.clear();
@@ -1519,7 +1534,10 @@ impl InputSet {
 
         let material1 = input1.canonical_material();
         let material2 = input2.canonical_material();
-        assert_ne!(material1, material2, "Different path structures should not collide");
+        assert_ne!(
+            material1, material2,
+            "Different path structures should not collide"
+        );
 
         // Test case 3: Different feature flag structures
         input1.changed_paths.clear();
@@ -1530,7 +1548,10 @@ impl InputSet {
 
         let material1 = input1.canonical_material();
         let material2 = input2.canonical_material();
-        assert_ne!(material1, material2, "Different feature flag structures should not collide");
+        assert_ne!(
+            material1, material2,
+            "Different feature flag structures should not collide"
+        );
     }
 }
 

@@ -94,6 +94,7 @@ impl PlannerInput {
 pub enum PlannedCommandKind {
     SourceOnly,
     ProofCacheLookup,
+    ProofCoalescerLookup,
     RchCargo,
     PythonGate,
 }
@@ -252,6 +253,7 @@ pub fn plan_validation(input: &PlannerInput) -> ValidationPlan {
 
     if has_rust || has_manifest || has_sibling_drift {
         builder.add_proof_cache_lookup();
+        builder.add_proof_coalescer_lookup();
     }
 
     if has_manifest {
@@ -461,6 +463,39 @@ impl<'a> PlanBuilder<'a> {
             rationale:
                 "look up a fresh validation proof-cache receipt before scheduling RCH cargo work"
                     .to_string(),
+            covers: self.changed_paths.clone(),
+        });
+    }
+
+    fn add_proof_coalescer_lookup(&mut self) {
+        let changed_paths = self.changed_paths.join(",");
+        let argv = vec![
+            "franken-node".to_string(),
+            "ops".to_string(),
+            "validation-proof-coalescer".to_string(),
+            "lookup".to_string(),
+            "--bead-id".to_string(),
+            self.input.bead_id.clone(),
+            "--thread-id".to_string(),
+            self.input.thread_id.clone(),
+            "--package".to_string(),
+            self.input.package.clone(),
+            "--cargo-toolchain".to_string(),
+            self.input.cargo_toolchain.clone(),
+            "--target-dir".to_string(),
+            self.input.target_dir.clone(),
+            "--changed-paths".to_string(),
+            changed_paths,
+        ];
+        self.add_command(PlannedCommand {
+            command_id: "cache-proof-coalescer-lookup".to_string(),
+            kind: PlannedCommandKind::ProofCoalescerLookup,
+            strength: GateStrength::Recommended,
+            shell: shell_command(&BTreeMap::new(), &argv),
+            env: BTreeMap::new(),
+            argv,
+            rationale: "join an existing in-flight validation proof before scheduling duplicate RCH cargo work"
+                .to_string(),
             covers: self.changed_paths.clone(),
         });
     }

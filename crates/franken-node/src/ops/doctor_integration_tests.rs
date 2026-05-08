@@ -21,10 +21,10 @@ mod tests {
 
     fn sample_critical_inputs() -> WorkspacePressureInputs {
         WorkspacePressureInputs {
-            free_disk_bytes: 80_000_000,     // 80MB - critical
+            free_disk_bytes: 80_000_000,      // 80MB - critical
             target_dir_bytes: 15_000_000_000, // 15GB
             active_build_count: 12,
-            rch_available_slots: None,        // RCH unavailable
+            rch_available_slots: None, // RCH unavailable
             memory_pressure: 0.96,
             active_reservations: 80,
             coordination_healthy: false,
@@ -62,7 +62,12 @@ mod tests {
         assert!(!output.resources.coordination_healthy);
         assert_eq!(output.policy_decisions.len(), 6);
         assert!(!output.recommended_actions.is_empty());
-        assert!(output.recommended_actions.iter().any(|a| a.priority == "high"));
+        assert!(
+            output
+                .recommended_actions
+                .iter()
+                .any(|a| a.priority == "high")
+        );
         assert_eq!(output.metadata.get("rch_available").unwrap(), "false");
     }
 
@@ -70,7 +75,7 @@ mod tests {
     fn test_doctor_with_custom_thresholds() {
         let conservative_thresholds = PolicyThresholds::conservative();
         let inputs = WorkspacePressureInputs {
-            free_disk_bytes: 800_000_000,   // 800MB
+            free_disk_bytes: 800_000_000,    // 800MB
             target_dir_bytes: 2_000_000_000, // 2GB
             active_build_count: 2,
             rch_available_slots: Some(5),
@@ -83,7 +88,10 @@ mod tests {
         let output = doctor.generate_report(&inputs);
 
         // With conservative thresholds, this should be more restrictive
-        assert!(matches!(output.status, DoctorStatus::Warning | DoctorStatus::Degraded));
+        assert!(matches!(
+            output.status,
+            DoctorStatus::Warning | DoctorStatus::Degraded
+        ));
         assert_eq!(output.policy_decisions.len(), 6);
     }
 
@@ -140,7 +148,7 @@ mod tests {
     fn test_policy_decision_summary_formatting() {
         let inputs = WorkspacePressureInputs {
             free_disk_bytes: 1_000_000_000,  // 1GB
-            target_dir_bytes: 8_000_000_000,  // 8GB - high
+            target_dir_bytes: 8_000_000_000, // 8GB - high
             active_build_count: 6,
             rch_available_slots: Some(3),
             memory_pressure: 0.75,
@@ -152,7 +160,14 @@ mod tests {
         let output = doctor.generate_report(&inputs);
 
         // Verify all work classes are covered
-        let expected_work_classes = ["SourceOnly", "DocsGate", "Validation", "Benchmark", "Fuzzing", "Cleanup"];
+        let expected_work_classes = [
+            "SourceOnly",
+            "DocsGate",
+            "Validation",
+            "Benchmark",
+            "Fuzzing",
+            "Cleanup",
+        ];
         for work_class in &expected_work_classes {
             assert!(output.policy_decisions.contains_key(*work_class));
             let decision = &output.policy_decisions[*work_class];
@@ -170,8 +185,8 @@ mod tests {
             free_disk_bytes: 2_147_483_648,  // 2GB exactly
             target_dir_bytes: 1_073_741_824, // 1GB exactly
             active_build_count: 4,
-            rch_available_slots: Some(0),     // Available but saturated
-            memory_pressure: 0.666,          // Test fractional display
+            rch_available_slots: Some(0), // Available but saturated
+            memory_pressure: 0.666,       // Test fractional display
             active_reservations: 20,
             coordination_healthy: true,
         };
@@ -189,19 +204,25 @@ mod tests {
         // Check RCH status for saturated case
         assert!(output.resources.rch_status.available);
         assert_eq!(output.resources.rch_status.available_slots, Some(0));
-        assert!(output.resources.rch_status.status_desc.contains("saturated"));
+        assert!(
+            output
+                .resources
+                .rch_status
+                .status_desc
+                .contains("saturated")
+        );
     }
 
     #[test]
     fn test_diagnostic_messages() {
         let inputs = WorkspacePressureInputs {
-            free_disk_bytes: 200_000_000,    // Low disk
+            free_disk_bytes: 200_000_000,     // Low disk
             target_dir_bytes: 12_000_000_000, // High target dir
-            active_build_count: 8,           // High build count
-            rch_available_slots: None,       // No RCH
-            memory_pressure: 0.9,            // High memory
-            active_reservations: 60,         // High reservations
-            coordination_healthy: false,     // Coordination issues
+            active_build_count: 8,            // High build count
+            rch_available_slots: None,        // No RCH
+            memory_pressure: 0.9,             // High memory
+            active_reservations: 60,          // High reservations
+            coordination_healthy: false,      // Coordination issues
         };
 
         let doctor = WorkspacePressureDoctor::new();
@@ -212,9 +233,11 @@ mod tests {
 
         // Check that diagnostics mention the work classes
         let diagnostic_text = output.diagnostics.join(" ");
-        assert!(diagnostic_text.contains("SourceOnly") ||
-                diagnostic_text.contains("Validation") ||
-                diagnostic_text.contains("Cleanup"));
+        assert!(
+            diagnostic_text.contains("SourceOnly")
+                || diagnostic_text.contains("Validation")
+                || diagnostic_text.contains("Cleanup")
+        );
     }
 
     #[test]
@@ -243,7 +266,10 @@ mod tests {
         let doctor = WorkspacePressureDoctor::new();
         let output = doctor.generate_report(&inputs);
 
-        assert_eq!(output.schema_version, "franken-node/doctor/workspace-pressure/v1");
+        assert_eq!(
+            output.schema_version,
+            "franken-node/doctor/workspace-pressure/v1"
+        );
         assert!(!output.timestamp.to_rfc3339().is_empty());
     }
 
@@ -261,7 +287,8 @@ mod tests {
         assert!(json_path.exists());
 
         let json_content = std::fs::read_to_string(&json_path).expect("Should read JSON file");
-        let parsed: serde_json::Value = serde_json::from_str(&json_content).expect("Should parse JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_content).expect("Should parse JSON");
         assert_eq!(parsed["status"], "critical");
 
         // Test human-readable file generation

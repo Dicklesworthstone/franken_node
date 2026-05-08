@@ -218,7 +218,7 @@ impl RecoveryDecision {
             &action,
             reason_code,
             &operator_message,
-            retry_after_ms,
+            &retry_after_ms,
             &worker_preference,
         )?;
 
@@ -355,7 +355,7 @@ impl ValidationRecoveryPlanner {
         input.attempt_count >= self.config.max_retry_attempts
             || input.worker_diversity_count >= self.config.max_worker_diversity
             || input.timeout_budget_remaining_ms == 0
-            || input.queue_age_ms > self.config.max_queue_age_ms
+            || input.queue_age_ms >= self.config.max_queue_age_ms
     }
 
     fn create_fail_closed_decision(
@@ -925,6 +925,18 @@ mod tests {
         let mut input = default_input();
         input.rch_outcome.outcome = RchOutcomeClass::WorkerTimeout;
         input.queue_age_ms = DEFAULT_MAX_QUEUE_AGE_MS + 1; // Exceeds max age
+
+        let decision = planner.plan_recovery(&input).unwrap();
+        assert_eq!(decision.action, RecoveryAction::FailClosed);
+        assert!(decision.fail_closed);
+    }
+
+    #[test]
+    fn queue_age_at_expiry_boundary_fails_closed() {
+        let planner = ValidationRecoveryPlanner::new(RecoveryPlannerConfig::default());
+        let mut input = default_input();
+        input.rch_outcome.outcome = RchOutcomeClass::WorkerTimeout;
+        input.queue_age_ms = DEFAULT_MAX_QUEUE_AGE_MS;
 
         let decision = planner.plan_recovery(&input).unwrap();
         assert_eq!(decision.action, RecoveryAction::FailClosed);

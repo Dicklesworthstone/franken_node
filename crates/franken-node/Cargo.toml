@@ -152,6 +152,10 @@ name = "validation_proof_coalescer"
 path = "tests/validation_proof_coalescer.rs"
 
 [[test]]
+name = "validation_proof_debt_ledger"
+path = "tests/validation_proof_debt_ledger.rs"
+
+[[test]]
 name = "validation_readiness"
 path = "tests/validation_readiness.rs"
 

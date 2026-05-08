@@ -49,6 +49,18 @@ fn direct_test_file_maps_to_exact_rch_test_command() {
         .expect("Rust validation plan should check proof cache first");
     assert_eq!(cache_lookup.kind, PlannedCommandKind::ProofCacheLookup);
     assert!(cache_lookup.shell.contains("validation-proof-cache lookup"));
+    let coalescer_lookup = plan
+        .command("cache-proof-coalescer-lookup")
+        .expect("Rust validation plan should check proof coalescer before RCH");
+    assert_eq!(
+        coalescer_lookup.kind,
+        PlannedCommandKind::ProofCoalescerLookup
+    );
+    assert!(
+        coalescer_lookup
+            .shell
+            .contains("validation-proof-coalescer lookup")
+    );
 
     let command = plan
         .command("cargo-test-rch_adapter_classification")
@@ -68,7 +80,14 @@ fn direct_test_file_maps_to_exact_rch_test_command() {
         .iter()
         .position(|command| command.command_id == "cargo-test-rch_adapter_classification")
         .expect("cargo command index");
+    let coalescer_index = plan
+        .commands
+        .iter()
+        .position(|command| command.command_id == "cache-proof-coalescer-lookup")
+        .expect("coalescer lookup command index");
     assert!(cache_index < cargo_index);
+    assert!(cache_index < coalescer_index);
+    assert!(coalescer_index < cargo_index);
     assert!(!plan.source_only_allowed);
 }
 

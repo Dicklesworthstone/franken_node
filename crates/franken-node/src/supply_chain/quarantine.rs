@@ -1324,7 +1324,9 @@ impl QuarantineRegistry {
     }
 
     fn order_id_seen(&self, order_id: &str) -> bool {
-        self.records.contains_key(order_id)
+        self.records
+            .keys()
+            .any(|key| constant_time::ct_eq(key, order_id))
             || self
                 .audit_trail
                 .iter()

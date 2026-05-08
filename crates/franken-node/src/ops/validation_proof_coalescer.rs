@@ -12,11 +12,16 @@ use crate::ops::validation_proof_cache::{
 };
 use crate::security::constant_time;
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File, OpenOptions};
+use std::cmp::Ordering;
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::thread;
+use std::time::Duration;
 
 pub const WORK_KEY_SCHEMA_VERSION: &str = "franken-node/validation-proof-coalescer/work-key/v1";
 pub const LEASE_SCHEMA_VERSION: &str = "franken-node/validation-proof-coalescer/lease/v1";
@@ -73,6 +78,170 @@ pub mod reason_codes {
     pub const REPAIR_CORRUPTED: &str = "VPCO_REPAIR_CORRUPTED";
     pub const WAIT_FRESH_PRODUCER: &str = "VPCO_WAIT_FRESH_PRODUCER";
     pub const INSUFFICIENT_STALE_EVIDENCE: &str = "VPCO_INSUFFICIENT_STALE_EVIDENCE";
+}
+
+pub mod swarm_scheduler_error_codes {
+    pub const ERR_VSS_INVALID_SCHEMA_VERSION: &str = "ERR_VSS_INVALID_SCHEMA_VERSION";
+    pub const ERR_VSS_MALFORMED_INPUT: &str = "ERR_VSS_MALFORMED_INPUT";
+    pub const ERR_VSS_BAD_WORK_KEY: &str = "ERR_VSS_BAD_WORK_KEY";
+    pub const ERR_VSS_COMMAND_DIGEST_MISMATCH: &str = "ERR_VSS_COMMAND_DIGEST_MISMATCH";
+    pub const ERR_VSS_MALFORMED_POLICY: &str = "ERR_VSS_MALFORMED_POLICY";
+    pub const ERR_VSS_PRODUCT_RETRIED_AS_INFRA: &str = "ERR_VSS_PRODUCT_RETRIED_AS_INFRA";
+    pub const ERR_VSS_INVALID_ARTIFACT_ACCEPTED: &str = "ERR_VSS_INVALID_ARTIFACT_ACCEPTED";
+}
+
+pub mod swarm_scheduler_reason_codes {
+    pub const RUN_READY: &str = "VSS_RUN_READY";
+    pub const JOIN_IDENTICAL: &str = "VSS_JOIN_IDENTICAL";
+    pub const WAIT_CAPACITY: &str = "VSS_WAIT_CAPACITY";
+    pub const STEAL_STALE: &str = "VSS_STEAL_STALE";
+    pub const REJECT_LOW_PRIORITY: &str = "VSS_REJECT_LOW_PRIORITY";
+    pub const SOURCE_ONLY_BLOCKER: &str = "VSS_SOURCE_ONLY_BLOCKER";
+    pub const FAIL_PRODUCT: &str = "VSS_FAIL_PRODUCT";
+    pub const FAIL_INVALID_ARTIFACT: &str = "VSS_FAIL_INVALID_ARTIFACT";
+}
+
+pub mod swarm_scheduler_event_codes {
+    pub const RUN_NOW: &str = "VSS-001";
+    pub const JOIN_EXISTING: &str = "VSS-002";
+    pub const WAIT_CAPACITY: &str = "VSS-003";
+    pub const STEAL_STALE: &str = "VSS-004";
+    pub const REJECT_LOW_PRIORITY: &str = "VSS-005";
+    pub const SOURCE_ONLY_BLOCKER: &str = "VSS-006";
+    pub const FAIL_PRODUCT: &str = "VSS-007";
+    pub const FAIL_INVALID_ARTIFACT: &str = "VSS-008";
+}
+
+/// Process-local validation proof coalescer lease synchronization lock.
+///
+/// Prevents TOCTOU race conditions in steal_stale_lease by coordinating
+/// file-based lease reads and writes across concurrent agents. Uses advisory
+/// file locking (cross-process) plus in-process mutex (same-process coordination).
+fn validation_proof_coalescer_persist_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn lock_validation_proof_coalescer_persist(
+    lease_path: &Path,
+) -> Result<MutexGuard<'static, ()>, ValidationProofCoalescerError> {
+    validation_proof_coalescer_persist_lock()
+        .lock()
+        .map_err(|_| {
+            ValidationProofCoalescerError::contract(
+                error_codes::ERR_VPCO_MALFORMED_LEASE,
+                "validation proof coalescer persist lock poisoned",
+            )
+        })
+}
+
+fn validation_proof_coalescer_lock_path(lease_path: &Path) -> PathBuf {
+    let parent = lease_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = lease_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("validation-proof-coalescer-lease");
+    parent.join(format!("{file_name}.lock"))
+}
+
+fn lock_validation_proof_coalescer_file(
+    file: &File,
+    lock_path: &Path,
+    lease_path: &Path,
+) -> Result<(), ValidationProofCoalescerError> {
+    match file.try_lock_exclusive() {
+        Ok(()) => return Ok(()),
+        Err(TryLockError::WouldBlock) => {}
+        Err(TryLockError::Error(err)) => {
+            return Err(ValidationProofCoalescerError::contract(
+                error_codes::ERR_VPCO_MALFORMED_LEASE,
+                &format!("failed acquiring flock for {}: {err}", lock_path.display()),
+            ));
+        }
+    }
+
+    // Retry with backoff for contested locks
+    let retry_delays = [50, 100, 200, 300, 500]; // milliseconds
+    for delay_millis in retry_delays {
+        thread::sleep(Duration::from_millis(delay_millis));
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(err)) => {
+                return Err(ValidationProofCoalescerError::contract(
+                    error_codes::ERR_VPCO_MALFORMED_LEASE,
+                    &format!("failed acquiring flock for {}: {err}", lock_path.display()),
+                ));
+            }
+        }
+    }
+
+    Err(ValidationProofCoalescerError::contract(
+        error_codes::ERR_VPCO_MALFORMED_LEASE,
+        &format!(
+            "validation proof coalescer file lock timeout for {}",
+            lease_path.display()
+        ),
+    ))
+}
+
+fn unlock_validation_proof_coalescer_file(
+    file: &File,
+    lock_path: &Path,
+    lease_path: &Path,
+) -> Result<(), ValidationProofCoalescerError> {
+    file.unlock().map_err(|err| {
+        ValidationProofCoalescerError::contract(
+            error_codes::ERR_VPCO_MALFORMED_LEASE,
+            &format!("failed releasing flock for {}: {err}", lock_path.display()),
+        )
+    })
+}
+
+fn with_validation_proof_coalescer_persist_lock<T>(
+    lease_path: &Path,
+    work_steal_operation: impl FnOnce() -> Result<T, ValidationProofCoalescerError>,
+) -> Result<T, ValidationProofCoalescerError> {
+    // Canonical lock order: file flock first, process mutex second.
+    let parent = lease_path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|err| {
+        ValidationProofCoalescerError::contract(
+            error_codes::ERR_VPCO_MALFORMED_LEASE,
+            &format!(
+                "failed creating lease parent directory {}: {err}",
+                parent.display()
+            ),
+        )
+    })?;
+
+    let lock_path = validation_proof_coalescer_lock_path(lease_path);
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|err| {
+            ValidationProofCoalescerError::contract(
+                error_codes::ERR_VPCO_MALFORMED_LEASE,
+                &format!("failed opening flock file {}: {err}", lock_path.display()),
+            )
+        })?;
+
+    // Step 1: Acquire file flock FIRST (cross-process synchronization)
+    lock_validation_proof_coalescer_file(&lock_file, &lock_path, lease_path)?;
+
+    // Step 2: Acquire process Mutex SECOND (in-process synchronization)
+    let _process_guard = lock_validation_proof_coalescer_persist(lease_path)?;
+
+    let work_result = work_steal_operation();
+    let unlock_result = unlock_validation_proof_coalescer_file(&lock_file, &lock_path, lease_path);
+
+    match (work_result, unlock_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(err), _) => Err(err),
+        (Ok(_), Err(err)) => Err(err),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -333,6 +502,711 @@ pub struct ValidationProofAdmissionDecision {
     pub reason_code: String,
     pub required_action: ValidationProofCoalescerRequiredAction,
     pub diagnostics: ValidationProofAdmissionDiagnostics,
+}
+
+pub const SWARM_SCHEDULER_INPUT_SCHEMA_VERSION: &str =
+    "franken-node/validation-swarm-scheduler/input/v1";
+pub const SWARM_SCHEDULER_POLICY_SCHEMA_VERSION: &str =
+    "franken-node/validation-swarm-scheduler/policy/v1";
+pub const SWARM_SCHEDULER_DECISION_SCHEMA_VERSION: &str =
+    "franken-node/validation-swarm-scheduler/decision/v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmSchedulerDigestRef {
+    pub algorithm: String,
+    pub hex: String,
+    pub canonical_material: String,
+}
+
+impl ValidationSwarmSchedulerDigestRef {
+    #[must_use]
+    pub fn sha256_material(material: impl Into<String>) -> Self {
+        let canonical_material = material.into();
+        Self {
+            algorithm: "sha256".to_string(),
+            hex: hex::encode(Sha256::digest(canonical_material.as_bytes())),
+            canonical_material,
+        }
+    }
+
+    #[must_use]
+    pub fn verifies(&self) -> bool {
+        if !string_eq(&self.algorithm, "sha256") || !is_sha256_hex(&self.hex) {
+            return false;
+        }
+        let expected = hex::encode(Sha256::digest(self.canonical_material.as_bytes()));
+        constant_time::ct_eq(&expected, &self.hex)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ValidationSwarmSchedulerPriority {
+    #[serde(rename = "P0")]
+    P0,
+    #[serde(rename = "P1")]
+    P1,
+    #[serde(rename = "P2")]
+    P2,
+    #[serde(rename = "P3")]
+    P3,
+    #[serde(rename = "P4")]
+    P4,
+}
+
+impl ValidationSwarmSchedulerPriority {
+    #[must_use]
+    pub const fn is_low_priority(self) -> bool {
+        matches!(self, Self::P3 | Self::P4)
+    }
+
+    #[must_use]
+    pub const fn sort_rank(self) -> u8 {
+        match self {
+            Self::P0 => 0,
+            Self::P1 => 1,
+            Self::P2 => 2,
+            Self::P3 => 3,
+            Self::P4 => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationSwarmSchedulerTargetDirClass {
+    OffRepo,
+    RepoLocalGuarded,
+    RepoLocalWritable,
+    Unwritable,
+    Missing,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationSwarmSchedulerCoalescerState {
+    None,
+    Running,
+    Joined,
+    Completed,
+    Stale,
+    Fenced,
+    Rejected,
+    FailedClosed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationSwarmSchedulerFlightRecorderState {
+    None,
+    RemoteSuccess,
+    WorkerTimeout,
+    MissingToolchain,
+    DiskPressure,
+    ContentionDeferred,
+    LocalFallbackRefused,
+    SourceOnlyBlocker,
+    ProductFailure,
+    InvalidArtifact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationSwarmSchedulerProofDebtClass {
+    None,
+    WorkerInfra,
+    Capacity,
+    StaleProducer,
+    SourceOnly,
+    ProductFailure,
+    InvalidArtifact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationSwarmSchedulerDecisionKind {
+    RunNow,
+    JoinExisting,
+    WaitForCapacity,
+    StealStaleWork,
+    RejectLowPriority,
+    RecordSourceOnlyBlocker,
+    FailClosedProduct,
+    FailClosedInvalidArtifact,
+}
+
+impl ValidationSwarmSchedulerDecisionKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RunNow => "run_now",
+            Self::JoinExisting => "join_existing",
+            Self::WaitForCapacity => "wait_for_capacity",
+            Self::StealStaleWork => "steal_stale_work",
+            Self::RejectLowPriority => "reject_low_priority",
+            Self::RecordSourceOnlyBlocker => "record_source_only_blocker",
+            Self::FailClosedProduct => "fail_closed_product",
+            Self::FailClosedInvalidArtifact => "fail_closed_invalid_artifact",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationSwarmSchedulerRequiredAction {
+    StartRchValidation,
+    JoinExistingProof,
+    WaitForCapacity,
+    StealWithNewFence,
+    DeferLowPriority,
+    RecordSourceOnlyBlocker,
+    SurfaceProductFailure,
+    RejectArtifact,
+}
+
+impl ValidationSwarmSchedulerRequiredAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StartRchValidation => "start_rch_validation",
+            Self::JoinExistingProof => "join_existing_proof",
+            Self::WaitForCapacity => "wait_for_capacity",
+            Self::StealWithNewFence => "steal_with_new_fence",
+            Self::DeferLowPriority => "defer_low_priority",
+            Self::RecordSourceOnlyBlocker => "record_source_only_blocker",
+            Self::SurfaceProductFailure => "surface_product_failure",
+            Self::RejectArtifact => "reject_artifact",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationSwarmSchedulerFairnessBucket {
+    Emergency,
+    High,
+    Normal,
+    Low,
+    Aging,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationSwarmSchedulerStarvationRisk {
+    None,
+    Watch,
+    Elevated,
+    Breached,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmSchedulerCapacitySnapshot {
+    pub snapshot_id: String,
+    pub captured_at: DateTime<Utc>,
+    pub workers_total: u16,
+    pub workers_healthy: u16,
+    pub slots_total: u16,
+    pub slots_available: u16,
+    pub queue_depth: u16,
+    pub stale_active_builds: u16,
+    pub disk_pressure_workers: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmSchedulerPolicy {
+    pub schema_version: String,
+    pub policy_id: String,
+    pub max_running_proofs: u16,
+    pub max_waiters_per_work_key: u16,
+    pub queue_high_watermark: u16,
+    pub starvation_after_ms: u64,
+    pub aging_step_ms: u64,
+    pub min_available_worker_slots: u16,
+    pub allow_work_stealing: bool,
+    pub fairness_buckets: Vec<ValidationSwarmSchedulerFairnessBucket>,
+}
+
+impl ValidationSwarmSchedulerPolicy {
+    #[must_use]
+    pub fn default_policy(policy_id: impl Into<String>) -> Self {
+        Self {
+            schema_version: SWARM_SCHEDULER_POLICY_SCHEMA_VERSION.to_string(),
+            policy_id: policy_id.into(),
+            max_running_proofs: 8,
+            max_waiters_per_work_key: 32,
+            queue_high_watermark: 64,
+            starvation_after_ms: 900_000,
+            aging_step_ms: 300_000,
+            min_available_worker_slots: 2,
+            allow_work_stealing: true,
+            fairness_buckets: vec![
+                ValidationSwarmSchedulerFairnessBucket::Emergency,
+                ValidationSwarmSchedulerFairnessBucket::High,
+                ValidationSwarmSchedulerFairnessBucket::Normal,
+                ValidationSwarmSchedulerFairnessBucket::Low,
+                ValidationSwarmSchedulerFairnessBucket::Aging,
+                ValidationSwarmSchedulerFairnessBucket::Blocked,
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmSchedulerInput {
+    pub schema_version: String,
+    pub input_id: String,
+    pub bead_id: String,
+    pub agent_name: String,
+    pub proof_work_key: ValidationSwarmSchedulerDigestRef,
+    pub command_digest: ValidationSwarmSchedulerDigestRef,
+    pub dirty_state_policy: DirtyStatePolicy,
+    pub target_dir_class: ValidationSwarmSchedulerTargetDirClass,
+    pub capacity_snapshot: ValidationSwarmSchedulerCapacitySnapshot,
+    pub coalescer_state: ValidationSwarmSchedulerCoalescerState,
+    pub flight_recorder_state: ValidationSwarmSchedulerFlightRecorderState,
+    pub proof_debt_class: ValidationSwarmSchedulerProofDebtClass,
+    pub queue_age_ms: u64,
+    pub priority: ValidationSwarmSchedulerPriority,
+    pub timeout_budget_ms: u64,
+    pub source_only_allowed: bool,
+    pub product_failure: bool,
+    pub worker_infra_retryable: bool,
+    pub artifact_valid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmSchedulerDiagnostics {
+    pub proof_work_key_hex: String,
+    pub command_digest_hex: String,
+    pub queue_age_ms: u64,
+    pub worker_slots: u16,
+    pub queue_depth: u16,
+    pub coalescer_state: ValidationSwarmSchedulerCoalescerState,
+    pub flight_recorder_state: ValidationSwarmSchedulerFlightRecorderState,
+    pub proof_debt_class: ValidationSwarmSchedulerProofDebtClass,
+    pub retry_after_ms: Option<u64>,
+    pub fencing_token_digest: Option<String>,
+    pub recorder_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmSchedulerDecision {
+    pub schema_version: String,
+    pub decision_id: String,
+    pub input_ref: String,
+    pub bead_id: String,
+    pub agent_name: String,
+    pub trace_id: String,
+    pub decided_at: DateTime<Utc>,
+    pub freshness_expires_at: DateTime<Utc>,
+    pub decision: ValidationSwarmSchedulerDecisionKind,
+    pub reason_code: String,
+    pub event_code: String,
+    pub required_action: ValidationSwarmSchedulerRequiredAction,
+    pub fairness_bucket: ValidationSwarmSchedulerFairnessBucket,
+    pub starvation_risk: ValidationSwarmSchedulerStarvationRisk,
+    pub retryable: bool,
+    pub fail_closed: bool,
+    pub green_proof_eligible: bool,
+    pub operator_message: String,
+    pub diagnostics: ValidationSwarmSchedulerDiagnostics,
+}
+
+pub fn decide_validation_swarm_schedule(
+    policy: &ValidationSwarmSchedulerPolicy,
+    input: &ValidationSwarmSchedulerInput,
+    decided_at: DateTime<Utc>,
+) -> Result<ValidationSwarmSchedulerDecision, ValidationProofCoalescerError> {
+    validate_swarm_scheduler_policy(policy)?;
+    validate_swarm_scheduler_input(input)?;
+
+    let starvation_risk = swarm_scheduler_starvation_risk(policy, input.queue_age_ms);
+    let kind = if !input.artifact_valid {
+        ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact
+    } else if input.product_failure
+        || matches!(
+            input.flight_recorder_state,
+            ValidationSwarmSchedulerFlightRecorderState::ProductFailure
+        )
+        || matches!(
+            input.proof_debt_class,
+            ValidationSwarmSchedulerProofDebtClass::ProductFailure
+        )
+    {
+        ValidationSwarmSchedulerDecisionKind::FailClosedProduct
+    } else if input.source_only_allowed
+        || matches!(
+            input.flight_recorder_state,
+            ValidationSwarmSchedulerFlightRecorderState::SourceOnlyBlocker
+        )
+        || matches!(
+            input.proof_debt_class,
+            ValidationSwarmSchedulerProofDebtClass::SourceOnly
+        )
+    {
+        ValidationSwarmSchedulerDecisionKind::RecordSourceOnlyBlocker
+    } else if matches!(
+        input.coalescer_state,
+        ValidationSwarmSchedulerCoalescerState::Running
+            | ValidationSwarmSchedulerCoalescerState::Joined
+            | ValidationSwarmSchedulerCoalescerState::Completed
+    ) {
+        ValidationSwarmSchedulerDecisionKind::JoinExisting
+    } else if policy.allow_work_stealing
+        && matches!(
+            input.coalescer_state,
+            ValidationSwarmSchedulerCoalescerState::Stale
+                | ValidationSwarmSchedulerCoalescerState::Fenced
+        )
+    {
+        ValidationSwarmSchedulerDecisionKind::StealStaleWork
+    } else if input.priority.is_low_priority()
+        && input.capacity_snapshot.queue_depth >= policy.queue_high_watermark
+        && !matches!(
+            starvation_risk,
+            ValidationSwarmSchedulerStarvationRisk::Elevated
+                | ValidationSwarmSchedulerStarvationRisk::Breached
+        )
+    {
+        ValidationSwarmSchedulerDecisionKind::RejectLowPriority
+    } else if input.capacity_snapshot.slots_available < policy.min_available_worker_slots
+        || input.capacity_snapshot.queue_depth >= policy.queue_high_watermark
+        || input.capacity_snapshot.stale_active_builds >= policy.max_running_proofs
+        || input.capacity_snapshot.disk_pressure_workers > 0
+        || input.worker_infra_retryable
+    {
+        ValidationSwarmSchedulerDecisionKind::WaitForCapacity
+    } else {
+        ValidationSwarmSchedulerDecisionKind::RunNow
+    };
+
+    Ok(build_swarm_scheduler_decision(
+        policy, input, kind, decided_at,
+    ))
+}
+
+pub fn order_validation_swarm_scheduler_inputs<'a>(
+    policy: &ValidationSwarmSchedulerPolicy,
+    inputs: &'a [ValidationSwarmSchedulerInput],
+) -> Result<Vec<&'a ValidationSwarmSchedulerInput>, ValidationProofCoalescerError> {
+    validate_swarm_scheduler_policy(policy)?;
+    for input in inputs {
+        validate_swarm_scheduler_input(input)?;
+    }
+
+    let mut ordered = inputs.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| swarm_scheduler_input_ordering(policy, left, right));
+    Ok(ordered)
+}
+
+fn swarm_scheduler_input_ordering(
+    policy: &ValidationSwarmSchedulerPolicy,
+    left: &ValidationSwarmSchedulerInput,
+    right: &ValidationSwarmSchedulerInput,
+) -> Ordering {
+    swarm_scheduler_effective_priority_rank(policy, left)
+        .cmp(&swarm_scheduler_effective_priority_rank(policy, right))
+        .then_with(|| left.timeout_budget_ms.cmp(&right.timeout_budget_ms))
+        .then_with(|| right.queue_age_ms.cmp(&left.queue_age_ms))
+        .then_with(|| left.proof_work_key.hex.cmp(&right.proof_work_key.hex))
+        .then_with(|| left.bead_id.cmp(&right.bead_id))
+        .then_with(|| left.agent_name.cmp(&right.agent_name))
+        .then_with(|| left.input_id.cmp(&right.input_id))
+}
+
+fn swarm_scheduler_effective_priority_rank(
+    policy: &ValidationSwarmSchedulerPolicy,
+    input: &ValidationSwarmSchedulerInput,
+) -> u8 {
+    let base_rank = input.priority.sort_rank();
+    if input.product_failure
+        || !input.artifact_valid
+        || matches!(
+            input.proof_debt_class,
+            ValidationSwarmSchedulerProofDebtClass::SourceOnly
+                | ValidationSwarmSchedulerProofDebtClass::ProductFailure
+                | ValidationSwarmSchedulerProofDebtClass::InvalidArtifact
+        )
+    {
+        return base_rank;
+    }
+
+    let aging_steps = input.queue_age_ms / policy.aging_step_ms;
+    let aging_boost = u8::try_from(aging_steps).unwrap_or(u8::MAX).min(2);
+    base_rank.saturating_sub(aging_boost)
+}
+
+fn validate_swarm_scheduler_policy(
+    policy: &ValidationSwarmSchedulerPolicy,
+) -> Result<(), ValidationProofCoalescerError> {
+    if !string_eq(
+        &policy.schema_version,
+        SWARM_SCHEDULER_POLICY_SCHEMA_VERSION,
+    ) || policy.policy_id.trim().is_empty()
+        || policy.max_running_proofs == 0
+        || policy.max_waiters_per_work_key == 0
+        || policy.queue_high_watermark == 0
+        || policy.starvation_after_ms == 0
+        || policy.aging_step_ms == 0
+        || policy.fairness_buckets.is_empty()
+    {
+        return Err(ValidationProofCoalescerError::contract(
+            swarm_scheduler_error_codes::ERR_VSS_MALFORMED_POLICY,
+            "validation swarm scheduler policy is malformed",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_swarm_scheduler_input(
+    input: &ValidationSwarmSchedulerInput,
+) -> Result<(), ValidationProofCoalescerError> {
+    if !string_eq(&input.schema_version, SWARM_SCHEDULER_INPUT_SCHEMA_VERSION) {
+        return Err(ValidationProofCoalescerError::contract(
+            swarm_scheduler_error_codes::ERR_VSS_INVALID_SCHEMA_VERSION,
+            "validation swarm scheduler input schema version is invalid",
+        ));
+    }
+    if input.input_id.trim().is_empty()
+        || input.bead_id.trim().is_empty()
+        || input.agent_name.trim().is_empty()
+        || input.capacity_snapshot.snapshot_id.trim().is_empty()
+        || input.capacity_snapshot.workers_total == 0
+        || input.capacity_snapshot.workers_healthy > input.capacity_snapshot.workers_total
+        || input.capacity_snapshot.slots_total == 0
+        || input.capacity_snapshot.slots_available > input.capacity_snapshot.slots_total
+        || input.timeout_budget_ms == 0
+    {
+        return Err(ValidationProofCoalescerError::contract(
+            swarm_scheduler_error_codes::ERR_VSS_MALFORMED_INPUT,
+            "validation swarm scheduler input identity fields are malformed",
+        ));
+    }
+    if !input.proof_work_key.verifies() {
+        return Err(ValidationProofCoalescerError::contract(
+            swarm_scheduler_error_codes::ERR_VSS_BAD_WORK_KEY,
+            "validation swarm scheduler proof work key digest does not verify",
+        ));
+    }
+    if !input.command_digest.verifies() {
+        return Err(ValidationProofCoalescerError::contract(
+            swarm_scheduler_error_codes::ERR_VSS_COMMAND_DIGEST_MISMATCH,
+            "validation swarm scheduler command digest does not verify",
+        ));
+    }
+    if input.product_failure && input.worker_infra_retryable {
+        return Err(ValidationProofCoalescerError::contract(
+            swarm_scheduler_error_codes::ERR_VSS_PRODUCT_RETRIED_AS_INFRA,
+            "product failure cannot be routed as retryable worker infrastructure",
+        ));
+    }
+    if !input.artifact_valid
+        && !matches!(
+            input.proof_debt_class,
+            ValidationSwarmSchedulerProofDebtClass::InvalidArtifact
+        )
+    {
+        return Err(ValidationProofCoalescerError::contract(
+            swarm_scheduler_error_codes::ERR_VSS_INVALID_ARTIFACT_ACCEPTED,
+            "invalid scheduler artifacts must be classified as invalid_artifact debt",
+        ));
+    }
+    Ok(())
+}
+
+fn build_swarm_scheduler_decision(
+    policy: &ValidationSwarmSchedulerPolicy,
+    input: &ValidationSwarmSchedulerInput,
+    kind: ValidationSwarmSchedulerDecisionKind,
+    decided_at: DateTime<Utc>,
+) -> ValidationSwarmSchedulerDecision {
+    let (reason_code, event_code, required_action, retryable, fail_closed, message) =
+        swarm_scheduler_rule(kind);
+    let freshness_expires_at = decided_at + swarm_scheduler_freshness_duration(policy);
+    let starvation_risk = swarm_scheduler_starvation_risk(policy, input.queue_age_ms);
+    let fairness_bucket = swarm_scheduler_fairness_bucket(kind, input.priority, starvation_risk);
+    let retry_after_ms = matches!(
+        kind,
+        ValidationSwarmSchedulerDecisionKind::WaitForCapacity
+            | ValidationSwarmSchedulerDecisionKind::RejectLowPriority
+    )
+    .then_some(policy.aging_step_ms.min(60_000));
+    let fencing_token_digest = matches!(kind, ValidationSwarmSchedulerDecisionKind::StealStaleWork)
+        .then(|| {
+            hex::encode(Sha256::digest(
+                format!(
+                    "{}:{}:{}",
+                    input.proof_work_key.hex, input.agent_name, input.queue_age_ms
+                )
+                .as_bytes(),
+            ))
+        });
+
+    ValidationSwarmSchedulerDecision {
+        schema_version: SWARM_SCHEDULER_DECISION_SCHEMA_VERSION.to_string(),
+        decision_id: format!("vss-decision-{}-{}", input.input_id, kind.as_str()),
+        input_ref: input.input_id.clone(),
+        bead_id: input.bead_id.clone(),
+        agent_name: input.agent_name.clone(),
+        trace_id: format!("trace-{}-{}", input.input_id, kind.as_str()),
+        decided_at,
+        freshness_expires_at,
+        decision: kind,
+        reason_code: reason_code.to_string(),
+        event_code: event_code.to_string(),
+        required_action,
+        fairness_bucket,
+        starvation_risk,
+        retryable,
+        fail_closed,
+        green_proof_eligible: false,
+        operator_message: message.to_string(),
+        diagnostics: ValidationSwarmSchedulerDiagnostics {
+            proof_work_key_hex: input.proof_work_key.hex.clone(),
+            command_digest_hex: input.command_digest.hex.clone(),
+            queue_age_ms: input.queue_age_ms,
+            worker_slots: input.capacity_snapshot.slots_available,
+            queue_depth: input.capacity_snapshot.queue_depth,
+            coalescer_state: input.coalescer_state,
+            flight_recorder_state: input.flight_recorder_state,
+            proof_debt_class: input.proof_debt_class,
+            retry_after_ms,
+            fencing_token_digest,
+            recorder_path: Some(format!(
+                "artifacts/validation_broker/swarm_scheduler/{}.json",
+                kind.as_str()
+            )),
+        },
+    }
+}
+
+fn swarm_scheduler_rule(
+    kind: ValidationSwarmSchedulerDecisionKind,
+) -> (
+    &'static str,
+    &'static str,
+    ValidationSwarmSchedulerRequiredAction,
+    bool,
+    bool,
+    &'static str,
+) {
+    match kind {
+        ValidationSwarmSchedulerDecisionKind::RunNow => (
+            swarm_scheduler_reason_codes::RUN_READY,
+            swarm_scheduler_event_codes::RUN_NOW,
+            ValidationSwarmSchedulerRequiredAction::StartRchValidation,
+            false,
+            false,
+            "Run one producer validation through RCH.",
+        ),
+        ValidationSwarmSchedulerDecisionKind::JoinExisting => (
+            swarm_scheduler_reason_codes::JOIN_IDENTICAL,
+            swarm_scheduler_event_codes::JOIN_EXISTING,
+            ValidationSwarmSchedulerRequiredAction::JoinExistingProof,
+            false,
+            false,
+            "Join the existing identical proof work key.",
+        ),
+        ValidationSwarmSchedulerDecisionKind::WaitForCapacity => (
+            swarm_scheduler_reason_codes::WAIT_CAPACITY,
+            swarm_scheduler_event_codes::WAIT_CAPACITY,
+            ValidationSwarmSchedulerRequiredAction::WaitForCapacity,
+            true,
+            false,
+            "Wait for worker capacity before starting another producer.",
+        ),
+        ValidationSwarmSchedulerDecisionKind::StealStaleWork => (
+            swarm_scheduler_reason_codes::STEAL_STALE,
+            swarm_scheduler_event_codes::STEAL_STALE,
+            ValidationSwarmSchedulerRequiredAction::StealWithNewFence,
+            true,
+            false,
+            "Fence the stale producer before retrying proof work.",
+        ),
+        ValidationSwarmSchedulerDecisionKind::RejectLowPriority => (
+            swarm_scheduler_reason_codes::REJECT_LOW_PRIORITY,
+            swarm_scheduler_event_codes::REJECT_LOW_PRIORITY,
+            ValidationSwarmSchedulerRequiredAction::DeferLowPriority,
+            true,
+            false,
+            "Defer low-priority proof work while higher-priority work is saturated.",
+        ),
+        ValidationSwarmSchedulerDecisionKind::RecordSourceOnlyBlocker => (
+            swarm_scheduler_reason_codes::SOURCE_ONLY_BLOCKER,
+            swarm_scheduler_event_codes::SOURCE_ONLY_BLOCKER,
+            ValidationSwarmSchedulerRequiredAction::RecordSourceOnlyBlocker,
+            false,
+            true,
+            "Record source-only blocker evidence; do not count it as green proof.",
+        ),
+        ValidationSwarmSchedulerDecisionKind::FailClosedProduct => (
+            swarm_scheduler_reason_codes::FAIL_PRODUCT,
+            swarm_scheduler_event_codes::FAIL_PRODUCT,
+            ValidationSwarmSchedulerRequiredAction::SurfaceProductFailure,
+            false,
+            true,
+            "Surface product compile/test failure instead of retrying as worker infra.",
+        ),
+        ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact => (
+            swarm_scheduler_reason_codes::FAIL_INVALID_ARTIFACT,
+            swarm_scheduler_event_codes::FAIL_INVALID_ARTIFACT,
+            ValidationSwarmSchedulerRequiredAction::RejectArtifact,
+            false,
+            true,
+            "Reject malformed recorder/coalescer/debt artifacts.",
+        ),
+    }
+}
+
+fn swarm_scheduler_freshness_duration(policy: &ValidationSwarmSchedulerPolicy) -> chrono::Duration {
+    chrono::Duration::milliseconds(i64::try_from(policy.aging_step_ms).unwrap_or(i64::MAX))
+}
+
+fn swarm_scheduler_starvation_risk(
+    policy: &ValidationSwarmSchedulerPolicy,
+    queue_age_ms: u64,
+) -> ValidationSwarmSchedulerStarvationRisk {
+    if queue_age_ms >= policy.starvation_after_ms {
+        ValidationSwarmSchedulerStarvationRisk::Breached
+    } else if queue_age_ms >= policy.aging_step_ms.saturating_mul(2) {
+        ValidationSwarmSchedulerStarvationRisk::Elevated
+    } else if queue_age_ms >= policy.aging_step_ms {
+        ValidationSwarmSchedulerStarvationRisk::Watch
+    } else {
+        ValidationSwarmSchedulerStarvationRisk::None
+    }
+}
+
+fn swarm_scheduler_fairness_bucket(
+    kind: ValidationSwarmSchedulerDecisionKind,
+    priority: ValidationSwarmSchedulerPriority,
+    starvation_risk: ValidationSwarmSchedulerStarvationRisk,
+) -> ValidationSwarmSchedulerFairnessBucket {
+    if matches!(
+        kind,
+        ValidationSwarmSchedulerDecisionKind::RecordSourceOnlyBlocker
+            | ValidationSwarmSchedulerDecisionKind::FailClosedProduct
+            | ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact
+    ) {
+        return ValidationSwarmSchedulerFairnessBucket::Blocked;
+    }
+    if matches!(
+        starvation_risk,
+        ValidationSwarmSchedulerStarvationRisk::Watch
+            | ValidationSwarmSchedulerStarvationRisk::Elevated
+            | ValidationSwarmSchedulerStarvationRisk::Breached
+    ) {
+        return ValidationSwarmSchedulerFairnessBucket::Aging;
+    }
+    match priority {
+        ValidationSwarmSchedulerPriority::P0 => ValidationSwarmSchedulerFairnessBucket::Emergency,
+        ValidationSwarmSchedulerPriority::P1 => ValidationSwarmSchedulerFairnessBucket::High,
+        ValidationSwarmSchedulerPriority::P2 => ValidationSwarmSchedulerFairnessBucket::Normal,
+        ValidationSwarmSchedulerPriority::P3 | ValidationSwarmSchedulerPriority::P4 => {
+            ValidationSwarmSchedulerFairnessBucket::Low
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -960,7 +1834,7 @@ impl ValidationProofCoalescerStore {
                 decided_at: request.fenced_at,
             }),
             lease: Some(lease),
-            lease_path: path,
+            lease_path: path.to_path_buf(),
         })
     }
 
@@ -973,6 +1847,20 @@ impl ValidationProofCoalescerStore {
         validate_work_steal_request(&request)?;
 
         let path = self.lease_path(&request.proof_work_key);
+
+        // Wrap the entire read-assess-write sequence with advisory file locking
+        // to prevent TOCTOU race conditions between concurrent steal attempts
+        with_validation_proof_coalescer_persist_lock(&path, || {
+            self.steal_stale_lease_synchronized(policy, &request, &path)
+        })
+    }
+
+    fn steal_stale_lease_synchronized(
+        &self,
+        policy: &ValidationProofWorkStealPolicy,
+        request: &StealStaleLeaseRequest,
+        path: &Path,
+    ) -> Result<ValidationProofWorkStealOutcome, ValidationProofCoalescerError> {
         let relative_path = self.relative_lease_path(&request.proof_work_key);
         let Some(mut lease) = self.read_lease(&request.proof_work_key)? else {
             return Err(ValidationProofCoalescerError::contract(
@@ -991,7 +1879,7 @@ impl ValidationProofCoalescerStore {
         if matches!(lease.state, ValidationProofLeaseState::Completed) {
             return Ok(work_steal_outcome(WorkStealOutcomeInput {
                 lease: Some(lease.clone()),
-                lease_path: path,
+                lease_path: path.to_path_buf(),
                 assessment,
                 kind: ValidationProofCoalescerDecisionKind::WaitForReceipt,
                 reason_code: reason_codes::WAIT_COMPLETION,
@@ -1014,7 +1902,7 @@ impl ValidationProofCoalescerStore {
         if !lease.state.is_active() || !assessment.evidence_matches_lease {
             return Ok(work_steal_outcome(WorkStealOutcomeInput {
                 lease: Some(lease.clone()),
-                lease_path: path,
+                lease_path: path.to_path_buf(),
                 assessment,
                 kind: ValidationProofCoalescerDecisionKind::RepairState,
                 reason_code: reason_codes::INSUFFICIENT_STALE_EVIDENCE,
@@ -1037,7 +1925,7 @@ impl ValidationProofCoalescerStore {
         if !assessment.lease_expired || !assessment.heartbeat_stale || !assessment.progress_stale {
             return Ok(work_steal_outcome(WorkStealOutcomeInput {
                 lease: Some(lease.clone()),
-                lease_path: path,
+                lease_path: path.to_path_buf(),
                 assessment,
                 kind: ValidationProofCoalescerDecisionKind::JoinExistingProof,
                 reason_code: reason_codes::WAIT_FRESH_PRODUCER,
@@ -1060,7 +1948,7 @@ impl ValidationProofCoalescerStore {
         if !assessment.timeout_budget_sufficient {
             return Ok(work_steal_outcome(WorkStealOutcomeInput {
                 lease: Some(lease.clone()),
-                lease_path: path,
+                lease_path: path.to_path_buf(),
                 assessment,
                 kind: ValidationProofCoalescerDecisionKind::RejectCapacity,
                 reason_code: reason_codes::REJECT_CAPACITY,
@@ -1113,7 +2001,7 @@ impl ValidationProofCoalescerStore {
 
         Ok(work_steal_outcome(WorkStealOutcomeInput {
             lease: Some(lease.clone()),
-            lease_path: path,
+            lease_path: path.to_path_buf(),
             assessment,
             kind: ValidationProofCoalescerDecisionKind::RetryAfterStaleLease,
             reason_code: reason_codes::RETRY_STALE,
@@ -1167,7 +2055,7 @@ impl ValidationProofCoalescerStore {
                     decided_at: request.created_at,
                 }),
                 lease: Some(lease),
-                lease_path: path,
+                lease_path: path.to_path_buf(),
             }),
             Err(ValidationProofCoalescerError::DuplicateLease { .. }) => {
                 let existing = self.read_lease(&request.proof_work_key)?;
@@ -1210,7 +2098,7 @@ impl ValidationProofCoalescerStore {
                     decided_at: request.created_at,
                 }),
                 lease: Some(lease),
-                lease_path: path,
+                lease_path: path.to_path_buf(),
             });
         }
         if !same_work_key(&lease.proof_work_key, &request.proof_work_key) {
@@ -1239,7 +2127,7 @@ impl ValidationProofCoalescerStore {
                     decided_at: request.created_at,
                 }),
                 lease: Some(lease),
-                lease_path: path,
+                lease_path: path.to_path_buf(),
             });
         }
         if !lease.state.is_active() {
@@ -1262,7 +2150,7 @@ impl ValidationProofCoalescerStore {
                     decided_at: request.created_at,
                 }),
                 lease: Some(lease),
-                lease_path: path,
+                lease_path: path.to_path_buf(),
             });
         }
 
@@ -1309,7 +2197,7 @@ impl ValidationProofCoalescerStore {
                 decided_at: request.created_at,
             }),
             lease: Some(lease),
-            lease_path: path,
+            lease_path: path.to_path_buf(),
         })
     }
 }
@@ -1407,8 +2295,7 @@ pub fn decide_validation_proof_admission(
             required_action: ValidationProofCoalescerRequiredAction::FailClosed,
             event_code: event_codes::CAPACITY_REJECTED,
             fail_closed: true,
-            message:
-                "validation admission rejected because capacity snapshot reports disk pressure",
+            message: "validation admission rejected because capacity snapshot reports disk pressure",
             effective_priority,
             input,
             available_worker_slots,
@@ -1466,8 +2353,7 @@ pub fn decide_validation_proof_admission(
                     required_action: ValidationProofCoalescerRequiredAction::FailClosed,
                     event_code: event_codes::CAPACITY_REJECTED,
                     fail_closed: true,
-                    message:
-                        "validation admission rejected because RCH capacity is below threshold",
+                    message: "validation admission rejected because RCH capacity is below threshold",
                     effective_priority,
                     input,
                     available_worker_slots,
@@ -1788,7 +2674,7 @@ fn repair_state_outcome(
 ) -> ValidationProofCoalescerOutcome {
     ValidationProofCoalescerOutcome {
         lease: None,
-        lease_path: path,
+        lease_path: path.to_path_buf(),
         decision: coalescer_decision(DecisionInput {
             kind: ValidationProofCoalescerDecisionKind::RepairState,
             reason_code: reason_codes::REPAIR_CORRUPTED,
@@ -2252,8 +3138,403 @@ mod tests {
         }
     }
 
+    fn scheduler_digest(material: &str) -> ValidationSwarmSchedulerDigestRef {
+        ValidationSwarmSchedulerDigestRef::sha256_material(material)
+    }
+
+    fn scheduler_capacity(
+        slots_available: u16,
+        queue_depth: u16,
+        stale_active_builds: u16,
+        disk_pressure_workers: u16,
+    ) -> ValidationSwarmSchedulerCapacitySnapshot {
+        ValidationSwarmSchedulerCapacitySnapshot {
+            snapshot_id: format!(
+                "vss-capacity-{slots_available}-{queue_depth}-{stale_active_builds}-{disk_pressure_workers}"
+            ),
+            captured_at: ts(3),
+            workers_total: 4,
+            workers_healthy: 3,
+            slots_total: 16,
+            slots_available,
+            queue_depth,
+            stale_active_builds,
+            disk_pressure_workers,
+        }
+    }
+
+    fn scheduler_policy() -> ValidationSwarmSchedulerPolicy {
+        ValidationSwarmSchedulerPolicy::default_policy(
+            "validation-swarm-scheduler/policy/unit-test/v1",
+        )
+    }
+
+    fn scheduler_input(seed: &str) -> ValidationSwarmSchedulerInput {
+        ValidationSwarmSchedulerInput {
+            schema_version: SWARM_SCHEDULER_INPUT_SCHEMA_VERSION.to_string(),
+            input_id: format!("vss-input-{seed}"),
+            bead_id: "bd-7d9di".to_string(),
+            agent_name: "RedGlen".to_string(),
+            proof_work_key: scheduler_digest(&format!("proof-work-key/{seed}")),
+            command_digest: scheduler_digest(&format!("cargo test swarm_scheduler/{seed}")),
+            dirty_state_policy: DirtyStatePolicy::CleanRequired,
+            target_dir_class: ValidationSwarmSchedulerTargetDirClass::OffRepo,
+            capacity_snapshot: scheduler_capacity(4, 0, 0, 0),
+            coalescer_state: ValidationSwarmSchedulerCoalescerState::None,
+            flight_recorder_state: ValidationSwarmSchedulerFlightRecorderState::None,
+            proof_debt_class: ValidationSwarmSchedulerProofDebtClass::None,
+            queue_age_ms: 0,
+            priority: ValidationSwarmSchedulerPriority::P1,
+            timeout_budget_ms: 900_000,
+            source_only_allowed: false,
+            product_failure: false,
+            worker_infra_retryable: false,
+            artifact_valid: true,
+        }
+    }
+
+    fn scheduler_decision(
+        policy: &ValidationSwarmSchedulerPolicy,
+        input: &ValidationSwarmSchedulerInput,
+    ) -> ValidationSwarmSchedulerDecision {
+        decide_validation_swarm_schedule(policy, input, ts(20)).expect("scheduler decision")
+    }
+
     fn replacement_marker() -> String {
         ["new", "lease", "marker"].join("-")
+    }
+
+    #[test]
+    fn swarm_scheduler_run_now_is_deterministic() {
+        let policy = scheduler_policy();
+        let input = scheduler_input("run-now");
+
+        let first = scheduler_decision(&policy, &input);
+        let second = scheduler_decision(&policy, &input);
+
+        assert_eq!(first, second);
+        assert_eq!(first.decision, ValidationSwarmSchedulerDecisionKind::RunNow);
+        assert_eq!(first.reason_code, swarm_scheduler_reason_codes::RUN_READY);
+        assert_eq!(first.event_code, swarm_scheduler_event_codes::RUN_NOW);
+        assert_eq!(
+            first.required_action,
+            ValidationSwarmSchedulerRequiredAction::StartRchValidation
+        );
+        assert_eq!(
+            first.fairness_bucket,
+            ValidationSwarmSchedulerFairnessBucket::High
+        );
+        assert_eq!(
+            first.starvation_risk,
+            ValidationSwarmSchedulerStarvationRisk::None
+        );
+        assert!(!first.green_proof_eligible);
+        assert!(!first.retryable);
+        assert!(!first.fail_closed);
+    }
+
+    #[test]
+    fn swarm_scheduler_joins_existing_equivalent_work() {
+        let policy = scheduler_policy();
+        let mut input = scheduler_input("join-existing");
+        input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Running;
+
+        let decision = scheduler_decision(&policy, &input);
+
+        assert_eq!(
+            decision.decision,
+            ValidationSwarmSchedulerDecisionKind::JoinExisting
+        );
+        assert_eq!(
+            decision.required_action,
+            ValidationSwarmSchedulerRequiredAction::JoinExistingProof
+        );
+        assert_eq!(
+            decision.diagnostics.coalescer_state,
+            ValidationSwarmSchedulerCoalescerState::Running
+        );
+        assert!(!decision.green_proof_eligible);
+    }
+
+    #[test]
+    fn swarm_scheduler_joins_completed_proof_cache_hit() {
+        let policy = scheduler_policy();
+        let mut input = scheduler_input("proof-cache-hit");
+        input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Completed;
+
+        let decision = scheduler_decision(&policy, &input);
+
+        assert_eq!(
+            decision.decision,
+            ValidationSwarmSchedulerDecisionKind::JoinExisting
+        );
+        assert_eq!(
+            decision.reason_code,
+            swarm_scheduler_reason_codes::JOIN_IDENTICAL
+        );
+        assert_eq!(
+            decision.required_action,
+            ValidationSwarmSchedulerRequiredAction::JoinExistingProof
+        );
+    }
+
+    #[test]
+    fn swarm_scheduler_waits_for_capacity_without_green_proof() {
+        let policy = scheduler_policy();
+        let mut input = scheduler_input("wait-capacity");
+        input.priority = ValidationSwarmSchedulerPriority::P2;
+        input.capacity_snapshot = scheduler_capacity(0, policy.queue_high_watermark + 8, 0, 0);
+        input.queue_age_ms = policy.aging_step_ms;
+
+        let decision = scheduler_decision(&policy, &input);
+
+        assert_eq!(
+            decision.decision,
+            ValidationSwarmSchedulerDecisionKind::WaitForCapacity
+        );
+        assert_eq!(
+            decision.required_action,
+            ValidationSwarmSchedulerRequiredAction::WaitForCapacity
+        );
+        assert_eq!(
+            decision.fairness_bucket,
+            ValidationSwarmSchedulerFairnessBucket::Aging
+        );
+        assert_eq!(
+            decision.starvation_risk,
+            ValidationSwarmSchedulerStarvationRisk::Watch
+        );
+        assert_eq!(decision.diagnostics.retry_after_ms, Some(60_000));
+        assert!(decision.retryable);
+        assert!(!decision.green_proof_eligible);
+    }
+
+    #[test]
+    fn swarm_scheduler_rejects_low_priority_at_high_watermark() {
+        let policy = scheduler_policy();
+        let mut input = scheduler_input("reject-low-priority");
+        input.priority = ValidationSwarmSchedulerPriority::P4;
+        input.capacity_snapshot = scheduler_capacity(4, policy.queue_high_watermark, 0, 0);
+
+        let decision = scheduler_decision(&policy, &input);
+
+        assert_eq!(
+            decision.decision,
+            ValidationSwarmSchedulerDecisionKind::RejectLowPriority
+        );
+        assert_eq!(
+            decision.required_action,
+            ValidationSwarmSchedulerRequiredAction::DeferLowPriority
+        );
+        assert_eq!(
+            decision.fairness_bucket,
+            ValidationSwarmSchedulerFairnessBucket::Low
+        );
+        assert_eq!(
+            decision.reason_code,
+            swarm_scheduler_reason_codes::REJECT_LOW_PRIORITY
+        );
+        assert_eq!(decision.diagnostics.retry_after_ms, Some(60_000));
+        assert!(!decision.green_proof_eligible);
+    }
+
+    #[test]
+    fn swarm_scheduler_ages_low_priority_to_capacity_wait() {
+        let policy = scheduler_policy();
+        let mut input = scheduler_input("aged-low-priority");
+        input.priority = ValidationSwarmSchedulerPriority::P4;
+        input.capacity_snapshot = scheduler_capacity(4, policy.queue_high_watermark, 0, 0);
+        input.queue_age_ms = policy.aging_step_ms.saturating_mul(2);
+
+        let decision = scheduler_decision(&policy, &input);
+
+        assert_eq!(
+            decision.decision,
+            ValidationSwarmSchedulerDecisionKind::WaitForCapacity
+        );
+        assert_eq!(
+            decision.fairness_bucket,
+            ValidationSwarmSchedulerFairnessBucket::Aging
+        );
+        assert_eq!(
+            decision.starvation_risk,
+            ValidationSwarmSchedulerStarvationRisk::Elevated
+        );
+        assert!(decision.retryable);
+    }
+
+    #[test]
+    fn swarm_scheduler_steals_stale_work_with_fence_digest() {
+        let policy = scheduler_policy();
+        let mut input = scheduler_input("steal-stale");
+        input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Stale;
+
+        let decision = scheduler_decision(&policy, &input);
+
+        assert_eq!(
+            decision.decision,
+            ValidationSwarmSchedulerDecisionKind::StealStaleWork
+        );
+        assert_eq!(
+            decision.required_action,
+            ValidationSwarmSchedulerRequiredAction::StealWithNewFence
+        );
+        assert_eq!(
+            decision.reason_code,
+            swarm_scheduler_reason_codes::STEAL_STALE
+        );
+        assert_eq!(
+            decision
+                .diagnostics
+                .fencing_token_digest
+                .as_deref()
+                .map(str::len),
+            Some(64)
+        );
+        assert!(decision.retryable);
+        assert!(!decision.green_proof_eligible);
+    }
+
+    #[test]
+    fn swarm_scheduler_records_source_only_blocker_fail_closed() {
+        let policy = scheduler_policy();
+        let mut input = scheduler_input("source-only");
+        input.source_only_allowed = true;
+        input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::SourceOnly;
+        input.queue_age_ms = policy.starvation_after_ms;
+
+        let decision = scheduler_decision(&policy, &input);
+
+        assert_eq!(
+            decision.decision,
+            ValidationSwarmSchedulerDecisionKind::RecordSourceOnlyBlocker
+        );
+        assert_eq!(
+            decision.required_action,
+            ValidationSwarmSchedulerRequiredAction::RecordSourceOnlyBlocker
+        );
+        assert_eq!(
+            decision.fairness_bucket,
+            ValidationSwarmSchedulerFairnessBucket::Blocked
+        );
+        assert!(decision.fail_closed);
+        assert!(!decision.retryable);
+        assert!(!decision.green_proof_eligible);
+    }
+
+    #[test]
+    fn swarm_scheduler_fails_closed_for_product_failure() {
+        let policy = scheduler_policy();
+        let mut input = scheduler_input("product-failure");
+        input.product_failure = true;
+        input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::ProductFailure;
+        input.flight_recorder_state = ValidationSwarmSchedulerFlightRecorderState::ProductFailure;
+
+        let decision = scheduler_decision(&policy, &input);
+
+        assert_eq!(
+            decision.decision,
+            ValidationSwarmSchedulerDecisionKind::FailClosedProduct
+        );
+        assert_eq!(
+            decision.reason_code,
+            swarm_scheduler_reason_codes::FAIL_PRODUCT
+        );
+        assert!(decision.fail_closed);
+        assert!(!decision.retryable);
+        assert!(!decision.green_proof_eligible);
+    }
+
+    #[test]
+    fn swarm_scheduler_fails_closed_for_invalid_artifact() {
+        let policy = scheduler_policy();
+        let mut input = scheduler_input("invalid-artifact");
+        input.artifact_valid = false;
+        input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::InvalidArtifact;
+        input.flight_recorder_state = ValidationSwarmSchedulerFlightRecorderState::InvalidArtifact;
+
+        let decision = scheduler_decision(&policy, &input);
+
+        assert_eq!(
+            decision.decision,
+            ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact
+        );
+        assert_eq!(
+            decision.reason_code,
+            swarm_scheduler_reason_codes::FAIL_INVALID_ARTIFACT
+        );
+        assert_eq!(
+            decision.required_action,
+            ValidationSwarmSchedulerRequiredAction::RejectArtifact
+        );
+        assert!(decision.fail_closed);
+        assert!(!decision.green_proof_eligible);
+    }
+
+    #[test]
+    fn swarm_scheduler_rejects_product_failure_as_worker_infra() {
+        let policy = scheduler_policy();
+        let mut input = scheduler_input("product-as-infra");
+        input.product_failure = true;
+        input.worker_infra_retryable = true;
+        input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::ProductFailure;
+
+        let err = decide_validation_swarm_schedule(&policy, &input, ts(20))
+            .expect_err("product failure cannot be worker infra");
+
+        assert_eq!(
+            err.code(),
+            swarm_scheduler_error_codes::ERR_VSS_PRODUCT_RETRIED_AS_INFRA
+        );
+    }
+
+    #[test]
+    fn swarm_scheduler_orders_by_effective_priority_freshness_and_stable_ties() {
+        let policy = scheduler_policy();
+        let mut p0 = scheduler_input("rank-p0");
+        p0.priority = ValidationSwarmSchedulerPriority::P0;
+        p0.timeout_budget_ms = 60_000;
+
+        let mut aged_p4 = scheduler_input("rank-aged-p4");
+        aged_p4.priority = ValidationSwarmSchedulerPriority::P4;
+        aged_p4.queue_age_ms = policy.aging_step_ms.saturating_mul(2);
+        aged_p4.timeout_budget_ms = 120_000;
+
+        let mut fresh_p2 = scheduler_input("rank-fresh-p2");
+        fresh_p2.priority = ValidationSwarmSchedulerPriority::P2;
+        fresh_p2.timeout_budget_ms = 120_000;
+
+        let mut tie_left = scheduler_input("rank-tie-left");
+        tie_left.priority = ValidationSwarmSchedulerPriority::P2;
+        tie_left.timeout_budget_ms = 240_000;
+        tie_left.bead_id = "bd-b".to_string();
+        tie_left.agent_name = "OrangeAsh".to_string();
+
+        let mut tie_right = scheduler_input("rank-tie-right");
+        tie_right.priority = ValidationSwarmSchedulerPriority::P2;
+        tie_right.timeout_budget_ms = 240_000;
+        tie_right.proof_work_key = tie_left.proof_work_key.clone();
+        tie_right.bead_id = "bd-a".to_string();
+        tie_right.agent_name = "BlueStone".to_string();
+
+        let inputs = vec![tie_left, fresh_p2, aged_p4, p0, tie_right];
+        let ordered =
+            order_validation_swarm_scheduler_inputs(&policy, &inputs).expect("ordered inputs");
+        let ordered_ids = ordered
+            .into_iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ordered_ids,
+            vec![
+                "vss-input-rank-p0",
+                "vss-input-rank-aged-p4",
+                "vss-input-rank-fresh-p2",
+                "vss-input-rank-tie-right",
+                "vss-input-rank-tie-left",
+            ]
+        );
     }
 
     #[test]

@@ -14,11 +14,19 @@ use frankenengine_node::ops::validation_broker::{
     ValidationFlightRecorderRecovery, ValidationPriority, ValidationProofCacheReuseEvidence,
     ValidationProofStatus, ValidationReadinessRef, ValidationReceipt, ValidationTiming,
     WorkerRequirements, error_codes, readiness_ref_reason_codes,
-    render_validation_proof_status_json, write_validation_receipt_at,
+    render_validation_proof_status_human, render_validation_proof_status_json,
+    write_validation_receipt_at,
 };
 use frankenengine_node::ops::validation_closeout::{
     ValidationCloseoutOptions, ValidationCloseoutStatus, build_validation_closeout_report,
     render_validation_closeout_json,
+};
+use frankenengine_node::ops::validation_proof_cache::DirtyStatePolicy;
+use frankenengine_node::ops::validation_proof_coalescer::{
+    CompleteLeaseRequest, CreateLeaseRequest, ValidationProofCoalescerDecisionKind,
+    ValidationProofCoalescerReceiptRef, ValidationProofCoalescerRequiredAction,
+    ValidationProofCoalescerStore, ValidationProofLeaseState, ValidationProofRchCommand,
+    ValidationProofWorkKey, ValidationProofWorkKeyParts,
 };
 use frankenengine_node::ops::validation_readiness::{
     RchWorkerReadiness, ResourceContentionSnapshot, TrackedValidationBead, ValidationBeadState,
@@ -111,6 +119,64 @@ fn worker_requirements() -> WorkerRequirements {
         cargo_toolchain: "nightly-2026-02-19".to_string(),
         feature_flags: vec!["default".to_string()],
         max_wall_time_ms: 1_800_000,
+    }
+}
+
+fn coalescer_work_key(seed: &str) -> ValidationProofWorkKey {
+    let command = command();
+    ValidationProofWorkKey::from_parts(ValidationProofWorkKeyParts {
+        command_digest: command.digest(),
+        input_digests: vec![InputDigest::new(
+            format!("crates/franken-node/src/ops/validation_broker_{seed}.rs"),
+            format!("validation-broker-coalescer-input-{seed}").as_bytes(),
+            "git-or-worktree",
+        )],
+        git_commit: "af6e4745".to_string(),
+        dirty_worktree: false,
+        dirty_state_policy: DirtyStatePolicy::CleanRequired,
+        feature_flags: vec!["default".to_string()],
+        cargo_toolchain: "nightly-2026-02-19".to_string(),
+        package: "frankenengine-node".to_string(),
+        test_target: "validation_broker".to_string(),
+        environment_policy_id: command.environment_policy_id,
+        target_dir_policy_id: command.target_dir_policy_id,
+    })
+    .expect("valid coalescer work key")
+}
+
+fn coalescer_request(
+    seed: &str,
+    owner_agent: &str,
+    owner_bead_id: &str,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+) -> CreateLeaseRequest {
+    let key = coalescer_work_key(seed);
+    CreateLeaseRequest {
+        proof_work_key: key.clone(),
+        owner_agent: owner_agent.to_string(),
+        owner_bead_id: owner_bead_id.to_string(),
+        trace_id: format!("trace-{seed}-{owner_agent}"),
+        fencing_token: format!("fence-{seed}-{owner_agent}"),
+        created_at,
+        expires_at,
+        admission_policy_id: "validation-proof-coalescer/admission/test/v1".to_string(),
+        rch_command: ValidationProofRchCommand {
+            argv: command().argv,
+            command_digest: key.command_digest.clone(),
+        },
+    }
+}
+
+fn coalescer_receipt_ref(
+    seed: &str,
+    proof_work_key: &ValidationProofWorkKey,
+) -> ValidationProofCoalescerReceiptRef {
+    ValidationProofCoalescerReceiptRef {
+        receipt_id: format!("receipt-{seed}"),
+        path: format!("artifacts/validation_broker/{seed}/receipt.json"),
+        bead_id: format!("bd-{seed}"),
+        proof_cache_key_hex: proof_work_key.proof_cache_key.hex.clone(),
     }
 }
 
@@ -217,6 +283,7 @@ fn receipt_for_bead(
             stderr_digest: DigestRef::sha256(b"stderr"),
         },
         readiness_ref: None,
+        flight_recorder_ref: None,
         trust: ReceiptTrust {
             generated_by: "validation-broker".to_string(),
             agent_name: "RusticPlateau".to_string(),
@@ -237,6 +304,21 @@ fn receipt_for_bead(
             ci_consumable: exit_kind == ValidationExitKind::Success,
         },
     }
+}
+
+fn base_receipt() -> Result<ValidationReceipt, Box<dyn std::error::Error>> {
+    Ok(receipt_for_bead(
+        "bd-base",
+        ts(0),
+        ts(10),
+        ts(3_600),
+        ValidationExitKind::Success,
+        ValidationErrorClass::None,
+        TimeoutClass::None,
+        RchMode::Remote,
+        Some("worker-123"),
+        None,
+    ))
 }
 
 fn receipt() -> ValidationReceipt {
@@ -502,6 +584,169 @@ fn cache_reuse_readiness_and_closeout_surface_receipt_and_key()
             .contains("- proof_cache_key:")
     );
     assert!(closeout_json.contains("\"proof_source\": \"proof_cache_hit\""));
+    Ok(())
+}
+
+#[test]
+fn coalescer_statuses_render_producer_waiter_and_completed_handoff()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let store = ValidationProofCoalescerStore::new(dir.path());
+    let producer_request = coalescer_request("joined", "PearlLeopard", "bd-producer", ts(1), ts(8));
+
+    let producer_outcome = store.create_or_join(producer_request.clone())?;
+    let producer_status = ValidationProofStatus::from_coalescer_outcome(&producer_outcome, ts(1));
+    let producer_json = render_validation_proof_status_json(&producer_status)?;
+
+    assert_eq!(producer_status.status, ProofStatusKind::Running);
+    assert_eq!(
+        producer_status.proof_source,
+        ProofEvidenceSource::CoalescedInflight
+    );
+    assert!(producer_json.contains("\"proof_source\": \"coalesced_inflight\""));
+    assert!(producer_json.contains("\"producer_agent\": \"PearlLeopard\""));
+    assert_eq!(
+        producer_status
+            .proof_coalescer
+            .as_ref()
+            .expect("producer coalescer evidence")
+            .required_action,
+        ValidationProofCoalescerRequiredAction::StartRchValidation.as_str()
+    );
+
+    let waiter_outcome = store.create_or_join(coalescer_request(
+        "joined",
+        "LavenderElk",
+        "bd-waiter",
+        ts(2),
+        ts(8),
+    ))?;
+    let waiter_status = ValidationProofStatus::from_coalescer_outcome(&waiter_outcome, ts(2));
+    let waiter_human = render_validation_proof_status_human(&waiter_status);
+
+    assert_eq!(waiter_status.status, ProofStatusKind::Running);
+    assert_eq!(
+        waiter_status.proof_source,
+        ProofEvidenceSource::CoalescedWaiter
+    );
+    assert!(waiter_status.deduplicated);
+    let waiter_evidence = waiter_status
+        .proof_coalescer
+        .as_ref()
+        .expect("waiter coalescer evidence");
+    assert_eq!(waiter_evidence.producer_agent, "PearlLeopard");
+    assert_eq!(waiter_evidence.producer_bead_id, "bd-producer");
+    assert_eq!(waiter_evidence.waiter_agent.as_deref(), Some("LavenderElk"));
+    assert!(waiter_human.contains("proof_source=coalesced_waiter"));
+    assert!(waiter_human.contains("producer=PearlLeopard"));
+    assert!(waiter_human.contains("waiter=LavenderElk"));
+    assert!(waiter_human.contains("lease=artifacts/validation_broker/proof_coalescer/"));
+
+    store.complete_lease(CompleteLeaseRequest {
+        proof_work_key: producer_request.proof_work_key.clone(),
+        owner_agent: producer_request.owner_agent.clone(),
+        owner_bead_id: producer_request.owner_bead_id.clone(),
+        fencing_token: producer_request.fencing_token.clone(),
+        completed_at: ts(3),
+        receipt_ref: coalescer_receipt_ref("joined", &producer_request.proof_work_key),
+    })?;
+    let completed_outcome = store.create_or_join(coalescer_request(
+        "joined",
+        "CyanHorizon",
+        "bd-waiter-completed",
+        ts(4),
+        ts(8),
+    ))?;
+    let completed_status = ValidationProofStatus::from_coalescer_outcome(&completed_outcome, ts(4));
+
+    assert_eq!(completed_status.status, ProofStatusKind::Reused);
+    assert_eq!(
+        completed_status.proof_source,
+        ProofEvidenceSource::CoalescedCompleted
+    );
+    let completed_evidence = completed_status
+        .proof_coalescer
+        .as_ref()
+        .expect("completed coalescer evidence");
+    assert_eq!(
+        completed_evidence.receipt_path.as_deref(),
+        Some("artifacts/validation_broker/joined/receipt.json")
+    );
+    assert_eq!(
+        completed_evidence.proof_cache_key_hex,
+        producer_request.proof_work_key.proof_cache_key.hex
+    );
+    Ok(())
+}
+
+#[test]
+fn coalescer_statuses_fail_closed_for_stale_and_rejected_work()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let store = ValidationProofCoalescerStore::new(dir.path());
+    let stale_request =
+        coalescer_request("stale", "PearlLeopard", "bd-stale-producer", ts(1), ts(2));
+    store.create_or_join(stale_request)?;
+
+    let stale_outcome = store.create_or_join(coalescer_request(
+        "stale",
+        "LavenderElk",
+        "bd-stale-waiter",
+        ts(3),
+        ts(8),
+    ))?;
+    let stale_status = ValidationProofStatus::from_coalescer_outcome(&stale_outcome, ts(3));
+    assert_eq!(stale_status.status, ProofStatusKind::Failed);
+    assert_eq!(
+        stale_status.proof_source,
+        ProofEvidenceSource::CoalescerRejected
+    );
+    assert_eq!(
+        stale_status
+            .proof_coalescer
+            .as_ref()
+            .expect("stale coalescer evidence")
+            .required_action,
+        ValidationProofCoalescerRequiredAction::RetryWithNewFence.as_str()
+    );
+
+    let corrupt_request = coalescer_request(
+        "corrupt",
+        "PearlLeopard",
+        "bd-corrupt-producer",
+        ts(1),
+        ts(8),
+    );
+    let corrupt_path = store.lease_path(&corrupt_request.proof_work_key);
+    fs::create_dir_all(corrupt_path.parent().expect("lease parent"))?;
+    fs::write(&corrupt_path, b"{not-json")?;
+    let rejected_outcome = store.create_or_join(corrupt_request)?;
+    let rejected_status = ValidationProofStatus::from_coalescer_outcome(&rejected_outcome, ts(1));
+    let rejected_json = render_validation_proof_status_json(&rejected_status)?;
+
+    assert_eq!(rejected_status.status, ProofStatusKind::Failed);
+    assert_eq!(
+        rejected_status.proof_source,
+        ProofEvidenceSource::CoalescerRejected
+    );
+    assert!(rejected_json.contains("\"proof_source\": \"coalescer_rejected\""));
+    assert!(rejected_json.contains("\"required_action\": \"repair_state\""));
+    assert_eq!(
+        rejected_status
+            .proof_coalescer
+            .as_ref()
+            .expect("rejected coalescer evidence")
+            .required_action,
+        ValidationProofCoalescerRequiredAction::RepairState.as_str()
+    );
+    assert_eq!(
+        rejected_outcome.decision.decision,
+        ValidationProofCoalescerDecisionKind::RepairState
+    );
+    assert_eq!(
+        rejected_outcome.lease.as_ref().map(|lease| lease.state),
+        None::<ValidationProofLeaseState>
+    );
     Ok(())
 }
 
@@ -1404,10 +1649,11 @@ fn flight_recorder_recovery_rejects_required_action_mismatch()
 }
 
 #[test]
-fn validation_flight_recorder_ref_from_rch_adapter_outcome() -> Result<(), Box<dyn std::error::Error>> {
+fn validation_flight_recorder_ref_from_rch_adapter_outcome()
+-> Result<(), Box<dyn std::error::Error>> {
     use frankenengine_node::ops::validation_broker::{
-        FlightRecorderAdapterOutcome, FlightRecorderAdapterOutcomeClass,
-        RchMode, TimeoutClass, ValidationFlightRecorderRef,
+        FlightRecorderAdapterOutcome, FlightRecorderAdapterOutcomeClass, RchMode, TimeoutClass,
+        ValidationFlightRecorderRef,
     };
 
     let adapter_outcome = FlightRecorderAdapterOutcome {
@@ -1443,12 +1689,18 @@ fn validation_flight_recorder_ref_from_rch_adapter_outcome() -> Result<(), Box<d
     assert_eq!(flight_ref.attempt_id, attempt_id);
     assert_eq!(flight_ref.attempt_path, attempt_path);
     assert_eq!(flight_ref.attempt_digest, attempt_digest);
-    assert_eq!(flight_ref.outcome_class, FlightRecorderAdapterOutcomeClass::Passed);
+    assert_eq!(
+        flight_ref.outcome_class,
+        FlightRecorderAdapterOutcomeClass::Passed
+    );
     assert_eq!(flight_ref.execution_mode, RchMode::Remote);
     assert_eq!(flight_ref.worker_id, Some("worker-123".to_string()));
     assert_eq!(flight_ref.reason_code, "RCH-S000");
     assert_eq!(flight_ref.generated_at, generated_at);
-    assert_eq!(flight_ref.freshness_expires_at, generated_at + Duration::seconds(ttl_secs as i64));
+    assert_eq!(
+        flight_ref.freshness_expires_at,
+        generated_at + Duration::seconds(ttl_secs as i64)
+    );
 
     // Validate the created reference
     flight_ref.validate_at(ts(200))?;
@@ -1457,10 +1709,11 @@ fn validation_flight_recorder_ref_from_rch_adapter_outcome() -> Result<(), Box<d
 }
 
 #[test]
-fn validation_flight_recorder_ref_validation_fails_when_stale() -> Result<(), Box<dyn std::error::Error>> {
+fn validation_flight_recorder_ref_validation_fails_when_stale()
+-> Result<(), Box<dyn std::error::Error>> {
     use frankenengine_node::ops::validation_broker::{
-        FlightRecorderAdapterOutcome, FlightRecorderAdapterOutcomeClass,
-        RchMode, TimeoutClass, ValidationFlightRecorderRef,
+        FlightRecorderAdapterOutcome, FlightRecorderAdapterOutcomeClass, RchMode, TimeoutClass,
+        ValidationFlightRecorderRef,
     };
 
     let adapter_outcome = FlightRecorderAdapterOutcome {
@@ -1503,7 +1756,8 @@ fn validation_flight_recorder_ref_validation_fails_when_stale() -> Result<(), Bo
 }
 
 #[test]
-fn validation_receipt_with_flight_recorder_ref_validates() -> Result<(), Box<dyn std::error::Error>> {
+fn validation_receipt_with_flight_recorder_ref_validates() -> Result<(), Box<dyn std::error::Error>>
+{
     use frankenengine_node::ops::validation_broker::{
         FlightRecorderAdapterOutcomeClass, ValidationFlightRecorderRef,
     };
@@ -1537,7 +1791,8 @@ fn validation_receipt_with_flight_recorder_ref_validates() -> Result<(), Box<dyn
 }
 
 #[test]
-fn validation_receipt_rejects_mismatched_flight_recorder_ref() -> Result<(), Box<dyn std::error::Error>> {
+fn validation_receipt_rejects_mismatched_flight_recorder_ref()
+-> Result<(), Box<dyn std::error::Error>> {
     use frankenengine_node::ops::validation_broker::{
         FlightRecorderAdapterOutcomeClass, ValidationFlightRecorderRef,
     };

@@ -1,0 +1,87 @@
+{
+  "schema_version": "franken-node/validation-proof-coalescer/stress-matrix/v1",
+  "bead_id": "bd-co196",
+  "attempts": 32,
+  "proof_command": {
+    "program": "rch",
+    "argv": [
+      "exec",
+      "--",
+      "env",
+      "CARGO_TARGET_DIR=/tmp/rch_target_franken_node_pane_7",
+      "cargo",
+      "test",
+      "-p",
+      "frankenengine-node",
+      "--test",
+      "validation_proof_cache"
+    ],
+    "cwd": "/data/projects/franken_node",
+    "environment_policy_id": "validation-proof-coalescer/env-policy/rch-only/v1",
+    "target_dir_policy_id": "validation-proof-coalescer/target-dir/off-repo/v1"
+  },
+  "required_log_fields": [
+    "trace_id",
+    "proof_work_key",
+    "proof_cache_key",
+    "lease_id",
+    "decision",
+    "reason_code",
+    "event_code",
+    "producer_agent",
+    "waiter_agent",
+    "bead_id",
+    "receipt_path",
+    "cache_key",
+    "fencing_token",
+    "target_dir_policy_id",
+    "dirty_state_policy"
+  ],
+  "scenarios": [
+    {
+      "name": "equivalent_attempts_coalesce",
+      "expected_decision": "run_locally_via_rch",
+      "expected_event_code": "VPCO-002"
+    },
+    {
+      "name": "waiters_join_single_producer",
+      "expected_decision": "join_existing_proof",
+      "expected_event_code": "VPCO-003"
+    },
+    {
+      "name": "completed_proof_hands_off_receipt",
+      "expected_decision": "coalesced_completed",
+      "expected_event_code": "VPCO-010"
+    },
+    {
+      "name": "post_completion_waiter_uses_receipt",
+      "expected_decision": "wait_for_receipt",
+      "expected_event_code": "VPCO-004"
+    },
+    {
+      "name": "changed_digest_creates_independent_lease",
+      "expected_decision": "run_locally_via_rch",
+      "expected_event_code": "VPCO-002"
+    },
+    {
+      "name": "stale_lease_requires_new_fence",
+      "expected_decision": "retry_after_stale_lease",
+      "expected_event_code": "VPCO-006"
+    },
+    {
+      "name": "corrupted_lease_fails_closed",
+      "expected_decision": "repair_state",
+      "expected_event_code": "VPCO-009"
+    },
+    {
+      "name": "capacity_pressure_queues_low_priority",
+      "expected_decision": "queued_by_policy",
+      "expected_event_code": "VPCO-005"
+    },
+    {
+      "name": "capacity_pressure_rejects_overflow",
+      "expected_decision": "reject_capacity",
+      "expected_event_code": "VPCO-008"
+    }
+  ]
+}

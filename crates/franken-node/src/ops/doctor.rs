@@ -4,8 +4,8 @@
 //! and recommended actions in both JSON and human-readable formats for operators.
 
 use crate::ops::workspace_pressure_policy::{
-    AdmissionDecision, PolicyDecision, PolicyThresholds, WorkCostClass,
-    WorkspacePressureInputs, WorkspacePressurePolicy,
+    AdmissionDecision, PolicyDecision, PolicyThresholds, WorkCostClass, WorkspacePressureInputs,
+    WorkspacePressurePolicy,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -193,7 +193,7 @@ impl WorkspacePressureDoctor {
         let mut policy_decisions = BTreeMap::new();
         let mut has_critical_decisions = false;
         let mut has_degraded_decisions = false;
-        let mut total_cleanup_candidates = 0;
+        let mut total_cleanup_candidates: usize = 0;
 
         for (work_class, priority) in &work_classes {
             let decision = self.policy.decide_admission(*work_class, *priority, inputs);
@@ -208,7 +208,8 @@ impl WorkspacePressureDoctor {
                 _ => {}
             }
 
-            total_cleanup_candidates = total_cleanup_candidates.saturating_add(decision.cleanup_candidates.len());
+            total_cleanup_candidates =
+                total_cleanup_candidates.saturating_add(decision.cleanup_candidates.len());
 
             // Add cleanup recommendations if candidates exist
             if !decision.cleanup_candidates.is_empty() {
@@ -221,7 +222,11 @@ impl WorkspacePressureDoctor {
 
             // Add decision diagnostics
             for diag in &decision.diagnostic_reasons {
-                push_bounded(&mut diagnostics, format!("{}: {}", work_class_str, diag), MAX_DOCTOR_DIAGNOSTICS);
+                push_bounded(
+                    &mut diagnostics,
+                    format!("{}: {}", work_class_str, diag),
+                    MAX_DOCTOR_DIAGNOSTICS,
+                );
             }
 
             let decision_summary = PolicyDecisionSummary {
@@ -257,9 +262,18 @@ impl WorkspacePressureDoctor {
         self.add_resource_recommendations(inputs, &mut recommended_actions);
 
         // Populate metadata
-        metadata.insert("total_cleanup_candidates".to_string(), total_cleanup_candidates.to_string());
-        metadata.insert("policy_decisions_count".to_string(), policy_decisions.len().to_string());
-        metadata.insert("rch_available".to_string(), inputs.rch_available_slots.is_some().to_string());
+        metadata.insert(
+            "total_cleanup_candidates".to_string(),
+            total_cleanup_candidates.to_string(),
+        );
+        metadata.insert(
+            "policy_decisions_count".to_string(),
+            policy_decisions.len().to_string(),
+        );
+        metadata.insert(
+            "rch_available".to_string(),
+            inputs.rch_available_slots.is_some().to_string(),
+        );
 
         DoctorOutput {
             schema_version: DOCTOR_OUTPUT_SCHEMA_VERSION.to_string(),
@@ -284,18 +298,46 @@ impl WorkspacePressureDoctor {
             output.status.emoji(),
             output.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
         ));
-        report.push_str(&format!("Status: {} - {}\n\n", output.status.as_str(), output.summary));
+        report.push_str(&format!(
+            "Status: {} - {}\n\n",
+            output.status.as_str(),
+            output.summary
+        ));
 
         // Resource summary
         report.push_str("📊 Resource Summary:\n");
-        report.push_str(&format!("  • Free Disk: {}\n", output.resources.free_disk_human));
-        report.push_str(&format!("  • Target Dir: {}\n", output.resources.target_dir_human));
-        report.push_str(&format!("  • Active Builds: {}\n", output.resources.active_builds));
-        report.push_str(&format!("  • Memory Pressure: {:.1}%\n", output.resources.memory_pressure * 100.0));
-        report.push_str(&format!("  • RCH Status: {}\n", output.resources.rch_status.status_desc));
-        report.push_str(&format!("  • File Reservations: {}\n", output.resources.active_reservations));
-        report.push_str(&format!("  • Coordination: {}\n\n",
-            if output.resources.coordination_healthy { "Healthy" } else { "Degraded" }));
+        report.push_str(&format!(
+            "  • Free Disk: {}\n",
+            output.resources.free_disk_human
+        ));
+        report.push_str(&format!(
+            "  • Target Dir: {}\n",
+            output.resources.target_dir_human
+        ));
+        report.push_str(&format!(
+            "  • Active Builds: {}\n",
+            output.resources.active_builds
+        ));
+        report.push_str(&format!(
+            "  • Memory Pressure: {:.1}%\n",
+            output.resources.memory_pressure * 100.0
+        ));
+        report.push_str(&format!(
+            "  • RCH Status: {}\n",
+            output.resources.rch_status.status_desc
+        ));
+        report.push_str(&format!(
+            "  • File Reservations: {}\n",
+            output.resources.active_reservations
+        ));
+        report.push_str(&format!(
+            "  • Coordination: {}\n\n",
+            if output.resources.coordination_healthy {
+                "Healthy"
+            } else {
+                "Degraded"
+            }
+        ));
 
         // Policy decisions
         if !output.policy_decisions.is_empty() {
@@ -348,8 +390,12 @@ impl WorkspacePressureDoctor {
         if !output.diagnostics.is_empty() && output.status != DoctorStatus::Healthy {
             report.push_str("🔍 Diagnostics:\n");
             for (i, diag) in output.diagnostics.iter().enumerate() {
-                if i >= 5 { // Limit to top 5 for human readability
-                    report.push_str(&format!("  ... and {} more\n", output.diagnostics.len() - 5));
+                if i >= 5 {
+                    // Limit to top 5 for human readability
+                    report.push_str(&format!(
+                        "  ... and {} more\n",
+                        output.diagnostics.len() - 5
+                    ));
                     break;
                 }
                 report.push_str(&format!("  • {}\n", diag));
@@ -357,9 +403,11 @@ impl WorkspacePressureDoctor {
             report.push('\n');
         }
 
-        report.push_str(&format!("Generated at {} with {} schema\n",
+        report.push_str(&format!(
+            "Generated at {} with {} schema\n",
             output.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
-            output.schema_version));
+            output.schema_version
+        ));
 
         report
     }
@@ -396,24 +444,36 @@ impl WorkspacePressureDoctor {
         }
     }
 
-    fn generate_summary(&self, status: &DoctorStatus, inputs: &WorkspacePressureInputs, cleanup_candidates: usize) -> String {
+    fn generate_summary(
+        &self,
+        status: &DoctorStatus,
+        inputs: &WorkspacePressureInputs,
+        cleanup_candidates: usize,
+    ) -> String {
         match status {
             DoctorStatus::Healthy => {
                 "Workspace pressure is low, all systems operating normally".to_string()
             }
             DoctorStatus::Warning => {
                 if cleanup_candidates > 0 {
-                    format!("Minor resource pressure detected, {} cleanup opportunities available", cleanup_candidates)
+                    format!(
+                        "Minor resource pressure detected, {} cleanup opportunities available",
+                        cleanup_candidates
+                    )
                 } else {
                     "Minor resource pressure detected, monitoring recommended".to_string()
                 }
             }
             DoctorStatus::Degraded => {
-                format!("Significant workspace pressure: {:.0}% memory, {} active builds",
-                    inputs.memory_pressure * 100.0, inputs.active_build_count)
+                format!(
+                    "Significant workspace pressure: {:.0}% memory, {} active builds",
+                    inputs.memory_pressure * 100.0,
+                    inputs.active_build_count
+                )
             }
             DoctorStatus::Critical => {
-                if inputs.free_disk_bytes < 100_000_000 { // < 100MB
+                if inputs.free_disk_bytes < 100_000_000 {
+                    // < 100MB
                     "Critical disk pressure detected, immediate cleanup required".to_string()
                 } else {
                     "Critical workspace pressure, blocking high-cost operations".to_string()
@@ -446,10 +506,16 @@ impl WorkspacePressureDoctor {
             return;
         }
 
-        let total_size: u64 = decision.cleanup_candidates.iter().map(|c| c.size_bytes).sum();
-        let priority = if total_size > 1_000_000_000 { // > 1GB
+        let total_size: u64 = decision
+            .cleanup_candidates
+            .iter()
+            .map(|c| c.size_bytes)
+            .sum();
+        let priority = if total_size > 1_000_000_000 {
+            // > 1GB
             "high"
-        } else if total_size > 100_000_000 { // > 100MB
+        } else if total_size > 100_000_000 {
+            // > 100MB
             "medium"
         } else {
             "low"
@@ -457,14 +523,21 @@ impl WorkspacePressureDoctor {
 
         let action = RecommendedAction {
             priority: priority.to_string(),
-            action: format!("Clean up {} targets for {}", decision.cleanup_candidates.len(), work_class),
+            action: format!(
+                "Clean up {} targets for {}",
+                decision.cleanup_candidates.len(),
+                work_class
+            ),
             explanation: format!(
                 "Remove {} of artifacts to reduce workspace pressure ({})",
                 format_bytes(total_size),
                 decision.cleanup_candidates[0].reason
             ),
             command: if decision.cleanup_candidates.len() == 1 {
-                Some(format!("rm -rf '{}'", decision.cleanup_candidates[0].path.display()))
+                Some(format!(
+                    "rm -rf '{}'",
+                    decision.cleanup_candidates[0].path.display()
+                ))
             } else {
                 None
             },
@@ -474,13 +547,20 @@ impl WorkspacePressureDoctor {
         push_bounded(recommendations, action, MAX_RECOMMENDED_ACTIONS);
     }
 
-    fn add_resource_recommendations(&self, inputs: &WorkspacePressureInputs, recommendations: &mut Vec<RecommendedAction>) {
+    fn add_resource_recommendations(
+        &self,
+        inputs: &WorkspacePressureInputs,
+        recommendations: &mut Vec<RecommendedAction>,
+    ) {
         // Memory pressure recommendations
         if inputs.memory_pressure > 0.9 {
             let action = RecommendedAction {
                 priority: "high".to_string(),
                 action: "Reduce memory pressure".to_string(),
-                explanation: format!("Memory usage at {:.0}%, close to exhaustion", inputs.memory_pressure * 100.0),
+                explanation: format!(
+                    "Memory usage at {:.0}%, close to exhaustion",
+                    inputs.memory_pressure * 100.0
+                ),
                 command: Some("killall -TERM cargo rustc".to_string()),
                 impact: "Prevent OOM kills and system instability".to_string(),
             };
@@ -489,7 +569,10 @@ impl WorkspacePressureDoctor {
             let action = RecommendedAction {
                 priority: "medium".to_string(),
                 action: "Monitor memory usage".to_string(),
-                explanation: format!("Memory usage at {:.0}%, approaching limits", inputs.memory_pressure * 100.0),
+                explanation: format!(
+                    "Memory usage at {:.0}%, approaching limits",
+                    inputs.memory_pressure * 100.0
+                ),
                 command: Some("free -h && ps aux --sort=-%mem | head -10".to_string()),
                 impact: "Prevent memory exhaustion".to_string(),
             };
@@ -501,7 +584,10 @@ impl WorkspacePressureDoctor {
             let action = RecommendedAction {
                 priority: "medium".to_string(),
                 action: "Reduce concurrent builds".to_string(),
-                explanation: format!("{} active builds detected, may cause resource contention", inputs.active_build_count),
+                explanation: format!(
+                    "{} active builds detected, may cause resource contention",
+                    inputs.active_build_count
+                ),
                 command: Some("pgrep -f 'cargo|rustc' | wc -l".to_string()),
                 impact: "Improve build performance and reduce system load".to_string(),
             };
@@ -525,7 +611,8 @@ impl WorkspacePressureDoctor {
             let action = RecommendedAction {
                 priority: "medium".to_string(),
                 action: "Check Agent Mail coordination".to_string(),
-                explanation: "Agent coordination health degraded, may affect file reservations".to_string(),
+                explanation: "Agent coordination health degraded, may affect file reservations"
+                    .to_string(),
                 command: None,
                 impact: "Restore reliable inter-agent coordination".to_string(),
             };
@@ -612,7 +699,7 @@ mod tests {
     fn test_doctor_output_healthy_scenario() {
         let inputs = WorkspacePressureInputs {
             free_disk_bytes: 10_000_000_000, // 10GB
-            target_dir_bytes: 1_000_000_000,  // 1GB
+            target_dir_bytes: 1_000_000_000, // 1GB
             active_build_count: 1,
             rch_available_slots: Some(4),
             memory_pressure: 0.3,
@@ -632,7 +719,7 @@ mod tests {
     #[test]
     fn test_doctor_output_critical_scenario() {
         let inputs = WorkspacePressureInputs {
-            free_disk_bytes: 50_000_000,    // 50MB - critical
+            free_disk_bytes: 50_000_000,     // 50MB - critical
             target_dir_bytes: 5_000_000_000, // 5GB
             active_build_count: 10,
             rch_available_slots: None,
@@ -647,13 +734,18 @@ mod tests {
         assert_eq!(output.status, DoctorStatus::Critical);
         assert!(output.summary.contains("Critical"));
         assert!(!output.recommended_actions.is_empty());
-        assert!(output.recommended_actions.iter().any(|a| a.priority == "high"));
+        assert!(
+            output
+                .recommended_actions
+                .iter()
+                .any(|a| a.priority == "high")
+        );
     }
 
     #[test]
     fn test_human_report_formatting() {
         let inputs = WorkspacePressureInputs {
-            free_disk_bytes: 2_000_000_000, // 2GB
+            free_disk_bytes: 2_000_000_000,  // 2GB
             target_dir_bytes: 3_000_000_000, // 3GB
             active_build_count: 3,
             rch_available_slots: Some(2),
@@ -671,6 +763,6 @@ mod tests {
         assert!(human_report.contains("🎯 Policy Decisions"));
         assert!(human_report.contains("2.0 GB")); // Free disk formatting
         assert!(human_report.contains("3.0 GB")); // Target dir formatting
-        assert!(human_report.contains("60.0%"));  // Memory pressure
+        assert!(human_report.contains("60.0%")); // Memory pressure
     }
 }

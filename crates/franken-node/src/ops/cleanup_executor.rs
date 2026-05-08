@@ -34,7 +34,7 @@ pub enum CleanupMode {
 }
 
 /// Outcome of a cleanup operation on a single path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CleanupOutcome {
     /// Path was successfully removed.
@@ -63,7 +63,10 @@ impl CleanupOutcome {
     pub const fn is_skipped(self) -> bool {
         matches!(
             self,
-            Self::SkippedProtected | Self::SkippedReserved | Self::SkippedTooYoung | Self::SkippedOpenFile
+            Self::SkippedProtected
+                | Self::SkippedReserved
+                | Self::SkippedTooYoung
+                | Self::SkippedOpenFile
         )
     }
 
@@ -128,7 +131,7 @@ pub struct CleanupReceipt {
     /// Total bytes that were skipped due to protections.
     pub bytes_skipped: u64,
     /// Number of protected pins that blocked cleanup.
-    pub skipped_pins: u32,
+    pub skipped_pins: usize,
     /// Diagnostic messages from the cleanup process.
     pub diagnostics: Vec<String>,
     /// Summary statistics.
@@ -139,13 +142,13 @@ pub struct CleanupReceipt {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleanupSummary {
     /// Total number of candidates evaluated.
-    pub total_candidates: u32,
+    pub total_candidates: usize,
     /// Number of paths successfully removed.
-    pub removed_count: u32,
+    pub removed_count: usize,
     /// Number of paths skipped due to protections.
-    pub skipped_count: u32,
+    pub skipped_count: usize,
     /// Number of operations that failed.
-    pub failed_count: u32,
+    pub failed_count: usize,
     /// Overall success rate (0.0-1.0).
     pub success_rate: f32,
 }
@@ -297,7 +300,10 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
 
     /// Create executor with custom protection rules.
     #[must_use]
-    pub fn with_protection_rules(protection_rules: CleanupProtectionRules, deletion_adapter: T) -> Self {
+    pub fn with_protection_rules(
+        protection_rules: CleanupProtectionRules,
+        deletion_adapter: T,
+    ) -> Self {
         Self {
             protection_rules,
             deletion_adapter,
@@ -327,9 +333,17 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
         let mut diagnostics = Vec::new();
         let mut bytes_freed = 0u64;
         let mut bytes_skipped = 0u64;
-        let mut skipped_pins = 0u32;
+        let mut skipped_pins = 0usize;
 
-        push_bounded(&mut diagnostics, format!("Starting cleanup: mode={:?}, candidates={}", mode, candidates.len()), MAX_CLEANUP_DIAGNOSTICS);
+        push_bounded(
+            &mut diagnostics,
+            format!(
+                "Starting cleanup: mode={:?}, candidates={}",
+                mode,
+                candidates.len()
+            ),
+            MAX_CLEANUP_DIAGNOSTICS,
+        );
 
         for candidate in candidates {
             let operation = self.process_candidate(candidate, mode, &mut diagnostics);
@@ -353,10 +367,19 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
         let completed_at = Utc::now();
 
         // Calculate summary statistics
-        let total_candidates = candidates.len() as u32;
-        let removed_count = operations.iter().filter(|op| op.outcome.is_success()).count() as u32;
-        let skipped_count = operations.iter().filter(|op| op.outcome.is_skipped()).count() as u32;
-        let failed_count = operations.iter().filter(|op| op.outcome == CleanupOutcome::Failed).count() as u32;
+        let total_candidates = candidates.len();
+        let removed_count = operations
+            .iter()
+            .filter(|op| op.outcome.is_success())
+            .count();
+        let skipped_count = operations
+            .iter()
+            .filter(|op| op.outcome.is_skipped())
+            .count();
+        let failed_count = operations
+            .iter()
+            .filter(|op| op.outcome == CleanupOutcome::Failed)
+            .count();
         let success_rate = if total_candidates > 0 {
             removed_count as f32 / total_candidates as f32
         } else {
@@ -371,7 +394,14 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
             success_rate,
         };
 
-        push_bounded(&mut diagnostics, format!("Cleanup complete: {} removed, {} skipped, {} failed", removed_count, skipped_count, failed_count), MAX_CLEANUP_DIAGNOSTICS);
+        push_bounded(
+            &mut diagnostics,
+            format!(
+                "Cleanup complete: {} removed, {} skipped, {} failed",
+                removed_count, skipped_count, failed_count
+            ),
+            MAX_CLEANUP_DIAGNOSTICS,
+        );
 
         CleanupReceipt {
             schema_version: "franken-node/cleanup-executor/v1".to_string(),
@@ -392,7 +422,12 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
         }
     }
 
-    fn process_candidate(&self, candidate: &CleanupCandidate, mode: CleanupMode, diagnostics: &mut Vec<String>) -> CleanupOperation {
+    fn process_candidate(
+        &self,
+        candidate: &CleanupCandidate,
+        mode: CleanupMode,
+        diagnostics: &mut Vec<String>,
+    ) -> CleanupOperation {
         let timestamp = Utc::now();
         let path = &candidate.path;
 
@@ -426,7 +461,8 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
         };
 
         let size_bytes = metadata.len();
-        let age_seconds = metadata.modified()
+        let age_seconds = metadata
+            .modified()
             .ok()
             .and_then(|modified| modified.elapsed().ok())
             .map(|duration| duration.as_secs())
@@ -447,7 +483,15 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
 
         // In dry-run mode, don't actually delete
         if mode == CleanupMode::DryRun {
-            push_bounded(diagnostics, format!("DRY-RUN: Would remove {} ({} bytes)", path.display(), size_bytes), MAX_CLEANUP_DIAGNOSTICS);
+            push_bounded(
+                diagnostics,
+                format!(
+                    "DRY-RUN: Would remove {} ({} bytes)",
+                    path.display(),
+                    size_bytes
+                ),
+                MAX_CLEANUP_DIAGNOSTICS,
+            );
             return CleanupOperation {
                 path: path.clone(),
                 size_bytes,
@@ -468,7 +512,11 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
 
         match deletion_result {
             Ok(()) => {
-                push_bounded(diagnostics, format!("Removed {} ({} bytes)", path.display(), size_bytes), MAX_CLEANUP_DIAGNOSTICS);
+                push_bounded(
+                    diagnostics,
+                    format!("Removed {} ({} bytes)", path.display(), size_bytes),
+                    MAX_CLEANUP_DIAGNOSTICS,
+                );
                 CleanupOperation {
                     path: path.clone(),
                     size_bytes,
@@ -480,7 +528,11 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
                 }
             }
             Err(err) => {
-                push_bounded(diagnostics, format!("Failed to remove {}: {}", path.display(), err), MAX_CLEANUP_DIAGNOSTICS);
+                push_bounded(
+                    diagnostics,
+                    format!("Failed to remove {}: {}", path.display(), err),
+                    MAX_CLEANUP_DIAGNOSTICS,
+                );
                 CleanupOperation {
                     path: path.clone(),
                     size_bytes,
@@ -499,13 +551,20 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
         if age_seconds < self.protection_rules.min_age_seconds {
             return Some((
                 CleanupOutcome::SkippedTooYoung,
-                format!("File is {} seconds old, minimum age is {} seconds", age_seconds, self.protection_rules.min_age_seconds),
+                format!(
+                    "File is {} seconds old, minimum age is {} seconds",
+                    age_seconds, self.protection_rules.min_age_seconds
+                ),
             ));
         }
 
         // Check protected extensions
         if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
-            if self.protection_rules.protected_extensions.contains(&format!(".{}", extension)) {
+            if self
+                .protection_rules
+                .protected_extensions
+                .contains(&format!(".{}", extension))
+            {
                 return Some((
                     CleanupOutcome::SkippedProtected,
                     format!("Extension .{} is protected", extension),
@@ -518,7 +577,10 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
             if path.starts_with(protected_dir) {
                 return Some((
                     CleanupOutcome::SkippedProtected,
-                    format!("Path is in protected directory: {}", protected_dir.display()),
+                    format!(
+                        "Path is in protected directory: {}",
+                        protected_dir.display()
+                    ),
                 ));
             }
         }
@@ -583,7 +645,9 @@ impl Default for CleanupExecutor<FilesystemDeletionAdapter> {
 }
 
 /// Convert cleanup candidates from policy decision to execution format.
-pub fn extract_cleanup_candidates_from_policy(policy_decision: &PolicyDecision) -> Vec<CleanupCandidate> {
+pub fn extract_cleanup_candidates_from_policy(
+    policy_decision: &PolicyDecision,
+) -> Vec<CleanupCandidate> {
     policy_decision.cleanup_candidates.clone()
 }
 
@@ -608,9 +672,11 @@ mod tests {
         let mock_adapter = MockDeletionAdapter::default();
         let executor = CleanupExecutor::with_adapter(mock_adapter);
 
-        let candidates = vec![
-            create_test_candidate("/tmp/test_file.tmp", 1024, "Test cleanup"),
-        ];
+        let candidates = vec![create_test_candidate(
+            "/tmp/test_file.tmp",
+            1024,
+            "Test cleanup",
+        )];
 
         let receipt = executor.execute_cleanup(
             &candidates,
@@ -631,9 +697,11 @@ mod tests {
         let mock_adapter = MockDeletionAdapter::default();
         let executor = CleanupExecutor::with_adapter(mock_adapter);
 
-        let candidates = vec![
-            create_test_candidate("src/main.rs", 1024, "Protected source file"),
-        ];
+        let candidates = vec![create_test_candidate(
+            "src/main.rs",
+            1024,
+            "Protected source file",
+        )];
 
         let receipt = executor.execute_cleanup(
             &candidates,
@@ -644,7 +712,10 @@ mod tests {
         );
 
         assert_eq!(receipt.operations.len(), 1);
-        assert_eq!(receipt.operations[0].outcome, CleanupOutcome::SkippedProtected);
+        assert_eq!(
+            receipt.operations[0].outcome,
+            CleanupOutcome::SkippedProtected
+        );
         assert!(receipt.operations[0].reason.contains("Extension"));
         assert_eq!(receipt.summary.skipped_count, 1);
         assert_eq!(receipt.skipped_pins, 1);
@@ -655,9 +726,11 @@ mod tests {
         let mock_adapter = MockDeletionAdapter::default();
         let executor = CleanupExecutor::with_adapter(mock_adapter);
 
-        let candidates = vec![
-            create_test_candidate("src/subdir/file.txt", 1024, "File in protected directory"),
-        ];
+        let candidates = vec![create_test_candidate(
+            "src/subdir/file.txt",
+            1024,
+            "File in protected directory",
+        )];
 
         let receipt = executor.execute_cleanup(
             &candidates,
@@ -668,7 +741,10 @@ mod tests {
         );
 
         assert_eq!(receipt.operations.len(), 1);
-        assert_eq!(receipt.operations[0].outcome, CleanupOutcome::SkippedProtected);
+        assert_eq!(
+            receipt.operations[0].outcome,
+            CleanupOutcome::SkippedProtected
+        );
         assert!(receipt.operations[0].reason.contains("protected directory"));
     }
 
@@ -682,15 +758,13 @@ mod tests {
         reservations.insert(reserved_path.clone());
         executor.update_reservations(reservations);
 
-        let candidates = vec![
-            CleanupCandidate {
-                path: reserved_path,
-                size_bytes: 1024,
-                reason: "Reserved file".to_string(),
-                requires_approval: false,
-                mtime: None,
-            },
-        ];
+        let candidates = vec![CleanupCandidate {
+            path: reserved_path,
+            size_bytes: 1024,
+            reason: "Reserved file".to_string(),
+            requires_approval: false,
+            mtime: None,
+        }];
 
         let receipt = executor.execute_cleanup(
             &candidates,
@@ -701,7 +775,10 @@ mod tests {
         );
 
         assert_eq!(receipt.operations.len(), 1);
-        assert_eq!(receipt.operations[0].outcome, CleanupOutcome::SkippedReserved);
+        assert_eq!(
+            receipt.operations[0].outcome,
+            CleanupOutcome::SkippedReserved
+        );
         assert!(receipt.operations[0].reason.contains("reservation"));
     }
 
@@ -710,9 +787,11 @@ mod tests {
         let mock_adapter = MockDeletionAdapter::default();
         let executor = CleanupExecutor::with_adapter(mock_adapter);
 
-        let candidates = vec![
-            create_test_candidate("/nonexistent/file", 1024, "Test structure"),
-        ];
+        let candidates = vec![create_test_candidate(
+            "/nonexistent/file",
+            1024,
+            "Test structure",
+        )];
 
         let receipt = executor.execute_cleanup(
             &candidates,
@@ -766,15 +845,13 @@ mod tests {
         let test_file = temp_dir.path().join("test.tmp");
         std::fs::write(&test_file, "test content").expect("write test file");
 
-        let candidates = vec![
-            CleanupCandidate {
-                path: test_file.clone(),
-                size_bytes: 12,
-                reason: "Mock test".to_string(),
-                requires_approval: false,
-                mtime: None,
-            },
-        ];
+        let candidates = vec![CleanupCandidate {
+            path: test_file.clone(),
+            size_bytes: 12,
+            reason: "Mock test".to_string(),
+            requires_approval: false,
+            mtime: None,
+        }];
 
         let receipt = executor.execute_cleanup(
             &candidates,

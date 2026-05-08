@@ -145,7 +145,7 @@ impl PolicyThresholds {
     /// Create conservative default thresholds suitable for shared environments.
     pub fn conservative() -> Self {
         Self {
-            min_free_disk_bytes: 1_000_000_000, // 1GB
+            min_free_disk_bytes: 1_000_000_000,  // 1GB
             max_target_dir_bytes: 5_000_000_000, // 5GB
             max_concurrent_builds: 3,
             max_memory_pressure: 0.8,
@@ -156,7 +156,7 @@ impl PolicyThresholds {
     /// Create balanced default thresholds for typical development.
     pub fn balanced() -> Self {
         Self {
-            min_free_disk_bytes: 500_000_000, // 500MB
+            min_free_disk_bytes: 500_000_000,     // 500MB
             max_target_dir_bytes: 10_000_000_000, // 10GB
             max_concurrent_builds: 5,
             max_memory_pressure: 0.9,
@@ -167,7 +167,7 @@ impl PolicyThresholds {
     /// Create permissive thresholds for high-capacity environments.
     pub fn permissive() -> Self {
         Self {
-            min_free_disk_bytes: 100_000_000, // 100MB
+            min_free_disk_bytes: 100_000_000,     // 100MB
             max_target_dir_bytes: 50_000_000_000, // 50GB
             max_concurrent_builds: 10,
             max_memory_pressure: 0.95,
@@ -198,7 +198,8 @@ impl WorkspacePressurePolicy {
         let mut cleanup_candidates = Vec::new();
 
         // Analyze disk pressure
-        let disk_pressure = self.analyze_disk_pressure(inputs, &mut diagnostic_reasons, &mut cleanup_candidates);
+        let disk_pressure =
+            self.analyze_disk_pressure(inputs, &mut diagnostic_reasons, &mut cleanup_candidates);
 
         // Analyze build pressure
         let build_pressure = self.analyze_build_pressure(inputs, &mut diagnostic_reasons);
@@ -231,7 +232,8 @@ impl WorkspacePressurePolicy {
         );
 
         // Generate reason code and summary
-        let (reason_code, summary) = self.generate_reason_and_summary(&admission, work_class, &diagnostic_reasons);
+        let (reason_code, summary) =
+            self.generate_reason_and_summary(&admission, work_class, &diagnostic_reasons);
 
         PolicyDecision {
             admission,
@@ -251,7 +253,9 @@ impl WorkspacePressurePolicy {
         if inputs.target_dir_bytes > self.thresholds.max_target_dir_bytes {
             candidates.push(CleanupCandidate {
                 path: "target".into(),
-                size_bytes: inputs.target_dir_bytes.saturating_sub(self.thresholds.max_target_dir_bytes / 2),
+                size_bytes: inputs
+                    .target_dir_bytes
+                    .saturating_sub(self.thresholds.max_target_dir_bytes / 2),
                 reason: "Large target directory detected".to_string(),
                 requires_approval: true,
                 mtime: None,
@@ -261,7 +265,8 @@ impl WorkspacePressurePolicy {
         // Add temp file cleanup candidates if disk pressure high
         if inputs.free_disk_bytes < self.thresholds.min_free_disk_bytes.saturating_mul(2) {
             if let Ok(temp_size) = estimate_temp_artifacts_size() {
-                if temp_size > 100_000_000 { // 100MB
+                if temp_size > 100_000_000 {
+                    // 100MB
                     candidates.push(CleanupCandidate {
                         path: "/tmp/cargo-*".into(),
                         size_bytes: temp_size,
@@ -283,21 +288,33 @@ impl WorkspacePressurePolicy {
         cleanup_candidates: &mut Vec<CleanupCandidate>,
     ) -> f32 {
         let disk_pressure = if inputs.free_disk_bytes < self.thresholds.min_free_disk_bytes {
-            push_bounded(diagnostics, "Critical disk space shortage".to_string(), MAX_DIAGNOSTIC_REASONS);
+            push_bounded(
+                diagnostics,
+                "Critical disk space shortage".to_string(),
+                MAX_DIAGNOSTIC_REASONS,
+            );
 
             // Suggest cleanup candidates
             cleanup_candidates.extend(self.propose_cleanup(inputs));
 
             1.0
         } else if inputs.free_disk_bytes < self.thresholds.min_free_disk_bytes.saturating_mul(2) {
-            push_bounded(diagnostics, "Low disk space warning".to_string(), MAX_DIAGNOSTIC_REASONS);
+            push_bounded(
+                diagnostics,
+                "Low disk space warning".to_string(),
+                MAX_DIAGNOSTIC_REASONS,
+            );
             0.7
         } else {
             0.0
         };
 
         if inputs.target_dir_bytes > self.thresholds.max_target_dir_bytes {
-            push_bounded(diagnostics, "Target directories consuming excessive space".to_string(), MAX_DIAGNOSTIC_REASONS);
+            push_bounded(
+                diagnostics,
+                "Target directories consuming excessive space".to_string(),
+                MAX_DIAGNOSTIC_REASONS,
+            );
         }
 
         disk_pressure
@@ -309,10 +326,18 @@ impl WorkspacePressurePolicy {
         diagnostics: &mut Vec<String>,
     ) -> f32 {
         if inputs.active_build_count > self.thresholds.max_concurrent_builds {
-            push_bounded(diagnostics, "High concurrent build activity".to_string(), MAX_DIAGNOSTIC_REASONS);
+            push_bounded(
+                diagnostics,
+                "High concurrent build activity".to_string(),
+                MAX_DIAGNOSTIC_REASONS,
+            );
             0.8
         } else if inputs.active_build_count > self.thresholds.max_concurrent_builds / 2 {
-            push_bounded(diagnostics, "Moderate build activity".to_string(), MAX_DIAGNOSTIC_REASONS);
+            push_bounded(
+                diagnostics,
+                "Moderate build activity".to_string(),
+                MAX_DIAGNOSTIC_REASONS,
+            );
             0.4
         } else {
             0.0
@@ -325,7 +350,11 @@ impl WorkspacePressurePolicy {
         diagnostics: &mut Vec<String>,
     ) -> f32 {
         if inputs.memory_pressure > self.thresholds.max_memory_pressure {
-            push_bounded(diagnostics, "High memory pressure detected".to_string(), MAX_DIAGNOSTIC_REASONS);
+            push_bounded(
+                diagnostics,
+                "High memory pressure detected".to_string(),
+                MAX_DIAGNOSTIC_REASONS,
+            );
             inputs.memory_pressure
         } else {
             0.0
@@ -338,12 +367,20 @@ impl WorkspacePressurePolicy {
         diagnostics: &mut Vec<String>,
     ) -> bool {
         if !inputs.coordination_healthy {
-            push_bounded(diagnostics, "Agent coordination degraded".to_string(), MAX_DIAGNOSTIC_REASONS);
+            push_bounded(
+                diagnostics,
+                "Agent coordination degraded".to_string(),
+                MAX_DIAGNOSTIC_REASONS,
+            );
             return true;
         }
 
         if inputs.active_reservations > self.thresholds.max_active_reservations {
-            push_bounded(diagnostics, "High file reservation contention".to_string(), MAX_DIAGNOSTIC_REASONS);
+            push_bounded(
+                diagnostics,
+                "High file reservation contention".to_string(),
+                MAX_DIAGNOSTIC_REASONS,
+            );
             return true;
         }
 
@@ -368,7 +405,9 @@ impl WorkspacePressurePolicy {
 
         // High memory pressure limits work
         if memory_pressure > 0.9 && work_class.cost_weight() > 2 {
-            return AdmissionDecision::Queue { retry_after_ms: 30000 };
+            return AdmissionDecision::Queue {
+                retry_after_ms: 30000,
+            };
         }
 
         // RCH availability check
@@ -376,15 +415,25 @@ impl WorkspacePressurePolicy {
             Some(slots) if slots > 0 => {
                 // RCH available - use it for expensive work or high pressure
                 if work_class.prefers_rch() || build_pressure > 0.5 || disk_pressure > 0.5 {
-                    push_bounded(diagnostics, "Offloading to RCH for resource management".to_string(), MAX_DIAGNOSTIC_REASONS);
+                    push_bounded(
+                        diagnostics,
+                        "Offloading to RCH for resource management".to_string(),
+                        MAX_DIAGNOSTIC_REASONS,
+                    );
                     return AdmissionDecision::RequireRch;
                 }
             }
             Some(_) => {
                 // RCH saturated
                 if work_class.prefers_rch() && (build_pressure > 0.7 || memory_pressure > 0.8) {
-                    push_bounded(diagnostics, "RCH saturated, queueing expensive work".to_string(), MAX_DIAGNOSTIC_REASONS);
-                    return AdmissionDecision::Queue { retry_after_ms: 60000 };
+                    push_bounded(
+                        diagnostics,
+                        "RCH saturated, queueing expensive work".to_string(),
+                        MAX_DIAGNOSTIC_REASONS,
+                    );
+                    return AdmissionDecision::Queue {
+                        retry_after_ms: 60000,
+                    };
                 }
             }
             None => {
@@ -397,13 +446,23 @@ impl WorkspacePressurePolicy {
 
         // Coordination issues affect cleanup and high-contention work
         if coordination_issues && matches!(work_class, WorkCostClass::Cleanup) {
-            push_bounded(diagnostics, "Deferring cleanup due to coordination issues".to_string(), MAX_DIAGNOSTIC_REASONS);
-            return AdmissionDecision::Wait { retry_after_ms: 10000 };
+            push_bounded(
+                diagnostics,
+                "Deferring cleanup due to coordination issues".to_string(),
+                MAX_DIAGNOSTIC_REASONS,
+            );
+            return AdmissionDecision::Wait {
+                retry_after_ms: 10000,
+            };
         }
 
         // High priority work gets preference
         if priority >= 1 && work_class.cost_weight() <= 5 {
-            push_bounded(diagnostics, "High priority work approved for local execution".to_string(), MAX_DIAGNOSTIC_REASONS);
+            push_bounded(
+                diagnostics,
+                "High priority work approved for local execution".to_string(),
+                MAX_DIAGNOSTIC_REASONS,
+            );
             return AdmissionDecision::AllowLocal;
         }
 
@@ -411,7 +470,9 @@ impl WorkspacePressurePolicy {
         if work_class.cost_weight() <= 3 || (build_pressure < 0.5 && memory_pressure < 0.7) {
             AdmissionDecision::AllowLocal
         } else {
-            AdmissionDecision::Wait { retry_after_ms: 15000 }
+            AdmissionDecision::Wait {
+                retry_after_ms: 15000,
+            }
         }
     }
 
@@ -474,7 +535,10 @@ impl WorkspacePressurePolicy {
                 format!("{:?} work requires RCH offloading", work_class)
             }
             AdmissionDecision::Queue { retry_after_ms } => {
-                format!("{:?} work queued, retry after {}ms", work_class, retry_after_ms)
+                format!(
+                    "{:?} work queued, retry after {}ms",
+                    work_class, retry_after_ms
+                )
             }
             AdmissionDecision::Wait { retry_after_ms } => {
                 format!("{:?} work throttled, wait {}ms", work_class, retry_after_ms)
@@ -500,7 +564,8 @@ fn estimate_temp_artifacts_size() -> std::io::Result<u64> {
             if let Ok(entries) = std::fs::read_dir("/tmp") {
                 for entry in entries.flatten() {
                     if let Some(name) = entry.file_name().to_str() {
-                        if name.starts_with(&prefix[5..]) { // Remove "/tmp/" prefix
+                        if name.starts_with(&prefix[5..]) {
+                            // Remove "/tmp/" prefix
                             if let Ok(size) = calculate_directory_size_safe(&entry.path()) {
                                 total = total.saturating_add(size);
                             }
@@ -540,7 +605,8 @@ fn calculate_directory_size_safe<P: AsRef<Path>>(path: P) -> std::io::Result<u64
             }
 
             // Safety check: don't let single operations take too long
-            if *total > 100_000_000_000 { // 100GB limit
+            if *total > 100_000_000_000 {
+                // 100GB limit
                 break;
             }
         }
@@ -602,7 +668,7 @@ mod tests {
     fn test_admission_decision_critical_pressure() {
         let policy = WorkspacePressurePolicy::with_balanced_defaults();
         let inputs = WorkspacePressureInputs {
-            free_disk_bytes: 100_000_000, // Below threshold
+            free_disk_bytes: 100_000_000,     // Below threshold
             target_dir_bytes: 15_000_000_000, // Above threshold
             active_build_count: 8,
             rch_available_slots: None,
@@ -612,7 +678,10 @@ mod tests {
         };
 
         let decision = policy.decide_admission(WorkCostClass::Fuzzing, 1, &inputs);
-        assert!(matches!(decision.admission, AdmissionDecision::RefuseLocalFallback));
+        assert!(matches!(
+            decision.admission,
+            AdmissionDecision::RefuseLocalFallback
+        ));
         assert!(!decision.cleanup_candidates.is_empty());
     }
 
@@ -637,7 +706,7 @@ mod tests {
     fn test_cleanup_candidates_generation() {
         let policy = WorkspacePressurePolicy::with_balanced_defaults();
         let inputs = WorkspacePressureInputs {
-            free_disk_bytes: 200_000_000, // Low
+            free_disk_bytes: 200_000_000,     // Low
             target_dir_bytes: 20_000_000_000, // High
             active_build_count: 2,
             rch_available_slots: Some(2),
@@ -648,7 +717,11 @@ mod tests {
 
         let candidates = policy.propose_cleanup(&inputs);
         assert!(!candidates.is_empty());
-        assert!(candidates.iter().any(|c| c.path.to_string_lossy().contains("target")));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.path.to_string_lossy().contains("target"))
+        );
     }
 
     #[test]

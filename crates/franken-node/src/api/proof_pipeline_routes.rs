@@ -182,8 +182,10 @@ mod tests {
                 command_digest: None,
                 exit: None,
                 reason: None,
+                proof_coalescer: None,
                 proof_cache: None,
                 readiness_ref: None,
+                flight_recorder_ref: None,
                 observed_at: chrono::Utc::now(),
             }],
             rch_workers: vec![RchWorkerReadiness {

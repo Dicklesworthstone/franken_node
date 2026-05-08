@@ -3,7 +3,7 @@
 //! Provides durable audit trail for cleanup operations with retrieval and
 //! search capabilities for compliance and forensics.
 
-use crate::ops::cleanup_executor::{CleanupReceipt, CleanupMode, CleanupOutcome};
+use crate::ops::cleanup_executor::{CleanupMode, CleanupOutcome, CleanupReceipt};
 use crate::push_bounded;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -51,7 +51,7 @@ pub struct ReceiptMetadata {
     /// When cleanup completed.
     pub completed_at: DateTime<Utc>,
     /// Number of operations in the receipt.
-    pub operation_count: u32,
+    pub operation_count: usize,
     /// Total bytes freed by the cleanup.
     pub bytes_freed: u64,
     /// Overall success rate of operations.
@@ -128,7 +128,10 @@ impl CleanupReceiptsStorage {
 
         // Load existing index if available
         if let Err(err) = storage.load_index() {
-            eprintln!("Warning: Failed to load receipt index, creating new: {}", err);
+            eprintln!(
+                "Warning: Failed to load receipt index, creating new: {}",
+                err
+            );
             // Continue with empty index - will rebuild on save
         }
 
@@ -136,9 +139,13 @@ impl CleanupReceiptsStorage {
     }
 
     /// Store a cleanup receipt with audit trail.
-    pub fn store_receipt(&mut self, receipt: &CleanupReceipt) -> Result<PathBuf, CleanupReceiptsError> {
+    pub fn store_receipt(
+        &mut self,
+        receipt: &CleanupReceipt,
+    ) -> Result<PathBuf, CleanupReceiptsError> {
         // Generate file path based on timestamp and receipt ID
-        let filename = format!("{}_{}.json",
+        let filename = format!(
+            "{}_{}.json",
             receipt.initiated_at.format("%Y%m%d_%H%M%S"),
             sanitize_filename(&receipt.receipt_id)
         );
@@ -156,7 +163,7 @@ impl CleanupReceiptsStorage {
             bead_id: receipt.bead_id.clone(),
             initiated_at: receipt.initiated_at,
             completed_at: receipt.completed_at,
-            operation_count: receipt.operations.len() as u32,
+            operation_count: receipt.operations.len(),
             bytes_freed: receipt.bytes_freed,
             success_rate: receipt.summary.success_rate,
             file_path: file_path.clone(),
@@ -167,7 +174,9 @@ impl CleanupReceiptsStorage {
             self.trim_index_to_size(MAX_RECEIPT_INDEX_SIZE - 1);
         }
 
-        self.index.receipts.insert(receipt.receipt_id.clone(), metadata);
+        self.index
+            .receipts
+            .insert(receipt.receipt_id.clone(), metadata);
         self.index.last_updated = Utc::now();
 
         // Save updated index
@@ -178,13 +187,17 @@ impl CleanupReceiptsStorage {
 
     /// Retrieve a specific receipt by ID.
     pub fn get_receipt(&self, receipt_id: &str) -> Result<CleanupReceipt, CleanupReceiptsError> {
-        let metadata = self.index.receipts.get(receipt_id)
+        let metadata = self
+            .index
+            .receipts
+            .get(receipt_id)
             .ok_or_else(|| CleanupReceiptsError::ReceiptNotFound(receipt_id.to_string()))?;
 
         if !metadata.file_path.exists() {
-            return Err(CleanupReceiptsError::Corruption(
-                format!("Receipt file missing: {}", metadata.file_path.display())
-            ));
+            return Err(CleanupReceiptsError::Corruption(format!(
+                "Receipt file missing: {}",
+                metadata.file_path.display()
+            )));
         }
 
         let receipt_data = fs::read_to_string(&metadata.file_path)?;
@@ -238,7 +251,10 @@ impl CleanupReceiptsStorage {
 
     /// Delete a receipt and update index.
     pub fn delete_receipt(&mut self, receipt_id: &str) -> Result<(), CleanupReceiptsError> {
-        let metadata = self.index.receipts.remove(receipt_id)
+        let metadata = self
+            .index
+            .receipts
+            .remove(receipt_id)
             .ok_or_else(|| CleanupReceiptsError::ReceiptNotFound(receipt_id.to_string()))?;
 
         if metadata.file_path.exists() {
@@ -254,20 +270,24 @@ impl CleanupReceiptsStorage {
     /// Get storage statistics.
     pub fn get_statistics(&self) -> ReceiptStorageStatistics {
         let total_receipts = self.index.receipts.len();
-        let total_bytes_freed: u64 = self.index.receipts.values()
-            .map(|m| m.bytes_freed)
-            .sum();
+        let total_bytes_freed: u64 = self.index.receipts.values().map(|m| m.bytes_freed).sum();
 
-        let execute_receipts = self.index.receipts.values()
+        let execute_receipts = self
+            .index
+            .receipts
+            .values()
             .filter(|m| m.mode == CleanupMode::Execute)
             .count();
 
         let dry_run_receipts = total_receipts - execute_receipts;
 
         let avg_success_rate = if total_receipts > 0 {
-            self.index.receipts.values()
+            self.index
+                .receipts
+                .values()
                 .map(|m| m.success_rate)
-                .sum::<f32>() / total_receipts as f32
+                .sum::<f32>()
+                / total_receipts as f32
         } else {
             0.0
         };
@@ -278,12 +298,8 @@ impl CleanupReceiptsStorage {
             dry_run_receipts,
             total_bytes_freed,
             avg_success_rate,
-            oldest_receipt: self.index.receipts.values()
-                .map(|m| m.initiated_at)
-                .min(),
-            newest_receipt: self.index.receipts.values()
-                .map(|m| m.initiated_at)
-                .max(),
+            oldest_receipt: self.index.receipts.values().map(|m| m.initiated_at).min(),
+            newest_receipt: self.index.receipts.values().map(|m| m.initiated_at).max(),
         }
     }
 
@@ -381,8 +397,13 @@ impl CleanupReceiptsStorage {
 
         // Remove oldest entries
         let to_remove = entries.len() - target_size;
-        for (receipt_id, _) in entries.iter().take(to_remove) {
-            self.index.receipts.remove(*receipt_id);
+        let receipt_ids = entries
+            .iter()
+            .take(to_remove)
+            .map(|(receipt_id, _)| (*receipt_id).clone())
+            .collect::<Vec<_>>();
+        for receipt_id in receipt_ids {
+            self.index.receipts.remove(&receipt_id);
         }
     }
 }
@@ -424,14 +445,29 @@ pub fn generate_cleanup_audit_report(storage: &CleanupReceiptsStorage) -> String
     // Overall statistics
     report.push_str("## Summary Statistics\n");
     report.push_str(&format!("- Total Receipts: {}\n", stats.total_receipts));
-    report.push_str(&format!("- Execute Operations: {}\n", stats.execute_receipts));
-    report.push_str(&format!("- Dry-Run Operations: {}\n", stats.dry_run_receipts));
-    report.push_str(&format!("- Total Bytes Freed: {}\n", format_bytes(stats.total_bytes_freed)));
-    report.push_str(&format!("- Average Success Rate: {:.1}%\n", stats.avg_success_rate * 100.0));
+    report.push_str(&format!(
+        "- Execute Operations: {}\n",
+        stats.execute_receipts
+    ));
+    report.push_str(&format!(
+        "- Dry-Run Operations: {}\n",
+        stats.dry_run_receipts
+    ));
+    report.push_str(&format!(
+        "- Total Bytes Freed: {}\n",
+        format_bytes(stats.total_bytes_freed)
+    ));
+    report.push_str(&format!(
+        "- Average Success Rate: {:.1}%\n",
+        stats.avg_success_rate * 100.0
+    ));
 
     if let (Some(oldest), Some(newest)) = (stats.oldest_receipt, stats.newest_receipt) {
-        report.push_str(&format!("- Date Range: {} to {}\n",
-            oldest.format("%Y-%m-%d"), newest.format("%Y-%m-%d")));
+        report.push_str(&format!(
+            "- Date Range: {} to {}\n",
+            oldest.format("%Y-%m-%d"),
+            newest.format("%Y-%m-%d")
+        ));
     }
 
     report.push_str("\n## Recent Activity\n");
@@ -517,8 +553,8 @@ mod tests {
     #[test]
     fn test_store_and_retrieve_receipt() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let mut storage = CleanupReceiptsStorage::with_directory(temp_dir.path().to_path_buf())
-            .expect("storage");
+        let mut storage =
+            CleanupReceiptsStorage::with_directory(temp_dir.path().to_path_buf()).expect("storage");
 
         let receipt = create_test_receipt("test_001", "test_actor", CleanupMode::Execute);
 
@@ -536,8 +572,8 @@ mod tests {
     #[test]
     fn test_search_receipts() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let mut storage = CleanupReceiptsStorage::with_directory(temp_dir.path().to_path_buf())
-            .expect("storage");
+        let mut storage =
+            CleanupReceiptsStorage::with_directory(temp_dir.path().to_path_buf()).expect("storage");
 
         // Store multiple receipts
         let receipt1 = create_test_receipt("test_001", "actor_a", CleanupMode::Execute);
@@ -569,8 +605,8 @@ mod tests {
     #[test]
     fn test_receipt_deletion() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let mut storage = CleanupReceiptsStorage::with_directory(temp_dir.path().to_path_buf())
-            .expect("storage");
+        let mut storage =
+            CleanupReceiptsStorage::with_directory(temp_dir.path().to_path_buf()).expect("storage");
 
         let receipt = create_test_receipt("test_delete", "test_actor", CleanupMode::Execute);
         storage.store_receipt(&receipt).expect("store receipt");
@@ -579,7 +615,9 @@ mod tests {
         assert!(storage.get_receipt("test_delete").is_ok());
 
         // Delete receipt
-        storage.delete_receipt("test_delete").expect("delete receipt");
+        storage
+            .delete_receipt("test_delete")
+            .expect("delete receipt");
 
         // Verify receipt is gone
         assert!(storage.get_receipt("test_delete").is_err());
@@ -588,8 +626,8 @@ mod tests {
     #[test]
     fn test_storage_statistics() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let mut storage = CleanupReceiptsStorage::with_directory(temp_dir.path().to_path_buf())
-            .expect("storage");
+        let mut storage =
+            CleanupReceiptsStorage::with_directory(temp_dir.path().to_path_buf()).expect("storage");
 
         let receipt1 = create_test_receipt("test_001", "actor_a", CleanupMode::Execute);
         let receipt2 = create_test_receipt("test_002", "actor_b", CleanupMode::DryRun);
@@ -607,15 +645,18 @@ mod tests {
     #[test]
     fn test_filename_sanitization() {
         assert_eq!(sanitize_filename("test_123"), "test_123");
-        assert_eq!(sanitize_filename("test/with\\special:chars"), "testwithspecialchars");
+        assert_eq!(
+            sanitize_filename("test/with\\special:chars"),
+            "testwithspecialchars"
+        );
         assert_eq!(sanitize_filename("test-receipt_001"), "test-receipt_001");
     }
 
     #[test]
     fn test_audit_report_generation() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let mut storage = CleanupReceiptsStorage::with_directory(temp_dir.path().to_path_buf())
-            .expect("storage");
+        let mut storage =
+            CleanupReceiptsStorage::with_directory(temp_dir.path().to_path_buf()).expect("storage");
 
         let receipt = create_test_receipt("test_report", "test_actor", CleanupMode::Execute);
         storage.store_receipt(&receipt).expect("store receipt");
