@@ -373,7 +373,7 @@ impl MigrationValidationCohorts {
         let content_hash = {
             let mut h = Sha256::new();
             h.update(b"migration_validation_hash_v1:");
-            h.update((self.schema_version.len() as u64).to_le_bytes());
+            h.update((u64::try_from(self.schema_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
             h.update(self.schema_version.as_bytes());
             h.update((total_cohorts as u64).to_le_bytes());
             h.update((total_runs as u64).to_le_bytes());
@@ -383,14 +383,14 @@ impl MigrationValidationCohorts {
                 h.update(f64::NAN.to_le_bytes());
             }
             h.update([u8::from(meets)]);
-            h.update((flagged.len() as u64).to_le_bytes());
+            h.update((u64::try_from(flagged.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for cid in &flagged {
-                h.update((cid.len() as u64).to_le_bytes());
+                h.update((u64::try_from(cid.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(cid.as_bytes());
             }
-            h.update((coverage.len() as u64).to_le_bytes());
+            h.update((u64::try_from(coverage.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for (cat, count) in &coverage {
-                h.update((cat.len() as u64).to_le_bytes());
+                h.update((u64::try_from(cat.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 h.update(cat.as_bytes());
                 h.update((*count as u64).to_le_bytes());
             }

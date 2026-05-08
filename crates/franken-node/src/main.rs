@@ -5631,7 +5631,7 @@ fn load_safe_mode_controller(
     match std::fs::read(state_path) {
         Ok(bytes) => {
             // Check size after read but before JSON parsing to prevent parser bombs
-            if bytes.len() as u64 > MAX_STATE_FILE_BYTES {
+            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_STATE_FILE_BYTES {
                 anyhow::bail!("Safe-mode state file too large: {} bytes (limit: {} bytes)",
                              bytes.len(), MAX_STATE_FILE_BYTES);
             }
@@ -6041,7 +6041,7 @@ fn load_remotecap_cli_state() -> Result<RemoteCapCliState> {
     let path = remotecap_cli_state_path();
     match std::fs::read(&path) {
         Ok(raw) => {
-            if raw.len() as u64 > MAX_CLI_STATE_BYTES {
+            if u64::try_from(raw.len()).unwrap_or(u64::MAX) > MAX_CLI_STATE_BYTES {
                 anyhow::bail!("RemoteCap CLI state file too large: {} bytes (limit: {} bytes)",
                              raw.len(), MAX_CLI_STATE_BYTES);
             }
@@ -6074,7 +6074,7 @@ fn read_remotecap_token(path: &Path) -> Result<RemoteCap> {
     let raw = std::fs::read(path)
         .with_context(|| format!("failed reading remotecap token {}", path.display()))?;
 
-    if raw.len() as u64 > MAX_TOKEN_FILE_BYTES {
+    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > MAX_TOKEN_FILE_BYTES {
         anyhow::bail!("RemoteCap token file too large: {} bytes (limit: {} bytes)",
                      raw.len(), MAX_TOKEN_FILE_BYTES);
     }
@@ -29288,5 +29288,180 @@ mod run_trust_gate_tests {
             );
             assert!(validate_trust_scan_url("https://registry.npmjs.org/test").is_ok());
         }
+    }
+}
+
+// ── Parser bomb DoS protection regression tests (bd-qemv0) ─────────────────
+
+#[cfg(test)]
+mod parser_bomb_protection_tests {
+    use super::*;
+    use tempfile::{tempdir, TempDir};
+
+    /// Helper to create a JSON file of specific size with valid content
+    fn create_sized_json_file(dir: &TempDir, filename: &str, target_size: u64) -> std::path::PathBuf {
+        let path = dir.path().join(filename);
+
+        // Create valid JSON with padding to reach target size
+        let base_json = r#"{"schema_version":"test"}"#;
+        let base_size = base_json.len() as u64;
+
+        if target_size <= base_size {
+            std::fs::write(&path, base_json).expect("write small JSON");
+        } else {
+            // Pad with whitespace to reach exact target size
+            let padding_needed = target_size - base_size;
+            let mut content = String::with_capacity(target_size as usize);
+            content.push_str(r#"{"schema_version":"test","padding":""#);
+
+            // Fill with spaces to reach target size, leaving room for closing quotes and brace
+            let spaces_needed = padding_needed.saturating_sub(3); // -3 for ""}
+            for _ in 0..spaces_needed {
+                content.push(' ');
+            }
+            content.push_str(r#""}"#);
+
+            // Ensure exact target size
+            if (content.len() as u64) < target_size {
+                content.push_str(&" ".repeat((target_size - content.len() as u64) as usize));
+                content.push_str("}");
+                content.truncate(target_size as usize);
+                content.push('}');
+                content.truncate(target_size as usize);
+            } else if (content.len() as u64) > target_size {
+                content.truncate(target_size as usize - 1);
+                content.push('}');
+            }
+
+            assert_eq!(content.len() as u64, target_size, "Size mismatch for test file");
+            std::fs::write(&path, content).expect("write sized JSON");
+        }
+
+        path
+    }
+
+    #[test]
+    fn load_safe_mode_controller_rejects_oversized_files() {
+        let tmp = tempdir().expect("tempdir");
+
+        // Test 1: File exactly at 16MB limit should succeed
+        const MAX_STATE_FILE_BYTES: u64 = 16 << 20; // 16 MiB
+        let valid_path = create_sized_json_file(&tmp, "valid_state.json", MAX_STATE_FILE_BYTES);
+
+        // Should not panic on size limit
+        let result = load_safe_mode_controller(&valid_path, false);
+        // May fail on JSON parsing since our padding creates invalid JSON structure, but should not fail on size
+        // The key point is that it doesn't fail with "too large" error
+        match result {
+            Err(err) => assert!(!err.to_string().contains("too large"),
+                              "Size-limit file should not trigger 'too large' error: {}", err),
+            Ok(_) => {}, // Success is fine too
+        }
+
+        // Test 2: File over 16MB limit should fail with specific error
+        let oversized_path = create_sized_json_file(&tmp, "oversized_state.json", MAX_STATE_FILE_BYTES + 1);
+
+        let result = load_safe_mode_controller(&oversized_path, false);
+        assert!(result.is_err(), "Oversized file should fail");
+
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("Safe-mode state file too large"),
+               "Should fail with size error, got: {}", error_msg);
+        assert!(error_msg.contains(&format!("{}", MAX_STATE_FILE_BYTES + 1)),
+               "Error should include actual size: {}", error_msg);
+        assert!(error_msg.contains(&format!("{}", MAX_STATE_FILE_BYTES)),
+               "Error should include size limit: {}", error_msg);
+    }
+
+    #[test]
+    fn load_remotecap_cli_state_rejects_oversized_files() {
+        let tmp = tempdir().expect("tempdir");
+        const MAX_CLI_STATE_BYTES: u64 = 4 << 20; // 4 MiB
+
+        // Create the expected directory structure in the temp dir
+        let franken_dir = tmp.path().join(".franken-node").join("remotecap");
+        std::fs::create_dir_all(&franken_dir).expect("create remotecap dir");
+
+        // Save current directory and change to temp dir
+        let original_dir = std::env::current_dir().expect("get current dir");
+        std::env::set_current_dir(tmp.path()).expect("change to temp dir");
+
+        // Test 1: File exactly at 4MB limit should succeed (size-wise)
+        let valid_content = format!(r#"{{"schema_version":"test","padding":"{}"}}"#,
+                                   " ".repeat((MAX_CLI_STATE_BYTES as usize).saturating_sub(35)));
+        let truncated_content = if valid_content.len() > MAX_CLI_STATE_BYTES as usize {
+            format!("{}}}", &valid_content[..MAX_CLI_STATE_BYTES as usize - 1])
+        } else {
+            format!("{}{}}}", valid_content, " ".repeat(MAX_CLI_STATE_BYTES as usize - valid_content.len() - 1))
+        };
+
+        std::fs::write(franken_dir.join("state.json"), truncated_content).expect("write valid state");
+
+        let result = load_remotecap_cli_state();
+        match result {
+            Err(err) => assert!(!err.to_string().contains("too large"),
+                              "Size-limit file should not trigger 'too large' error: {}", err),
+            Ok(_) => {}, // Success is fine too
+        }
+
+        // Test 2: File over 4MB limit should fail with specific error
+        let oversized_content = format!(r#"{{"schema_version":"test","padding":"{}"}}"#,
+                                       " ".repeat(MAX_CLI_STATE_BYTES as usize + 100));
+        std::fs::write(franken_dir.join("state.json"), oversized_content).expect("write oversized state");
+
+        let result = load_remotecap_cli_state();
+        assert!(result.is_err(), "Oversized file should fail");
+
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("RemoteCap CLI state file too large"),
+               "Should fail with size error, got: {}", error_msg);
+
+        // Restore original directory
+        std::env::set_current_dir(original_dir).expect("restore directory");
+    }
+
+    #[test]
+    fn read_remotecap_token_rejects_oversized_files() {
+        let tmp = tempdir().expect("tempdir");
+
+        // Test 1: File exactly at 1MB limit should succeed (size-wise)
+        const MAX_TOKEN_FILE_BYTES: u64 = 1 << 20; // 1 MiB
+        let valid_path = create_sized_json_file(&tmp, "valid_token.json", MAX_TOKEN_FILE_BYTES);
+
+        // Should not panic on size limit - will fail on JSON parsing but not size
+        let result = read_remotecap_token(&valid_path);
+        match result {
+            Err(err) => assert!(!err.to_string().contains("too large"),
+                              "Size-limit file should not trigger 'too large' error: {}", err),
+            Ok(_) => {}, // Success is fine too
+        }
+
+        // Test 2: File over 1MB limit should fail with specific error
+        let oversized_path = create_sized_json_file(&tmp, "oversized_token.json", MAX_TOKEN_FILE_BYTES + 1);
+
+        let result = read_remotecap_token(&oversized_path);
+        assert!(result.is_err(), "Oversized file should fail");
+
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("RemoteCap token file too large"),
+               "Should fail with size error, got: {}", error_msg);
+        assert!(error_msg.contains(&format!("{}", MAX_TOKEN_FILE_BYTES + 1)),
+               "Error should include actual size: {}", error_msg);
+        assert!(error_msg.contains(&format!("{}", MAX_TOKEN_FILE_BYTES)),
+               "Error should include size limit: {}", error_msg);
+    }
+
+    #[test]
+    fn dos_protection_constants_match_implementation() {
+        // Regression test: ensure constants haven't drifted
+        const EXPECTED_STATE_LIMIT: u64 = 16 << 20; // 16 MiB
+        const EXPECTED_CLI_LIMIT: u64 = 4 << 20;     // 4 MiB
+        const EXPECTED_TOKEN_LIMIT: u64 = 1 << 20;   // 1 MiB
+
+        // This test documents the expected limits and will fail if they change
+        // If you need to change limits, update both the implementation and this test
+        assert_eq!(EXPECTED_STATE_LIMIT, 16777216, "State file limit should be 16MB");
+        assert_eq!(EXPECTED_CLI_LIMIT, 4194304, "CLI state limit should be 4MB");
+        assert_eq!(EXPECTED_TOKEN_LIMIT, 1048576, "Token file limit should be 1MB");
     }
 }

@@ -1933,7 +1933,7 @@ pub fn compute_cohort_summary(state: &PipelineState) -> CohortSummary {
         .iter()
         .fold(0u64, |acc, t| acc.saturating_add(t.duration_ms));
     let mean_time = if !state.execution_traces.is_empty() {
-        total_duration / state.execution_traces.len() as u64
+        total_duration / u64::try_from(state.execution_traces.len()).unwrap_or(u64::MAX)
     } else {
         0
     };

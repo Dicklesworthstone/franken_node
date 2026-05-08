@@ -630,9 +630,9 @@ fn elapsed_millis(start: Instant, elapsed_override_ms: Option<u64>) -> u64 {
 fn hash_witnesses(proof_hashes: &[String]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"durable_claim_merkle_v1:");
-    hasher.update((proof_hashes.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(proof_hashes.len()).unwrap_or(u64::MAX)).to_le_bytes());
     for proof_hash in proof_hashes {
-        hasher.update((proof_hash.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(proof_hash.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(proof_hash.as_bytes());
     }
     hex::encode(hasher.finalize())

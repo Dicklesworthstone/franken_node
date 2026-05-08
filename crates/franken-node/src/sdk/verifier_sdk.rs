@@ -264,7 +264,7 @@ fn deterministic_hash_iter<'a>(fields: impl IntoIterator<Item = &'a str>) -> Str
     let mut hasher = Sha256::new();
     hasher.update(b"verifier_sdk_v1:");
     for field in fields {
-        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(field.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(field.as_bytes());
     }
     hex::encode(hasher.finalize())

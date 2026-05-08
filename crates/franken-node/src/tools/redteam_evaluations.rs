@@ -547,16 +547,16 @@ fn compute_catalog_content_hash(
     hasher.update((total_engagements as u64).to_le_bytes());
     hasher.update((total_findings as u64).to_le_bytes());
 
-    hasher.update((schema_version.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(schema_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(schema_version.as_bytes());
 
     // Serialize maps deterministically with length prefixes
     let by_type_json = serde_json::to_string(by_type).unwrap_or_default();
-    hasher.update((by_type_json.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(by_type_json.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(by_type_json.as_bytes());
 
     let by_severity_json = serde_json::to_string(by_severity).unwrap_or_default();
-    hasher.update((by_severity_json.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(by_severity_json.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(by_severity_json.as_bytes());
 
     hex::encode(hasher.finalize())

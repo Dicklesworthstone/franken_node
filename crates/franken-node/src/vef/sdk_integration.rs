@@ -282,7 +282,7 @@ impl std::error::Error for VsiError {}
 fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"vef_sdk_hash_v1:");
-    hasher.update((data.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(data.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(data);
     let digest = hasher.finalize();
     format!("sha256:{}", hex::encode(digest))

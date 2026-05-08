@@ -313,17 +313,17 @@ pub fn fork_log_entry(
 
     let mut hasher = sha2::Sha256::new();
     sha2::Digest::update(&mut hasher, b"lease_conflict_resolution_v1:");
-    sha2::Digest::update(&mut hasher, (lease_lo.len() as u64).to_le_bytes());
+    sha2::Digest::update(&mut hasher, (u64::try_from(lease_lo.len()).unwrap_or(u64::MAX)).to_le_bytes());
     sha2::Digest::update(&mut hasher, lease_lo.as_bytes());
-    sha2::Digest::update(&mut hasher, (lease_hi.len() as u64).to_le_bytes());
+    sha2::Digest::update(&mut hasher, (u64::try_from(lease_hi.len()).unwrap_or(u64::MAX)).to_le_bytes());
     sha2::Digest::update(&mut hasher, lease_hi.as_bytes());
-    sha2::Digest::update(&mut hasher, (conflict.resource.len() as u64).to_le_bytes());
+    sha2::Digest::update(&mut hasher, (u64::try_from(conflict.resource.len()).unwrap_or(u64::MAX)).to_le_bytes());
     sha2::Digest::update(&mut hasher, conflict.resource.as_bytes());
     sha2::Digest::update(&mut hasher, conflict.overlap_start.to_le_bytes());
     sha2::Digest::update(&mut hasher, conflict.overlap_end.to_le_bytes());
-    sha2::Digest::update(&mut hasher, (trace_id.len() as u64).to_le_bytes());
+    sha2::Digest::update(&mut hasher, (u64::try_from(trace_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
     sha2::Digest::update(&mut hasher, trace_id.as_bytes());
-    sha2::Digest::update(&mut hasher, (action_id.len() as u64).to_le_bytes());
+    sha2::Digest::update(&mut hasher, (u64::try_from(action_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
     sha2::Digest::update(&mut hasher, action_id.as_bytes());
     let hash_hex = hex::encode(sha2::Digest::finalize(hasher));
     let entry_id = format!("fork-{}", &hash_hex[..16]);

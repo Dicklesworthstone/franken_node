@@ -1722,7 +1722,7 @@ mod tests {
 
         // Test summary calculations with extreme values
         let summary = extreme_gate.summary();
-        assert!(summary.total_decisions <= extreme_depths.len() as u64);
+        assert!(summary.total_decisions <= u64::try_from(extreme_depths.len()).unwrap_or(u64::MAX));
         assert!(summary.avg_chain_depth.is_finite()); // Should not overflow to NaN/Inf
         assert!(summary.replay_success_rate_pct >= 0.0 && summary.replay_success_rate_pct <= 100.0);
 

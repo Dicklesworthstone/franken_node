@@ -457,11 +457,11 @@ fn compute_catalog_content_hash(
     h.update((published_claims as u64).to_le_bytes());
     h.update((pending_claims as u64).to_le_bytes());
     for (category, count) in claims_by_category {
-        h.update((category.len() as u64).to_le_bytes());
+        h.update((u64::try_from(category.len()).unwrap_or(u64::MAX)).to_le_bytes());
         h.update(category.as_bytes());
         h.update((*count as u64).to_le_bytes());
     }
-    h.update((schema_version.len() as u64).to_le_bytes());
+    h.update((u64::try_from(schema_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
     h.update(schema_version.as_bytes());
     hex::encode(h.finalize())
 }

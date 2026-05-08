@@ -440,11 +440,11 @@ fn compute_metrics_content_hash(
     h.update((published_releases as u64).to_le_bytes());
     h.update(total_downloads.to_le_bytes());
     for (release_type, downloads) in downloads_by_type {
-        h.update((release_type.len() as u64).to_le_bytes());
+        h.update((u64::try_from(release_type.len()).unwrap_or(u64::MAX)).to_le_bytes());
         h.update(release_type.as_bytes());
         h.update(downloads.to_le_bytes());
     }
-    h.update((schema_version.len() as u64).to_le_bytes());
+    h.update((u64::try_from(schema_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
     h.update(schema_version.as_bytes());
     hex::encode(h.finalize())
 }

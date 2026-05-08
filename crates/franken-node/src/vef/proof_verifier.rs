@@ -874,7 +874,7 @@ fn compute_report_digest(
     })?;
     let mut hasher = Sha256::new();
     hasher.update(b"proof_verifier_hash_v1:");
-    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(bytes.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(&bytes);
     let digest = hasher.finalize();
     Ok(format!("sha256:{}", hex::encode(digest)))

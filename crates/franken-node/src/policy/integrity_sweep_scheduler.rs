@@ -1427,9 +1427,9 @@ mod tests {
 
         let mut proper_hasher = Sha256::new();
         proper_hasher.update(b"integrity_sweep_v1:");
-        proper_hasher.update((field1.len() as u64).to_le_bytes()); // Length prefix
+        proper_hasher.update((u64::try_from(field1.len()).unwrap_or(u64::MAX)).to_le_bytes()); // Length prefix
         proper_hasher.update(field1.as_bytes());
-        proper_hasher.update((field2.len() as u64).to_le_bytes()); // Length prefix
+        proper_hasher.update((u64::try_from(field2.len()).unwrap_or(u64::MAX)).to_le_bytes()); // Length prefix
         proper_hasher.update(field2.as_bytes());
         let proper_hash = proper_hasher.finalize();
 

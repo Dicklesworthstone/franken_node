@@ -676,7 +676,7 @@ fn compute_audit_hash(entry: &RegistryAuditEntry) -> String {
         &entry.event_type,
         &entry.detail,
     ] {
-        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(field.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(field.as_bytes());
     }
     format!("sha256:{}", hex::encode(hasher.finalize()))

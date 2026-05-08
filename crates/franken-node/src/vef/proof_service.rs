@@ -65,7 +65,7 @@ fn sha256_json<T: Serialize>(value: &T) -> Result<String, ProofServiceError> {
     // Hash collision prevention: domain separator + length-prefixed fields
     let mut hasher = Sha256::new();
     hasher.update(b"proof_service_hash_v1:");
-    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(bytes.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(&bytes);
     let digest = hasher.finalize();
 

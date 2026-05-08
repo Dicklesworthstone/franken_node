@@ -22,7 +22,7 @@ fn to_pct(value: f64) -> f64 {
 }
 
 fn push_length_prefixed_str(hasher: &mut Sha256, value: &str) {
-    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(value.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(value.as_bytes());
 }
 
@@ -195,11 +195,11 @@ impl VefMetrics {
         hasher.update((self.gap_count as u64).to_le_bytes());
         hasher.update(self.avg_proof_age_secs.to_le_bytes());
         hasher.update(degraded_time_frac.to_le_bytes());
-        hasher.update((self.covered_classes.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(self.covered_classes.len()).unwrap_or(u64::MAX)).to_le_bytes());
         for class in &self.covered_classes {
             push_length_prefixed_str(&mut hasher, class);
         }
-        hasher.update((self.gap_classes.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(self.gap_classes.len()).unwrap_or(u64::MAX)).to_le_bytes());
         for class in &self.gap_classes {
             push_length_prefixed_str(&mut hasher, class);
         }
@@ -264,7 +264,7 @@ impl ScoreboardEntry {
         let mut hasher = Sha256::new();
         hasher.update(b"vef_scoreboard_v1:");
         hasher.update(metrics.digest());
-        hasher.update((evidence_links.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(evidence_links.len()).unwrap_or(u64::MAX)).to_le_bytes());
         for link in evidence_links {
             push_length_prefixed_str(&mut hasher, &link.proof_id);
             push_length_prefixed_str(&mut hasher, &link.action_class);

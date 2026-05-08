@@ -228,10 +228,10 @@ impl RollbackProof {
         let mut hasher = Sha256::new();
         hasher.update(b"rollback_proof_content_v1:");
         hasher.update(self.pre_state_hash);
-        hasher.update((self.action_spec.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(self.action_spec.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(self.action_spec.as_bytes());
         hasher.update(self.post_state_hash);
-        hasher.update((self.rollback_spec.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(self.rollback_spec.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(self.rollback_spec.as_bytes());
         hasher.finalize().into()
     }
@@ -492,7 +492,7 @@ impl RecommendationEngine {
     fn recommendation_id(action_key: &str, timestamp: u64, context_fp: [u8; 32]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"operator_intelligence_recommendation_id_v1:");
-        hasher.update((action_key.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(action_key.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(action_key.as_bytes());
         hasher.update(timestamp.to_le_bytes());
         hasher.update(context_fp);

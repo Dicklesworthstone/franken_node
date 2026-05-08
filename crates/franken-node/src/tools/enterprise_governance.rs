@@ -51,14 +51,14 @@ fn compute_report_content_hash(
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"enterprise_governance_hash_v1:");
-    hasher.update((schema_version.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(schema_version.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(schema_version.as_bytes());
     hasher.update((total_rules as u64).to_le_bytes());
     hasher.update((total_assessments as u64).to_le_bytes());
-    hasher.update((categories.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(categories.len()).unwrap_or(u64::MAX)).to_le_bytes());
     for category in categories {
         let category_label = category.category.label();
-        hasher.update((category_label.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(category_label.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(category_label.as_bytes());
         hasher.update((category.total_rules as u64).to_le_bytes());
         hasher.update((category.compliant as u64).to_le_bytes());
@@ -68,11 +68,11 @@ fn compute_report_content_hash(
         hash_f64(&mut hasher, category.compliance_rate);
     }
     let gate_label = format!("{gate_action:?}");
-    hasher.update((gate_label.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(gate_label.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(gate_label.as_bytes());
-    hasher.update((blocked_rules.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(blocked_rules.len()).unwrap_or(u64::MAX)).to_le_bytes());
     for rule_id in blocked_rules {
-        hasher.update((rule_id.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(rule_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(rule_id.as_bytes());
     }
     hex::encode(hasher.finalize())

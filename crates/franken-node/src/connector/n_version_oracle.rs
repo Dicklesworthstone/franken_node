@@ -206,7 +206,7 @@ pub struct BoundarySample {
 fn digest_bytes(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(b"n_version_oracle_v1:");
-    h.update((data.len() as u64).to_le_bytes());
+    h.update((u64::try_from(data.len()).unwrap_or(u64::MAX)).to_le_bytes());
     h.update(data);
     hex::encode(h.finalize())
 }

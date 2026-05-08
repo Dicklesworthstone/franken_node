@@ -75,7 +75,7 @@ fn deterministic_digest(domain: &[u8], fields: &[&str]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(domain);
     for field in fields {
-        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(field.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(field.as_bytes());
     }
 
@@ -739,9 +739,9 @@ impl VerifierToolkit {
     fn step_hash(&self, claim_id: &str, step: &str, passed: bool) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"verifier_toolkit_hash_v1:");
-        hasher.update((claim_id.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(claim_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(claim_id.as_bytes());
-        hasher.update((step.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(step.len()).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(step.as_bytes());
         hasher.update([u8::from(passed)]);
         hex::encode(hasher.finalize())
