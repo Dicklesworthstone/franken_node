@@ -1448,7 +1448,7 @@ impl EngineDispatcher {
             }
 
             // Check for timeout
-            if start_time.elapsed() > timeout {
+            if start_time.elapsed() >= timeout {
                 // Thread may still be running, but we'll return timeout error
                 let dispatch_error = EngineDispatchError::EngineTimeout {
                     app_path: app_path_buf,
