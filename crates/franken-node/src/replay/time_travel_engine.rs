@@ -2687,7 +2687,7 @@ mod tests {
                 input,
                 output,
                 side_effects,
-                1000000 + u64::try_from(i).unwrap_or(u64::MAX),
+                1000000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
             ) {
                 Ok(()) => {
                     successful_steps = successful_steps.saturating_add(1);
