@@ -6,6 +6,7 @@
 //! and classifies worker/toolchain/timeout problems separately from compile and
 //! test failures.
 
+use crate::ops::validation_broker::{FlightRecorderAdapterOutcome, FlightRecorderAdapterOutcomeClass, RchMode, TimeoutClass};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -224,6 +225,184 @@ impl RchAdapterOutcome {
         self.outcome.is_success()
             && self.execution_mode == RchExecutionMode::Remote
             && !self.product_failure
+    }
+
+    /// Convert RCH adapter outcome to flight recorder adapter outcome for replayable attempt records.
+    #[must_use]
+    pub fn to_flight_recorder_adapter_outcome(&self) -> FlightRecorderAdapterOutcome {
+        FlightRecorderAdapterOutcome {
+            outcome: self.map_outcome_class(),
+            execution_mode: self.map_execution_mode(),
+            worker_id: self.worker_id.clone(),
+            timeout_class: self.map_timeout_class(),
+            exit_code: self.exit_code,
+            retryable: self.retryable,
+            product_failure: self.product_failure,
+            reason_code: self.reason_code.clone(),
+            detail: self.detail.clone(),
+        }
+    }
+
+    fn map_outcome_class(&self) -> FlightRecorderAdapterOutcomeClass {
+        match self.outcome {
+            RchOutcomeClass::Passed => FlightRecorderAdapterOutcomeClass::Passed,
+            RchOutcomeClass::CommandFailed => FlightRecorderAdapterOutcomeClass::CommandFailed,
+            RchOutcomeClass::CompileFailed => FlightRecorderAdapterOutcomeClass::CompileFailed,
+            RchOutcomeClass::TestFailed => FlightRecorderAdapterOutcomeClass::TestFailed,
+            RchOutcomeClass::WorkerTimeout => FlightRecorderAdapterOutcomeClass::WorkerTimeout,
+            RchOutcomeClass::WorkerMissingToolchain => FlightRecorderAdapterOutcomeClass::WorkerMissingToolchain,
+            RchOutcomeClass::WorkerFilesystemError => FlightRecorderAdapterOutcomeClass::WorkerFilesystemError,
+            RchOutcomeClass::LocalFallbackRefused => FlightRecorderAdapterOutcomeClass::LocalFallbackRefused,
+            RchOutcomeClass::ContentionDeferred => FlightRecorderAdapterOutcomeClass::ContentionDeferred,
+            RchOutcomeClass::BrokerInternalError => FlightRecorderAdapterOutcomeClass::BrokerInternalError,
+        }
+    }
+
+    fn map_execution_mode(&self) -> RchMode {
+        match self.execution_mode {
+            RchExecutionMode::Remote => RchMode::Remote,
+            RchExecutionMode::LocalFallback => RchMode::LocalFallback,
+            RchExecutionMode::Unavailable => RchMode::Unavailable,
+            RchExecutionMode::Unknown => RchMode::Unavailable, // Map Unknown to Unavailable as closest match
+        }
+    }
+
+    fn map_timeout_class(&self) -> TimeoutClass {
+        match self.timeout_class {
+            RchTimeoutClass::None => TimeoutClass::None,
+            RchTimeoutClass::SshCommand => TimeoutClass::SshCommand,
+            RchTimeoutClass::CargoTestTimeout => TimeoutClass::CargoTestTimeout,
+            RchTimeoutClass::ProcessIdle => TimeoutClass::ProcessIdle,
+            RchTimeoutClass::ProcessWall => TimeoutClass::ProcessWall,
+            RchTimeoutClass::WorkerUnreachable => TimeoutClass::WorkerUnreachable,
+            RchTimeoutClass::Unknown => TimeoutClass::Unknown,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::validation_broker::{FlightRecorderAdapterOutcomeClass, RchMode, TimeoutClass};
+
+    #[test]
+    fn test_rch_adapter_outcome_to_flight_recorder_mapping() {
+        let rch_outcome = RchAdapterOutcome {
+            schema_version: "test/v1".to_string(),
+            command_digest: "deadbeef".to_string(),
+            action: Some(RchValidationAction::Check),
+            package: Some("frankenengine-node".to_string()),
+            outcome: RchOutcomeClass::Passed,
+            execution_mode: RchExecutionMode::Remote,
+            worker_id: Some("worker-123".to_string()),
+            timeout_class: RchTimeoutClass::None,
+            exit_code: Some(0),
+            retryable: false,
+            product_failure: false,
+            reason_code: "RCH-S000".to_string(),
+            detail: "successful validation".to_string(),
+            stdout_digest: RchArtifactDigest {
+                algorithm: "sha256".to_string(),
+                hex: "abcd1234".to_string(),
+                snippet: "success output".to_string(),
+            },
+            stderr_digest: RchArtifactDigest {
+                algorithm: "sha256".to_string(),
+                hex: "efgh5678".to_string(),
+                snippet: "".to_string(),
+            },
+            duration_ms: 12345,
+        };
+
+        let flight_outcome = rch_outcome.to_flight_recorder_adapter_outcome();
+
+        assert_eq!(flight_outcome.outcome, FlightRecorderAdapterOutcomeClass::Passed);
+        assert_eq!(flight_outcome.execution_mode, RchMode::Remote);
+        assert_eq!(flight_outcome.worker_id, Some("worker-123".to_string()));
+        assert_eq!(flight_outcome.timeout_class, TimeoutClass::None);
+        assert_eq!(flight_outcome.exit_code, Some(0));
+        assert!(!flight_outcome.retryable);
+        assert!(!flight_outcome.product_failure);
+        assert_eq!(flight_outcome.reason_code, "RCH-S000");
+        assert_eq!(flight_outcome.detail, "successful validation");
+    }
+
+    #[test]
+    fn test_rch_adapter_outcome_mapping_worker_timeout() {
+        let rch_outcome = RchAdapterOutcome {
+            schema_version: "test/v1".to_string(),
+            command_digest: "deadbeef".to_string(),
+            action: Some(RchValidationAction::Check),
+            package: Some("frankenengine-node".to_string()),
+            outcome: RchOutcomeClass::WorkerTimeout,
+            execution_mode: RchExecutionMode::Unavailable,
+            worker_id: None,
+            timeout_class: RchTimeoutClass::SshCommand,
+            exit_code: None,
+            retryable: true,
+            product_failure: false,
+            reason_code: "RCH-E104".to_string(),
+            detail: "worker ssh connection timeout".to_string(),
+            stdout_digest: RchArtifactDigest {
+                algorithm: "sha256".to_string(),
+                hex: "".to_string(),
+                snippet: "".to_string(),
+            },
+            stderr_digest: RchArtifactDigest {
+                algorithm: "sha256".to_string(),
+                hex: "".to_string(),
+                snippet: "timeout error".to_string(),
+            },
+            duration_ms: 30000,
+        };
+
+        let flight_outcome = rch_outcome.to_flight_recorder_adapter_outcome();
+
+        assert_eq!(flight_outcome.outcome, FlightRecorderAdapterOutcomeClass::WorkerTimeout);
+        assert_eq!(flight_outcome.execution_mode, RchMode::Unavailable);
+        assert_eq!(flight_outcome.worker_id, None);
+        assert_eq!(flight_outcome.timeout_class, TimeoutClass::SshCommand);
+        assert_eq!(flight_outcome.exit_code, None);
+        assert!(flight_outcome.retryable);
+        assert!(!flight_outcome.product_failure);
+        assert_eq!(flight_outcome.reason_code, "RCH-E104");
+        assert_eq!(flight_outcome.detail, "worker ssh connection timeout");
+    }
+
+    #[test]
+    fn test_rch_adapter_outcome_mapping_unknown_execution_mode() {
+        // Test that RchExecutionMode::Unknown maps to RchMode::Unavailable
+        let rch_outcome = RchAdapterOutcome {
+            schema_version: "test/v1".to_string(),
+            command_digest: "deadbeef".to_string(),
+            action: Some(RchValidationAction::Build),
+            package: None,
+            outcome: RchOutcomeClass::BrokerInternalError,
+            execution_mode: RchExecutionMode::Unknown,
+            worker_id: None,
+            timeout_class: RchTimeoutClass::Unknown,
+            exit_code: Some(-1),
+            retryable: false,
+            product_failure: false,
+            reason_code: "RCH-E999".to_string(),
+            detail: "internal broker error".to_string(),
+            stdout_digest: RchArtifactDigest {
+                algorithm: "sha256".to_string(),
+                hex: "".to_string(),
+                snippet: "".to_string(),
+            },
+            stderr_digest: RchArtifactDigest {
+                algorithm: "sha256".to_string(),
+                hex: "".to_string(),
+                snippet: "".to_string(),
+            },
+            duration_ms: 100,
+        };
+
+        let flight_outcome = rch_outcome.to_flight_recorder_adapter_outcome();
+
+        assert_eq!(flight_outcome.execution_mode, RchMode::Unavailable);
+        assert_eq!(flight_outcome.timeout_class, TimeoutClass::Unknown);
     }
 }
 
