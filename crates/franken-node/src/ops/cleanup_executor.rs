@@ -7,9 +7,10 @@ use crate::ops::workspace_pressure_policy::{CleanupCandidate, PolicyDecision};
 use crate::push_bounded;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Maximum cleanup operations to record in one receipt.
 const MAX_CLEANUP_OPERATIONS: usize = 1000;
@@ -39,6 +40,8 @@ pub enum CleanupMode {
 pub enum CleanupOutcome {
     /// Path was successfully removed.
     Removed,
+    /// Path would be removed in dry-run mode.
+    WouldRemove,
     /// Path was skipped due to protection rules.
     SkippedProtected,
     /// Path was skipped due to active file reservations.
@@ -74,6 +77,7 @@ impl CleanupOutcome {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Removed => "REMOVED",
+            Self::WouldRemove => "WOULD_REMOVE",
             Self::SkippedProtected => "SKIPPED_PROTECTED",
             Self::SkippedReserved => "SKIPPED_RESERVED",
             Self::SkippedTooYoung => "SKIPPED_TOO_YOUNG",
@@ -496,7 +500,7 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
                 path: path.clone(),
                 size_bytes,
                 age_seconds,
-                outcome: CleanupOutcome::Removed, // Simulate success
+                outcome: CleanupOutcome::WouldRemove,
                 reason: "Dry-run simulation".to_string(),
                 error: None,
                 timestamp,
@@ -547,17 +551,6 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
     }
 
     fn check_protections(&self, path: &Path, age_seconds: u64) -> Option<(CleanupOutcome, String)> {
-        // Check age threshold
-        if age_seconds < self.protection_rules.min_age_seconds {
-            return Some((
-                CleanupOutcome::SkippedTooYoung,
-                format!(
-                    "File is {} seconds old, minimum age is {} seconds",
-                    age_seconds, self.protection_rules.min_age_seconds
-                ),
-            ));
-        }
-
         // Check protected extensions
         if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
             if self
@@ -574,7 +567,7 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
 
         // Check protected directories
         for protected_dir in &self.protection_rules.protected_directories {
-            if path.starts_with(protected_dir) {
+            if path.starts_with(protected_dir) || path_has_component(path, protected_dir) {
                 return Some((
                     CleanupOutcome::SkippedProtected,
                     format!(
@@ -597,10 +590,26 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
         }
 
         // Check active file reservations
-        if self.active_reservations.contains(path) {
+        if self
+            .active_reservations
+            .iter()
+            .any(|reservation| path.starts_with(reservation) || reservation.starts_with(path))
+        {
             return Some((
                 CleanupOutcome::SkippedReserved,
                 "Path has active file reservation".to_string(),
+            ));
+        }
+
+        // Check age threshold after hard protection gates so receipts preserve the
+        // strongest reason a path was refused.
+        if age_seconds < self.protection_rules.min_age_seconds {
+            return Some((
+                CleanupOutcome::SkippedTooYoung,
+                format!(
+                    "File is {} seconds old, minimum age is {} seconds",
+                    age_seconds, self.protection_rules.min_age_seconds
+                ),
             ));
         }
 
@@ -621,21 +630,53 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
     }
 
     fn compute_candidates_digest(&self, candidates: &[CleanupCandidate]) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        let mut hasher = Sha256::new();
 
-        let mut hasher = DefaultHasher::new();
+        let mut candidates: Vec<&CleanupCandidate> = candidates.iter().collect();
+        candidates.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then_with(|| left.size_bytes.cmp(&right.size_bytes))
+                .then_with(|| left.reason.cmp(&right.reason))
+        });
 
-        // Hash the sorted list of candidate paths for deterministic digest
-        let mut paths: Vec<&Path> = candidates.iter().map(|c| c.path.as_path()).collect();
-        paths.sort();
-
-        for path in paths {
-            path.hash(&mut hasher);
+        hasher.update(len_to_u64(candidates.len()).to_be_bytes());
+        for candidate in candidates {
+            update_digest_field(&mut hasher, &candidate.path.to_string_lossy());
+            hasher.update(candidate.size_bytes.to_be_bytes());
+            update_digest_field(&mut hasher, &candidate.reason);
+            hasher.update([u8::from(candidate.requires_approval)]);
+            match candidate.mtime.as_deref() {
+                Some(mtime) => {
+                    hasher.update([1]);
+                    update_digest_field(&mut hasher, mtime);
+                }
+                None => hasher.update([0]),
+            }
         }
 
-        format!("{:x}", hasher.finish())
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
+}
+
+fn path_has_component(path: &Path, protected_dir: &Path) -> bool {
+    let Some(protected_name) = protected_dir.file_name() else {
+        return false;
+    };
+
+    path.components().any(|component| match component {
+        Component::Normal(name) => name == protected_name,
+        _ => false,
+    })
+}
+
+fn update_digest_field(hasher: &mut Sha256, value: &str) {
+    hasher.update(len_to_u64(value.len()).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn len_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 impl Default for CleanupExecutor<FilesystemDeletionAdapter> {
@@ -667,13 +708,22 @@ mod tests {
         }
     }
 
+    fn test_cleanup_rules() -> CleanupProtectionRules {
+        let mut rules = CleanupProtectionRules::default();
+        rules.min_age_seconds = 0;
+        rules
+    }
+
     #[test]
     fn test_dry_run_mode() {
         let mock_adapter = MockDeletionAdapter::default();
-        let executor = CleanupExecutor::with_adapter(mock_adapter);
+        let executor = CleanupExecutor::with_protection_rules(test_cleanup_rules(), mock_adapter);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let test_file = temp_dir.path().join("test_file.tmp");
+        std::fs::write(&test_file, "dry run").expect("write test file");
 
         let candidates = vec![create_test_candidate(
-            "/tmp/test_file.tmp",
+            &test_file.to_string_lossy(),
             1024,
             "Test cleanup",
         )];
@@ -688,6 +738,9 @@ mod tests {
 
         assert_eq!(receipt.mode, CleanupMode::DryRun);
         assert_eq!(receipt.operations.len(), 1);
+        assert_eq!(receipt.operations[0].outcome, CleanupOutcome::WouldRemove);
+        assert_eq!(receipt.summary.removed_count, 0);
+        assert_eq!(receipt.bytes_freed, 0);
         assert_eq!(receipt.summary.total_candidates, 1);
         assert!(receipt.diagnostics.iter().any(|d| d.contains("DRY-RUN")));
     }
@@ -696,9 +749,14 @@ mod tests {
     fn test_protection_rules_extension() {
         let mock_adapter = MockDeletionAdapter::default();
         let executor = CleanupExecutor::with_adapter(mock_adapter);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let source_file = temp_dir.path().join("src/main.rs");
+        std::fs::create_dir_all(source_file.parent().expect("source parent"))
+            .expect("create source dir");
+        std::fs::write(&source_file, "fn main() {}").expect("write source file");
 
         let candidates = vec![create_test_candidate(
-            "src/main.rs",
+            &source_file.to_string_lossy(),
             1024,
             "Protected source file",
         )];
@@ -725,9 +783,14 @@ mod tests {
     fn test_protection_rules_directory() {
         let mock_adapter = MockDeletionAdapter::default();
         let executor = CleanupExecutor::with_adapter(mock_adapter);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let source_file = temp_dir.path().join("src/subdir/file.txt");
+        std::fs::create_dir_all(source_file.parent().expect("source parent"))
+            .expect("create source dir");
+        std::fs::write(&source_file, "source tree content").expect("write source file");
 
         let candidates = vec![create_test_candidate(
-            "src/subdir/file.txt",
+            &source_file.to_string_lossy(),
             1024,
             "File in protected directory",
         )];
@@ -752,8 +815,10 @@ mod tests {
     fn test_active_reservations() {
         let mock_adapter = MockDeletionAdapter::default();
         let mut executor = CleanupExecutor::with_adapter(mock_adapter);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let reserved_path = temp_dir.path().join("reserved_file.tmp");
+        std::fs::write(&reserved_path, "reserved").expect("write reserved file");
 
-        let reserved_path = PathBuf::from("/tmp/reserved_file.tmp");
         let mut reservations = BTreeSet::new();
         reservations.insert(reserved_path.clone());
         executor.update_reservations(reservations);
@@ -783,6 +848,42 @@ mod tests {
     }
 
     #[test]
+    fn test_active_reservations_block_nested_paths() {
+        let mock_adapter = MockDeletionAdapter::default();
+        let mut executor = CleanupExecutor::with_adapter(mock_adapter);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let reserved_dir = temp_dir.path().join("reserved-dir");
+        let nested_path = reserved_dir.join("nested.tmp");
+        std::fs::create_dir_all(&reserved_dir).expect("create reserved dir");
+        std::fs::write(&nested_path, "reserved").expect("write nested reserved file");
+
+        let mut reservations = BTreeSet::new();
+        reservations.insert(reserved_dir);
+        executor.update_reservations(reservations);
+
+        let candidates = vec![CleanupCandidate {
+            path: nested_path,
+            size_bytes: 1024,
+            reason: "Nested reserved file".to_string(),
+            requires_approval: false,
+            mtime: None,
+        }];
+
+        let receipt = executor.execute_cleanup(
+            &candidates,
+            CleanupMode::Execute,
+            "test_actor".to_string(),
+            "Test nested reservations".to_string(),
+            None,
+        );
+
+        assert_eq!(
+            receipt.operations[0].outcome,
+            CleanupOutcome::SkippedReserved
+        );
+    }
+
+    #[test]
     fn test_cleanup_receipt_structure() {
         let mock_adapter = MockDeletionAdapter::default();
         let executor = CleanupExecutor::with_adapter(mock_adapter);
@@ -808,6 +909,8 @@ mod tests {
         assert_eq!(receipt.approved_reason, "Test receipt structure");
         assert_eq!(receipt.bead_id, Some("test_bead_id".to_string()));
         assert!(!receipt.candidates_digest.is_empty());
+        assert!(receipt.candidates_digest.starts_with("sha256:"));
+        assert_eq!(receipt.candidates_digest.len(), "sha256:".len() + 64);
         assert_eq!(receipt.summary.total_candidates, 1);
         assert!(receipt.initiated_at <= receipt.completed_at);
     }
@@ -838,7 +941,7 @@ mod tests {
     fn test_mock_adapter_tracking() {
         let mock_adapter = MockDeletionAdapter::default();
         let deletion_requests = Arc::clone(&mock_adapter.deletion_requests);
-        let executor = CleanupExecutor::with_adapter(mock_adapter);
+        let executor = CleanupExecutor::with_protection_rules(test_cleanup_rules(), mock_adapter);
 
         // Create temp file for test
         let temp_dir = TempDir::new().expect("temp dir");

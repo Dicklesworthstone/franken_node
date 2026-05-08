@@ -6,6 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path};
@@ -23,10 +24,19 @@ pub const MAX_PRESSURE_SAMPLE_ROOTS: usize = 128;
 pub const MAX_PRESSURE_SAMPLE_RCH_WORKERS: usize = 256;
 pub const MAX_PRESSURE_SAMPLE_NUMA_NODES: usize = 128;
 pub const MAX_PRESSURE_SAMPLE_UNAVAILABLE_SIGNALS: usize = 128;
+pub const MAX_CLEANUP_CANDIDATES: usize = 1_024;
+pub const CLEANUP_RECEIPT_SCHEMA_VERSION: &str =
+    "franken-node/resource-governor/cleanup-receipt/v1";
+pub const DEFAULT_MINIMUM_AGE_SECS: u64 = 300;
 
 pub mod event_codes {
     pub const OBSERVATION_RECORDED: &str = "RG-001";
     pub const DECISION_RECORDED: &str = "RG-002";
+    pub const CLEANUP_STARTED: &str = "RG-010";
+    pub const CLEANUP_COMPLETED: &str = "RG-011";
+    pub const CLEANUP_PATH_REMOVED: &str = "RG-012";
+    pub const CLEANUP_PATH_SKIPPED: &str = "RG-013";
+    pub const CLEANUP_PATH_FAILED: &str = "RG-014";
 }
 
 pub mod reason_codes {
@@ -520,7 +530,7 @@ impl ResourcePressureSampleError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceArtifactKind {
     CargoTargetDir,
@@ -531,7 +541,7 @@ pub enum ResourceArtifactKind {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ResourceArtifactSafetyClass {
     SourceNeverDelete,
@@ -1488,10 +1498,456 @@ pub fn process_kind_label(kind: ResourceProcessKind) -> &'static str {
     kind.as_str()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupMode {
+    ReportOnly,
+    DryRun,
+    Execute,
+}
+
+impl CleanupMode {
+    pub fn is_destructive(self) -> bool {
+        matches!(self, Self::Execute)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupRequest {
+    pub trace_id: String,
+    pub mode: CleanupMode,
+    pub actor: Option<String>,
+    pub agent: Option<String>,
+    pub bead_id: Option<String>,
+    pub approved_reason: String,
+    pub candidates: Vec<ResourceArtifactInventoryEntry>,
+    pub active_reservations: Vec<String>,
+}
+
+impl CleanupRequest {
+    pub fn validated(self) -> Result<Self, CleanupError> {
+        if self.candidates.len() > MAX_CLEANUP_CANDIDATES {
+            return Err(CleanupError::TooManyCandidates {
+                count: self.candidates.len(),
+                max: MAX_CLEANUP_CANDIDATES,
+            });
+        }
+        validate_artifact_string("trace_id", &self.trace_id, MAX_ARTIFACT_FIELD_BYTES).map_err(
+            |err| CleanupError::InvalidField {
+                field: "trace_id",
+                reason: err.to_string(),
+            },
+        )?;
+        validate_artifact_string(
+            "approved_reason",
+            &self.approved_reason,
+            MAX_ARTIFACT_FIELD_BYTES,
+        )
+        .map_err(|err| CleanupError::InvalidField {
+            field: "approved_reason",
+            reason: err.to_string(),
+        })?;
+        validate_optional_artifact_string("actor", self.actor.as_deref()).map_err(|err| {
+            CleanupError::InvalidField {
+                field: "actor",
+                reason: err.to_string(),
+            }
+        })?;
+        validate_optional_artifact_string("agent", self.agent.as_deref()).map_err(|err| {
+            CleanupError::InvalidField {
+                field: "agent",
+                reason: err.to_string(),
+            }
+        })?;
+        validate_optional_artifact_string("bead_id", self.bead_id.as_deref()).map_err(|err| {
+            CleanupError::InvalidField {
+                field: "bead_id",
+                reason: err.to_string(),
+            }
+        })?;
+        for candidate in &self.candidates {
+            if candidate.safety_class.is_protected() {
+                return Err(CleanupError::ProtectedSafetyClass {
+                    path: candidate.path.clone(),
+                    safety_class: format!("{:?}", candidate.safety_class),
+                });
+            }
+        }
+        Ok(self)
+    }
+
+    pub fn candidates_digest(&self) -> String {
+        let mut hasher = Sha256::new();
+        let mut candidates: Vec<&ResourceArtifactInventoryEntry> = self.candidates.iter().collect();
+        candidates.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then_with(|| left.kind.cmp(&right.kind))
+                .then_with(|| left.safety_class.cmp(&right.safety_class))
+                .then_with(|| left.bytes.cmp(&right.bytes))
+        });
+
+        hasher.update(usize_to_u64(candidates.len()).to_be_bytes());
+        for candidate in candidates {
+            update_cleanup_digest_field(&mut hasher, &candidate.path);
+            update_cleanup_digest_field(&mut hasher, &candidate.repo_key);
+            update_cleanup_digest_field(&mut hasher, &format!("{:?}", candidate.kind));
+            update_cleanup_digest_field(&mut hasher, &format!("{:?}", candidate.safety_class));
+            hasher.update(candidate.bytes.unwrap_or(0).to_be_bytes());
+            update_cleanup_digest_optional(&mut hasher, candidate.owner_agent.as_deref());
+            update_cleanup_digest_optional(&mut hasher, candidate.bead_id.as_deref());
+            update_cleanup_digest_optional(
+                &mut hasher,
+                candidate.producer_command_digest.as_deref(),
+            );
+            update_cleanup_digest_optional(&mut hasher, candidate.content_digest.as_deref());
+        }
+
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+}
+
+fn update_cleanup_digest_field(hasher: &mut Sha256, value: &str) {
+    hasher.update(usize_to_u64(value.len()).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn update_cleanup_digest_optional(hasher: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            update_cleanup_digest_field(hasher, value);
+        }
+        None => hasher.update([0]),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupOutcome {
+    Removed,
+    WouldRemove,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupPathResult {
+    pub path: String,
+    pub outcome: CleanupOutcome,
+    pub candidate_bytes: Option<u64>,
+    pub bytes_freed: u64,
+    pub skip_reason: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupReceipt {
+    pub schema_version: String,
+    pub trace_id: String,
+    pub mode: CleanupMode,
+    pub actor: Option<String>,
+    pub agent: Option<String>,
+    pub bead_id: Option<String>,
+    pub approved_reason: String,
+    pub candidates_digest: String,
+    pub candidates_count: usize,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: DateTime<Utc>,
+    pub total_bytes_freed: u64,
+    pub estimated_bytes_reclaimable: u64,
+    pub removed_count: usize,
+    pub would_remove_count: usize,
+    pub skipped_count: usize,
+    pub failed_count: usize,
+    pub skipped_pins: Vec<String>,
+    pub outcomes: Vec<CleanupPathResult>,
+    pub event_code: String,
+}
+
+impl CleanupReceipt {
+    pub fn summary(&self) -> String {
+        format!(
+            "mode={:?} candidates={} removed={} would_remove={} skipped={} failed={} bytes_freed={} estimated_bytes_reclaimable={}",
+            self.mode,
+            self.candidates_count,
+            self.removed_count,
+            self.would_remove_count,
+            self.skipped_count,
+            self.failed_count,
+            self.total_bytes_freed,
+            self.estimated_bytes_reclaimable
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CleanupError {
+    #[error("RG_CLEANUP_TOO_MANY_CANDIDATES: {count} candidates, max {max}")]
+    TooManyCandidates { count: usize, max: usize },
+    #[error("RG_CLEANUP_INVALID_FIELD: {field} is invalid: {reason}")]
+    InvalidField { field: &'static str, reason: String },
+    #[error(
+        "RG_CLEANUP_PROTECTED_SAFETY_CLASS: path {path} has protected safety class {safety_class}"
+    )]
+    ProtectedSafetyClass { path: String, safety_class: String },
+    #[error("RG_CLEANUP_PROTECTED_PATH: path {path} is protected workspace state")]
+    ProtectedPath { path: String },
+    #[error("RG_CLEANUP_ACTIVE_RESERVATION: path {path} has active reservation")]
+    ActiveReservation { path: String },
+    #[error("RG_CLEANUP_OPEN_FILE: path {path} is open")]
+    OpenFile { path: String },
+    #[error(
+        "RG_CLEANUP_TOO_YOUNG: path {path} is younger than minimum age ({age_secs}s < {min_age_secs}s)"
+    )]
+    TooYoung {
+        path: String,
+        age_secs: u64,
+        min_age_secs: u64,
+    },
+    #[error("RG_CLEANUP_PINNED: path {path} is pinned: {reason}")]
+    Pinned { path: String, reason: String },
+    #[error("RG_CLEANUP_ADAPTER_ERROR: {0}")]
+    Adapter(String),
+}
+
+impl CleanupError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::TooManyCandidates { .. } => "RG_CLEANUP_TOO_MANY_CANDIDATES",
+            Self::InvalidField { .. } => "RG_CLEANUP_INVALID_FIELD",
+            Self::ProtectedSafetyClass { .. } => "RG_CLEANUP_PROTECTED_SAFETY_CLASS",
+            Self::ProtectedPath { .. } => "RG_CLEANUP_PROTECTED_PATH",
+            Self::ActiveReservation { .. } => "RG_CLEANUP_ACTIVE_RESERVATION",
+            Self::OpenFile { .. } => "RG_CLEANUP_OPEN_FILE",
+            Self::TooYoung { .. } => "RG_CLEANUP_TOO_YOUNG",
+            Self::Pinned { .. } => "RG_CLEANUP_PINNED",
+            Self::Adapter(_) => "RG_CLEANUP_ADAPTER_ERROR",
+        }
+    }
+}
+
+pub trait CleanupAdapter {
+    fn remove(&self, path: &str) -> Result<u64, String>;
+    fn is_open(&self, path: &str) -> Option<bool>;
+    fn mtime_age_secs(&self, path: &str, now: DateTime<Utc>) -> Option<u64>;
+}
+
+pub struct DefaultCleanupAdapter;
+
+impl CleanupAdapter for DefaultCleanupAdapter {
+    fn remove(&self, path: &str) -> Result<u64, String> {
+        let path_obj = Path::new(path);
+        let metadata = fs::metadata(path_obj).map_err(|err| err.to_string())?;
+        let bytes = metadata.len();
+        if metadata.is_dir() {
+            fs::remove_dir_all(path_obj).map_err(|err| err.to_string())?;
+        } else {
+            fs::remove_file(path_obj).map_err(|err| err.to_string())?;
+        }
+        Ok(bytes)
+    }
+
+    fn is_open(&self, _path: &str) -> Option<bool> {
+        None
+    }
+
+    fn mtime_age_secs(&self, path: &str, now: DateTime<Utc>) -> Option<u64> {
+        let metadata = fs::metadata(path).ok()?;
+        let mtime = metadata.modified().ok()?;
+        let mtime_utc: DateTime<Utc> = mtime.into();
+        let age_ms = now
+            .signed_duration_since(mtime_utc)
+            .num_milliseconds()
+            .max(0);
+        Some(u64::try_from(age_ms).unwrap_or(u64::MAX) / 1000)
+    }
+}
+
+fn check_cleanup_eligibility(
+    entry: &ResourceArtifactInventoryEntry,
+    active_reservations: &[String],
+    adapter: &dyn CleanupAdapter,
+    now: DateTime<Utc>,
+) -> Result<(), CleanupError> {
+    if entry.safety_class.is_protected() {
+        return Err(CleanupError::ProtectedSafetyClass {
+            path: entry.path.clone(),
+            safety_class: format!("{:?}", entry.safety_class),
+        });
+    }
+    if path_is_protected_workspace_state(&entry.path) {
+        return Err(CleanupError::ProtectedPath {
+            path: entry.path.clone(),
+        });
+    }
+    if let Some(pin) = &entry.pin {
+        return Err(CleanupError::Pinned {
+            path: entry.path.clone(),
+            reason: pin.reason.clone(),
+        });
+    }
+    if active_reservations
+        .iter()
+        .any(|res| entry.path.starts_with(res) || res.starts_with(&entry.path))
+    {
+        return Err(CleanupError::ActiveReservation {
+            path: entry.path.clone(),
+        });
+    }
+    let is_open = entry.open_file_status == ResourceArtifactOpenFileStatus::Open
+        || adapter.is_open(&entry.path) == Some(true);
+    if is_open {
+        return Err(CleanupError::OpenFile {
+            path: entry.path.clone(),
+        });
+    }
+    let min_age_secs = entry.minimum_age_secs.unwrap_or(DEFAULT_MINIMUM_AGE_SECS);
+    if min_age_secs > 0 {
+        let age_secs = entry
+            .mtime
+            .map(|mtime| {
+                let age_ms = now.signed_duration_since(mtime).num_milliseconds().max(0);
+                u64::try_from(age_ms).unwrap_or(u64::MAX) / 1000
+            })
+            .or_else(|| adapter.mtime_age_secs(&entry.path, now));
+        if let Some(age) = age_secs {
+            if age < min_age_secs {
+                return Err(CleanupError::TooYoung {
+                    path: entry.path.clone(),
+                    age_secs: age,
+                    min_age_secs,
+                });
+            }
+        } else {
+            return Err(CleanupError::TooYoung {
+                path: entry.path.clone(),
+                age_secs: 0,
+                min_age_secs,
+            });
+        }
+    }
+    Ok(())
+}
+
+pub fn execute_cleanup<A: CleanupAdapter>(
+    request: CleanupRequest,
+    adapter: &A,
+    now: DateTime<Utc>,
+) -> Result<CleanupReceipt, CleanupError> {
+    let request = request.validated()?;
+    let started_at = now;
+    let candidates_digest = request.candidates_digest();
+    let candidates_count = request.candidates.len();
+    let mut outcomes = Vec::with_capacity(candidates_count);
+    let mut total_bytes_freed: u64 = 0;
+    let mut estimated_bytes_reclaimable: u64 = 0;
+    let mut removed_count: usize = 0;
+    let mut would_remove_count: usize = 0;
+    let mut skipped_count: usize = 0;
+    let mut failed_count: usize = 0;
+    let mut skipped_pins = Vec::new();
+
+    for candidate in &request.candidates {
+        let eligibility =
+            check_cleanup_eligibility(candidate, &request.active_reservations, adapter, now);
+        match eligibility {
+            Err(err) => {
+                let skip_reason = err.to_string();
+                if let CleanupError::Pinned { path, reason } = &err {
+                    skipped_pins.push(format!("{}: {}", path, reason));
+                }
+                skipped_count = skipped_count.saturating_add(1);
+                outcomes.push(CleanupPathResult {
+                    path: candidate.path.clone(),
+                    outcome: CleanupOutcome::Skipped,
+                    candidate_bytes: candidate.bytes,
+                    bytes_freed: 0,
+                    skip_reason: Some(skip_reason),
+                    error: None,
+                });
+            }
+            Ok(()) => {
+                if request.mode.is_destructive() {
+                    match adapter.remove(&candidate.path) {
+                        Ok(bytes) => {
+                            total_bytes_freed = total_bytes_freed.saturating_add(bytes);
+                            removed_count = removed_count.saturating_add(1);
+                            outcomes.push(CleanupPathResult {
+                                path: candidate.path.clone(),
+                                outcome: CleanupOutcome::Removed,
+                                candidate_bytes: candidate.bytes,
+                                bytes_freed: bytes,
+                                skip_reason: None,
+                                error: None,
+                            });
+                        }
+                        Err(err) => {
+                            failed_count = failed_count.saturating_add(1);
+                            outcomes.push(CleanupPathResult {
+                                path: candidate.path.clone(),
+                                outcome: CleanupOutcome::Failed,
+                                candidate_bytes: candidate.bytes,
+                                bytes_freed: 0,
+                                skip_reason: None,
+                                error: Some(err),
+                            });
+                        }
+                    }
+                } else {
+                    let estimated_bytes = candidate.bytes.unwrap_or(0);
+                    estimated_bytes_reclaimable =
+                        estimated_bytes_reclaimable.saturating_add(estimated_bytes);
+                    would_remove_count = would_remove_count.saturating_add(1);
+                    outcomes.push(CleanupPathResult {
+                        path: candidate.path.clone(),
+                        outcome: CleanupOutcome::WouldRemove,
+                        candidate_bytes: candidate.bytes,
+                        bytes_freed: 0,
+                        skip_reason: None,
+                        error: None,
+                    });
+                }
+            }
+        }
+    }
+
+    let completed_at = now;
+    let event_code = if request.mode.is_destructive() {
+        event_codes::CLEANUP_COMPLETED
+    } else {
+        event_codes::CLEANUP_COMPLETED
+    };
+
+    Ok(CleanupReceipt {
+        schema_version: CLEANUP_RECEIPT_SCHEMA_VERSION.to_string(),
+        trace_id: request.trace_id,
+        mode: request.mode,
+        actor: request.actor,
+        agent: request.agent,
+        bead_id: request.bead_id,
+        approved_reason: request.approved_reason,
+        candidates_digest,
+        candidates_count,
+        started_at,
+        completed_at,
+        total_bytes_freed,
+        estimated_bytes_reclaimable,
+        removed_count,
+        would_remove_count,
+        skipped_count,
+        failed_count,
+        skipped_pins,
+        outcomes,
+        event_code: event_code.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use tempfile::TempDir;
 
     fn sample_ts(second: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, second)
@@ -2165,5 +2621,483 @@ mod tests {
         assert_eq!(observation.target_dir_usage_mb, Some(3));
         assert_eq!(observation.memory_used_mb, Some(6));
         assert_eq!(observation.cpu_load_permyriad, Some(7_500));
+    }
+
+    struct MockCleanupAdapter {
+        removed: std::cell::RefCell<Vec<String>>,
+        open_paths: Vec<String>,
+        remove_error: Option<String>,
+        mtimes: std::collections::HashMap<String, DateTime<Utc>>,
+    }
+
+    impl MockCleanupAdapter {
+        fn new() -> Self {
+            Self {
+                removed: std::cell::RefCell::new(Vec::new()),
+                open_paths: Vec::new(),
+                remove_error: None,
+                mtimes: std::collections::HashMap::new(),
+            }
+        }
+
+        fn with_open(mut self, path: &str) -> Self {
+            self.open_paths.push(path.to_string());
+            self
+        }
+
+        fn with_mtime(mut self, path: &str, mtime: DateTime<Utc>) -> Self {
+            self.mtimes.insert(path.to_string(), mtime);
+            self
+        }
+
+        fn with_remove_error(mut self, error: &str) -> Self {
+            self.remove_error = Some(error.to_string());
+            self
+        }
+    }
+
+    impl CleanupAdapter for MockCleanupAdapter {
+        fn remove(&self, path: &str) -> Result<u64, String> {
+            if let Some(ref error) = self.remove_error {
+                return Err(error.clone());
+            }
+            self.removed.borrow_mut().push(path.to_string());
+            Ok(1024)
+        }
+
+        fn is_open(&self, path: &str) -> Option<bool> {
+            Some(self.open_paths.contains(&path.to_string()))
+        }
+
+        fn mtime_age_secs(&self, path: &str, now: DateTime<Utc>) -> Option<u64> {
+            self.mtimes.get(path).map(|mtime| {
+                let age_ms = now.signed_duration_since(*mtime).num_milliseconds().max(0);
+                u64::try_from(age_ms).unwrap_or(u64::MAX) / 1000
+            })
+        }
+    }
+
+    fn cleanup_candidate(path: &str, bytes: u64) -> ResourceArtifactInventoryEntry {
+        let mut entry = ResourceArtifactInventoryEntry::new(
+            path,
+            "/data/projects/franken_node",
+            ResourceArtifactKind::CargoTargetDir,
+            ResourceArtifactSafetyClass::RebuildableBuildOutput,
+            Some(bytes),
+        );
+        entry.open_file_status = ResourceArtifactOpenFileStatus::NotOpen;
+        entry.minimum_age_secs = Some(0);
+        entry
+    }
+
+    fn cleanup_request(
+        candidates: Vec<ResourceArtifactInventoryEntry>,
+        mode: CleanupMode,
+    ) -> CleanupRequest {
+        CleanupRequest {
+            trace_id: "test-cleanup".to_string(),
+            mode,
+            actor: Some("test-actor".to_string()),
+            agent: Some("TestAgent".to_string()),
+            bead_id: Some("bd-test".to_string()),
+            approved_reason: "test cleanup".to_string(),
+            candidates,
+            active_reservations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn cleanup_report_only_mode_produces_would_remove_outcomes() {
+        let adapter = MockCleanupAdapter::new();
+        let candidates = vec![
+            cleanup_candidate("/tmp/target/debug/build/foo", 1024),
+            cleanup_candidate("/tmp/target/debug/build/bar", 2048),
+        ];
+        let request = cleanup_request(candidates, CleanupMode::ReportOnly);
+
+        let receipt =
+            execute_cleanup(request, &adapter, sample_ts(600)).expect("cleanup should succeed");
+
+        assert_eq!(receipt.mode, CleanupMode::ReportOnly);
+        assert_eq!(receipt.candidates_count, 2);
+        assert_eq!(receipt.removed_count, 0);
+        assert_eq!(receipt.would_remove_count, 2);
+        assert_eq!(receipt.skipped_count, 0);
+        assert_eq!(receipt.total_bytes_freed, 0);
+        assert_eq!(receipt.estimated_bytes_reclaimable, 3072);
+        assert!(adapter.removed.borrow().is_empty());
+        assert!(
+            receipt
+                .outcomes
+                .iter()
+                .all(|o| o.outcome == CleanupOutcome::WouldRemove)
+        );
+    }
+
+    #[test]
+    fn cleanup_dry_run_mode_does_not_remove_files() {
+        let adapter = MockCleanupAdapter::new();
+        let candidates = vec![cleanup_candidate("/tmp/target/debug/build/foo", 1024)];
+        let request = cleanup_request(candidates, CleanupMode::DryRun);
+
+        let receipt =
+            execute_cleanup(request, &adapter, sample_ts(600)).expect("cleanup should succeed");
+
+        assert_eq!(receipt.mode, CleanupMode::DryRun);
+        assert!(!receipt.mode.is_destructive());
+        assert!(adapter.removed.borrow().is_empty());
+        assert_eq!(receipt.outcomes[0].outcome, CleanupOutcome::WouldRemove);
+        assert_eq!(receipt.outcomes[0].candidate_bytes, Some(1024));
+        assert_eq!(receipt.outcomes[0].bytes_freed, 0);
+        assert_eq!(receipt.total_bytes_freed, 0);
+        assert_eq!(receipt.estimated_bytes_reclaimable, 1024);
+    }
+
+    #[test]
+    fn cleanup_execute_mode_removes_files_via_adapter() {
+        let adapter = MockCleanupAdapter::new();
+        let candidates = vec![
+            cleanup_candidate("/tmp/target/debug/build/foo", 1024),
+            cleanup_candidate("/tmp/target/debug/build/bar", 2048),
+        ];
+        let request = cleanup_request(candidates, CleanupMode::Execute);
+
+        let receipt =
+            execute_cleanup(request, &adapter, sample_ts(600)).expect("cleanup should succeed");
+
+        assert_eq!(receipt.mode, CleanupMode::Execute);
+        assert!(receipt.mode.is_destructive());
+        assert_eq!(adapter.removed.borrow().len(), 2);
+        assert_eq!(receipt.removed_count, 2);
+        assert_eq!(receipt.would_remove_count, 0);
+        assert_eq!(receipt.total_bytes_freed, 2048);
+        assert!(
+            receipt
+                .outcomes
+                .iter()
+                .all(|o| o.outcome == CleanupOutcome::Removed)
+        );
+    }
+
+    #[test]
+    fn cleanup_skips_protected_safety_class() {
+        let adapter = MockCleanupAdapter::new();
+        let mut protected = cleanup_candidate("/data/source/main.rs", 1024);
+        protected.safety_class = ResourceArtifactSafetyClass::SourceNeverDelete;
+        let candidates = vec![protected];
+
+        let result = cleanup_request(candidates, CleanupMode::Execute).validated();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            CleanupError::ProtectedSafetyClass { path, .. }
+                if path == "/data/source/main.rs"
+        ));
+    }
+
+    #[test]
+    fn cleanup_skips_protected_workspace_paths() {
+        let adapter = MockCleanupAdapter::new();
+        let mut entry = cleanup_candidate("/data/projects/franken_node/.beads/issues.jsonl", 1024);
+        entry.safety_class = ResourceArtifactSafetyClass::DisposableTempOutput;
+        let candidates = vec![entry];
+        let request = cleanup_request(candidates, CleanupMode::Execute);
+
+        let receipt =
+            execute_cleanup(request, &adapter, sample_ts(600)).expect("cleanup should succeed");
+
+        assert_eq!(receipt.skipped_count, 1);
+        assert!(adapter.removed.borrow().is_empty());
+        assert!(
+            receipt.outcomes[0]
+                .skip_reason
+                .as_ref()
+                .unwrap()
+                .contains("protected")
+        );
+    }
+
+    #[test]
+    fn cleanup_skips_pinned_artifacts() {
+        let adapter = MockCleanupAdapter::new();
+        let pinned = cleanup_candidate("/tmp/target/debug/build/pinned", 1024).with_pin(
+            ResourceArtifactPin {
+                reason: "manual pin by operator".to_string(),
+                owner_agent: Some("TestAgent".to_string()),
+                bead_id: None,
+                expires_at: None,
+            },
+        );
+        let candidates = vec![pinned];
+        let request = cleanup_request(candidates, CleanupMode::Execute);
+
+        let receipt =
+            execute_cleanup(request, &adapter, sample_ts(600)).expect("cleanup should succeed");
+
+        assert_eq!(receipt.skipped_count, 1);
+        assert_eq!(receipt.skipped_pins.len(), 1);
+        assert!(receipt.skipped_pins[0].contains("manual pin by operator"));
+        assert!(adapter.removed.borrow().is_empty());
+    }
+
+    #[test]
+    fn cleanup_skips_open_files() {
+        let adapter = MockCleanupAdapter::new().with_open("/tmp/target/debug/build/open-file");
+        let candidates = vec![cleanup_candidate("/tmp/target/debug/build/open-file", 1024)];
+        let request = cleanup_request(candidates, CleanupMode::Execute);
+
+        let receipt =
+            execute_cleanup(request, &adapter, sample_ts(600)).expect("cleanup should succeed");
+
+        assert_eq!(receipt.skipped_count, 1);
+        assert!(
+            receipt.outcomes[0]
+                .skip_reason
+                .as_ref()
+                .unwrap()
+                .contains("open")
+        );
+        assert!(adapter.removed.borrow().is_empty());
+    }
+
+    #[test]
+    fn cleanup_skips_active_reservations() {
+        let adapter = MockCleanupAdapter::new();
+        let candidates = vec![cleanup_candidate("/tmp/target/debug/build/reserved", 1024)];
+        let mut request = cleanup_request(candidates, CleanupMode::Execute);
+        request.active_reservations = vec!["/tmp/target/debug/build/reserved".to_string()];
+
+        let receipt =
+            execute_cleanup(request, &adapter, sample_ts(600)).expect("cleanup should succeed");
+
+        assert_eq!(receipt.skipped_count, 1);
+        assert!(
+            receipt.outcomes[0]
+                .skip_reason
+                .as_ref()
+                .unwrap()
+                .contains("reservation")
+        );
+        assert!(adapter.removed.borrow().is_empty());
+    }
+
+    #[test]
+    fn cleanup_skips_files_younger_than_minimum_age() {
+        let now = sample_ts(600);
+        let recent_mtime = sample_ts(500);
+        let adapter =
+            MockCleanupAdapter::new().with_mtime("/tmp/target/debug/build/young", recent_mtime);
+        let mut entry = cleanup_candidate("/tmp/target/debug/build/young", 1024);
+        entry.minimum_age_secs = Some(300);
+        let candidates = vec![entry];
+        let request = cleanup_request(candidates, CleanupMode::Execute);
+
+        let receipt = execute_cleanup(request, &adapter, now).expect("cleanup should succeed");
+
+        assert_eq!(receipt.skipped_count, 1);
+        assert!(
+            receipt.outcomes[0]
+                .skip_reason
+                .as_ref()
+                .unwrap()
+                .contains("younger")
+        );
+        assert!(adapter.removed.borrow().is_empty());
+    }
+
+    #[test]
+    fn cleanup_removes_files_older_than_minimum_age() {
+        let now = sample_ts(600);
+        let old_mtime = sample_ts(0);
+        let adapter =
+            MockCleanupAdapter::new().with_mtime("/tmp/target/debug/build/old", old_mtime);
+        let mut entry = cleanup_candidate("/tmp/target/debug/build/old", 1024);
+        entry.minimum_age_secs = Some(300);
+        let candidates = vec![entry];
+        let request = cleanup_request(candidates, CleanupMode::Execute);
+
+        let receipt = execute_cleanup(request, &adapter, now).expect("cleanup should succeed");
+
+        assert_eq!(receipt.removed_count, 1);
+        assert_eq!(adapter.removed.borrow().len(), 1);
+    }
+
+    #[test]
+    fn cleanup_records_adapter_failures() {
+        let adapter = MockCleanupAdapter::new().with_remove_error("permission denied");
+        let candidates = vec![cleanup_candidate("/tmp/target/debug/build/error", 1024)];
+        let request = cleanup_request(candidates, CleanupMode::Execute);
+
+        let receipt =
+            execute_cleanup(request, &adapter, sample_ts(600)).expect("cleanup should succeed");
+
+        assert_eq!(receipt.failed_count, 1);
+        assert_eq!(receipt.outcomes[0].outcome, CleanupOutcome::Failed);
+        assert!(
+            receipt.outcomes[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("permission denied")
+        );
+    }
+
+    #[test]
+    fn cleanup_receipt_has_stable_schema_version() {
+        let adapter = MockCleanupAdapter::new();
+        let candidates = vec![cleanup_candidate("/tmp/target/foo", 1024)];
+        let request = cleanup_request(candidates, CleanupMode::ReportOnly);
+
+        let receipt =
+            execute_cleanup(request, &adapter, sample_ts(600)).expect("cleanup should succeed");
+
+        assert_eq!(receipt.schema_version, CLEANUP_RECEIPT_SCHEMA_VERSION);
+        assert!(receipt.candidates_digest.starts_with("sha256:"));
+        assert_eq!(receipt.candidates_digest.len(), "sha256:".len() + 64);
+        assert!(receipt.summary().contains("mode=ReportOnly"));
+        assert!(receipt.summary().contains("estimated_bytes_reclaimable="));
+    }
+
+    #[test]
+    fn cleanup_candidates_digest_is_order_independent_and_stable() {
+        let candidates1 = vec![
+            cleanup_candidate("/tmp/target/foo", 1024),
+            cleanup_candidate("/tmp/target/bar", 2048),
+        ];
+        let candidates2 = vec![
+            cleanup_candidate("/tmp/target/bar", 2048),
+            cleanup_candidate("/tmp/target/foo", 1024),
+        ];
+
+        let digest1 = cleanup_request(candidates1, CleanupMode::ReportOnly).candidates_digest();
+        let digest2 = cleanup_request(candidates2, CleanupMode::ReportOnly).candidates_digest();
+
+        assert_eq!(digest1, digest2);
+        assert!(digest1.starts_with("sha256:"));
+        assert_eq!(digest1.len(), "sha256:".len() + 64);
+    }
+
+    #[test]
+    fn cleanup_receipt_round_trips_through_serde() {
+        let adapter = MockCleanupAdapter::new();
+        let candidates = vec![
+            cleanup_candidate("/tmp/target/foo", 1024),
+            cleanup_candidate("/tmp/target/bar", 2048),
+        ];
+        let request = cleanup_request(candidates, CleanupMode::DryRun);
+
+        let receipt =
+            execute_cleanup(request, &adapter, sample_ts(600)).expect("cleanup should succeed");
+
+        let json = serde_json::to_string(&receipt).expect("serialize");
+        let decoded: CleanupReceipt = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(decoded.trace_id, receipt.trace_id);
+        assert_eq!(decoded.mode, receipt.mode);
+        assert_eq!(decoded.candidates_count, receipt.candidates_count);
+        assert_eq!(decoded.outcomes.len(), receipt.outcomes.len());
+    }
+
+    #[test]
+    fn cleanup_validates_too_many_candidates() {
+        let candidates: Vec<_> = (0..MAX_CLEANUP_CANDIDATES + 1)
+            .map(|i| cleanup_candidate(&format!("/tmp/target/{}", i), 1024))
+            .collect();
+        let request = cleanup_request(candidates, CleanupMode::ReportOnly);
+
+        let result = request.validated();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            CleanupError::TooManyCandidates { count, max }
+                if count == MAX_CLEANUP_CANDIDATES + 1 && max == MAX_CLEANUP_CANDIDATES
+        ));
+    }
+
+    #[test]
+    fn cleanup_executor_e2e_tempdir_removes_only_eligible_artifacts() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let eligible_file = temp_dir.path().join("eligible_artifact.o");
+        let protected_dir = temp_dir.path().join(".beads");
+        let protected_file = protected_dir.join("issues.jsonl");
+
+        std::fs::write(&eligible_file, b"artifact content").expect("write eligible");
+        std::fs::create_dir_all(&protected_dir).expect("create protected dir");
+        std::fs::write(&protected_file, b"protected content").expect("write protected");
+
+        assert!(eligible_file.exists());
+        assert!(protected_file.exists());
+
+        let old_mtime = sample_ts(0);
+        let now = sample_ts(600);
+
+        let mut eligible_entry = ResourceArtifactInventoryEntry::new(
+            eligible_file.to_string_lossy(),
+            temp_dir.path().to_string_lossy(),
+            ResourceArtifactKind::TempOutput,
+            ResourceArtifactSafetyClass::DisposableTempOutput,
+            Some(16),
+        );
+        eligible_entry.open_file_status = ResourceArtifactOpenFileStatus::NotOpen;
+        eligible_entry.minimum_age_secs = Some(0);
+        eligible_entry.mtime = Some(old_mtime);
+
+        let mut protected_entry = ResourceArtifactInventoryEntry::new(
+            protected_file.to_string_lossy(),
+            temp_dir.path().to_string_lossy(),
+            ResourceArtifactKind::Unknown,
+            ResourceArtifactSafetyClass::DisposableTempOutput,
+            Some(17),
+        );
+        protected_entry.open_file_status = ResourceArtifactOpenFileStatus::NotOpen;
+        protected_entry.minimum_age_secs = Some(0);
+        protected_entry.mtime = Some(old_mtime);
+
+        let request = CleanupRequest {
+            trace_id: "e2e-tempdir-test".to_string(),
+            mode: CleanupMode::Execute,
+            actor: Some("e2e-test".to_string()),
+            agent: Some("TestAgent".to_string()),
+            bead_id: Some("bd-e2e".to_string()),
+            approved_reason: "e2e temp cleanup test".to_string(),
+            candidates: vec![eligible_entry, protected_entry],
+            active_reservations: Vec::new(),
+        };
+
+        let receipt =
+            execute_cleanup(request, &DefaultCleanupAdapter, now).expect("cleanup should succeed");
+
+        assert!(
+            !eligible_file.exists(),
+            "eligible artifact should be removed"
+        );
+        assert!(
+            protected_file.exists(),
+            "protected .beads file should NOT be removed"
+        );
+
+        assert_eq!(receipt.removed_count, 1);
+        assert_eq!(receipt.skipped_count, 1);
+
+        let eligible_outcome = receipt
+            .outcomes
+            .iter()
+            .find(|o| o.path.contains("eligible_artifact"))
+            .expect("eligible outcome");
+        assert_eq!(eligible_outcome.outcome, CleanupOutcome::Removed);
+
+        let protected_outcome = receipt
+            .outcomes
+            .iter()
+            .find(|o| o.path.contains(".beads"))
+            .expect("protected outcome");
+        assert_eq!(protected_outcome.outcome, CleanupOutcome::Skipped);
+        assert!(
+            protected_outcome
+                .skip_reason
+                .as_ref()
+                .expect("skip reason")
+                .contains("protected")
+        );
     }
 }

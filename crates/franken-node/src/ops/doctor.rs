@@ -529,19 +529,15 @@ impl WorkspacePressureDoctor {
                 work_class
             ),
             explanation: format!(
-                "Remove {} of artifacts to reduce workspace pressure ({})",
+                "Review {} of approved cleanup candidates through the audited cleanup executor ({})",
                 format_bytes(total_size),
                 decision.cleanup_candidates[0].reason
             ),
-            command: if decision.cleanup_candidates.len() == 1 {
-                Some(format!(
-                    "rm -rf '{}'",
-                    decision.cleanup_candidates[0].path.display()
-                ))
-            } else {
-                None
-            },
-            impact: format!("Free {} of disk space", format_bytes(total_size)),
+            command: None,
+            impact: format!(
+                "Potentially free {} of disk space after explicit approved cleanup mode",
+                format_bytes(total_size)
+            ),
         };
 
         push_bounded(recommendations, action, MAX_RECOMMENDED_ACTIONS);
@@ -739,6 +735,40 @@ mod tests {
                 .recommended_actions
                 .iter()
                 .any(|a| a.priority == "high")
+        );
+    }
+
+    #[test]
+    fn test_cleanup_recommendations_do_not_emit_destructive_shell_commands() {
+        let inputs = WorkspacePressureInputs {
+            free_disk_bytes: 50_000_000,      // 50MB - critical
+            target_dir_bytes: 15_000_000_000, // 15GB
+            active_build_count: 3,
+            rch_available_slots: Some(2),
+            memory_pressure: 0.7,
+            active_reservations: 10,
+            coordination_healthy: true,
+        };
+
+        let doctor = WorkspacePressureDoctor::new();
+        let output = doctor.generate_report(&inputs);
+        let human_report = doctor.format_human_report(&output);
+
+        assert!(!output.recommended_actions.is_empty());
+        for action in &output.recommended_actions {
+            if let Some(command) = &action.command {
+                assert!(!command.contains("rm -rf"));
+                assert!(!command.contains("git clean"));
+                assert!(!command.contains("git reset"));
+            }
+        }
+        assert!(!human_report.contains("rm -rf"));
+        assert!(!human_report.contains("git clean"));
+        assert!(!human_report.contains("git reset"));
+        assert!(
+            output.recommended_actions.iter().any(|action| {
+                action.action.starts_with("Clean up") && action.command.is_none()
+            })
         );
     }
 
