@@ -954,13 +954,12 @@ impl LaneScheduler {
     }
 
     fn next_task_id(&mut self) -> Result<TaskId, LaneSchedulerError> {
-        let next_counter = self.task_counter.saturating_add(1);
-        if next_counter == self.task_counter {
+        if self.task_counter == u64::MAX {
             return Err(LaneSchedulerError::TaskIdExhausted {
                 last_counter: self.task_counter,
             });
         }
-        self.task_counter = next_counter;
+        self.task_counter = self.task_counter.saturating_add(1);
         Ok(TaskId::new(self.task_counter))
     }
 
