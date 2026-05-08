@@ -15,6 +15,18 @@ const MAX_AUDIT_PATH_ENTRIES: usize = crate::capacity_defaults::base::SMALL;
 
 // ── Hash helper ─────────────────────────────────────────────────────
 
+/// Compute a deterministic hash of two byte arrays combined.
+/// Uses full-width SHA-256 output for collision resistance.
+fn hash_pair_bytes(left: &[u8], right: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(b"transparency_interior_v1:");
+    h.update(len_to_u64(left.len()).to_le_bytes());
+    h.update(left);
+    h.update(len_to_u64(right.len()).to_le_bytes());
+    h.update(right);
+    h.finalize().into()
+}
+
 /// Compute a deterministic hash of two hex strings combined.
 /// Uses full-width SHA-256 output (64 hex chars) to avoid weakened collision
 /// resistance from truncation.
@@ -162,24 +174,42 @@ impl fmt::Display for ProofFailure {
 
 // ── Merkle path verification ────────────────────────────────────────
 
-/// Recompute the Merkle root from a leaf and its audit path.
+/// Recompute the Merkle root from a leaf and its audit path, returning raw bytes.
 ///
-/// At each level, if the current index is even we hash (current || sibling),
-/// if odd we hash (sibling || current). Then shift the index right by 1.
-pub fn recompute_root(proof: &InclusionProof) -> String {
-    let mut current = proof.leaf_hash.clone();
+/// Optimized version that works with byte arrays internally to avoid per-step
+/// hex encoding allocations.
+fn recompute_root_bytes(proof: &InclusionProof) -> [u8; 32] {
+    // Decode the hex leaf hash to bytes
+    let mut current = hex::decode(&proof.leaf_hash)
+        .expect("leaf_hash should be valid hex")
+        .try_into()
+        .expect("leaf_hash should be 32 bytes");
     let mut index = proof.leaf_index;
 
     for sibling in &proof.audit_path {
+        let sibling_bytes: [u8; 32] = hex::decode(sibling)
+            .expect("audit path entry should be valid hex")
+            .try_into()
+            .expect("audit path entry should be 32 bytes");
+
         if index.is_multiple_of(2) {
-            current = hash_pair(&current, sibling);
+            current = hash_pair_bytes(&current, &sibling_bytes);
         } else {
-            current = hash_pair(sibling, &current);
+            current = hash_pair_bytes(&sibling_bytes, &current);
         }
         index /= 2;
     }
 
     current
+}
+
+/// Recompute the Merkle root from a leaf and its audit path.
+///
+/// At each level, if the current index is even we hash (current || sibling),
+/// if odd we hash (sibling || current). Then shift the index right by 1.
+pub fn recompute_root(proof: &InclusionProof) -> String {
+    let root_bytes = recompute_root_bytes(proof);
+    hex::encode(root_bytes)
 }
 
 fn audit_path_len_limit(tree_size: u64) -> usize {
@@ -585,6 +615,30 @@ mod tests {
         assert_eq!(proofs.len(), 2);
         assert_eq!(recompute_root(&proofs[0]), root);
         assert_eq!(recompute_root(&proofs[1]), root);
+    }
+
+    #[test]
+    fn recompute_root_bytes_matches_hex_version() {
+        // Test that the optimized byte-based implementation produces the same results
+        let (root, proofs) = build_test_tree(&["a", "b", "c", "d"]);
+
+        for proof in &proofs {
+            // Both implementations should produce the same root
+            let hex_root = recompute_root(proof);
+            let byte_root = recompute_root_bytes(proof);
+            let byte_root_as_hex = hex::encode(byte_root);
+
+            assert_eq!(
+                hex_root, byte_root_as_hex,
+                "Optimized byte version differs from hex version for proof {}",
+                proof.leaf_index
+            );
+            assert_eq!(
+                hex_root, root,
+                "Root computation failed for proof {}",
+                proof.leaf_index
+            );
+        }
     }
 
     // === verify_inclusion ===
