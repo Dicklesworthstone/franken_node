@@ -841,7 +841,7 @@ impl AntiEntropyReconciler {
         for record in &delta {
             // Check cancellation.
             if self.config.cancellation_enabled
-                && cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                && cancelled.load(std::sync::atomic::Ordering::Acquire)
             {
                 self.push_event(ReconciliationEvent {
                     code: EVT_CANCELLED.to_string(),
@@ -3708,14 +3708,14 @@ mod tests {
 
                     // Cancel some operations midway
                     if i % 3 == 0 {
-                        cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                        cancelled.store(true, std::sync::atomic::Ordering::Release);
                     }
 
                     let mut local_state = state_clone.lock().unwrap().clone();
                     let result = reconciler_clone.apply_delta(&mut local_state, delta, &cancelled);
 
                     // Return result and whether cancellation was requested
-                    (result, cancelled.load(std::sync::atomic::Ordering::Relaxed))
+                    (result, cancelled.load(std::sync::atomic::Ordering::Acquire))
                 });
 
                 push_bounded(&mut handles, handle, 20);
