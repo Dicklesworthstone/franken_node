@@ -19,7 +19,7 @@ use frankenengine_node::ops::validation_broker::{
 };
 use frankenengine_node::ops::validation_closeout::{
     ValidationCloseoutOptions, ValidationCloseoutStatus, build_validation_closeout_report,
-    render_validation_closeout_json,
+    render_validation_closeout_json, render_validation_closeout_structured_log_jsonl,
 };
 use frankenengine_node::ops::validation_proof_cache::DirtyStatePolicy;
 use frankenengine_node::ops::validation_proof_coalescer::{
@@ -667,7 +667,8 @@ fn coalescer_statuses_render_producer_waiter_and_completed_handoff()
     let completed_evidence = completed_status
         .proof_coalescer
         .as_ref()
-        .expect("completed coalescer evidence");
+        .expect("completed coalescer evidence")
+        .clone();
     assert_eq!(
         completed_evidence.receipt_path.as_deref(),
         Some("artifacts/validation_broker/joined/receipt.json")
@@ -675,6 +676,78 @@ fn coalescer_statuses_render_producer_waiter_and_completed_handoff()
     assert_eq!(
         completed_evidence.proof_cache_key_hex,
         producer_request.proof_work_key.proof_cache_key.hex
+    );
+
+    let readiness_input = ValidationReadinessInput {
+        proof_statuses: vec![
+            producer_status.clone(),
+            waiter_status.clone(),
+            completed_status.clone(),
+        ],
+        rch_workers: vec![remote_worker("ts2")],
+        resource_governor: Some(allow_resource_snapshot()),
+        ..ValidationReadinessInput::default()
+    };
+    let readiness_report =
+        build_validation_readiness_report(&readiness_input, "bd-coalescer-readiness", ts(4));
+    assert_eq!(readiness_report.summary.proof_coalescer.producer_proofs, 1);
+    assert_eq!(readiness_report.summary.proof_coalescer.waiters, 1);
+    assert_eq!(readiness_report.summary.proof_coalescer.cache_handoffs, 1);
+    let readiness_human = render_validation_readiness_human(&readiness_report);
+    assert!(readiness_human.contains(
+        "proof_coalescer=producers:1 waiters:1 stale_leases:0 fenced_leases:0 capacity_rejections:0 cache_handoffs:1 rejected:0"
+    ));
+
+    let closeout_options = ValidationCloseoutOptions::new("bd-6efmv", "bd-coalescer-closeout")
+        .with_proof_coalescer(
+            ProofEvidenceSource::CoalescedCompleted,
+            completed_evidence.clone(),
+        );
+    let closeout_report = build_validation_closeout_report(&receipt(), &closeout_options, ts(4))?;
+    let closeout_json = render_validation_closeout_json(&closeout_report)?;
+    let closeout_jsonl = render_validation_closeout_structured_log_jsonl(&closeout_report)?;
+    let closeout_log: Value = serde_json::from_str(closeout_jsonl.trim_end())?;
+    assert_eq!(
+        closeout_report.proof_source,
+        ProofEvidenceSource::CoalescedCompleted
+    );
+    assert_eq!(
+        closeout_report
+            .proof_coalescer
+            .as_ref()
+            .expect("closeout coalescer evidence")
+            .producer_agent,
+        "PearlLeopard"
+    );
+    assert!(closeout_report.close_reason.contains("coalescer_decision="));
+    assert!(
+        closeout_report
+            .agent_mail_markdown
+            .contains("- proof_coalescer_lease:")
+    );
+    assert!(closeout_json.contains("\"proof_source\": \"coalesced_completed\""));
+    assert!(closeout_json.contains("\"proof_coalescer\""));
+    assert_eq!(closeout_log["event"].as_str(), Some("validation_closeout"));
+    assert_eq!(
+        closeout_log["detail"]["trace_id"].as_str(),
+        Some("bd-coalescer-closeout")
+    );
+    assert_eq!(
+        closeout_log["detail"]["proof_source"].as_str(),
+        Some("coalesced_completed")
+    );
+    assert_eq!(
+        closeout_log["detail"]["producer_agent"].as_str(),
+        Some("PearlLeopard")
+    );
+    let expected_receipt_path = receipt().artifacts.receipt_path;
+    assert_eq!(
+        closeout_log["detail"]["receipt_path"].as_str(),
+        Some(expected_receipt_path.as_str())
+    );
+    assert_eq!(
+        closeout_log["detail"]["cache_key"].as_str(),
+        Some(producer_request.proof_work_key.proof_cache_key.hex.as_str())
     );
     Ok(())
 }
@@ -747,6 +820,36 @@ fn coalescer_statuses_fail_closed_for_stale_and_rejected_work()
         rejected_outcome.lease.as_ref().map(|lease| lease.state),
         None::<ValidationProofLeaseState>
     );
+
+    let mut capacity_status = rejected_status.clone();
+    capacity_status
+        .proof_coalescer
+        .as_mut()
+        .expect("capacity coalescer evidence")
+        .reason_code = "VPCO_REJECT_CAPACITY".to_string();
+    let readiness_input = ValidationReadinessInput {
+        proof_statuses: vec![stale_status, capacity_status],
+        rch_workers: vec![remote_worker("ts2")],
+        resource_governor: Some(allow_resource_snapshot()),
+        ..ValidationReadinessInput::default()
+    };
+    let readiness_report =
+        build_validation_readiness_report(&readiness_input, "bd-coalescer-rejected", ts(4));
+    assert_eq!(readiness_report.summary.proof_coalescer.stale_leases, 1);
+    assert_eq!(
+        readiness_report.summary.proof_coalescer.capacity_rejections,
+        1
+    );
+    assert_eq!(readiness_report.summary.proof_coalescer.rejected, 2);
+    let coalescer_check = readiness_report
+        .checks
+        .iter()
+        .find(|check| check.code == "VR-PROOF-COALESCER-009")
+        .expect("coalescer readiness check");
+    assert_eq!(coalescer_check.status, ValidationReadinessStatus::Fail);
+    let readiness_human = render_validation_readiness_human(&readiness_report);
+    assert!(readiness_human.contains("capacity_rejections:1"));
+    assert!(readiness_human.contains("VR-PROOF-COALESCER-009 [FAIL]"));
     Ok(())
 }
 

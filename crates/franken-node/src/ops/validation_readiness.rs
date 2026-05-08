@@ -213,6 +213,23 @@ pub struct ProofKindCounts {
     pub unknown: usize,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofCoalescerCounts {
+    pub producer_proofs: usize,
+    pub waiters: usize,
+    pub stale_leases: usize,
+    pub fenced_leases: usize,
+    pub capacity_rejections: usize,
+    pub cache_handoffs: usize,
+    pub rejected: usize,
+}
+
+impl ProofCoalescerCounts {
+    fn active_work(&self) -> usize {
+        self.producer_proofs.saturating_add(self.waiters)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationFailureDomain {
@@ -536,6 +553,7 @@ pub struct ValidationReadinessSummary {
     pub receipts: usize,
     pub proof_statuses: usize,
     pub proof_counts: ProofKindCounts,
+    pub proof_coalescer: ProofCoalescerCounts,
     pub proof_cache_hits: usize,
     pub stale_receipt_count: usize,
     pub malformed_receipt_count: usize,
@@ -609,6 +627,7 @@ pub fn build_validation_readiness_report(
         evaluate_required_receipts_check(input, &summary, now),
         evaluate_receipt_freshness_check(input, &summary, now),
         evaluate_proof_status_check(input, &summary),
+        evaluate_proof_coalescer_check(&summary),
         evaluate_rch_worker_check(input, &summary),
         evaluate_proof_lane_readiness_check(&summary),
         evaluate_resource_contention_check(input),
@@ -726,6 +745,16 @@ pub fn render_validation_readiness_human(report: &ValidationReadinessReport) -> 
             report.summary.proof_cache_hits
         ),
         format!(
+            "  proof_coalescer=producers:{} waiters:{} stale_leases:{} fenced_leases:{} capacity_rejections:{} cache_handoffs:{} rejected:{}",
+            report.summary.proof_coalescer.producer_proofs,
+            report.summary.proof_coalescer.waiters,
+            report.summary.proof_coalescer.stale_leases,
+            report.summary.proof_coalescer.fenced_leases,
+            report.summary.proof_coalescer.capacity_rejections,
+            report.summary.proof_coalescer.cache_handoffs,
+            report.summary.proof_coalescer.rejected
+        ),
+        format!(
             "  stale_receipts={} missing_required_receipts={} malformed_receipts={}",
             report.summary.stale_receipt_count,
             report.summary.missing_required_receipts,
@@ -778,7 +807,9 @@ pub fn render_validation_readiness_human(report: &ValidationReadinessReport) -> 
             check.status.as_str(),
             check.message
         ));
-        if !check.remediation.trim().is_empty() && check.status != ValidationReadinessStatus::Pass {
+        if !check.remediation.trim().is_empty()
+            && !matches!(check.status, ValidationReadinessStatus::Pass)
+        {
             lines.push(format!("    remediation={}", check.remediation));
         }
     }
@@ -800,9 +831,11 @@ fn summarize_validation_readiness(
     let mut rch_remote_missing_worker_id = 0usize;
     let mut last_successful_cargo_proof_at = None;
     let mut proof_cache_hits = 0usize;
+    let mut proof_coalescer = ProofCoalescerCounts::default();
 
     for status in &input.proof_statuses {
         increment_proof_count(&mut proof_counts, status.status);
+        increment_proof_coalescer_count(&mut proof_coalescer, status);
         if status.proof_source == ProofEvidenceSource::ProofCacheHit || status.proof_cache.is_some()
         {
             proof_cache_hits = proof_cache_hits.saturating_add(1);
@@ -854,7 +887,7 @@ fn summarize_validation_readiness(
             }
         }
 
-        if receipt.exit.kind == ValidationExitKind::Success && command_uses_cargo(receipt) {
+        if matches!(receipt.exit.kind, ValidationExitKind::Success) && command_uses_cargo(receipt) {
             last_successful_cargo_proof_at = Some(
                 last_successful_cargo_proof_at
                     .map_or(receipt.timing.finished_at, |current: DateTime<Utc>| {
@@ -931,7 +964,7 @@ fn summarize_validation_readiness(
             flight_recorder_refs_count = flight_recorder_refs_count.saturating_add(1);
 
             // If this receipt indicates a failure, add to failed attempts
-            if receipt.exit.kind != ValidationExitKind::Success {
+            if !matches!(receipt.exit.kind, ValidationExitKind::Success) {
                 let domain = failure_domain_for_receipt(receipt);
 
                 let (retryable, recovery_plan) = {
@@ -993,6 +1026,7 @@ fn summarize_validation_readiness(
         receipts: input.receipts.len(),
         proof_statuses: input.proof_statuses.len(),
         proof_counts,
+        proof_coalescer,
         proof_cache_hits,
         stale_receipt_count,
         malformed_receipt_count,
@@ -1281,6 +1315,62 @@ fn evaluate_proof_status_check(
     )
 }
 
+fn evaluate_proof_coalescer_check(
+    summary: &ValidationReadinessSummary,
+) -> ValidationReadinessCheck {
+    if summary.proof_coalescer.stale_leases > 0 || summary.proof_coalescer.rejected > 0 {
+        return check(
+            "VR-PROOF-COALESCER-009",
+            "VPCO-006",
+            "validation_proof_coalescer.lease_state",
+            ValidationReadinessStatus::Fail,
+            format!(
+                "Validation proof coalescer has fail-closed lease decisions (stale={} fenced={} rejected={} capacity_rejections={}).",
+                summary.proof_coalescer.stale_leases,
+                summary.proof_coalescer.fenced_leases,
+                summary.proof_coalescer.rejected,
+                summary.proof_coalescer.capacity_rejections
+            ),
+            "Repair or fence stale/malformed leases before launching or joining cargo proof work.",
+        );
+    }
+    if summary.proof_coalescer.active_work() > 0 {
+        return check(
+            "VR-PROOF-COALESCER-009",
+            "VPCO-003",
+            "validation_proof_coalescer.lease_state",
+            ValidationReadinessStatus::Warn,
+            format!(
+                "Validation proof coalescer has active shared proof work (producers={} waiters={}).",
+                summary.proof_coalescer.producer_proofs, summary.proof_coalescer.waiters
+            ),
+            "Join or wait for the existing lease instead of launching duplicate RCH cargo validation.",
+        );
+    }
+    if summary.proof_coalescer.cache_handoffs > 0 {
+        return check(
+            "VR-PROOF-COALESCER-009",
+            "VPCO-010",
+            "validation_proof_coalescer.lease_state",
+            ValidationReadinessStatus::Pass,
+            format!(
+                "Validation proof coalescer completed {} cache handoff(s).",
+                summary.proof_coalescer.cache_handoffs
+            ),
+            "No action required.",
+        );
+    }
+
+    check(
+        "VR-PROOF-COALESCER-009",
+        "VPCO-001",
+        "validation_proof_coalescer.lease_state",
+        ValidationReadinessStatus::Pass,
+        "No validation proof coalescer decisions were supplied.",
+        "No action required.",
+    )
+}
+
 fn evaluate_rch_worker_check(
     input: &ValidationReadinessInput,
     summary: &ValidationReadinessSummary,
@@ -1377,10 +1467,12 @@ fn evaluate_proof_lane_readiness_check(
         );
     }
 
-    let mut retryable = summary
-        .proof_lane_readiness
-        .iter()
-        .filter(|capsule| capsule.decision != ProofLaneReadinessDecisionKind::ReadyToLaunch);
+    let mut retryable = summary.proof_lane_readiness.iter().filter(|capsule| {
+        !matches!(
+            capsule.decision,
+            ProofLaneReadinessDecisionKind::ReadyToLaunch
+        )
+    });
     if let Some(first_retryable) = retryable.next() {
         let mut queued = vec![proof_lane_blocker_label(first_retryable)];
         queued.extend(retryable.map(proof_lane_blocker_label));
@@ -1505,6 +1597,49 @@ fn increment_proof_count(counts: &mut ProofKindCounts, status: ProofStatusKind) 
         ProofStatusKind::Passed => counts.passed += 1,
         ProofStatusKind::SourceOnly => counts.source_only += 1,
         ProofStatusKind::Cancelled => counts.cancelled += 1,
+    }
+}
+
+fn increment_proof_coalescer_count(
+    counts: &mut ProofCoalescerCounts,
+    status: &ValidationProofStatus,
+) {
+    match status.proof_source {
+        ProofEvidenceSource::CoalescedInflight => {
+            counts.producer_proofs = counts.producer_proofs.saturating_add(1);
+        }
+        ProofEvidenceSource::CoalescedWaiter => {
+            counts.waiters = counts.waiters.saturating_add(1);
+        }
+        ProofEvidenceSource::CoalescedCompleted => {
+            counts.cache_handoffs = counts.cache_handoffs.saturating_add(1);
+        }
+        ProofEvidenceSource::CoalescerRejected => {
+            counts.rejected = counts.rejected.saturating_add(1);
+        }
+        ProofEvidenceSource::Unknown
+        | ProofEvidenceSource::BrokerQueue
+        | ProofEvidenceSource::FreshExecution
+        | ProofEvidenceSource::SourceOnlyFallback
+        | ProofEvidenceSource::ProofCacheHit => {}
+    }
+
+    let Some(evidence) = &status.proof_coalescer else {
+        return;
+    };
+    let stale_decision = matches!(evidence.lease_state.as_str(), "stale")
+        || matches!(
+            evidence.reason_code.as_str(),
+            "VPCO_RETRY_STALE" | "VPCO_WAIT_FRESH_PRODUCER" | "VPCO_INSUFFICIENT_STALE_EVIDENCE"
+        );
+    if stale_decision {
+        counts.stale_leases = counts.stale_leases.saturating_add(1);
+    }
+    if matches!(evidence.lease_state.as_str(), "fenced") {
+        counts.fenced_leases = counts.fenced_leases.saturating_add(1);
+    }
+    if matches!(evidence.reason_code.as_str(), "VPCO_REJECT_CAPACITY") {
+        counts.capacity_rejections = counts.capacity_rejections.saturating_add(1);
     }
 }
 

@@ -5,7 +5,8 @@
 
 use crate::ops::validation_broker::{
     ProofEvidenceSource, RchMode, ValidationBrokerError, ValidationErrorClass, ValidationExitKind,
-    ValidationProofCacheReuseEvidence, ValidationReadinessRef, ValidationReceipt, error_codes,
+    ValidationProofCacheReuseEvidence, ValidationProofCoalescerEvidence, ValidationReadinessRef,
+    ValidationReceipt, error_codes,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,8 @@ pub struct ValidationCloseoutOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proof_cache: Option<ValidationProofCacheReuseEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_coalescer: Option<ValidationProofCoalescerEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr_text: Option<String>,
@@ -63,6 +66,7 @@ impl ValidationCloseoutOptions {
             max_output_excerpt_bytes: DEFAULT_MAX_OUTPUT_EXCERPT_BYTES,
             proof_source: ProofEvidenceSource::FreshExecution,
             proof_cache: None,
+            proof_coalescer: None,
             stdout_text: None,
             stderr_text: None,
         }
@@ -75,6 +79,17 @@ impl ValidationCloseoutOptions {
     ) -> Self {
         self.proof_source = ProofEvidenceSource::ProofCacheHit;
         self.proof_cache = Some(proof_cache);
+        self
+    }
+
+    #[must_use]
+    pub fn with_proof_coalescer(
+        mut self,
+        proof_source: ProofEvidenceSource,
+        proof_coalescer: ValidationProofCoalescerEvidence,
+    ) -> Self {
+        self.proof_source = proof_source;
+        self.proof_coalescer = Some(proof_coalescer);
         self
     }
 }
@@ -94,6 +109,8 @@ pub struct ValidationCloseoutReport {
     pub proof_source: ProofEvidenceSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proof_cache: Option<ValidationProofCacheReuseEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_coalescer: Option<ValidationProofCoalescerEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_ref: Option<ValidationReadinessRef>,
     pub close_reason: String,
@@ -139,6 +156,38 @@ pub struct ValidationCloseoutOutputExcerpt {
     pub original_bytes: usize,
     pub included_bytes: usize,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationCloseoutStructuredLog {
+    pub ts: DateTime<Utc>,
+    pub event: String,
+    pub severity: String,
+    pub detail: ValidationCloseoutStructuredLogDetail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationCloseoutStructuredLogDetail {
+    pub trace_id: String,
+    pub bead_id: String,
+    pub thread_id: String,
+    pub receipt_id: String,
+    pub receipt_path: String,
+    pub status: String,
+    pub proof_source: String,
+    pub proof_work_key: Option<String>,
+    pub lease_id: Option<String>,
+    pub lease_path: Option<String>,
+    pub lease_state: Option<String>,
+    pub decision: Option<String>,
+    pub reason_code: Option<String>,
+    pub event_code: Option<String>,
+    pub required_action: Option<String>,
+    pub producer_agent: Option<String>,
+    pub producer_bead_id: Option<String>,
+    pub waiter_agent: Option<String>,
+    pub coalescer_receipt_path: Option<String>,
+    pub cache_key: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -197,6 +246,7 @@ pub fn build_validation_closeout_report(
         status,
         proof_source,
         options.proof_cache.as_ref(),
+        options.proof_coalescer.as_ref(),
         &warnings,
     );
     let agent_mail_markdown = render_agent_mail_markdown(
@@ -204,6 +254,7 @@ pub fn build_validation_closeout_report(
         status,
         proof_source,
         options.proof_cache.as_ref(),
+        options.proof_coalescer.as_ref(),
         &summary,
         &warnings,
         &output_excerpts,
@@ -222,6 +273,7 @@ pub fn build_validation_closeout_report(
         status_label: status.as_str().to_string(),
         proof_source,
         proof_cache: options.proof_cache.clone(),
+        proof_coalescer: options.proof_coalescer.clone(),
         readiness_ref: receipt.readiness_ref.clone(),
         close_reason,
         agent_mail_markdown,
@@ -235,6 +287,15 @@ pub fn render_validation_closeout_json(
     report: &ValidationCloseoutReport,
 ) -> Result<String, ValidationCloseoutError> {
     serde_json::to_string_pretty(report).map_err(ValidationCloseoutError::Encode)
+}
+
+pub fn render_validation_closeout_structured_log_jsonl(
+    report: &ValidationCloseoutReport,
+) -> Result<String, ValidationCloseoutError> {
+    let mut line = serde_json::to_string(&structured_log_for_closeout(report))
+        .map_err(ValidationCloseoutError::Encode)?;
+    line.push('\n');
+    Ok(line)
 }
 
 pub fn render_validation_closeout_human(report: &ValidationCloseoutReport) -> String {
@@ -399,11 +460,53 @@ fn closeout_output_excerpts(
     excerpts
 }
 
+fn structured_log_for_closeout(
+    report: &ValidationCloseoutReport,
+) -> ValidationCloseoutStructuredLog {
+    let coalescer = report.proof_coalescer.as_ref();
+    ValidationCloseoutStructuredLog {
+        ts: report.generated_at_utc,
+        event: "validation_closeout".to_string(),
+        severity: closeout_log_severity(report.status).to_string(),
+        detail: ValidationCloseoutStructuredLogDetail {
+            trace_id: report.trace_id.clone(),
+            bead_id: report.bead_id.clone(),
+            thread_id: report.thread_id.clone(),
+            receipt_id: report.receipt_id.clone(),
+            receipt_path: report.receipt.artifact_receipt_path.clone(),
+            status: report.status.as_str().to_string(),
+            proof_source: report.proof_source.as_str().to_string(),
+            proof_work_key: coalescer.map(|evidence| evidence.proof_work_key_hex.clone()),
+            lease_id: coalescer.map(|evidence| evidence.lease_id.clone()),
+            lease_path: coalescer.map(|evidence| evidence.lease_path.clone()),
+            lease_state: coalescer.map(|evidence| evidence.lease_state.clone()),
+            decision: coalescer.map(|evidence| evidence.decision_id.clone()),
+            reason_code: coalescer.map(|evidence| evidence.reason_code.clone()),
+            event_code: coalescer.map(|evidence| evidence.event_code.clone()),
+            required_action: coalescer.map(|evidence| evidence.required_action.clone()),
+            producer_agent: coalescer.map(|evidence| evidence.producer_agent.clone()),
+            producer_bead_id: coalescer.map(|evidence| evidence.producer_bead_id.clone()),
+            waiter_agent: coalescer.and_then(|evidence| evidence.waiter_agent.clone()),
+            coalescer_receipt_path: coalescer.and_then(|evidence| evidence.receipt_path.clone()),
+            cache_key: coalescer.map(|evidence| evidence.proof_cache_key_hex.clone()),
+        },
+    }
+}
+
+const fn closeout_log_severity(status: ValidationCloseoutStatus) -> &'static str {
+    match status {
+        ValidationCloseoutStatus::Ready => "info",
+        ValidationCloseoutStatus::SourceOnly | ValidationCloseoutStatus::Stale => "warn",
+        ValidationCloseoutStatus::Blocked | ValidationCloseoutStatus::Invalid => "error",
+    }
+}
+
 fn render_close_reason(
     receipt: &ValidationReceipt,
     status: ValidationCloseoutStatus,
     proof_source: ProofEvidenceSource,
     proof_cache: Option<&ValidationProofCacheReuseEvidence>,
+    proof_coalescer: Option<&ValidationProofCoalescerEvidence>,
     warnings: &[String],
 ) -> String {
     let worker = receipt.rch.worker_id.as_deref().unwrap_or("unknown-worker");
@@ -421,6 +524,24 @@ fn render_close_reason(
             cache.cache_key_hex, cache.receipt_path, cache.entry_path
         )
     });
+    let coalescer_suffix = proof_coalescer.map_or_else(String::new, |coalescer| {
+        format!(
+            " coalescer_decision={} lease_id={} lease_path={} lease_state={} producer={} producer_bead={} waiter={} trace_id={} coalescer_receipt={} coalescer_cache_key={} coalescer_reason={} coalescer_action={} coalescer_event={}",
+            coalescer.decision_id,
+            coalescer.lease_id,
+            coalescer.lease_path,
+            coalescer.lease_state,
+            coalescer.producer_agent,
+            coalescer.producer_bead_id,
+            coalescer.waiter_agent.as_deref().unwrap_or("none"),
+            coalescer.trace_id,
+            coalescer.receipt_path.as_deref().unwrap_or("none"),
+            coalescer.proof_cache_key_hex,
+            coalescer.reason_code,
+            coalescer.required_action,
+            coalescer.event_code
+        )
+    });
     let readiness_suffix = receipt.readiness_ref.as_ref().map_or_else(String::new, |ref_| {
         format!(
             " readiness_ref={} readiness_digest={}:{} readiness_reason={} readiness_action={} readiness_fresh_until={}",
@@ -433,7 +554,7 @@ fn render_close_reason(
         )
     });
     format!(
-        "{} validation receipt {} status={} proof_source={} exit={} error_class={} worker={} command=\"{}\" artifacts={}{}{}{}",
+        "{} validation receipt {} status={} proof_source={} exit={} error_class={} worker={} command=\"{}\" artifacts={}{}{}{}{}",
         receipt.bead_id,
         receipt.receipt_id,
         status.as_str(),
@@ -444,6 +565,7 @@ fn render_close_reason(
         command,
         receipt.artifacts.summary_path,
         cache_suffix,
+        coalescer_suffix,
         readiness_suffix,
         warning_suffix
     )
@@ -454,6 +576,7 @@ fn render_agent_mail_markdown(
     status: ValidationCloseoutStatus,
     proof_source: ProofEvidenceSource,
     proof_cache: Option<&ValidationProofCacheReuseEvidence>,
+    proof_coalescer: Option<&ValidationProofCoalescerEvidence>,
     summary: &ValidationCloseoutReceiptSummary,
     warnings: &[String],
     output_excerpts: &[ValidationCloseoutOutputExcerpt],
@@ -495,6 +618,39 @@ fn render_agent_mail_markdown(
         lines.push(format!(
             "- proof_cache_reason: `{}` action=`{}` event=`{}`",
             cache.reason_code, cache.required_action, cache.event_code
+        ));
+    }
+
+    if let Some(coalescer) = proof_coalescer {
+        lines.push(format!(
+            "- proof_coalescer_decision: `{}`",
+            coalescer.decision_id
+        ));
+        lines.push(format!(
+            "- proof_work_key: `{}`",
+            coalescer.proof_work_key_hex
+        ));
+        lines.push(format!(
+            "- proof_coalescer_lease: `{}` id=`{}` state=`{}`",
+            coalescer.lease_path, coalescer.lease_id, coalescer.lease_state
+        ));
+        lines.push(format!(
+            "- proof_coalescer_producer: `{}` bead=`{}`",
+            coalescer.producer_agent, coalescer.producer_bead_id
+        ));
+        lines.push(format!(
+            "- proof_coalescer_waiter: `{}`",
+            coalescer.waiter_agent.as_deref().unwrap_or("none")
+        ));
+        lines.push(format!("- proof_coalescer_trace: `{}`", coalescer.trace_id));
+        lines.push(format!(
+            "- proof_coalescer_receipt: `{}` cache_key=`{}`",
+            coalescer.receipt_path.as_deref().unwrap_or("none"),
+            coalescer.proof_cache_key_hex
+        ));
+        lines.push(format!(
+            "- proof_coalescer_reason: `{}` action=`{}` event=`{}`",
+            coalescer.reason_code, coalescer.required_action, coalescer.event_code
         ));
     }
 
