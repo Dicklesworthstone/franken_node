@@ -595,20 +595,30 @@ impl TraceStep {
         }
     }
 
-    /// Compute a SHA-256 digest of the step's output for comparison.
-    pub fn output_digest(&self) -> String {
+    /// Compute a SHA-256 digest of the step's output as raw bytes.
+    pub fn output_digest_bytes(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"replay_step_output_v1:");
         update_hash_len_prefixed(&mut hasher, &self.output);
-        hex::encode(hasher.finalize())
+        hasher.finalize().into()
+    }
+
+    /// Compute a SHA-256 digest of the step's output for comparison.
+    pub fn output_digest(&self) -> String {
+        hex::encode(self.output_digest_bytes())
+    }
+
+    /// Compute a SHA-256 digest of the step's side-effects as raw bytes.
+    pub fn side_effects_digest_bytes(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"replay_step_effects_v1:");
+        update_side_effects_hash_len_prefixed(&mut hasher, &self.side_effects);
+        hasher.finalize().into()
     }
 
     /// Compute a SHA-256 digest of the step's side-effects for comparison.
     pub fn side_effects_digest(&self) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(b"replay_step_effects_v1:");
-        update_side_effects_hash_len_prefixed(&mut hasher, &self.side_effects);
-        hex::encode(hasher.finalize())
+        hex::encode(self.side_effects_digest_bytes())
     }
 }
 
@@ -632,13 +642,14 @@ pub struct WorkflowTrace {
 
 impl WorkflowTrace {
     /// Compute the canonical trace digest from the full replay trace envelope.
-    pub fn compute_digest(
+    /// Compute a SHA-256 digest of the trace as raw bytes.
+    pub fn compute_digest_bytes(
         trace_id: &str,
         workflow_name: &str,
         steps: &[TraceStep],
         environment: &EnvironmentSnapshot,
         schema_version: &str,
-    ) -> String {
+    ) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"replay_trace_digest_v1:");
         update_hash_str_len_prefixed(&mut hasher, trace_id);
@@ -653,7 +664,17 @@ impl WorkflowTrace {
             update_hash_len_prefixed(&mut hasher, &step.output);
             update_side_effects_hash_len_prefixed(&mut hasher, &step.side_effects);
         }
-        hex::encode(hasher.finalize())
+        hasher.finalize().into()
+    }
+
+    pub fn compute_digest(
+        trace_id: &str,
+        workflow_name: &str,
+        steps: &[TraceStep],
+        environment: &EnvironmentSnapshot,
+        schema_version: &str,
+    ) -> String {
+        hex::encode(Self::compute_digest_bytes(trace_id, workflow_name, steps, environment, schema_version))
     }
 
     /// Recompute the digest that seals the current trace metadata, environment, and steps.
@@ -831,13 +852,13 @@ impl TraceBuilder {
     pub fn build(mut self) -> Result<(WorkflowTrace, Vec<AuditEntry>), TimeTravelError> {
         if self.steps.is_empty() {
             return Err(TimeTravelError::EmptyTrace {
-                trace_id: self.trace_id.clone(),
+                trace_id: self.trace_id,
             });
         }
 
         let trace = WorkflowTrace {
-            trace_id: self.trace_id.clone(),
-            workflow_name: self.workflow_name.clone(),
+            trace_id: self.trace_id,
+            workflow_name: self.workflow_name,
             steps: self.steps,
             environment: self.environment,
             trace_digest: String::new(),
@@ -5024,5 +5045,68 @@ mod tests {
                 eprintln!("Wraparound case correctly determined to be within tolerance");
             }
         }
+    }
+
+    #[test]
+    fn test_digest_optimization_preserves_bit_identical_output() {
+        // Verify that the digest optimization doesn't change the actual digest values
+        let trace_step = TraceStep {
+            seq: 1,
+            timestamp_ns: 1000000,
+            input: b"test input data".to_vec(),
+            output: b"test output result".to_vec(),
+            side_effects: Vec::new(),
+        };
+
+        let environment = EnvironmentSnapshot {
+            franken_node_version: "1.0.0".to_string(),
+            rust_version: "1.70.0".to_string(),
+            os_info: "linux".to_string(),
+            cpu_info: "x64".to_string(),
+            memory_mb: 8192,
+            environment_variables: vec![],
+        };
+
+        // Test TraceStep digest methods produce identical results
+        let output_digest_old = {
+            let mut hasher = Sha256::new();
+            hasher.update(b"replay_step_output_v1:");
+            update_hash_len_prefixed(&mut hasher, &trace_step.output);
+            hex::encode(hasher.finalize())
+        };
+        assert_eq!(trace_step.output_digest(), output_digest_old, "TraceStep output_digest should be bit-identical");
+
+        let side_effects_digest_old = {
+            let mut hasher = Sha256::new();
+            hasher.update(b"replay_step_effects_v1:");
+            update_side_effects_hash_len_prefixed(&mut hasher, &trace_step.side_effects);
+            hex::encode(hasher.finalize())
+        };
+        assert_eq!(trace_step.side_effects_digest(), side_effects_digest_old, "TraceStep side_effects_digest should be bit-identical");
+
+        // Test WorkflowTrace compute_digest produces identical results
+        let steps = vec![trace_step];
+        let trace_digest_old = {
+            let mut hasher = Sha256::new();
+            hasher.update(b"replay_trace_digest_v1:");
+            update_hash_str_len_prefixed(&mut hasher, "test-trace");
+            update_hash_str_len_prefixed(&mut hasher, "test-workflow");
+            update_hash_str_len_prefixed(&mut hasher, SCHEMA_VERSION);
+            update_environment_hash_len_prefixed(&mut hasher, &environment);
+            hasher.update((u64::try_from(steps.len()).unwrap_or(u64::MAX)).to_le_bytes());
+            for step in &steps {
+                hasher.update(step.seq.to_le_bytes());
+                hasher.update(step.timestamp_ns.to_le_bytes());
+                update_hash_len_prefixed(&mut hasher, &step.input);
+                update_hash_len_prefixed(&mut hasher, &step.output);
+                update_side_effects_hash_len_prefixed(&mut hasher, &step.side_effects);
+            }
+            hex::encode(hasher.finalize())
+        };
+        assert_eq!(
+            WorkflowTrace::compute_digest("test-trace", "test-workflow", &steps, &environment, SCHEMA_VERSION),
+            trace_digest_old,
+            "WorkflowTrace compute_digest should be bit-identical"
+        );
     }
 }
