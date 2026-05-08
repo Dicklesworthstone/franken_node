@@ -144,7 +144,12 @@ pub struct BpetMigrationReport {
     pub admission: AdmissionDecision,
 }
 
-fn gate_event(code: &'static str, level: &'static str, trace_id: &str, message: String) -> GateEvent {
+fn gate_event(
+    code: &'static str,
+    level: &'static str,
+    trace_id: &str,
+    message: String,
+) -> GateEvent {
     GateEvent {
         code,
         level,
@@ -2424,19 +2429,149 @@ mod tests {
             event_codes::ROLLBACK_TRIGGERED,
             "error",
             "trace-123",
-            "rollback triggered at phase=Canary: observed instability=0.8500/0.7500".to_string()
+            "rollback triggered at phase=Canary: observed instability=0.8500/0.7500".to_string(),
         );
 
         // Verify static string fields use &'static str (no allocation)
         assert_eq!(event.code, "BPET-MIGRATE-005");
         assert_eq!(event.level, "error");
         assert_eq!(event.trace_id, "trace-123");
-        assert_eq!(event.message, "rollback triggered at phase=Canary: observed instability=0.8500/0.7500");
+        assert_eq!(
+            event.message,
+            "rollback triggered at phase=Canary: observed instability=0.8500/0.7500"
+        );
 
         // Verify serialization works correctly with new field types
         let serialized = serde_json::to_string(&event).unwrap();
         assert!(serialized.contains("BPET-MIGRATE-005"));
         assert!(serialized.contains("error"));
         assert!(serialized.contains("trace-123"));
+    }
+
+    #[test]
+    fn test_gate_event_all_event_codes_byte_identical() {
+        // Test all available event codes produce expected output
+        let test_cases = [
+            (event_codes::BASELINE_CAPTURED, "BPET-MIGRATE-001"),
+            (event_codes::ADMISSION_ALLOWED, "BPET-MIGRATE-002"),
+            (event_codes::EVIDENCE_REQUIRED, "BPET-MIGRATE-003"),
+            (event_codes::STAGED_ROLLOUT_REQUIRED, "BPET-MIGRATE-004"),
+            (event_codes::ROLLBACK_TRIGGERED, "BPET-MIGRATE-005"),
+            (event_codes::PHASE_ADVANCED, "BPET-MIGRATE-006"),
+            (event_codes::FALLBACK_PLAN_GENERATED, "BPET-MIGRATE-007"),
+        ];
+
+        for (code, expected_code) in test_cases {
+            let event = gate_event(code, "info", "test-trace", "test message".to_string());
+            assert_eq!(event.code, expected_code, "Event code should match constant");
+            assert_eq!(event.level, "info");
+            assert_eq!(event.trace_id, "test-trace");
+            assert_eq!(event.message, "test message");
+
+            // Verify serialization includes expected code
+            let serialized = serde_json::to_string(&event).unwrap();
+            assert!(serialized.contains(expected_code), "Serialization should contain {}", expected_code);
+        }
+    }
+
+    #[test]
+    fn test_gate_event_all_levels_byte_identical() {
+        // Test all used log levels produce expected output
+        let levels = ["info", "warn", "error"];
+
+        for level in levels {
+            let event = gate_event(
+                event_codes::BASELINE_CAPTURED,
+                level,
+                "level-test",
+                "level test message".to_string(),
+            );
+
+            assert_eq!(event.code, "BPET-MIGRATE-001");
+            assert_eq!(event.level, level, "Level should be preserved exactly");
+            assert_eq!(event.trace_id, "level-test");
+            assert_eq!(event.message, "level test message");
+
+            // Verify serialization includes expected level
+            let serialized = serde_json::to_string(&event).unwrap();
+            assert!(serialized.contains(level), "Serialization should contain level '{}'", level);
+        }
+    }
+
+    #[test]
+    fn test_gate_event_empty_edge_cases() {
+        // Test edge cases with empty and special content
+
+        // Empty trace_id (allowed)
+        let event_empty_trace = gate_event(
+            event_codes::BASELINE_CAPTURED,
+            "info",
+            "",
+            "empty trace test".to_string(),
+        );
+        assert_eq!(event_empty_trace.code, "BPET-MIGRATE-001");
+        assert_eq!(event_empty_trace.level, "info");
+        assert_eq!(event_empty_trace.trace_id, "");
+        assert_eq!(event_empty_trace.message, "empty trace test");
+
+        // Empty message (allowed)
+        let event_empty_message = gate_event(
+            event_codes::EVIDENCE_REQUIRED,
+            "warn",
+            "trace-empty-msg",
+            String::new(),
+        );
+        assert_eq!(event_empty_message.code, "BPET-MIGRATE-003");
+        assert_eq!(event_empty_message.level, "warn");
+        assert_eq!(event_empty_message.trace_id, "trace-empty-msg");
+        assert_eq!(event_empty_message.message, "");
+
+        // Special characters in trace_id and message
+        let special_content = "trace-with-newlines\nand\ttabs\rand\\backslashes\"quotes";
+        let event_special = gate_event(
+            event_codes::ROLLBACK_TRIGGERED,
+            "error",
+            special_content,
+            special_content.to_string(),
+        );
+        assert_eq!(event_special.code, "BPET-MIGRATE-005");
+        assert_eq!(event_special.level, "error");
+        assert_eq!(event_special.trace_id, special_content);
+        assert_eq!(event_special.message, special_content);
+
+        // Verify serialization handles special characters correctly
+        let serialized_special = serde_json::to_string(&event_special).unwrap();
+        assert!(serialized_special.contains("BPET-MIGRATE-005"));
+        assert!(serialized_special.contains("error"));
+        // JSON escapes special characters
+        assert!(serialized_special.contains("\\n"));
+        assert!(serialized_special.contains("\\t"));
+        assert!(serialized_special.contains("\\\\"));
+        assert!(serialized_special.contains("\\\""));
+    }
+
+    #[test]
+    fn test_gate_event_long_content_byte_identical() {
+        // Test with very long trace_id and message to ensure no truncation
+
+        let long_trace = "a".repeat(1000);
+        let long_message = "b".repeat(5000);
+
+        let event_long = gate_event(
+            event_codes::FALLBACK_PLAN_GENERATED,
+            "warn",
+            &long_trace,
+            long_message.clone(),
+        );
+
+        assert_eq!(event_long.code, "BPET-MIGRATE-007");
+        assert_eq!(event_long.level, "warn");
+        assert_eq!(event_long.trace_id, long_trace);
+        assert_eq!(event_long.message, long_message);
+
+        // Verify long content serializes correctly
+        let serialized_long = serde_json::to_string(&event_long).unwrap();
+        assert!(serialized_long.contains("BPET-MIGRATE-007"));
+        assert!(serialized_long.len() > 5000); // Should be large due to long content
     }
 }
