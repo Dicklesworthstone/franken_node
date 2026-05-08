@@ -24,7 +24,6 @@ pub struct SafeModeEnterRequest {
     pub operator_id: String,
     pub timestamp: String,
     pub trust_state_hash: String,
-    #[serde(default)]
     pub inconsistencies: Vec<String>,
 }
 
@@ -336,5 +335,40 @@ mod tests {
         .expect_err("exit without confirmation should fail");
         assert!(matches!(err, ApiError::BadRequest { .. }));
         assert!(controller.is_active());
+    }
+
+    #[test]
+    fn safe_mode_enter_request_requires_inconsistencies_field() {
+        // Test that SafeModeEnterRequest fails deserialization when inconsistencies field is missing
+        // This test verifies the fix for bd-uptzn (fail-closed deserialization)
+
+        // Valid request with inconsistencies field should deserialize successfully
+        let valid_json = r#"{
+            "reason": "TrustStateInconsistency",
+            "operator_id": "test-operator",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "trust_state_hash": "abc123",
+            "inconsistencies": ["trust_mismatch", "signature_invalid"]
+        }"#;
+
+        let request: SafeModeEnterRequest = serde_json::from_str(valid_json)
+            .expect("valid request should deserialize");
+        assert_eq!(request.inconsistencies.len(), 2);
+        assert_eq!(request.inconsistencies[0], "trust_mismatch");
+
+        // Request missing inconsistencies field should fail deserialization (fail-closed)
+        let invalid_json = r#"{
+            "reason": "TrustStateInconsistency",
+            "operator_id": "test-operator",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "trust_state_hash": "abc123"
+        }"#;
+
+        let result: Result<SafeModeEnterRequest, _> = serde_json::from_str(invalid_json);
+        assert!(result.is_err(), "Missing inconsistencies field should cause deserialization failure");
+
+        // Verify the error is about the missing field
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("inconsistencies") || error_msg.contains("missing field"));
     }
 }
