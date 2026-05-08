@@ -1,0 +1,77 @@
+{
+  "schema_version": "franken-node/validation-swarm-scheduler/stress-matrix/v1",
+  "bead_id": "bd-qtnmv",
+  "attempts": 32,
+  "proof_command": {
+    "program": "rch",
+    "argv": [
+      "exec",
+      "--",
+      "env",
+      "CARGO_TARGET_DIR=/tmp/rch_target_franken_node_pane_5",
+      "cargo",
+      "test",
+      "-p",
+      "frankenengine-node",
+      "--test",
+      "validation_proof_cache",
+      "fixture_replay_swarm_scheduler_fairness_stress_matches_economics",
+      "--",
+      "--nocapture"
+    ],
+    "cwd": "/data/projects/franken_node",
+    "environment_policy_id": "validation-swarm-scheduler/env-policy/rch-only/v1",
+    "target_dir_policy_id": "validation-swarm-scheduler/target-dir/off-repo/v1"
+  },
+  "required_log_fields": [
+    "trace_id",
+    "proof_work_key",
+    "scheduler_decision",
+    "agent",
+    "bead_id",
+    "artifact_path",
+    "event_code",
+    "required_action",
+    "queue_age_ms",
+    "fairness_bucket",
+    "starvation_risk",
+    "coalescer_state",
+    "recorder_path"
+  ],
+  "expected_economics": {
+    "duplicate_proofs_avoided": 31,
+    "worker_time_saved_seconds": 1860,
+    "queue_debt_count": 5,
+    "slo_breach_count": 1
+  },
+  "scenarios": [
+    {
+      "name": "equivalent_attempts_single_producer",
+      "expected_decision": "run_now"
+    },
+    {
+      "name": "equivalent_attempts_join_existing",
+      "expected_decision": "join_existing"
+    },
+    {
+      "name": "fresh_low_priority_rejected_under_high_watermark",
+      "expected_decision": "reject_low_priority"
+    },
+    {
+      "name": "aged_low_priority_waits_instead_of_disappearing",
+      "expected_decision": "wait_for_capacity"
+    },
+    {
+      "name": "stale_producer_requires_fenced_steal",
+      "expected_decision": "steal_stale_work"
+    },
+    {
+      "name": "source_only_blocker_fails_closed",
+      "expected_decision": "record_source_only_blocker"
+    },
+    {
+      "name": "product_failure_fails_closed",
+      "expected_decision": "fail_closed_product"
+    }
+  ]
+}

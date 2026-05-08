@@ -1,10 +1,15 @@
 use chrono::{DateTime, TimeZone, Utc};
+use frankenengine_node::observability::validation_proof_economics::{
+    EconomicsReportingPeriod, SloStatus, SloTargets, ValidationProofEconomicsGenerator,
+};
 use frankenengine_node::ops::validation_broker::{
-    CommandSpec, DigestRef, EnvironmentPolicy, FallbackPolicy, InputDigest, InputSet, OutputPolicy,
-    RECEIPT_SCHEMA_VERSION, RchMode, RchReceipt, ReceiptArtifacts, ReceiptClassifications,
-    ReceiptRequestRef, ReceiptTrust, SourceOnlyReason, TargetDirPolicy, TimeoutClass,
-    ValidationBrokerRequest, ValidationErrorClass, ValidationExit, ValidationExitKind,
-    ValidationPriority, ValidationReceipt, ValidationTiming,
+    CommandSpec, DigestRef, EnvironmentPolicy, FallbackPolicy, FlightRecorderAdapterOutcomeClass,
+    InputDigest, InputSet, OutputPolicy, ProofArtifactPaths, ProofEvidenceSource, ProofStatusKind,
+    QueueState, RECEIPT_SCHEMA_VERSION, RchMode, RchReceipt, ReceiptArtifacts,
+    ReceiptClassifications, ReceiptRequestRef, ReceiptTrust, SourceOnlyReason, TargetDirPolicy,
+    TimeoutClass, ValidationBrokerRequest, ValidationErrorClass, ValidationExit,
+    ValidationExitKind, ValidationFlightRecorderRef, ValidationPriority,
+    ValidationProofCoalescerEvidence, ValidationProofStatus, ValidationReceipt, ValidationTiming,
 };
 use frankenengine_node::ops::validation_closeout::{
     ValidationCloseoutOptions, ValidationCloseoutStatus, build_validation_closeout_report,
@@ -26,9 +31,18 @@ use frankenengine_node::ops::validation_proof_coalescer::{
     ValidationProofCoalescerStore, ValidationProofLeaseState, ValidationProofPriority,
     ValidationProofRchCapacitySnapshot, ValidationProofRchCommand,
     ValidationProofRchWorkerCapacity, ValidationProofTargetDirClass, ValidationProofWorkKey,
-    ValidationProofWorkKeyParts, decide_validation_proof_admission,
-    error_codes as coalescer_error_codes, event_codes as coalescer_event_codes,
+    ValidationProofWorkKeyParts, ValidationSwarmSchedulerCapacitySnapshot,
+    ValidationSwarmSchedulerCoalescerState, ValidationSwarmSchedulerDecision,
+    ValidationSwarmSchedulerDecisionKind, ValidationSwarmSchedulerDigestRef,
+    ValidationSwarmSchedulerFlightRecorderState, ValidationSwarmSchedulerInput,
+    ValidationSwarmSchedulerPolicy, ValidationSwarmSchedulerPriority,
+    ValidationSwarmSchedulerProofDebtClass, ValidationSwarmSchedulerTargetDirClass,
+    decide_validation_proof_admission, decide_validation_swarm_schedule,
+    error_codes as coalescer_error_codes, order_validation_swarm_scheduler_inputs,
     reason_codes as coalescer_reason_codes,
+};
+use frankenengine_node::ops::validation_proof_debt_ledger::{
+    ValidationProofDebtClass, build_validation_proof_debt_ledger,
 };
 use frankenengine_node::ops::validation_readiness::{
     TrackedValidationBead, ValidationBeadState, ValidationReadinessInput,
@@ -52,6 +66,9 @@ const E2E_MATRIX_JSON: &str = include_str!(
 const COALESCER_STRESS_MATRIX_JSON: &str = include_str!(
     "../../../artifacts/validation_broker/proof_coalescer/validation_proof_coalescer_stress_matrix.v1.json"
 );
+const SWARM_SCHEDULER_STRESS_MATRIX_JSON: &str = include_str!(
+    "../../../artifacts/validation_broker/swarm_scheduler/validation_swarm_scheduler_stress_matrix.v1.json"
+);
 const REQUIRED_LOG_FIELDS: [&str; 7] = [
     "trace_id",
     "cache_key",
@@ -64,6 +81,8 @@ const REQUIRED_LOG_FIELDS: [&str; 7] = [
 const COALESCER_STRESS_ATTEMPTS: usize = 32;
 const COALESCER_STRESS_BEAD: &str = "bd-co196";
 const COALESCER_STRESS_RECEIPT_PATH: &str = "receipts/bd-co196-producer.json";
+const SWARM_SCHEDULER_STRESS_ATTEMPTS: usize = 32;
+const SWARM_SCHEDULER_STRESS_BEAD: &str = "bd-qtnmv";
 const REQUIRED_COALESCER_LOG_FIELDS: [&str; 15] = [
     "trace_id",
     "proof_work_key",
@@ -80,6 +99,21 @@ const REQUIRED_COALESCER_LOG_FIELDS: [&str; 15] = [
     "fencing_token",
     "target_dir_policy_id",
     "dirty_state_policy",
+];
+const REQUIRED_SWARM_SCHEDULER_LOG_FIELDS: [&str; 13] = [
+    "trace_id",
+    "proof_work_key",
+    "scheduler_decision",
+    "agent",
+    "bead_id",
+    "artifact_path",
+    "event_code",
+    "required_action",
+    "queue_age_ms",
+    "fairness_bucket",
+    "starvation_risk",
+    "coalescer_state",
+    "recorder_path",
 ];
 
 fn ts(second: u32) -> DateTime<Utc> {
@@ -725,6 +759,252 @@ fn assert_coalescer_log_event_fields(event: &serde_json::Value) {
     }
 }
 
+fn swarm_scheduler_digest(material: &str) -> ValidationSwarmSchedulerDigestRef {
+    ValidationSwarmSchedulerDigestRef::sha256_material(material)
+}
+
+fn swarm_scheduler_policy() -> ValidationSwarmSchedulerPolicy {
+    ValidationSwarmSchedulerPolicy::default_policy("validation-swarm-scheduler/stress-policy/v1")
+}
+
+fn swarm_scheduler_capacity(
+    slots_available: u16,
+    queue_depth: u16,
+    stale_active_builds: u16,
+    disk_pressure_workers: u16,
+) -> ValidationSwarmSchedulerCapacitySnapshot {
+    ValidationSwarmSchedulerCapacitySnapshot {
+        snapshot_id: format!(
+            "vss-stress-capacity-{slots_available}-{queue_depth}-{stale_active_builds}-{disk_pressure_workers}"
+        ),
+        captured_at: ts(30),
+        workers_total: 4,
+        workers_healthy: 3,
+        slots_total: 16,
+        slots_available,
+        queue_depth,
+        stale_active_builds,
+        disk_pressure_workers,
+    }
+}
+
+fn swarm_scheduler_input(seed: &str, agent: &str) -> ValidationSwarmSchedulerInput {
+    ValidationSwarmSchedulerInput {
+        schema_version: frankenengine_node::ops::validation_proof_coalescer::SWARM_SCHEDULER_INPUT_SCHEMA_VERSION
+            .to_string(),
+        input_id: format!("vss-stress-{seed}-{agent}"),
+        bead_id: SWARM_SCHEDULER_STRESS_BEAD.to_string(),
+        agent_name: agent.to_string(),
+        proof_work_key: swarm_scheduler_digest(&format!(
+            "bd-qtnmv/proof-work/{seed}/cargo-test-validation-proof-cache"
+        )),
+        command_digest: swarm_scheduler_digest(&format!(
+            "rch exec -- cargo test -p frankenengine-node --test validation_proof_cache {seed}"
+        )),
+        dirty_state_policy: DirtyStatePolicy::CleanRequired,
+        target_dir_class: ValidationSwarmSchedulerTargetDirClass::OffRepo,
+        capacity_snapshot: swarm_scheduler_capacity(8, 0, 0, 0),
+        coalescer_state: ValidationSwarmSchedulerCoalescerState::None,
+        flight_recorder_state: ValidationSwarmSchedulerFlightRecorderState::None,
+        proof_debt_class: ValidationSwarmSchedulerProofDebtClass::None,
+        queue_age_ms: 0,
+        priority: ValidationSwarmSchedulerPriority::P2,
+        timeout_budget_ms: 600_000,
+        source_only_allowed: false,
+        product_failure: false,
+        worker_infra_retryable: false,
+        artifact_valid: true,
+    }
+}
+
+fn swarm_scheduler_decision(
+    seed: &str,
+    agent: &str,
+    mutate: impl FnOnce(&mut ValidationSwarmSchedulerInput),
+) -> ValidationSwarmSchedulerDecision {
+    let mut input = swarm_scheduler_input(seed, agent);
+    mutate(&mut input);
+    decide_validation_swarm_schedule(&swarm_scheduler_policy(), &input, ts(40))
+        .expect("scheduler decision")
+}
+
+fn swarm_scheduler_log_event(
+    decision: &ValidationSwarmSchedulerDecision,
+    phase: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "trace_id": decision.trace_id.as_str(),
+        "phase": phase,
+        "proof_work_key": decision.diagnostics.proof_work_key_hex.as_str(),
+        "scheduler_decision": decision.decision.as_str(),
+        "agent": decision.agent_name.as_str(),
+        "bead_id": decision.bead_id.as_str(),
+        "artifact_path": format!(
+            "artifacts/validation_broker/swarm_scheduler/{phase}-{}.json",
+            decision.decision.as_str()
+        ),
+        "event_code": decision.event_code.as_str(),
+        "required_action": decision.required_action.as_str(),
+        "queue_age_ms": decision.diagnostics.queue_age_ms.to_string(),
+        "worker_id": "rch-worker-stress-1",
+        "fairness_bucket": decision.fairness_bucket.as_str(),
+        "starvation_risk": decision.starvation_risk.as_str(),
+        "coalescer_state": decision.diagnostics.coalescer_state.as_str(),
+        "recorder_path": decision
+            .diagnostics
+            .recorder_path
+            .as_deref()
+            .unwrap_or("no-recorder"),
+    })
+}
+
+fn assert_swarm_scheduler_log_event_fields(event: &serde_json::Value) {
+    for field in REQUIRED_SWARM_SCHEDULER_LOG_FIELDS {
+        assert!(
+            event
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+            "missing swarm scheduler structured log field {field}: {event}"
+        );
+    }
+}
+
+fn proof_status_from_scheduler_decision(
+    decision: &ValidationSwarmSchedulerDecision,
+) -> ValidationProofStatus {
+    let mut status =
+        ValidationProofStatus::unknown(&decision.bead_id, &decision.input_ref, decision.decided_at);
+    status.request_id = Some(decision.input_ref.clone());
+    status.command_digest = Some(DigestRef {
+        algorithm: "sha256".to_string(),
+        hex: decision.diagnostics.command_digest_hex.clone(),
+    });
+    status.reason = Some(format!(
+        "{} {}",
+        decision.decision.as_str(),
+        decision.required_action.as_str()
+    ));
+
+    match decision.decision {
+        ValidationSwarmSchedulerDecisionKind::RunNow => {
+            status.status = ProofStatusKind::Passed;
+            status.proof_source = ProofEvidenceSource::FreshExecution;
+            status.artifact_paths = Some(ProofArtifactPaths {
+                stdout_path: "artifacts/validation_broker/bd-qtnmv/stdout.txt".to_string(),
+                stderr_path: "artifacts/validation_broker/bd-qtnmv/stderr.txt".to_string(),
+                summary_path: "artifacts/validation_broker/bd-qtnmv/summary.json".to_string(),
+                receipt_path: "receipts/bd-qtnmv-producer.json".to_string(),
+            });
+        }
+        ValidationSwarmSchedulerDecisionKind::JoinExisting => {
+            status.status = ProofStatusKind::Passed;
+            status.proof_source = ProofEvidenceSource::CoalescedWaiter;
+            status.deduplicated = true;
+            status.proof_coalescer = Some(ValidationProofCoalescerEvidence {
+                decision_id: decision.decision_id.clone(),
+                proof_work_key_hex: decision.diagnostics.proof_work_key_hex.clone(),
+                lease_id: "vss-stress-equivalent-lease".to_string(),
+                lease_path:
+                    "artifacts/validation_broker/proof_coalescer/vss-stress-equivalent.json"
+                        .to_string(),
+                lease_state: "running".to_string(),
+                producer_agent: "stress-agent-00".to_string(),
+                producer_bead_id: decision.bead_id.clone(),
+                waiter_agent: Some(decision.agent_name.clone()),
+                trace_id: decision.trace_id.clone(),
+                receipt_id: None,
+                receipt_path: None,
+                proof_cache_key_hex: decision.diagnostics.proof_work_key_hex.clone(),
+                reason_code: decision.reason_code.clone(),
+                event_code: decision.event_code.clone(),
+                required_action: decision.required_action.as_str().to_string(),
+                diagnostic: decision.operator_message.clone(),
+            });
+        }
+        ValidationSwarmSchedulerDecisionKind::WaitForCapacity
+        | ValidationSwarmSchedulerDecisionKind::RejectLowPriority => {
+            status.status = ProofStatusKind::Queued;
+            status.proof_source = ProofEvidenceSource::BrokerQueue;
+            status.queue_state = Some(QueueState::Queued);
+            status.queue_depth = usize::from(decision.diagnostics.queue_depth);
+            status.exit = Some(ValidationExit {
+                kind: ValidationExitKind::Timeout,
+                code: None,
+                signal: None,
+                timeout_class: TimeoutClass::QueueWait,
+                error_class: ValidationErrorClass::EnvironmentContention,
+                retryable: true,
+            });
+        }
+        ValidationSwarmSchedulerDecisionKind::StealStaleWork => {
+            status.status = ProofStatusKind::Running;
+            status.proof_source = ProofEvidenceSource::CoalescedInflight;
+            status.proof_coalescer = Some(ValidationProofCoalescerEvidence {
+                decision_id: decision.decision_id.clone(),
+                proof_work_key_hex: decision.diagnostics.proof_work_key_hex.clone(),
+                lease_id: "vss-stale-producer-lease".to_string(),
+                lease_path: "artifacts/validation_broker/proof_coalescer/stale.json".to_string(),
+                lease_state: "stale".to_string(),
+                producer_agent: "stale-producer".to_string(),
+                producer_bead_id: decision.bead_id.clone(),
+                waiter_agent: Some(decision.agent_name.clone()),
+                trace_id: decision.trace_id.clone(),
+                receipt_id: None,
+                receipt_path: None,
+                proof_cache_key_hex: decision.diagnostics.proof_work_key_hex.clone(),
+                reason_code: decision.reason_code.clone(),
+                event_code: decision.event_code.clone(),
+                required_action: decision.required_action.as_str().to_string(),
+                diagnostic: "stale lease requires a fresh fence before reuse".to_string(),
+            });
+        }
+        ValidationSwarmSchedulerDecisionKind::RecordSourceOnlyBlocker => {
+            status.status = ProofStatusKind::SourceOnly;
+            status.proof_source = ProofEvidenceSource::SourceOnlyFallback;
+            status.exit = Some(ValidationExit {
+                kind: ValidationExitKind::SourceOnly,
+                code: Some(0),
+                signal: None,
+                timeout_class: TimeoutClass::None,
+                error_class: ValidationErrorClass::SourceOnly,
+                retryable: false,
+            });
+        }
+        ValidationSwarmSchedulerDecisionKind::FailClosedProduct => {
+            status.status = ProofStatusKind::Failed;
+            status.proof_source = ProofEvidenceSource::CoalescerRejected;
+            status.exit = Some(ValidationExit {
+                kind: ValidationExitKind::Failed,
+                code: Some(101),
+                signal: None,
+                timeout_class: TimeoutClass::None,
+                error_class: ValidationErrorClass::CompileError,
+                retryable: false,
+            });
+            status.flight_recorder_ref = Some(ValidationFlightRecorderRef {
+                schema_version: "franken-node/validation-flight-recorder-ref/v1".to_string(),
+                attempt_path: "artifacts/validation_broker/flight_recorder/product_failure.json"
+                    .to_string(),
+                attempt_digest: DigestRef::sha256(b"bd-qtnmv-product-failure"),
+                attempt_id: "bd-qtnmv-product-failure".to_string(),
+                generated_at: decision.decided_at,
+                freshness_expires_at: decision.freshness_expires_at,
+                outcome_class: FlightRecorderAdapterOutcomeClass::CompileFailed,
+                execution_mode: RchMode::Remote,
+                worker_id: Some("rch-worker-stress-1".to_string()),
+                reason_code: decision.reason_code.clone(),
+            });
+        }
+        ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact => {
+            status.status = ProofStatusKind::Failed;
+            status.proof_source = ProofEvidenceSource::CoalescerRejected;
+        }
+    }
+
+    status
+}
+
 #[derive(Debug)]
 struct CoalescerStressAttempt {
     agent: String,
@@ -1173,6 +1453,266 @@ fn mock_free_e2e_concurrent_proof_attempts_coalesce_and_handoff_receipt()
                         == Some(expected_event_code)
             }),
             "missing coalescer stress scenario {name}: decision={expected_decision} event_code={expected_event_code}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn fixture_replay_swarm_scheduler_fairness_stress_matches_economics()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let log_path = dir.path().join("swarm-scheduler-stress.ndjson");
+    let policy = swarm_scheduler_policy();
+
+    let mut decisions = Vec::new();
+    let producer = swarm_scheduler_decision("equivalent", "stress-agent-00", |_| {});
+    assert_eq!(
+        producer.decision,
+        ValidationSwarmSchedulerDecisionKind::RunNow
+    );
+    decisions.push(producer);
+
+    for idx in 1..SWARM_SCHEDULER_STRESS_ATTEMPTS {
+        let idx_u64 = u64::try_from(idx)?;
+        let waiter =
+            swarm_scheduler_decision("equivalent", &format!("stress-agent-{idx:02}"), |input| {
+                input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Running;
+                input.queue_age_ms = 10_000 + idx_u64;
+            });
+        assert_eq!(
+            waiter.decision,
+            ValidationSwarmSchedulerDecisionKind::JoinExisting
+        );
+        decisions.push(waiter);
+    }
+
+    let fresh_low_priority = swarm_scheduler_decision("p4-fresh", "low-priority-fresh", |input| {
+        input.priority = ValidationSwarmSchedulerPriority::P4;
+        input.capacity_snapshot = swarm_scheduler_capacity(0, 96, 0, 0);
+        input.queue_age_ms = 120_000;
+    });
+    assert_eq!(
+        fresh_low_priority.decision,
+        ValidationSwarmSchedulerDecisionKind::RejectLowPriority
+    );
+
+    let aged_low_priority = swarm_scheduler_decision("p4-aged", "low-priority-aged", |input| {
+        input.priority = ValidationSwarmSchedulerPriority::P4;
+        input.capacity_snapshot = swarm_scheduler_capacity(0, 96, 0, 0);
+        input.queue_age_ms = 700_000;
+    });
+    assert_eq!(
+        aged_low_priority.decision,
+        ValidationSwarmSchedulerDecisionKind::WaitForCapacity
+    );
+    assert_eq!(aged_low_priority.fairness_bucket.as_str(), "aging");
+
+    let stale_steal = swarm_scheduler_decision("stale-producer", "fresh-fence-agent", |input| {
+        input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Stale;
+        input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::StaleProducer;
+        input.queue_age_ms = 950_000;
+    });
+    assert_eq!(
+        stale_steal.decision,
+        ValidationSwarmSchedulerDecisionKind::StealStaleWork
+    );
+    assert!(stale_steal.diagnostics.fencing_token_digest.is_some());
+
+    let source_only = swarm_scheduler_decision("source-only", "source-only-agent", |input| {
+        input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::SourceOnly;
+        input.flight_recorder_state =
+            ValidationSwarmSchedulerFlightRecorderState::SourceOnlyBlocker;
+        input.source_only_allowed = true;
+        input.queue_age_ms = 950_000;
+    });
+    assert_eq!(
+        source_only.decision,
+        ValidationSwarmSchedulerDecisionKind::RecordSourceOnlyBlocker
+    );
+    assert!(source_only.fail_closed);
+
+    let product_failure = swarm_scheduler_decision("product-failure", "product-agent", |input| {
+        input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::ProductFailure;
+        input.flight_recorder_state = ValidationSwarmSchedulerFlightRecorderState::ProductFailure;
+        input.product_failure = true;
+    });
+    assert_eq!(
+        product_failure.decision,
+        ValidationSwarmSchedulerDecisionKind::FailClosedProduct
+    );
+    assert!(product_failure.fail_closed);
+
+    decisions.extend([
+        fresh_low_priority.clone(),
+        aged_low_priority.clone(),
+        stale_steal.clone(),
+        source_only.clone(),
+        product_failure.clone(),
+    ]);
+
+    let ordered_inputs = [
+        swarm_scheduler_input("tie-right", "agent-b"),
+        swarm_scheduler_input("tie-left", "agent-a"),
+        {
+            let mut aged = swarm_scheduler_input("aged-p4", "agent-c");
+            aged.priority = ValidationSwarmSchedulerPriority::P4;
+            aged.queue_age_ms = 700_000;
+            aged
+        },
+        {
+            let mut p0 = swarm_scheduler_input("p0", "agent-d");
+            p0.priority = ValidationSwarmSchedulerPriority::P0;
+            p0
+        },
+    ];
+    let ordered = order_validation_swarm_scheduler_inputs(&policy, &ordered_inputs)?;
+    assert_eq!(ordered[0].priority, ValidationSwarmSchedulerPriority::P0);
+    assert_eq!(ordered[1].input_id, "vss-stress-aged-p4-agent-c");
+    assert_eq!(ordered[2].agent_name, "agent-a");
+    assert_eq!(ordered[3].agent_name, "agent-b");
+
+    for decision in &decisions {
+        append_log_event(
+            &log_path,
+            &swarm_scheduler_log_event(decision, decision.decision.as_str()),
+        );
+    }
+    let events = read_log_events(&log_path);
+    assert_eq!(events.len(), decisions.len());
+    for event in &events {
+        assert_swarm_scheduler_log_event_fields(event);
+    }
+
+    let mut statuses = decisions
+        .iter()
+        .map(proof_status_from_scheduler_decision)
+        .collect::<Vec<_>>();
+    statuses.retain(|status| {
+        status.deduplicated
+            || matches!(
+                status.status,
+                ProofStatusKind::Queued
+                    | ProofStatusKind::Running
+                    | ProofStatusKind::SourceOnly
+                    | ProofStatusKind::Failed
+            )
+    });
+    let debt_ledger = build_validation_proof_debt_ledger(
+        &statuses,
+        ts(41),
+        [
+            SWARM_SCHEDULER_STRESS_BEAD,
+            "vss-stress-p4-aged-low-priority-aged",
+        ],
+    );
+    assert_eq!(
+        debt_ledger
+            .summary
+            .by_class
+            .get(&ValidationProofDebtClass::WaitingForCapacity),
+        Some(&2)
+    );
+    assert_eq!(
+        debt_ledger
+            .summary
+            .by_class
+            .get(&ValidationProofDebtClass::StaleLease),
+        Some(&1)
+    );
+    assert_eq!(
+        debt_ledger
+            .summary
+            .by_class
+            .get(&ValidationProofDebtClass::SourceOnlyFallback),
+        Some(&1)
+    );
+    assert_eq!(
+        debt_ledger
+            .summary
+            .by_class
+            .get(&ValidationProofDebtClass::ProductFailure),
+        Some(&1)
+    );
+
+    let economics = ValidationProofEconomicsGenerator::with_slo_targets(SloTargets {
+        max_queue_depth: 4,
+        max_average_wait_time_seconds: 300.0,
+        max_failure_rate: 0.50,
+        max_debt_age_seconds: 10_000_000.0,
+        min_coalescing_efficiency: 0.20,
+    })
+    .generate_report(
+        &statuses,
+        &debt_ledger,
+        EconomicsReportingPeriod {
+            start_time: ts(0),
+            end_time: ts(60),
+            duration_seconds: 60,
+        },
+    );
+    assert_eq!(
+        economics.summary.duplicate_proofs_avoided,
+        SWARM_SCHEDULER_STRESS_ATTEMPTS - 1
+    );
+    assert_eq!(
+        economics.summary.worker_time_saved_seconds,
+        ((SWARM_SCHEDULER_STRESS_ATTEMPTS - 1) as u64).saturating_mul(60)
+    );
+    assert_eq!(economics.summary.queue_debt_count, 5);
+    assert_eq!(economics.summary.stale_producer_count, 1);
+    assert_eq!(economics.summary.source_only_blocker_count, 1);
+    assert_eq!(economics.summary.product_failure_count, 1);
+    assert_eq!(economics.summary.slo_breach_count, 1);
+    assert_eq!(economics.slo_compliance.overall_status, SloStatus::Breach);
+
+    let readiness_input = ValidationReadinessInput {
+        proof_statuses: statuses,
+        swarm_scheduler_decisions: decisions.clone(),
+        ..ValidationReadinessInput::default()
+    };
+    let readiness =
+        build_validation_readiness_report(&readiness_input, "bd-qtnmv-readiness", ts(41));
+    assert_eq!(readiness.summary.swarm_scheduler.decisions, decisions.len());
+    assert_eq!(readiness.summary.swarm_scheduler.capacity_waits, 1);
+    assert_eq!(readiness.summary.swarm_scheduler.work_steals, 1);
+    assert_eq!(readiness.summary.swarm_scheduler.source_only_blockers, 1);
+    assert_eq!(readiness.summary.swarm_scheduler.product_failures, 1);
+    assert!(
+        readiness
+            .summary
+            .swarm_scheduler
+            .decision_details
+            .iter()
+            .any(|detail| detail.slo_breached && detail.scheduler_decision == "steal_stale_work")
+    );
+
+    let matrix: serde_json::Value = serde_json::from_str(SWARM_SCHEDULER_STRESS_MATRIX_JSON)?;
+    assert_eq!(
+        matrix.get("attempts").and_then(serde_json::Value::as_u64),
+        Some(SWARM_SCHEDULER_STRESS_ATTEMPTS as u64)
+    );
+    let matrix_scenarios = matrix
+        .get("scenarios")
+        .and_then(serde_json::Value::as_array)
+        .expect("swarm scheduler matrix scenarios");
+    for scenario in matrix_scenarios {
+        let name = scenario
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .expect("swarm scheduler matrix scenario name");
+        let expected_decision = scenario
+            .get("expected_decision")
+            .and_then(serde_json::Value::as_str)
+            .expect("swarm scheduler matrix expected decision");
+        assert!(
+            events.iter().any(|event| {
+                event
+                    .get("scheduler_decision")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(expected_decision)
+            }),
+            "missing swarm scheduler stress scenario {name}: decision={expected_decision}"
         );
     }
     Ok(())
