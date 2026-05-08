@@ -80,7 +80,7 @@ fn hot_reload_rejects_removed_lane_with_active_work() {
     );
     assert_eq!(
         scheduler.active_task_ids(SchedulerLane::ControlCritical),
-        vec![active.task_id]
+        vec![active.task_id.to_string()]
     );
     assert!(
         scheduler
@@ -120,7 +120,7 @@ fn lane_scheduler_keeps_capped_task_identity_and_promotes_fifo() {
     assert_eq!(counters.rejected_total, 1);
 
     scheduler
-        .complete_task(&active.task_id, 1_010, "trace-complete")
+        .complete_task(&active.task_id.to_string(), 1_010, "trace-complete")
         .expect("completion should promote queued task");
 
     assert!(
@@ -189,7 +189,7 @@ fn lane_scheduler_aborts_specific_queued_task_without_dropping_neighbors() {
         .abort_queued_task_id(&second_queued, 2_003, "trace-abort")
         .expect("specific queued task should abort");
 
-    assert_eq!(aborted.task_id, second_queued);
+    assert_eq!(aborted.task_id.to_string(), second_queued);
     assert_eq!(
         scheduler.queued_task_ids(SchedulerLane::Background),
         vec![first_queued]
