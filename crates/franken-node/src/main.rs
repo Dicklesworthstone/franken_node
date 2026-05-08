@@ -1,7 +1,14 @@
 #![forbid(unsafe_code)]
 #![cfg(not(test))]
 
-pub use frankenengine_node::{ActionableError, lock_utils};
+pub use frankenengine_node::{ActionableError, bounded_read_to_string, lock_utils};
+
+/// Maximum file size limits to prevent DoS via parser bombs
+const MAX_EVIDENCE_INPUT_BYTES: u64 = 10 << 20; // 10 MiB for evidence input files
+const MAX_MANIFEST_FILE_BYTES: u64 = 5 << 20;   // 5 MiB for manifest files
+const MAX_POLICY_FILE_BYTES: u64 = 2 << 20;     // 2 MiB for policy files
+const MAX_LOCKFILE_BYTES: u64 = 1 << 20;        // 1 MiB for lockfiles
+const MAX_GENERAL_FILE_BYTES: u64 = 10 << 20;   // 10 MiB for general CLI input files
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
@@ -9994,7 +10001,7 @@ fn build_evidence_readiness_report_from_path(
     input_path: &Path,
     trace_id: &str,
 ) -> Result<EvidenceReadinessReport> {
-    let raw = std::fs::read_to_string(input_path).with_context(|| {
+    let raw = bounded_read_to_string(input_path, MAX_EVIDENCE_INPUT_BYTES).with_context(|| {
         format!(
             "failed reading evidence-readiness input {}",
             input_path.display()
@@ -17683,7 +17690,7 @@ fn load_local_registry_artifact_manifest(
     manifest_path: &Path,
     archived: bool,
 ) -> Result<StoredRegistryArtifact> {
-    let raw = std::fs::read_to_string(manifest_path)
+    let raw = bounded_read_to_string(manifest_path, MAX_MANIFEST_FILE_BYTES)
         .with_context(|| format!("failed reading {}", manifest_path.display()))?;
     let manifest = serde_json::from_str::<LocalRegistryArtifactManifest>(&raw)
         .with_context(|| format!("failed parsing {}", manifest_path.display()))?;
@@ -22003,7 +22010,7 @@ fn load_release_verification_context(
             anyhow::bail!("{reason}");
         }
     }
-    let manifest_raw = std::fs::read_to_string(&manifest_path)
+    let manifest_raw = bounded_read_to_string(&manifest_path, MAX_MANIFEST_FILE_BYTES)
         .with_context(|| format!("failed reading {}", manifest_path.display()))?;
     let parsed_entries = ChecksumManifest::parse_canonical(&manifest_raw)
         .with_context(|| format!("manifest {} is not canonical", manifest_path.display()))?;
@@ -25599,7 +25606,7 @@ fn handle_debug_trace(args: &DebugTraceArgs) -> Result<()> {
         .with_context(|| format!("Invalid input path: {:?}", args.input))?;
 
     // Load policy file
-    let policy_content = fs::read_to_string(policy_path)
+    let policy_content = bounded_read_to_string(policy_path, MAX_POLICY_FILE_BYTES)
         .with_context(|| format!("Failed to read policy file: {:?}", policy_path))?;
 
     let policy_config = parse_debug_trace_policy_config(&policy_content, policy_path)?;
