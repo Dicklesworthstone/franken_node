@@ -62,6 +62,35 @@ pub mod error_codes {
 
 // ---- Core types ----
 
+/// Task identifier newtype to eliminate per-assignment String allocation.
+///
+/// Internally stores u64 counter, formats to "task-{:08}" only at display boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TaskId(u64);
+
+impl TaskId {
+    fn new(counter: u64) -> Self {
+        Self(counter)
+    }
+
+    fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    /// Parse a task ID string in "task-{:08}" format back to TaskId.
+    fn from_str(s: &str) -> Option<Self> {
+        s.strip_prefix("task-")
+            .and_then(|suffix| suffix.parse::<u64>().ok())
+            .map(Self::new)
+    }
+}
+
+impl fmt::Display for TaskId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "task-{:08}", self.0)
+    }
+}
+
 /// Scheduler lane identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum SchedulerLane {
@@ -626,7 +655,7 @@ impl fmt::Display for LaneSchedulerError {
 /// Task assignment record.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskAssignment {
-    pub task_id: String,
+    pub task_id: TaskId,
     pub task_class: TaskClass,
     pub lane: SchedulerLane,
     pub assigned_at_ms: u64,
@@ -648,7 +677,7 @@ impl std::fmt::Debug for TaskAssignment {
 /// Queued task identity retained when a lane is at capacity.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedTaskAssignment {
-    pub task_id: String,
+    pub task_id: TaskId,
     pub task_class: TaskClass,
     pub lane: SchedulerLane,
     pub queued_at_ms: u64,
@@ -858,7 +887,7 @@ pub struct LaneScheduler {
     /// Runtime counters: optimized with HashMap for SIMD-accelerated lookups
     counters: HashMap<String, LaneCounters>,
     /// Active task tracking: optimized with HashMap for frequent task ID lookups
-    active_tasks: HashMap<String, TaskAssignment>,
+    active_tasks: HashMap<TaskId, TaskAssignment>,
     /// Per-lane queued work stays FIFO, so front-pop promotion must remain O(1).
     /// Optimized with HashMap for frequent lane-based queue access.
     queued_tasks: HashMap<String, VecDeque<QueuedTaskAssignment>>,
@@ -925,7 +954,7 @@ impl LaneScheduler {
         push_bounded(&mut self.audit_log, record, cap);
     }
 
-    fn next_task_id(&mut self) -> Result<String, LaneSchedulerError> {
+    fn next_task_id(&mut self) -> Result<TaskId, LaneSchedulerError> {
         let next_counter = self.task_counter.saturating_add(1);
         if next_counter == self.task_counter {
             return Err(LaneSchedulerError::TaskIdExhausted {
@@ -933,7 +962,7 @@ impl LaneScheduler {
             });
         }
         self.task_counter = next_counter;
-        Ok(format!("task-{:08}", self.task_counter))
+        Ok(TaskId::new(self.task_counter))
     }
 
     fn refresh_lane_queue_counters(
@@ -981,7 +1010,7 @@ impl LaneScheduler {
 
         let task_id = self.next_task_id()?;
         let queued = QueuedTaskAssignment {
-            task_id: task_id.clone(),
+            task_id,
             task_class: task_class.clone(),
             lane,
             queued_at_ms: timestamp_ms,
@@ -996,7 +1025,7 @@ impl LaneScheduler {
         self.refresh_lane_queue_counters(lane)?;
         self.push_audit_record(LaneAuditRecord {
             event_code: event_codes::LANE_TASK_QUEUED.to_string(),
-            task_id: task_id.clone(),
+            task_id: task_id.to_string(),
             task_class: task_class.to_string(),
             lane: lane.to_string(),
             timestamp_ms,
@@ -1004,7 +1033,7 @@ impl LaneScheduler {
             trace_id: trace_id.to_string(),
             schema_version: SCHEMA_VERSION.to_string(),
         });
-        Ok(Some(task_id))
+        Ok(Some(task_id.to_string()))
     }
 
     fn promote_queued_tasks_for_lane(
@@ -1049,7 +1078,7 @@ impl LaneScheduler {
             self.refresh_lane_queue_counters(lane)?;
 
             let assignment = TaskAssignment {
-                task_id: queued.task_id.clone(),
+                task_id: queued.task_id,
                 task_class: queued.task_class.clone(),
                 lane,
                 assigned_at_ms: timestamp_ms,
@@ -1061,10 +1090,10 @@ impl LaneScheduler {
                 }
             })?;
             counters.active_count = counters.active_count.saturating_add(1);
-            self.active_tasks.insert(queued.task_id.clone(), assignment);
+            self.active_tasks.insert(queued.task_id, assignment);
             self.push_audit_record(LaneAuditRecord {
                 event_code: event_codes::LANE_TASK_PROMOTED.to_string(),
-                task_id: queued.task_id,
+                task_id: queued.task_id.to_string(),
                 task_class: queued.task_class.to_string(),
                 lane: lane.to_string(),
                 timestamp_ms,
@@ -1136,7 +1165,7 @@ impl LaneScheduler {
         counters.active_count = counters.active_count.saturating_add(1);
 
         let assignment = TaskAssignment {
-            task_id: task_id.clone(),
+            task_id,
             task_class: task_class.clone(),
             lane,
             assigned_at_ms: timestamp_ms,
@@ -1144,11 +1173,11 @@ impl LaneScheduler {
         };
 
         self.active_tasks
-            .insert(task_id.clone(), assignment.clone());
+            .insert(task_id, assignment.clone());
 
         self.push_audit_record(LaneAuditRecord {
             event_code: event_codes::LANE_ASSIGN.to_string(),
-            task_id,
+            task_id: task_id.to_string(),
             task_class: task_class.to_string(),
             lane: lane.to_string(),
             timestamp_ms,
@@ -1167,9 +1196,13 @@ impl LaneScheduler {
         timestamp_ms: u64,
         trace_id: &str,
     ) -> Result<SchedulerLane, LaneSchedulerError> {
+        let task_id_parsed = TaskId::from_str(task_id)
+            .ok_or_else(|| LaneSchedulerError::TaskNotFound {
+                task_id: task_id.to_string(),
+            })?;
         let assignment =
             self.active_tasks
-                .remove(task_id)
+                .remove(&task_id_parsed)
                 .ok_or_else(|| LaneSchedulerError::TaskNotFound {
                     task_id: task_id.to_string(),
                 })?;
@@ -1216,8 +1249,10 @@ impl LaneScheduler {
     ) -> Result<QueuedTaskAssignment, LaneSchedulerError> {
         let mut removed: Option<QueuedTaskAssignment> = None;
 
+        let task_id_parsed = TaskId::from_str(task_id);
         for queue in self.queued_tasks.values_mut() {
-            if let Some(position) = queue.iter().position(|queued| queued.task_id == task_id)
+            if let Some(position) = queue.iter().position(|queued|
+                task_id_parsed.is_some_and(|id| queued.task_id == id))
                 && let Some(queued) = queue.remove(position)
             {
                 removed = Some(queued);
@@ -1232,7 +1267,7 @@ impl LaneScheduler {
         self.refresh_lane_queue_counters(lane)?;
         self.push_audit_record(LaneAuditRecord {
             event_code: event_codes::LANE_TASK_ABORTED.to_string(),
-            task_id: queued.task_id.clone(),
+            task_id: queued.task_id.to_string(),
             task_class: queued.task_class.to_string(),
             lane: lane.to_string(),
             timestamp_ms,
@@ -1429,7 +1464,7 @@ impl LaneScheduler {
             .map(|queue| {
                 queue
                     .iter()
-                    .map(|queued_task| queued_task.task_id.clone())
+                    .map(|queued_task| queued_task.task_id.to_string())
                     .collect()
             })
             .unwrap_or_default()
@@ -1440,7 +1475,7 @@ impl LaneScheduler {
         self.active_tasks
             .values()
             .filter(|assignment| assignment.lane == lane)
-            .map(|assignment| assignment.task_id.clone())
+            .map(|assignment| assignment.task_id.to_string())
             .collect()
     }
 
@@ -3567,5 +3602,28 @@ mod tests {
         assert!(debug_output.contains("TASK_ASSIGNED")); // event code should remain
         assert!(debug_output.contains("3000")); // timestamp should remain
         assert!(debug_output.contains("v1")); // schema version should remain
+    }
+
+    #[test]
+    fn task_id_newtype_formats_identically_to_prior_string_form() {
+        // Verify TaskId::Display produces identical format to legacy format!("task-{:08}", counter)
+        let test_cases = vec![
+            (1, "task-00000001"),
+            (42, "task-00000042"),
+            (999, "task-00000999"),
+            (12345678, "task-12345678"),
+            (u64::MAX, "task-18446744073709551615"),
+        ];
+
+        for (counter, expected) in test_cases {
+            let task_id = TaskId::new(counter);
+            assert_eq!(task_id.to_string(), expected,
+                "TaskId({}) should format to '{}'", counter, expected);
+
+            // Test round-trip: TaskId -> String -> TaskId
+            let reparsed = TaskId::from_str(&task_id.to_string()).unwrap();
+            assert_eq!(reparsed, task_id,
+                "Round-trip parsing should preserve TaskId({}) value", counter);
+        }
     }
 }
