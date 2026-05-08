@@ -104,7 +104,7 @@ use crate::cli::{
     RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand,
     SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
     TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
-    VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
+    VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs, VerifyRecoveryRunbookArgs,
     load_doctor_policy_activation_input,
 };
 use crate::policy::{
@@ -6225,17 +6225,20 @@ fn handle_doctor_evidence_readiness(
 
 fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Result<()> {
     use crate::ops::doctor::{WorkspacePressureDoctor, generate_doctor_report_file, generate_human_report_file};
-    use crate::ops::workspace_pressure_policy::{PolicyThresholds, WorkspacePressureInputs};
+    use crate::ops::workspace_pressure_policy::{
+        PolicyThresholds, WorkspacePressureInputs,
+        get_workspace_disk_space, get_workspace_file_reservations
+    };
     use std::fs;
 
     // Collect current workspace pressure inputs
     let inputs = WorkspacePressureInputs {
-        free_disk_bytes: get_free_disk_space()?,
+        free_disk_bytes: get_workspace_disk_space()?,
         target_dir_bytes: get_target_directory_size()?,
         active_build_count: get_active_build_count()?,
         rch_available_slots: get_rch_available_slots(),
         memory_pressure: get_memory_pressure()?,
-        active_reservations: get_active_reservations()?,
+        active_reservations: get_workspace_file_reservations()?,
         coordination_healthy: get_coordination_health()?,
     };
 
@@ -6280,10 +6283,6 @@ fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Resul
 }
 
 // Helper functions for collecting workspace pressure data
-fn get_free_disk_space() -> Result<u64> {
-    Ok(10_000_000_000) // 10GB placeholder - would use statvfs in production
-}
-
 fn get_target_directory_size() -> Result<u64> {
     use std::fs;
     use std::path::Path;
@@ -6381,10 +6380,6 @@ fn get_memory_pressure() -> Result<f32> {
         let pressure = (used_kb as f32) / (total_kb as f32);
         Ok(pressure.min(1.0))
     }
-}
-
-fn get_active_reservations() -> Result<u32> {
-    Ok(10) // Placeholder - would query Agent Mail in production
 }
 
 fn get_coordination_health() -> Result<bool> {
@@ -21976,6 +21971,222 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
     Ok(if total_errors == 0 { 0 } else { 1 })
 }
 
+fn handle_verify_recovery_runbook(args: &VerifyRecoveryRunbookArgs) -> Result<()> {
+    use crate::ops::validation_readiness::{
+        summarize_validation_readiness_report, ValidationReadinessInput,
+        FailedAttemptSummary, RecoveryPlanSummary,
+    };
+    use crate::ops::validation_recovery_planner::{RecoveryAction, reason_codes};
+    use chrono::{DateTime, Utc};
+    use std::collections::BTreeMap;
+
+    // Parse fixed timestamp if provided, otherwise use current time
+    let timestamp = if let Some(ts_str) = &args.fixed_timestamp {
+        DateTime::parse_from_rfc3339(ts_str)
+            .with_context(|| format!("invalid ISO 8601 timestamp: {}", ts_str))?
+            .with_timezone(&Utc)
+    } else {
+        Utc::now()
+    };
+
+    // Load validation readiness input or generate test scenario
+    let input = if let Some(input_path) = &args.readiness_input {
+        let input_json = std::fs::read_to_string(input_path)
+            .with_context(|| format!("failed reading input file: {}", input_path.display()))?;
+        serde_json::from_str(&input_json)
+            .with_context(|| format!("invalid validation readiness JSON in {}", input_path.display()))?
+    } else if let Some(scenario) = &args.scenario {
+        generate_test_scenario(scenario, timestamp)?
+    } else {
+        return Err(anyhow::anyhow!(
+            "Must provide either --readiness-input <file> or --scenario <name> for testing"
+        ));
+    };
+
+    // Generate the recovery runbook report
+    let report = summarize_validation_readiness_report(
+        &input,
+        "recovery-runbook".to_string(),
+        "trace-recovery-runbook".to_string(),
+        timestamp,
+    );
+
+    // Output the runbook
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        emit_recovery_runbook_human(&report)?;
+    }
+
+    Ok(())
+}
+
+fn generate_test_scenario(scenario: &str, timestamp: DateTime<Utc>) -> Result<ValidationReadinessInput> {
+    use crate::ops::validation_broker::{
+        ProofStatusKind, ValidationProofStatus, ValidationReceipt, ValidationFlightRecorderRef,
+        RchMode, ValidationExitKind, ValidationExitCode,
+    };
+    use std::collections::BTreeMap;
+
+    let (proof_statuses, receipts) = match scenario {
+        "green_remote_proof" => {
+            let status = ValidationProofStatus {
+                proof_kind: "cargo_test".to_string(),
+                status: ProofStatusKind::Passed,
+                flight_recorder_ref: None,
+                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
+                    started_at: timestamp,
+                    finished_at: timestamp,
+                },
+                exit: Some(crate::ops::validation_broker::ValidationExit {
+                    kind: ValidationExitKind::ProcessExit,
+                    code: ValidationExitCode::Zero,
+                    signal: None,
+                    description: "Success".to_string(),
+                }),
+                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
+                proof_cache: None,
+                rch: crate::ops::validation_broker::RchSnapshot {
+                    mode: RchMode::Remote,
+                    worker_id: Some("worker-001".to_string()),
+                },
+            };
+            (vec![status], vec![])
+        }
+        "rch_e104_retry" => {
+            let flight_ref = ValidationFlightRecorderRef {
+                attempt_path: Some("/tmp/flight_rec_rch_e104.json".to_string()),
+                attempt_digest: Some("bead-rch-e104".to_string()),
+                outcome_class: "infrastructure_failure".to_string(),
+                execution_mode: "remote".to_string(),
+                worker_id: Some("worker-002".to_string()),
+                reason_code: "RCH_E104_WORKER_TIMEOUT".to_string(),
+            };
+            let status = ValidationProofStatus {
+                proof_kind: "cargo_build".to_string(),
+                status: ProofStatusKind::Failed,
+                flight_recorder_ref: Some(flight_ref),
+                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
+                    started_at: timestamp,
+                    finished_at: timestamp,
+                },
+                exit: Some(crate::ops::validation_broker::ValidationExit {
+                    kind: ValidationExitKind::ProcessExit,
+                    code: ValidationExitCode::NonZero(124),
+                    signal: None,
+                    description: "Worker timeout".to_string(),
+                }),
+                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
+                proof_cache: None,
+                rch: crate::ops::validation_broker::RchSnapshot {
+                    mode: RchMode::Remote,
+                    worker_id: Some("worker-002".to_string()),
+                },
+            };
+            (vec![status], vec![])
+        }
+        "worker_drain_recommendation" => {
+            let flight_ref = ValidationFlightRecorderRef {
+                attempt_path: Some("/tmp/flight_rec_worker_drain.json".to_string()),
+                attempt_digest: Some("bead-worker-drain".to_string()),
+                outcome_class: "resource_exhaustion".to_string(),
+                execution_mode: "remote".to_string(),
+                worker_id: Some("worker-003".to_string()),
+                reason_code: "MEMORY_PRESSURE".to_string(),
+            };
+            let status = ValidationProofStatus {
+                proof_kind: "cargo_test".to_string(),
+                status: ProofStatusKind::Failed,
+                flight_recorder_ref: Some(flight_ref),
+                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
+                    started_at: timestamp,
+                    finished_at: timestamp,
+                },
+                exit: Some(crate::ops::validation_broker::ValidationExit {
+                    kind: ValidationExitKind::ProcessExit,
+                    code: ValidationExitCode::NonZero(137),
+                    signal: Some(9),
+                    description: "Out of memory".to_string(),
+                }),
+                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
+                proof_cache: None,
+                rch: crate::ops::validation_broker::RchSnapshot {
+                    mode: RchMode::Remote,
+                    worker_id: Some("worker-003".to_string()),
+                },
+            };
+            (vec![status], vec![])
+        }
+        _ => return Err(anyhow::anyhow!("Unknown scenario: {}", scenario))
+    };
+
+    Ok(ValidationReadinessInput {
+        schema_version: "test".to_string(),
+        tracked_beads: vec![],
+        proof_statuses,
+        receipts,
+        rch_workers: vec![],
+        proof_lane_readiness: vec![],
+        resource_governor: None,
+        max_receipt_age_secs: 3600,
+    })
+}
+
+fn emit_recovery_runbook_human(report: &crate::ops::validation_readiness::ValidationReadinessReport) -> Result<()> {
+    println!("# RCH Validation Recovery Runbook");
+    println!();
+
+    match report.summary.status {
+        crate::ops::validation_readiness::ValidationReadinessStatus::Pass => {
+            println!("✅ **Status**: PASS - All validation evidence is ready");
+        }
+        crate::ops::validation_readiness::ValidationReadinessStatus::Warn => {
+            println!("⚠️  **Status**: WARN - Some validation evidence has issues");
+        }
+        crate::ops::validation_readiness::ValidationReadinessStatus::Fail => {
+            println!("❌ **Status**: FAIL - Validation evidence is not ready");
+        }
+    }
+
+    println!();
+    println!("## Summary");
+    println!("- **Flight Recorder Refs**: {}", report.summary.flight_recorder_refs);
+    println!("- **Failed Attempts**: {}", report.summary.failed_attempt_details.len());
+    println!("- **Pending Recoveries**: {}", report.summary.pending_recoveries.len());
+
+    if !report.summary.failed_attempt_details.is_empty() {
+        println!();
+        println!("## Failed Attempts");
+        for attempt in &report.summary.failed_attempt_details {
+            println!();
+            println!("### {} / {}", attempt.bead_id, attempt.thread_id);
+            println!("- **Outcome Class**: {}", attempt.outcome_class);
+            println!("- **Execution Mode**: {}", attempt.execution_mode);
+            if let Some(worker_id) = &attempt.worker_id {
+                println!("- **Worker ID**: {}", worker_id);
+            }
+            println!("- **Reason Code**: {}", attempt.reason_code);
+            if let Some(path) = &attempt.flight_recorder_path {
+                println!("- **Flight Recorder**: {}", path);
+            }
+            println!("- **Retryable**: {}", if attempt.retryable { "Yes" } else { "No" });
+            println!("- **Product Failure**: {}", if attempt.product_failure { "Yes" } else { "No" });
+        }
+    }
+
+    if !report.summary.pending_recoveries.is_empty() {
+        println!();
+        println!("## Pending Recoveries");
+        for recovery in &report.summary.pending_recoveries {
+            println!();
+            println!("### {} / {}", recovery.bead_id, recovery.thread_id);
+            println!("- **Action**: {}", recovery.action);
+        }
+    }
+
+    Ok(())
+}
+
 fn build_verify_output(
     command: &str,
     compat_version: Option<u16>,
@@ -25678,6 +25889,9 @@ fn main() -> Result<()> {
             VerifyCommand::TransparencyLog(args) => {
                 let code = handle_verify_transparency_log(&args)?;
                 std::process::exit(code);
+            }
+            VerifyCommand::RecoveryRunbook(args) => {
+                handle_verify_recovery_runbook(&args)?;
             }
         },
 
