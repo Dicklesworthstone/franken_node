@@ -1137,8 +1137,9 @@ fn mock_free_e2e_concurrent_proof_attempts_coalesce_and_handoff_receipt()
         matrix.get("attempts").and_then(serde_json::Value::as_u64),
         Some(COALESCER_STRESS_ATTEMPTS as u64)
     );
-    let matrix_fields = matrix["required_log_fields"]
-        .as_array()
+    let matrix_fields = matrix
+        .get("required_log_fields")
+        .and_then(serde_json::Value::as_array)
         .expect("coalescer matrix fields");
     for field in REQUIRED_COALESCER_LOG_FIELDS {
         assert!(
@@ -1148,10 +1149,11 @@ fn mock_free_e2e_concurrent_proof_attempts_coalesce_and_handoff_receipt()
             "coalescer matrix missing required log field {field}"
         );
     }
-    for scenario in matrix["scenarios"]
-        .as_array()
-        .expect("coalescer matrix scenarios")
-    {
+    let matrix_scenarios = matrix
+        .get("scenarios")
+        .and_then(serde_json::Value::as_array)
+        .expect("coalescer matrix scenarios");
+    for scenario in matrix_scenarios {
         let name = scenario
             .get("name")
             .and_then(serde_json::Value::as_str)
