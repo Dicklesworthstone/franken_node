@@ -189,12 +189,17 @@ impl ChecksumManifest {
     /// signing: one line per entry, sorted by filename, format
     /// `<sha256>  <name>  <size>\n`.
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut buf = String::new();
+        // Pre-calculate total size to avoid reallocations
+        let estimated_size: usize = self.entries.values()
+            .map(|entry| entry.sha256.len() + entry.name.len() + 25) // 25 for size_bytes (max 20) + 4 separators + newline
+            .sum();
+
+        let mut buf = String::with_capacity(estimated_size);
         for entry in self.entries.values() {
-            buf.push_str(&format!(
-                "{}  {}  {}\n",
-                entry.sha256, entry.name, entry.size_bytes
-            ));
+            use std::fmt::Write;
+            write!(buf, "{}  {}  {}\n",
+                   entry.sha256, entry.name, entry.size_bytes)
+                .expect("writing to String never fails");
         }
         buf.into_bytes()
     }
@@ -943,6 +948,48 @@ mod tests {
         let parsed = ChecksumManifest::parse_canonical(&text).expect("canonical manifest");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].name, "file.bin");
+    }
+
+    #[test]
+    fn test_canonical_bytes_optimized_format_identical() {
+        // Test that the optimized canonical_bytes produces identical output to the old format!() approach
+        let sk = demo_signing_key();
+        let artifacts = vec![
+            ("small.txt", b"tiny" as &[u8]),
+            ("large_file_name_for_testing.bin", b"larger content for size testing" as &[u8]),
+            ("medium.dat", b"medium sized content" as &[u8]),
+        ];
+        let manifest = build_and_sign_manifest(&artifacts, &sk);
+
+        // Get the optimized result
+        let optimized_bytes = manifest.canonical_bytes();
+
+        // Simulate the old approach with format!() per entry for comparison
+        let mut old_approach = String::new();
+        for entry in manifest.entries.values() {
+            old_approach.push_str(&format!(
+                "{}  {}  {}\n",
+                entry.sha256, entry.name, entry.size_bytes
+            ));
+        }
+        let old_bytes = old_approach.into_bytes();
+
+        // Must be byte-identical
+        assert_eq!(optimized_bytes, old_bytes,
+            "Optimized canonical_bytes must produce identical output to format!() approach");
+
+        // Also verify the format is correct (space-separated, newline-terminated)
+        let text = String::from_utf8(optimized_bytes).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "Should have 3 entries");
+
+        for line in lines {
+            let parts: Vec<&str> = line.split("  ").collect();
+            assert_eq!(parts.len(), 3, "Each line should have 3 space-separated parts");
+            assert_eq!(parts[0].len(), 64, "SHA256 should be 64 hex chars");
+            assert!(!parts[1].is_empty(), "Filename should not be empty");
+            assert!(parts[2].parse::<u64>().is_ok(), "Size should be a valid u64");
+        }
     }
 
     #[test]

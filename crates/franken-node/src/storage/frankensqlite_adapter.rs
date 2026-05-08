@@ -714,10 +714,11 @@ impl FrankensqliteAdapter {
 
         self.read_count = self.read_count.saturating_add(1);
         let tier = class.tier();
-        let entry = self.store.get(&(class, key.to_string()));
+        let key_string = key.to_string();
+        let entry = self.store.get(&(class, key_string.clone()));
         Ok(ReadResult {
             found: entry.is_some(),
-            key: key.to_string(),
+            key: key_string,
             value: entry.map(|value| value.as_ref().to_vec()),
             persistence_class: class,
             tier,
@@ -3269,5 +3270,43 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             read_result.found,
             "legacy read should use system permissions"
         );
+    }
+
+    #[test]
+    fn test_key_string_optimization_preserves_identical_behavior() {
+        // Verify that the key string optimization doesn't change read/write behavior
+        let mut adapter = FrankensqliteAdapter::default();
+        let caller = CallerContext::new_system();
+
+        // Test representative namespace.key combinations
+        let test_cases = vec![
+            ("short-key", b"value1"),
+            ("namespace.subsystem.component", b"value2"),
+            ("a".repeat(50).as_str(), b"long-key-value"),
+        ];
+
+        for (key, value) in test_cases {
+            // Write and verify success
+            let write_result = adapter.write(
+                &caller,
+                PersistenceClass::ControlState,
+                key,
+                value,
+            ).expect("write should succeed");
+
+            assert!(write_result.success, "write should report success for key: {}", key);
+
+            // Read back and verify identical value
+            let read_result = adapter.read(
+                &caller,
+                PersistenceClass::ControlState,
+                key,
+            ).expect("read should succeed");
+
+            assert!(read_result.found, "key should be found: {}", key);
+            assert_eq!(read_result.key, key, "returned key should match input");
+            assert_eq!(read_result.value.unwrap(), value, "returned value should match for key: {}", key);
+            assert_eq!(read_result.persistence_class, PersistenceClass::ControlState);
+        }
     }
 }
