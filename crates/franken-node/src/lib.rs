@@ -118,11 +118,15 @@ pub mod lock_utils {
         })
     }
 
-    /// For infallible contexts where poison should never happen in well-tested code.
-    /// Use this ONLY when mutex poisoning indicates an unrecoverable program state.
-    pub fn expect_lock<'a, T>(mutex: &'a Mutex<T>, context: &str) -> MutexGuard<'a, T> {
-        mutex.lock().unwrap_or_else(|poison_err| {
-            panic!("Critical mutex poisoned in {}: {}. This indicates a serious bug in concurrent code.", context, poison_err)
+    /// Try to acquire mutex lock, returning error instead of panicking on poison.
+    /// Replaces panic with structured error for better error handling in production code.
+    pub fn try_lock<'a, T>(mutex: &'a Mutex<T>, context: &str) -> Result<MutexGuard<'a, T>, ActionableError> {
+        mutex.lock().map_err(|poison_err| {
+            ActionableError::new(
+                format!("Critical mutex poisoned in {}: {}. This indicates a serious bug in concurrent code.", context, poison_err),
+                "Check for panics in concurrent code and fix root cause",
+            )
+            .with_help_url("https://doc.rust-lang.org/std/sync/struct.Mutex.html#poisoning")
         })
     }
 }
@@ -1232,6 +1236,31 @@ mod tests {
         // Verify all threads completed successfully
         let final_results = results.lock().unwrap();
         assert_eq!(final_results.len(), 4, "All threads should complete");
+    }
+
+    #[test]
+    fn try_lock_returns_error_instead_of_panic_on_poison() {
+        let mutex = Arc::new(Mutex::new(42));
+        let poison_mutex = Arc::clone(&mutex);
+
+        // Create a poisoned mutex by panicking while holding the lock
+        let handle = thread::spawn(move || {
+            let _guard = poison_mutex.lock().unwrap();
+            panic!("Intentional panic to poison mutex");
+        });
+
+        // Wait for the thread to panic and poison the mutex
+        handle.join().unwrap_err();
+
+        // Test that try_lock returns error instead of panicking
+        let result = lock_utils::try_lock(&mutex, "test_context");
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.message.contains("Critical mutex poisoned"));
+        assert!(error.message.contains("test_context"));
+        assert!(error.fix_command.contains("Check for panics"));
+        assert!(!error.help_urls.is_empty());
     }
 }
 
