@@ -2,15 +2,17 @@ use chrono::{DateTime, TimeZone, Utc};
 use frankenengine_node::ops::validation_broker::{CommandSpec, InputDigest};
 use frankenengine_node::ops::validation_proof_cache::DirtyStatePolicy;
 use frankenengine_node::ops::validation_proof_coalescer::{
-    CAPACITY_SNAPSHOT_SCHEMA_VERSION, CompleteLeaseRequest, CreateLeaseRequest,
-    FenceStaleLeaseRequest, StaticValidationProofRchCapacityProbe, ValidationProofAdmissionInput,
-    ValidationProofAdmissionPolicy, ValidationProofCoalescerDecisionKind,
+    decide_validation_proof_admission, error_codes, event_codes, reason_codes,
+    sample_validation_proof_capacity, CompleteLeaseRequest, CreateLeaseRequest,
+    FenceStaleLeaseRequest, StaticValidationProofRchCapacityProbe, StealStaleLeaseRequest,
+    ValidationProofAdmissionInput, ValidationProofAdmissionPolicy,
+    ValidationProofCoalescerDecisionKind, ValidationProofCoalescerLease,
     ValidationProofCoalescerReceiptRef, ValidationProofCoalescerRequiredAction,
     ValidationProofCoalescerStore, ValidationProofLeaseState, ValidationProofPriority,
     ValidationProofRchCapacitySnapshot, ValidationProofRchCommand,
-    ValidationProofRchWorkerCapacity, ValidationProofTargetDirClass, ValidationProofWorkKey,
-    ValidationProofWorkKeyParts, decide_validation_proof_admission, error_codes, event_codes,
-    reason_codes, sample_validation_proof_capacity,
+    ValidationProofRchWorkerCapacity, ValidationProofStaleProducerEvidence,
+    ValidationProofTargetDirClass, ValidationProofWorkKey, ValidationProofWorkKeyParts,
+    ValidationProofWorkStealPolicy, CAPACITY_SNAPSHOT_SCHEMA_VERSION,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -94,6 +96,60 @@ fn receipt_ref(seed: &str) -> ValidationProofCoalescerReceiptRef {
         path: format!("artifacts/validation_broker/receipts/{seed}.json"),
         bead_id: "bd-y4coj".to_string(),
         proof_cache_key_hex: key.proof_cache_key.hex,
+    }
+}
+
+fn work_steal_policy() -> ValidationProofWorkStealPolicy {
+    ValidationProofWorkStealPolicy {
+        min_heartbeat_stale_seconds: 5,
+        min_progress_stale_seconds: 5,
+        min_timeout_budget_seconds: 10,
+        ..ValidationProofWorkStealPolicy::default_policy(
+            "validation-proof-coalescer/work-steal/default/v1",
+        )
+    }
+}
+
+fn stale_evidence(
+    lease: &ValidationProofCoalescerLease,
+    last_heartbeat_at: DateTime<Utc>,
+    last_progress_at: DateTime<Utc>,
+    progress_stale_observed_at: DateTime<Utc>,
+) -> ValidationProofStaleProducerEvidence {
+    ValidationProofStaleProducerEvidence {
+        recorder_attempt_id: format!("recorder-{}", lease.lease_id),
+        recorder_path: format!(
+            "artifacts/validation_broker/flight_recorder/{}.json",
+            lease.lease_id
+        ),
+        producer_agent: lease.owner_agent.clone(),
+        producer_bead_id: lease.owner_bead_id.clone(),
+        lease_id: lease.lease_id.clone(),
+        fencing_token: lease.fencing_token.clone(),
+        last_heartbeat_at,
+        last_progress_at,
+        progress_stale_observed_at,
+    }
+}
+
+fn steal_request(
+    seed: &str,
+    stealer: &str,
+    key: ValidationProofWorkKey,
+    evidence: ValidationProofStaleProducerEvidence,
+    observed_at: DateTime<Utc>,
+    timeout_budget_seconds: u64,
+) -> StealStaleLeaseRequest {
+    StealStaleLeaseRequest {
+        proof_work_key: key,
+        stealer_agent: stealer.to_string(),
+        stealer_bead_id: "bd-q5iee".to_string(),
+        trace_id: format!("trace-work-steal-{seed}-{stealer}"),
+        new_fencing_token: format!("fence-{seed}-{stealer}-v2"),
+        observed_at,
+        expires_at: observed_at + chrono::Duration::minutes(30),
+        timeout_budget_seconds,
+        stale_progress_evidence: evidence,
     }
 }
 
@@ -266,6 +322,160 @@ fn real_temp_dir_stale_fence_blocks_old_owner_completion() {
         })
         .expect_err("old owner cannot complete");
     assert_eq!(err.code(), error_codes::ERR_VPCO_FENCED_OWNER);
+}
+
+#[test]
+fn real_temp_dir_stale_evidence_fences_work_steal_with_new_token() {
+    let temp = TempDir::new().expect("tempdir");
+    let store = ValidationProofCoalescerStore::new(temp.path());
+    let mut original = create_request("work-steal", "PearlLeopard", ts(1));
+    original.expires_at = ts(5);
+    let created = store
+        .create_or_join(original.clone())
+        .expect("create staleable lease");
+    let lease = created.lease.expect("created lease");
+    let evidence = stale_evidence(&lease, ts(4), ts(3), ts(14));
+
+    let stolen = store
+        .steal_stale_lease(
+            &work_steal_policy(),
+            steal_request(
+                "work-steal",
+                "LavenderElk",
+                original.proof_work_key.clone(),
+                evidence,
+                ts(20),
+                60,
+            ),
+        )
+        .expect("steal stale lease");
+
+    assert_eq!(
+        stolen.decision.decision,
+        ValidationProofCoalescerDecisionKind::RetryAfterStaleLease
+    );
+    assert_eq!(
+        stolen.decision.required_action,
+        ValidationProofCoalescerRequiredAction::RetryWithNewFence
+    );
+    assert!(stolen.assessment.lease_expired);
+    assert!(stolen.assessment.heartbeat_stale);
+    assert!(stolen.assessment.progress_stale);
+    assert!(stolen.assessment.timeout_budget_sufficient);
+
+    let active = stolen.lease.expect("stolen lease");
+    assert_eq!(active.owner_agent, "LavenderElk");
+    assert_eq!(active.owner_bead_id, "bd-q5iee");
+    assert_eq!(active.state, ValidationProofLeaseState::Running);
+    assert_eq!(active.fencing_token, "fence-work-steal-LavenderElk-v2");
+    assert!(active.waiter_agents.is_empty());
+    assert_eq!(
+        active.diagnostics.event_code,
+        event_codes::STALE_LEASE_FENCED
+    );
+
+    let err = store
+        .complete_lease(CompleteLeaseRequest {
+            proof_work_key: original.proof_work_key,
+            owner_agent: original.owner_agent,
+            owner_bead_id: original.owner_bead_id,
+            fencing_token: original.fencing_token,
+            completed_at: ts(21),
+            receipt_ref: receipt_ref("work-steal"),
+        })
+        .expect_err("old producer is fenced");
+    assert_eq!(err.code(), error_codes::ERR_VPCO_FENCED_OWNER);
+}
+
+#[test]
+fn real_temp_dir_fresh_heartbeat_blocks_work_steal_without_mutation() {
+    let temp = TempDir::new().expect("tempdir");
+    let store = ValidationProofCoalescerStore::new(temp.path());
+    let mut original = create_request("fresh-heartbeat", "PearlLeopard", ts(1));
+    original.expires_at = ts(5);
+    let created = store
+        .create_or_join(original.clone())
+        .expect("create staleable lease");
+    let lease = created.lease.expect("created lease");
+    let evidence = stale_evidence(&lease, ts(18), ts(3), ts(14));
+
+    let outcome = store
+        .steal_stale_lease(
+            &work_steal_policy(),
+            steal_request(
+                "fresh-heartbeat",
+                "LavenderElk",
+                original.proof_work_key.clone(),
+                evidence,
+                ts(20),
+                60,
+            ),
+        )
+        .expect("fresh heartbeat decision");
+
+    assert_eq!(
+        outcome.decision.decision,
+        ValidationProofCoalescerDecisionKind::JoinExistingProof
+    );
+    assert_eq!(
+        outcome.decision.reason_code,
+        reason_codes::WAIT_FRESH_PRODUCER
+    );
+    assert!(!outcome.decision.diagnostics.fail_closed);
+    assert!(outcome.assessment.lease_expired);
+    assert!(!outcome.assessment.heartbeat_stale);
+
+    let lease = store
+        .read_lease(&original.proof_work_key)
+        .expect("read lease")
+        .expect("lease remains");
+    assert_eq!(lease.owner_agent, "PearlLeopard");
+    assert_eq!(lease.fencing_token, original.fencing_token);
+}
+
+#[test]
+fn real_temp_dir_timeout_budget_blocks_work_steal_without_mutation() {
+    let temp = TempDir::new().expect("tempdir");
+    let store = ValidationProofCoalescerStore::new(temp.path());
+    let mut original = create_request("timeout-budget", "PearlLeopard", ts(1));
+    original.expires_at = ts(5);
+    let created = store
+        .create_or_join(original.clone())
+        .expect("create staleable lease");
+    let lease = created.lease.expect("created lease");
+    let evidence = stale_evidence(&lease, ts(4), ts(3), ts(14));
+
+    let outcome = store
+        .steal_stale_lease(
+            &work_steal_policy(),
+            steal_request(
+                "timeout-budget",
+                "LavenderElk",
+                original.proof_work_key.clone(),
+                evidence,
+                ts(20),
+                5,
+            ),
+        )
+        .expect("timeout budget decision");
+
+    assert_eq!(
+        outcome.decision.decision,
+        ValidationProofCoalescerDecisionKind::RejectCapacity
+    );
+    assert_eq!(
+        outcome.decision.required_action,
+        ValidationProofCoalescerRequiredAction::FailClosed
+    );
+    assert!(outcome.decision.diagnostics.fail_closed);
+    assert!(!outcome.assessment.timeout_budget_sufficient);
+
+    let lease = store
+        .read_lease(&original.proof_work_key)
+        .expect("read lease")
+        .expect("lease remains");
+    assert_eq!(lease.owner_agent, "PearlLeopard");
+    assert_eq!(lease.fencing_token, original.fencing_token);
 }
 
 #[test]

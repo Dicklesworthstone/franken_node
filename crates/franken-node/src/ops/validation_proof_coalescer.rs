@@ -27,6 +27,8 @@ pub const ADMISSION_POLICY_SCHEMA_VERSION: &str =
     "franken-node/validation-proof-coalescer/admission-policy/v1";
 pub const ADMISSION_DECISION_SCHEMA_VERSION: &str =
     "franken-node/validation-proof-coalescer/admission-decision/v1";
+pub const WORK_STEAL_POLICY_SCHEMA_VERSION: &str =
+    "franken-node/validation-proof-coalescer/work-steal-policy/v1";
 const SHA256_HEX_LEN: usize = 64;
 
 pub mod error_codes {
@@ -44,6 +46,7 @@ pub mod error_codes {
     pub const ERR_VPCO_MALFORMED_DECISION: &str = "ERR_VPCO_MALFORMED_DECISION";
     pub const ERR_VPCO_MALFORMED_POLICY: &str = "ERR_VPCO_MALFORMED_POLICY";
     pub const ERR_VPCO_DUPLICATE_LEASE: &str = "ERR_VPCO_DUPLICATE_LEASE";
+    pub const ERR_VPCO_INSUFFICIENT_STALE_EVIDENCE: &str = "ERR_VPCO_INSUFFICIENT_STALE_EVIDENCE";
 }
 
 pub mod event_codes {
@@ -68,6 +71,8 @@ pub mod reason_codes {
     pub const REJECT_DIRTY_POLICY: &str = "VPCO_REJECT_DIRTY_POLICY";
     pub const REJECT_CAPACITY: &str = "VPCO_REJECT_CAPACITY";
     pub const REPAIR_CORRUPTED: &str = "VPCO_REPAIR_CORRUPTED";
+    pub const WAIT_FRESH_PRODUCER: &str = "VPCO_WAIT_FRESH_PRODUCER";
+    pub const INSUFFICIENT_STALE_EVIDENCE: &str = "VPCO_INSUFFICIENT_STALE_EVIDENCE";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -220,6 +225,28 @@ pub struct ValidationProofAdmissionPolicy {
     pub low_priority: ValidationProofAdmissionThreshold,
     pub normal_priority: ValidationProofAdmissionThreshold,
     pub high_priority: ValidationProofAdmissionThreshold,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofWorkStealPolicy {
+    pub schema_version: String,
+    pub policy_id: String,
+    pub min_heartbeat_stale_seconds: u64,
+    pub min_progress_stale_seconds: u64,
+    pub min_timeout_budget_seconds: u64,
+}
+
+impl ValidationProofWorkStealPolicy {
+    #[must_use]
+    pub fn default_policy(policy_id: impl Into<String>) -> Self {
+        Self {
+            schema_version: WORK_STEAL_POLICY_SCHEMA_VERSION.to_string(),
+            policy_id: policy_id.into(),
+            min_heartbeat_stale_seconds: 300,
+            min_progress_stale_seconds: 300,
+            min_timeout_budget_seconds: 300,
+        }
+    }
 }
 
 impl ValidationProofAdmissionPolicy {
@@ -688,6 +715,55 @@ pub struct FenceStaleLeaseRequest {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofStaleProducerEvidence {
+    pub recorder_attempt_id: String,
+    pub recorder_path: String,
+    pub producer_agent: String,
+    pub producer_bead_id: String,
+    pub lease_id: String,
+    pub fencing_token: String,
+    pub last_heartbeat_at: DateTime<Utc>,
+    pub last_progress_at: DateTime<Utc>,
+    pub progress_stale_observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StealStaleLeaseRequest {
+    pub proof_work_key: ValidationProofWorkKey,
+    pub stealer_agent: String,
+    pub stealer_bead_id: String,
+    pub trace_id: String,
+    pub new_fencing_token: String,
+    pub observed_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub timeout_budget_seconds: u64,
+    pub stale_progress_evidence: ValidationProofStaleProducerEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofWorkStealAssessment {
+    pub previous_lease_ref: ValidationProofCoalescerLeaseRef,
+    pub recorder_attempt_id: String,
+    pub recorder_path: String,
+    pub lease_expired: bool,
+    pub evidence_matches_lease: bool,
+    pub heartbeat_age_seconds: u64,
+    pub heartbeat_stale: bool,
+    pub progress_age_seconds: u64,
+    pub progress_stale: bool,
+    pub timeout_budget_seconds: u64,
+    pub timeout_budget_sufficient: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationProofWorkStealOutcome {
+    pub lease: Option<ValidationProofCoalescerLease>,
+    pub lease_path: PathBuf,
+    pub decision: ValidationProofCoalescerDecision,
+    pub assessment: ValidationProofWorkStealAssessment,
+}
+
 #[derive(Debug, Clone)]
 pub struct ValidationProofCoalescerStore {
     root: PathBuf,
@@ -886,6 +962,175 @@ impl ValidationProofCoalescerStore {
             lease: Some(lease),
             lease_path: path,
         })
+    }
+
+    pub fn steal_stale_lease(
+        &self,
+        policy: &ValidationProofWorkStealPolicy,
+        request: StealStaleLeaseRequest,
+    ) -> Result<ValidationProofWorkStealOutcome, ValidationProofCoalescerError> {
+        validate_work_steal_policy(policy)?;
+        validate_work_steal_request(&request)?;
+
+        let path = self.lease_path(&request.proof_work_key);
+        let relative_path = self.relative_lease_path(&request.proof_work_key);
+        let Some(mut lease) = self.read_lease(&request.proof_work_key)? else {
+            return Err(ValidationProofCoalescerError::contract(
+                error_codes::ERR_VPCO_MALFORMED_LEASE,
+                "cannot steal missing validation proof lease",
+            ));
+        };
+        if !same_work_key(&lease.proof_work_key, &request.proof_work_key) {
+            return Err(ValidationProofCoalescerError::contract(
+                error_codes::ERR_VPCO_BAD_WORK_KEY,
+                "work-steal request work key does not match stored lease",
+            ));
+        }
+
+        let assessment = assess_work_steal(&lease, &relative_path, policy, &request)?;
+        if matches!(lease.state, ValidationProofLeaseState::Completed) {
+            return Ok(work_steal_outcome(WorkStealOutcomeInput {
+                lease: Some(lease.clone()),
+                lease_path: path,
+                assessment,
+                kind: ValidationProofCoalescerDecisionKind::WaitForReceipt,
+                reason_code: reason_codes::WAIT_COMPLETION,
+                required_action: ValidationProofCoalescerRequiredAction::WaitForReceipt,
+                event_code: event_codes::WAIT_FOR_RECEIPT,
+                fail_closed: false,
+                message: "completed lease is ready for proof-cache receipt handoff",
+                work_key: lease.proof_work_key.clone(),
+                lease_ref: Some(ValidationProofCoalescerLeaseRef::from_lease(
+                    &lease,
+                    relative_path,
+                )),
+                bead_id: request.stealer_bead_id,
+                agent_name: request.stealer_agent,
+                trace_id: request.trace_id,
+                decided_at: request.observed_at,
+            }));
+        }
+
+        if !lease.state.is_active() || !assessment.evidence_matches_lease {
+            return Ok(work_steal_outcome(WorkStealOutcomeInput {
+                lease: Some(lease.clone()),
+                lease_path: path,
+                assessment,
+                kind: ValidationProofCoalescerDecisionKind::RepairState,
+                reason_code: reason_codes::INSUFFICIENT_STALE_EVIDENCE,
+                required_action: ValidationProofCoalescerRequiredAction::FailClosed,
+                event_code: event_codes::CORRUPTED_STATE_REPAIR,
+                fail_closed: true,
+                message: "work-steal stale-progress evidence does not match an active lease",
+                work_key: request.proof_work_key,
+                lease_ref: Some(ValidationProofCoalescerLeaseRef::from_lease(
+                    &lease,
+                    relative_path,
+                )),
+                bead_id: request.stealer_bead_id,
+                agent_name: request.stealer_agent,
+                trace_id: request.trace_id,
+                decided_at: request.observed_at,
+            }));
+        }
+
+        if !assessment.lease_expired || !assessment.heartbeat_stale || !assessment.progress_stale {
+            return Ok(work_steal_outcome(WorkStealOutcomeInput {
+                lease: Some(lease.clone()),
+                lease_path: path,
+                assessment,
+                kind: ValidationProofCoalescerDecisionKind::JoinExistingProof,
+                reason_code: reason_codes::WAIT_FRESH_PRODUCER,
+                required_action: ValidationProofCoalescerRequiredAction::JoinExistingLease,
+                event_code: event_codes::WAIT_FOR_RECEIPT,
+                fail_closed: false,
+                message: "active validation producer still has fresh lease, heartbeat, or progress evidence",
+                work_key: request.proof_work_key,
+                lease_ref: Some(ValidationProofCoalescerLeaseRef::from_lease(
+                    &lease,
+                    relative_path,
+                )),
+                bead_id: request.stealer_bead_id,
+                agent_name: request.stealer_agent,
+                trace_id: request.trace_id,
+                decided_at: request.observed_at,
+            }));
+        }
+
+        if !assessment.timeout_budget_sufficient {
+            return Ok(work_steal_outcome(WorkStealOutcomeInput {
+                lease: Some(lease.clone()),
+                lease_path: path,
+                assessment,
+                kind: ValidationProofCoalescerDecisionKind::RejectCapacity,
+                reason_code: reason_codes::REJECT_CAPACITY,
+                required_action: ValidationProofCoalescerRequiredAction::FailClosed,
+                event_code: event_codes::CAPACITY_REJECTED,
+                fail_closed: true,
+                message: "stale validation lease cannot be stolen because retry timeout budget is below policy minimum",
+                work_key: request.proof_work_key,
+                lease_ref: Some(ValidationProofCoalescerLeaseRef::from_lease(
+                    &lease,
+                    relative_path,
+                )),
+                bead_id: request.stealer_bead_id,
+                agent_name: request.stealer_agent,
+                trace_id: request.trace_id,
+                decided_at: request.observed_at,
+            }));
+        }
+
+        let previous_owner = lease.owner_agent.clone();
+        let previous_bead = lease.owner_bead_id.clone();
+        lease.state = ValidationProofLeaseState::Running;
+        lease.owner_agent = request.stealer_agent.clone();
+        lease.owner_bead_id = request.stealer_bead_id.clone();
+        lease.fencing_token = request.new_fencing_token;
+        lease.updated_at = request.observed_at;
+        lease.expires_at = request.expires_at;
+        lease.waiter_agents.clear();
+        lease.receipt_ref = None;
+        lease.diagnostics = ValidationProofCoalescerDiagnostics {
+            trace_id: request.trace_id.clone(),
+            event_code: event_codes::STALE_LEASE_FENCED.to_string(),
+            reason_code: reason_codes::RETRY_STALE.to_string(),
+            producer_agent: request.stealer_agent.clone(),
+            waiter_agent: None,
+            message: format!(
+                "stale producer {previous_owner}/{previous_bead} fenced by {} using recorder attempt {}",
+                request.stealer_agent, request.stale_progress_evidence.recorder_attempt_id
+            ),
+            fail_closed: false,
+        };
+        validate_lease_metadata(&lease)?;
+        let bytes = serde_json::to_vec_pretty(&lease).map_err(|source| {
+            ValidationProofCoalescerError::Json {
+                path: path.display().to_string(),
+                source,
+            }
+        })?;
+        write_bytes_replace(&path, &bytes)?;
+
+        Ok(work_steal_outcome(WorkStealOutcomeInput {
+            lease: Some(lease.clone()),
+            lease_path: path,
+            assessment,
+            kind: ValidationProofCoalescerDecisionKind::RetryAfterStaleLease,
+            reason_code: reason_codes::RETRY_STALE,
+            required_action: ValidationProofCoalescerRequiredAction::RetryWithNewFence,
+            event_code: event_codes::STALE_LEASE_FENCED,
+            fail_closed: false,
+            message: "stale validation proof producer fenced and stolen with a fresh token",
+            work_key: lease.proof_work_key.clone(),
+            lease_ref: Some(ValidationProofCoalescerLeaseRef::from_lease(
+                &lease,
+                relative_path,
+            )),
+            bead_id: request.stealer_bead_id,
+            agent_name: request.stealer_agent,
+            trace_id: request.trace_id,
+            decided_at: request.observed_at,
+        }))
     }
 
     fn create_new_lease(
@@ -1162,7 +1407,8 @@ pub fn decide_validation_proof_admission(
             required_action: ValidationProofCoalescerRequiredAction::FailClosed,
             event_code: event_codes::CAPACITY_REJECTED,
             fail_closed: true,
-            message: "validation admission rejected because capacity snapshot reports disk pressure",
+            message:
+                "validation admission rejected because capacity snapshot reports disk pressure",
             effective_priority,
             input,
             available_worker_slots,
@@ -1220,7 +1466,8 @@ pub fn decide_validation_proof_admission(
                     required_action: ValidationProofCoalescerRequiredAction::FailClosed,
                     event_code: event_codes::CAPACITY_REJECTED,
                     fail_closed: true,
-                    message: "validation admission rejected because RCH capacity is below threshold",
+                    message:
+                        "validation admission rejected because RCH capacity is below threshold",
                     effective_priority,
                     input,
                     available_worker_slots,
@@ -1259,6 +1506,24 @@ struct AdmissionDecisionInput<'a> {
     observed_queue_depth: u16,
 }
 
+struct WorkStealOutcomeInput {
+    lease: Option<ValidationProofCoalescerLease>,
+    lease_path: PathBuf,
+    assessment: ValidationProofWorkStealAssessment,
+    kind: ValidationProofCoalescerDecisionKind,
+    reason_code: &'static str,
+    required_action: ValidationProofCoalescerRequiredAction,
+    event_code: &'static str,
+    fail_closed: bool,
+    message: &'static str,
+    work_key: ValidationProofWorkKey,
+    lease_ref: Option<ValidationProofCoalescerLeaseRef>,
+    bead_id: String,
+    agent_name: String,
+    trace_id: String,
+    decided_at: DateTime<Utc>,
+}
+
 fn admission_decision(input: AdmissionDecisionInput<'_>) -> ValidationProofAdmissionDecision {
     ValidationProofAdmissionDecision {
         schema_version: ADMISSION_DECISION_SCHEMA_VERSION.to_string(),
@@ -1279,6 +1544,28 @@ fn admission_decision(input: AdmissionDecisionInput<'_>) -> ValidationProofAdmis
             target_dir_class: input.input.target_dir_class,
             timeout_budget_seconds: input.input.timeout_budget_seconds,
         },
+    }
+}
+
+fn work_steal_outcome(input: WorkStealOutcomeInput) -> ValidationProofWorkStealOutcome {
+    ValidationProofWorkStealOutcome {
+        lease: input.lease,
+        lease_path: input.lease_path,
+        assessment: input.assessment,
+        decision: coalescer_decision(DecisionInput {
+            kind: input.kind,
+            reason_code: input.reason_code,
+            required_action: input.required_action,
+            event_code: input.event_code,
+            fail_closed: input.fail_closed,
+            message: input.message,
+            work_key: input.work_key,
+            lease_ref: input.lease_ref,
+            bead_id: input.bead_id,
+            agent_name: input.agent_name,
+            trace_id: input.trace_id,
+            decided_at: input.decided_at,
+        }),
     }
 }
 
@@ -1348,6 +1635,101 @@ fn validate_admission_input(
         ));
     }
     Ok(())
+}
+
+fn validate_work_steal_policy(
+    policy: &ValidationProofWorkStealPolicy,
+) -> Result<(), ValidationProofCoalescerError> {
+    if !string_eq(&policy.schema_version, WORK_STEAL_POLICY_SCHEMA_VERSION)
+        || policy.policy_id.trim().is_empty()
+        || policy.min_heartbeat_stale_seconds == 0
+        || policy.min_progress_stale_seconds == 0
+        || policy.min_timeout_budget_seconds == 0
+    {
+        return Err(ValidationProofCoalescerError::contract(
+            error_codes::ERR_VPCO_MALFORMED_POLICY,
+            "validation proof work-steal policy is malformed",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_work_steal_request(
+    request: &StealStaleLeaseRequest,
+) -> Result<(), ValidationProofCoalescerError> {
+    let evidence = &request.stale_progress_evidence;
+    if request.stealer_agent.trim().is_empty()
+        || request.stealer_bead_id.trim().is_empty()
+        || request.trace_id.trim().is_empty()
+        || request.new_fencing_token.trim().is_empty()
+        || request.timeout_budget_seconds == 0
+        || request.expires_at <= request.observed_at
+        || evidence.recorder_attempt_id.trim().is_empty()
+        || evidence.recorder_path.trim().is_empty()
+        || evidence.producer_agent.trim().is_empty()
+        || evidence.producer_bead_id.trim().is_empty()
+        || evidence.lease_id.trim().is_empty()
+        || evidence.fencing_token.trim().is_empty()
+        || evidence.progress_stale_observed_at < evidence.last_progress_at
+        || request.observed_at < evidence.last_heartbeat_at
+        || request.observed_at < evidence.progress_stale_observed_at
+        || string_eq(&request.new_fencing_token, &evidence.fencing_token)
+    {
+        return Err(ValidationProofCoalescerError::contract(
+            error_codes::ERR_VPCO_MALFORMED_DECISION,
+            "validation proof work-steal request is malformed",
+        ));
+    }
+    Ok(())
+}
+
+fn assess_work_steal(
+    lease: &ValidationProofCoalescerLease,
+    relative_path: &str,
+    policy: &ValidationProofWorkStealPolicy,
+    request: &StealStaleLeaseRequest,
+) -> Result<ValidationProofWorkStealAssessment, ValidationProofCoalescerError> {
+    let evidence = &request.stale_progress_evidence;
+    let heartbeat_age_seconds = seconds_between(evidence.last_heartbeat_at, request.observed_at)?;
+    let progress_age_seconds = seconds_between(
+        evidence.last_progress_at,
+        evidence.progress_stale_observed_at,
+    )?;
+    Ok(ValidationProofWorkStealAssessment {
+        previous_lease_ref: ValidationProofCoalescerLeaseRef::from_lease(lease, relative_path),
+        recorder_attempt_id: evidence.recorder_attempt_id.clone(),
+        recorder_path: evidence.recorder_path.clone(),
+        lease_expired: lease.is_expired_at(request.observed_at),
+        evidence_matches_lease: string_eq(&evidence.producer_agent, &lease.owner_agent)
+            && string_eq(&evidence.producer_bead_id, &lease.owner_bead_id)
+            && string_eq(&evidence.lease_id, &lease.lease_id)
+            && string_eq(&evidence.fencing_token, &lease.fencing_token),
+        heartbeat_age_seconds,
+        heartbeat_stale: heartbeat_age_seconds >= policy.min_heartbeat_stale_seconds,
+        progress_age_seconds,
+        progress_stale: progress_age_seconds >= policy.min_progress_stale_seconds,
+        timeout_budget_seconds: request.timeout_budget_seconds,
+        timeout_budget_sufficient: request.timeout_budget_seconds
+            >= policy.min_timeout_budget_seconds,
+    })
+}
+
+fn seconds_between(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<u64, ValidationProofCoalescerError> {
+    if end < start {
+        return Err(ValidationProofCoalescerError::contract(
+            error_codes::ERR_VPCO_MALFORMED_DECISION,
+            "validation proof timestamp order is malformed",
+        ));
+    }
+    u64::try_from(end.signed_duration_since(start).num_seconds()).map_err(|_| {
+        ValidationProofCoalescerError::contract(
+            error_codes::ERR_VPCO_MALFORMED_DECISION,
+            "validation proof timestamp range is malformed",
+        )
+    })
 }
 
 struct DecisionInput {
