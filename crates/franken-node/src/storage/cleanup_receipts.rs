@@ -417,10 +417,16 @@ impl CleanupReceiptsStorage {
         let mut entries: Vec<_> = self.index.receipts.iter().collect();
         entries.sort_by(|a, b| a.1.initiated_at.cmp(&b.1.initiated_at));
 
-        // Remove oldest entries directly to avoid intermediate clone collection
+        // Collect keys to remove first, then remove them
         let to_remove = entries.len() - target_size;
-        for (receipt_id, _) in entries.iter().take(to_remove) {
-            self.index.receipts.remove(*receipt_id);
+        let keys_to_remove: Vec<String> = entries
+            .iter()
+            .take(to_remove)
+            .map(|(receipt_id, _)| (*receipt_id).clone())
+            .collect();
+
+        for key in keys_to_remove {
+            self.index.receipts.remove(&key);
         }
     }
 }
