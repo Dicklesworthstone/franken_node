@@ -2346,14 +2346,14 @@ fn package_manifest_declares_module_type(project_root: &Path, directory: &Path) 
 fn create_backup_directory_safe(project_path: &Path, backup_path: &Path) -> anyhow::Result<()> {
     let backup_root = project_path.join(MIGRATION_BACKUP_DIR);
 
-    // Ensure backup root exists and validate it's not a symlink
-    if !backup_root.exists() {
-        std::fs::create_dir(&backup_root).map_err(|err| {
-            anyhow::anyhow!(
+    // Ensure backup root exists and validate it's not a symlink (TOCTOU-safe)
+    if let Err(err) = std::fs::create_dir(&backup_root) {
+        if err.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(anyhow::anyhow!(
                 "failed creating backup root directory {}: {err}",
                 backup_root.display()
-            )
-        })?;
+            ));
+        }
     }
 
     // Validate backup root is not a symlink (race-resistant check)
@@ -2378,15 +2378,14 @@ fn create_backup_directory_safe(project_path: &Path, backup_path: &Path) -> anyh
             if let std::path::Component::Normal(name) = component {
                 current_path = current_path.join(name);
 
-                // If this component doesn't exist, create it
-                if !current_path.exists() {
-                    // Create single directory (not recursive to maintain control)
-                    std::fs::create_dir(&current_path).map_err(|err| {
-                        anyhow::anyhow!(
+                // Create directory component atomically (TOCTOU-safe)
+                if let Err(err) = std::fs::create_dir(&current_path) {
+                    if err.kind() != std::io::ErrorKind::AlreadyExists {
+                        return Err(anyhow::anyhow!(
                             "failed creating backup directory component {}: {err}",
                             current_path.display()
-                        )
-                    })?;
+                        ));
+                    }
                 }
 
                 // SECURITY: Validate the just-created/existing directory is not a symlink

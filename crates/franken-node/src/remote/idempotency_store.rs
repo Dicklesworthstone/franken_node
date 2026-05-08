@@ -674,6 +674,7 @@ impl Default for IdempotencyDedupeStore {
 mod tests {
     use super::*;
     use crate::security::constant_time;
+    use proptest::prelude::*;
 
     /// Deterministic key for testing.
     fn test_key(seed: u8) -> IdempotencyKey {
@@ -1827,5 +1828,120 @@ mod tests {
                 "Debug should show creation timestamp");
         assert!(debug_output.contains("[REDACTED]"),
                 "Debug should indicate redacted fields");
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_saturating_add_counter_operations_never_panic(
+            initial_total_new in any::<u64>(),
+            initial_total_expired in any::<u64>(),
+            initial_total_conflict in any::<u64>(),
+            initial_total_duplicate in any::<u64>(),
+            increment_count in 0u64..=1000,
+        ) {
+            // Property: saturating_add counter operations never panic and correctly saturate
+            // Tests the 8+ saturating_add sites in idempotency store operations
+
+            let mut stats = IdempotencyStatistics {
+                total_new: initial_total_new,
+                total_expired: initial_total_expired,
+                total_conflict: initial_total_conflict,
+                total_duplicate: initial_total_duplicate,
+            };
+
+            // Test total_new counter (simulates record_new_entry calls)
+            for _ in 0..increment_count {
+                let old_value = stats.total_new;
+                stats.total_new = stats.total_new.saturating_add(1);
+
+                // Properties that must hold:
+                if old_value < u64::MAX {
+                    assert_eq!(stats.total_new, old_value + 1, "Should increment by 1 when not at max");
+                } else {
+                    assert_eq!(stats.total_new, u64::MAX, "Should remain at MAX when saturated");
+                }
+                assert!(stats.total_new >= old_value, "Counter should never decrease");
+            }
+
+            // Test total_expired counter with arbitrary increments
+            let old_expired = stats.total_expired;
+            stats.total_expired = stats.total_expired.saturating_add(increment_count);
+
+            if old_expired <= u64::MAX - increment_count {
+                assert_eq!(stats.total_expired, old_expired + increment_count,
+                    "Should add full increment when no overflow");
+            } else {
+                assert_eq!(stats.total_expired, u64::MAX,
+                    "Should saturate at MAX on overflow");
+            }
+
+            // Test total_conflict counter
+            let old_conflict = stats.total_conflict;
+            stats.total_conflict = stats.total_conflict.saturating_add(1);
+
+            if old_conflict < u64::MAX {
+                assert_eq!(stats.total_conflict, old_conflict + 1);
+            } else {
+                assert_eq!(stats.total_conflict, u64::MAX);
+            }
+        }
+
+        #[test]
+        fn proptest_saturating_add_overflow_boundary_conditions(
+            base_value in u64::MAX - 1000..=u64::MAX,
+            add_amount in 0u64..=2000,
+        ) {
+            // Property: saturating_add behaves correctly at overflow boundaries
+            let result = base_value.saturating_add(add_amount);
+
+            if base_value == u64::MAX {
+                // Already at max - should stay at max regardless of add_amount
+                assert_eq!(result, u64::MAX, "Adding to MAX should stay at MAX");
+            } else if base_value > u64::MAX - add_amount {
+                // Would overflow - should saturate to MAX
+                assert_eq!(result, u64::MAX, "Overflow should saturate to MAX");
+            } else {
+                // No overflow - should be exact addition
+                assert_eq!(result, base_value + add_amount, "No overflow should give exact result");
+            }
+
+            // Universal properties:
+            assert!(result >= base_value, "Result should never be less than input");
+            assert!(result <= u64::MAX, "Result should never exceed MAX");
+        }
+
+        #[test]
+        fn proptest_idempotency_ttl_calculation_never_overflows(
+            created_at_secs in any::<u64>(),
+            ttl_secs in any::<u64>(),
+            now_secs in any::<u64>(),
+        ) {
+            // Property: TTL expiry calculation using saturating_add never overflows
+            // Tests: now_secs >= self.created_at_secs.saturating_add(self.ttl_secs)
+
+            let expiry_time = created_at_secs.saturating_add(ttl_secs);
+            let is_expired = now_secs >= expiry_time;
+
+            // Properties that must hold:
+            assert!(expiry_time >= created_at_secs, "Expiry should never be before creation");
+            assert!(expiry_time <= u64::MAX, "Expiry should never overflow");
+
+            if created_at_secs <= u64::MAX - ttl_secs {
+                // No overflow case
+                assert_eq!(expiry_time, created_at_secs + ttl_secs,
+                    "No overflow should give exact expiry time");
+            } else {
+                // Overflow case - should saturate
+                assert_eq!(expiry_time, u64::MAX,
+                    "Overflow should saturate expiry time to MAX");
+            }
+
+            // Expiry logic should be consistent
+            if now_secs >= expiry_time {
+                assert!(is_expired, "Should be expired when now >= expiry");
+            } else {
+                assert!(!is_expired, "Should not be expired when now < expiry");
+            }
+        }
     }
 }

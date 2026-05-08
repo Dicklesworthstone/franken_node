@@ -116,9 +116,11 @@ impl CleanupReceiptsStorage {
 
     /// Create storage manager with custom directory.
     pub fn with_directory(storage_dir: PathBuf) -> Result<Self, CleanupReceiptsError> {
-        // Ensure storage directory exists
-        if !storage_dir.exists() {
-            fs::create_dir_all(&storage_dir)?;
+        // Ensure storage directory exists (TOCTOU-safe)
+        if let Err(e) = fs::create_dir_all(&storage_dir) {
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(e.into());
+            }
         }
 
         let mut storage = Self {
@@ -257,8 +259,11 @@ impl CleanupReceiptsStorage {
             .remove(receipt_id)
             .ok_or_else(|| CleanupReceiptsError::ReceiptNotFound(receipt_id.to_string()))?;
 
-        if metadata.file_path.exists() {
-            fs::remove_file(&metadata.file_path)?;
+        // Remove file atomically (TOCTOU-safe)
+        if let Err(e) = fs::remove_file(&metadata.file_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e.into());
+            }
         }
 
         self.index.last_updated = Utc::now();
@@ -351,12 +356,17 @@ impl CleanupReceiptsStorage {
 
     fn load_index(&mut self) -> Result<(), CleanupReceiptsError> {
         let index_path = self.storage_dir.join("index.json");
-        if index_path.exists() {
-            let index_data = fs::read_to_string(&index_path)?;
-            self.index = serde_json::from_str(&index_data)?;
-
-            // Validate that referenced files still exist
-            self.cleanup_stale_index_entries();
+        // Load index file atomically (TOCTOU-safe)
+        match fs::read_to_string(&index_path) {
+            Ok(index_data) => {
+                self.index = serde_json::from_str(&index_data)?;
+                // Validate that referenced files still exist
+                self.cleanup_stale_index_entries();
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // No index file exists yet, use default empty index
+            }
+            Err(e) => return Err(e.into()),
         }
         Ok(())
     }

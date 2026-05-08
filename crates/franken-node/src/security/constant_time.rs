@@ -26,6 +26,7 @@ pub fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{ct_eq, ct_eq_bytes};
+    use proptest::prelude::*;
 
     #[test]
     fn equal_strings_match() {
@@ -1295,5 +1296,111 @@ mod comprehensive_boundary_negative_tests {
             test_data_store.len() <= MAX_STORE_SIZE,
             "Should respect bounds"
         );
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_ct_eq_matches_regular_equality(
+            a in any::<Vec<u8>>(),
+            b in any::<Vec<u8>>(),
+        ) {
+            // Property: ct_eq_bytes should match regular equality for any input
+            // Tests correctness invariant of constant-time comparison
+            let expected = a == b;
+            let ct_result = ct_eq_bytes(&a, &b);
+
+            assert_eq!(ct_result, expected,
+                "ct_eq_bytes({:?}, {:?}) = {} but regular equality = {}",
+                a, b, ct_result, expected);
+        }
+
+        #[test]
+        fn proptest_ct_eq_string_matches_regular_equality(
+            a in ".*",
+            b in ".*",
+        ) {
+            // Property: ct_eq should match regular string equality for any UTF-8 input
+            let expected = a == b;
+            let ct_result = ct_eq(&a, &b);
+
+            assert_eq!(ct_result, expected,
+                "ct_eq({:?}, {:?}) = {} but regular equality = {}",
+                a, b, ct_result, expected);
+        }
+
+        #[test]
+        fn proptest_ct_eq_timing_bounded_variance(
+            len in 1usize..=1000,
+            content_a in any::<u8>(),
+            content_b in any::<u8>(),
+        ) {
+            // Property: timing variance should be bounded for equal-length inputs
+            // Best-effort microbenchmark to detect gross timing side-channels
+            use std::time::Instant;
+
+            let a = vec![content_a; len];
+            let b_same = a.clone();
+            let b_diff = vec![content_b; len];
+
+            // Measure timing for equal inputs
+            let start_same = Instant::now();
+            let result_same = ct_eq_bytes(&a, &b_same);
+            let duration_same = start_same.elapsed();
+
+            // Measure timing for different inputs (same length)
+            let start_diff = Instant::now();
+            let result_diff = ct_eq_bytes(&a, &b_diff);
+            let duration_diff = start_diff.elapsed();
+
+            // Verify correctness first
+            assert!(result_same, "Equal arrays should compare as equal");
+            if content_a == content_b {
+                assert!(result_diff, "Equal content should compare as equal");
+            } else {
+                assert!(!result_diff, "Different content should compare as different");
+            }
+
+            // Timing variance check (best effort - may be noisy in CI)
+            // Allow 10x variance as a gross side-channel check
+            let max_duration = duration_same.max(duration_diff);
+            let min_duration = duration_same.min(duration_diff);
+
+            if min_duration.as_nanos() > 0 {
+                let variance_ratio = max_duration.as_nanos() as f64 / min_duration.as_nanos() as f64;
+                // This is a best-effort timing check - if it fails consistently,
+                // investigate potential timing side-channels
+                assert!(variance_ratio < 10.0,
+                    "Timing variance too high: same={:?} vs diff={:?} (ratio: {:.2})",
+                    duration_same, duration_diff, variance_ratio);
+            }
+        }
+
+        #[test]
+        fn proptest_ct_eq_bytes_length_rejection(
+            len_a in 0usize..=500,
+            len_b in 0usize..=500,
+            fill_a in any::<u8>(),
+            fill_b in any::<u8>(),
+        ) {
+            // Property: different length inputs should be rejected immediately
+            // without comparing content
+            let a = vec![fill_a; len_a];
+            let b = vec![fill_b; len_b];
+
+            let result = ct_eq_bytes(&a, &b);
+
+            if len_a == len_b {
+                // Same length - result depends on content
+                let expected = fill_a == fill_b;
+                assert_eq!(result, expected,
+                    "Same length arrays should compare content: len={}, a[0]={}, b[0]={}",
+                    len_a, fill_a, fill_b);
+            } else {
+                // Different lengths should always be false
+                assert!(!result,
+                    "Different length arrays should always compare as false: len_a={}, len_b={}",
+                    len_a, len_b);
+            }
+        }
     }
 }
