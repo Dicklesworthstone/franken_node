@@ -869,3 +869,191 @@ fn cli_json_golden_doctor_close_condition_output() -> Result<(), Box<dyn Error>>
     });
     Ok(())
 }
+
+#[test]
+fn cli_json_golden_verify_recovery_runbook_green_remote_proof() -> Result<(), Box<dyn Error>> {
+    let mut cmd = Command::cargo_bin("franken-node")?;
+    let assertion = cmd
+        .args([
+            "verify",
+            "recovery-runbook",
+            "--json",
+            "--scenario", "green_remote_proof",
+            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+        ])
+        .assert()
+        .success();
+
+    let stdout = parse_json_stdout(
+        "verify recovery-runbook --json --scenario green_remote_proof",
+        &assertion.get_output().stdout,
+    )?;
+    with_json_snapshot_settings("verify_cli", || {
+        assert_json_snapshot!("verify_recovery_runbook_green_remote_proof_json", stdout);
+    });
+    Ok(())
+}
+
+#[test]
+fn cli_json_golden_verify_recovery_runbook_rch_e104_retry() -> Result<(), Box<dyn Error>> {
+    let mut cmd = Command::cargo_bin("franken-node")?;
+    let assertion = cmd
+        .args([
+            "verify",
+            "recovery-runbook",
+            "--json",
+            "--scenario", "rch_e104_retry",
+            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+        ])
+        .assert()
+        .success();
+
+    let stdout = parse_json_stdout(
+        "verify recovery-runbook --json --scenario rch_e104_retry",
+        &assertion.get_output().stdout,
+    )?;
+    with_json_snapshot_settings("verify_cli", || {
+        assert_json_snapshot!("verify_recovery_runbook_rch_e104_retry_json", stdout);
+    });
+    Ok(())
+}
+
+#[test]
+fn cli_json_golden_verify_recovery_runbook_worker_drain_recommendation() -> Result<(), Box<dyn Error>> {
+    let mut cmd = Command::cargo_bin("franken-node")?;
+    let assertion = cmd
+        .args([
+            "verify",
+            "recovery-runbook",
+            "--json",
+            "--scenario", "worker_drain_recommendation",
+            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+        ])
+        .assert()
+        .success();
+
+    let stdout = parse_json_stdout(
+        "verify recovery-runbook --json --scenario worker_drain_recommendation",
+        &assertion.get_output().stdout,
+    )?;
+    with_json_snapshot_settings("verify_cli", || {
+        assert_json_snapshot!("verify_recovery_runbook_worker_drain_recommendation_json", stdout);
+    });
+    Ok(())
+}
+
+#[test]
+fn cli_text_golden_verify_recovery_runbook_human_output() -> Result<(), Box<dyn Error>> {
+    let mut cmd = Command::cargo_bin("franken-node")?;
+    let assertion = cmd
+        .args([
+            "verify",
+            "recovery-runbook",
+            "--scenario", "rch_e104_retry",
+            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+        ])
+        .assert()
+        .success();
+
+    let output = String::from_utf8(assertion.get_output().stdout.to_vec())?;
+    with_scrubbed_snapshot_settings("verify_cli", || {
+        assert_snapshot!("verify_recovery_runbook_human_output", output);
+    });
+    Ok(())
+}
+
+#[test]
+fn cli_json_golden_verify_recovery_runbook_missing_toolchain() -> Result<(), Box<dyn Error>> {
+    let mut cmd = Command::cargo_bin("franken-node")?;
+    let assertion = cmd
+        .args([
+            "verify",
+            "recovery-runbook",
+            "--json",
+            "--scenario", "missing_toolchain",
+            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+        ])
+        .assert()
+        .success();
+
+    let stdout = parse_json_stdout(
+        "verify recovery-runbook --json --scenario missing_toolchain",
+        &assertion.get_output().stdout,
+    )?;
+    with_json_snapshot_settings("verify_cli", || {
+        assert_json_snapshot!("verify_recovery_runbook_missing_toolchain_json", stdout);
+    });
+    Ok(())
+}
+
+#[test]
+fn cli_json_golden_verify_recovery_runbook_disk_pressure() -> Result<(), Box<dyn Error>> {
+    let mut cmd = Command::cargo_bin("franken-node")?;
+    let assertion = cmd
+        .args([
+            "verify",
+            "recovery-runbook",
+            "--json",
+            "--scenario", "disk_pressure",
+            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+        ])
+        .assert()
+        .success();
+
+    let stdout = parse_json_stdout(
+        "verify recovery-runbook --json --scenario disk_pressure",
+        &assertion.get_output().stdout,
+    )?;
+    with_json_snapshot_settings("verify_cli", || {
+        assert_json_snapshot!("verify_recovery_runbook_disk_pressure_json", stdout);
+    });
+    Ok(())
+}
+
+#[test]
+fn cli_json_golden_verify_recovery_runbook_source_only_blocker() -> Result<(), Box<dyn Error>> {
+    let mut cmd = Command::cargo_bin("franken-node")?;
+    let assertion = cmd
+        .args([
+            "verify",
+            "recovery-runbook",
+            "--json",
+            "--scenario", "source_only_blocker",
+            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+        ])
+        .assert()
+        .success();
+
+    let stdout = parse_json_stdout(
+        "verify recovery-runbook --json --scenario source_only_blocker",
+        &assertion.get_output().stdout,
+    )?;
+    with_json_snapshot_settings("verify_cli", || {
+        assert_json_snapshot!("verify_recovery_runbook_source_only_blocker_json", stdout);
+    });
+    Ok(())
+}
+
+#[test]
+fn cli_json_golden_verify_recovery_runbook_product_compile_failure() -> Result<(), Box<dyn Error>> {
+    let mut cmd = Command::cargo_bin("franken-node")?;
+    let assertion = cmd
+        .args([
+            "verify",
+            "recovery-runbook",
+            "--json",
+            "--scenario", "product_compile_failure",
+            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+        ])
+        .assert()
+        .success();
+
+    let stdout = parse_json_stdout(
+        "verify recovery-runbook --json --scenario product_compile_failure",
+        &assertion.get_output().stdout,
+    )?;
+    with_json_snapshot_settings("verify_cli", || {
+        assert_json_snapshot!("verify_recovery_runbook_product_compile_failure_json", stdout);
+    });
+    Ok(())
+}

@@ -766,6 +766,10 @@ pub enum VerifyCommand {
     /// Verify transparency log auditability and hash chain integrity.
     #[command(name = "transparency-log")]
     TransparencyLog(VerifyTransparencyLogArgs),
+
+    /// Generate recovery runbook for RCH validation failures.
+    #[command(name = "recovery-runbook")]
+    RecoveryRunbook(VerifyRecoveryRunbookArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -873,6 +877,25 @@ pub struct VerifyTransparencyLogArgs {
     /// Emit structured JSON output.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct VerifyRecoveryRunbookArgs {
+    /// Path to validation readiness input JSON file.
+    #[arg(value_parser = parse_safe_content_pathbuf)]
+    pub readiness_input: Option<PathBuf>,
+
+    /// Emit structured JSON output instead of human-readable format.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Recovery scenario to simulate (for golden testing).
+    #[arg(long)]
+    pub scenario: Option<String>,
+
+    /// Deterministic timestamp for reproducible outputs (ISO 8601 format).
+    #[arg(long)]
+    pub fixed_timestamp: Option<String>,
 }
 
 // -- trust --

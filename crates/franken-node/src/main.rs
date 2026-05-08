@@ -22117,6 +22117,134 @@ fn generate_test_scenario(scenario: &str, timestamp: DateTime<Utc>) -> Result<Va
             };
             (vec![status], vec![])
         }
+        "missing_toolchain" => {
+            let flight_ref = ValidationFlightRecorderRef {
+                attempt_path: Some("/tmp/flight_rec_missing_toolchain.json".to_string()),
+                attempt_digest: Some("bead-missing-toolchain".to_string()),
+                outcome_class: "configuration_error".to_string(),
+                execution_mode: "local".to_string(),
+                worker_id: None,
+                reason_code: "MISSING_RUST_TOOLCHAIN".to_string(),
+            };
+            let status = ValidationProofStatus {
+                proof_kind: "cargo_check".to_string(),
+                status: ProofStatusKind::Failed,
+                flight_recorder_ref: Some(flight_ref),
+                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
+                    started_at: timestamp,
+                    finished_at: timestamp,
+                },
+                exit: Some(crate::ops::validation_broker::ValidationExit {
+                    kind: ValidationExitKind::ProcessExit,
+                    code: ValidationExitCode::NonZero(101),
+                    signal: None,
+                    description: "rustc not found".to_string(),
+                }),
+                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
+                proof_cache: None,
+                rch: crate::ops::validation_broker::RchSnapshot {
+                    mode: RchMode::Local,
+                    worker_id: None,
+                },
+            };
+            (vec![status], vec![])
+        }
+        "disk_pressure" => {
+            let flight_ref = ValidationFlightRecorderRef {
+                attempt_path: Some("/tmp/flight_rec_disk_pressure.json".to_string()),
+                attempt_digest: Some("bead-disk-pressure".to_string()),
+                outcome_class: "resource_exhaustion".to_string(),
+                execution_mode: "remote".to_string(),
+                worker_id: Some("worker-004".to_string()),
+                reason_code: "DISK_FULL".to_string(),
+            };
+            let status = ValidationProofStatus {
+                proof_kind: "cargo_build".to_string(),
+                status: ProofStatusKind::Failed,
+                flight_recorder_ref: Some(flight_ref),
+                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
+                    started_at: timestamp,
+                    finished_at: timestamp,
+                },
+                exit: Some(crate::ops::validation_broker::ValidationExit {
+                    kind: ValidationExitKind::ProcessExit,
+                    code: ValidationExitCode::NonZero(28),
+                    signal: None,
+                    description: "No space left on device".to_string(),
+                }),
+                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
+                proof_cache: None,
+                rch: crate::ops::validation_broker::RchSnapshot {
+                    mode: RchMode::Remote,
+                    worker_id: Some("worker-004".to_string()),
+                },
+            };
+            (vec![status], vec![])
+        }
+        "source_only_blocker" => {
+            let flight_ref = ValidationFlightRecorderRef {
+                attempt_path: Some("/tmp/flight_rec_source_only_blocker.json".to_string()),
+                attempt_digest: Some("bead-source-only-blocker".to_string()),
+                outcome_class: "source_analysis_required".to_string(),
+                execution_mode: "local".to_string(),
+                worker_id: None,
+                reason_code: "SOURCE_ONLY_ANALYSIS_BLOCKER".to_string(),
+            };
+            let status = ValidationProofStatus {
+                proof_kind: "cargo_audit".to_string(),
+                status: ProofStatusKind::Failed,
+                flight_recorder_ref: Some(flight_ref),
+                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
+                    started_at: timestamp,
+                    finished_at: timestamp,
+                },
+                exit: Some(crate::ops::validation_broker::ValidationExit {
+                    kind: ValidationExitKind::ProcessExit,
+                    code: ValidationExitCode::NonZero(3),
+                    signal: None,
+                    description: "Source-only analysis required".to_string(),
+                }),
+                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
+                proof_cache: None,
+                rch: crate::ops::validation_broker::RchSnapshot {
+                    mode: RchMode::Local,
+                    worker_id: None,
+                },
+            };
+            (vec![status], vec![])
+        }
+        "product_compile_failure" => {
+            let flight_ref = ValidationFlightRecorderRef {
+                attempt_path: Some("/tmp/flight_rec_product_compile_failure.json".to_string()),
+                attempt_digest: Some("bead-product-compile-failure".to_string()),
+                outcome_class: "product_failure".to_string(),
+                execution_mode: "remote".to_string(),
+                worker_id: Some("worker-005".to_string()),
+                reason_code: "PRODUCT_COMPILE_ERROR".to_string(),
+            };
+            let status = ValidationProofStatus {
+                proof_kind: "cargo_build".to_string(),
+                status: ProofStatusKind::Failed,
+                flight_recorder_ref: Some(flight_ref),
+                timing: crate::ops::validation_broker::ValidationTimingSnapshot {
+                    started_at: timestamp,
+                    finished_at: timestamp,
+                },
+                exit: Some(crate::ops::validation_broker::ValidationExit {
+                    kind: ValidationExitKind::ProcessExit,
+                    code: ValidationExitCode::NonZero(101),
+                    signal: None,
+                    description: "Compilation failed".to_string(),
+                }),
+                proof_source: crate::ops::validation_broker::ProofEvidenceSource::Fresh,
+                proof_cache: None,
+                rch: crate::ops::validation_broker::RchSnapshot {
+                    mode: RchMode::Remote,
+                    worker_id: Some("worker-005".to_string()),
+                },
+            };
+            (vec![status], vec![])
+        }
         _ => return Err(anyhow::anyhow!("Unknown scenario: {}", scenario))
     };
 
