@@ -286,7 +286,7 @@ pub enum QuarantineScope {
 /// - **Traceability**: Every order links to an incident trace for audit purposes
 /// - **Grace periods**: Hard quarantines include data export windows before shutdown
 /// - **Graduated response**: Soft quarantines warn users, hard quarantines block execution
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuarantineOrder {
     /// Unique order identifier.
     pub order_id: String,
@@ -310,6 +310,24 @@ pub struct QuarantineOrder {
     pub trace_id: String,
     /// Grace period in seconds for hard quarantine (data export window).
     pub grace_period_secs: u64,
+}
+
+impl std::fmt::Debug for QuarantineOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuarantineOrder")
+            .field("order_id", &self.order_id)
+            .field("scope", &self.scope)
+            .field("mode", &self.mode)
+            .field("severity", &self.severity)
+            .field("reason", &self.reason)
+            .field("justification", &self.justification)
+            .field("issued_by", &self.issued_by)
+            .field("issued_at", &self.issued_at)
+            .field("signature", &"[REDACTED]")
+            .field("trace_id", &self.trace_id)
+            .field("grace_period_secs", &self.grace_period_secs)
+            .finish()
+    }
 }
 
 /// Reason for quarantine.

@@ -461,11 +461,21 @@ pub struct AttestationEvidence {
 }
 
 /// Cryptographic signature.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AttestationSignature {
     pub algorithm: String,
     pub public_key: String,
     pub value: String,
+}
+
+impl std::fmt::Debug for AttestationSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttestationSignature")
+            .field("algorithm", &self.algorithm)
+            .field("public_key", &"[REDACTED]")
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// A verification attestation.
@@ -507,13 +517,25 @@ pub struct Verifier {
 }
 
 /// Input for registering a verifier.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct VerifierRegistration {
     pub name: String,
     pub contact: String,
     pub public_key: String,
     pub capabilities: Vec<VerificationDimension>,
     pub tier: VerifierTier,
+}
+
+impl std::fmt::Debug for VerifierRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifierRegistration")
+            .field("name", &self.name)
+            .field("contact", &"[REDACTED]")
+            .field("public_key", &"[REDACTED]")
+            .field("capabilities", &self.capabilities)
+            .field("tier", &self.tier)
+            .finish()
+    }
 }
 
 /// Reputation dimension scores for deterministic computation.
@@ -796,8 +818,8 @@ impl VerifierEconomyRegistry {
     fn now_epoch(&self) -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
+            .map(|d| d.as_secs())
+            .unwrap_or(u64::MAX)
     }
 
     fn emit(&mut self, code: &str, detail: &str) {

@@ -46,10 +46,19 @@ fn len_to_u64(len: usize) -> u64 {
 // ── Types ───────────────────────────────────────────────────────────
 
 /// A pinned log root checkpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogRoot {
     pub tree_size: u64,
     pub root_hash: String,
+}
+
+impl std::fmt::Debug for LogRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogRoot")
+            .field("tree_size", &self.tree_size)
+            .field("root_hash", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// A Merkle inclusion proof.
