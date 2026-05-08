@@ -17171,8 +17171,7 @@ fn build_registry_seed_request_with_config(
 
     let now_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+        .map_or(u64::MAX, |duration| duration.as_secs());  // Fail-closed: very far future = fail expiry checks
 
     // Use real commit SHA if available, otherwise fallback to attestation hash prefix
     let vcs_commit_sha = build_context
@@ -17336,8 +17335,7 @@ fn registry_cli_registry() -> Result<SignedExtensionRegistry> {
 
     let now_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+        .map_or(u64::MAX, |duration| duration.as_secs());  // Fail-closed: very far future = fail expiry checks
 
     let baseline = [
         build_registry_seed_request(
@@ -18716,8 +18714,7 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
     registry.register_publisher_key(signing_material.signing_key.verifying_key());
     let publish_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+        .map_or(u64::MAX, |duration| duration.as_secs());  // Fail-closed: very far future = fail expiry checks
     let result = registry.register(request, "trace-cli-registry-publish", publish_epoch);
     if !result.success {
         anyhow::bail!("registry publish failed: {}", result.detail);
