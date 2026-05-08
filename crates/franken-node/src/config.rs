@@ -17,6 +17,10 @@ pub mod timeouts;
 pub const DEFAULT_MAX_MERGE_DECISIONS: usize = 100;
 const MIN_REGISTRY_SIGNING_KEY_BYTES: usize = 32;
 
+/// Maximum allowed config file size to prevent DoS via parser bombs.
+/// 1MB should be more than sufficient for any reasonable configuration.
+const MAX_CONFIG_FILE_BYTES: u64 = 1 << 20; // 1 MiB
+
 const fn default_max_merge_decisions() -> usize {
     DEFAULT_MAX_MERGE_DECISIONS
 }
@@ -335,6 +339,19 @@ impl Config {
     /// ```
     #[allow(dead_code)]
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        // Check file size before reading to prevent DoS via oversized config files
+        let metadata = std::fs::metadata(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        if metadata.len() > MAX_CONFIG_FILE_BYTES {
+            return Err(ConfigError::ReadFailed(
+                path.into(),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Config file too large: {} bytes (limit: {} bytes)",
+                            metadata.len(), MAX_CONFIG_FILE_BYTES)
+                )
+            ));
+        }
+
         let content =
             std::fs::read_to_string(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
         let parsed: Self =
@@ -2273,6 +2290,19 @@ struct ConfigDocument {
 
 impl ConfigDocument {
     fn load(path: &Path) -> Result<Self, ConfigError> {
+        // Check file size before reading to prevent DoS via oversized config files
+        let metadata = std::fs::metadata(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        if metadata.len() > MAX_CONFIG_FILE_BYTES {
+            return Err(ConfigError::ReadFailed(
+                path.into(),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Config file too large: {} bytes (limit: {} bytes)",
+                            metadata.len(), MAX_CONFIG_FILE_BYTES)
+                )
+            ));
+        }
+
         let content =
             std::fs::read_to_string(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
         toml::from_str(&content).map_err(|e| ConfigError::ParseFailed(path.into(), e))
@@ -2347,7 +2377,7 @@ struct MigrationOverrides {
     pub determinism_rate: Option<f64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct TrustOverrides {
     pub risky_requires_fresh_revocation: Option<bool>,
@@ -2358,6 +2388,21 @@ struct TrustOverrides {
     pub min_trust_score: Option<f64>,
     pub decay_factor: Option<f64>,
     pub registry_signing_key: Option<String>,
+}
+
+impl std::fmt::Debug for TrustOverrides {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrustOverrides")
+            .field("risky_requires_fresh_revocation", &self.risky_requires_fresh_revocation)
+            .field("dangerous_requires_fresh_revocation", &self.dangerous_requires_fresh_revocation)
+            .field("quarantine_on_high_risk", &self.quarantine_on_high_risk)
+            .field("card_cache_ttl_secs", &self.card_cache_ttl_secs)
+            .field("freshness_window_secs", &self.freshness_window_secs)
+            .field("min_trust_score", &self.min_trust_score)
+            .field("decay_factor", &self.decay_factor)
+            .field("registry_signing_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2402,13 +2447,24 @@ struct RemoteOverrides {
     pub idempotency_ttl_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct SecurityOverrides {
     pub max_degraded_duration_secs: Option<u64>,
     pub max_merge_decisions: Option<usize>,
     pub decision_receipt_signing_key_path: Option<PathBuf>,
     pub authorized_api_keys: Option<BTreeSet<String>>,
+}
+
+impl std::fmt::Debug for SecurityOverrides {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecurityOverrides")
+            .field("max_degraded_duration_secs", &self.max_degraded_duration_secs)
+            .field("max_merge_decisions", &self.max_merge_decisions)
+            .field("decision_receipt_signing_key_path", &self.decision_receipt_signing_key_path)
+            .field("authorized_api_keys", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2788,7 +2844,7 @@ pub struct RemoteConfig {
 
 // -- Security --
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecurityConfig {
     /// Maximum time the system may remain in degraded mode before suspension.
     pub max_degraded_duration_secs: u64,
@@ -2808,6 +2864,18 @@ pub struct SecurityConfig {
     /// Network egress policy enforcement mode.
     #[serde(default)]
     pub network_policy: NetworkPolicyConfig,
+}
+
+impl std::fmt::Debug for SecurityConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecurityConfig")
+            .field("max_degraded_duration_secs", &self.max_degraded_duration_secs)
+            .field("max_merge_decisions", &self.max_merge_decisions)
+            .field("decision_receipt_signing_key_path", &self.decision_receipt_signing_key_path)
+            .field("authorized_api_keys", &"[REDACTED]")
+            .field("network_policy", &self.network_policy)
+            .finish()
+    }
 }
 
 /// SSRF enforcement mode for network policy.
@@ -3691,6 +3759,29 @@ mod tests {
     fn load_nonexistent_file_returns_error() {
         let result = Config::load(Path::new("/nonexistent/franken_node.toml"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_oversized_config_file_returns_error() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let config_path = temp_dir.path().join("oversized.toml");
+
+        // Create a config file larger than MAX_CONFIG_FILE_BYTES (1 MiB)
+        let large_content = "# ".repeat(600_000); // ~1.2 MiB of comments
+        std::fs::write(&config_path, large_content).expect("write oversized file");
+
+        // Verify file is actually oversized
+        let metadata = std::fs::metadata(&config_path).expect("get metadata");
+        assert!(metadata.len() > MAX_CONFIG_FILE_BYTES, "Test file should exceed size limit");
+
+        // Load should fail with size error
+        let result = Config::load(&config_path);
+        assert!(result.is_err(), "Oversized config should be rejected");
+
+        // Check that error message mentions size limit
+        let error_msg = format!("{}", result.unwrap_err());
+        assert!(error_msg.contains("too large"), "Error should mention size limit: {}", error_msg);
+        assert!(error_msg.contains("bytes"), "Error should include byte counts: {}", error_msg);
     }
 
     #[test]
