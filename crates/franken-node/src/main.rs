@@ -29455,4 +29455,85 @@ mod parser_bomb_protection_tests {
         assert_eq!(EXPECTED_CLI_LIMIT, 4194304, "CLI state limit should be 4MB");
         assert_eq!(EXPECTED_TOKEN_LIMIT, 1048576, "Token file limit should be 1MB");
     }
+
+    #[test]
+    fn bounded_read_to_string_constants_regression_test() {
+        // Test that bounded_read_to_string size constants are defined correctly
+        // This test verifies the fix for bd-vmiky (regression test coverage for 51809d58)
+
+        // Verify all constants exist and have expected values
+        assert_eq!(MAX_EVIDENCE_INPUT_BYTES, 10 << 20, "Evidence input limit should be 10 MiB");
+        assert_eq!(MAX_MANIFEST_FILE_BYTES, 5 << 20, "Manifest file limit should be 5 MiB");
+        assert_eq!(MAX_POLICY_FILE_BYTES, 2 << 20, "Policy file limit should be 2 MiB");
+        assert_eq!(MAX_LOCKFILE_BYTES, 1 << 20, "Lockfile limit should be 1 MiB");
+        assert_eq!(MAX_GENERAL_FILE_BYTES, 10 << 20, "General CLI file limit should be 10 MiB");
+        assert_eq!(MAX_SIGNING_KEY_BYTES, 64 << 10, "Signing key limit should be 64 KiB");
+
+        // Verify constants are in sensible order (stricter to more permissive)
+        assert!(MAX_SIGNING_KEY_BYTES < MAX_LOCKFILE_BYTES);
+        assert!(MAX_LOCKFILE_BYTES < MAX_POLICY_FILE_BYTES);
+        assert!(MAX_POLICY_FILE_BYTES < MAX_MANIFEST_FILE_BYTES);
+        assert!(MAX_MANIFEST_FILE_BYTES <= MAX_EVIDENCE_INPUT_BYTES);
+        assert!(MAX_GENERAL_FILE_BYTES >= MAX_EVIDENCE_INPUT_BYTES);
+    }
+
+    #[test]
+    fn bounded_read_to_string_dos_protection_integration() {
+        // Integration test: verify DoS protection works end-to-end for different file types
+        // This test verifies bounded_read_to_string actually prevents parser bombs
+        use tempfile::NamedTempFile;
+        use std::io::Write;
+
+        // Test evidence input file size enforcement
+        let mut large_evidence_file = NamedTempFile::new().expect("create temp file");
+        let oversized_content = "x".repeat((MAX_EVIDENCE_INPUT_BYTES + 1) as usize);
+        large_evidence_file.write_all(oversized_content.as_bytes()).expect("write oversized content");
+
+        // Simulate evidence file read with MAX_EVIDENCE_INPUT_BYTES limit
+        let result = crate::bounded_read_to_string(large_evidence_file.path(), MAX_EVIDENCE_INPUT_BYTES);
+        assert!(result.is_err(), "Oversized evidence file should be rejected");
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+
+        // Test policy file size enforcement
+        let mut large_policy_file = NamedTempFile::new().expect("create temp file");
+        let oversized_policy = "policy content".repeat((MAX_POLICY_FILE_BYTES / 10) as usize);
+        large_policy_file.write_all(oversized_policy.as_bytes()).expect("write oversized policy");
+
+        let result = crate::bounded_read_to_string(large_policy_file.path(), MAX_POLICY_FILE_BYTES);
+        assert!(result.is_err(), "Oversized policy file should be rejected");
+
+        // Test that reasonably sized files are accepted
+        let mut reasonable_file = NamedTempFile::new().expect("create temp file");
+        let reasonable_content = "reasonable content";
+        reasonable_file.write_all(reasonable_content.as_bytes()).expect("write reasonable content");
+
+        let result = crate::bounded_read_to_string(reasonable_file.path(), MAX_POLICY_FILE_BYTES);
+        assert!(result.is_ok(), "Reasonable sized file should be accepted");
+        assert_eq!(result.unwrap(), reasonable_content);
+    }
+
+    #[test]
+    fn bounded_read_to_string_error_message_format() {
+        // Test that error messages from bounded_read_to_string are informative
+        use tempfile::NamedTempFile;
+        use std::io::Write;
+
+        let mut oversized_file = NamedTempFile::new().expect("create temp file");
+        let content = "x".repeat(100);
+        oversized_file.write_all(content.as_bytes()).expect("write content");
+
+        // Test with specific limit to verify error message format
+        let limit = 50u64;
+        let result = crate::bounded_read_to_string(oversized_file.path(), limit);
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        let error_msg = error.to_string();
+
+        // Verify error message contains all expected information
+        assert!(error_msg.contains("File too large"));
+        assert!(error_msg.contains("100 bytes"));
+        assert!(error_msg.contains("limit: 50 bytes"));
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
 }
