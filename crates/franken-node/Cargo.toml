@@ -377,6 +377,10 @@ name = "runtime_cli_e2e"
 path = "tests/runtime_cli_e2e.rs"
 
 [[test]]
+name = "workspace_pressure_governance_e2e"
+path = "tests/workspace_pressure_governance_e2e.rs"
+
+[[test]]
 name = "runtime_lane_router_security"
 path = "tests/runtime_lane_router_security.rs"
 
