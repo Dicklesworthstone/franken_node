@@ -6717,7 +6717,7 @@ mod tests {
         sign_evidence_entry(&mut entry, &signing_key);
 
         // Tamper with the signature by flipping a bit
-        let mut sig_bytes = hex::decode(&entry.signature).expect("Should be valid hex");
+        let mut sig_bytes = hex::decode(&entry.signature).unwrap_or_else(|_| panic!("Invalid hex in test signature"));
         if !sig_bytes.is_empty() {
             sig_bytes[0] ^= 0x01; // Flip a bit
             entry.signature = hex::encode(sig_bytes);
@@ -7381,7 +7381,7 @@ mod tests {
         sign_evidence_entry(&mut entry, &signing_key);
 
         // Tamper with first byte of signature
-        let mut sig_bytes = hex::decode(&entry.signature).expect("Valid hex");
+        let mut sig_bytes = hex::decode(&entry.signature).unwrap_or_else(|e| panic!("Test signature hex decode failed: {}", e));
         sig_bytes[0] = sig_bytes[0].wrapping_add(1);
         entry.signature = hex::encode(sig_bytes);
 
@@ -7405,7 +7405,7 @@ mod tests {
         sign_evidence_entry(&mut entry, &signing_key);
 
         // Tamper with middle byte of signature (32nd byte)
-        let mut sig_bytes = hex::decode(&entry.signature).expect("Valid hex");
+        let mut sig_bytes = hex::decode(&entry.signature).unwrap_or_else(|e| panic!("Test signature hex decode failed: {}", e));
         sig_bytes[32] = sig_bytes[32].wrapping_add(1);
         entry.signature = hex::encode(sig_bytes);
 
@@ -7429,7 +7429,7 @@ mod tests {
         sign_evidence_entry(&mut entry, &signing_key);
 
         // Tamper with last byte of signature
-        let mut sig_bytes = hex::decode(&entry.signature).expect("Valid hex");
+        let mut sig_bytes = hex::decode(&entry.signature).unwrap_or_else(|e| panic!("Test signature hex decode failed: {}", e));
         let last_idx = sig_bytes.len() - 1;
         sig_bytes[last_idx] = sig_bytes[last_idx].wrapping_add(1);
         entry.signature = hex::encode(sig_bytes);
@@ -7943,7 +7943,7 @@ mod tests {
 
         // Test that known signatures are detected as replay attacks
         let existing_entry = make_signed_entry("TEST-PREFILTER-05", 5, &signing_key);
-        let signature_bytes = hex::decode(&existing_entry.signature).expect("valid hex");
+        let signature_bytes = hex::decode(&existing_entry.signature).unwrap_or_else(|e| panic!("Test signature hex decode failed: {}", e));
         assert!(
             ledger.is_replay_attack_ct_bytes(existing_entry.timestamp_ms, &signature_bytes),
             "Known signature should be detected as replay attack"
@@ -7951,7 +7951,7 @@ mod tests {
 
         // Test that unknown signatures are not detected as replay attacks
         let new_entry = make_signed_entry("TEST-PREFILTER-NEW", 999, &signing_key);
-        let new_signature_bytes = hex::decode(&new_entry.signature).expect("valid hex");
+        let new_signature_bytes = hex::decode(&new_entry.signature).unwrap_or_else(|e| panic!("Test signature hex decode failed: {}", e));
         assert!(
             !ledger.is_replay_attack_ct_bytes(new_entry.timestamp_ms, &new_signature_bytes),
             "Unknown signature should not be detected as replay attack"
@@ -7971,7 +7971,7 @@ mod tests {
         }
 
         // Verify that old entries are no longer detected (they should have been evicted)
-        let old_signature_bytes = hex::decode(&existing_entry.signature).expect("valid hex");
+        let old_signature_bytes = hex::decode(&existing_entry.signature).unwrap_or_else(|e| panic!("Test signature hex decode failed: {}", e));
         assert!(
             !ledger.is_replay_attack_ct_bytes(existing_entry.timestamp_ms, &old_signature_bytes),
             "Evicted signature should no longer be detected as replay attack"

@@ -2184,7 +2184,7 @@ mod additional_negative_path_tests {
                     );
 
                     // Test round-trip encoding/decoding
-                    let decoded = hex::decode(hex_field).expect("Should decode valid hex");
+                    let decoded = hex::decode(hex_field).unwrap_or_else(|e| panic!("Hex decode failed in test: {}", e));
                     assert_eq!(decoded.len(), 32, "Decoded hex should be 32 bytes");
 
                     let re_encoded = hex::encode(&decoded);

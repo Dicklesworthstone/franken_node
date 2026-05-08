@@ -28793,7 +28793,7 @@ mod run_trust_gate_tests {
             for test_data in consistency_test_data {
                 // Hex consistency
                 let hex_encoded = hex::encode(&test_data);
-                let hex_decoded = hex::decode(&hex_encoded).expect("Hex should round-trip");
+                let hex_decoded = hex::decode(&hex_encoded).unwrap_or_else(|e| panic!("Hex round-trip failed: {}", e));
                 assert_eq!(test_data, hex_decoded, "Hex encoding should be consistent");
 
                 // Base64 consistency across engines
@@ -28827,7 +28827,7 @@ mod run_trust_gate_tests {
                     size
                 );
 
-                let hex_decoded = hex::decode(&hex_encoded).expect("Large hex should decode");
+                let hex_decoded = hex::decode(&hex_encoded).unwrap_or_else(|e| panic!("Large hex decode failed: {}", e));
                 assert_eq!(large_data, hex_decoded, "Large hex should round-trip");
 
                 // Base64 encoding/decoding performance
