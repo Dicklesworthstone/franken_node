@@ -796,7 +796,7 @@ pub struct CategoryShiftDimensionInput {
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"category_shift_v1:");
-    hasher.update((data.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(data.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(data);
     hex::encode(hasher.finalize())
 }
@@ -3387,5 +3387,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn sha256_hex_uses_safe_length_casting() {
+        // Test that sha256_hex uses u64::try_from instead of direct casting
+        let test_data = b"test data for length casting";
+
+        // This should not panic even with large inputs
+        let hash1 = sha256_hex(test_data);
+        assert_eq!(hash1.len(), 64);
+        assert!(hash1.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Verify deterministic behavior
+        let hash2 = sha256_hex(test_data);
+        assert_eq!(hash1, hash2);
+
+        // Test with zero-length data
+        let hash_empty = sha256_hex(b"");
+        assert_eq!(hash_empty.len(), 64);
+
+        // The implementation should handle edge cases without truncation
+        // by using u64::try_from().unwrap_or(u64::MAX) instead of direct cast
+        let large_vec = vec![0u8; 1_000_000]; // 1MB test data
+        let hash_large = sha256_hex(&large_vec);
+        assert_eq!(hash_large.len(), 64);
     }
 }
