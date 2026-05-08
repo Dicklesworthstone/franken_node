@@ -6672,7 +6672,7 @@ fn count_active_reservations_in_dir(dir: &Path) -> Option<u32> {
             continue;
         }
 
-        let Ok(contents) = std::fs::read_to_string(&path) else {
+        let Ok(contents) = bounded_read_to_string(&path, MAX_GENERAL_FILE_BYTES) else {
             continue;
         };
         let Ok(payload) = serde_json::from_str::<serde_json::Value>(&contents) else {
@@ -14911,7 +14911,7 @@ fn read_package_manifest_object(
         );
     }
 
-    let raw = std::fs::read_to_string(&resolved)
+    let raw = bounded_read_to_string(&resolved, MAX_MANIFEST_FILE_BYTES)
         .with_context(|| format!("failed reading dependency manifest {}", resolved.display()))?;
     let manifest = serde_json::from_str::<serde_json::Value>(&raw).with_context(|| {
         format!(
@@ -15245,7 +15245,7 @@ fn parse_trust_scan_lockfile_metadata(
         return Ok(entries);
     };
 
-    let raw = std::fs::read_to_string(&lockfile_path)
+    let raw = bounded_read_to_string(&lockfile_path, MAX_LOCKFILE_BYTES)
         .with_context(|| format!("failed reading lockfile {}", lockfile_path.display()))?;
     let payload = serde_json::from_str::<serde_json::Value>(&raw)
         .with_context(|| format!("invalid lockfile JSON: {}", lockfile_path.display()))?;
@@ -22430,7 +22430,7 @@ fn handle_verify_recovery_runbook(args: &VerifyRecoveryRunbookArgs) -> Result<()
 
     // Load validation readiness input or generate test scenario
     let input = if let Some(input_path) = &args.readiness_input {
-        let input_json = std::fs::read_to_string(input_path)
+        let input_json = bounded_read_to_string(input_path, MAX_GENERAL_FILE_BYTES)
             .with_context(|| format!("failed reading input file: {}", input_path.display()))?;
         serde_json::from_str(&input_json)
             .with_context(|| format!("invalid validation readiness JSON in {}", input_path.display()))?
@@ -22993,7 +22993,7 @@ fn locate_verify_module_declaration(module_id: &str) -> Option<PathBuf> {
         crate_source_root().join("lib.rs"),
         crate_source_root().join("main.rs"),
     ] {
-        let Ok(source) = std::fs::read_to_string(&candidate) else {
+        let Ok(source) = bounded_read_to_string(&candidate, MAX_GENERAL_FILE_BYTES) else {
             continue;
         };
         if contains_top_level_module_declaration(&source, module_id) {
@@ -23368,7 +23368,7 @@ fn evaluate_migration_post_condition(
                 Ok(resolved) => {
                     let actual_exists = resolved.exists();
                     let actual_contains = expected_contains.as_ref().and_then(|needle| {
-                        std::fs::read_to_string(&resolved)
+                        bounded_read_to_string(&resolved, MAX_GENERAL_FILE_BYTES)
                             .ok()
                             .map(|contents| contents.contains(needle))
                     });
@@ -23907,7 +23907,7 @@ fn emit_verify_module(args: &VerifyModuleArgs) -> i32 {
     }
 
     let payload = match resolve_verify_module_source(&normalized) {
-        Ok(Some(source_path)) => match std::fs::read_to_string(&source_path) {
+        Ok(Some(source_path)) => match bounded_read_to_string(&source_path, MAX_GENERAL_FILE_BYTES) {
             Ok(source) => {
                 let declaration_path = locate_verify_module_declaration(&normalized);
                 let dependencies = collect_declared_module_dependencies(&source_path, &source);
@@ -24059,7 +24059,7 @@ fn emit_verify_migration(args: &VerifyMigrationArgs) -> i32 {
     };
 
     let payload = if let Some(record_path) = record_path {
-        match std::fs::read_to_string(&record_path) {
+        match bounded_read_to_string(&record_path, MAX_GENERAL_FILE_BYTES) {
             Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
                 Ok(serde_json::Value::Object(record)) => build_verify_migration_record_output(
                     &project_root,
@@ -25085,7 +25085,7 @@ fn validate_corpus_artifact(
     path: &Path,
     mode: VerifyCorpusKindRequest,
 ) -> VerifyCorpusValidationReport {
-    let raw = match std::fs::read_to_string(path) {
+    let raw = match bounded_read_to_string(path, MAX_GENERAL_FILE_BYTES) {
         Ok(raw) => raw,
         Err(err) => {
             return unsupported_corpus_validation_report(
@@ -25612,7 +25612,7 @@ fn handle_debug_trace(args: &DebugTraceArgs) -> Result<()> {
     let policy_config = parse_debug_trace_policy_config(&policy_content, policy_path)?;
 
     // Load input fixture
-    let input_content = fs::read_to_string(input_path)
+    let input_content = bounded_read_to_string(input_path, MAX_GENERAL_FILE_BYTES)
         .with_context(|| format!("Failed to read input file: {:?}", input_path))?;
 
     // Parse input as JSON
