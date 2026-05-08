@@ -1698,6 +1698,7 @@ impl ValidationProofStatus {
                 .map(|reason| reason.as_str().to_string()),
             proof_cache: None,
             readiness_ref: receipt.readiness_ref.clone(),
+            flight_recorder_ref: receipt.flight_recorder_ref.clone(),
             observed_at,
         })
     }
@@ -1733,6 +1734,7 @@ impl ValidationProofStatus {
             reason: Some(format!("proof cache hit: {}", proof_cache.reason_code)),
             proof_cache: Some(proof_cache),
             readiness_ref: receipt.readiness_ref.clone(),
+            flight_recorder_ref: receipt.flight_recorder_ref.clone(),
             observed_at,
         })
     }
