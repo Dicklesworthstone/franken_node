@@ -121,8 +121,16 @@ impl fmt::Display for SchedulerLane {
 }
 
 /// Task class discriminant for incoming tasks.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TaskClass(pub String);
+
+impl std::fmt::Debug for TaskClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("TaskClass")
+            .field(&"<redacted>")
+            .finish()
+    }
+}
 
 impl TaskClass {
     /// Creates a new task class with the given name.

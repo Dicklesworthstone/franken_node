@@ -29536,4 +29536,168 @@ mod parser_bomb_protection_tests {
         assert!(error_msg.contains("limit: 50 bytes"));
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
+
+    #[test]
+    fn build_trust_scan_evidence_ref_basic_functionality() {
+        // Test basic functionality of build_trust_scan_evidence_ref
+        // This test verifies the fix for bd-zsfpy (commit 5b6d964f)
+
+        let dependency = RunPackageDependency {
+            extension_id: "test-extension".to_string(),
+            display_name: "Test Extension".to_string(),
+        };
+        let version = "1.0.0";
+        let artifact_hashes = vec!["hash1".to_string(), "hash2".to_string()];
+        let now_secs = 1640995200; // 2022-01-01
+
+        let result = build_trust_scan_evidence_ref(&dependency, version, &artifact_hashes, now_secs);
+
+        // Verify basic structure
+        assert_eq!(result.evidence_id, "manifest-admission:test-extension@1.0.0");
+        assert_eq!(result.evidence_type, EvidenceType::ManifestAdmission);
+        assert_eq!(result.verified_at_epoch, now_secs);
+        assert!(result.verification_receipt_hash.starts_with("sha256:"));
+
+        // Hash should be deterministic
+        let result2 = build_trust_scan_evidence_ref(&dependency, version, &artifact_hashes, now_secs);
+        assert_eq!(result.verification_receipt_hash, result2.verification_receipt_hash);
+    }
+
+    #[test]
+    fn build_trust_scan_evidence_ref_integer_truncation_protection() {
+        // Test that integer truncation protection works for oversized inputs
+        // This test verifies the fix for bd-zsfpy (commit 5b6d964f)
+
+        let dependency = RunPackageDependency {
+            extension_id: "test-extension".to_string(),
+            display_name: "Test Extension".to_string(),
+        };
+
+        // Create a very long version string that would overflow usize → u64 cast on 32-bit
+        // Use a size that would definitely trigger the protection
+        let normal_version = "1.0.0";
+        let oversized_version = "x".repeat(std::usize::MAX / 2); // Large but not MAX to avoid OOM
+
+        let artifact_hashes = vec!["hash1".to_string()];
+        let now_secs = 1640995200;
+
+        // Both should succeed (no panics), but produce different hashes
+        let result_normal = build_trust_scan_evidence_ref(&dependency, normal_version, &artifact_hashes, now_secs);
+        let result_oversized = build_trust_scan_evidence_ref(&dependency, &oversized_version, &artifact_hashes, now_secs);
+
+        // Should produce different hashes
+        assert_ne!(result_normal.verification_receipt_hash, result_oversized.verification_receipt_hash);
+
+        // Both should have valid sha256 format
+        assert!(result_normal.verification_receipt_hash.starts_with("sha256:"));
+        assert!(result_oversized.verification_receipt_hash.starts_with("sha256:"));
+        assert_eq!(result_normal.verification_receipt_hash.len(), 71); // "sha256:" + 64 hex chars
+        assert_eq!(result_oversized.verification_receipt_hash.len(), 71);
+    }
+
+    #[test]
+    fn build_trust_scan_evidence_ref_oversized_extension_id() {
+        // Test integer truncation protection for oversized extension_id
+        let normal_dependency = RunPackageDependency {
+            extension_id: "normal-extension".to_string(),
+            display_name: "Normal Extension".to_string(),
+        };
+        let oversized_dependency = RunPackageDependency {
+            extension_id: "x".repeat(std::usize::MAX / 3).to_string(), // Oversized but manageable
+            display_name: "Oversized Extension".to_string(),
+        };
+
+        let version = "1.0.0";
+        let artifact_hashes = vec!["hash1".to_string()];
+        let now_secs = 1640995200;
+
+        // Both should succeed without panicking
+        let result_normal = build_trust_scan_evidence_ref(&normal_dependency, version, &artifact_hashes, now_secs);
+        let result_oversized = build_trust_scan_evidence_ref(&oversized_dependency, version, &artifact_hashes, now_secs);
+
+        // Should produce different hashes due to different extension_id lengths
+        assert_ne!(result_normal.verification_receipt_hash, result_oversized.verification_receipt_hash);
+
+        // Evidence IDs should incorporate the extension_id properly
+        assert!(result_normal.evidence_id.contains("normal-extension"));
+        assert!(result_oversized.evidence_id.contains(&oversized_dependency.extension_id[..20])); // Just check prefix
+    }
+
+    #[test]
+    fn build_trust_scan_evidence_ref_oversized_artifact_hash() {
+        // Test integer truncation protection for oversized artifact_hash
+        let dependency = RunPackageDependency {
+            extension_id: "test-extension".to_string(),
+            display_name: "Test Extension".to_string(),
+        };
+        let version = "1.0.0";
+        let now_secs = 1640995200;
+
+        let normal_hashes = vec!["normal-hash".to_string()];
+        let oversized_hashes = vec!["x".repeat(std::usize::MAX / 4).to_string()]; // Oversized hash
+
+        // Both should succeed without panicking
+        let result_normal = build_trust_scan_evidence_ref(&dependency, version, &normal_hashes, now_secs);
+        let result_oversized = build_trust_scan_evidence_ref(&dependency, version, &oversized_hashes, now_secs);
+
+        // Should produce different hashes due to different artifact hash lengths
+        assert_ne!(result_normal.verification_receipt_hash, result_oversized.verification_receipt_hash);
+    }
+
+    #[test]
+    fn build_trust_scan_evidence_ref_hash_collision_resistance() {
+        // Test that length prefixing prevents hash collisions from length manipulation
+        // This verifies the security properties of the integer truncation fix
+        let dependency = RunPackageDependency {
+            extension_id: "test".to_string(),
+            display_name: "Test".to_string(),
+        };
+        let now_secs = 1640995200;
+
+        // These should produce different hashes due to proper length prefixing
+        let result1 = build_trust_scan_evidence_ref(&dependency, "ab", &["cd".to_string()], now_secs);
+        let result2 = build_trust_scan_evidence_ref(&dependency, "a", &["bcd".to_string()], now_secs);
+
+        // Without proper length prefixing, these could potentially collide
+        // With proper length prefixing, they should always be different
+        assert_ne!(result1.verification_receipt_hash, result2.verification_receipt_hash,
+                   "Different input structures should produce different hashes");
+
+        // Test another collision-resistant case
+        let result3 = build_trust_scan_evidence_ref(&dependency, "version1", &[], now_secs);
+        let result4 = build_trust_scan_evidence_ref(&dependency, "", &["version1".to_string()], now_secs);
+
+        assert_ne!(result3.verification_receipt_hash, result4.verification_receipt_hash,
+                   "Version vs artifact hash should produce different hashes");
+    }
+
+    #[test]
+    fn build_trust_scan_evidence_ref_deterministic_output() {
+        // Test that the function produces deterministic output for the same inputs
+        let dependency = RunPackageDependency {
+            extension_id: "deterministic-test".to_string(),
+            display_name: "Deterministic Test".to_string(),
+        };
+        let version = "2.1.0";
+        let artifact_hashes = vec!["hash-a".to_string(), "hash-b".to_string(), "hash-c".to_string()];
+        let now_secs = 1609459200; // 2021-01-01
+
+        // Call multiple times with identical inputs
+        let results: Vec<_> = (0..5).map(|_| {
+            build_trust_scan_evidence_ref(&dependency, version, &artifact_hashes, now_secs)
+        }).collect();
+
+        // All results should be identical
+        for result in &results[1..] {
+            assert_eq!(results[0].evidence_id, result.evidence_id);
+            assert_eq!(results[0].evidence_type, result.evidence_type);
+            assert_eq!(results[0].verified_at_epoch, result.verified_at_epoch);
+            assert_eq!(results[0].verification_receipt_hash, result.verification_receipt_hash);
+        }
+
+        // Hash should be a valid sha256 hex string
+        let hash_hex = results[0].verification_receipt_hash.strip_prefix("sha256:").unwrap();
+        assert_eq!(hash_hex.len(), 64);
+        assert!(hash_hex.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }
