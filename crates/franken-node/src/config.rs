@@ -343,20 +343,26 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         // Open file and check size atomically to prevent TOCTOU file swapping
         let mut file = File::open(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
-        let metadata = file.metadata().map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
         if metadata.len() > MAX_CONFIG_FILE_BYTES {
             return Err(ConfigError::ReadFailed(
                 path.into(),
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Config file too large: {} bytes (limit: {} bytes)",
-                            metadata.len(), MAX_CONFIG_FILE_BYTES)
-                )
+                    format!(
+                        "Config file too large: {} bytes (limit: {} bytes)",
+                        metadata.len(),
+                        MAX_CONFIG_FILE_BYTES
+                    ),
+                ),
             ));
         }
 
         let mut content = String::new();
-        file.read_to_string(&mut content).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        file.read_to_string(&mut content)
+            .map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
         let parsed: Self =
             toml::from_str(&content).map_err(|e| ConfigError::ParseFailed(path.into(), e))?;
         parsed.validate()?;
@@ -2301,20 +2307,26 @@ impl ConfigDocument {
     fn load(path: &Path) -> Result<Self, ConfigError> {
         // Open file and check size atomically to prevent TOCTOU file swapping
         let mut file = File::open(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
-        let metadata = file.metadata().map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
         if metadata.len() > MAX_CONFIG_FILE_BYTES {
             return Err(ConfigError::ReadFailed(
                 path.into(),
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Config file too large: {} bytes (limit: {} bytes)",
-                            metadata.len(), MAX_CONFIG_FILE_BYTES)
-                )
+                    format!(
+                        "Config file too large: {} bytes (limit: {} bytes)",
+                        metadata.len(),
+                        MAX_CONFIG_FILE_BYTES
+                    ),
+                ),
             ));
         }
 
         let mut content = String::new();
-        file.read_to_string(&mut content).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        file.read_to_string(&mut content)
+            .map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
         toml::from_str(&content).map_err(|e| ConfigError::ParseFailed(path.into(), e))
     }
 
@@ -2403,8 +2415,14 @@ struct TrustOverrides {
 impl std::fmt::Debug for TrustOverrides {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TrustOverrides")
-            .field("risky_requires_fresh_revocation", &self.risky_requires_fresh_revocation)
-            .field("dangerous_requires_fresh_revocation", &self.dangerous_requires_fresh_revocation)
+            .field(
+                "risky_requires_fresh_revocation",
+                &self.risky_requires_fresh_revocation,
+            )
+            .field(
+                "dangerous_requires_fresh_revocation",
+                &self.dangerous_requires_fresh_revocation,
+            )
             .field("quarantine_on_high_risk", &self.quarantine_on_high_risk)
             .field("card_cache_ttl_secs", &self.card_cache_ttl_secs)
             .field("freshness_window_secs", &self.freshness_window_secs)
@@ -2469,9 +2487,15 @@ struct SecurityOverrides {
 impl std::fmt::Debug for SecurityOverrides {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecurityOverrides")
-            .field("max_degraded_duration_secs", &self.max_degraded_duration_secs)
+            .field(
+                "max_degraded_duration_secs",
+                &self.max_degraded_duration_secs,
+            )
             .field("max_merge_decisions", &self.max_merge_decisions)
-            .field("decision_receipt_signing_key_path", &self.decision_receipt_signing_key_path)
+            .field(
+                "decision_receipt_signing_key_path",
+                &self.decision_receipt_signing_key_path,
+            )
             .field("authorized_api_keys", &"[REDACTED]")
             .finish()
     }
@@ -2879,9 +2903,15 @@ pub struct SecurityConfig {
 impl std::fmt::Debug for SecurityConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecurityConfig")
-            .field("max_degraded_duration_secs", &self.max_degraded_duration_secs)
+            .field(
+                "max_degraded_duration_secs",
+                &self.max_degraded_duration_secs,
+            )
             .field("max_merge_decisions", &self.max_merge_decisions)
-            .field("decision_receipt_signing_key_path", &self.decision_receipt_signing_key_path)
+            .field(
+                "decision_receipt_signing_key_path",
+                &self.decision_receipt_signing_key_path,
+            )
             .field("authorized_api_keys", &"[REDACTED]")
             .field("network_policy", &self.network_policy)
             .finish()
@@ -2945,7 +2975,7 @@ fn default_true() -> bool {
 impl Default for NetworkPolicyConfig {
     fn default() -> Self {
         Self {
-            ssrf_enforcement: SsrfEnforcementMode::Block,  // Fail-closed: block by default
+            ssrf_enforcement: SsrfEnforcementMode::Block, // Fail-closed: block by default
             ssrf_protection_enabled: true,
             block_cloud_metadata: true,
             allowlist: Vec::new(),
@@ -3782,7 +3812,10 @@ mod tests {
 
         // Verify file is actually oversized
         let metadata = std::fs::metadata(&config_path).expect("get metadata");
-        assert!(metadata.len() > MAX_CONFIG_FILE_BYTES, "Test file should exceed size limit");
+        assert!(
+            metadata.len() > MAX_CONFIG_FILE_BYTES,
+            "Test file should exceed size limit"
+        );
 
         // Load should fail with size error
         let result = Config::load(&config_path);
@@ -3790,8 +3823,16 @@ mod tests {
 
         // Check that error message mentions size limit
         let error_msg = format!("{}", result.unwrap_err());
-        assert!(error_msg.contains("too large"), "Error should mention size limit: {}", error_msg);
-        assert!(error_msg.contains("bytes"), "Error should include byte counts: {}", error_msg);
+        assert!(
+            error_msg.contains("too large"),
+            "Error should mention size limit: {}",
+            error_msg
+        );
+        assert!(
+            error_msg.contains("bytes"),
+            "Error should include byte counts: {}",
+            error_msg
+        );
     }
 
     #[test]
@@ -5358,7 +5399,10 @@ max_merge_decisions = 100
 authorized_api_keys = ["test-key"]
 "#;
         let config: SecurityConfig = toml::from_str(raw).expect("parse security config");
-        assert_eq!(config.network_policy.ssrf_enforcement, SsrfEnforcementMode::Block);
+        assert_eq!(
+            config.network_policy.ssrf_enforcement,
+            SsrfEnforcementMode::Block
+        );
         assert!(config.network_policy.ssrf_protection_enabled);
         assert!(config.network_policy.block_cloud_metadata);
     }
@@ -5377,6 +5421,11 @@ max_merge_decisions = 100
         let full_config = Config::for_profile(Profile::Balanced);
         let validation_result = full_config.validate();
         assert!(validation_result.is_err());
-        assert!(validation_result.unwrap_err().to_string().contains("authorized_api_keys"));
+        assert!(
+            validation_result
+                .unwrap_err()
+                .to_string()
+                .contains("authorized_api_keys")
+        );
     }
 }

@@ -6551,19 +6551,37 @@ mod tests {
 
         // Verify file is actually oversized
         let metadata = std::fs::metadata(&oversized_path).expect("get metadata");
-        assert!(metadata.len() > MAX_MIGRATION_FILE_BYTES,
+        assert!(
+            metadata.len() > MAX_MIGRATION_FILE_BYTES,
             "Test file should exceed size limit: {} > {}",
-            metadata.len(), MAX_MIGRATION_FILE_BYTES);
+            metadata.len(),
+            MAX_MIGRATION_FILE_BYTES
+        );
 
         // Bounded read should fail with size error
         let result = read_file_bounded(&oversized_path);
-        assert!(result.is_err(), "Oversized migration file should be rejected");
+        assert!(
+            result.is_err(),
+            "Oversized migration file should be rejected"
+        );
 
         // Check that error message mentions size limit
         let error = result.unwrap_err();
         let error_msg = format!("{}", error);
-        assert!(error_msg.contains("too large"), "Error should mention size limit: {}", error_msg);
-        assert!(error_msg.contains("bytes"), "Error should include byte counts: {}", error_msg);
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "Error should be InvalidData");
+        assert!(
+            error_msg.contains("too large"),
+            "Error should mention size limit: {}",
+            error_msg
+        );
+        assert!(
+            error_msg.contains("bytes"),
+            "Error should include byte counts: {}",
+            error_msg
+        );
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::InvalidData,
+            "Error should be InvalidData"
+        );
     }
 }

@@ -483,7 +483,7 @@ impl KeyRoleRegistry {
         max_validity_seconds: u64,
         trace_id: &str,
     ) -> Result<&KeyRoleBinding, KeyRoleSeparationError> {
-        if old_key_id == new_key_id {
+        if crate::security::constant_time::ct_eq(old_key_id, new_key_id) {
             return Err(KeyRoleSeparationError::RotationFailed {
                 role,
                 reason: "old_key_id and new_key_id must differ".to_string(),

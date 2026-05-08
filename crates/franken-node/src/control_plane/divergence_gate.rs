@@ -934,8 +934,8 @@ impl ControlPlaneDivergenceGate {
         self.active_divergence.as_ref().is_some_and(|active| {
             active.detection_result == result.label()
                 && active.fork_epoch == local.epoch
-                && active.local_hash == local.state_hash
-                && active.remote_hash == remote.state_hash
+                && crate::security::constant_time::ct_eq(&active.local_hash, &local.state_hash)
+                && crate::security::constant_time::ct_eq(&active.remote_hash, &remote.state_hash)
         })
     }
 

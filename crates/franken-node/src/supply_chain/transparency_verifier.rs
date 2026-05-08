@@ -193,9 +193,9 @@ fn recompute_root_bytes(proof: &InclusionProof) -> [u8; 32] {
             .expect("audit path entry should be 32 bytes");
 
         if index.is_multiple_of(2) {
-            current = hash_pair_bytes(&current, &sibling_bytes);
+            current = hash_pair_bytes(&current[..], &sibling_bytes[..]);
         } else {
-            current = hash_pair_bytes(&sibling_bytes, &current);
+            current = hash_pair_bytes(&sibling_bytes[..], &current[..]);
         }
         index /= 2;
     }
@@ -1511,15 +1511,26 @@ mod tests {
         let debug_output = format!("{:?}", log_root);
 
         // Positive test: Assert redaction marker appears
-        assert!(debug_output.contains("[REDACTED]"), "Debug output should contain redaction marker");
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should contain redaction marker"
+        );
 
         // Negative test: Assert sensitive root hash data does NOT appear
-        assert!(!debug_output.contains("sensitive-root-hash-data-that-should-be-redacted"),
-                "Sensitive root hash data should not appear in debug output");
+        assert!(
+            !debug_output.contains("sensitive-root-hash-data-that-should-be-redacted"),
+            "Sensitive root hash data should not appear in debug output"
+        );
 
         // Format verification: Assert non-sensitive fields still appear correctly
         assert!(debug_output.contains("12345"), "Tree size should appear");
-        assert!(debug_output.contains("tree_size"), "Field name should appear");
-        assert!(debug_output.contains("root_hash"), "Field name should appear (but not value)");
+        assert!(
+            debug_output.contains("tree_size"),
+            "Field name should appear"
+        );
+        assert!(
+            debug_output.contains("root_hash"),
+            "Field name should appear (but not value)"
+        );
     }
 }

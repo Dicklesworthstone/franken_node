@@ -195,7 +195,12 @@ fn evaluate_policy(
     reasons
 }
 
-fn gate_event(code: &'static str, level: &'static str, trace_id: &str, message: String) -> GateEvent {
+fn gate_event(
+    code: &'static str,
+    level: &'static str,
+    trace_id: &str,
+    message: String,
+) -> GateEvent {
     GateEvent {
         code,
         level,

@@ -155,9 +155,7 @@ pub struct TaskClass(pub String);
 
 impl std::fmt::Debug for TaskClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("TaskClass")
-            .field(&"<redacted>")
-            .finish()
+        f.debug_tuple("TaskClass").field(&"<redacted>").finish()
     }
 }
 
@@ -509,57 +507,55 @@ pub enum LaneSchedulerError {
 impl std::fmt::Debug for LaneSchedulerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LaneSchedulerError::UnknownClass { task_class: _ } => {
-                f.debug_struct("UnknownClass")
-                    .field("task_class", &"<redacted>")
-                    .finish()
-            }
-            LaneSchedulerError::CapExceeded { lane, cap, current, queued_task_id } => {
-                f.debug_struct("CapExceeded")
-                    .field("lane", lane)
-                    .field("cap", cap)
-                    .field("current", current)
-                    .field("queued_task_id", queued_task_id)
-                    .finish()
-            }
+            LaneSchedulerError::UnknownClass { task_class: _ } => f
+                .debug_struct("UnknownClass")
+                .field("task_class", &"<redacted>")
+                .finish(),
+            LaneSchedulerError::CapExceeded {
+                lane,
+                cap,
+                current,
+                queued_task_id,
+            } => f
+                .debug_struct("CapExceeded")
+                .field("lane", lane)
+                .field("cap", cap)
+                .field("current", current)
+                .field("queued_task_id", queued_task_id)
+                .finish(),
             LaneSchedulerError::UnknownLane { lane } => {
-                f.debug_struct("UnknownLane")
-                    .field("lane", lane)
-                    .finish()
+                f.debug_struct("UnknownLane").field("lane", lane).finish()
             }
             LaneSchedulerError::DuplicateLane { lane } => {
-                f.debug_struct("DuplicateLane")
-                    .field("lane", lane)
-                    .finish()
+                f.debug_struct("DuplicateLane").field("lane", lane).finish()
             }
-            LaneSchedulerError::InvalidPolicy { detail } => {
-                f.debug_struct("InvalidPolicy")
-                    .field("detail", detail)
-                    .finish()
-            }
-            LaneSchedulerError::Starvation { lane, queue_depth, elapsed_ms } => {
-                f.debug_struct("Starvation")
-                    .field("lane", lane)
-                    .field("queue_depth", queue_depth)
-                    .field("elapsed_ms", elapsed_ms)
-                    .finish()
-            }
-            LaneSchedulerError::TaskNotFound { task_id: _ } => {
-                f.debug_struct("TaskNotFound")
-                    .field("task_id", &"<redacted>")
-                    .finish()
-            }
-            LaneSchedulerError::TaskIdExhausted { last_counter } => {
-                f.debug_struct("TaskIdExhausted")
-                    .field("last_counter", last_counter)
-                    .finish()
-            }
-            LaneSchedulerError::InvalidWeight { lane, weight } => {
-                f.debug_struct("InvalidWeight")
-                    .field("lane", lane)
-                    .field("weight", weight)
-                    .finish()
-            }
+            LaneSchedulerError::InvalidPolicy { detail } => f
+                .debug_struct("InvalidPolicy")
+                .field("detail", detail)
+                .finish(),
+            LaneSchedulerError::Starvation {
+                lane,
+                queue_depth,
+                elapsed_ms,
+            } => f
+                .debug_struct("Starvation")
+                .field("lane", lane)
+                .field("queue_depth", queue_depth)
+                .field("elapsed_ms", elapsed_ms)
+                .finish(),
+            LaneSchedulerError::TaskNotFound { task_id: _ } => f
+                .debug_struct("TaskNotFound")
+                .field("task_id", &"<redacted>")
+                .finish(),
+            LaneSchedulerError::TaskIdExhausted { last_counter } => f
+                .debug_struct("TaskIdExhausted")
+                .field("last_counter", last_counter)
+                .finish(),
+            LaneSchedulerError::InvalidWeight { lane, weight } => f
+                .debug_struct("InvalidWeight")
+                .field("lane", lane)
+                .field("weight", weight)
+                .finish(),
         }
     }
 }
@@ -903,7 +899,10 @@ impl fmt::Debug for LaneScheduler {
             .field("policy", &self.policy)
             .field("counters", &self.counters)
             .field("active_tasks_count", &self.active_tasks.len())
-            .field("queued_tasks_count", &self.queued_tasks.values().map(|q| q.len()).sum::<usize>())
+            .field(
+                "queued_tasks_count",
+                &self.queued_tasks.values().map(|q| q.len()).sum::<usize>(),
+            )
             .field("audit_log_count", &self.audit_log.len())
             .field("max_audit_log_entries", &self.max_audit_log_entries)
             .field("max_queued_tasks_per_lane", &self.max_queued_tasks_per_lane)
@@ -1172,8 +1171,7 @@ impl LaneScheduler {
             trace_id: trace_id.to_string(),
         };
 
-        self.active_tasks
-            .insert(task_id, assignment.clone());
+        self.active_tasks.insert(task_id, assignment.clone());
 
         self.push_audit_record(LaneAuditRecord {
             event_code: event_codes::LANE_ASSIGN.to_string(),
@@ -1196,16 +1194,15 @@ impl LaneScheduler {
         timestamp_ms: u64,
         trace_id: &str,
     ) -> Result<SchedulerLane, LaneSchedulerError> {
-        let task_id_parsed = TaskId::from_str(task_id)
-            .ok_or_else(|| LaneSchedulerError::TaskNotFound {
+        let task_id_parsed =
+            TaskId::from_str(task_id).ok_or_else(|| LaneSchedulerError::TaskNotFound {
                 task_id: task_id.to_string(),
             })?;
-        let assignment =
-            self.active_tasks
-                .remove(&task_id_parsed)
-                .ok_or_else(|| LaneSchedulerError::TaskNotFound {
-                    task_id: task_id.to_string(),
-                })?;
+        let assignment = self.active_tasks.remove(&task_id_parsed).ok_or_else(|| {
+            LaneSchedulerError::TaskNotFound {
+                task_id: task_id.to_string(),
+            }
+        })?;
 
         let counters = self
             .counters
@@ -1251,8 +1248,9 @@ impl LaneScheduler {
 
         let task_id_parsed = TaskId::from_str(task_id);
         for queue in self.queued_tasks.values_mut() {
-            if let Some(position) = queue.iter().position(|queued|
-                task_id_parsed.is_some_and(|id| queued.task_id == id))
+            if let Some(position) = queue
+                .iter()
+                .position(|queued| task_id_parsed.is_some_and(|id| queued.task_id == id))
                 && let Some(queued) = queue.remove(position)
             {
                 removed = Some(queued);
@@ -3617,13 +3615,21 @@ mod tests {
 
         for (counter, expected) in test_cases {
             let task_id = TaskId::new(counter);
-            assert_eq!(task_id.to_string(), expected,
-                "TaskId({}) should format to '{}'", counter, expected);
+            assert_eq!(
+                task_id.to_string(),
+                expected,
+                "TaskId({}) should format to '{}'",
+                counter,
+                expected
+            );
 
             // Test round-trip: TaskId -> String -> TaskId
             let reparsed = TaskId::from_str(&task_id.to_string()).unwrap();
-            assert_eq!(reparsed, task_id,
-                "Round-trip parsing should preserve TaskId({}) value", counter);
+            assert_eq!(
+                reparsed, task_id,
+                "Round-trip parsing should preserve TaskId({}) value",
+                counter
+            );
         }
     }
 }

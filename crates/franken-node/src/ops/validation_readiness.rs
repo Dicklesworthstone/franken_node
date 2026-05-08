@@ -2738,9 +2738,7 @@ pub fn known_check_codes(report: &ValidationReadinessReport) -> BTreeSet<String>
 #[cfg(test)]
 mod fail_closed_boundary_tests {
     use super::*;
-    use crate::ops::validation_readiness::validation_proof_capabilities::{
-        ValidationProofCapabilitySnapshot,
-    };
+    use crate::ops::validation_readiness::validation_proof_capabilities::ValidationProofCapabilitySnapshot;
 
     #[test]
     fn test_freshness_expires_at_boundary_fail_closed() {
@@ -2754,11 +2752,13 @@ mod fail_closed_boundary_tests {
             freshness_expires_at: expires_at,
         };
 
-        let decision_at_expiry = classify_proof_lane_decision(&input_at_expiry, expires_at, trace_id);
+        let decision_at_expiry =
+            classify_proof_lane_decision(&input_at_expiry, expires_at, trace_id);
         assert_eq!(
             decision_at_expiry.kind,
             ProofLaneReadinessDecisionKind::FailClosed,
-            "At exactly expiry time t={}, should fail closed", expires_at
+            "At exactly expiry time t={}, should fail closed",
+            expires_at
         );
         assert_eq!(
             decision_at_expiry.reason_code,
@@ -2767,11 +2767,13 @@ mod fail_closed_boundary_tests {
 
         // Test case 2: one nanosecond before expiry should PASS
         let now_before_expiry = expires_at - 1;
-        let decision_before_expiry = classify_proof_lane_decision(&input_at_expiry, now_before_expiry, trace_id);
+        let decision_before_expiry =
+            classify_proof_lane_decision(&input_at_expiry, now_before_expiry, trace_id);
         assert_ne!(
             decision_before_expiry.kind,
             ProofLaneReadinessDecisionKind::FailClosed,
-            "At t={} (1 before expiry), should not fail closed", now_before_expiry
+            "At t={} (1 before expiry), should not fail closed",
+            now_before_expiry
         );
         assert_ne!(
             decision_before_expiry.reason_code,
@@ -2780,11 +2782,13 @@ mod fail_closed_boundary_tests {
 
         // Test case 3: one after expiry should definitely FAIL
         let now_after_expiry = expires_at + 1;
-        let decision_after_expiry = classify_proof_lane_decision(&input_at_expiry, now_after_expiry, trace_id);
+        let decision_after_expiry =
+            classify_proof_lane_decision(&input_at_expiry, now_after_expiry, trace_id);
         assert_eq!(
             decision_after_expiry.kind,
             ProofLaneReadinessDecisionKind::FailClosed,
-            "At t={} (1 after expiry), should fail closed", now_after_expiry
+            "At t={} (1 after expiry), should fail closed",
+            now_after_expiry
         );
         assert_eq!(
             decision_after_expiry.reason_code,
@@ -2805,26 +2809,32 @@ mod fail_closed_boundary_tests {
         };
 
         // Test case 1: exactly at expiry time should be STALE (fail-closed)
-        let is_stale_at_expiry = capability_snapshot_unknown_or_stale(&capability_with_expiry, expires_at);
+        let is_stale_at_expiry =
+            capability_snapshot_unknown_or_stale(&capability_with_expiry, expires_at);
         assert!(
             is_stale_at_expiry,
-            "At exactly expiry time t={}, capability should be stale (fail-closed)", expires_at
+            "At exactly expiry time t={}, capability should be stale (fail-closed)",
+            expires_at
         );
 
         // Test case 2: one nanosecond before expiry should NOT be stale
         let now_before_expiry = expires_at - 1;
-        let is_stale_before_expiry = capability_snapshot_unknown_or_stale(&capability_with_expiry, now_before_expiry);
+        let is_stale_before_expiry =
+            capability_snapshot_unknown_or_stale(&capability_with_expiry, now_before_expiry);
         assert!(
             !is_stale_before_expiry,
-            "At t={} (1 before expiry), capability should not be stale", now_before_expiry
+            "At t={} (1 before expiry), capability should not be stale",
+            now_before_expiry
         );
 
         // Test case 3: one after expiry should definitely be STALE
         let now_after_expiry = expires_at + 1;
-        let is_stale_after_expiry = capability_snapshot_unknown_or_stale(&capability_with_expiry, now_after_expiry);
+        let is_stale_after_expiry =
+            capability_snapshot_unknown_or_stale(&capability_with_expiry, now_after_expiry);
         assert!(
             is_stale_after_expiry,
-            "At t={} (1 after expiry), capability should be stale", now_after_expiry
+            "At t={} (1 after expiry), capability should be stale",
+            now_after_expiry
         );
 
         // Test case 4: None expiry should be stale (always fail-closed when no expiry)
@@ -2834,7 +2844,8 @@ mod fail_closed_boundary_tests {
             observed_at: Some(expires_at),
             freshness_expires_at: None,
         };
-        let is_stale_no_expiry = capability_snapshot_unknown_or_stale(&capability_no_expiry, expires_at);
+        let is_stale_no_expiry =
+            capability_snapshot_unknown_or_stale(&capability_no_expiry, expires_at);
         assert!(
             is_stale_no_expiry,
             "Capability with no expiry time should always be stale (fail-closed)"

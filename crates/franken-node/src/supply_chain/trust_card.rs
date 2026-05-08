@@ -565,12 +565,18 @@ impl std::fmt::Debug for TrustCard {
             .field("behavioral_profile", &self.behavioral_profile)
             .field("revocation_status", &self.revocation_status)
             .field("provenance_summary", &self.provenance_summary)
-            .field("reputation_score_basis_points", &self.reputation_score_basis_points)
+            .field(
+                "reputation_score_basis_points",
+                &self.reputation_score_basis_points,
+            )
             .field("reputation_trend", &self.reputation_trend)
             .field("active_quarantine", &self.active_quarantine)
             .field("dependency_trust_summary", &self.dependency_trust_summary)
             .field("last_verified_timestamp", &self.last_verified_timestamp)
-            .field("user_facing_risk_assessment", &self.user_facing_risk_assessment)
+            .field(
+                "user_facing_risk_assessment",
+                &self.user_facing_risk_assessment,
+            )
             .field("audit_history", &self.audit_history)
             .field("derivation_evidence", &self.derivation_evidence)
             .field("card_hash", &"[REDACTED]")
@@ -706,7 +712,10 @@ impl std::fmt::Debug for TrustCardRegistrySnapshot {
             .field("snapshot_epoch", &self.snapshot_epoch)
             .field("previous_snapshot_hash", &self.previous_snapshot_hash)
             .field("cache_ttl_secs", &self.cache_ttl_secs)
-            .field("cards_by_extension", &format!("{} extensions", self.cards_by_extension.len()))
+            .field(
+                "cards_by_extension",
+                &format!("{} extensions", self.cards_by_extension.len()),
+            )
             .field("snapshot_hash", &"[REDACTED]")
             .field("registry_signature", &"[REDACTED]")
             .finish()

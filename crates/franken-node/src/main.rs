@@ -5,11 +5,11 @@ pub use frankenengine_node::{ActionableError, bounded_read_to_string, lock_utils
 
 /// Maximum file size limits to prevent DoS via parser bombs
 const MAX_EVIDENCE_INPUT_BYTES: u64 = 10 << 20; // 10 MiB for evidence input files
-const MAX_MANIFEST_FILE_BYTES: u64 = 5 << 20;   // 5 MiB for manifest files
-const MAX_POLICY_FILE_BYTES: u64 = 2 << 20;     // 2 MiB for policy files
-const MAX_LOCKFILE_BYTES: u64 = 1 << 20;        // 1 MiB for lockfiles
-const MAX_GENERAL_FILE_BYTES: u64 = 10 << 20;   // 10 MiB for general CLI input files
-const MAX_SIGNING_KEY_BYTES: u64 = 64 << 10;    // 64 KiB for signing keys
+const MAX_MANIFEST_FILE_BYTES: u64 = 5 << 20; // 5 MiB for manifest files
+const MAX_POLICY_FILE_BYTES: u64 = 2 << 20; // 2 MiB for policy files
+const MAX_LOCKFILE_BYTES: u64 = 1 << 20; // 1 MiB for lockfiles
+const MAX_GENERAL_FILE_BYTES: u64 = 10 << 20; // 10 MiB for general CLI input files
+const MAX_SIGNING_KEY_BYTES: u64 = 64 << 10; // 64 KiB for signing keys
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
@@ -104,15 +104,15 @@ use crate::api::{
 use crate::cli::{
     BenchCommand, Cli, Command, DebugCommand, DebugEvidenceArgs, DebugEvidenceKind,
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
-    DoctorEvidenceReadinessArgs, DoctorWorkspacePressureArgs, DoctorPolicyActivationInput, FleetAgentArgs, FleetCommand,
-    IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand, OpsConfigAuditArgs,
-    OpsMetricsFormat, OpsResourceGovernorArgs, OpsValidationCloseoutArgs,
+    DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, DoctorWorkspacePressureArgs,
+    FleetAgentArgs, FleetCommand, IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand,
+    OpsConfigAuditArgs, OpsMetricsFormat, OpsResourceGovernorArgs, OpsValidationCloseoutArgs,
     OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs, ProofWorkersCommand,
     ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
     RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand,
     SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
     TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
-    VerifyModuleArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs, VerifyRecoveryRunbookArgs,
+    VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
     load_doctor_policy_activation_input,
 };
 use crate::policy::{
@@ -5637,10 +5637,8 @@ fn load_safe_mode_controller(
     const MAX_STATE_FILE_BYTES: u64 = 16 << 20; // 16 MiB
 
     match crate::bounded_read(state_path, MAX_STATE_FILE_BYTES) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes)
-                .with_context(|| format!("failed parsing safe-mode state {}", state_path.display()))
-        },
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("failed parsing safe-mode state {}", state_path.display())),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && missing_as_inactive => {
             Ok(runtime::safe_mode::SafeModeController::with_default_config())
         }
@@ -6043,10 +6041,8 @@ fn load_remotecap_cli_state() -> Result<RemoteCapCliState> {
 
     let path = remotecap_cli_state_path();
     match crate::bounded_read(&path, MAX_CLI_STATE_BYTES) {
-        Ok(raw) => {
-            serde_json::from_slice(&raw)
-                .with_context(|| format!("failed parsing remotecap state {}", path.display()))
-        },
+        Ok(raw) => serde_json::from_slice(&raw)
+            .with_context(|| format!("failed parsing remotecap state {}", path.display())),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
             Ok(RemoteCapCliState::default())
         }
@@ -6246,10 +6242,12 @@ fn handle_doctor_evidence_readiness(
 }
 
 fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Result<()> {
-    use crate::ops::doctor::{WorkspacePressureDoctor, generate_doctor_report_file, generate_human_report_file};
+    use crate::ops::doctor::{
+        WorkspacePressureDoctor, generate_doctor_report_file, generate_human_report_file,
+    };
     use crate::ops::workspace_pressure_policy::{
-        PolicyThresholds, WorkspacePressureInputs,
-        get_workspace_disk_space, get_workspace_file_reservations
+        PolicyThresholds, WorkspacePressureInputs, get_workspace_disk_space,
+        get_workspace_file_reservations,
     };
     use std::fs;
 
@@ -6337,15 +6335,11 @@ fn get_target_directory_size() -> Result<u64> {
 fn get_active_build_count() -> Result<u32> {
     use std::process::Command;
 
-    let output = Command::new("pgrep")
-        .args(&["-f", "cargo|rustc"])
-        .output();
+    let output = Command::new("pgrep").args(&["-f", "cargo|rustc"]).output();
 
     match output {
         Ok(result) => {
-            let count = String::from_utf8_lossy(&result.stdout)
-                .lines()
-                .count();
+            let count = String::from_utf8_lossy(&result.stdout).lines().count();
             Ok(count as u32)
         }
         Err(_) => Ok(0), // pgrep not available
@@ -6355,15 +6349,14 @@ fn get_active_build_count() -> Result<u32> {
 fn get_rch_available_slots() -> Option<u32> {
     use std::process::Command;
 
-    let output = Command::new("rch")
-        .args(&["status", "--json"])
-        .output();
+    let output = Command::new("rch").args(&["status", "--json"]).output();
 
     match output {
         Ok(result) if result.status.success() => {
             let json_str = String::from_utf8_lossy(&result.stdout);
             if let Ok(status) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                status.get("available_slots")
+                status
+                    .get("available_slots")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as u32)
             } else {
@@ -6383,12 +6376,14 @@ fn get_memory_pressure() -> Result<f32> {
 
     for line in meminfo.lines() {
         if line.starts_with("MemTotal:") {
-            total_kb = line.split_whitespace()
+            total_kb = line
+                .split_whitespace()
                 .nth(1)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
         } else if line.starts_with("MemAvailable:") {
-            available_kb = line.split_whitespace()
+            available_kb = line
+                .split_whitespace()
                 .nth(1)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
@@ -6734,7 +6729,7 @@ fn latest_file_age_secs(dir: &Path) -> Option<u64> {
     Some(
         SystemTime::now()
             .checked_duration_since(modified)
-            .unwrap_or(Duration::from_secs(u32::MAX as u64))  // Very large age = very stale
+            .unwrap_or(Duration::from_secs(u32::MAX as u64)) // Very large age = very stale
             .as_secs(),
     )
 }
@@ -8384,8 +8379,9 @@ fn count_active_fleet_quarantines(fleet_state_dir: &Path) -> Result<u64> {
         // Parse with depth limit to prevent JSON parser bomb DoS
         let mut deserializer = serde_json::Deserializer::from_str(&line);
         let record: PersistedFleetActionRecord = serde::Deserialize::deserialize(
-            &mut deserializer.recursion_limit(64)
-        ).with_context(|| {
+            &mut deserializer.recursion_limit(64),
+        )
+        .with_context(|| {
             format!(
                 "failed parsing fleet action log {} line {}",
                 actions_path.display(),
@@ -9841,7 +9837,7 @@ fn evaluate_evidence_artifact_readiness(
 fn current_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(u64::MAX, |duration| duration.as_secs())  // Fail-closed: very far future = fail expiry checks
+        .map_or(u64::MAX, |duration| duration.as_secs()) // Fail-closed: very far future = fail expiry checks
 }
 
 fn evaluate_telemetry_exporter_readiness(
@@ -10068,17 +10064,26 @@ fn evaluate_workspace_inventory_pressure() -> (DoctorStatus, String, String) {
                 disposable_bytes / 1024.0 / 1024.0
             );
 
-            if disposable_bytes > 500 * 1024 * 1024 {  // > 500MB disposable
-                (DoctorStatus::Warn, message, "Consider running workspace cleanup when safe".to_string())
+            if disposable_bytes > 500 * 1024 * 1024 {
+                // > 500MB disposable
+                (
+                    DoctorStatus::Warn,
+                    message,
+                    "Consider running workspace cleanup when safe".to_string(),
+                )
             } else {
-                (DoctorStatus::Pass, message, "No action required".to_string())
+                (
+                    DoctorStatus::Pass,
+                    message,
+                    "No action required".to_string(),
+                )
             }
         }
         Err(e) => (
             DoctorStatus::Fail,
             format!("Cannot access workspace: {}", e),
-            "Check workspace permissions and availability".to_string()
-        )
+            "Check workspace permissions and availability".to_string(),
+        ),
     }
 }
 
@@ -10093,11 +10098,23 @@ fn evaluate_build_pressure() -> (DoctorStatus, String, String) {
     );
 
     if active_builds > 3 {
-        (DoctorStatus::Warn, message, "High build concurrency - consider using RCH for offload".to_string())
+        (
+            DoctorStatus::Warn,
+            message,
+            "High build concurrency - consider using RCH for offload".to_string(),
+        )
     } else if target_dirs > 5 {
-        (DoctorStatus::Warn, message, "Many target directories detected - cleanup may free disk space".to_string())
+        (
+            DoctorStatus::Warn,
+            message,
+            "Many target directories detected - cleanup may free disk space".to_string(),
+        )
     } else {
-        (DoctorStatus::Pass, message, "Build pressure within normal range".to_string())
+        (
+            DoctorStatus::Pass,
+            message,
+            "Build pressure within normal range".to_string(),
+        )
     }
 }
 
@@ -10107,23 +10124,35 @@ fn evaluate_rch_availability() -> (DoctorStatus, String, String) {
         Ok(output) if output.status.success() => {
             let status_text = String::from_utf8_lossy(&output.stdout);
             if status_text.contains("healthy") {
-                (DoctorStatus::Pass, "RCH available and healthy".to_string(), "No action required".to_string())
+                (
+                    DoctorStatus::Pass,
+                    "RCH available and healthy".to_string(),
+                    "No action required".to_string(),
+                )
             } else if status_text.contains("degraded") {
-                (DoctorStatus::Warn, "RCH available but degraded".to_string(), "Check RCH worker status".to_string())
+                (
+                    DoctorStatus::Warn,
+                    "RCH available but degraded".to_string(),
+                    "Check RCH worker status".to_string(),
+                )
             } else {
-                (DoctorStatus::Warn, "RCH status unclear".to_string(), "Run 'rch doctor' for detailed status".to_string())
+                (
+                    DoctorStatus::Warn,
+                    "RCH status unclear".to_string(),
+                    "Run 'rch doctor' for detailed status".to_string(),
+                )
             }
         }
         Ok(_) => (
             DoctorStatus::Warn,
             "RCH command failed".to_string(),
-            "Check RCH installation and configuration".to_string()
+            "Check RCH installation and configuration".to_string(),
         ),
         Err(_) => (
             DoctorStatus::Fail,
             "RCH not available".to_string(),
-            "Install RCH or prepare for local-only builds".to_string()
-        )
+            "Install RCH or prepare for local-only builds".to_string(),
+        ),
     }
 }
 
@@ -10136,23 +10165,23 @@ fn evaluate_coordination_health() -> (DoctorStatus, String, String) {
         (true, true) => (
             DoctorStatus::Pass,
             "Agent coordination healthy".to_string(),
-            "No action required".to_string()
+            "No action required".to_string(),
         ),
         (true, false) => (
             DoctorStatus::Warn,
             "Beads healthy, Agent Mail issues detected".to_string(),
-            "Check Agent Mail MCP server connectivity".to_string()
+            "Check Agent Mail MCP server connectivity".to_string(),
         ),
         (false, true) => (
             DoctorStatus::Warn,
             "Agent Mail healthy, Beads issues detected".to_string(),
-            "Run 'br sync --flush-only' to check Beads state".to_string()
+            "Run 'br sync --flush-only' to check Beads state".to_string(),
         ),
         (false, false) => (
             DoctorStatus::Fail,
             "Agent coordination degraded".to_string(),
-            "Check both Beads and Agent Mail connectivity".to_string()
-        )
+            "Check both Beads and Agent Mail connectivity".to_string(),
+        ),
     }
 }
 
@@ -10163,11 +10192,23 @@ fn evaluate_active_reservations() -> (DoctorStatus, String, String) {
     let message = format!("Active file reservations: {}", reservations);
 
     if reservations > 10 {
-        (DoctorStatus::Warn, message, "Many active reservations - coordinate with other agents before cleanup".to_string())
+        (
+            DoctorStatus::Warn,
+            message,
+            "Many active reservations - coordinate with other agents before cleanup".to_string(),
+        )
     } else if reservations > 0 {
-        (DoctorStatus::Pass, message, "Some active reservations - normal for multi-agent work".to_string())
+        (
+            DoctorStatus::Pass,
+            message,
+            "Some active reservations - normal for multi-agent work".to_string(),
+        )
     } else {
-        (DoctorStatus::Pass, message, "No active reservations".to_string())
+        (
+            DoctorStatus::Pass,
+            message,
+            "No active reservations".to_string(),
+        )
     }
 }
 
@@ -10255,14 +10296,16 @@ fn count_target_directories() -> usize {
 
 fn count_active_builds() -> usize {
     // Check for active cargo/rustc processes
-    match std::process::Command::new("pgrep").arg("-c").arg("cargo|rustc").output() {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .parse::<usize>()
-                .unwrap_or(0)
-        }
-        _ => 0
+    match std::process::Command::new("pgrep")
+        .arg("-c")
+        .arg("cargo|rustc")
+        .output()
+    {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(0),
+        _ => 0,
     }
 }
 
@@ -10278,8 +10321,7 @@ fn check_beads_health() -> bool {
 
 fn check_agent_mail_health() -> bool {
     // Check if agent mail directory exists and is accessible
-    std::path::Path::new(".agent-mail").exists() ||
-    std::path::Path::new("agents").exists()
+    std::path::Path::new(".agent-mail").exists() || std::path::Path::new("agents").exists()
 }
 
 fn count_active_reservations() -> usize {
@@ -11040,13 +11082,11 @@ fn build_doctor_report_with_cwd_and_policy_input(
                 "doctor-check".to_string(),
                 vec![], // Empty processes for check
             ) {
-                observation => {
-                    (
-                        DoctorStatus::Pass,
-                        "Resource governor monitoring is available and functional.".to_string(),
-                        "No action required - workspace pressure monitoring is ready.".to_string(),
-                    )
-                }
+                observation => (
+                    DoctorStatus::Pass,
+                    "Resource governor monitoring is available and functional.".to_string(),
+                    "No action required - workspace pressure monitoring is ready.".to_string(),
+                ),
             }
         },
     ));
@@ -17168,7 +17208,7 @@ fn build_registry_seed_request_with_config(
 
     let now_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(u64::MAX, |duration| duration.as_secs());  // Fail-closed: very far future = fail expiry checks
+        .map_or(u64::MAX, |duration| duration.as_secs()); // Fail-closed: very far future = fail expiry checks
 
     // Use real commit SHA if available, otherwise fallback to attestation hash prefix
     let vcs_commit_sha = build_context
@@ -17332,7 +17372,7 @@ fn registry_cli_registry() -> Result<SignedExtensionRegistry> {
 
     let now_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(u64::MAX, |duration| duration.as_secs());  // Fail-closed: very far future = fail expiry checks
+        .map_or(u64::MAX, |duration| duration.as_secs()); // Fail-closed: very far future = fail expiry checks
 
     let baseline = [
         build_registry_seed_request(
@@ -18711,7 +18751,7 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
     registry.register_publisher_key(signing_material.signing_key.verifying_key());
     let publish_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(u64::MAX, |duration| duration.as_secs());  // Fail-closed: very far future = fail expiry checks
+        .map_or(u64::MAX, |duration| duration.as_secs()); // Fail-closed: very far future = fail expiry checks
     let result = registry.register(request, "trace-cli-registry-publish", publish_epoch);
     if !result.success {
         anyhow::bail!("registry publish failed: {}", result.detail);
@@ -19042,7 +19082,7 @@ fn quarantine_trust_cards(
                 card.provenance_summary
                     .artifact_hashes
                     .iter()
-                    .any(|hash| hash == &prefix || hash.starts_with(&prefix))
+                    .any(|hash| crate::security::constant_time::ct_eq(hash, &prefix) || hash.starts_with(&prefix))
             })
             .map(|card| card.extension.extension_id)
             .collect();
@@ -20338,7 +20378,7 @@ fn resolve_fleet_agent_action_targets(
             card.provenance_summary
                 .artifact_hashes
                 .iter()
-                .any(|hash| hash == &prefix || hash.starts_with(&prefix))
+                .any(|hash| crate::security::constant_time::ct_eq(hash, &prefix) || hash.starts_with(&prefix))
         })
         .map(|card| card.extension.extension_id)
         .collect::<Vec<_>>();
@@ -21892,8 +21932,8 @@ fn load_verifying_keys(key_dir: &Path) -> Result<Vec<ed25519_dalek::VerifyingKey
 
     let mut keys = Vec::new();
     for path in paths {
-        let raw =
-            crate::bounded_read(&path, MAX_SIGNING_KEY_BYTES).with_context(|| format!("failed reading {}", path.display()))?;
+        let raw = crate::bounded_read(&path, MAX_SIGNING_KEY_BYTES)
+            .with_context(|| format!("failed reading {}", path.display()))?;
         if let Some(key) = parse_verifying_key_from_blob(&raw) {
             keys.push(key);
         }
@@ -22026,8 +22066,9 @@ fn load_release_verification_context(
             anyhow::bail!("{reason}");
         }
     }
-    let manifest_signature_raw = crate::bounded_read(&manifest_signature_path, MAX_SIGNING_KEY_BYTES)
-        .with_context(|| format!("failed reading {}", manifest_signature_path.display()))?;
+    let manifest_signature_raw =
+        crate::bounded_read(&manifest_signature_path, MAX_SIGNING_KEY_BYTES)
+            .with_context(|| format!("failed reading {}", manifest_signature_path.display()))?;
     let manifest_signature = decode_signature_blob(&manifest_signature_raw);
 
     let verifying_keys = load_verifying_keys(key_dir)?;
@@ -22077,8 +22118,9 @@ fn load_release_verification_context(
         let artifact_path = release_dir.join(artifact_name);
         match inspect_release_entry_path(release_dir, &artifact_path)? {
             ReleaseEntryState::File => {
-                let artifact_bytes = crate::bounded_read(&artifact_path, MAX_MANIFEST_FILE_BYTES)
-                    .with_context(|| format!("failed reading {}", artifact_path.display()))?;
+                let artifact_bytes =
+                    crate::bounded_read(&artifact_path, MAX_MANIFEST_FILE_BYTES)
+                        .with_context(|| format!("failed reading {}", artifact_path.display()))?;
                 artifacts.insert(artifact_name.clone(), artifact_bytes);
             }
             ReleaseEntryState::Missing => {}
@@ -22298,14 +22340,19 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
 
         // Parse with depth limit to prevent JSON parser bomb DoS
         let mut deserializer = serde_json::Deserializer::from_str(&line);
-        let entry: EvidenceEntry = serde::Deserialize::deserialize(
-            &mut deserializer.recursion_limit(64)
-        ).with_context(|| format!("Invalid JSON at line {}: {}", line_number, line))?;
+        let entry: EvidenceEntry =
+            serde::Deserialize::deserialize(&mut deserializer.recursion_limit(64))
+                .with_context(|| format!("Invalid JSON at line {}: {}", line_number, line))?;
 
         // Prevent memory exhaustion from unbounded collection growth
         const MAX_EVIDENCE_ENTRIES_PER_OPERATION: usize = 10_000;
         crate::security::push_bounded(&mut entries, entry, MAX_EVIDENCE_ENTRIES_PER_OPERATION)
-            .with_context(|| format!("Too many evidence entries (limit: {})", MAX_EVIDENCE_ENTRIES_PER_OPERATION))?;
+            .with_context(|| {
+                format!(
+                    "Too many evidence entries (limit: {})",
+                    MAX_EVIDENCE_ENTRIES_PER_OPERATION
+                )
+            })?;
     }
 
     if entries.is_empty() {
@@ -22409,8 +22456,8 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
 
 fn handle_verify_recovery_runbook(args: &VerifyRecoveryRunbookArgs) -> Result<()> {
     use crate::ops::validation_readiness::{
-        summarize_validation_readiness_report, ValidationReadinessInput,
-        FailedAttemptSummary, RecoveryPlanSummary,
+        FailedAttemptSummary, RecoveryPlanSummary, ValidationReadinessInput,
+        summarize_validation_readiness_report,
     };
     use crate::ops::validation_recovery_planner::{RecoveryAction, reason_codes};
     use chrono::{DateTime, Utc};
@@ -22429,8 +22476,12 @@ fn handle_verify_recovery_runbook(args: &VerifyRecoveryRunbookArgs) -> Result<()
     let input = if let Some(input_path) = &args.readiness_input {
         let input_json = bounded_read_to_string(input_path, MAX_GENERAL_FILE_BYTES)
             .with_context(|| format!("failed reading input file: {}", input_path.display()))?;
-        serde_json::from_str(&input_json)
-            .with_context(|| format!("invalid validation readiness JSON in {}", input_path.display()))?
+        serde_json::from_str(&input_json).with_context(|| {
+            format!(
+                "invalid validation readiness JSON in {}",
+                input_path.display()
+            )
+        })?
     } else if let Some(scenario) = &args.scenario {
         generate_test_scenario(scenario, timestamp)?
     } else {
@@ -22457,10 +22508,13 @@ fn handle_verify_recovery_runbook(args: &VerifyRecoveryRunbookArgs) -> Result<()
     Ok(())
 }
 
-fn generate_test_scenario(scenario: &str, timestamp: DateTime<Utc>) -> Result<ValidationReadinessInput> {
+fn generate_test_scenario(
+    scenario: &str,
+    timestamp: DateTime<Utc>,
+) -> Result<ValidationReadinessInput> {
     use crate::ops::validation_broker::{
-        ProofStatusKind, ValidationProofStatus, ValidationReceipt, ValidationFlightRecorderRef,
-        RchMode, ValidationExitKind, ValidationExitCode,
+        ProofStatusKind, RchMode, ValidationExitCode, ValidationExitKind,
+        ValidationFlightRecorderRef, ValidationProofStatus, ValidationReceipt,
     };
     use std::collections::BTreeMap;
 
@@ -22681,7 +22735,7 @@ fn generate_test_scenario(scenario: &str, timestamp: DateTime<Utc>) -> Result<Va
             };
             (vec![status], vec![])
         }
-        _ => return Err(anyhow::anyhow!("Unknown scenario: {}", scenario))
+        _ => return Err(anyhow::anyhow!("Unknown scenario: {}", scenario)),
     };
 
     Ok(ValidationReadinessInput {
@@ -22696,7 +22750,9 @@ fn generate_test_scenario(scenario: &str, timestamp: DateTime<Utc>) -> Result<Va
     })
 }
 
-fn emit_recovery_runbook_human(report: &crate::ops::validation_readiness::ValidationReadinessReport) -> Result<()> {
+fn emit_recovery_runbook_human(
+    report: &crate::ops::validation_readiness::ValidationReadinessReport,
+) -> Result<()> {
     println!("# RCH Validation Recovery Runbook");
     println!();
 
@@ -22714,9 +22770,18 @@ fn emit_recovery_runbook_human(report: &crate::ops::validation_readiness::Valida
 
     println!();
     println!("## Summary");
-    println!("- **Flight Recorder Refs**: {}", report.summary.flight_recorder_refs);
-    println!("- **Failed Attempts**: {}", report.summary.failed_attempt_details.len());
-    println!("- **Pending Recoveries**: {}", report.summary.pending_recoveries.len());
+    println!(
+        "- **Flight Recorder Refs**: {}",
+        report.summary.flight_recorder_refs
+    );
+    println!(
+        "- **Failed Attempts**: {}",
+        report.summary.failed_attempt_details.len()
+    );
+    println!(
+        "- **Pending Recoveries**: {}",
+        report.summary.pending_recoveries.len()
+    );
 
     if !report.summary.failed_attempt_details.is_empty() {
         println!();
@@ -22733,8 +22798,14 @@ fn emit_recovery_runbook_human(report: &crate::ops::validation_readiness::Valida
             if let Some(path) = &attempt.flight_recorder_path {
                 println!("- **Flight Recorder**: {}", path);
             }
-            println!("- **Retryable**: {}", if attempt.retryable { "Yes" } else { "No" });
-            println!("- **Product Failure**: {}", if attempt.product_failure { "Yes" } else { "No" });
+            println!(
+                "- **Retryable**: {}",
+                if attempt.retryable { "Yes" } else { "No" }
+            );
+            println!(
+                "- **Product Failure**: {}",
+                if attempt.product_failure { "Yes" } else { "No" }
+            );
         }
     }
 
@@ -23904,7 +23975,8 @@ fn emit_verify_module(args: &VerifyModuleArgs) -> i32 {
     }
 
     let payload = match resolve_verify_module_source(&normalized) {
-        Ok(Some(source_path)) => match bounded_read_to_string(&source_path, MAX_GENERAL_FILE_BYTES) {
+        Ok(Some(source_path)) => match bounded_read_to_string(&source_path, MAX_GENERAL_FILE_BYTES)
+        {
             Ok(source) => {
                 let declaration_path = locate_verify_module_declaration(&normalized);
                 let dependencies = collect_declared_module_dependencies(&source_path, &source);
@@ -28589,7 +28661,7 @@ mod run_trust_gate_tests {
                         // But all should decode back to the same data
                         if let Ok(decoded1) = engines[i].decode(encoded1) {
                             if let Ok(decoded2) = engines[j].decode(encoded2) {
-                                if decoded1 == test_data && decoded2 == test_data {
+                                if crate::security::constant_time::ct_eq_bytes(&decoded1, test_data) && crate::security::constant_time::ct_eq_bytes(&decoded2, test_data) {
                                     // Both decoded correctly to original data
                                     continue;
                                 }
@@ -29297,10 +29369,14 @@ mod run_trust_gate_tests {
 #[cfg(test)]
 mod parser_bomb_protection_tests {
     use super::*;
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     /// Helper to create a JSON file of specific size with valid content
-    fn create_sized_json_file(dir: &TempDir, filename: &str, target_size: u64) -> std::path::PathBuf {
+    fn create_sized_json_file(
+        dir: &TempDir,
+        filename: &str,
+        target_size: u64,
+    ) -> std::path::PathBuf {
         let path = dir.path().join(filename);
 
         // Create valid JSON with padding to reach target size
@@ -29334,7 +29410,11 @@ mod parser_bomb_protection_tests {
                 content.push('}');
             }
 
-            assert_eq!(content.len() as u64, target_size, "Size mismatch for test file");
+            assert_eq!(
+                content.len() as u64,
+                target_size,
+                "Size mismatch for test file"
+            );
             std::fs::write(&path, content).expect("write sized JSON");
         }
 
@@ -29354,24 +29434,37 @@ mod parser_bomb_protection_tests {
         // May fail on JSON parsing since our padding creates invalid JSON structure, but should not fail on size
         // The key point is that it doesn't fail with "too large" error
         match result {
-            Err(err) => assert!(!err.to_string().contains("too large"),
-                              "Size-limit file should not trigger 'too large' error: {}", err),
-            Ok(_) => {}, // Success is fine too
+            Err(err) => assert!(
+                !err.to_string().contains("too large"),
+                "Size-limit file should not trigger 'too large' error: {}",
+                err
+            ),
+            Ok(_) => {} // Success is fine too
         }
 
         // Test 2: File over 16MB limit should fail with specific error
-        let oversized_path = create_sized_json_file(&tmp, "oversized_state.json", MAX_STATE_FILE_BYTES + 1);
+        let oversized_path =
+            create_sized_json_file(&tmp, "oversized_state.json", MAX_STATE_FILE_BYTES + 1);
 
         let result = load_safe_mode_controller(&oversized_path, false);
         assert!(result.is_err(), "Oversized file should fail");
 
         let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("Safe-mode state file too large"),
-               "Should fail with size error, got: {}", error_msg);
-        assert!(error_msg.contains(&format!("{}", MAX_STATE_FILE_BYTES + 1)),
-               "Error should include actual size: {}", error_msg);
-        assert!(error_msg.contains(&format!("{}", MAX_STATE_FILE_BYTES)),
-               "Error should include size limit: {}", error_msg);
+        assert!(
+            error_msg.contains("Safe-mode state file too large"),
+            "Should fail with size error, got: {}",
+            error_msg
+        );
+        assert!(
+            error_msg.contains(&format!("{}", MAX_STATE_FILE_BYTES + 1)),
+            "Error should include actual size: {}",
+            error_msg
+        );
+        assert!(
+            error_msg.contains(&format!("{}", MAX_STATE_FILE_BYTES)),
+            "Error should include size limit: {}",
+            error_msg
+        );
     }
 
     #[test]
@@ -29388,34 +29481,50 @@ mod parser_bomb_protection_tests {
         std::env::set_current_dir(tmp.path()).expect("change to temp dir");
 
         // Test 1: File exactly at 4MB limit should succeed (size-wise)
-        let valid_content = format!(r#"{{"schema_version":"test","padding":"{}"}}"#,
-                                   " ".repeat((MAX_CLI_STATE_BYTES as usize).saturating_sub(35)));
+        let valid_content = format!(
+            r#"{{"schema_version":"test","padding":"{}"}}"#,
+            " ".repeat((MAX_CLI_STATE_BYTES as usize).saturating_sub(35))
+        );
         let truncated_content = if valid_content.len() > MAX_CLI_STATE_BYTES as usize {
             format!("{}}}", &valid_content[..MAX_CLI_STATE_BYTES as usize - 1])
         } else {
-            format!("{}{}}}", valid_content, " ".repeat(MAX_CLI_STATE_BYTES as usize - valid_content.len() - 1))
+            format!(
+                "{}{}}}",
+                valid_content,
+                " ".repeat(MAX_CLI_STATE_BYTES as usize - valid_content.len() - 1)
+            )
         };
 
-        std::fs::write(franken_dir.join("state.json"), truncated_content).expect("write valid state");
+        std::fs::write(franken_dir.join("state.json"), truncated_content)
+            .expect("write valid state");
 
         let result = load_remotecap_cli_state();
         match result {
-            Err(err) => assert!(!err.to_string().contains("too large"),
-                              "Size-limit file should not trigger 'too large' error: {}", err),
-            Ok(_) => {}, // Success is fine too
+            Err(err) => assert!(
+                !err.to_string().contains("too large"),
+                "Size-limit file should not trigger 'too large' error: {}",
+                err
+            ),
+            Ok(_) => {} // Success is fine too
         }
 
         // Test 2: File over 4MB limit should fail with specific error
-        let oversized_content = format!(r#"{{"schema_version":"test","padding":"{}"}}"#,
-                                       " ".repeat(MAX_CLI_STATE_BYTES as usize + 100));
-        std::fs::write(franken_dir.join("state.json"), oversized_content).expect("write oversized state");
+        let oversized_content = format!(
+            r#"{{"schema_version":"test","padding":"{}"}}"#,
+            " ".repeat(MAX_CLI_STATE_BYTES as usize + 100)
+        );
+        std::fs::write(franken_dir.join("state.json"), oversized_content)
+            .expect("write oversized state");
 
         let result = load_remotecap_cli_state();
         assert!(result.is_err(), "Oversized file should fail");
 
         let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("RemoteCap CLI state file too large"),
-               "Should fail with size error, got: {}", error_msg);
+        assert!(
+            error_msg.contains("RemoteCap CLI state file too large"),
+            "Should fail with size error, got: {}",
+            error_msg
+        );
 
         // Restore original directory
         std::env::set_current_dir(original_dir).expect("restore directory");
@@ -29432,38 +29541,57 @@ mod parser_bomb_protection_tests {
         // Should not panic on size limit - will fail on JSON parsing but not size
         let result = read_remotecap_token(&valid_path);
         match result {
-            Err(err) => assert!(!err.to_string().contains("too large"),
-                              "Size-limit file should not trigger 'too large' error: {}", err),
-            Ok(_) => {}, // Success is fine too
+            Err(err) => assert!(
+                !err.to_string().contains("too large"),
+                "Size-limit file should not trigger 'too large' error: {}",
+                err
+            ),
+            Ok(_) => {} // Success is fine too
         }
 
         // Test 2: File over 1MB limit should fail with specific error
-        let oversized_path = create_sized_json_file(&tmp, "oversized_token.json", MAX_TOKEN_FILE_BYTES + 1);
+        let oversized_path =
+            create_sized_json_file(&tmp, "oversized_token.json", MAX_TOKEN_FILE_BYTES + 1);
 
         let result = read_remotecap_token(&oversized_path);
         assert!(result.is_err(), "Oversized file should fail");
 
         let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("RemoteCap token file too large"),
-               "Should fail with size error, got: {}", error_msg);
-        assert!(error_msg.contains(&format!("{}", MAX_TOKEN_FILE_BYTES + 1)),
-               "Error should include actual size: {}", error_msg);
-        assert!(error_msg.contains(&format!("{}", MAX_TOKEN_FILE_BYTES)),
-               "Error should include size limit: {}", error_msg);
+        assert!(
+            error_msg.contains("RemoteCap token file too large"),
+            "Should fail with size error, got: {}",
+            error_msg
+        );
+        assert!(
+            error_msg.contains(&format!("{}", MAX_TOKEN_FILE_BYTES + 1)),
+            "Error should include actual size: {}",
+            error_msg
+        );
+        assert!(
+            error_msg.contains(&format!("{}", MAX_TOKEN_FILE_BYTES)),
+            "Error should include size limit: {}",
+            error_msg
+        );
     }
 
     #[test]
     fn dos_protection_constants_match_implementation() {
         // Regression test: ensure constants haven't drifted
         const EXPECTED_STATE_LIMIT: u64 = 16 << 20; // 16 MiB
-        const EXPECTED_CLI_LIMIT: u64 = 4 << 20;     // 4 MiB
-        const EXPECTED_TOKEN_LIMIT: u64 = 1 << 20;   // 1 MiB
+        const EXPECTED_CLI_LIMIT: u64 = 4 << 20; // 4 MiB
+        const EXPECTED_TOKEN_LIMIT: u64 = 1 << 20; // 1 MiB
 
         // This test documents the expected limits and will fail if they change
         // If you need to change limits, update both the implementation and this test
-        assert_eq!(EXPECTED_STATE_LIMIT, 16777216, "State file limit should be 16MB");
+        assert_eq!(
+            EXPECTED_STATE_LIMIT, 16777216,
+            "State file limit should be 16MB"
+        );
         assert_eq!(EXPECTED_CLI_LIMIT, 4194304, "CLI state limit should be 4MB");
-        assert_eq!(EXPECTED_TOKEN_LIMIT, 1048576, "Token file limit should be 1MB");
+        assert_eq!(
+            EXPECTED_TOKEN_LIMIT, 1048576,
+            "Token file limit should be 1MB"
+        );
     }
 
     #[test]
@@ -29472,12 +29600,36 @@ mod parser_bomb_protection_tests {
         // This test verifies the fix for bd-vmiky (regression test coverage for 51809d58)
 
         // Verify all constants exist and have expected values
-        assert_eq!(MAX_EVIDENCE_INPUT_BYTES, 10 << 20, "Evidence input limit should be 10 MiB");
-        assert_eq!(MAX_MANIFEST_FILE_BYTES, 5 << 20, "Manifest file limit should be 5 MiB");
-        assert_eq!(MAX_POLICY_FILE_BYTES, 2 << 20, "Policy file limit should be 2 MiB");
-        assert_eq!(MAX_LOCKFILE_BYTES, 1 << 20, "Lockfile limit should be 1 MiB");
-        assert_eq!(MAX_GENERAL_FILE_BYTES, 10 << 20, "General CLI file limit should be 10 MiB");
-        assert_eq!(MAX_SIGNING_KEY_BYTES, 64 << 10, "Signing key limit should be 64 KiB");
+        assert_eq!(
+            MAX_EVIDENCE_INPUT_BYTES,
+            10 << 20,
+            "Evidence input limit should be 10 MiB"
+        );
+        assert_eq!(
+            MAX_MANIFEST_FILE_BYTES,
+            5 << 20,
+            "Manifest file limit should be 5 MiB"
+        );
+        assert_eq!(
+            MAX_POLICY_FILE_BYTES,
+            2 << 20,
+            "Policy file limit should be 2 MiB"
+        );
+        assert_eq!(
+            MAX_LOCKFILE_BYTES,
+            1 << 20,
+            "Lockfile limit should be 1 MiB"
+        );
+        assert_eq!(
+            MAX_GENERAL_FILE_BYTES,
+            10 << 20,
+            "General CLI file limit should be 10 MiB"
+        );
+        assert_eq!(
+            MAX_SIGNING_KEY_BYTES,
+            64 << 10,
+            "Signing key limit should be 64 KiB"
+        );
 
         // Verify constants are in sensible order (stricter to more permissive)
         assert!(MAX_SIGNING_KEY_BYTES < MAX_LOCKFILE_BYTES);
@@ -29491,23 +29643,31 @@ mod parser_bomb_protection_tests {
     fn bounded_read_to_string_dos_protection_integration() {
         // Integration test: verify DoS protection works end-to-end for different file types
         // This test verifies bounded_read_to_string actually prevents parser bombs
-        use tempfile::NamedTempFile;
         use std::io::Write;
+        use tempfile::NamedTempFile;
 
         // Test evidence input file size enforcement
         let mut large_evidence_file = NamedTempFile::new().expect("create temp file");
         let oversized_content = "x".repeat((MAX_EVIDENCE_INPUT_BYTES + 1) as usize);
-        large_evidence_file.write_all(oversized_content.as_bytes()).expect("write oversized content");
+        large_evidence_file
+            .write_all(oversized_content.as_bytes())
+            .expect("write oversized content");
 
         // Simulate evidence file read with MAX_EVIDENCE_INPUT_BYTES limit
-        let result = crate::bounded_read_to_string(large_evidence_file.path(), MAX_EVIDENCE_INPUT_BYTES);
-        assert!(result.is_err(), "Oversized evidence file should be rejected");
+        let result =
+            crate::bounded_read_to_string(large_evidence_file.path(), MAX_EVIDENCE_INPUT_BYTES);
+        assert!(
+            result.is_err(),
+            "Oversized evidence file should be rejected"
+        );
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
 
         // Test policy file size enforcement
         let mut large_policy_file = NamedTempFile::new().expect("create temp file");
         let oversized_policy = "policy content".repeat((MAX_POLICY_FILE_BYTES / 10) as usize);
-        large_policy_file.write_all(oversized_policy.as_bytes()).expect("write oversized policy");
+        large_policy_file
+            .write_all(oversized_policy.as_bytes())
+            .expect("write oversized policy");
 
         let result = crate::bounded_read_to_string(large_policy_file.path(), MAX_POLICY_FILE_BYTES);
         assert!(result.is_err(), "Oversized policy file should be rejected");
@@ -29515,7 +29675,9 @@ mod parser_bomb_protection_tests {
         // Test that reasonably sized files are accepted
         let mut reasonable_file = NamedTempFile::new().expect("create temp file");
         let reasonable_content = "reasonable content";
-        reasonable_file.write_all(reasonable_content.as_bytes()).expect("write reasonable content");
+        reasonable_file
+            .write_all(reasonable_content.as_bytes())
+            .expect("write reasonable content");
 
         let result = crate::bounded_read_to_string(reasonable_file.path(), MAX_POLICY_FILE_BYTES);
         assert!(result.is_ok(), "Reasonable sized file should be accepted");
@@ -29525,12 +29687,14 @@ mod parser_bomb_protection_tests {
     #[test]
     fn bounded_read_to_string_error_message_format() {
         // Test that error messages from bounded_read_to_string are informative
-        use tempfile::NamedTempFile;
         use std::io::Write;
+        use tempfile::NamedTempFile;
 
         let mut oversized_file = NamedTempFile::new().expect("create temp file");
         let content = "x".repeat(100);
-        oversized_file.write_all(content.as_bytes()).expect("write content");
+        oversized_file
+            .write_all(content.as_bytes())
+            .expect("write content");
 
         // Test with specific limit to verify error message format
         let limit = 50u64;
@@ -29560,17 +29724,25 @@ mod parser_bomb_protection_tests {
         let artifact_hashes = vec!["hash1".to_string(), "hash2".to_string()];
         let now_secs = 1640995200; // 2022-01-01
 
-        let result = build_trust_scan_evidence_ref(&dependency, version, &artifact_hashes, now_secs);
+        let result =
+            build_trust_scan_evidence_ref(&dependency, version, &artifact_hashes, now_secs);
 
         // Verify basic structure
-        assert_eq!(result.evidence_id, "manifest-admission:test-extension@1.0.0");
+        assert_eq!(
+            result.evidence_id,
+            "manifest-admission:test-extension@1.0.0"
+        );
         assert_eq!(result.evidence_type, EvidenceType::ManifestAdmission);
         assert_eq!(result.verified_at_epoch, now_secs);
         assert!(result.verification_receipt_hash.starts_with("sha256:"));
 
         // Hash should be deterministic
-        let result2 = build_trust_scan_evidence_ref(&dependency, version, &artifact_hashes, now_secs);
-        assert_eq!(result.verification_receipt_hash, result2.verification_receipt_hash);
+        let result2 =
+            build_trust_scan_evidence_ref(&dependency, version, &artifact_hashes, now_secs);
+        assert_eq!(
+            result.verification_receipt_hash,
+            result2.verification_receipt_hash
+        );
     }
 
     #[test]
@@ -29592,15 +29764,32 @@ mod parser_bomb_protection_tests {
         let now_secs = 1640995200;
 
         // Both should succeed (no panics), but produce different hashes
-        let result_normal = build_trust_scan_evidence_ref(&dependency, normal_version, &artifact_hashes, now_secs);
-        let result_oversized = build_trust_scan_evidence_ref(&dependency, &oversized_version, &artifact_hashes, now_secs);
+        let result_normal =
+            build_trust_scan_evidence_ref(&dependency, normal_version, &artifact_hashes, now_secs);
+        let result_oversized = build_trust_scan_evidence_ref(
+            &dependency,
+            &oversized_version,
+            &artifact_hashes,
+            now_secs,
+        );
 
         // Should produce different hashes
-        assert_ne!(result_normal.verification_receipt_hash, result_oversized.verification_receipt_hash);
+        assert_ne!(
+            result_normal.verification_receipt_hash,
+            result_oversized.verification_receipt_hash
+        );
 
         // Both should have valid sha256 format
-        assert!(result_normal.verification_receipt_hash.starts_with("sha256:"));
-        assert!(result_oversized.verification_receipt_hash.starts_with("sha256:"));
+        assert!(
+            result_normal
+                .verification_receipt_hash
+                .starts_with("sha256:")
+        );
+        assert!(
+            result_oversized
+                .verification_receipt_hash
+                .starts_with("sha256:")
+        );
         assert_eq!(result_normal.verification_receipt_hash.len(), 71); // "sha256:" + 64 hex chars
         assert_eq!(result_oversized.verification_receipt_hash.len(), 71);
     }
@@ -29622,15 +29811,28 @@ mod parser_bomb_protection_tests {
         let now_secs = 1640995200;
 
         // Both should succeed without panicking
-        let result_normal = build_trust_scan_evidence_ref(&normal_dependency, version, &artifact_hashes, now_secs);
-        let result_oversized = build_trust_scan_evidence_ref(&oversized_dependency, version, &artifact_hashes, now_secs);
+        let result_normal =
+            build_trust_scan_evidence_ref(&normal_dependency, version, &artifact_hashes, now_secs);
+        let result_oversized = build_trust_scan_evidence_ref(
+            &oversized_dependency,
+            version,
+            &artifact_hashes,
+            now_secs,
+        );
 
         // Should produce different hashes due to different extension_id lengths
-        assert_ne!(result_normal.verification_receipt_hash, result_oversized.verification_receipt_hash);
+        assert_ne!(
+            result_normal.verification_receipt_hash,
+            result_oversized.verification_receipt_hash
+        );
 
         // Evidence IDs should incorporate the extension_id properly
         assert!(result_normal.evidence_id.contains("normal-extension"));
-        assert!(result_oversized.evidence_id.contains(&oversized_dependency.extension_id[..20])); // Just check prefix
+        assert!(
+            result_oversized
+                .evidence_id
+                .contains(&oversized_dependency.extension_id[..20])
+        ); // Just check prefix
     }
 
     #[test]
@@ -29647,11 +29849,16 @@ mod parser_bomb_protection_tests {
         let oversized_hashes = vec!["x".repeat(std::usize::MAX / 4).to_string()]; // Oversized hash
 
         // Both should succeed without panicking
-        let result_normal = build_trust_scan_evidence_ref(&dependency, version, &normal_hashes, now_secs);
-        let result_oversized = build_trust_scan_evidence_ref(&dependency, version, &oversized_hashes, now_secs);
+        let result_normal =
+            build_trust_scan_evidence_ref(&dependency, version, &normal_hashes, now_secs);
+        let result_oversized =
+            build_trust_scan_evidence_ref(&dependency, version, &oversized_hashes, now_secs);
 
         // Should produce different hashes due to different artifact hash lengths
-        assert_ne!(result_normal.verification_receipt_hash, result_oversized.verification_receipt_hash);
+        assert_ne!(
+            result_normal.verification_receipt_hash,
+            result_oversized.verification_receipt_hash
+        );
     }
 
     #[test]
@@ -29665,20 +29872,27 @@ mod parser_bomb_protection_tests {
         let now_secs = 1640995200;
 
         // These should produce different hashes due to proper length prefixing
-        let result1 = build_trust_scan_evidence_ref(&dependency, "ab", &["cd".to_string()], now_secs);
-        let result2 = build_trust_scan_evidence_ref(&dependency, "a", &["bcd".to_string()], now_secs);
+        let result1 =
+            build_trust_scan_evidence_ref(&dependency, "ab", &["cd".to_string()], now_secs);
+        let result2 =
+            build_trust_scan_evidence_ref(&dependency, "a", &["bcd".to_string()], now_secs);
 
         // Without proper length prefixing, these could potentially collide
         // With proper length prefixing, they should always be different
-        assert_ne!(result1.verification_receipt_hash, result2.verification_receipt_hash,
-                   "Different input structures should produce different hashes");
+        assert_ne!(
+            result1.verification_receipt_hash, result2.verification_receipt_hash,
+            "Different input structures should produce different hashes"
+        );
 
         // Test another collision-resistant case
         let result3 = build_trust_scan_evidence_ref(&dependency, "version1", &[], now_secs);
-        let result4 = build_trust_scan_evidence_ref(&dependency, "", &["version1".to_string()], now_secs);
+        let result4 =
+            build_trust_scan_evidence_ref(&dependency, "", &["version1".to_string()], now_secs);
 
-        assert_ne!(result3.verification_receipt_hash, result4.verification_receipt_hash,
-                   "Version vs artifact hash should produce different hashes");
+        assert_ne!(
+            result3.verification_receipt_hash, result4.verification_receipt_hash,
+            "Version vs artifact hash should produce different hashes"
+        );
     }
 
     #[test]
@@ -29689,24 +29903,36 @@ mod parser_bomb_protection_tests {
             display_name: "Deterministic Test".to_string(),
         };
         let version = "2.1.0";
-        let artifact_hashes = vec!["hash-a".to_string(), "hash-b".to_string(), "hash-c".to_string()];
+        let artifact_hashes = vec![
+            "hash-a".to_string(),
+            "hash-b".to_string(),
+            "hash-c".to_string(),
+        ];
         let now_secs = 1609459200; // 2021-01-01
 
         // Call multiple times with identical inputs
-        let results: Vec<_> = (0..5).map(|_| {
-            build_trust_scan_evidence_ref(&dependency, version, &artifact_hashes, now_secs)
-        }).collect();
+        let results: Vec<_> = (0..5)
+            .map(|_| {
+                build_trust_scan_evidence_ref(&dependency, version, &artifact_hashes, now_secs)
+            })
+            .collect();
 
         // All results should be identical
         for result in &results[1..] {
             assert_eq!(results[0].evidence_id, result.evidence_id);
             assert_eq!(results[0].evidence_type, result.evidence_type);
             assert_eq!(results[0].verified_at_epoch, result.verified_at_epoch);
-            assert_eq!(results[0].verification_receipt_hash, result.verification_receipt_hash);
+            assert_eq!(
+                results[0].verification_receipt_hash,
+                result.verification_receipt_hash
+            );
         }
 
         // Hash should be a valid sha256 hex string
-        let hash_hex = results[0].verification_receipt_hash.strip_prefix("sha256:").unwrap();
+        let hash_hex = results[0]
+            .verification_receipt_hash
+            .strip_prefix("sha256:")
+            .unwrap();
         assert_eq!(hash_hex.len(), 64);
         assert!(hash_hex.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -29802,7 +30028,7 @@ mod parser_bomb_protection_tests {
 mod time_math_wraparound_tests {
     use super::*;
     use std::fs::File;
-    use std::time::{SystemTime, UNIX_EPOCH, Duration};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
 
     #[test]
@@ -29817,7 +30043,11 @@ mod time_math_wraparound_tests {
         let age_secs = latest_file_age_secs(tmp.path()).expect("should find file");
 
         // Should be a small age (just created)
-        assert!(age_secs < 10, "Recently created file should have small age, got {}", age_secs);
+        assert!(
+            age_secs < 10,
+            "Recently created file should have small age, got {}",
+            age_secs
+        );
     }
 
     #[test]
@@ -29830,26 +30060,36 @@ mod time_math_wraparound_tests {
         let future_time = now + Duration::from_secs(86400); // 1 day in future
 
         // This simulates what happens in latest_file_age_secs with a future file timestamp
-        let age_duration = now.checked_duration_since(future_time)
-                             .unwrap_or(Duration::from_secs(u32::MAX as u64));
+        let age_duration = now
+            .checked_duration_since(future_time)
+            .unwrap_or(Duration::from_secs(u32::MAX as u64));
 
         // With future timestamp, checked_duration_since returns None,
         // so we get the fallback Duration::from_secs(u32::MAX as u64)
-        assert_eq!(age_duration.as_secs(), u32::MAX as u64,
-                   "Future timestamp should result in maximum age to prevent bypass");
+        assert_eq!(
+            age_duration.as_secs(),
+            u32::MAX as u64,
+            "Future timestamp should result in maximum age to prevent bypass"
+        );
 
         // Verify the old vulnerable approach would have been different
         // OLD CODE: would use unwrap_or_default() → Duration::ZERO for future files
-        let old_vulnerable_approach = now.checked_duration_since(future_time)
-                                        .unwrap_or_default();
-        assert_eq!(old_vulnerable_approach.as_secs(), 0,
-                   "Old approach would have returned 0 (vulnerable)");
+        let old_vulnerable_approach = now.checked_duration_since(future_time).unwrap_or_default();
+        assert_eq!(
+            old_vulnerable_approach.as_secs(),
+            0,
+            "Old approach would have returned 0 (vulnerable)"
+        );
 
         // NEW CODE: uses unwrap_or(large_duration) → very large age for future files
-        let new_secure_approach = now.checked_duration_since(future_time)
-                                    .unwrap_or(Duration::from_secs(u32::MAX as u64));
-        assert_eq!(new_secure_approach.as_secs(), u32::MAX as u64,
-                   "New approach returns maximum age (secure)");
+        let new_secure_approach = now
+            .checked_duration_since(future_time)
+            .unwrap_or(Duration::from_secs(u32::MAX as u64));
+        assert_eq!(
+            new_secure_approach.as_secs(),
+            u32::MAX as u64,
+            "New approach returns maximum age (secure)"
+        );
     }
 
     #[test]
@@ -29869,11 +30109,16 @@ mod time_math_wraparound_tests {
             let attacker_timestamp = now + future_offset;
 
             // Test the security logic from latest_file_age_secs
-            let age_duration = now.checked_duration_since(attacker_timestamp)
-                                 .unwrap_or(Duration::from_secs(u32::MAX as u64));
+            let age_duration = now
+                .checked_duration_since(attacker_timestamp)
+                .unwrap_or(Duration::from_secs(u32::MAX as u64));
 
-            assert_eq!(age_duration.as_secs(), u32::MAX as u64,
-                       "Scenario '{}': Future timestamp should result in maximum staleness", scenario_name);
+            assert_eq!(
+                age_duration.as_secs(),
+                u32::MAX as u64,
+                "Scenario '{}': Future timestamp should result in maximum staleness",
+                scenario_name
+            );
         }
     }
 
@@ -29887,26 +30132,42 @@ mod time_math_wraparound_tests {
         let future_time = now + Duration::from_secs(86400); // 1 day future (attack case)
 
         // Test normal timestamp handling
-        let normal_age = now.checked_duration_since(past_time)
-                           .unwrap_or(Duration::from_secs(u32::MAX as u64));
-        assert_eq!(normal_age.as_secs(), 3600, "Normal past timestamp should show correct age");
+        let normal_age = now
+            .checked_duration_since(past_time)
+            .unwrap_or(Duration::from_secs(u32::MAX as u64));
+        assert_eq!(
+            normal_age.as_secs(),
+            3600,
+            "Normal past timestamp should show correct age"
+        );
 
         // Test future timestamp handling (attack scenario)
-        let future_age = now.checked_duration_since(future_time)
-                           .unwrap_or(Duration::from_secs(u32::MAX as u64));
-        assert_eq!(future_age.as_secs(), u32::MAX as u64,
-                   "Future timestamp should be treated as maximally stale");
+        let future_age = now
+            .checked_duration_since(future_time)
+            .unwrap_or(Duration::from_secs(u32::MAX as u64));
+        assert_eq!(
+            future_age.as_secs(),
+            u32::MAX as u64,
+            "Future timestamp should be treated as maximally stale"
+        );
 
         // Verify that the function finds the latest file
         // In the real function, max() is used to find the newest timestamp
         let latest_timestamp = past_time.max(future_time);
-        assert_eq!(latest_timestamp, future_time, "Future time should be considered 'latest'");
+        assert_eq!(
+            latest_timestamp, future_time,
+            "Future time should be considered 'latest'"
+        );
 
         // But when converting to age, future times get maximum age
-        let latest_age = now.checked_duration_since(latest_timestamp)
-                           .unwrap_or(Duration::from_secs(u32::MAX as u64));
-        assert_eq!(latest_age.as_secs(), u32::MAX as u64,
-                   "Latest file with future timestamp should have maximum age");
+        let latest_age = now
+            .checked_duration_since(latest_timestamp)
+            .unwrap_or(Duration::from_secs(u32::MAX as u64));
+        assert_eq!(
+            latest_age.as_secs(),
+            u32::MAX as u64,
+            "Latest file with future timestamp should have maximum age"
+        );
     }
 
     #[test]
@@ -29918,8 +30179,11 @@ mod time_math_wraparound_tests {
         let year_2020_secs = 1577836800; // 2020-01-01 UTC
         let year_2030_secs = 1893456000; // 2030-01-01 UTC
 
-        assert!(now_secs >= year_2020_secs && now_secs < year_2030_secs,
-                "Timestamp should be reasonable, got {}", now_secs);
+        assert!(
+            now_secs >= year_2020_secs && now_secs < year_2030_secs,
+            "Timestamp should be reasonable, got {}",
+            now_secs
+        );
     }
 
     #[test]
@@ -29938,11 +30202,15 @@ mod time_math_wraparound_tests {
 
         // Create a SystemTime before UNIX_EPOCH to test the logic
         let pre_epoch = UNIX_EPOCH - Duration::from_secs(1000);
-        let result = pre_epoch.duration_since(UNIX_EPOCH)
-                             .map_or(u64::MAX, |duration| duration.as_secs());
+        let result = pre_epoch
+            .duration_since(UNIX_EPOCH)
+            .map_or(u64::MAX, |duration| duration.as_secs());
 
-        assert_eq!(result, u64::MAX,
-                   "Pre-UNIX_EPOCH time should result in u64::MAX for fail-closed behavior");
+        assert_eq!(
+            result,
+            u64::MAX,
+            "Pre-UNIX_EPOCH time should result in u64::MAX for fail-closed behavior"
+        );
     }
 
     #[test]
@@ -29950,23 +30218,31 @@ mod time_math_wraparound_tests {
         // Test edge cases near time boundaries
 
         // Test that UNIX_EPOCH itself works
-        let epoch_result = UNIX_EPOCH.duration_since(UNIX_EPOCH)
-                                    .map_or(u64::MAX, |duration| duration.as_secs());
+        let epoch_result = UNIX_EPOCH
+            .duration_since(UNIX_EPOCH)
+            .map_or(u64::MAX, |duration| duration.as_secs());
         assert_eq!(epoch_result, 0, "UNIX_EPOCH should give 0 seconds");
 
         // Test a time just after UNIX_EPOCH
         let just_after = UNIX_EPOCH + Duration::from_secs(1);
-        let after_result = just_after.duration_since(UNIX_EPOCH)
-                                    .map_or(u64::MAX, |duration| duration.as_secs());
+        let after_result = just_after
+            .duration_since(UNIX_EPOCH)
+            .map_or(u64::MAX, |duration| duration.as_secs());
         assert_eq!(after_result, 1, "1 second after UNIX_EPOCH should give 1");
 
         // Test that the fail-closed pattern works for pre-EPOCH
-        let before_epoch = UNIX_EPOCH.checked_sub(Duration::from_secs(1))
-                                     .unwrap_or(UNIX_EPOCH);
+        let before_epoch = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or(UNIX_EPOCH);
         if before_epoch < UNIX_EPOCH {
-            let before_result = before_epoch.duration_since(UNIX_EPOCH)
-                                           .map_or(u64::MAX, |duration| duration.as_secs());
-            assert_eq!(before_result, u64::MAX, "Pre-UNIX_EPOCH should give u64::MAX");
+            let before_result = before_epoch
+                .duration_since(UNIX_EPOCH)
+                .map_or(u64::MAX, |duration| duration.as_secs());
+            assert_eq!(
+                before_result,
+                u64::MAX,
+                "Pre-UNIX_EPOCH should give u64::MAX"
+            );
         }
     }
 
@@ -29981,48 +30257,75 @@ mod time_math_wraparound_tests {
         let future_time = now + Duration::from_secs(86400); // 1 day future
 
         // OLD VULNERABLE CODE pattern: checked_duration_since().unwrap_or_default()
-        let old_vulnerable_result = now.checked_duration_since(future_time)
-                                      .unwrap_or_default(); // Duration::ZERO
-        assert_eq!(old_vulnerable_result.as_secs(), 0,
-                   "Old pattern would return 0 seconds (fresh file) - VULNERABLE");
+        let old_vulnerable_result = now.checked_duration_since(future_time).unwrap_or_default(); // Duration::ZERO
+        assert_eq!(
+            old_vulnerable_result.as_secs(),
+            0,
+            "Old pattern would return 0 seconds (fresh file) - VULNERABLE"
+        );
 
         // NEW SECURE CODE pattern: checked_duration_since().unwrap_or(Duration::from_secs(u32::MAX))
-        let new_secure_result = now.checked_duration_since(future_time)
-                                  .unwrap_or(Duration::from_secs(u32::MAX as u64));
-        assert_eq!(new_secure_result.as_secs(), u32::MAX as u64,
-                   "New pattern returns maximum age - SECURE");
+        let new_secure_result = now
+            .checked_duration_since(future_time)
+            .unwrap_or(Duration::from_secs(u32::MAX as u64));
+        assert_eq!(
+            new_secure_result.as_secs(),
+            u32::MAX as u64,
+            "New pattern returns maximum age - SECURE"
+        );
 
-        assert_ne!(old_vulnerable_result.as_secs(), new_secure_result.as_secs(),
-                   "Fix changed behavior for future timestamps");
+        assert_ne!(
+            old_vulnerable_result.as_secs(),
+            new_secure_result.as_secs(),
+            "Fix changed behavior for future timestamps"
+        );
 
         // Test 2: current_unix_secs pre-EPOCH vulnerability fix
         let pre_epoch = UNIX_EPOCH - Duration::from_secs(1000);
 
         // OLD VULNERABLE CODE pattern: map_or(0, |d| d.as_secs())
-        let old_vulnerable_timestamp = pre_epoch.duration_since(UNIX_EPOCH)
-                                                .map_or(0, |d| d.as_secs());
-        assert_eq!(old_vulnerable_timestamp, 0,
-                   "Old pattern would return timestamp 0 - VULNERABLE");
+        let old_vulnerable_timestamp = pre_epoch
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        assert_eq!(
+            old_vulnerable_timestamp, 0,
+            "Old pattern would return timestamp 0 - VULNERABLE"
+        );
 
         // NEW SECURE CODE pattern: map_or(u64::MAX, |d| d.as_secs())
-        let new_secure_timestamp = pre_epoch.duration_since(UNIX_EPOCH)
-                                           .map_or(u64::MAX, |d| d.as_secs());
-        assert_eq!(new_secure_timestamp, u64::MAX,
-                   "New pattern returns u64::MAX - SECURE");
+        let new_secure_timestamp = pre_epoch
+            .duration_since(UNIX_EPOCH)
+            .map_or(u64::MAX, |d| d.as_secs());
+        assert_eq!(
+            new_secure_timestamp,
+            u64::MAX,
+            "New pattern returns u64::MAX - SECURE"
+        );
 
-        assert_ne!(old_vulnerable_timestamp, new_secure_timestamp,
-                   "Fix changed behavior for pre-EPOCH times");
+        assert_ne!(
+            old_vulnerable_timestamp, new_secure_timestamp,
+            "Fix changed behavior for pre-EPOCH times"
+        );
 
         // Test 3: Normal cases should still work correctly
         let past_time = now - Duration::from_secs(3600); // 1 hour ago
-        let normal_age = now.checked_duration_since(past_time)
-                           .unwrap_or(Duration::from_secs(u32::MAX as u64));
-        assert_eq!(normal_age.as_secs(), 3600, "Normal timestamps still work correctly");
+        let normal_age = now
+            .checked_duration_since(past_time)
+            .unwrap_or(Duration::from_secs(u32::MAX as u64));
+        assert_eq!(
+            normal_age.as_secs(),
+            3600,
+            "Normal timestamps still work correctly"
+        );
 
         let recent_epoch_time = UNIX_EPOCH + Duration::from_secs(1640995200); // ~2022
-        let normal_timestamp = recent_epoch_time.duration_since(UNIX_EPOCH)
-                                               .map_or(u64::MAX, |d| d.as_secs());
-        assert_eq!(normal_timestamp, 1640995200, "Normal unix timestamps still work correctly");
+        let normal_timestamp = recent_epoch_time
+            .duration_since(UNIX_EPOCH)
+            .map_or(u64::MAX, |d| d.as_secs());
+        assert_eq!(
+            normal_timestamp, 1640995200,
+            "Normal unix timestamps still work correctly"
+        );
     }
 
     #[test]

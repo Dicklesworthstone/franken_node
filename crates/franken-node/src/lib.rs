@@ -20,7 +20,10 @@ pub(crate) fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 
 /// Read file with size limits to prevent DoS via parser bombs.
 /// Returns file content as String if within size limit, error otherwise.
-pub(crate) fn bounded_read_to_string(path: &std::path::Path, max_bytes: u64) -> std::io::Result<String> {
+pub(crate) fn bounded_read_to_string(
+    path: &std::path::Path,
+    max_bytes: u64,
+) -> std::io::Result<String> {
     use std::fs::File;
     use std::io::Read;
 
@@ -170,7 +173,10 @@ pub mod lock_utils {
 
     /// Try to acquire mutex lock, returning error instead of panicking on poison.
     /// Replaces panic with structured error for better error handling in production code.
-    pub fn try_lock<'a, T>(mutex: &'a Mutex<T>, context: &str) -> Result<MutexGuard<'a, T>, ActionableError> {
+    pub fn try_lock<'a, T>(
+        mutex: &'a Mutex<T>,
+        context: &str,
+    ) -> Result<MutexGuard<'a, T>, ActionableError> {
         mutex.lock().map_err(|poison_err| {
             ActionableError::new(
                 format!("Critical mutex poisoned in {}: {}. This indicates a serious bug in concurrent code.", context, poison_err),
@@ -1318,14 +1324,16 @@ mod tests {
         // Test bounded_read_to_string helper function size limit enforcement
         // This test verifies the fix for bd-vmiky (regression test coverage)
 
-        use tempfile::NamedTempFile;
-        use std::io::Write;
         use super::bounded_read_to_string;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
 
         // Create a small file within limit
         let mut small_file = NamedTempFile::new().expect("create temp file");
         let small_content = "small content";
-        small_file.write_all(small_content.as_bytes()).expect("write small content");
+        small_file
+            .write_all(small_content.as_bytes())
+            .expect("write small content");
 
         // Should succeed with generous limit
         let result = bounded_read_to_string(small_file.path(), 1000);
@@ -1354,14 +1362,16 @@ mod tests {
     #[test]
     fn bounded_read_to_string_handles_oversized_files() {
         // Test that oversized files are rejected with proper error message
-        use tempfile::NamedTempFile;
-        use std::io::Write;
         use super::bounded_read_to_string;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
 
         // Create a file that's definitely too large
         let mut large_file = NamedTempFile::new().expect("create temp file");
         let large_content = "x".repeat(2000); // 2000 bytes
-        large_file.write_all(large_content.as_bytes()).expect("write large content");
+        large_file
+            .write_all(large_content.as_bytes())
+            .expect("write large content");
 
         // Test with 1KB limit - should fail
         let result = bounded_read_to_string(large_file.path(), 1000);
@@ -1377,9 +1387,9 @@ mod tests {
     fn bounded_read_to_string_atomic_toctou_protection() {
         // Test that size check and read are atomic (TOCTOU protection)
         // This is harder to test directly, but we verify the implementation pattern
-        use tempfile::NamedTempFile;
-        use std::io::Write;
         use super::bounded_read_to_string;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
 
         let mut file = NamedTempFile::new().expect("create temp file");
         let content = "test content for TOCTOU protection";
@@ -1412,9 +1422,9 @@ mod tests {
     #[test]
     fn bounded_read_to_string_boundary_conditions() {
         // Test boundary conditions: zero limit, empty file, etc.
-        use tempfile::NamedTempFile;
-        use std::io::Write;
         use super::bounded_read_to_string;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
 
         // Empty file with zero limit should succeed
         let empty_file = NamedTempFile::new().expect("create temp file");

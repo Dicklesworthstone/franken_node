@@ -584,7 +584,6 @@ mod tests {
         assert_eq!(artifact.plan_version, 1);
     }
 
-
     #[test]
     fn test_reference_artifact_has_steps() {
         let artifact = generate_reference_artifact();

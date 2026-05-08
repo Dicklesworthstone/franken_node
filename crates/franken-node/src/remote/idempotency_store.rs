@@ -1755,26 +1755,40 @@ mod tests {
         let debug_output = format!("{:?}", store);
 
         // Critical: Verify sensitive audit data is not exposed
-        assert!(!debug_output.contains("entries: {"),
-                "Debug output should not expose entry details");
-        assert!(!debug_output.contains("audit_log: ["),
-                "Debug output should not expose audit log entries");
+        assert!(
+            !debug_output.contains("entries: {"),
+            "Debug output should not expose entry details"
+        );
+        assert!(
+            !debug_output.contains("audit_log: ["),
+            "Debug output should not expose audit log entries"
+        );
 
         // Verify counts are shown instead
-        assert!(debug_output.contains("entries_count"),
-                "Debug should show entries count");
-        assert!(debug_output.contains("audit_log_count"),
-                "Debug should show audit log count");
+        assert!(
+            debug_output.contains("entries_count"),
+            "Debug should show entries count"
+        );
+        assert!(
+            debug_output.contains("audit_log_count"),
+            "Debug should show audit log count"
+        );
 
         // Verify other safe fields are visible
-        assert!(debug_output.contains("ttl_secs: 3600"),
-                "Debug should show TTL");
-        assert!(debug_output.contains("total_new"),
-                "Debug should show total counts");
+        assert!(
+            debug_output.contains("ttl_secs: 3600"),
+            "Debug should show TTL"
+        );
+        assert!(
+            debug_output.contains("total_new"),
+            "Debug should show total counts"
+        );
 
         // Should use finish_non_exhaustive() pattern
-        assert!(debug_output.contains(".."),
-                "Debug output should indicate hidden fields with '..'");
+        assert!(
+            debug_output.contains(".."),
+            "Debug output should indicate hidden fields with '..'"
+        );
     }
 
     #[test]
@@ -1788,18 +1802,28 @@ mod tests {
         let debug_output = format!("{:?}", outcome);
 
         // Verify sensitive fields are redacted
-        assert!(!debug_output.contains("sensitive_hash_abc123"),
-                "Debug output should not expose result_hash");
-        assert!(!debug_output.contains("sensitive_result_data"),
-                "Debug output should not expose result_data");
+        assert!(
+            !debug_output.contains("sensitive_hash_abc123"),
+            "Debug output should not expose result_hash"
+        );
+        assert!(
+            !debug_output.contains("sensitive_result_data"),
+            "Debug output should not expose result_data"
+        );
 
         // Verify safe fields and counts are shown
-        assert!(debug_output.contains("result_data_bytes: 21"),
-                "Debug should show result_data length");
-        assert!(debug_output.contains("completed_at_secs: 1234567890"),
-                "Debug should show completion timestamp");
-        assert!(debug_output.contains("[REDACTED]"),
-                "Debug should indicate redacted fields");
+        assert!(
+            debug_output.contains("result_data_bytes: 21"),
+            "Debug should show result_data length"
+        );
+        assert!(
+            debug_output.contains("completed_at_secs: 1234567890"),
+            "Debug should show completion timestamp"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug should indicate redacted fields"
+        );
     }
 
     #[test]
@@ -1816,18 +1840,28 @@ mod tests {
         let debug_output = format!("{:?}", entry);
 
         // Verify sensitive fields are redacted
-        assert!(!debug_output.contains("sensitive_payload_hash_xyz789"),
-                "Debug output should not expose payload_hash");
+        assert!(
+            !debug_output.contains("sensitive_payload_hash_xyz789"),
+            "Debug output should not expose payload_hash"
+        );
 
         // Verify safe fields are shown
-        assert!(debug_output.contains("test_key"),
-                "Debug should show idempotency key");
-        assert!(debug_output.contains("Complete"),
-                "Debug should show status");
-        assert!(debug_output.contains("created_at_secs: 1234567890"),
-                "Debug should show creation timestamp");
-        assert!(debug_output.contains("[REDACTED]"),
-                "Debug should indicate redacted fields");
+        assert!(
+            debug_output.contains("test_key"),
+            "Debug should show idempotency key"
+        );
+        assert!(
+            debug_output.contains("Complete"),
+            "Debug should show status"
+        );
+        assert!(
+            debug_output.contains("created_at_secs: 1234567890"),
+            "Debug should show creation timestamp"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug should indicate redacted fields"
+        );
     }
 
     proptest! {

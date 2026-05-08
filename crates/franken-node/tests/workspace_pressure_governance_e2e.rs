@@ -4,14 +4,14 @@ use frankenengine_node::ops::workspace_pressure_policy::{
     WorkspacePressurePolicy,
 };
 use frankenengine_node::runtime::resource_governor::{
-    reason_codes, ResourceArtifactInventory, ResourceArtifactInventoryEntry, ResourceArtifactKind,
+    ResourceArtifactInventory, ResourceArtifactInventoryEntry, ResourceArtifactKind,
     ResourceArtifactOpenFileStatus, ResourceArtifactPin, ResourceArtifactSafetyClass,
-    ResourceGovernorSnapshotInput, SnapshotProcessInput,
+    ResourceGovernorSnapshotInput, SnapshotProcessInput, reason_codes,
 };
 use fsqlite::compat::TransactionExt;
 use fsqlite::{Connection, SqliteValue};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -190,13 +190,17 @@ fn cli_subprocess_reads_real_snapshot_artifact_inventory() {
         .as_array()
         .expect("artifact inventory entries");
     assert!(entries.len() >= 7);
-    assert!(entries
-        .iter()
-        .any(|entry| entry["cleanup_eligible"].as_bool() == Some(true)));
-    assert!(entries
-        .iter()
-        .filter(|entry| entry["cleanup_eligible"].as_bool() == Some(true))
-        .all(|entry| !is_protected_path(entry["path"].as_str().expect("entry path"))));
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["cleanup_eligible"].as_bool() == Some(true))
+    );
+    assert!(
+        entries
+            .iter()
+            .filter(|entry| entry["cleanup_eligible"].as_bool() == Some(true))
+            .all(|entry| !is_protected_path(entry["path"].as_str().expect("entry path")))
+    );
 
     workspace.append_assertion_log(json!({
         "schema_version": "bd-p9mpd.6/assertion-log/v1",

@@ -6962,9 +6962,14 @@ mod tests {
         let debug_output = format!("{:?}", signature);
 
         // Critical: Verify signature_hex is redacted in debug output
-        assert!(debug_output.contains("[REDACTED]"), "signature_hex must be redacted in debug output");
-        assert!(!debug_output.contains("sensitive_signature_data_abcdef"),
-                "actual signature hex must not appear in debug output");
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "signature_hex must be redacted in debug output"
+        );
+        assert!(
+            !debug_output.contains("sensitive_signature_data_abcdef"),
+            "actual signature hex must not appear in debug output"
+        );
 
         // Verify other fields are still visible
         assert!(debug_output.contains("test-key-id"));

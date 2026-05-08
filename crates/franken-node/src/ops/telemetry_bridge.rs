@@ -4298,7 +4298,8 @@ mod tests {
 
         // Wait for workers to complete and verify no handles are left orphaned
         let start = std::time::Instant::now();
-        while !workers_completed.load(Ordering::Acquire) || !final_completed.load(Ordering::Acquire) {
+        while !workers_completed.load(Ordering::Acquire) || !final_completed.load(Ordering::Acquire)
+        {
             assert!(
                 start.elapsed() <= Duration::from_secs(1),
                 "Workers did not complete within timeout - possible handle leak"
@@ -4322,8 +4323,8 @@ mod tests {
     #[test]
     fn test_relaxed_atomic_ordering_coordination() {
         // Test that Release/Acquire ordering provides proper coordination for stop signaling
-        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
         use std::thread;
         use std::time::Duration;
 
@@ -4361,10 +4362,14 @@ mod tests {
         stop_flag.store(true, Ordering::Release);
 
         // Wait for worker to complete
-        worker.join().expect("worker thread should complete successfully");
+        worker
+            .join()
+            .expect("worker thread should complete successfully");
 
         // Verify work was completed (should use Acquire ordering)
-        assert!(work_completed.load(Ordering::Acquire),
-            "Worker should complete after stop signaling");
+        assert!(
+            work_completed.load(Ordering::Acquire),
+            "Worker should complete after stop signaling"
+        );
     }
 }

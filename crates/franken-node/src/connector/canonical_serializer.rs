@@ -1134,8 +1134,10 @@ mod tests {
         let digest_new = hasher_new.finalize();
 
         // Digests must be identical
-        assert_eq!(digest_old, digest_new,
-            "feed_into_hasher must produce identical digest as to_bytes");
+        assert_eq!(
+            digest_old, digest_new,
+            "feed_into_hasher must produce identical digest as to_bytes"
+        );
 
         // Test with empty payload
         let pi_empty = SignaturePreimage::build(0, [0x00, 0xFF], vec![]);
@@ -1147,8 +1149,10 @@ mod tests {
         pi_empty.feed_into_hasher(&mut hasher_empty_new);
         let digest_empty_new = hasher_empty_new.finalize();
 
-        assert_eq!(digest_empty_old, digest_empty_new,
-            "feed_into_hasher must work correctly with empty payload");
+        assert_eq!(
+            digest_empty_old, digest_empty_new,
+            "feed_into_hasher must work correctly with empty payload"
+        );
     }
 
     proptest! {

@@ -3287,26 +3287,33 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
 
         for (key, value) in test_cases {
             // Write and verify success
-            let write_result = adapter.write(
-                &caller,
-                PersistenceClass::ControlState,
-                key,
-                value,
-            ).expect("write should succeed");
+            let write_result = adapter
+                .write(&caller, PersistenceClass::ControlState, key, value)
+                .expect("write should succeed");
 
-            assert!(write_result.success, "write should report success for key: {}", key);
+            assert!(
+                write_result.success,
+                "write should report success for key: {}",
+                key
+            );
 
             // Read back and verify identical value
-            let read_result = adapter.read(
-                &caller,
-                PersistenceClass::ControlState,
-                key,
-            ).expect("read should succeed");
+            let read_result = adapter
+                .read(&caller, PersistenceClass::ControlState, key)
+                .expect("read should succeed");
 
             assert!(read_result.found, "key should be found: {}", key);
             assert_eq!(read_result.key, key, "returned key should match input");
-            assert_eq!(read_result.value.unwrap(), value, "returned value should match for key: {}", key);
-            assert_eq!(read_result.persistence_class, PersistenceClass::ControlState);
+            assert_eq!(
+                read_result.value.unwrap(),
+                value,
+                "returned value should match for key: {}",
+                key
+            );
+            assert_eq!(
+                read_result.persistence_class,
+                PersistenceClass::ControlState
+            );
         }
     }
 }

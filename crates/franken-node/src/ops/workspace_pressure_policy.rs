@@ -663,9 +663,12 @@ pub fn get_active_file_reservations() -> Result<u32, Box<dyn std::error::Error>>
         .args([
             "-s",
             "-f", // Fail on HTTP error codes
-            "--connect-timeout", "5", // 5 second connection timeout
-            "--max-time", "10", // 10 second total timeout
-            "-H", "Content-Type: application/json",
+            "--connect-timeout",
+            "5", // 5 second connection timeout
+            "--max-time",
+            "10", // 10 second total timeout
+            "-H",
+            "Content-Type: application/json",
             "http://localhost:8765/mail/api/file-reservations/active/count",
         ])
         .output()
@@ -677,19 +680,26 @@ pub fn get_active_file_reservations() -> Result<u32, Box<dyn std::error::Error>>
                 Ok(count) => Ok(count),
                 Err(_) => {
                     // If we can't parse the response, fall back to reasonable estimate
-                    eprintln!("Warning: Could not parse Agent Mail reservation count response. Using fallback.");
+                    eprintln!(
+                        "Warning: Could not parse Agent Mail reservation count response. Using fallback."
+                    );
                     Ok(5) // Conservative fallback
                 }
             }
         }
         Ok(_) => {
             // Agent Mail returned an error - use fallback
-            eprintln!("Warning: Agent Mail query failed. Using conservative estimate for reservations.");
+            eprintln!(
+                "Warning: Agent Mail query failed. Using conservative estimate for reservations."
+            );
             Ok(5) // Conservative fallback
         }
         Err(e) => {
             // Could not run curl or Agent Mail unavailable - use fallback
-            eprintln!("Warning: Agent Mail unavailable ({}). Using conservative estimate for reservations.", e);
+            eprintln!(
+                "Warning: Agent Mail unavailable ({}). Using conservative estimate for reservations.",
+                e
+            );
             Ok(5) // Conservative fallback
         }
     }
@@ -873,8 +883,10 @@ mod tests {
             .args([
                 "-s",
                 "-f",
-                "--connect-timeout", "1",
-                "--max-time", "2",
+                "--connect-timeout",
+                "1",
+                "--max-time",
+                "2",
                 "http://localhost:99999/nonexistent",
             ])
             .output();

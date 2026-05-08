@@ -7,7 +7,7 @@ mod tests {
         AdmissionDecision, PolicyDecision, PolicyThresholds, WorkCostClass,
         WorkspacePressureInputs, WorkspacePressurePolicy,
     };
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
@@ -71,10 +71,12 @@ mod tests {
         assert!(!output.resources.coordination_healthy);
         assert_eq!(output.policy_decisions.len(), 6);
         assert!(!output.recommended_actions.is_empty());
-        assert!(output
-            .recommended_actions
-            .iter()
-            .any(|a| a.priority == "high"));
+        assert!(
+            output
+                .recommended_actions
+                .iter()
+                .any(|a| a.priority == "high")
+        );
         assert_eq!(output.metadata.get("rch_available").unwrap(), "false");
     }
 
@@ -211,11 +213,13 @@ mod tests {
         // Check RCH status for saturated case
         assert!(output.resources.rch_status.available);
         assert_eq!(output.resources.rch_status.available_slots, Some(0));
-        assert!(output
-            .resources
-            .rch_status
-            .status_desc
-            .contains("saturated"));
+        assert!(
+            output
+                .resources
+                .rch_status
+                .status_desc
+                .contains("saturated")
+        );
     }
 
     #[test]

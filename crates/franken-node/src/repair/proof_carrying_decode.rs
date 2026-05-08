@@ -5701,7 +5701,7 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
             // Verify that collision attack fails
             if result.is_ok() {
                 // If any succeed, check if it's actually a hash collision
-                if malicious_hash == legit_hash {
+                if crate::security::constant_time::ct_eq(&malicious_hash, &legit_hash) {
                     collision_detected = true;
                     panic!(
                         "CRITICAL: Hash collision detected between legitimate and malicious fragments!"

@@ -1532,16 +1532,14 @@ mod tests {
         // Test normal case: small collections should hash correctly
         // This verifies the basic functionality after the saturating arithmetic fix
 
-        let categories = vec![
-            CategoryCompliance {
-                category: RuleCategory::AccessControl,
-                total_rules: 2,
-                compliant: 1,
-                non_compliant: 1,
-                not_assessed: 0,
-                compliance_rate: 0.5,
-            },
-        ];
+        let categories = vec![CategoryCompliance {
+            category: RuleCategory::AccessControl,
+            total_rules: 2,
+            compliant: 1,
+            non_compliant: 1,
+            not_assessed: 0,
+            compliance_rate: 0.5,
+        }];
 
         let blocked_rules = vec!["rule1".to_string(), "rule2".to_string()];
 
@@ -1556,7 +1554,10 @@ mod tests {
 
         // Should produce a valid hash
         assert_eq!(hash1.len(), 64, "Hash should be 64 hex characters");
-        assert!(hash1.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex");
+        assert!(
+            hash1.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should be hex"
+        );
 
         // Deterministic: same inputs should produce same hash
         let hash2 = compute_report_content_hash(
@@ -1600,8 +1601,15 @@ mod tests {
         );
 
         // Should produce valid hash despite large inputs
-        assert_eq!(hash.len(), 64, "Hash should still be valid with large inputs");
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex");
+        assert_eq!(
+            hash.len(),
+            64,
+            "Hash should still be valid with large inputs"
+        );
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should be hex"
+        );
     }
 
     #[test]
@@ -1650,8 +1658,10 @@ mod tests {
         );
 
         // Should produce different hashes
-        assert_ne!(normal_hash, large_hash,
-                   "Normal vs large inputs should produce different hashes");
+        assert_ne!(
+            normal_hash, large_hash,
+            "Normal vs large inputs should produce different hashes"
+        );
     }
 
     #[test]
@@ -1698,8 +1708,10 @@ mod tests {
         );
 
         // Should produce different hashes due to proper length prefixing
-        assert_ne!(hash1, hash2,
-                   "Different field boundaries should produce different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "Different field boundaries should produce different hashes"
+        );
     }
 
     #[test]
@@ -1754,7 +1766,10 @@ mod tests {
 
         // Verify hash integrity
         assert_eq!(hash.len(), 64, "Hash should be valid with many inputs");
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex");
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should be hex"
+        );
 
         // Verify determinism
         let hash2 = compute_report_content_hash(
@@ -1785,8 +1800,15 @@ mod tests {
         );
 
         // Should still produce valid hash with empty collections
-        assert_eq!(hash.len(), 64, "Hash should be valid with empty collections");
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex");
+        assert_eq!(
+            hash.len(),
+            64,
+            "Hash should be valid with empty collections"
+        );
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should be hex"
+        );
 
         // Should be different from non-empty case
         let non_empty_hash = compute_report_content_hash(
@@ -1805,8 +1827,10 @@ mod tests {
             &["rule".to_string()],
         );
 
-        assert_ne!(hash, non_empty_hash,
-                   "Empty vs non-empty collections should produce different hashes");
+        assert_ne!(
+            hash, non_empty_hash,
+            "Empty vs non-empty collections should produce different hashes"
+        );
     }
 
     proptest! {

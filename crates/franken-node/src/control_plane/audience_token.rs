@@ -1716,8 +1716,15 @@ mod tests {
         // 1. Assert deterministic output: identical input produces identical bytes
         let hash1 = token1.hash_bytes();
         let hash2 = token2.hash_bytes();
-        assert_eq!(hash1, hash2, "hash_bytes() must be deterministic for identical input");
-        assert_eq!(hash1.len(), 32, "hash_bytes() must return SHA256 digest (32 bytes)");
+        assert_eq!(
+            hash1, hash2,
+            "hash_bytes() must be deterministic for identical input"
+        );
+        assert_eq!(
+            hash1.len(),
+            32,
+            "hash_bytes() must return SHA256 digest (32 bytes)"
+        );
 
         // 2. Verify existing call sites use constant-time comparison (snapshot test)
         // This test captures the current source code pattern to ensure ct_eq_bytes is used
@@ -1726,19 +1733,25 @@ mod tests {
         // Assert that hash comparison call sites use constant_time::ct_eq_bytes, NOT ==
         let ct_eq_pattern = "constant_time::ct_eq_bytes(";
         let ct_eq_count = source_content.matches(ct_eq_pattern).count();
-        assert!(ct_eq_count >= 4,
-            "Expected at least 4 ct_eq_bytes calls for hash comparison, found: {}", ct_eq_count);
+        assert!(
+            ct_eq_count >= 4,
+            "Expected at least 4 ct_eq_bytes calls for hash comparison, found: {}",
+            ct_eq_count
+        );
 
         // Assert no direct == comparison on .hash().as_bytes() pattern (timing oracle vulnerability)
         let dangerous_patterns = [
             ".hash().as_bytes() ==",
             "== token.hash().as_bytes()",
             ".hash_bytes() ==",
-            "== token.hash_bytes()"
+            "== token.hash_bytes()",
         ];
         for pattern in &dangerous_patterns {
-            assert!(!source_content.contains(pattern),
-                "SECURITY VIOLATION: Found timing oracle pattern '{}' - must use ct_eq_bytes", pattern);
+            assert!(
+                !source_content.contains(pattern),
+                "SECURITY VIOLATION: Found timing oracle pattern '{}' - must use ct_eq_bytes",
+                pattern
+            );
         }
 
         // 3. Demonstrate correct usage pattern for hash_bytes() comparison
@@ -1746,8 +1759,10 @@ mod tests {
         let different_hash = different_token.hash_bytes();
 
         // CORRECT: Use constant-time comparison for security
-        assert!(!constant_time::ct_eq_bytes(&hash1, &different_hash),
-            "Different tokens must produce different hashes");
+        assert!(
+            !constant_time::ct_eq_bytes(&hash1, &different_hash),
+            "Different tokens must produce different hashes"
+        );
 
         // INCORRECT pattern (commented out to prevent timing oracle):
         // assert_ne!(hash1, different_hash); // <-- This would be a timing oracle!

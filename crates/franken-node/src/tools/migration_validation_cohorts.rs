@@ -952,20 +952,25 @@ mod tests {
         // This verifies basic functionality after the saturating arithmetic fix
 
         let mut engine = MigrationValidationCohorts::default();
-        engine.create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
-              .unwrap();
+        engine
+            .create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
+            .unwrap();
         engine.add_project("c1", "project1", &trace()).unwrap();
 
         let report1 = engine.generate_report(&trace());
         let report2 = engine.generate_report(&trace());
 
         // Should be deterministic
-        assert_eq!(report1.content_hash, report2.content_hash,
-                   "Same engine state should produce same hash");
+        assert_eq!(
+            report1.content_hash, report2.content_hash,
+            "Same engine state should produce same hash"
+        );
 
         // Should be valid hex hash
-        assert!(report1.content_hash.chars().all(|c| c.is_ascii_hexdigit()),
-                "Hash should be hex");
+        assert!(
+            report1.content_hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should be hex"
+        );
         assert!(report1.content_hash.len() > 0, "Hash should not be empty");
     }
 
@@ -986,15 +991,19 @@ mod tests {
         // Add projects with large IDs to test flagged collection length prefixing
         for i in 0..10 {
             let large_project = format!("project_{}", "x".repeat(100000)); // ~700KB each
-            engine.add_project("large_cohort", &large_project, &trace()).unwrap();
+            engine
+                .add_project("large_cohort", &large_project, &trace())
+                .unwrap();
         }
 
         // Should succeed without panicking (saturation prevents overflow)
         let report = engine.generate_report(&trace());
 
         // Should produce valid hash despite large inputs
-        assert!(report.content_hash.chars().all(|c| c.is_ascii_hexdigit()),
-                "Hash should be valid hex with large inputs");
+        assert!(
+            report.content_hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should be valid hex with large inputs"
+        );
         assert!(report.content_hash.len() > 0, "Hash should not be empty");
     }
 
@@ -1005,8 +1014,12 @@ mod tests {
 
         // Normal engine
         let mut normal_engine = MigrationValidationCohorts::new("v1.0");
-        normal_engine.create_cohort(sample_cohort("normal", CohortCategory::NodeMinimal), &trace())
-                     .unwrap();
+        normal_engine
+            .create_cohort(
+                sample_cohort("normal", CohortCategory::NodeMinimal),
+                &trace(),
+            )
+            .unwrap();
 
         let normal_hash = normal_engine.generate_report(&trace()).content_hash;
 
@@ -1019,8 +1032,10 @@ mod tests {
         let large_hash = large_engine.generate_report(&trace()).content_hash;
 
         // Should produce different hashes
-        assert_ne!(normal_hash, large_hash,
-                   "Normal vs large inputs should produce different hashes");
+        assert_ne!(
+            normal_hash, large_hash,
+            "Normal vs large inputs should produce different hashes"
+        );
     }
 
     #[test]
@@ -1043,8 +1058,10 @@ mod tests {
         let hash2 = engine2.generate_report(&trace()).content_hash;
 
         // Should produce different hashes due to proper length prefixing
-        assert_ne!(hash1, hash2,
-                   "Different field boundaries should produce different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "Different field boundaries should produce different hashes"
+        );
     }
 
     #[test]
@@ -1079,14 +1096,18 @@ mod tests {
             // Add projects to test flagged collection
             for i in 0..project_count {
                 let project_id = format!("project_{}_{}", i, "x".repeat(i * 100));
-                engine.add_project(cohort_name, &project_id, &trace()).unwrap();
+                engine
+                    .add_project(cohort_name, &project_id, &trace())
+                    .unwrap();
             }
 
             let hash = engine.generate_report(&trace()).content_hash;
 
             // Verify hash format
-            assert!(hash.chars().all(|c| c.is_ascii_hexdigit()),
-                    "Hash should be hex");
+            assert!(
+                hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "Hash should be hex"
+            );
             assert!(hash.len() > 0, "Hash should not be empty");
 
             hashes.push(hash);
@@ -1095,8 +1116,11 @@ mod tests {
         // All hashes should be unique (different inputs produce different outputs)
         for i in 0..hashes.len() {
             for j in (i + 1)..hashes.len() {
-                assert_ne!(hashes[i], hashes[j],
-                           "Different inputs should produce different hashes: case {} vs {}", i, j);
+                assert_ne!(
+                    hashes[i], hashes[j],
+                    "Different inputs should produce different hashes: case {} vs {}",
+                    i, j
+                );
             }
         }
     }
@@ -1125,15 +1149,22 @@ mod tests {
         let report = engine.generate_report(&trace());
 
         // Should have coverage for each category
-        assert!(report.category_coverage.len() > 1, "Should have multiple categories in coverage");
+        assert!(
+            report.category_coverage.len() > 1,
+            "Should have multiple categories in coverage"
+        );
 
         // Hash should be valid
-        assert!(report.content_hash.chars().all(|c| c.is_ascii_hexdigit()),
-                "Hash should be hex");
+        assert!(
+            report.content_hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should be hex"
+        );
 
         // Should be deterministic
         let report2 = engine.generate_report(&trace());
-        assert_eq!(report.content_hash, report2.content_hash,
-                   "Coverage hash should be deterministic");
+        assert_eq!(
+            report.content_hash, report2.content_hash,
+            "Coverage hash should be deterministic"
+        );
     }
 }

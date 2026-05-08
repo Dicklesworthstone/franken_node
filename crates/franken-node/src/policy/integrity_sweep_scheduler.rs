@@ -1361,7 +1361,7 @@ mod tests {
         );
 
         // Anti-pattern demonstration (don't actually use this in production)
-        let timing_vulnerable = hash1 == hash3; // This could leak timing info
+        let timing_vulnerable = crate::security::constant_time::ct_eq(hash1, hash3); // Fixed timing attack
         assert!(!timing_vulnerable);
 
         // Test with empty hashes

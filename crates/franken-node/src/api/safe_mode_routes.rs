@@ -351,8 +351,8 @@ mod tests {
             "inconsistencies": ["trust_mismatch", "signature_invalid"]
         }"#;
 
-        let request: SafeModeEnterRequest = serde_json::from_str(valid_json)
-            .expect("valid request should deserialize");
+        let request: SafeModeEnterRequest =
+            serde_json::from_str(valid_json).expect("valid request should deserialize");
         assert_eq!(request.inconsistencies.len(), 2);
         assert_eq!(request.inconsistencies[0], "trust_mismatch");
 
@@ -365,7 +365,10 @@ mod tests {
         }"#;
 
         let result: Result<SafeModeEnterRequest, _> = serde_json::from_str(invalid_json);
-        assert!(result.is_err(), "Missing inconsistencies field should cause deserialization failure");
+        assert!(
+            result.is_err(),
+            "Missing inconsistencies field should cause deserialization failure"
+        );
 
         // Verify the error is about the missing field
         let error_msg = result.unwrap_err().to_string();

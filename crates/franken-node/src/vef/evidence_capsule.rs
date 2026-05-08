@@ -1351,7 +1351,8 @@ mod tests {
         // Test length-prefixed domain separation (even better)
         let mut length_prefixed_hasher = Sha256::new();
         let domain = "vef_evidence_v1";
-        length_prefixed_hasher.update((u64::try_from(domain.len()).unwrap_or(u64::MAX)).to_le_bytes());
+        length_prefixed_hasher
+            .update((u64::try_from(domain.len()).unwrap_or(u64::MAX)).to_le_bytes());
         length_prefixed_hasher.update(domain.as_bytes());
         length_prefixed_hasher.update(evidence_json.as_bytes());
         let length_prefixed_hash = length_prefixed_hasher.finalize();

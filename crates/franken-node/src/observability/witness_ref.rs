@@ -76,7 +76,7 @@ fn is_valid_witness_structure(witness: &WitnessRef) -> bool {
     }
 
     // Reject all-zero integrity hashes (likely garbage/uninitialized)
-    if witness.integrity_hash == [0u8; 32] {
+    if crate::security::constant_time::ct_eq_bytes(&witness.integrity_hash, &[0u8; 32]) {
         return false;
     }
 
@@ -2306,24 +2306,48 @@ mod tests {
             let debug_output = format!("{:?}", witness);
 
             // Ensure integrity_hash field is redacted
-            assert!(debug_output.contains("integrity_hash: \"[REDACTED; 32 bytes]\""),
-                    "Debug output should redact integrity_hash: {}", debug_output);
+            assert!(
+                debug_output.contains("integrity_hash: \"[REDACTED; 32 bytes]\""),
+                "Debug output should redact integrity_hash: {}",
+                debug_output
+            );
 
             // Ensure safe fields are still visible
-            assert!(debug_output.contains("witness_id"), "Debug should show witness_id");
-            assert!(debug_output.contains("test-witness-001"), "Debug should show witness_id value");
-            assert!(debug_output.contains("ProofArtifact"), "Debug should show witness_kind");
-            assert!(debug_output.contains("bundle-loc-123"), "Debug should show replay_bundle_locator");
+            assert!(
+                debug_output.contains("witness_id"),
+                "Debug should show witness_id"
+            );
+            assert!(
+                debug_output.contains("test-witness-001"),
+                "Debug should show witness_id value"
+            );
+            assert!(
+                debug_output.contains("ProofArtifact"),
+                "Debug should show witness_kind"
+            );
+            assert!(
+                debug_output.contains("bundle-loc-123"),
+                "Debug should show replay_bundle_locator"
+            );
 
             // Ensure actual hash bytes do not appear in debug output
             // Check for hex representation of test hash bytes
-            assert!(!debug_output.contains("42424242"),
-                    "Debug output should not contain hex of hash bytes: {}", debug_output);
-            assert!(!debug_output.contains(&format!("{:02x}", test_hash[0])),
-                    "Debug output should not contain individual hash bytes: {}", debug_output);
+            assert!(
+                !debug_output.contains("42424242"),
+                "Debug output should not contain hex of hash bytes: {}",
+                debug_output
+            );
+            assert!(
+                !debug_output.contains(&format!("{:02x}", test_hash[0])),
+                "Debug output should not contain individual hash bytes: {}",
+                debug_output
+            );
 
             // Verify the actual hash is what we expect (sanity check)
-            assert_eq!(witness.integrity_hash, test_hash, "Test hash should match expected value");
+            assert_eq!(
+                witness.integrity_hash, test_hash,
+                "Test hash should match expected value"
+            );
         }
     }
 }

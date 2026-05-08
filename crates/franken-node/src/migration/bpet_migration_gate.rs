@@ -2463,14 +2463,21 @@ mod tests {
 
         for (code, expected_code) in test_cases {
             let event = gate_event(code, "info", "test-trace", "test message".to_string());
-            assert_eq!(event.code, expected_code, "Event code should match constant");
+            assert_eq!(
+                event.code, expected_code,
+                "Event code should match constant"
+            );
             assert_eq!(event.level, "info");
             assert_eq!(event.trace_id, "test-trace");
             assert_eq!(event.message, "test message");
 
             // Verify serialization includes expected code
             let serialized = serde_json::to_string(&event).unwrap();
-            assert!(serialized.contains(expected_code), "Serialization should contain {}", expected_code);
+            assert!(
+                serialized.contains(expected_code),
+                "Serialization should contain {}",
+                expected_code
+            );
         }
     }
 
@@ -2494,7 +2501,11 @@ mod tests {
 
             // Verify serialization includes expected level
             let serialized = serde_json::to_string(&event).unwrap();
-            assert!(serialized.contains(level), "Serialization should contain level '{}'", level);
+            assert!(
+                serialized.contains(level),
+                "Serialization should contain level '{}'",
+                level
+            );
         }
     }
 

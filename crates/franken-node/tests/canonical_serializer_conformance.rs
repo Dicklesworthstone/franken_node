@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 // Import the canonical serializer module - actually use it!
 use frankenengine_node::connector::canonical_serializer::{
-    TrustObjectType, CanonicalSerializer, SerializerError,
+    CanonicalSerializer, SerializerError, TrustObjectType,
 };
 
 /// Test fixture for canonical serialization
@@ -72,7 +72,10 @@ fn test_canonical_serializer_conformance() {
     let test_payload = r#"{"field1": "value1", "field2": 42, "field3": true}"#;
     let test_payload_bytes = test_payload.as_bytes();
 
-    for &trust_type in &[TrustObjectType::PolicyCheckpoint, TrustObjectType::DelegationToken] {
+    for &trust_type in &[
+        TrustObjectType::PolicyCheckpoint,
+        TrustObjectType::DelegationToken,
+    ] {
         // Test determinism by serializing the same payload multiple times
         let result1 = serializer.serialize(trust_type, test_payload_bytes, "determinism-test-1");
         let result2 = serializer.serialize(trust_type, test_payload_bytes, "determinism-test-2");
@@ -92,12 +95,12 @@ fn test_canonical_serializer_conformance() {
 
     // BD_JJM_ROUND_TRIP_001: Test actual round-trip verification using CanonicalSerializer API
     let mut round_trip_pass = true;
-    for &trust_type in &[TrustObjectType::SessionTicket, TrustObjectType::ZoneBoundaryClaim] {
-        let round_trip_result = serializer.round_trip_canonical(
-            trust_type,
-            test_payload_bytes,
-            "round-trip-test"
-        );
+    for &trust_type in &[
+        TrustObjectType::SessionTicket,
+        TrustObjectType::ZoneBoundaryClaim,
+    ] {
+        let round_trip_result =
+            serializer.round_trip_canonical(trust_type, test_payload_bytes, "round-trip-test");
 
         let test_pass = round_trip_result.is_ok();
         if !test_pass {
@@ -117,18 +120,20 @@ fn test_canonical_serializer_conformance() {
 
     // BD_JJM_PREIMAGE_001: Test actual signature preimage construction
     let mut preimage_pass = true;
-    for &trust_type in &[TrustObjectType::RevocationAssertion, TrustObjectType::OperatorReceipt] {
-        let preimage_result = serializer.build_preimage(
-            trust_type,
-            test_payload_bytes,
-            "preimage-test"
-        );
+    for &trust_type in &[
+        TrustObjectType::RevocationAssertion,
+        TrustObjectType::OperatorReceipt,
+    ] {
+        let preimage_result =
+            serializer.build_preimage(trust_type, test_payload_bytes, "preimage-test");
 
         let test_pass = match &preimage_result {
             Ok(preimage) => {
                 // Verify preimage structure: version + domain_tag + payload
                 let domain_tag = trust_type.domain_tag();
-                preimage.version == 1 && preimage.domain_tag == domain_tag && !preimage.canonical_payload.is_empty()
+                preimage.version == 1
+                    && preimage.domain_tag == domain_tag
+                    && !preimage.canonical_payload.is_empty()
             }
             Err(_) => false,
         };
@@ -144,7 +149,9 @@ fn test_canonical_serializer_conformance() {
             match preimage_result {
                 Ok(preimage) => format!(
                     "version: {}, domain_tag: {:?}, payload_len: {}",
-                    preimage.version, preimage.domain_tag, preimage.canonical_payload.len()
+                    preimage.version,
+                    preimage.domain_tag,
+                    preimage.canonical_payload.len()
                 ),
                 Err(e) => format!("preimage failed: {}", e),
             },
@@ -156,17 +163,22 @@ fn test_canonical_serializer_conformance() {
     let float_result = serializer.serialize(
         TrustObjectType::PolicyCheckpoint,
         float_payload.as_bytes(),
-        "float-rejection-test"
+        "float-rejection-test",
     );
 
-    let float_rejection_pass = matches!(float_result, Err(SerializerError::FloatingPointRejected { .. }));
+    let float_rejection_pass = matches!(
+        float_result,
+        Err(SerializerError::FloatingPointRejected { .. })
+    );
 
     test_results.push((
         "BD_JJM_NO_FLOAT_001".to_string(),
         "Floating-point payload rejection".to_string(),
         float_rejection_pass,
         match float_result {
-            Err(SerializerError::FloatingPointRejected { .. }) => "correctly rejected float".to_string(),
+            Err(SerializerError::FloatingPointRejected { .. }) => {
+                "correctly rejected float".to_string()
+            }
             Ok(_) => "incorrectly accepted float".to_string(),
             Err(e) => format!("unexpected error: {}", e),
         },
@@ -177,17 +189,22 @@ fn test_canonical_serializer_conformance() {
     let malformed_result = serializer.serialize(
         TrustObjectType::DelegationToken,
         malformed_payload,
-        "malformed-rejection-test"
+        "malformed-rejection-test",
     );
 
-    let non_canonical_rejection_pass = matches!(malformed_result, Err(SerializerError::NonCanonicalInput { .. }));
+    let non_canonical_rejection_pass = matches!(
+        malformed_result,
+        Err(SerializerError::NonCanonicalInput { .. })
+    );
 
     test_results.push((
         "BD_JJM_NON_CANONICAL_001".to_string(),
         "Non-canonical input rejection".to_string(),
         non_canonical_rejection_pass,
         match malformed_result {
-            Err(SerializerError::NonCanonicalInput { .. }) => "correctly rejected malformed input".to_string(),
+            Err(SerializerError::NonCanonicalInput { .. }) => {
+                "correctly rejected malformed input".to_string()
+            }
             Ok(_) => "incorrectly accepted malformed input".to_string(),
             Err(e) => format!("unexpected error: {}", e),
         },
@@ -230,8 +247,14 @@ fn test_canonical_serializer_conformance() {
     eprintln!("\n## Invariant Validation Summary:");
     eprintln!(
         "- **INV-CAN-DETERMINISTIC**: {}",
-        if test_results.iter().any(|(id, _, passed, _)|
-            id.contains("DETERMINISM") && *passed) { "PASS" } else { "FAIL" }
+        if test_results
+            .iter()
+            .any(|(id, _, passed, _)| id.contains("DETERMINISM") && *passed)
+        {
+            "PASS"
+        } else {
+            "FAIL"
+        }
     );
     eprintln!(
         "- **INV-CAN-ROUND-TRIP**: {}",
@@ -269,19 +292,36 @@ fn test_canonical_serializer_negative_cases() {
 
     // Test schema not found error
     let payload = r#"{"test": "value"}"#;
-    let result = serializer.serialize(TrustObjectType::PolicyCheckpoint, payload.as_bytes(), "test");
-    assert!(matches!(result, Err(SerializerError::SchemaNotFound { .. })));
+    let result = serializer.serialize(
+        TrustObjectType::PolicyCheckpoint,
+        payload.as_bytes(),
+        "test",
+    );
+    assert!(matches!(
+        result,
+        Err(SerializerError::SchemaNotFound { .. })
+    ));
 
     // Test with schemas registered
     let mut serializer = CanonicalSerializer::with_all_schemas();
 
     // Test floating point rejection
     let float_payload = r#"{"number": 1.5}"#;
-    let result = serializer.serialize(TrustObjectType::SessionTicket, float_payload.as_bytes(), "float-test");
-    assert!(matches!(result, Err(SerializerError::FloatingPointRejected { .. })));
+    let result = serializer.serialize(
+        TrustObjectType::SessionTicket,
+        float_payload.as_bytes(),
+        "float-test",
+    );
+    assert!(matches!(
+        result,
+        Err(SerializerError::FloatingPointRejected { .. })
+    ));
 
     // Test malformed JSON rejection
     let bad_json = b"not json at all";
     let result = serializer.serialize(TrustObjectType::DelegationToken, bad_json, "bad-json-test");
-    assert!(matches!(result, Err(SerializerError::NonCanonicalInput { .. })));
+    assert!(matches!(
+        result,
+        Err(SerializerError::NonCanonicalInput { .. })
+    ));
 }

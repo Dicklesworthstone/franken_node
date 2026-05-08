@@ -2514,8 +2514,9 @@ fn encode_scope_entries<'a>(entries: impl IntoIterator<Item = &'a str>) -> Strin
 
     // Estimate capacity: for each entry, roughly 3 digits + 1 + entry.len() + 1
     // Conservative estimate avoids reallocation in hot path
-    let estimated_capacity = entries.iter()
-        .map(|entry| 5 + entry.len())  // 3 for length digits + 1 for ':' + entry + 1 for '|'
+    let estimated_capacity = entries
+        .iter()
+        .map(|entry| 5 + entry.len()) // 3 for length digits + 1 for ':' + entry + 1 for '|'
         .sum();
 
     let mut encoded = String::with_capacity(estimated_capacity);
@@ -2589,7 +2590,7 @@ fn is_repeated_secret_pattern(secret: &str, pattern: &str) -> bool {
         && secret
             .as_bytes()
             .chunks(pattern.len())
-            .all(|chunk| chunk == pattern.as_bytes())
+            .all(|chunk| crate::security::constant_time::ct_eq_bytes(chunk, pattern.as_bytes()))
 }
 
 /// Calculate Shannon entropy for secret quality validation.
@@ -2806,7 +2807,10 @@ mod tests {
             // Mixed typical operation names
             vec!["TelemetryExport", "FederationSync", "NetworkEgress"],
             // Edge case: very short and very long
-            vec!["x", "this_is_a_very_long_operation_name_that_tests_capacity_estimation"],
+            vec![
+                "x",
+                "this_is_a_very_long_operation_name_that_tests_capacity_estimation",
+            ],
         ];
 
         for entries in test_cases {
@@ -2815,22 +2819,34 @@ mod tests {
             // Verify expected format: each entry should be "len:entry|"
             for entry in &entries {
                 let expected_fragment = format!("{}:{}|", entry.len(), entry);
-                assert!(result.contains(&expected_fragment),
+                assert!(
+                    result.contains(&expected_fragment),
                     "Result '{}' should contain fragment '{}' for entry '{}'",
-                    result, expected_fragment, entry);
+                    result,
+                    expected_fragment,
+                    entry
+                );
             }
 
             // Verify no extra content (count of '|' should match entry count)
             let pipe_count = result.chars().filter(|&c| c == '|').count();
-            assert_eq!(pipe_count, entries.len(),
+            assert_eq!(
+                pipe_count,
+                entries.len(),
                 "Result '{}' should have {} pipes for {} entries",
-                result, entries.len(), entries.len());
+                result,
+                entries.len(),
+                entries.len()
+            );
         }
 
         // Test property: encoding is deterministic and length-prefixed
         let entries = vec!["abc", "12345"];
         let result = encode_scope_entries(entries.iter().copied());
-        assert_eq!(result, "3:abc|5:12345|", "Specific encoding should match expected format");
+        assert_eq!(
+            result, "3:abc|5:12345|",
+            "Specific encoding should match expected format"
+        );
     }
 
     #[test]
@@ -2882,6 +2898,8 @@ mod tests {
 
     #[test]
     fn revoked_and_replay_display_redact_token_ids() {
+        #[allow(clippy::string_lit_as_bytes)]
+        // Test-only secret fixture - not used in production
         let token_id = "tok-secret-123";
         let revoked = RemoteCapError::Revoked {
             token_id: token_id.to_string(),
@@ -5680,6 +5698,8 @@ mod remote_cap_comprehensive_negative_tests {
 
     #[test]
     fn strong_secret_material_is_accepted() {
+        #[allow(clippy::string_lit_as_bytes)]
+        // Test-only secret fixture - not used in production
         let strong_secret = "V4ult!8x-Hsm#Torus9@Cipher";
         CapabilityProvider::try_new(strong_secret)
             .expect("strong signing material should pass validation");
@@ -5899,19 +5919,39 @@ mod remote_cap_comprehensive_negative_tests {
         );
 
         let (cap, _) = provider
-            .issue("test@example.com", scope, 1000, 60, false, false, "debug-test")
+            .issue(
+                "test@example.com",
+                scope,
+                1000,
+                60,
+                false,
+                false,
+                "debug-test",
+            )
             .expect("capability issuance should succeed");
 
         let debug_output = format!("{:?}", cap);
 
         // Ensure signature field is redacted
-        assert!(debug_output.contains("signature: \"<redacted>\""),
-                "Debug output should redact signature: {}", debug_output);
+        assert!(
+            debug_output.contains("signature: \"<redacted>\""),
+            "Debug output should redact signature: {}",
+            debug_output
+        );
 
         // Ensure safe fields are still visible
-        assert!(debug_output.contains("token_id"), "Debug should show token_id");
-        assert!(debug_output.contains("issuer_identity"), "Debug should show issuer_identity");
-        assert!(debug_output.contains("test@example.com"), "Debug should show issuer value");
+        assert!(
+            debug_output.contains("token_id"),
+            "Debug should show token_id"
+        );
+        assert!(
+            debug_output.contains("issuer_identity"),
+            "Debug should show issuer_identity"
+        );
+        assert!(
+            debug_output.contains("test@example.com"),
+            "Debug should show issuer value"
+        );
 
         // Ensure actual signature value is not present (it would be base64-encoded)
         // Get the actual signature to ensure it's not in debug output
@@ -5920,8 +5960,11 @@ mod remote_cap_comprehensive_negative_tests {
         for chunk in signature_bytes.chunks(4) {
             let chunk_str = String::from_utf8_lossy(chunk);
             if chunk_str.len() >= 3 {
-                assert!(!debug_output.contains(&chunk_str),
-                        "Debug output should not contain signature chunks: {}", chunk_str);
+                assert!(
+                    !debug_output.contains(&chunk_str),
+                    "Debug output should not contain signature chunks: {}",
+                    chunk_str
+                );
             }
         }
     }
@@ -5945,18 +5988,27 @@ mod remote_cap_comprehensive_negative_tests {
         let debug_output = format!("{:?}", replay_set);
 
         // Ensure token count is shown
-        assert!(debug_output.contains("token_count: 3"),
-                "Debug output should show token count: {}", debug_output);
+        assert!(
+            debug_output.contains("token_count: 3"),
+            "Debug output should show token count: {}",
+            debug_output
+        );
 
         // Ensure actual token IDs are not exposed
         for token in &test_tokens {
-            assert!(!debug_output.contains(token),
-                    "Debug output should not contain token ID '{}': {}", token, debug_output);
+            assert!(
+                !debug_output.contains(token),
+                "Debug output should not contain token ID '{}': {}",
+                token,
+                debug_output
+            );
         }
 
         // Should use finish_non_exhaustive() pattern
-        assert!(debug_output.contains(".."),
-                "Debug output should indicate hidden fields with '..'");
+        assert!(
+            debug_output.contains(".."),
+            "Debug output should indicate hidden fields with '..'"
+        );
     }
 }
 
@@ -5965,7 +6017,10 @@ mod remote_cap_comprehensive_negative_tests {
 #[cfg(test)]
 mod toctou_concurrency_regression_tests {
     use super::*;
-    use std::sync::{Arc, Barrier, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::thread;
     use tempfile::TempDir;
 
@@ -5984,19 +6039,21 @@ mod toctou_concurrency_regression_tests {
         );
 
         // Create a single-use capability
-        let (cap, _) = provider.issue(
-            "test-operator",
-            scope,
-            1_700_000_000,
-            3600,
-            true,  // single_use = true
-            false,
-            "toctou-test",
-        ).expect("issue capability");
+        let (cap, _) = provider
+            .issue(
+                "test-operator",
+                scope,
+                1_700_000_000,
+                3600,
+                true, // single_use = true
+                false,
+                "toctou-test",
+            )
+            .expect("issue capability");
 
         let temp_dir = TempDir::new().expect("temp dir");
-        let gate = CapabilityGate::with_durable_replay_store("test-key", temp_dir.path())
-            .expect("gate");
+        let gate =
+            CapabilityGate::with_durable_replay_store("test-key", temp_dir.path()).expect("gate");
         let gate = Arc::new(gate);
 
         // Barrier to synchronize thread start for maximum race probability
@@ -6039,17 +6096,23 @@ mod toctou_concurrency_regression_tests {
         let final_success_count = success_count.load(Ordering::SeqCst);
 
         // CRITICAL ASSERTION: Exactly one thread should succeed due to atomic check-and-consume
-        assert_eq!(final_success_count, 1,
-                  "Expected exactly 1 success due to single-use constraint, got {}. Results: {:?}",
-                  final_success_count, results);
+        assert_eq!(
+            final_success_count, 1,
+            "Expected exactly 1 success due to single-use constraint, got {}. Results: {:?}",
+            final_success_count, results
+        );
 
         // Verify the successful thread count matches the boolean results
         let bool_success_count = results.iter().filter(|&&success| success).count();
-        assert_eq!(bool_success_count, 1,
-                  "Boolean success count should match atomic count");
+        assert_eq!(
+            bool_success_count, 1,
+            "Boolean success count should match atomic count"
+        );
 
-        println!("✓ Single-use capability race test: {} threads, {} succeeded (expected: 1)",
-                NUM_THREADS, final_success_count);
+        println!(
+            "✓ Single-use capability race test: {} threads, {} succeeded (expected: 1)",
+            NUM_THREADS, final_success_count
+        );
     }
 
     /// Regression test for commit 1aa36dc4: Test with memory-only replay store
@@ -6063,15 +6126,17 @@ mod toctou_concurrency_regression_tests {
             vec!["https://example.com".to_string()],
         );
 
-        let (cap, _) = provider.issue(
-            "test-operator",
-            scope,
-            1_700_000_000,
-            3600,
-            true,
-            false,
-            "memory-toctou-test",
-        ).expect("issue capability");
+        let (cap, _) = provider
+            .issue(
+                "test-operator",
+                scope,
+                1_700_000_000,
+                3600,
+                true,
+                false,
+                "memory-toctou-test",
+            )
+            .expect("issue capability");
 
         // Use memory-only gate (no durable store)
         let gate = Arc::new(CapabilityGate::try_new("test-key").expect("gate"));
@@ -6109,11 +6174,15 @@ mod toctou_concurrency_regression_tests {
         let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         let final_success_count = success_count.load(Ordering::SeqCst);
 
-        assert_eq!(final_success_count, 1,
-                  "Memory-only store: Expected exactly 1 success, got {}. Results: {:?}",
-                  final_success_count, results);
+        assert_eq!(
+            final_success_count, 1,
+            "Memory-only store: Expected exactly 1 success, got {}. Results: {:?}",
+            final_success_count, results
+        );
 
-        println!("✓ Memory-only capability race test: {} threads, {} succeeded",
-                NUM_THREADS, final_success_count);
+        println!(
+            "✓ Memory-only capability race test: {} threads, {} succeeded",
+            NUM_THREADS, final_success_count
+        );
     }
 }

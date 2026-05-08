@@ -4038,7 +4038,8 @@ pub fn auth_failure_limiter_cardinality_loom_model() {
         assert!(stats.unique_source_ips <= MAX_AUTH_FAILURE_SOURCES);
 
         // Global count should equal sum of all increments
-        let expected_global = u64::try_from(results_a.len()).unwrap_or(u64::MAX)
+        let expected_global = u64::try_from(results_a.len())
+            .unwrap_or(u64::MAX)
             .saturating_add(u64::try_from(results_b.len()).unwrap_or(u64::MAX))
             .saturating_add(1u64); // +1 for result_c
         assert_eq!(stats.global_failure_count, expected_global);

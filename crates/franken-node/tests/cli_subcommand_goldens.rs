@@ -878,8 +878,10 @@ fn cli_json_golden_verify_recovery_runbook_green_remote_proof() -> Result<(), Bo
             "verify",
             "recovery-runbook",
             "--json",
-            "--scenario", "green_remote_proof",
-            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+            "--scenario",
+            "green_remote_proof",
+            "--fixed-timestamp",
+            "2026-02-21T12:00:00Z",
         ])
         .assert()
         .success();
@@ -902,8 +904,10 @@ fn cli_json_golden_verify_recovery_runbook_rch_e104_retry() -> Result<(), Box<dy
             "verify",
             "recovery-runbook",
             "--json",
-            "--scenario", "rch_e104_retry",
-            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+            "--scenario",
+            "rch_e104_retry",
+            "--fixed-timestamp",
+            "2026-02-21T12:00:00Z",
         ])
         .assert()
         .success();
@@ -919,15 +923,18 @@ fn cli_json_golden_verify_recovery_runbook_rch_e104_retry() -> Result<(), Box<dy
 }
 
 #[test]
-fn cli_json_golden_verify_recovery_runbook_worker_drain_recommendation() -> Result<(), Box<dyn Error>> {
+fn cli_json_golden_verify_recovery_runbook_worker_drain_recommendation()
+-> Result<(), Box<dyn Error>> {
     let mut cmd = Command::cargo_bin("franken-node")?;
     let assertion = cmd
         .args([
             "verify",
             "recovery-runbook",
             "--json",
-            "--scenario", "worker_drain_recommendation",
-            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+            "--scenario",
+            "worker_drain_recommendation",
+            "--fixed-timestamp",
+            "2026-02-21T12:00:00Z",
         ])
         .assert()
         .success();
@@ -937,7 +944,10 @@ fn cli_json_golden_verify_recovery_runbook_worker_drain_recommendation() -> Resu
         &assertion.get_output().stdout,
     )?;
     with_json_snapshot_settings("verify_cli", || {
-        assert_json_snapshot!("verify_recovery_runbook_worker_drain_recommendation_json", stdout);
+        assert_json_snapshot!(
+            "verify_recovery_runbook_worker_drain_recommendation_json",
+            stdout
+        );
     });
     Ok(())
 }
@@ -949,8 +959,10 @@ fn cli_text_golden_verify_recovery_runbook_human_output() -> Result<(), Box<dyn 
         .args([
             "verify",
             "recovery-runbook",
-            "--scenario", "rch_e104_retry",
-            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+            "--scenario",
+            "rch_e104_retry",
+            "--fixed-timestamp",
+            "2026-02-21T12:00:00Z",
         ])
         .assert()
         .success();
@@ -970,8 +982,10 @@ fn cli_json_golden_verify_recovery_runbook_missing_toolchain() -> Result<(), Box
             "verify",
             "recovery-runbook",
             "--json",
-            "--scenario", "missing_toolchain",
-            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+            "--scenario",
+            "missing_toolchain",
+            "--fixed-timestamp",
+            "2026-02-21T12:00:00Z",
         ])
         .assert()
         .success();
@@ -994,8 +1008,10 @@ fn cli_json_golden_verify_recovery_runbook_disk_pressure() -> Result<(), Box<dyn
             "verify",
             "recovery-runbook",
             "--json",
-            "--scenario", "disk_pressure",
-            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+            "--scenario",
+            "disk_pressure",
+            "--fixed-timestamp",
+            "2026-02-21T12:00:00Z",
         ])
         .assert()
         .success();
@@ -1018,8 +1034,10 @@ fn cli_json_golden_verify_recovery_runbook_source_only_blocker() -> Result<(), B
             "verify",
             "recovery-runbook",
             "--json",
-            "--scenario", "source_only_blocker",
-            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+            "--scenario",
+            "source_only_blocker",
+            "--fixed-timestamp",
+            "2026-02-21T12:00:00Z",
         ])
         .assert()
         .success();
@@ -1042,8 +1060,10 @@ fn cli_json_golden_verify_recovery_runbook_product_compile_failure() -> Result<(
             "verify",
             "recovery-runbook",
             "--json",
-            "--scenario", "product_compile_failure",
-            "--fixed-timestamp", "2026-02-21T12:00:00Z",
+            "--scenario",
+            "product_compile_failure",
+            "--fixed-timestamp",
+            "2026-02-21T12:00:00Z",
         ])
         .assert()
         .success();
@@ -1053,7 +1073,10 @@ fn cli_json_golden_verify_recovery_runbook_product_compile_failure() -> Result<(
         &assertion.get_output().stdout,
     )?;
     with_json_snapshot_settings("verify_cli", || {
-        assert_json_snapshot!("verify_recovery_runbook_product_compile_failure_json", stdout);
+        assert_json_snapshot!(
+            "verify_recovery_runbook_product_compile_failure_json",
+            stdout
+        );
     });
     Ok(())
 }

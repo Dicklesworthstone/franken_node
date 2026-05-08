@@ -448,7 +448,10 @@ mod tests {
     #[test]
     fn optimized_render_produces_identical_output() {
         // Test that the optimized render functions produce byte-identical output to original
-        use super::{render_labels, render_labels_to_buffer, render_metric_value, render_metric_value_to_buffer};
+        use super::{
+            render_labels, render_labels_to_buffer, render_metric_value,
+            render_metric_value_to_buffer,
+        };
 
         // Test labels rendering
         let labels = vec![
@@ -461,7 +464,10 @@ mod tests {
         let mut optimized_labels = String::new();
         render_labels_to_buffer(&labels, &mut optimized_labels);
 
-        assert_eq!(original_labels, optimized_labels, "Labels rendering should be identical");
+        assert_eq!(
+            original_labels, optimized_labels,
+            "Labels rendering should be identical"
+        );
 
         // Test empty labels
         let empty_labels = vec![];
@@ -469,7 +475,10 @@ mod tests {
         let mut optimized_empty = String::new();
         render_labels_to_buffer(&empty_labels, &mut optimized_empty);
 
-        assert_eq!(original_empty, optimized_empty, "Empty labels rendering should be identical");
+        assert_eq!(
+            original_empty, optimized_empty,
+            "Empty labels rendering should be identical"
+        );
 
         // Test metric value rendering
         let test_values = vec![0.0, 1.5, 123.456789, f64::MAX, f64::MIN, 1e-10, 1e10];
@@ -479,12 +488,18 @@ mod tests {
             let mut optimized_value = String::new();
             render_metric_value_to_buffer(value, &mut optimized_value);
 
-            assert_eq!(original_value, optimized_value, "Value rendering should be identical for {}", value);
+            assert_eq!(
+                original_value, optimized_value,
+                "Value rendering should be identical for {}",
+                value
+            );
         }
 
         // Integration test with full metrics registry
         let mut registry = MetricsRegistry::new();
-        registry.record_gauge("test_metric", "A test metric", 42.5, &[("label", "value")]).expect("valid metric");
+        registry
+            .record_gauge("test_metric", "A test metric", 42.5, &[("label", "value")])
+            .expect("valid metric");
 
         let rendered = registry.render_prometheus();
         // Ensure the output still contains expected content (proving compatibility)

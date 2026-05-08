@@ -6831,13 +6831,25 @@ mod session_auth_boundary_negative_tests {
         let message_debug = format!("{:?}", message);
 
         // Critical: Verify HMAC material is redacted in debug output
-        assert!(session_debug.contains("[REDACTED]"), "handshake_mac must be redacted in session debug");
-        assert!(message_debug.contains("[REDACTED]"), "verified_mac must be redacted in message debug");
+        assert!(
+            session_debug.contains("[REDACTED]"),
+            "handshake_mac must be redacted in session debug"
+        );
+        assert!(
+            message_debug.contains("[REDACTED]"),
+            "verified_mac must be redacted in message debug"
+        );
 
         // Verify actual MAC bytes don't appear in debug output
         let sensitive_hex = hex::encode(&sensitive_mac);
-        assert!(!session_debug.contains(&sensitive_hex), "actual MAC hex must not appear in session debug");
-        assert!(!message_debug.contains(&sensitive_hex), "actual MAC hex must not appear in message debug");
+        assert!(
+            !session_debug.contains(&sensitive_hex),
+            "actual MAC hex must not appear in session debug"
+        );
+        assert!(
+            !message_debug.contains(&sensitive_hex),
+            "actual MAC hex must not appear in message debug"
+        );
 
         // Verify other fields are still visible
         assert!(session_debug.contains("test-session"));

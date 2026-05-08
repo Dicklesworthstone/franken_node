@@ -190,16 +190,21 @@ impl ChecksumManifest {
     /// `<sha256>  <name>  <size>\n`.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         // Pre-calculate total size to avoid reallocations
-        let estimated_size: usize = self.entries.values()
+        let estimated_size: usize = self
+            .entries
+            .values()
             .map(|entry| entry.sha256.len() + entry.name.len() + 25) // 25 for size_bytes (max 20) + 4 separators + newline
             .sum();
 
         let mut buf = String::with_capacity(estimated_size);
         for entry in self.entries.values() {
             use std::fmt::Write;
-            write!(buf, "{}  {}  {}\n",
-                   entry.sha256, entry.name, entry.size_bytes)
-                .expect("writing to String never fails");
+            write!(
+                buf,
+                "{}  {}  {}\n",
+                entry.sha256, entry.name, entry.size_bytes
+            )
+            .expect("writing to String never fails");
         }
         buf.into_bytes()
     }
@@ -956,7 +961,10 @@ mod tests {
         let sk = demo_signing_key();
         let artifacts = vec![
             ("small.txt", b"tiny" as &[u8]),
-            ("large_file_name_for_testing.bin", b"larger content for size testing" as &[u8]),
+            (
+                "large_file_name_for_testing.bin",
+                b"larger content for size testing" as &[u8],
+            ),
             ("medium.dat", b"medium sized content" as &[u8]),
         ];
         let manifest = build_and_sign_manifest(&artifacts, &sk);
@@ -975,8 +983,10 @@ mod tests {
         let old_bytes = old_approach.into_bytes();
 
         // Must be byte-identical
-        assert_eq!(optimized_bytes, old_bytes,
-            "Optimized canonical_bytes must produce identical output to format!() approach");
+        assert_eq!(
+            optimized_bytes, old_bytes,
+            "Optimized canonical_bytes must produce identical output to format!() approach"
+        );
 
         // Also verify the format is correct (space-separated, newline-terminated)
         let text = String::from_utf8(optimized_bytes).unwrap();
@@ -985,10 +995,17 @@ mod tests {
 
         for line in lines {
             let parts: Vec<&str> = line.split("  ").collect();
-            assert_eq!(parts.len(), 3, "Each line should have 3 space-separated parts");
+            assert_eq!(
+                parts.len(),
+                3,
+                "Each line should have 3 space-separated parts"
+            );
             assert_eq!(parts[0].len(), 64, "SHA256 should be 64 hex chars");
             assert!(!parts[1].is_empty(), "Filename should not be empty");
-            assert!(parts[2].parse::<u64>().is_ok(), "Size should be a valid u64");
+            assert!(
+                parts[2].parse::<u64>().is_ok(),
+                "Size should be a valid u64"
+            );
         }
     }
 

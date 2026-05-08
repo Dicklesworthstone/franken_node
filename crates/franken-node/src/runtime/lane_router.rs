@@ -469,9 +469,15 @@ impl std::fmt::Debug for LaneRouter {
             .field("bulkhead", &self.bulkhead)
             .field("lanes_count", &self.lanes.len())
             .field("active_operations_count", &self.active.len())
-            .field("queued_operation_ids_count", &self.queued_operation_ids.len())
+            .field(
+                "queued_operation_ids_count",
+                &self.queued_operation_ids.len(),
+            )
             .field("events_count", &self.events.len())
-            .field("unknown_lane_default_count", &self.unknown_lane_default_count)
+            .field(
+                "unknown_lane_default_count",
+                &self.unknown_lane_default_count,
+            )
             .finish()
     }
 }

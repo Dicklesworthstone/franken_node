@@ -4906,9 +4906,7 @@ mod tests {
         // Test the fail-closed pattern directly
         let fake_error: Result<Duration, std::time::SystemTimeError> =
             Err(UNIX_EPOCH.duration_since(SystemTime::now()).unwrap_err());
-        let result_error = fake_error
-            .map(|d| d.as_secs())
-            .unwrap_or(u64::MAX);
+        let result_error = fake_error.map(|d| d.as_secs()).unwrap_or(u64::MAX);
 
         // When there's an error, should return u64::MAX (fail-closed)
         assert_eq!(result_error, u64::MAX);
@@ -4918,11 +4916,12 @@ mod tests {
     fn now_epoch_pre_unix_epoch_clock_manipulation() {
         // Test real pre-UNIX_EPOCH clock scenarios in now_epoch() method
         // This test verifies the fix for bd-9l4xk addresses real clock manipulation attacks
-        use std::time::{SystemTime, UNIX_EPOCH, Duration};
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
         // Create a SystemTime before UNIX_EPOCH (simulates clock rewind attack)
-        let pre_epoch_time = UNIX_EPOCH.checked_sub(Duration::from_secs(2000))
-                                      .unwrap_or(UNIX_EPOCH);
+        let pre_epoch_time = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(2000))
+            .unwrap_or(UNIX_EPOCH);
 
         // Test the exact pattern used in now_epoch() method
         let timestamp = pre_epoch_time
@@ -4931,8 +4930,11 @@ mod tests {
             .unwrap_or(u64::MAX);
 
         // Pre-EPOCH time should trigger fail-closed behavior
-        assert_eq!(timestamp, u64::MAX,
-                   "Pre-UNIX_EPOCH time should return u64::MAX for fail-closed semantics");
+        assert_eq!(
+            timestamp,
+            u64::MAX,
+            "Pre-UNIX_EPOCH time should return u64::MAX for fail-closed semantics"
+        );
 
         // Verify this is different from normal case
         let normal_timestamp = SystemTime::now()
@@ -4940,10 +4942,14 @@ mod tests {
             .map(|d| d.as_secs())
             .unwrap_or(u64::MAX);
 
-        assert_ne!(timestamp, normal_timestamp,
-                   "Pre-EPOCH should behave differently than normal time");
-        assert!(normal_timestamp < u64::MAX,
-                "Normal timestamp should not be u64::MAX");
+        assert_ne!(
+            timestamp, normal_timestamp,
+            "Pre-EPOCH should behave differently than normal time"
+        );
+        assert!(
+            normal_timestamp < u64::MAX,
+            "Normal timestamp should not be u64::MAX"
+        );
     }
 
     #[test]
@@ -4968,21 +4974,25 @@ mod tests {
 
         // Test that u64::MAX timestamp is far beyond reasonable freshness window
         let time_diff = far_future_time.saturating_sub(capsule_timestamp);
-        assert!(time_diff > freshness_window,
-                "u64::MAX should exceed freshness window by huge margin");
+        assert!(
+            time_diff > freshness_window,
+            "u64::MAX should exceed freshness window by huge margin"
+        );
 
         // This means capsules would be rejected as stale when clock errors occur
         // (fail-closed behavior - better to reject valid capsules than accept invalid ones)
         let staleness = time_diff;
-        assert!(staleness > 365 * 24 * 3600, // More than 1 year
-                "u64::MAX timestamp should make all capsules appear very stale");
+        assert!(
+            staleness > 365 * 24 * 3600, // More than 1 year
+            "u64::MAX timestamp should make all capsules appear very stale"
+        );
     }
 
     #[test]
     fn now_epoch_clock_rewind_attack_scenarios() {
         // Test various clock manipulation scenarios that could be used in attacks
         // This verifies the u64::MAX fallback prevents time-based bypasses
-        use std::time::{SystemTime, UNIX_EPOCH, Duration};
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
         // Scenario 1: Clock set to exactly UNIX_EPOCH
         let epoch_timestamp = UNIX_EPOCH
@@ -4998,8 +5008,11 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(u64::MAX);
-            assert_eq!(timestamp, u64::MAX,
-                       "Just before UNIX_EPOCH should trigger fail-closed u64::MAX");
+            assert_eq!(
+                timestamp,
+                u64::MAX,
+                "Just before UNIX_EPOCH should trigger fail-closed u64::MAX"
+            );
         }
 
         // Scenario 3: Clock set far back (severe manipulation)
@@ -5009,7 +5022,11 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(u64::MAX);
-            assert_eq!(timestamp, u64::MAX, "Far past should trigger fail-closed u64::MAX");
+            assert_eq!(
+                timestamp,
+                u64::MAX,
+                "Far past should trigger fail-closed u64::MAX"
+            );
         }
 
         // Scenario 4: Verify old vulnerable vs new secure behavior
@@ -5026,9 +5043,19 @@ mod tests {
                 .map(|d| d.as_secs())
                 .unwrap_or(u64::MAX);
 
-            assert_eq!(old_vulnerable, 0, "Old pattern returns 0 (potentially bypassable)");
-            assert_eq!(new_secure, u64::MAX, "New pattern returns u64::MAX (fail-closed)");
-            assert_ne!(old_vulnerable, new_secure, "Security fix changed the behavior");
+            assert_eq!(
+                old_vulnerable, 0,
+                "Old pattern returns 0 (potentially bypassable)"
+            );
+            assert_eq!(
+                new_secure,
+                u64::MAX,
+                "New pattern returns u64::MAX (fail-closed)"
+            );
+            assert_ne!(
+                old_vulnerable, new_secure,
+                "Security fix changed the behavior"
+            );
         }
     }
 
@@ -5057,22 +5084,30 @@ mod tests {
 
         // Normal case: recent telemetry should pass staleness check
         let normal_age = normal_now.saturating_sub(recent_telemetry);
-        assert!(normal_age <= max_staleness, "Recent telemetry should be fresh");
+        assert!(
+            normal_age <= max_staleness,
+            "Recent telemetry should be fresh"
+        );
 
         // Clock error case: u64::MAX makes all telemetry appear infinitely stale
         let error_age = clock_error_now.saturating_sub(recent_telemetry);
-        assert!(error_age > max_staleness,
-                "u64::MAX timestamp should make all telemetry appear stale");
+        assert!(
+            error_age > max_staleness,
+            "u64::MAX timestamp should make all telemetry appear stale"
+        );
 
         // This is fail-closed behavior: better to reject valid telemetry due to clock
         // errors than to accept invalid/stale telemetry due to clock manipulation
-        assert!(error_age > 365 * 24 * 3600, "Should appear older than 1 year");
+        assert!(
+            error_age > 365 * 24 * 3600,
+            "Should appear older than 1 year"
+        );
     }
 
     #[test]
     fn now_epoch_boundary_conditions() {
         // Test boundary conditions around UNIX_EPOCH that could trigger edge cases
-        use std::time::{SystemTime, UNIX_EPOCH, Duration};
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
         // Test at UNIX_EPOCH boundary
         let epoch_result = UNIX_EPOCH
@@ -5095,8 +5130,15 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(u64::MAX);
-        assert_eq!(future_result, u32::MAX as u64, "Large valid time should not trigger fallback");
-        assert!(future_result < u64::MAX, "Should be less than fallback value");
+        assert_eq!(
+            future_result,
+            u32::MAX as u64,
+            "Large valid time should not trigger fallback"
+        );
+        assert!(
+            future_result < u64::MAX,
+            "Should be less than fallback value"
+        );
 
         // Only actual SystemTimeError (like pre-EPOCH times) should trigger u64::MAX fallback
         // The boundary test verifies that the fallback only happens for error conditions,
@@ -5118,19 +5160,35 @@ mod tests {
 
         // Positive test: Assert redaction markers appear (should be 2 for public_key + value)
         let redacted_count = debug_output.matches("[REDACTED]").count();
-        assert_eq!(redacted_count, 2, "Debug output should contain 2 redaction markers");
+        assert_eq!(
+            redacted_count, 2,
+            "Debug output should contain 2 redaction markers"
+        );
 
         // Negative test: Assert sensitive crypto data does NOT appear
-        assert!(!debug_output.contains("sensitive-public-key-data-that-should-be-redacted"),
-                "Sensitive public key data should not appear in debug output");
-        assert!(!debug_output.contains("sensitive-signature-value-that-should-be-redacted"),
-                "Sensitive signature value data should not appear in debug output");
+        assert!(
+            !debug_output.contains("sensitive-public-key-data-that-should-be-redacted"),
+            "Sensitive public key data should not appear in debug output"
+        );
+        assert!(
+            !debug_output.contains("sensitive-signature-value-that-should-be-redacted"),
+            "Sensitive signature value data should not appear in debug output"
+        );
 
         // Format verification: Assert non-sensitive fields still appear correctly
         assert!(debug_output.contains("ed25519"), "Algorithm should appear");
-        assert!(debug_output.contains("algorithm"), "Field name should appear");
-        assert!(debug_output.contains("public_key"), "Field name should appear (but not value)");
-        assert!(debug_output.contains("value"), "Field name should appear (but not value)");
+        assert!(
+            debug_output.contains("algorithm"),
+            "Field name should appear"
+        );
+        assert!(
+            debug_output.contains("public_key"),
+            "Field name should appear (but not value)"
+        );
+        assert!(
+            debug_output.contains("value"),
+            "Field name should appear (but not value)"
+        );
     }
 
     #[test]
@@ -5150,19 +5208,35 @@ mod tests {
 
         // Positive test: Assert redaction markers appear (should be 2 for contact + public_key)
         let redacted_count = debug_output.matches("[REDACTED]").count();
-        assert_eq!(redacted_count, 2, "Debug output should contain 2 redaction markers");
+        assert_eq!(
+            redacted_count, 2,
+            "Debug output should contain 2 redaction markers"
+        );
 
         // Negative test: Assert sensitive data does NOT appear
-        assert!(!debug_output.contains("sensitive-contact-info@example.com"),
-                "Sensitive contact info should not appear in debug output");
-        assert!(!debug_output.contains("sensitive-verifier-public-key-data"),
-                "Sensitive public key data should not appear in debug output");
+        assert!(
+            !debug_output.contains("sensitive-contact-info@example.com"),
+            "Sensitive contact info should not appear in debug output"
+        );
+        assert!(
+            !debug_output.contains("sensitive-verifier-public-key-data"),
+            "Sensitive public key data should not appear in debug output"
+        );
 
         // Format verification: Assert non-sensitive fields still appear correctly
         assert!(debug_output.contains("test-verifier"), "Name should appear");
-        assert!(debug_output.contains("Compliance"), "Capabilities should appear");
+        assert!(
+            debug_output.contains("Compliance"),
+            "Capabilities should appear"
+        );
         assert!(debug_output.contains("Enterprise"), "Tier should appear");
-        assert!(debug_output.contains("contact"), "Field name should appear (but not value)");
-        assert!(debug_output.contains("public_key"), "Field name should appear (but not value)");
+        assert!(
+            debug_output.contains("contact"),
+            "Field name should appear (but not value)"
+        );
+        assert!(
+            debug_output.contains("public_key"),
+            "Field name should appear (but not value)"
+        );
     }
 }

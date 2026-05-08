@@ -313,17 +313,32 @@ pub fn fork_log_entry(
 
     let mut hasher = sha2::Sha256::new();
     sha2::Digest::update(&mut hasher, b"lease_conflict_resolution_v1:");
-    sha2::Digest::update(&mut hasher, (u64::try_from(lease_lo.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    sha2::Digest::update(
+        &mut hasher,
+        (u64::try_from(lease_lo.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+    );
     sha2::Digest::update(&mut hasher, lease_lo.as_bytes());
-    sha2::Digest::update(&mut hasher, (u64::try_from(lease_hi.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    sha2::Digest::update(
+        &mut hasher,
+        (u64::try_from(lease_hi.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+    );
     sha2::Digest::update(&mut hasher, lease_hi.as_bytes());
-    sha2::Digest::update(&mut hasher, (u64::try_from(conflict.resource.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    sha2::Digest::update(
+        &mut hasher,
+        (u64::try_from(conflict.resource.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+    );
     sha2::Digest::update(&mut hasher, conflict.resource.as_bytes());
     sha2::Digest::update(&mut hasher, conflict.overlap_start.to_le_bytes());
     sha2::Digest::update(&mut hasher, conflict.overlap_end.to_le_bytes());
-    sha2::Digest::update(&mut hasher, (u64::try_from(trace_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    sha2::Digest::update(
+        &mut hasher,
+        (u64::try_from(trace_id.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+    );
     sha2::Digest::update(&mut hasher, trace_id.as_bytes());
-    sha2::Digest::update(&mut hasher, (u64::try_from(action_id.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    sha2::Digest::update(
+        &mut hasher,
+        (u64::try_from(action_id.len()).unwrap_or(u64::MAX)).to_le_bytes(),
+    );
     sha2::Digest::update(&mut hasher, action_id.as_bytes());
     let hash_hex = hex::encode(sha2::Digest::finalize(hasher));
     let entry_id = format!("fork-{}", &hash_hex[..16]);
@@ -1325,7 +1340,10 @@ mod tests {
         assert!(hash1.starts_with("fork-"), "Hash should have fork- prefix");
         let hash_part = &hash1[5..]; // Remove "fork-" prefix
         assert_eq!(hash_part.len(), 16, "Hash part should be 16 hex characters");
-        assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex");
+        assert!(
+            hash_part.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should be hex"
+        );
 
         // Deterministic: same inputs should produce same hash
         let hash2 = super::compute_conflict_resolution_hash(
@@ -1367,10 +1385,20 @@ mod tests {
         );
 
         // Should produce valid hash despite large inputs
-        assert!(hash.starts_with("fork-"), "Hash should have fork- prefix with large inputs");
+        assert!(
+            hash.starts_with("fork-"),
+            "Hash should have fork- prefix with large inputs"
+        );
         let hash_part = &hash[5..];
-        assert_eq!(hash_part.len(), 16, "Hash should be valid length with large inputs");
-        assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex");
+        assert_eq!(
+            hash_part.len(),
+            16,
+            "Hash should be valid length with large inputs"
+        );
+        assert!(
+            hash_part.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should be hex"
+        );
     }
 
     #[test]
@@ -1407,16 +1435,18 @@ mod tests {
         };
 
         let large_hash = super::compute_conflict_resolution_hash(
-            &"lease-a-".repeat(100000),  // 700KB lease ID
-            &"lease-b-".repeat(100000),  // 700KB lease ID
+            &"lease-a-".repeat(100000), // 700KB lease ID
+            &"lease-b-".repeat(100000), // 700KB lease ID
             &large_conflict,
-            &"trace-".repeat(50000),     // 300KB trace ID
-            &"action-".repeat(50000),    // 350KB action ID
+            &"trace-".repeat(50000),  // 300KB trace ID
+            &"action-".repeat(50000), // 350KB action ID
         );
 
         // Should produce different hashes
-        assert_ne!(normal_hash, large_hash,
-                   "Normal vs large inputs should produce different hashes");
+        assert_ne!(
+            normal_hash, large_hash,
+            "Normal vs large inputs should produce different hashes"
+        );
     }
 
     #[test]
@@ -1435,24 +1465,24 @@ mod tests {
 
         // Test case: different field boundaries that could collide without length prefixes
         let hash1 = super::compute_conflict_resolution_hash(
-            "ab",      // lease_lo
-            "cd",      // lease_hi
-            &conflict,
-            "ef",      // trace_id
-            "gh",      // action_id
+            "ab", // lease_lo
+            "cd", // lease_hi
+            &conflict, "ef", // trace_id
+            "gh", // action_id
         );
 
         let hash2 = super::compute_conflict_resolution_hash(
-            "a",       // Different boundary
-            "bcd",     // Shifted content
-            &conflict,
-            "e",       // Different boundary
-            "fgh",     // Shifted content
+            "a",   // Different boundary
+            "bcd", // Shifted content
+            &conflict, "e",   // Different boundary
+            "fgh", // Shifted content
         );
 
         // Should produce different hashes due to proper length prefixing
-        assert_ne!(hash1, hash2,
-                   "Different field boundaries should produce different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "Different field boundaries should produce different hashes"
+        );
     }
 
     #[test]
@@ -1464,10 +1494,21 @@ mod tests {
         let test_cases = vec![
             // (lease_lo, lease_hi, resource, trace_id, action_id)
             ("short", "short", "short", "short", "short"),
-            ("medium_length_lease", "another_medium", "medium_resource", "medium_trace", "medium_action"),
-            (&"long".repeat(1000), &"very".repeat(1000), &"extremely".repeat(1000),
-             &"incredibly".repeat(1000), &"massively".repeat(1000)),
-            ("", "", "", "", ""), // Empty strings edge case
+            (
+                "medium_length_lease",
+                "another_medium",
+                "medium_resource",
+                "medium_trace",
+                "medium_action",
+            ),
+            (
+                &"long".repeat(1000),
+                &"very".repeat(1000),
+                &"extremely".repeat(1000),
+                &"incredibly".repeat(1000),
+                &"massively".repeat(1000),
+            ),
+            ("", "", "", "", ""),                // Empty strings edge case
             ("a", "bb", "ccc", "dddd", "eeeee"), // Incrementally increasing lengths
         ];
 
@@ -1484,18 +1525,17 @@ mod tests {
             };
 
             let hash = super::compute_conflict_resolution_hash(
-                lease_lo,
-                lease_hi,
-                &conflict,
-                trace_id,
-                action_id,
+                lease_lo, lease_hi, &conflict, trace_id, action_id,
             );
 
             // Verify hash format
             assert!(hash.starts_with("fork-"), "Hash should have fork- prefix");
             let hash_part = &hash[5..];
             assert_eq!(hash_part.len(), 16, "Hash should be 16 chars");
-            assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()), "Should be hex");
+            assert!(
+                hash_part.chars().all(|c| c.is_ascii_hexdigit()),
+                "Should be hex"
+            );
 
             hashes.push(hash);
         }
@@ -1503,8 +1543,11 @@ mod tests {
         // All hashes should be unique (different inputs produce different outputs)
         for i in 0..hashes.len() {
             for j in (i + 1)..hashes.len() {
-                assert_ne!(hashes[i], hashes[j],
-                           "Different inputs should produce different hashes: case {} vs {}", i, j);
+                assert_ne!(
+                    hashes[i], hashes[j],
+                    "Different inputs should produce different hashes: case {} vs {}",
+                    i, j
+                );
             }
         }
     }

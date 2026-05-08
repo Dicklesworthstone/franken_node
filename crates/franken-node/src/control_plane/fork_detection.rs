@@ -2011,9 +2011,7 @@ mod tests {
         // Test the fail-closed pattern directly with an error case
         let fake_error: Result<Duration, std::time::SystemTimeError> =
             Err(UNIX_EPOCH.duration_since(SystemTime::now()).unwrap_err());
-        let result_error = fake_error
-            .map(|d| d.as_secs())
-            .unwrap_or(u64::MAX);
+        let result_error = fake_error.map(|d| d.as_secs()).unwrap_or(u64::MAX);
 
         // When there's an error, should return u64::MAX (fail-closed)
         // This prevents clock manipulation attacks from bypassing time-based validation
@@ -2024,11 +2022,12 @@ mod tests {
     fn time_math_pre_epoch_clock_manipulation() {
         // Test real pre-UNIX_EPOCH clock scenarios that would trigger the u64::MAX fallback
         // This test verifies the fix for bd-9l4xk addresses real clock manipulation attacks
-        use std::time::{SystemTime, UNIX_EPOCH, Duration};
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
         // Create a SystemTime before UNIX_EPOCH (simulates clock rewind attack)
-        let pre_epoch_time = UNIX_EPOCH.checked_sub(Duration::from_secs(1000))
-                                      .unwrap_or(UNIX_EPOCH);
+        let pre_epoch_time = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(1000))
+            .unwrap_or(UNIX_EPOCH);
 
         // Test the exact pattern used in compare() method
         let timestamp = pre_epoch_time
@@ -2037,8 +2036,11 @@ mod tests {
             .unwrap_or(u64::MAX);
 
         // Pre-EPOCH time should trigger fail-closed behavior
-        assert_eq!(timestamp, u64::MAX,
-                   "Pre-UNIX_EPOCH time should return u64::MAX for fail-closed semantics");
+        assert_eq!(
+            timestamp,
+            u64::MAX,
+            "Pre-UNIX_EPOCH time should return u64::MAX for fail-closed semantics"
+        );
 
         // Verify this is different from normal case
         let normal_timestamp = SystemTime::now()
@@ -2046,10 +2048,14 @@ mod tests {
             .map(|d| d.as_secs())
             .unwrap_or(u64::MAX);
 
-        assert_ne!(timestamp, normal_timestamp,
-                   "Pre-EPOCH should behave differently than normal time");
-        assert!(normal_timestamp < u64::MAX,
-                "Normal timestamp should not be u64::MAX");
+        assert_ne!(
+            timestamp, normal_timestamp,
+            "Pre-EPOCH should behave differently than normal time"
+        );
+        assert!(
+            normal_timestamp < u64::MAX,
+            "Normal timestamp should not be u64::MAX"
+        );
     }
 
     #[test]
@@ -2073,21 +2079,25 @@ mod tests {
         let far_future = u64::MAX;
         let recent_time = 1640995200u64; // 2022 timestamp
 
-        assert!(far_future > recent_time + (365 * 24 * 3600),
-                "u64::MAX should be far in future to fail staleness checks");
+        assert!(
+            far_future > recent_time + (365 * 24 * 3600),
+            "u64::MAX should be far in future to fail staleness checks"
+        );
 
         // In practice, any validation that checks "timestamp > recent_threshold"
         // would fail with u64::MAX, providing fail-closed semantics
         let max_reasonable_future = recent_time + (10 * 365 * 24 * 3600); // 10 years
-        assert!(far_future > max_reasonable_future,
-                "u64::MAX timestamp should exceed reasonable future bounds");
+        assert!(
+            far_future > max_reasonable_future,
+            "u64::MAX timestamp should exceed reasonable future bounds"
+        );
     }
 
     #[test]
     fn time_math_clock_rewind_attack_simulation() {
         // Simulate scenarios where system clock could be manipulated by attacker
         // This tests the real conditions that the u64::MAX fix protects against
-        use std::time::{SystemTime, UNIX_EPOCH, Duration};
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
         // Scenario 1: Clock set to just before UNIX_EPOCH
         let just_before_epoch = UNIX_EPOCH.checked_sub(Duration::from_secs(1));
@@ -2096,7 +2106,11 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(u64::MAX);
-            assert_eq!(timestamp, u64::MAX, "Just before UNIX_EPOCH should fail closed");
+            assert_eq!(
+                timestamp,
+                u64::MAX,
+                "Just before UNIX_EPOCH should fail closed"
+            );
         }
 
         // Scenario 2: Clock set way back (simulates severe clock manipulation)
@@ -2115,15 +2129,19 @@ mod tests {
             let old_vulnerable = pre_epoch
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
-                .unwrap_or(0);  // Old vulnerable pattern
+                .unwrap_or(0); // Old vulnerable pattern
 
             let new_secure = pre_epoch
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
-                .unwrap_or(u64::MAX);  // New secure pattern
+                .unwrap_or(u64::MAX); // New secure pattern
 
             assert_eq!(old_vulnerable, 0, "Old pattern would return 0 (vulnerable)");
-            assert_eq!(new_secure, u64::MAX, "New pattern returns u64::MAX (secure)");
+            assert_eq!(
+                new_secure,
+                u64::MAX,
+                "New pattern returns u64::MAX (secure)"
+            );
             assert_ne!(old_vulnerable, new_secure, "Fix changed the behavior");
         }
     }
@@ -2131,7 +2149,7 @@ mod tests {
     #[test]
     fn time_math_boundary_edge_cases() {
         // Test edge cases around time boundaries that could trigger the fallback
-        use std::time::{SystemTime, UNIX_EPOCH, Duration};
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
         // Test UNIX_EPOCH exactly
         let epoch_timestamp = UNIX_EPOCH
@@ -2154,8 +2172,16 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(u64::MAX);
-        assert_eq!(future_timestamp, u32::MAX as u64, "Far future should work normally");
-        assert_ne!(future_timestamp, u64::MAX, "Far future should not trigger fallback");
+        assert_eq!(
+            future_timestamp,
+            u32::MAX as u64,
+            "Far future should work normally"
+        );
+        assert_ne!(
+            future_timestamp,
+            u64::MAX,
+            "Far future should not trigger fallback"
+        );
 
         // The fallback should only trigger for actual SystemTimeError conditions
         // (when duration_since fails, not when it succeeds with large values)

@@ -100,8 +100,9 @@ pub fn create_trust_card(
     input: TrustCardInput,
     now_secs: u64,
 ) -> Result<ApiResponse<TrustCard>, TrustCardError> {
-    enforce_handler_contract(identity, trace, "POST", "/api/v1/trust-cards")
-        .map_err(|e| TrustCardError::AuthenticationFailed(format!("create_trust_card auth failed: {}", e)))?;
+    enforce_handler_contract(identity, trace, "POST", "/api/v1/trust-cards").map_err(|e| {
+        TrustCardError::AuthenticationFailed(format!("create_trust_card auth failed: {}", e))
+    })?;
     let card = registry.create(input, now_secs, &trace.trace_id)?;
     Ok(ApiResponse {
         ok: true,
@@ -135,7 +136,9 @@ pub fn update_trust_card(
     now_secs: u64,
 ) -> Result<ApiResponse<TrustCard>, TrustCardError> {
     enforce_handler_contract(identity, trace, "PUT", "/api/v1/trust-cards/{extension_id}")
-        .map_err(|e| TrustCardError::AuthenticationFailed(format!("update_trust_card auth failed: {}", e)))?;
+        .map_err(|e| {
+            TrustCardError::AuthenticationFailed(format!("update_trust_card auth failed: {}", e))
+        })?;
     let card = registry.update(extension_id, mutation, now_secs, &trace.trace_id)?;
     Ok(ApiResponse {
         ok: true,
@@ -167,7 +170,9 @@ pub fn get_trust_card(
     now_secs: u64,
 ) -> Result<ApiResponse<Option<TrustCard>>, TrustCardError> {
     enforce_handler_contract(identity, trace, "GET", "/api/v1/trust-cards/{extension_id}")
-        .map_err(|e| TrustCardError::AuthenticationFailed(format!("get_trust_card auth failed: {}", e)))?;
+        .map_err(|e| {
+            TrustCardError::AuthenticationFailed(format!("get_trust_card auth failed: {}", e))
+        })?;
     let card = registry.read(extension_id, now_secs, &trace.trace_id)?;
     Ok(ApiResponse {
         ok: true,
@@ -199,8 +204,9 @@ pub fn list_trust_cards(
     now_secs: u64,
     pagination: Pagination,
 ) -> Result<ApiResponse<Vec<TrustCard>>, TrustCardError> {
-    enforce_handler_contract(identity, trace, "GET", "/api/v1/trust-cards")
-        .map_err(|e| TrustCardError::AuthenticationFailed(format!("list_trust_cards auth failed: {}", e)))?;
+    enforce_handler_contract(identity, trace, "GET", "/api/v1/trust-cards").map_err(|e| {
+        TrustCardError::AuthenticationFailed(format!("list_trust_cards auth failed: {}", e))
+    })?;
     let all = registry.list(filter, &trace.trace_id, now_secs)?;
     paged_response(&all, pagination)
 }

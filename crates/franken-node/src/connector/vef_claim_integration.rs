@@ -195,7 +195,8 @@ impl VefMetrics {
         hasher.update((self.gap_count as u64).to_le_bytes());
         hasher.update(self.avg_proof_age_secs.to_le_bytes());
         hasher.update(degraded_time_frac.to_le_bytes());
-        hasher.update((u64::try_from(self.covered_classes.len()).unwrap_or(u64::MAX)).to_le_bytes());
+        hasher
+            .update((u64::try_from(self.covered_classes.len()).unwrap_or(u64::MAX)).to_le_bytes());
         for class in &self.covered_classes {
             push_length_prefixed_str(&mut hasher, class);
         }

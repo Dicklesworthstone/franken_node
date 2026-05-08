@@ -2221,23 +2221,38 @@ mod additional_negative_path_tests {
         let debug_output = format!("{:?}", content_hash);
 
         // Ensure hash bytes are redacted
-        assert!(debug_output.contains("ContentHash([REDACTED; 32 bytes])"),
-                "Debug output should redact hash bytes: {}", debug_output);
+        assert!(
+            debug_output.contains("ContentHash([REDACTED; 32 bytes])"),
+            "Debug output should redact hash bytes: {}",
+            debug_output
+        );
 
         // Ensure actual hash bytes do not appear in debug output
         // Check for hex representation of test hash bytes
-        assert!(!debug_output.contains("42424242"),
-                "Debug output should not contain hex of hash bytes: {}", debug_output);
-        assert!(!debug_output.contains(&format!("{:02x}", test_bytes[0])),
-                "Debug output should not contain individual hash bytes: {}", debug_output);
+        assert!(
+            !debug_output.contains("42424242"),
+            "Debug output should not contain hex of hash bytes: {}",
+            debug_output
+        );
+        assert!(
+            !debug_output.contains(&format!("{:02x}", test_bytes[0])),
+            "Debug output should not contain individual hash bytes: {}",
+            debug_output
+        );
 
         // Test that normal hex conversion still works (not affected by Debug redaction)
         let hex_output = content_hash.to_hex();
-        assert!(hex_output.contains("42424242"),
-                "Normal hex conversion should still work: {}", hex_output);
+        assert!(
+            hex_output.contains("42424242"),
+            "Normal hex conversion should still work: {}",
+            hex_output
+        );
         assert_eq!(hex_output.len(), 64, "Hex output should be 64 characters");
 
         // Verify the actual hash is what we expect (sanity check)
-        assert_eq!(content_hash.0, test_bytes, "Test hash should match expected value");
+        assert_eq!(
+            content_hash.0, test_bytes,
+            "Test hash should match expected value"
+        );
     }
 }

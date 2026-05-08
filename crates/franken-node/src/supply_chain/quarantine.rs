@@ -3369,7 +3369,7 @@ mod tests {
                     );
 
                     // Should not match the tampered hash (except by coincidence)
-                    if computed_hash == tampered_hash {
+                    if crate::security::constant_time::ct_eq_bytes(&computed_hash, &tampered_hash) {
                         // This would be an extremely unlikely hash collision
                         tracing::warn!(
                             computed_hash = %hex::encode(&computed_hash),
@@ -3701,17 +3701,34 @@ mod tests {
             let debug_output = format!("{:?}", order);
 
             // Positive test: Assert redaction marker appears
-            assert!(debug_output.contains("[REDACTED]"), "Debug output should contain redaction marker");
+            assert!(
+                debug_output.contains("[REDACTED]"),
+                "Debug output should contain redaction marker"
+            );
 
             // Negative test: Assert sensitive signature data does NOT appear
-            assert!(!debug_output.contains("sensitive-signature-data-that-should-be-redacted"),
-                    "Sensitive signature data should not appear in debug output");
+            assert!(
+                !debug_output.contains("sensitive-signature-data-that-should-be-redacted"),
+                "Sensitive signature data should not appear in debug output"
+            );
 
             // Format verification: Assert non-sensitive fields still appear correctly
-            assert!(debug_output.contains("test-order-123"), "Order ID should appear");
-            assert!(debug_output.contains("test-operator"), "Issued by should appear");
-            assert!(debug_output.contains("test-trace-456"), "Trace ID should appear");
-            assert!(debug_output.contains("Test quarantine justification"), "Justification should appear");
+            assert!(
+                debug_output.contains("test-order-123"),
+                "Order ID should appear"
+            );
+            assert!(
+                debug_output.contains("test-operator"),
+                "Issued by should appear"
+            );
+            assert!(
+                debug_output.contains("test-trace-456"),
+                "Trace ID should appear"
+            );
+            assert!(
+                debug_output.contains("Test quarantine justification"),
+                "Justification should appear"
+            );
             assert!(debug_output.contains("3600"), "Grace period should appear");
         }
     }

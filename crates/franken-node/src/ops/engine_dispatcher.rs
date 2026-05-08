@@ -5604,8 +5604,8 @@ mod tests {
     #[cfg(feature = "engine")]
     #[test]
     fn engine_timeout_boundary_fail_closed_e5467b4b() {
-        use tempfile::NamedTempFile;
         use std::time::Instant;
+        use tempfile::NamedTempFile;
 
         // Create a hanging JavaScript program
         let hanging_js = r#"
@@ -5632,16 +5632,32 @@ mod tests {
         std::env::remove_var("FRANKEN_ENGINE_TIMEOUT_SECS");
 
         // Verify timeout occurred and error type is correct
-        assert!(result.is_err(), "Expected timeout error for hanging program");
+        assert!(
+            result.is_err(),
+            "Expected timeout error for hanging program"
+        );
 
         let error = result.unwrap_err().to_string();
-        assert!(error.contains("timeout") || error.contains("Timeout"),
-               "Error should mention timeout: {}", error);
+        assert!(
+            error.contains("timeout") || error.contains("Timeout"),
+            "Error should mention timeout: {}",
+            error
+        );
 
         // Verify timeout occurred close to the boundary (2 seconds ± 1 second tolerance)
-        assert!(elapsed.as_secs() >= 2, "Should timeout at >= 2 seconds (fail-closed)");
-        assert!(elapsed.as_secs() < 4, "Should timeout reasonably close to boundary, got {}s", elapsed.as_secs());
+        assert!(
+            elapsed.as_secs() >= 2,
+            "Should timeout at >= 2 seconds (fail-closed)"
+        );
+        assert!(
+            elapsed.as_secs() < 4,
+            "Should timeout reasonably close to boundary, got {}s",
+            elapsed.as_secs()
+        );
 
-        println!("✓ Timeout occurred at {}ms (boundary: 2000ms)", elapsed.as_millis());
+        println!(
+            "✓ Timeout occurred at {}ms (boundary: 2000ms)",
+            elapsed.as_millis()
+        );
     }
 }

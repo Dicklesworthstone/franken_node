@@ -3922,7 +3922,7 @@ mod tests {
                     test_env(),
                 ) {
                     if !capsule.expected_outputs.is_empty() {
-                        if capsule.expected_outputs[0].output_hash == target_hash {
+                        if crate::security::constant_time::ct_eq(&capsule.expected_outputs[0].output_hash, &target_hash) {
                             found_preimage = true;
                             break;
                         }
