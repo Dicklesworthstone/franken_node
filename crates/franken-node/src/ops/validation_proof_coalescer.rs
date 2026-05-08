@@ -16,8 +16,8 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::Write as _;
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
@@ -114,16 +114,17 @@ pub mod swarm_scheduler_event_codes {
 
 /// Process-local validation proof coalescer lease synchronization lock.
 ///
-/// Prevents TOCTOU race conditions in steal_stale_lease by coordinating
-/// file-based lease reads and writes across concurrent agents. Uses advisory
-/// file locking (cross-process) plus in-process mutex (same-process coordination).
+/// Prevents TOCTOU race conditions in lease read-modify-write paths by
+/// coordinating file-based reads and writes across concurrent agents. Uses
+/// advisory file locking (cross-process) plus in-process mutex (same-process
+/// coordination).
 fn validation_proof_coalescer_persist_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn lock_validation_proof_coalescer_persist(
-    lease_path: &Path,
+    _lease_path: &Path,
 ) -> Result<MutexGuard<'static, ()>, ValidationProofCoalescerError> {
     validation_proof_coalescer_persist_lock()
         .lock()
@@ -151,8 +152,8 @@ fn lock_validation_proof_coalescer_file(
 ) -> Result<(), ValidationProofCoalescerError> {
     match file.try_lock_exclusive() {
         Ok(()) => return Ok(()),
-        Err(TryLockError::WouldBlock) => {}
-        Err(TryLockError::Error(err)) => {
+        Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+        Err(err) => {
             return Err(ValidationProofCoalescerError::contract(
                 error_codes::ERR_VPCO_MALFORMED_LEASE,
                 &format!("failed acquiring flock for {}: {err}", lock_path.display()),
@@ -166,8 +167,8 @@ fn lock_validation_proof_coalescer_file(
         thread::sleep(Duration::from_millis(delay_millis));
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(()),
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(err)) => {
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+            Err(err) => {
                 return Err(ValidationProofCoalescerError::contract(
                     error_codes::ERR_VPCO_MALFORMED_LEASE,
                     &format!("failed acquiring flock for {}: {err}", lock_path.display()),
@@ -188,7 +189,7 @@ fn lock_validation_proof_coalescer_file(
 fn unlock_validation_proof_coalescer_file(
     file: &File,
     lock_path: &Path,
-    lease_path: &Path,
+    _lease_path: &Path,
 ) -> Result<(), ValidationProofCoalescerError> {
     file.unlock().map_err(|err| {
         ValidationProofCoalescerError::contract(
@@ -200,7 +201,7 @@ fn unlock_validation_proof_coalescer_file(
 
 fn with_validation_proof_coalescer_persist_lock<T>(
     lease_path: &Path,
-    work_steal_operation: impl FnOnce() -> Result<T, ValidationProofCoalescerError>,
+    lease_operation: impl FnOnce() -> Result<T, ValidationProofCoalescerError>,
 ) -> Result<T, ValidationProofCoalescerError> {
     // Canonical lock order: file flock first, process mutex second.
     let parent = lease_path.parent().unwrap_or_else(|| Path::new("."));
@@ -234,7 +235,7 @@ fn with_validation_proof_coalescer_persist_lock<T>(
     // Step 2: Acquire process Mutex SECOND (in-process synchronization)
     let _process_guard = lock_validation_proof_coalescer_persist(lease_path)?;
 
-    let work_result = work_steal_operation();
+    let work_result = lease_operation();
     let unlock_result = unlock_validation_proof_coalescer_file(&lock_file, &lock_path, lease_path);
 
     match (work_result, unlock_result) {
@@ -1696,11 +1697,14 @@ impl ValidationProofCoalescerStore {
     ) -> Result<ValidationProofCoalescerOutcome, ValidationProofCoalescerError> {
         let path = self.lease_path(&request.proof_work_key);
         let relative_path = self.relative_lease_path(&request.proof_work_key);
-        match self.read_lease(&request.proof_work_key) {
-            Ok(None) => self.create_new_lease(request, path, relative_path),
-            Ok(Some(lease)) => self.join_or_wait(request, lease, path, relative_path),
-            Err(error) => Ok(repair_state_outcome(request, path, relative_path, &error)),
-        }
+        let lock_path = path.clone();
+        with_validation_proof_coalescer_persist_lock(&lock_path, || {
+            match self.read_lease(&request.proof_work_key) {
+                Ok(None) => self.create_new_lease(request, path, relative_path),
+                Ok(Some(lease)) => self.join_or_wait(request, lease, path, relative_path),
+                Err(error) => Ok(repair_state_outcome(request, path, relative_path, &error)),
+            }
+        })
     }
 
     pub fn complete_lease(
@@ -1708,6 +1712,17 @@ impl ValidationProofCoalescerStore {
         request: CompleteLeaseRequest,
     ) -> Result<ValidationProofCoalescerLease, ValidationProofCoalescerError> {
         let path = self.lease_path(&request.proof_work_key);
+        let lock_path = path.clone();
+        with_validation_proof_coalescer_persist_lock(&lock_path, || {
+            self.complete_lease_synchronized(request, &path)
+        })
+    }
+
+    fn complete_lease_synchronized(
+        &self,
+        request: CompleteLeaseRequest,
+        path: &Path,
+    ) -> Result<ValidationProofCoalescerLease, ValidationProofCoalescerError> {
         let Some(mut lease) = self.read_lease(&request.proof_work_key)? else {
             return Err(ValidationProofCoalescerError::contract(
                 error_codes::ERR_VPCO_MALFORMED_LEASE,
@@ -1761,7 +1776,7 @@ impl ValidationProofCoalescerStore {
         lease.diagnostics.fail_closed = false;
         validate_lease_metadata(&lease)?;
         write_bytes_replace(
-            &path,
+            path,
             &serde_json::to_vec_pretty(&lease).map_err(|source| {
                 ValidationProofCoalescerError::Json {
                     path: path.display().to_string(),
@@ -1778,12 +1793,49 @@ impl ValidationProofCoalescerStore {
     ) -> Result<ValidationProofCoalescerOutcome, ValidationProofCoalescerError> {
         let path = self.lease_path(&request.proof_work_key);
         let relative_path = self.relative_lease_path(&request.proof_work_key);
+        let lock_path = path.clone();
+        with_validation_proof_coalescer_persist_lock(&lock_path, || {
+            self.fence_stale_lease_synchronized(request, path, relative_path)
+        })
+    }
+
+    fn fence_stale_lease_synchronized(
+        &self,
+        request: FenceStaleLeaseRequest,
+        path: PathBuf,
+        relative_path: String,
+    ) -> Result<ValidationProofCoalescerOutcome, ValidationProofCoalescerError> {
         let Some(mut lease) = self.read_lease(&request.proof_work_key)? else {
             return Err(ValidationProofCoalescerError::contract(
                 error_codes::ERR_VPCO_MALFORMED_LEASE,
                 "cannot fence missing validation proof lease",
             ));
         };
+        if matches!(lease.state, ValidationProofLeaseState::Completed)
+            || lease.receipt_ref.is_some()
+        {
+            return Ok(ValidationProofCoalescerOutcome {
+                decision: coalescer_decision(DecisionInput {
+                    kind: ValidationProofCoalescerDecisionKind::WaitForReceipt,
+                    reason_code: reason_codes::WAIT_COMPLETION,
+                    required_action: ValidationProofCoalescerRequiredAction::WaitForReceipt,
+                    event_code: event_codes::WAIT_FOR_RECEIPT,
+                    fail_closed: false,
+                    message: "completed lease is ready for receipt handoff",
+                    work_key: lease.proof_work_key.clone(),
+                    lease_ref: Some(ValidationProofCoalescerLeaseRef::from_lease(
+                        &lease,
+                        relative_path,
+                    )),
+                    bead_id: request.owner_bead_id,
+                    agent_name: request.owner_agent,
+                    trace_id: request.trace_id,
+                    decided_at: request.fenced_at,
+                }),
+                lease: Some(lease),
+                lease_path: path.to_path_buf(),
+            });
+        }
         if !lease.is_expired_at(request.fenced_at) {
             return Err(ValidationProofCoalescerError::contract(
                 error_codes::ERR_VPCO_STALE_LEASE,
@@ -1828,9 +1880,9 @@ impl ValidationProofCoalescerStore {
                     &lease,
                     relative_path,
                 )),
-                bead_id: request.owner_bead_id,
-                agent_name: request.owner_agent,
-                trace_id: request.trace_id,
+                bead_id: request.owner_bead_id.clone(),
+                agent_name: request.owner_agent.clone(),
+                trace_id: request.trace_id.clone(),
                 decided_at: request.fenced_at,
             }),
             lease: Some(lease),
@@ -1875,7 +1927,7 @@ impl ValidationProofCoalescerStore {
             ));
         }
 
-        let assessment = assess_work_steal(&lease, &relative_path, policy, &request)?;
+        let assessment = assess_work_steal(&lease, &relative_path, policy, request)?;
         if matches!(lease.state, ValidationProofLeaseState::Completed) {
             return Ok(work_steal_outcome(WorkStealOutcomeInput {
                 lease: Some(lease.clone()),
@@ -1892,9 +1944,9 @@ impl ValidationProofCoalescerStore {
                     &lease,
                     relative_path,
                 )),
-                bead_id: request.stealer_bead_id,
-                agent_name: request.stealer_agent,
-                trace_id: request.trace_id,
+                bead_id: request.stealer_bead_id.clone(),
+                agent_name: request.stealer_agent.clone(),
+                trace_id: request.trace_id.clone(),
                 decided_at: request.observed_at,
             }));
         }
@@ -1910,14 +1962,14 @@ impl ValidationProofCoalescerStore {
                 event_code: event_codes::CORRUPTED_STATE_REPAIR,
                 fail_closed: true,
                 message: "work-steal stale-progress evidence does not match an active lease",
-                work_key: request.proof_work_key,
+                work_key: request.proof_work_key.clone(),
                 lease_ref: Some(ValidationProofCoalescerLeaseRef::from_lease(
                     &lease,
                     relative_path,
                 )),
-                bead_id: request.stealer_bead_id,
-                agent_name: request.stealer_agent,
-                trace_id: request.trace_id,
+                bead_id: request.stealer_bead_id.clone(),
+                agent_name: request.stealer_agent.clone(),
+                trace_id: request.trace_id.clone(),
                 decided_at: request.observed_at,
             }));
         }
@@ -1933,14 +1985,14 @@ impl ValidationProofCoalescerStore {
                 event_code: event_codes::WAIT_FOR_RECEIPT,
                 fail_closed: false,
                 message: "active validation producer still has fresh lease, heartbeat, or progress evidence",
-                work_key: request.proof_work_key,
+                work_key: request.proof_work_key.clone(),
                 lease_ref: Some(ValidationProofCoalescerLeaseRef::from_lease(
                     &lease,
                     relative_path,
                 )),
-                bead_id: request.stealer_bead_id,
-                agent_name: request.stealer_agent,
-                trace_id: request.trace_id,
+                bead_id: request.stealer_bead_id.clone(),
+                agent_name: request.stealer_agent.clone(),
+                trace_id: request.trace_id.clone(),
                 decided_at: request.observed_at,
             }));
         }
@@ -1956,14 +2008,14 @@ impl ValidationProofCoalescerStore {
                 event_code: event_codes::CAPACITY_REJECTED,
                 fail_closed: true,
                 message: "stale validation lease cannot be stolen because retry timeout budget is below policy minimum",
-                work_key: request.proof_work_key,
+                work_key: request.proof_work_key.clone(),
                 lease_ref: Some(ValidationProofCoalescerLeaseRef::from_lease(
                     &lease,
                     relative_path,
                 )),
-                bead_id: request.stealer_bead_id,
-                agent_name: request.stealer_agent,
-                trace_id: request.trace_id,
+                bead_id: request.stealer_bead_id.clone(),
+                agent_name: request.stealer_agent.clone(),
+                trace_id: request.trace_id.clone(),
                 decided_at: request.observed_at,
             }));
         }
@@ -1973,7 +2025,7 @@ impl ValidationProofCoalescerStore {
         lease.state = ValidationProofLeaseState::Running;
         lease.owner_agent = request.stealer_agent.clone();
         lease.owner_bead_id = request.stealer_bead_id.clone();
-        lease.fencing_token = request.new_fencing_token;
+        lease.fencing_token = request.new_fencing_token.clone();
         lease.updated_at = request.observed_at;
         lease.expires_at = request.expires_at;
         lease.waiter_agents.clear();
@@ -1997,7 +2049,7 @@ impl ValidationProofCoalescerStore {
                 source,
             }
         })?;
-        write_bytes_replace(&path, &bytes)?;
+        write_bytes_replace(path, &bytes)?;
 
         Ok(work_steal_outcome(WorkStealOutcomeInput {
             lease: Some(lease.clone()),
@@ -2014,9 +2066,9 @@ impl ValidationProofCoalescerStore {
                 &lease,
                 relative_path,
             )),
-            bead_id: request.stealer_bead_id,
-            agent_name: request.stealer_agent,
-            trace_id: request.trace_id,
+            bead_id: request.stealer_bead_id.clone(),
+            agent_name: request.stealer_agent.clone(),
+            trace_id: request.trace_id.clone(),
             decided_at: request.observed_at,
         }))
     }
@@ -2152,6 +2204,19 @@ impl ValidationProofCoalescerStore {
                 lease: Some(lease),
                 lease_path: path.to_path_buf(),
             });
+        }
+
+        match self.read_lease(&request.proof_work_key)? {
+            Some(current) if current != lease => {
+                return self.join_or_wait(request, current, path, relative_path);
+            }
+            Some(_) => {}
+            None => {
+                return Err(ValidationProofCoalescerError::contract(
+                    error_codes::ERR_VPCO_MALFORMED_LEASE,
+                    "cannot join missing validation proof lease",
+                ));
+            }
         }
 
         if !lease
@@ -3677,6 +3742,91 @@ mod tests {
             completed.diagnostics.event_code,
             event_codes::RECEIPT_HANDOFF_COMPLETED
         );
+    }
+
+    #[test]
+    fn stale_join_snapshot_cannot_overwrite_completed_receipt() {
+        let temp = TempDir::new().expect("tempdir");
+        let store = ValidationProofCoalescerStore::new(temp.path());
+        let request = create_request("stale-join", "PearlLeopard", ts(1));
+        let path = store.lease_path(&request.proof_work_key);
+        let relative_path = store.relative_lease_path(&request.proof_work_key);
+        let stale_lease = store
+            .create_or_join(request.clone())
+            .expect("created")
+            .lease
+            .expect("lease");
+
+        store
+            .complete_lease(CompleteLeaseRequest {
+                proof_work_key: request.proof_work_key.clone(),
+                owner_agent: request.owner_agent.clone(),
+                owner_bead_id: request.owner_bead_id.clone(),
+                fencing_token: request.fencing_token.clone(),
+                completed_at: ts(3),
+                receipt_ref: receipt_ref("stale-join"),
+            })
+            .expect("completed");
+
+        let waiter = create_request("stale-join", "LavenderElk", ts(4));
+        let outcome = store
+            .join_or_wait(waiter, stale_lease, path, relative_path)
+            .expect("stale join snapshot handled");
+
+        assert_eq!(
+            outcome.decision.decision,
+            ValidationProofCoalescerDecisionKind::WaitForReceipt
+        );
+        let final_lease = store
+            .read_lease(&request.proof_work_key)
+            .expect("read final")
+            .expect("lease present");
+        assert_eq!(final_lease.state, ValidationProofLeaseState::Completed);
+        assert!(final_lease.receipt_ref.is_some());
+        assert!(final_lease.waiter_agents.is_empty());
+    }
+
+    #[test]
+    fn stale_fence_cannot_reopen_completed_receipt() {
+        let temp = TempDir::new().expect("tempdir");
+        let store = ValidationProofCoalescerStore::new(temp.path());
+        let mut request = create_request("stale-fence", "PearlLeopard", ts(1));
+        request.expires_at = ts(5);
+        store.create_or_join(request.clone()).expect("created");
+        store
+            .complete_lease(CompleteLeaseRequest {
+                proof_work_key: request.proof_work_key.clone(),
+                owner_agent: request.owner_agent.clone(),
+                owner_bead_id: request.owner_bead_id.clone(),
+                fencing_token: request.fencing_token.clone(),
+                completed_at: ts(3),
+                receipt_ref: receipt_ref("stale-fence"),
+            })
+            .expect("completed");
+
+        let fenced = store
+            .fence_stale_lease(FenceStaleLeaseRequest {
+                proof_work_key: request.proof_work_key.clone(),
+                owner_agent: "LavenderElk".to_string(),
+                owner_bead_id: "bd-y4coj".to_string(),
+                trace_id: "trace-fence-completed".to_string(),
+                fencing_token: replacement_marker(),
+                fenced_at: ts(10),
+                expires_at: ts(50),
+            })
+            .expect("completed lease is not reopened");
+
+        assert_eq!(
+            fenced.decision.decision,
+            ValidationProofCoalescerDecisionKind::WaitForReceipt
+        );
+        let final_lease = store
+            .read_lease(&request.proof_work_key)
+            .expect("read final")
+            .expect("lease present");
+        assert_eq!(final_lease.state, ValidationProofLeaseState::Completed);
+        assert_eq!(final_lease.owner_agent, "PearlLeopard");
+        assert!(final_lease.receipt_ref.is_some());
     }
 
     #[test]
