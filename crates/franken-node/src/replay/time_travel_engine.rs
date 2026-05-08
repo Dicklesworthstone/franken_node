@@ -4324,6 +4324,7 @@ mod tests {
 
         // Verify timing is consistent - ct_eq prevents early termination timing leaks
         let ratio = duration1.as_nanos() as f64 / duration2.as_nanos().max(1) as f64;
+        assert!(ratio.is_finite(), "Non-finite timing ratio: {}", ratio);
         assert!(
             ratio < 5.0 && ratio > 0.2,
             "Potential timing leak in digest comparison: ratio={}",
