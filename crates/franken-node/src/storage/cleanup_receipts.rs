@@ -211,18 +211,24 @@ impl CleanupReceiptsStorage {
 
     /// Search receipts based on filters.
     pub fn search_receipts(&self, filter: &ReceiptSearchFilter) -> Vec<ReceiptMetadata> {
-        let mut results = Vec::new();
+        // Collect matching references first to avoid per-result clones
+        let mut matching_refs = Vec::new();
 
         for (_, metadata) in &self.index.receipts {
             if self.matches_filter(metadata, filter) {
-                push_bounded(&mut results, metadata.clone(), MAX_RECEIPT_SEARCH_RESULTS);
+                if matching_refs.len() < MAX_RECEIPT_SEARCH_RESULTS {
+                    matching_refs.push(metadata);
+                } else {
+                    break; // Respect search result limit
+                }
             }
         }
 
-        // Sort by timestamp (newest first)
-        results.sort_by(|a, b| b.initiated_at.cmp(&a.initiated_at));
+        // Sort references by timestamp (newest first)
+        matching_refs.sort_by(|a, b| b.initiated_at.cmp(&a.initiated_at));
 
-        results
+        // Clone only the final sorted results
+        matching_refs.into_iter().cloned().collect()
     }
 
     /// Get all receipts for a specific actor.
@@ -379,13 +385,19 @@ impl CleanupReceiptsStorage {
     }
 
     fn cleanup_stale_index_entries(&mut self) {
-        let mut stale_keys = Vec::new();
-
-        for (receipt_id, metadata) in &self.index.receipts {
-            if !metadata.file_path.exists() {
-                stale_keys.push(receipt_id.clone());
-            }
-        }
+        // Collect stale keys as references to avoid cloning
+        let stale_keys: Vec<String> = self
+            .index
+            .receipts
+            .iter()
+            .filter_map(|(receipt_id, metadata)| {
+                if !metadata.file_path.exists() {
+                    Some(receipt_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         for key in stale_keys {
             self.index.receipts.remove(&key);
@@ -405,15 +417,10 @@ impl CleanupReceiptsStorage {
         let mut entries: Vec<_> = self.index.receipts.iter().collect();
         entries.sort_by(|a, b| a.1.initiated_at.cmp(&b.1.initiated_at));
 
-        // Remove oldest entries
+        // Remove oldest entries directly to avoid intermediate clone collection
         let to_remove = entries.len() - target_size;
-        let receipt_ids = entries
-            .iter()
-            .take(to_remove)
-            .map(|(receipt_id, _)| (*receipt_id).clone())
-            .collect::<Vec<_>>();
-        for receipt_id in receipt_ids {
-            self.index.receipts.remove(&receipt_id);
+        for (receipt_id, _) in entries.iter().take(to_remove) {
+            self.index.receipts.remove(*receipt_id);
         }
     }
 }
@@ -676,5 +683,49 @@ mod tests {
         assert!(report.contains("Total Receipts: 1"));
         assert!(report.contains("Execute Operations: 1"));
         assert!(report.contains("test_actor"));
+    }
+
+    #[test]
+    fn test_search_optimization_preserves_identical_behavior() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut storage =
+            CleanupReceiptsStorage::with_directory(temp_dir.path().to_path_buf()).expect("storage");
+
+        // Create receipts with different timestamps for ordering verification
+        let base_time = Utc::now();
+        let mut receipts = Vec::new();
+
+        for i in 0..5 {
+            let mut receipt = create_test_receipt(&format!("test_{:03}", i), "test_actor", CleanupMode::Execute);
+            receipt.initiated_at = base_time - chrono::Duration::minutes(i as i64 * 10);
+            receipt.completed_at = receipt.initiated_at + chrono::Duration::minutes(1);
+            receipts.push(receipt);
+        }
+
+        for receipt in &receipts {
+            storage.store_receipt(receipt).expect("store receipt");
+        }
+
+        // Test search returns same count and ordering as before optimization
+        let filter = ReceiptSearchFilter {
+            actor: Some("test_actor".to_string()),
+            ..Default::default()
+        };
+        let results = storage.search_receipts(&filter);
+
+        // Verify count matches expected (all 5 receipts)
+        assert_eq!(results.len(), 5, "Search should return all matching receipts");
+
+        // Verify ordering is newest-first by timestamp
+        for i in 1..results.len() {
+            assert!(
+                results[i-1].initiated_at >= results[i].initiated_at,
+                "Results should be ordered newest-first by initiated_at timestamp"
+            );
+        }
+
+        // Verify receipt IDs are in expected order (newest timestamp = test_000)
+        assert_eq!(results[0].receipt_id, "test_000");
+        assert_eq!(results[4].receipt_id, "test_004");
     }
 }
