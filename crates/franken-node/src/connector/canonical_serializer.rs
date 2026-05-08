@@ -208,6 +208,17 @@ impl SignaturePreimage {
         bytes
     }
 
+    /// Feed preimage bytes directly into a hasher without intermediate allocation.
+    ///
+    /// Writes the same byte sequence as `to_bytes()` but streams directly to the hasher,
+    /// eliminating the need for a temporary Vec allocation in hash computation paths.
+    /// Layout: \[version\]\[domain_tag_0\]\[domain_tag_1\]\[payload...\]
+    pub fn feed_into_hasher<D: Digest>(&self, hasher: &mut D) {
+        hasher.update(&[self.version]);
+        hasher.update(&self.domain_tag);
+        hasher.update(&self.canonical_payload);
+    }
+
     /// Byte length of the preimage.
     pub fn byte_len(&self) -> usize {
         3 + self.canonical_payload.len()
@@ -218,9 +229,9 @@ impl SignaturePreimage {
     pub fn content_hash_prefix(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"canonical_serializer_hash_v1:");
-        let bytes = self.to_bytes();
-        hasher.update((u64::try_from(bytes.len()).unwrap_or(u64::MAX)).to_le_bytes());
-        hasher.update(&bytes);
+        let byte_len = self.byte_len();
+        hasher.update((u64::try_from(byte_len).unwrap_or(u64::MAX)).to_le_bytes());
+        self.feed_into_hasher(&mut hasher);
         let digest = hex::encode(hasher.finalize());
         digest[..8].to_string()
     }
@@ -1105,6 +1116,39 @@ mod tests {
         assert_eq!(bytes[1], 0x10); // domain_tag[0]
         assert_eq!(bytes[2], 0x01); // domain_tag[1]
         assert_eq!(&bytes[3..], b"abc"); // payload
+    }
+
+    #[test]
+    fn test_preimage_feed_into_hasher_identical_to_to_bytes() {
+        let pi = SignaturePreimage::build(42, [0xDE, 0xAD], b"hash_test_payload".to_vec());
+
+        // Hash using to_bytes() (old method)
+        let mut hasher_old = Sha256::new();
+        let bytes = pi.to_bytes();
+        hasher_old.update(&bytes);
+        let digest_old = hasher_old.finalize();
+
+        // Hash using feed_into_hasher() (new method)
+        let mut hasher_new = Sha256::new();
+        pi.feed_into_hasher(&mut hasher_new);
+        let digest_new = hasher_new.finalize();
+
+        // Digests must be identical
+        assert_eq!(digest_old, digest_new,
+            "feed_into_hasher must produce identical digest as to_bytes");
+
+        // Test with empty payload
+        let pi_empty = SignaturePreimage::build(0, [0x00, 0xFF], vec![]);
+        let mut hasher_empty_old = Sha256::new();
+        hasher_empty_old.update(&pi_empty.to_bytes());
+        let digest_empty_old = hasher_empty_old.finalize();
+
+        let mut hasher_empty_new = Sha256::new();
+        pi_empty.feed_into_hasher(&mut hasher_empty_new);
+        let digest_empty_new = hasher_empty_new.finalize();
+
+        assert_eq!(digest_empty_old, digest_empty_new,
+            "feed_into_hasher must work correctly with empty payload");
     }
 
     #[test]
