@@ -7,11 +7,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::push_bounded;
+
 pub const VALIDATION_PLANNER_SCHEMA_VERSION: &str = "franken-node/validation-planner/plan/v1";
 pub const DEFAULT_CARGO_TOOLCHAIN: &str = "nightly-2026-02-19";
 pub const DEFAULT_PACKAGE: &str = "frankenengine-node";
 pub const DEFAULT_WORKSPACE_ROOT: &str = "/data/projects/franken_node";
 pub const DEFAULT_RCH_PRIORITY: &str = "low";
+
+/// Maximum skipped gates per validation plan to prevent DoS attacks.
+const MAX_SKIPPED_GATES: usize = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredTest {
@@ -528,7 +533,7 @@ impl<'a> PlanBuilder<'a> {
             covers.to_vec(),
         );
         self.add_command(command);
-        self.rch_command_count += 1;
+        self.rch_command_count = self.rch_command_count.saturating_add(1);
     }
 
     fn add_cargo_check_tests(
@@ -545,7 +550,7 @@ impl<'a> PlanBuilder<'a> {
         ];
         let command = self.rch_cargo_command(command_id, cargo_args, rationale, covers);
         self.add_command(command);
-        self.rch_command_count += 1;
+        self.rch_command_count = self.rch_command_count.saturating_add(1);
     }
 
     fn rch_cargo_command(
@@ -590,10 +595,14 @@ impl<'a> PlanBuilder<'a> {
     }
 
     fn add_skipped_gate(&mut self, gate: impl Into<String>, reason: impl Into<String>) {
-        self.skipped_gates.push(SkippedGate {
-            gate: gate.into(),
-            reason: reason.into(),
-        });
+        push_bounded(
+            &mut self.skipped_gates,
+            SkippedGate {
+                gate: gate.into(),
+                reason: reason.into(),
+            },
+            MAX_SKIPPED_GATES,
+        );
     }
 
     fn add_escalation(&mut self, condition: impl Into<String>) {
@@ -731,4 +740,46 @@ fn shell_quote(value: &str) -> String {
         return value.to_string();
     }
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::validation_input::ValidationInput;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_rch_command_count_saturating_arithmetic() {
+        let input = ValidationInput {
+            package: "test-package".to_string(),
+            changed_files: vec![],
+            workspace_root: PathBuf::from("/tmp"),
+            workdir: PathBuf::from("/tmp"),
+        };
+
+        let mut planner = ValidationPlanner::new(input);
+
+        // Set counter near usize::MAX to test saturation
+        planner.rch_command_count = usize::MAX - 1;
+
+        // These should saturate instead of wrapping
+        planner.add_cargo_test_named(
+            "overflow-test",
+            "test-module",
+            "Testing saturating arithmetic",
+            vec!["test-file.rs".to_string()],
+        );
+
+        // Should be at usize::MAX, not wrapped around
+        assert_eq!(planner.rch_command_count, usize::MAX);
+
+        // Another addition should still be MAX
+        planner.add_cargo_check_tests(
+            "overflow-test-2",
+            "Testing saturating arithmetic again",
+            vec!["test-file2.rs".to_string()],
+        );
+
+        assert_eq!(planner.rch_command_count, usize::MAX);
+    }
 }
