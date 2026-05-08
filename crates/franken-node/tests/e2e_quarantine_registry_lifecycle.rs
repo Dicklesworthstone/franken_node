@@ -65,6 +65,9 @@ struct Harness {
     started: Instant,
 }
 
+const QUARANTINE_ORDER_FIXTURE_SIGNATURE: &str =
+    "sha256:4516c63acce5f11fe6b750c98e1ea51c8fe384e5c211c829ea9894962ba928cb";
+
 impl Harness {
     fn new(test_name: &'static str) -> Self {
         init_test_tracing();
@@ -124,7 +127,7 @@ fn order(
         justification: format!("incident-{order_id}"),
         issued_by: "security-ops@example.com".to_string(),
         issued_at: issued_at.to_string(),
-        signature: "ed25519:fake-but-shape-correct".to_string(),
+        signature: QUARANTINE_ORDER_FIXTURE_SIGNATURE.to_string(),
         trace_id: format!("trace-{order_id}"),
         grace_period_secs: 3600,
     }
@@ -140,6 +143,27 @@ fn clearance(order_id: &str, justification: &str, cleared_at: &str) -> Quarantin
         signature: "ed25519:clearance-sig".to_string(),
         trace_id: format!("trace-clearance-{order_id}"),
     }
+}
+
+#[test]
+fn e2e_quarantine_order_fixture_uses_deterministic_signature_material() {
+    let fixture = order(
+        "QO-SIGNATURE-001",
+        "npm:@e2e/signature-pkg",
+        QuarantineSeverity::High,
+        "2026-04-26T22:00:00Z",
+    );
+
+    let digest = fixture
+        .signature
+        .strip_prefix("sha256:")
+        .expect("fixture signature should be tagged as sha256 material");
+    assert_eq!(digest.len(), 64);
+    assert!(digest.chars().all(|ch| ch.is_ascii_hexdigit()));
+
+    let lowered = fixture.signature.to_ascii_lowercase();
+    assert!(!lowered.contains("placeholder"));
+    assert!(!lowered.contains("fake"));
 }
 
 #[test]

@@ -611,7 +611,7 @@ impl QuarantineRegistry {
         };
 
         let mut state_history = vec![(QuarantineState::Initiated, timestamp.clone())];
-        if initial_state == QuarantineState::Enforced {
+        if matches!(initial_state, QuarantineState::Enforced) {
             state_history.push((QuarantineState::Enforced, timestamp.clone()));
         }
 
@@ -644,7 +644,7 @@ impl QuarantineRegistry {
             "Quarantine order issued",
         )?;
 
-        if initial_state == QuarantineState::Enforced {
+        if matches!(initial_state, QuarantineState::Enforced) {
             self.append_audit(
                 QUARANTINE_ENFORCED,
                 &order_id,
@@ -699,7 +699,7 @@ impl QuarantineRegistry {
                 code: ERR_QUARANTINE_NOT_FOUND.to_owned(),
                 message: "Quarantine order disappeared during operation".to_string(),
             })?;
-        if record.state == QuarantineState::Initiated {
+        if matches!(record.state, QuarantineState::Initiated) {
             record.state = QuarantineState::Propagated;
             push_bounded(
                 &mut record.state_history,
@@ -778,7 +778,7 @@ impl QuarantineRegistry {
                 code: ERR_QUARANTINE_NOT_FOUND.to_owned(),
                 message: format!("Quarantine order not found: {order_id}"),
             })?;
-            if record.state != QuarantineState::Enforced {
+            if !matches!(record.state, QuarantineState::Enforced) {
                 return Err(QuarantineError {
                     code: ERR_QUARANTINE_INVALID_TRANSITION.to_owned(),
                     message: format!(
@@ -832,7 +832,7 @@ impl QuarantineRegistry {
                 code: ERR_QUARANTINE_NOT_FOUND.to_owned(),
                 message: format!("Quarantine order not found: {order_id}"),
             })?;
-            if record.state != QuarantineState::Draining {
+            if !matches!(record.state, QuarantineState::Draining) {
                 return Err(QuarantineError {
                     code: ERR_QUARANTINE_INVALID_TRANSITION.to_owned(),
                     message: format!(
@@ -995,7 +995,7 @@ impl QuarantineRegistry {
                 code: ERR_QUARANTINE_NOT_FOUND.to_owned(),
                 message: "Quarantine order disappeared during operation".to_string(),
             })?;
-        if record.state != QuarantineState::RecallTriggered {
+        if !matches!(record.state, QuarantineState::RecallTriggered) {
             return Err(QuarantineError {
                 code: ERR_RECALL_WITHOUT_QUARANTINE.to_owned(),
                 message: format!(
@@ -1058,7 +1058,7 @@ impl QuarantineRegistry {
                 message: "Quarantine order disappeared during operation".to_string(),
             })?;
 
-        if record.state != QuarantineState::RecallTriggered {
+        if !matches!(record.state, QuarantineState::RecallTriggered) {
             return Err(QuarantineError {
                 code: ERR_QUARANTINE_INVALID_TRANSITION.to_owned(),
                 message: format!(
@@ -1112,7 +1112,7 @@ impl QuarantineRegistry {
                 code: ERR_QUARANTINE_NOT_FOUND.to_owned(),
                 message: format!("Quarantine order not found: {order_id}"),
             })?;
-            if record.state != QuarantineState::Isolated {
+            if !matches!(record.state, QuarantineState::Isolated) {
                 return Err(QuarantineError {
                     code: ERR_QUARANTINE_INVALID_TRANSITION.to_owned(),
                     message: format!(
@@ -1328,12 +1328,12 @@ impl QuarantineRegistry {
             || self
                 .audit_trail
                 .iter()
-                .any(|entry| entry.order_id == order_id)
+                .any(|entry| constant_time::ct_eq(&entry.order_id, order_id))
     }
 
     fn remove_active_quarantine(&mut self, order_id: &str) {
         self.active_quarantines
-            .retain(|_, active| active != order_id);
+            .retain(|_, active| !constant_time::ct_eq(active, order_id));
     }
 
     fn remove_record(&mut self, order_id: &str) {
@@ -1425,6 +1425,9 @@ mod tests {
         RecallOrder, RecallReceipt, constant_time,
     };
 
+    const QUARANTINE_ORDER_FIXTURE_SIGNATURE: &str =
+        "sha256:4516c63acce5f11fe6b750c98e1ea51c8fe384e5c211c829ea9894962ba928cb";
+
     fn make_order(id: &str, severity: QuarantineSeverity, mode: QuarantineMode) -> QuarantineOrder {
         QuarantineOrder {
             order_id: id.to_owned(),
@@ -1438,7 +1441,7 @@ mod tests {
             justification: "Test quarantine".to_owned(),
             issued_by: "operator-1".to_owned(),
             issued_at: "2026-01-15T00:00:00Z".to_owned(),
-            signature: "sig-fixture-quarantine-order-v1".to_owned(),
+            signature: QUARANTINE_ORDER_FIXTURE_SIGNATURE.to_owned(),
             trace_id: "trace-001".to_owned(),
             grace_period_secs: 300,
         }
@@ -1509,7 +1512,10 @@ mod tests {
             QuarantineMode::Soft,
         );
 
-        assert_eq!(order.signature, "sig-fixture-quarantine-order-v1");
+        assert!(constant_time::ct_eq(
+            &order.signature,
+            QUARANTINE_ORDER_FIXTURE_SIGNATURE
+        ));
         assert!(!order.signature.contains("placeholder"));
     }
 
@@ -3465,7 +3471,7 @@ mod tests {
                 if total_nodes == 0 {
                     // Division by zero case - should be handled gracefully
                     assert!(
-                        pct.is_infinite() || pct.is_nan() || pct == 0.0,
+                        pct.is_infinite() || pct.is_nan() || pct.abs() <= f64::EPSILON,
                         "division by zero should be handled: got {}",
                         pct
                     );
