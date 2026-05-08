@@ -2287,7 +2287,7 @@ fn classify_proof_lane_decision(
             format!("Readiness input is malformed: {reason}."),
         );
     }
-    if now > input.freshness_expires_at {
+    if now >= input.freshness_expires_at {
         return proof_lane_decision(
             ProofLaneReadinessDecisionKind::FailClosed,
             proof_lane_reason_codes::STALE_READINESS_CAPSULE,
@@ -2630,7 +2630,7 @@ fn capability_snapshot_unknown_or_stale(
         || capability.observed_at.is_none()
         || capability
             .freshness_expires_at
-            .is_none_or(|expires_at| now > expires_at)
+            .is_none_or(|expires_at| now >= expires_at)
 }
 
 fn product_validation_error_class(error_class: ValidationErrorClass) -> bool {
