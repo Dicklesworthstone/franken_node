@@ -2240,91 +2240,16 @@ impl CapabilityGate {
             return Err(err);
         }
 
+        // SECURITY FIX: Atomic check-and-consume to prevent TOCTOU race
+        // Previous code had TOCTOU: check if consumed, then later consume, allowing
+        // race where two threads both pass check but both consume same single-use token.
         let replay_key = cap.single_use.then(|| replay_store_key(cap));
-        if cap.single_use && self.consumed_tokens.contains(&cap.token_id) {
-            let err = RemoteCapError::ReplayDetected {
-                token_id: cap.token_id.clone(),
-            };
-            self.push_audit(build_audit_event(
-                "REMOTECAP_DENIED",
-                "RC_CHECK_DENIED",
-                Some(cap.token_id.clone()),
-                Some(cap.issuer_identity.clone()),
-                Some(operation),
-                Some(endpoint.to_string()),
-                trace_id.to_string(),
-                now_epoch_secs,
-                false,
-                Some(err.code().to_string()),
-            ));
-            return Err(err);
-        }
 
-        if !consume_single_use && let Some(replay_key) = replay_key.as_deref() {
-            match self.replay_store.contains_consumed(replay_key) {
-                Ok(false) => {}
-                Ok(true) => {
-                    let err = RemoteCapError::ReplayDetected {
-                        token_id: cap.token_id.clone(),
-                    };
-                    self.push_audit(build_audit_event(
-                        "REMOTECAP_DENIED",
-                        "RC_CHECK_DENIED",
-                        Some(cap.token_id.clone()),
-                        Some(cap.issuer_identity.clone()),
-                        Some(operation),
-                        Some(endpoint.to_string()),
-                        trace_id.to_string(),
-                        now_epoch_secs,
-                        false,
-                        Some(err.code().to_string()),
-                    ));
-                    return Err(err);
-                }
-                Err(err) => {
-                    self.push_audit(build_audit_event(
-                        "REMOTECAP_DENIED",
-                        "RC_CHECK_DENIED",
-                        Some(cap.token_id.clone()),
-                        Some(cap.issuer_identity.clone()),
-                        Some(operation),
-                        Some(endpoint.to_string()),
-                        trace_id.to_string(),
-                        now_epoch_secs,
-                        false,
-                        Some(err.code().to_string()),
-                    ));
-                    return Err(err);
-                }
-            }
-        }
-
-        if cap.single_use && consume_single_use {
-            if self.replay_store.is_memory_only()
-                && !self.consumed_tokens.insert_if_new(cap.token_id.clone())
-            {
-                let err = RemoteCapError::ReplayDetected {
-                    token_id: cap.token_id.clone(),
-                };
-                self.push_audit(build_audit_event(
-                    "REMOTECAP_DENIED",
-                    "RC_CHECK_DENIED",
-                    Some(cap.token_id.clone()),
-                    Some(cap.issuer_identity.clone()),
-                    Some(operation),
-                    Some(endpoint.to_string()),
-                    trace_id.to_string(),
-                    now_epoch_secs,
-                    false,
-                    Some(err.code().to_string()),
-                ));
-                return Err(err);
-            }
-
-            if let Some(replay_key) = replay_key.as_deref() {
-                match self.replay_store.consume(cap, replay_key) {
-                    Ok(true) => {}
-                    Ok(false) => {
+        if cap.single_use {
+            if consume_single_use {
+                // Consume path: atomic check-and-consume to prevent replay races
+                if self.replay_store.is_memory_only() {
+                    if !self.consumed_tokens.insert_if_new(cap.token_id.clone()) {
                         let err = RemoteCapError::ReplayDetected {
                             token_id: cap.token_id.clone(),
                         };
@@ -2342,26 +2267,109 @@ impl CapabilityGate {
                         ));
                         return Err(err);
                     }
-                    Err(err) => {
-                        self.push_audit(build_audit_event(
-                            "REMOTECAP_DENIED",
-                            "RC_CHECK_DENIED",
-                            Some(cap.token_id.clone()),
-                            Some(cap.issuer_identity.clone()),
-                            Some(operation),
-                            Some(endpoint.to_string()),
-                            trace_id.to_string(),
-                            now_epoch_secs,
-                            false,
-                            Some(err.code().to_string()),
-                        ));
-                        return Err(err);
+                }
+
+                if let Some(replay_key) = replay_key.as_deref() {
+                    match self.replay_store.consume(cap, replay_key) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let err = RemoteCapError::ReplayDetected {
+                                token_id: cap.token_id.clone(),
+                            };
+                            self.push_audit(build_audit_event(
+                                "REMOTECAP_DENIED",
+                                "RC_CHECK_DENIED",
+                                Some(cap.token_id.clone()),
+                                Some(cap.issuer_identity.clone()),
+                                Some(operation),
+                                Some(endpoint.to_string()),
+                                trace_id.to_string(),
+                                now_epoch_secs,
+                                false,
+                                Some(err.code().to_string()),
+                            ));
+                            return Err(err);
+                        }
+                        Err(err) => {
+                            self.push_audit(build_audit_event(
+                                "REMOTECAP_DENIED",
+                                "RC_CHECK_DENIED",
+                                Some(cap.token_id.clone()),
+                                Some(cap.issuer_identity.clone()),
+                                Some(operation),
+                                Some(endpoint.to_string()),
+                                trace_id.to_string(),
+                                now_epoch_secs,
+                                false,
+                                Some(err.code().to_string()),
+                            ));
+                            return Err(err);
+                        }
                     }
                 }
-            }
 
-            if !self.replay_store.is_memory_only() {
-                self.consumed_tokens.insert(cap.token_id.clone());
+                if !self.replay_store.is_memory_only() {
+                    self.consumed_tokens.insert(cap.token_id.clone());
+                }
+            } else {
+                // Recheck path: read-only validation without consumption
+                if self.consumed_tokens.contains(&cap.token_id) {
+                    let err = RemoteCapError::ReplayDetected {
+                        token_id: cap.token_id.clone(),
+                    };
+                    self.push_audit(build_audit_event(
+                        "REMOTECAP_DENIED",
+                        "RC_CHECK_DENIED",
+                        Some(cap.token_id.clone()),
+                        Some(cap.issuer_identity.clone()),
+                        Some(operation),
+                        Some(endpoint.to_string()),
+                        trace_id.to_string(),
+                        now_epoch_secs,
+                        false,
+                        Some(err.code().to_string()),
+                    ));
+                    return Err(err);
+                }
+
+                if let Some(replay_key) = replay_key.as_deref() {
+                    match self.replay_store.contains_consumed(replay_key) {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            let err = RemoteCapError::ReplayDetected {
+                                token_id: cap.token_id.clone(),
+                            };
+                            self.push_audit(build_audit_event(
+                                "REMOTECAP_DENIED",
+                                "RC_CHECK_DENIED",
+                                Some(cap.token_id.clone()),
+                                Some(cap.issuer_identity.clone()),
+                                Some(operation),
+                                Some(endpoint.to_string()),
+                                trace_id.to_string(),
+                                now_epoch_secs,
+                                false,
+                                Some(err.code().to_string()),
+                            ));
+                            return Err(err);
+                        }
+                        Err(err) => {
+                            self.push_audit(build_audit_event(
+                                "REMOTECAP_DENIED",
+                                "RC_CHECK_DENIED",
+                                Some(cap.token_id.clone()),
+                                Some(cap.issuer_identity.clone()),
+                                Some(operation),
+                                Some(endpoint.to_string()),
+                                trace_id.to_string(),
+                                now_epoch_secs,
+                                false,
+                                Some(err.code().to_string()),
+                            ));
+                            return Err(err);
+                        }
+                    }
+                }
             }
         }
 

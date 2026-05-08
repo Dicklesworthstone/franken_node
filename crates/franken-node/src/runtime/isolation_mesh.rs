@@ -490,19 +490,25 @@ impl IsolationMesh {
             });
         }
 
-        // Rail capacity
-        let state = self
+        // SECURITY FIX: Atomic capacity check-and-reserve to prevent TOCTOU race
+        // Previous code had TOCTOU: check capacity, then later increment, allowing
+        // race where multiple threads pass capacity check but exceed rail limits.
+        let rs = self
             .rail_states
-            .get(rail_id)
+            .get_mut(rail_id)
             .ok_or_else(|| MeshError::UnknownRail {
                 rail_id: rail_id.to_string(),
             })?;
-        if state.active_count >= rail.capacity {
+
+        // Atomic check-and-reserve: fail if at capacity, otherwise increment immediately
+        if rs.active_count >= rail.capacity {
             return Err(MeshError::RailAtCapacity {
                 rail_id: rail_id.to_string(),
                 capacity: rail.capacity,
             });
         }
+        rs.active_count = rs.active_count.saturating_add(1);
+        rs.total_placed = rs.total_placed.saturating_add(1);
 
         let placement = WorkloadPlacement {
             workload_id: workload_id.to_string(),
@@ -515,15 +521,6 @@ impl IsolationMesh {
 
         self.workloads
             .insert(workload_id.to_string(), placement.clone());
-
-        let rs = self
-            .rail_states
-            .get_mut(rail_id)
-            .ok_or_else(|| MeshError::UnknownRail {
-                rail_id: rail_id.to_string(),
-            })?;
-        rs.active_count = rs.active_count.saturating_add(1);
-        rs.total_placed = rs.total_placed.saturating_add(1);
 
         self.push_event(
             event_codes::MESH_001,
@@ -607,36 +604,28 @@ impl IsolationMesh {
             return Err(e);
         }
 
-        // Target rail capacity
-        let target_state =
-            self.rail_states
-                .get(target_rail_id)
-                .ok_or_else(|| MeshError::UnknownRail {
-                    rail_id: target_rail_id.to_string(),
-                })?;
-        if target_state.active_count >= target_capacity {
-            return Err(MeshError::RailAtCapacity {
-                rail_id: target_rail_id.to_string(),
-                capacity: target_capacity,
-            });
-        }
-
-        // INV-MESH-ATOMIC-TRANSITION: perform the transition
-        // Decrement old rail
-        if let Some(old_state) = self.rail_states.get_mut(&old_rail_id) {
-            old_state.active_count = old_state.active_count.saturating_sub(1);
-            old_state.total_elevated_out = old_state.total_elevated_out.saturating_add(1);
-        }
-
-        // Increment new rail
+        // SECURITY FIX: Atomic capacity check-and-reserve for elevation
+        // Check target capacity and reserve slot atomically to prevent TOCTOU race
         let new_state =
             self.rail_states
                 .get_mut(target_rail_id)
                 .ok_or_else(|| MeshError::UnknownRail {
                     rail_id: target_rail_id.to_string(),
                 })?;
+        if new_state.active_count >= target_capacity {
+            return Err(MeshError::RailAtCapacity {
+                rail_id: target_rail_id.to_string(),
+                capacity: target_capacity,
+            });
+        }
         new_state.active_count = new_state.active_count.saturating_add(1);
         new_state.total_elevated_in = new_state.total_elevated_in.saturating_add(1);
+
+        // INV-MESH-ATOMIC-TRANSITION: decrement old rail after securing new rail
+        if let Some(old_state) = self.rail_states.get_mut(&old_rail_id) {
+            old_state.active_count = old_state.active_count.saturating_sub(1);
+            old_state.total_elevated_out = old_state.total_elevated_out.saturating_add(1);
+        }
 
         // Update workload placement -- INV-MESH-POLICY-CONTINUITY: policy preserved
         let updated_placement = {
