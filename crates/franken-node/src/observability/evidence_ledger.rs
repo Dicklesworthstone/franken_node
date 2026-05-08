@@ -1757,11 +1757,11 @@ impl SharedEvidenceLedger {
     }
 
     fn is_poisoned(&self) -> bool {
-        self.poisoned.load(Ordering::Relaxed)
+        self.poisoned.load(Ordering::Acquire)
     }
 
     fn mark_poisoned(&self) {
-        if !self.poisoned.swap(true, Ordering::Relaxed) {
+        if !self.poisoned.swap(true, Ordering::Release) {
             emit_ledger_lock_poison_fail_closed_event();
         }
     }
@@ -7743,5 +7743,44 @@ mod tests {
         entry = test_entry("DEC-002", 1);
         entry.entry_id = Some("entry-valid-123".to_string());
         assert!(ledger.append_unsigned_entry(entry).is_ok());
+    }
+
+    #[test]
+    fn shared_ledger_poison_flag_memory_ordering() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        // Test that poison flag uses proper memory ordering for cross-thread visibility
+        let ledger = SharedEvidenceLedger::new(LedgerCapacity::new(10, 1000));
+        let ledger_clone = ledger.clone();
+
+        // Verify initial state
+        assert!(!ledger.is_poisoned());
+
+        // Thread 1: Mark as poisoned
+        let handle = thread::spawn(move || {
+            // Simulate some work before poisoning
+            thread::sleep(Duration::from_millis(1));
+            ledger_clone.mark_poisoned();
+        });
+
+        // Thread 2: Wait for poison to be visible
+        handle.join().expect("thread should complete");
+
+        // With Acquire/Release ordering, the poison should be immediately visible
+        assert!(ledger.is_poisoned());
+
+        // All operations should now fail closed
+        assert!(matches!(
+            ledger.append(test_entry("DEC-POISON", 1)),
+            Err(LedgerError::LockPoisoned)
+        ));
+        assert_eq!(ledger.len(), 0);
+        assert!(ledger.is_empty());
+
+        // Snapshot should return fail-closed state
+        let snapshot = ledger.snapshot();
+        assert_eq!(snapshot.entries.len(), 0);
     }
 }
