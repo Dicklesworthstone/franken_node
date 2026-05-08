@@ -1,6 +1,7 @@
 pub mod durability_violation;
 pub mod evidence_ledger;
 pub mod metrics;
+pub mod validation_proof_economics;
 pub mod witness_ref;
 
 #[cfg(feature = "test-support")]
