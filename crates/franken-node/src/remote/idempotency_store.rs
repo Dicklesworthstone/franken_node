@@ -111,7 +111,7 @@ impl fmt::Display for EntryStatus {
 }
 
 /// A cached outcome for a completed idempotent operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CachedOutcome {
     /// SHA-256 hex digest of `result_data`.
     pub result_hash: String,
@@ -121,8 +121,18 @@ pub struct CachedOutcome {
     pub completed_at_secs: u64,
 }
 
+impl std::fmt::Debug for CachedOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedOutcome")
+            .field("result_hash", &"[REDACTED]")
+            .field("result_data_bytes", &self.result_data.len())
+            .field("completed_at_secs", &self.completed_at_secs)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A stored dedupe entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DedupeEntry {
     /// The idempotency key for this entry.
     pub key: IdempotencyKey,
@@ -136,6 +146,19 @@ pub struct DedupeEntry {
     pub created_at_secs: u64,
     /// Time-to-live in seconds from `created_at_secs`.
     pub ttl_secs: u64,
+}
+
+impl std::fmt::Debug for DedupeEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DedupeEntry")
+            .field("key", &self.key)
+            .field("payload_hash", &"[REDACTED]")
+            .field("status", &self.status)
+            .field("outcome", &self.outcome)
+            .field("created_at_secs", &self.created_at_secs)
+            .field("ttl_secs", &self.ttl_secs)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DedupeEntry {
@@ -1751,5 +1774,58 @@ mod tests {
         // Should use finish_non_exhaustive() pattern
         assert!(debug_output.contains(".."),
                 "Debug output should indicate hidden fields with '..'");
+    }
+
+    #[test]
+    fn cached_outcome_debug_redacts_sensitive_fields() {
+        let outcome = CachedOutcome {
+            result_hash: "sensitive_hash_abc123".to_string(),
+            result_data: b"sensitive_result_data".to_vec(),
+            completed_at_secs: 1234567890,
+        };
+
+        let debug_output = format!("{:?}", outcome);
+
+        // Verify sensitive fields are redacted
+        assert!(!debug_output.contains("sensitive_hash_abc123"),
+                "Debug output should not expose result_hash");
+        assert!(!debug_output.contains("sensitive_result_data"),
+                "Debug output should not expose result_data");
+
+        // Verify safe fields and counts are shown
+        assert!(debug_output.contains("result_data_bytes: 21"),
+                "Debug should show result_data length");
+        assert!(debug_output.contains("completed_at_secs: 1234567890"),
+                "Debug should show completion timestamp");
+        assert!(debug_output.contains("[REDACTED]"),
+                "Debug should indicate redacted fields");
+    }
+
+    #[test]
+    fn dedupe_entry_debug_redacts_payload_hash() {
+        let entry = DedupeEntry {
+            key: IdempotencyKey::new("test_key".to_string()),
+            payload_hash: "sensitive_payload_hash_xyz789".to_string(),
+            status: EntryStatus::Complete,
+            outcome: None,
+            created_at_secs: 1234567890,
+            ttl_secs: 3600,
+        };
+
+        let debug_output = format!("{:?}", entry);
+
+        // Verify sensitive fields are redacted
+        assert!(!debug_output.contains("sensitive_payload_hash_xyz789"),
+                "Debug output should not expose payload_hash");
+
+        // Verify safe fields are shown
+        assert!(debug_output.contains("test_key"),
+                "Debug should show idempotency key");
+        assert!(debug_output.contains("Complete"),
+                "Debug should show status");
+        assert!(debug_output.contains("created_at_secs: 1234567890"),
+                "Debug should show creation timestamp");
+        assert!(debug_output.contains("[REDACTED]"),
+                "Debug should indicate redacted fields");
     }
 }

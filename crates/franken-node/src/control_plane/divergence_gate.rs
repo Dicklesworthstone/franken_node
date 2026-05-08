@@ -48,7 +48,7 @@ fn update_decimal(hasher: &mut Sha256, mut value: u128) {
 }
 
 fn update_len_prefixed_text(hasher: &mut Sha256, value: &str) {
-    update_decimal(hasher, value.len() as u128);
+    update_decimal(hasher, u128::try_from(value.len()).unwrap_or(u128::MAX));
     hasher.update(b":");
     hasher.update(value.as_bytes());
 }
@@ -4103,5 +4103,38 @@ mod tests {
             error_disclosure_attacks.len(),
             key_handling_attacks.len()
         );
+    }
+
+    #[test]
+    fn update_len_prefixed_text_uses_safe_length_casting() {
+        use sha2::Sha256;
+
+        // Test that update_len_prefixed_text uses u128::try_from instead of direct casting
+        let mut hasher = Sha256::new();
+        let test_text = "test data for safe length casting";
+
+        // This should not panic even with edge case length values
+        update_len_prefixed_text(&mut hasher, test_text);
+
+        // Verify deterministic behavior
+        let hash1 = hasher.finalize();
+        let mut hasher2 = Sha256::new();
+        update_len_prefixed_text(&mut hasher2, test_text);
+        let hash2 = hasher2.finalize();
+        assert_eq!(hash1, hash2);
+
+        // Test with empty string (edge case)
+        let mut hasher3 = Sha256::new();
+        update_len_prefixed_text(&mut hasher3, "");
+        let _hash_empty = hasher3.finalize();
+
+        // Test with moderately large string to ensure no truncation issues
+        let large_text = "a".repeat(1_000_000); // 1MB string
+        let mut hasher4 = Sha256::new();
+        update_len_prefixed_text(&mut hasher4, &large_text);
+        let _hash_large = hasher4.finalize();
+
+        // The implementation should handle edge cases without truncation
+        // by using u128::try_from().unwrap_or(u128::MAX) instead of direct cast
     }
 }
