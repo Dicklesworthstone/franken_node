@@ -9,11 +9,23 @@ use frankenengine_node::ops::validation_broker::{
 };
 use frankenengine_node::ops::validation_closeout::{
     ValidationCloseoutError, ValidationCloseoutOptions, ValidationCloseoutStatus,
-    build_validation_closeout_report, redact_output_excerpt,
+    build_validation_closeout_report, redact_output_excerpt, render_validation_closeout_json,
+    render_validation_closeout_structured_log_jsonl,
+};
+use frankenengine_node::ops::validation_proof_cache::DirtyStatePolicy;
+use frankenengine_node::ops::validation_proof_coalescer::{
+    ValidationSwarmSchedulerCapacitySnapshot, ValidationSwarmSchedulerCoalescerState,
+    ValidationSwarmSchedulerDecision, ValidationSwarmSchedulerDigestRef,
+    ValidationSwarmSchedulerFlightRecorderState, ValidationSwarmSchedulerInput,
+    ValidationSwarmSchedulerPolicy, ValidationSwarmSchedulerPriority,
+    ValidationSwarmSchedulerProofDebtClass, ValidationSwarmSchedulerTargetDirClass,
+    decide_validation_swarm_schedule,
 };
 use serde_json::Value;
 use std::process::Command;
 use tempfile::TempDir;
+
+type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn ts(seconds: i64) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 5, 5, 12, 0, 0)
@@ -154,6 +166,7 @@ fn receipt(
             stderr_digest: DigestRef::sha256(b"stderr"),
         },
         readiness_ref: None,
+        flight_recorder_ref: None,
         trust: ReceiptTrust {
             generated_by: "validation-broker".to_string(),
             agent_name: "RusticPlateau".to_string(),
@@ -184,6 +197,68 @@ fn readiness_ref(reason_code: &str) -> ValidationReadinessRef {
     }
 }
 
+fn scheduler_digest(material: &str) -> ValidationSwarmSchedulerDigestRef {
+    ValidationSwarmSchedulerDigestRef::sha256_material(material)
+}
+
+fn scheduler_capacity(
+    slots_total: u16,
+    slots_available: u16,
+    queue_depth: u16,
+) -> ValidationSwarmSchedulerCapacitySnapshot {
+    ValidationSwarmSchedulerCapacitySnapshot {
+        snapshot_id: "closeout-scheduler-capacity".to_string(),
+        captured_at: ts(1),
+        workers_total: 4,
+        workers_healthy: 3,
+        slots_total,
+        slots_available,
+        queue_depth,
+        stale_active_builds: 0,
+        disk_pressure_workers: 0,
+    }
+}
+
+fn scheduler_input(seed: &str) -> ValidationSwarmSchedulerInput {
+    ValidationSwarmSchedulerInput {
+        schema_version:
+            frankenengine_node::ops::validation_proof_coalescer::SWARM_SCHEDULER_INPUT_SCHEMA_VERSION
+                .to_string(),
+        input_id: format!("closeout-{seed}"),
+        bead_id: "bd-y4mkq".to_string(),
+        agent_name: "RusticPlateau".to_string(),
+        proof_work_key: scheduler_digest(&format!("closeout-proof-work/{seed}")),
+        command_digest: scheduler_digest(&format!("cargo test validation_closeout/{seed}")),
+        dirty_state_policy: DirtyStatePolicy::CleanRequired,
+        target_dir_class: ValidationSwarmSchedulerTargetDirClass::OffRepo,
+        capacity_snapshot: scheduler_capacity(8, 1, 80),
+        coalescer_state: ValidationSwarmSchedulerCoalescerState::None,
+        flight_recorder_state: ValidationSwarmSchedulerFlightRecorderState::None,
+        proof_debt_class: ValidationSwarmSchedulerProofDebtClass::None,
+        queue_age_ms: 300_000,
+        priority: ValidationSwarmSchedulerPriority::P2,
+        timeout_budget_ms: 600_000,
+        source_only_allowed: false,
+        product_failure: false,
+        worker_infra_retryable: false,
+        artifact_valid: true,
+    }
+}
+
+fn scheduler_decision(
+    seed: &str,
+    mutate: impl FnOnce(&mut ValidationSwarmSchedulerInput),
+) -> ValidationSwarmSchedulerDecision {
+    let mut input = scheduler_input(seed);
+    mutate(&mut input);
+    decide_validation_swarm_schedule(
+        &ValidationSwarmSchedulerPolicy::default_policy("validation-closeout-scheduler/v1"),
+        &input,
+        ts(2),
+    )
+    .expect("scheduler decision")
+}
+
 #[test]
 fn ready_receipt_renders_close_reason_and_agent_mail_summary() {
     let now = ts(1);
@@ -205,6 +280,79 @@ fn ready_receipt_renders_close_reason_and_agent_mail_summary() {
     assert!(report.close_reason.contains("worker=ts2"));
     assert!(report.agent_mail_markdown.contains("validation closeout"));
     assert!(report.agent_mail_markdown.contains("summary_artifact"));
+}
+
+#[test]
+fn closeout_surfaces_swarm_scheduler_decision_in_json_markdown_and_structured_log() -> TestResult {
+    let now = ts(1);
+    let receipt = receipt(
+        "bd-y4mkq",
+        now,
+        ValidationExitKind::Success,
+        ValidationErrorClass::None,
+        TimeoutClass::None,
+        ts(60),
+    );
+    let decision = scheduler_decision("capacity", |input| {
+        input.capacity_snapshot = scheduler_capacity(8, 0, 96);
+        input.worker_infra_retryable = true;
+        input.queue_age_ms = 900_000;
+    });
+    let options = ValidationCloseoutOptions::new("bd-y4mkq", "vc-scheduler")
+        .with_swarm_scheduler_decision(&decision);
+
+    let report = build_validation_closeout_report(&receipt, &options, ts(2))?;
+
+    assert_eq!(report.status, ValidationCloseoutStatus::Ready);
+    assert!(
+        report
+            .close_reason
+            .contains("scheduler_decision=wait_for_capacity")
+    );
+    assert!(
+        report
+            .close_reason
+            .contains("scheduler_queue_age_ms=900000")
+    );
+    assert!(
+        report
+            .agent_mail_markdown
+            .contains("- swarm_scheduler_decision: `wait_for_capacity`")
+    );
+    assert!(
+        report
+            .agent_mail_markdown
+            .contains("- swarm_scheduler_slo: fairness_bucket=`aging`")
+    );
+
+    let json: Value = serde_json::from_str(&render_validation_closeout_json(&report)?)?;
+    assert_eq!(
+        json["swarm_scheduler"]["scheduler_decision"],
+        "wait_for_capacity"
+    );
+    assert_eq!(json["swarm_scheduler"]["next_action"], "wait_for_capacity");
+    assert_eq!(json["swarm_scheduler"]["queue_age_ms"], 900_000);
+    assert_eq!(json["swarm_scheduler"]["slo_breached"], true);
+
+    let logs = render_validation_closeout_structured_log_jsonl(&report)?;
+    let log_json: Value = serde_json::from_str(logs.trim())?;
+    assert_eq!(
+        log_json["detail"]["scheduler_decision"],
+        "wait_for_capacity"
+    );
+    assert_eq!(
+        log_json["detail"]["scheduler_required_action"],
+        "wait_for_capacity"
+    );
+    assert_eq!(log_json["detail"]["scheduler_queue_age_ms"], 900_000);
+    assert_eq!(log_json["detail"]["scheduler_slo_breached"], true);
+    assert!(
+        log_json["detail"]["scheduler_recorder_path"]
+            .as_str()
+            .is_some()
+    );
+
+    Ok(())
 }
 
 #[test]

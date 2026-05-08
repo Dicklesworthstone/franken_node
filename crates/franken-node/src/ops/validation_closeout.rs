@@ -8,6 +8,9 @@ use crate::ops::validation_broker::{
     ValidationProofCacheReuseEvidence, ValidationProofCoalescerEvidence, ValidationReadinessRef,
     ValidationReceipt, error_codes,
 };
+use crate::ops::validation_proof_coalescer::{
+    ValidationSwarmSchedulerDecision, ValidationSwarmSchedulerDecisionKind,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -52,6 +55,8 @@ pub struct ValidationCloseoutOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proof_coalescer: Option<ValidationProofCoalescerEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub swarm_scheduler: Option<ValidationCloseoutSwarmSchedulerEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr_text: Option<String>,
@@ -67,6 +72,7 @@ impl ValidationCloseoutOptions {
             proof_source: ProofEvidenceSource::FreshExecution,
             proof_cache: None,
             proof_coalescer: None,
+            swarm_scheduler: None,
             stdout_text: None,
             stderr_text: None,
         }
@@ -92,6 +98,17 @@ impl ValidationCloseoutOptions {
         self.proof_coalescer = Some(proof_coalescer);
         self
     }
+
+    #[must_use]
+    pub fn with_swarm_scheduler_decision(
+        mut self,
+        decision: &ValidationSwarmSchedulerDecision,
+    ) -> Self {
+        self.swarm_scheduler = Some(ValidationCloseoutSwarmSchedulerEvidence::from_decision(
+            decision,
+        ));
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +128,8 @@ pub struct ValidationCloseoutReport {
     pub proof_cache: Option<ValidationProofCacheReuseEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proof_coalescer: Option<ValidationProofCoalescerEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swarm_scheduler: Option<ValidationCloseoutSwarmSchedulerEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_ref: Option<ValidationReadinessRef>,
     pub close_reason: String,
@@ -159,6 +178,57 @@ pub struct ValidationCloseoutOutputExcerpt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationCloseoutSwarmSchedulerEvidence {
+    pub decision_id: String,
+    pub trace_id: String,
+    pub bead_id: String,
+    pub agent: String,
+    pub proof_work_key: String,
+    pub scheduler_decision: String,
+    pub reason_code: String,
+    pub event_code: String,
+    pub required_action: String,
+    pub next_action: String,
+    pub fairness_bucket: String,
+    pub starvation_risk: String,
+    pub queue_age_ms: u64,
+    pub worker_id: Option<String>,
+    pub coalescer_state: String,
+    pub recorder_path: Option<String>,
+    pub slo_breached: bool,
+    pub retryable: bool,
+    pub fail_closed: bool,
+}
+
+impl ValidationCloseoutSwarmSchedulerEvidence {
+    #[must_use]
+    pub fn from_decision(decision: &ValidationSwarmSchedulerDecision) -> Self {
+        let required_action = decision.required_action.as_str().to_string();
+        Self {
+            decision_id: decision.decision_id.clone(),
+            trace_id: decision.trace_id.clone(),
+            bead_id: decision.bead_id.clone(),
+            agent: decision.agent_name.clone(),
+            proof_work_key: decision.diagnostics.proof_work_key_hex.clone(),
+            scheduler_decision: decision.decision.as_str().to_string(),
+            reason_code: decision.reason_code.clone(),
+            event_code: decision.event_code.clone(),
+            required_action: required_action.clone(),
+            next_action: required_action,
+            fairness_bucket: decision.fairness_bucket.as_str().to_string(),
+            starvation_risk: decision.starvation_risk.as_str().to_string(),
+            queue_age_ms: decision.diagnostics.queue_age_ms,
+            worker_id: None,
+            coalescer_state: decision.diagnostics.coalescer_state.as_str().to_string(),
+            recorder_path: decision.diagnostics.recorder_path.clone(),
+            slo_breached: swarm_scheduler_decision_breaches_slo(decision),
+            retryable: decision.retryable,
+            fail_closed: decision.fail_closed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationCloseoutStructuredLog {
     pub ts: DateTime<Utc>,
     pub event: String,
@@ -188,6 +258,16 @@ pub struct ValidationCloseoutStructuredLogDetail {
     pub waiter_agent: Option<String>,
     pub coalescer_receipt_path: Option<String>,
     pub cache_key: Option<String>,
+    pub scheduler_decision: Option<String>,
+    pub scheduler_reason_code: Option<String>,
+    pub scheduler_event_code: Option<String>,
+    pub scheduler_required_action: Option<String>,
+    pub scheduler_queue_age_ms: Option<u64>,
+    pub scheduler_worker_id: Option<String>,
+    pub scheduler_recorder_path: Option<String>,
+    pub scheduler_fairness_bucket: Option<String>,
+    pub scheduler_starvation_risk: Option<String>,
+    pub scheduler_slo_breached: Option<bool>,
 }
 
 #[derive(Debug, Error)]
@@ -207,6 +287,16 @@ pub enum ValidationCloseoutError {
         path: String,
         source: std::io::Error,
     },
+    #[error("failed reading swarm scheduler decision {path}: {source}")]
+    ReadSwarmSchedulerDecision {
+        path: String,
+        source: std::io::Error,
+    },
+    #[error("failed parsing swarm scheduler decision {path}: {source}")]
+    ParseSwarmSchedulerDecision {
+        path: String,
+        source: serde_json::Error,
+    },
     #[error("failed encoding validation closeout report JSON: {0}")]
     Encode(serde_json::Error),
 }
@@ -215,6 +305,23 @@ pub fn read_closeout_output_text(path: &Path) -> Result<String, ValidationCloseo
     fs::read_to_string(path).map_err(|source| ValidationCloseoutError::ReadOutput {
         path: path.display().to_string(),
         source,
+    })
+}
+
+pub fn read_swarm_scheduler_decision(
+    path: &Path,
+) -> Result<ValidationSwarmSchedulerDecision, ValidationCloseoutError> {
+    let raw = fs::read_to_string(path).map_err(|source| {
+        ValidationCloseoutError::ReadSwarmSchedulerDecision {
+            path: path.display().to_string(),
+            source,
+        }
+    })?;
+    serde_json::from_str(&raw).map_err(|source| {
+        ValidationCloseoutError::ParseSwarmSchedulerDecision {
+            path: path.display().to_string(),
+            source,
+        }
     })
 }
 
@@ -247,6 +354,7 @@ pub fn build_validation_closeout_report(
         proof_source,
         options.proof_cache.as_ref(),
         options.proof_coalescer.as_ref(),
+        options.swarm_scheduler.as_ref(),
         &warnings,
     );
     let agent_mail_markdown = render_agent_mail_markdown(
@@ -255,6 +363,7 @@ pub fn build_validation_closeout_report(
         proof_source,
         options.proof_cache.as_ref(),
         options.proof_coalescer.as_ref(),
+        options.swarm_scheduler.as_ref(),
         &summary,
         &warnings,
         &output_excerpts,
@@ -274,6 +383,7 @@ pub fn build_validation_closeout_report(
         proof_source,
         proof_cache: options.proof_cache.clone(),
         proof_coalescer: options.proof_coalescer.clone(),
+        swarm_scheduler: options.swarm_scheduler.clone(),
         readiness_ref: receipt.readiness_ref.clone(),
         close_reason,
         agent_mail_markdown,
@@ -464,6 +574,7 @@ fn structured_log_for_closeout(
     report: &ValidationCloseoutReport,
 ) -> ValidationCloseoutStructuredLog {
     let coalescer = report.proof_coalescer.as_ref();
+    let scheduler = report.swarm_scheduler.as_ref();
     ValidationCloseoutStructuredLog {
         ts: report.generated_at_utc,
         event: "validation_closeout".to_string(),
@@ -489,8 +600,28 @@ fn structured_log_for_closeout(
             waiter_agent: coalescer.and_then(|evidence| evidence.waiter_agent.clone()),
             coalescer_receipt_path: coalescer.and_then(|evidence| evidence.receipt_path.clone()),
             cache_key: coalescer.map(|evidence| evidence.proof_cache_key_hex.clone()),
+            scheduler_decision: scheduler.map(|evidence| evidence.scheduler_decision.clone()),
+            scheduler_reason_code: scheduler.map(|evidence| evidence.reason_code.clone()),
+            scheduler_event_code: scheduler.map(|evidence| evidence.event_code.clone()),
+            scheduler_required_action: scheduler.map(|evidence| evidence.required_action.clone()),
+            scheduler_queue_age_ms: scheduler.map(|evidence| evidence.queue_age_ms),
+            scheduler_worker_id: scheduler.and_then(|evidence| evidence.worker_id.clone()),
+            scheduler_recorder_path: scheduler.and_then(|evidence| evidence.recorder_path.clone()),
+            scheduler_fairness_bucket: scheduler.map(|evidence| evidence.fairness_bucket.clone()),
+            scheduler_starvation_risk: scheduler.map(|evidence| evidence.starvation_risk.clone()),
+            scheduler_slo_breached: scheduler.map(|evidence| evidence.slo_breached),
         },
     }
+}
+
+fn swarm_scheduler_decision_breaches_slo(decision: &ValidationSwarmSchedulerDecision) -> bool {
+    decision.starvation_risk.breaches_slo()
+        || decision.fail_closed
+        || matches!(
+            decision.decision,
+            ValidationSwarmSchedulerDecisionKind::FailClosedProduct
+                | ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact
+        )
 }
 
 const fn closeout_log_severity(status: ValidationCloseoutStatus) -> &'static str {
@@ -507,6 +638,7 @@ fn render_close_reason(
     proof_source: ProofEvidenceSource,
     proof_cache: Option<&ValidationProofCacheReuseEvidence>,
     proof_coalescer: Option<&ValidationProofCoalescerEvidence>,
+    swarm_scheduler: Option<&ValidationCloseoutSwarmSchedulerEvidence>,
     warnings: &[String],
 ) -> String {
     let worker = receipt.rch.worker_id.as_deref().unwrap_or("unknown-worker");
@@ -542,6 +674,21 @@ fn render_close_reason(
             coalescer.event_code
         )
     });
+    let scheduler_suffix = swarm_scheduler.map_or_else(String::new, |scheduler| {
+        format!(
+            " scheduler_decision={} scheduler_reason={} scheduler_action={} scheduler_event={} scheduler_queue_age_ms={} scheduler_fairness_bucket={} scheduler_starvation_risk={} scheduler_slo_breached={} scheduler_recorder={} scheduler_proof_work_key={}",
+            scheduler.scheduler_decision,
+            scheduler.reason_code,
+            scheduler.next_action,
+            scheduler.event_code,
+            scheduler.queue_age_ms,
+            scheduler.fairness_bucket,
+            scheduler.starvation_risk,
+            scheduler.slo_breached,
+            scheduler.recorder_path.as_deref().unwrap_or("none"),
+            scheduler.proof_work_key
+        )
+    });
     let readiness_suffix = receipt.readiness_ref.as_ref().map_or_else(String::new, |ref_| {
         format!(
             " readiness_ref={} readiness_digest={}:{} readiness_reason={} readiness_action={} readiness_fresh_until={}",
@@ -554,7 +701,7 @@ fn render_close_reason(
         )
     });
     format!(
-        "{} validation receipt {} status={} proof_source={} exit={} error_class={} worker={} command=\"{}\" artifacts={}{}{}{}{}",
+        "{} validation receipt {} status={} proof_source={} exit={} error_class={} worker={} command=\"{}\" artifacts={}{}{}{}{}{}",
         receipt.bead_id,
         receipt.receipt_id,
         status.as_str(),
@@ -566,6 +713,7 @@ fn render_close_reason(
         receipt.artifacts.summary_path,
         cache_suffix,
         coalescer_suffix,
+        scheduler_suffix,
         readiness_suffix,
         warning_suffix
     )
@@ -577,6 +725,7 @@ fn render_agent_mail_markdown(
     proof_source: ProofEvidenceSource,
     proof_cache: Option<&ValidationProofCacheReuseEvidence>,
     proof_coalescer: Option<&ValidationProofCoalescerEvidence>,
+    swarm_scheduler: Option<&ValidationCloseoutSwarmSchedulerEvidence>,
     summary: &ValidationCloseoutReceiptSummary,
     warnings: &[String],
     output_excerpts: &[ValidationCloseoutOutputExcerpt],
@@ -651,6 +800,32 @@ fn render_agent_mail_markdown(
         lines.push(format!(
             "- proof_coalescer_reason: `{}` action=`{}` event=`{}`",
             coalescer.reason_code, coalescer.required_action, coalescer.event_code
+        ));
+    }
+
+    if let Some(scheduler) = swarm_scheduler {
+        lines.push(format!(
+            "- swarm_scheduler_decision: `{}`",
+            scheduler.scheduler_decision
+        ));
+        lines.push(format!(
+            "- swarm_scheduler_owner: agent=`{}` bead=`{}` trace=`{}`",
+            scheduler.agent, scheduler.bead_id, scheduler.trace_id
+        ));
+        lines.push(format!(
+            "- swarm_scheduler_work: proof_work_key=`{}` queue_age_ms={} coalescer_state=`{}` recorder=`{}`",
+            scheduler.proof_work_key,
+            scheduler.queue_age_ms,
+            scheduler.coalescer_state,
+            scheduler.recorder_path.as_deref().unwrap_or("none")
+        ));
+        lines.push(format!(
+            "- swarm_scheduler_slo: fairness_bucket=`{}` starvation_risk=`{}` breached={}",
+            scheduler.fairness_bucket, scheduler.starvation_risk, scheduler.slo_breached
+        ));
+        lines.push(format!(
+            "- swarm_scheduler_reason: `{}` action=`{}` event=`{}`",
+            scheduler.reason_code, scheduler.next_action, scheduler.event_code
         ));
     }
 

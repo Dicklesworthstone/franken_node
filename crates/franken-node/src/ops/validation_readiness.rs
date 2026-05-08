@@ -9,6 +9,9 @@ use crate::ops::validation_broker::{
     SourceOnlyReason, TimeoutClass, ValidationErrorClass, ValidationExit, ValidationExitKind,
     ValidationProofStatus, ValidationReceipt,
 };
+use crate::ops::validation_proof_coalescer::{
+    ValidationSwarmSchedulerDecision, ValidationSwarmSchedulerDecisionKind,
+};
 use crate::ops::validation_recovery_planner::{RecoveryAction, reason_codes};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -163,6 +166,8 @@ pub struct ValidationReadinessInput {
     #[serde(default)]
     pub proof_lane_readiness: Vec<ProofLaneReadinessCapsule>,
     #[serde(default)]
+    pub swarm_scheduler_decisions: Vec<ValidationSwarmSchedulerDecision>,
+    #[serde(default)]
     pub resource_governor: Option<ResourceContentionSnapshot>,
     #[serde(default = "default_max_receipt_age_secs")]
     pub max_receipt_age_secs: u64,
@@ -177,6 +182,7 @@ impl Default for ValidationReadinessInput {
             receipts: Vec::new(),
             rch_workers: Vec::new(),
             proof_lane_readiness: Vec::new(),
+            swarm_scheduler_decisions: Vec::new(),
             resource_governor: None,
             max_receipt_age_secs: DEFAULT_MAX_RECEIPT_AGE_SECS,
         }
@@ -547,7 +553,88 @@ pub struct RecoveryPlanSummary {
     pub fail_closed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SwarmSchedulerReadinessSummary {
+    pub decisions: usize,
+    pub queue_age_p95_ms: u64,
+    pub queue_age_max_ms: u64,
+    pub slot_utilization: f64,
+    pub fairness_index: f64,
+    pub slo_breach_status: SwarmSchedulerSloBreachStatus,
+    pub breached_decisions: usize,
+    pub capacity_waits: usize,
+    pub work_steals: usize,
+    pub source_only_blockers: usize,
+    pub product_failures: usize,
+    pub worker_infra_retries: usize,
+    #[serde(default)]
+    pub decision_details: Vec<SwarmSchedulerDecisionSummary>,
+}
+
+impl Default for SwarmSchedulerReadinessSummary {
+    fn default() -> Self {
+        Self {
+            decisions: 0,
+            queue_age_p95_ms: 0,
+            queue_age_max_ms: 0,
+            slot_utilization: 0.0,
+            fairness_index: 1.0,
+            slo_breach_status: SwarmSchedulerSloBreachStatus::NoData,
+            breached_decisions: 0,
+            capacity_waits: 0,
+            work_steals: 0,
+            source_only_blockers: 0,
+            product_failures: 0,
+            worker_infra_retries: 0,
+            decision_details: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmSchedulerSloBreachStatus {
+    NoData,
+    Pass,
+    Warn,
+    Breach,
+}
+
+impl SwarmSchedulerSloBreachStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoData => "no_data",
+            Self::Pass => "pass",
+            Self::Warn => "warn",
+            Self::Breach => "breach",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmSchedulerDecisionSummary {
+    pub trace_id: String,
+    pub bead_id: String,
+    pub agent: String,
+    pub proof_work_key: String,
+    pub scheduler_decision: String,
+    pub reason_code: String,
+    pub event_code: String,
+    pub required_action: String,
+    pub next_action: String,
+    pub fairness_bucket: String,
+    pub starvation_risk: String,
+    pub queue_age_ms: u64,
+    pub worker_id: Option<String>,
+    pub coalescer_state: String,
+    pub recorder_path: Option<String>,
+    pub slo_breached: bool,
+    pub retryable: bool,
+    pub fail_closed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidationReadinessSummary {
     pub tracked_beads: usize,
     pub receipts: usize,
@@ -568,6 +655,8 @@ pub struct ValidationReadinessSummary {
     #[serde(default)]
     pub proof_lane_readiness: Vec<ProofLaneReadinessSummary>,
     #[serde(default)]
+    pub swarm_scheduler: SwarmSchedulerReadinessSummary,
+    #[serde(default)]
     pub flight_recorder_refs: usize,
     #[serde(default)]
     pub failed_attempt_details: Vec<FailedAttemptSummary>,
@@ -575,7 +664,7 @@ pub struct ValidationReadinessSummary {
     pub pending_recoveries: Vec<RecoveryPlanSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidationReadinessReport {
     pub schema_version: String,
     pub command: String,
@@ -628,6 +717,7 @@ pub fn build_validation_readiness_report(
         evaluate_receipt_freshness_check(input, &summary, now),
         evaluate_proof_status_check(input, &summary),
         evaluate_proof_coalescer_check(&summary),
+        evaluate_swarm_scheduler_slo_check(&summary),
         evaluate_rch_worker_check(input, &summary),
         evaluate_proof_lane_readiness_check(&summary),
         evaluate_resource_contention_check(input),
@@ -755,6 +845,15 @@ pub fn render_validation_readiness_human(report: &ValidationReadinessReport) -> 
             report.summary.proof_coalescer.rejected
         ),
         format!(
+            "  swarm_scheduler=decisions:{} queue_age_p95_ms:{} slot_utilization:{:.3} fairness_index:{:.3} slo_breach_status:{} breached_decisions:{}",
+            report.summary.swarm_scheduler.decisions,
+            report.summary.swarm_scheduler.queue_age_p95_ms,
+            report.summary.swarm_scheduler.slot_utilization,
+            report.summary.swarm_scheduler.fairness_index,
+            report.summary.swarm_scheduler.slo_breach_status.as_str(),
+            report.summary.swarm_scheduler.breached_decisions
+        ),
+        format!(
             "  stale_receipts={} missing_required_receipts={} malformed_receipts={}",
             report.summary.stale_receipt_count,
             report.summary.missing_required_receipts,
@@ -800,6 +899,36 @@ pub fn render_validation_readiness_human(report: &ValidationReadinessReport) -> 
         }
     }
 
+    for decision in &report.summary.swarm_scheduler.decision_details {
+        if decision.slo_breached
+            || matches!(
+                decision.scheduler_decision.as_str(),
+                "wait_for_capacity"
+                    | "steal_stale_work"
+                    | "record_source_only_blocker"
+                    | "fail_closed_product"
+                    | "fail_closed_invalid_artifact"
+            )
+        {
+            lines.push(format!(
+                "    swarm_scheduler_decision bead={} agent={} decision={} reason_code={} event_code={} action={} queue_age_ms={} fairness_bucket={} starvation_risk={} proof_work_key={} coalescer_state={} recorder_path={} slo_breached={}",
+                decision.bead_id,
+                decision.agent,
+                decision.scheduler_decision,
+                decision.reason_code,
+                decision.event_code,
+                decision.next_action,
+                decision.queue_age_ms,
+                decision.fairness_bucket,
+                decision.starvation_risk,
+                decision.proof_work_key,
+                decision.coalescer_state,
+                decision.recorder_path.as_deref().unwrap_or("none"),
+                decision.slo_breached
+            ));
+        }
+    }
+
     for check in &report.checks {
         lines.push(format!(
             "  {} [{}] {}",
@@ -832,6 +961,7 @@ fn summarize_validation_readiness(
     let mut last_successful_cargo_proof_at = None;
     let mut proof_cache_hits = 0usize;
     let mut proof_coalescer = ProofCoalescerCounts::default();
+    let swarm_scheduler = summarize_swarm_scheduler_decisions(&input.swarm_scheduler_decisions);
 
     for status in &input.proof_statuses {
         increment_proof_count(&mut proof_counts, status.status);
@@ -1043,6 +1173,7 @@ fn summarize_validation_readiness(
             .iter()
             .map(summarize_proof_lane_capsule)
             .collect(),
+        swarm_scheduler,
         flight_recorder_refs: flight_recorder_refs_count,
         failed_attempt_details,
         pending_recoveries,
@@ -1369,6 +1500,245 @@ fn evaluate_proof_coalescer_check(
         "No validation proof coalescer decisions were supplied.",
         "No action required.",
     )
+}
+
+#[must_use]
+pub fn summarize_swarm_scheduler_decisions(
+    decisions: &[ValidationSwarmSchedulerDecision],
+) -> SwarmSchedulerReadinessSummary {
+    if decisions.is_empty() {
+        return SwarmSchedulerReadinessSummary::default();
+    }
+
+    let mut queue_ages = decisions
+        .iter()
+        .map(|decision| decision.diagnostics.queue_age_ms)
+        .collect::<Vec<_>>();
+    queue_ages.sort_unstable();
+    let p95_index = queue_ages
+        .len()
+        .saturating_mul(95)
+        .saturating_add(99)
+        .checked_div(100)
+        .unwrap_or(1)
+        .saturating_sub(1)
+        .min(queue_ages.len().saturating_sub(1));
+    let queue_age_p95_ms = queue_ages[p95_index];
+    let queue_age_max_ms = queue_ages.last().copied().unwrap_or(0);
+
+    let slots_total = decisions.iter().fold(0_u64, |total, decision| {
+        total.saturating_add(u64::from(decision.diagnostics.slots_total))
+    });
+    let slots_available = decisions.iter().fold(0_u64, |total, decision| {
+        total.saturating_add(u64::from(decision.diagnostics.slots_available))
+    });
+    let slot_utilization = if slots_total == 0 {
+        0.0
+    } else {
+        slots_total.saturating_sub(slots_available) as f64 / slots_total as f64
+    };
+
+    let mut bucket_counts = BTreeMap::<&'static str, usize>::new();
+    for decision in decisions {
+        let bucket = decision.fairness_bucket.as_str();
+        *bucket_counts.entry(bucket).or_default() += 1;
+    }
+    let fairness_index = fairness_index(bucket_counts.values().copied());
+
+    let decision_details = decisions
+        .iter()
+        .map(summarize_swarm_scheduler_decision)
+        .collect::<Vec<_>>();
+    let breached_decisions = decision_details
+        .iter()
+        .filter(|decision| decision.slo_breached)
+        .count();
+    let capacity_waits = decisions
+        .iter()
+        .filter(|decision| {
+            matches!(
+                decision.decision,
+                ValidationSwarmSchedulerDecisionKind::WaitForCapacity
+            )
+        })
+        .count();
+    let work_steals = decisions
+        .iter()
+        .filter(|decision| {
+            matches!(
+                decision.decision,
+                ValidationSwarmSchedulerDecisionKind::StealStaleWork
+            )
+        })
+        .count();
+    let source_only_blockers = decisions
+        .iter()
+        .filter(|decision| {
+            matches!(
+                decision.decision,
+                ValidationSwarmSchedulerDecisionKind::RecordSourceOnlyBlocker
+            )
+        })
+        .count();
+    let product_failures = decisions
+        .iter()
+        .filter(|decision| {
+            matches!(
+                decision.decision,
+                ValidationSwarmSchedulerDecisionKind::FailClosedProduct
+            )
+        })
+        .count();
+    let worker_infra_retries = decisions
+        .iter()
+        .filter(|decision| {
+            decision.retryable
+                && matches!(
+                    decision.decision,
+                    ValidationSwarmSchedulerDecisionKind::WaitForCapacity
+                        | ValidationSwarmSchedulerDecisionKind::StealStaleWork
+                )
+        })
+        .count();
+
+    let slo_breach_status = if breached_decisions > 0 {
+        SwarmSchedulerSloBreachStatus::Breach
+    } else if capacity_waits > 0 || work_steals > 0 || source_only_blockers > 0 {
+        SwarmSchedulerSloBreachStatus::Warn
+    } else {
+        SwarmSchedulerSloBreachStatus::Pass
+    };
+
+    SwarmSchedulerReadinessSummary {
+        decisions: decisions.len(),
+        queue_age_p95_ms,
+        queue_age_max_ms,
+        slot_utilization,
+        fairness_index,
+        slo_breach_status,
+        breached_decisions,
+        capacity_waits,
+        work_steals,
+        source_only_blockers,
+        product_failures,
+        worker_infra_retries,
+        decision_details,
+    }
+}
+
+fn summarize_swarm_scheduler_decision(
+    decision: &ValidationSwarmSchedulerDecision,
+) -> SwarmSchedulerDecisionSummary {
+    let required_action = decision.required_action.as_str().to_string();
+    SwarmSchedulerDecisionSummary {
+        trace_id: decision.trace_id.clone(),
+        bead_id: decision.bead_id.clone(),
+        agent: decision.agent_name.clone(),
+        proof_work_key: decision.diagnostics.proof_work_key_hex.clone(),
+        scheduler_decision: decision.decision.as_str().to_string(),
+        reason_code: decision.reason_code.clone(),
+        event_code: decision.event_code.clone(),
+        required_action: required_action.clone(),
+        next_action: required_action,
+        fairness_bucket: decision.fairness_bucket.as_str().to_string(),
+        starvation_risk: decision.starvation_risk.as_str().to_string(),
+        queue_age_ms: decision.diagnostics.queue_age_ms,
+        worker_id: None,
+        coalescer_state: decision.diagnostics.coalescer_state.as_str().to_string(),
+        recorder_path: decision.diagnostics.recorder_path.clone(),
+        slo_breached: swarm_scheduler_decision_breaches_slo(decision),
+        retryable: decision.retryable,
+        fail_closed: decision.fail_closed,
+    }
+}
+
+fn swarm_scheduler_decision_breaches_slo(decision: &ValidationSwarmSchedulerDecision) -> bool {
+    decision.starvation_risk.breaches_slo()
+        || decision.fail_closed
+        || matches!(
+            decision.decision,
+            ValidationSwarmSchedulerDecisionKind::FailClosedProduct
+                | ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact
+        )
+}
+
+fn fairness_index(counts: impl IntoIterator<Item = usize>) -> f64 {
+    let mut bucket_count = 0_u64;
+    let mut total = 0_u64;
+    let mut sum_squares = 0_u64;
+    for count in counts {
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        if count == 0 {
+            continue;
+        }
+        bucket_count = bucket_count.saturating_add(1);
+        total = total.saturating_add(count);
+        sum_squares = sum_squares.saturating_add(count.saturating_mul(count));
+    }
+    if bucket_count <= 1 || total == 0 || sum_squares == 0 {
+        1.0
+    } else {
+        let numerator = total.saturating_mul(total) as f64;
+        let denominator = bucket_count.saturating_mul(sum_squares) as f64;
+        numerator / denominator
+    }
+}
+
+fn evaluate_swarm_scheduler_slo_check(
+    summary: &ValidationReadinessSummary,
+) -> ValidationReadinessCheck {
+    match summary.swarm_scheduler.slo_breach_status {
+        SwarmSchedulerSloBreachStatus::NoData => check(
+            "VR-SWARM-SCHEDULER-010",
+            "VSS-001",
+            "validation_swarm_scheduler.slo",
+            ValidationReadinessStatus::Pass,
+            "No swarm-scheduler decisions were supplied.",
+            "No action required.",
+        ),
+        SwarmSchedulerSloBreachStatus::Pass => check(
+            "VR-SWARM-SCHEDULER-010",
+            "VSS-001",
+            "validation_swarm_scheduler.slo",
+            ValidationReadinessStatus::Pass,
+            format!(
+                "Swarm scheduler SLOs are within bounds (decisions={}, queue_age_p95_ms={}, slot_utilization={:.3}, fairness_index={:.3}).",
+                summary.swarm_scheduler.decisions,
+                summary.swarm_scheduler.queue_age_p95_ms,
+                summary.swarm_scheduler.slot_utilization,
+                summary.swarm_scheduler.fairness_index
+            ),
+            "No action required.",
+        ),
+        SwarmSchedulerSloBreachStatus::Warn => check(
+            "VR-SWARM-SCHEDULER-010",
+            "VSS-002",
+            "validation_swarm_scheduler.slo",
+            ValidationReadinessStatus::Warn,
+            format!(
+                "Swarm scheduler is deferring or rerouting proof work (capacity_waits={}, work_steals={}, source_only_blockers={}, queue_age_p95_ms={}).",
+                summary.swarm_scheduler.capacity_waits,
+                summary.swarm_scheduler.work_steals,
+                summary.swarm_scheduler.source_only_blockers,
+                summary.swarm_scheduler.queue_age_p95_ms
+            ),
+            "Wait, join, steal, retry, or record source-only blocker according to each scheduler next_action.",
+        ),
+        SwarmSchedulerSloBreachStatus::Breach => check(
+            "VR-SWARM-SCHEDULER-010",
+            "VSS-003",
+            "validation_swarm_scheduler.slo",
+            ValidationReadinessStatus::Fail,
+            format!(
+                "Swarm scheduler SLO breach detected (breached_decisions={}, product_failures={}, queue_age_p95_ms={}, fairness_index={:.3}).",
+                summary.swarm_scheduler.breached_decisions,
+                summary.swarm_scheduler.product_failures,
+                summary.swarm_scheduler.queue_age_p95_ms,
+                summary.swarm_scheduler.fairness_index
+            ),
+            "Do not count breached scheduler decisions as green proof; surface product/source-only failures or refresh capacity evidence.",
+        ),
+    }
 }
 
 fn evaluate_rch_worker_check(

@@ -1649,9 +1649,18 @@ fn validate_action_record(action: &FleetActionRecord) -> Result<(), FleetTranspo
             scope,
         } => {
             validate_zone_id(&scope.zone_id)?;
+
+            // bd-hstmy: Validate tenant_id when present for tenant isolation
             if let Some(tenant_id) = scope.tenant_id.as_deref() {
                 validate_action_text_field("revoke tenant_id", tenant_id)?;
+            } else {
+                // Log warning about potential tenant isolation gap in transport layer
+                // Note: This should be rare as fleet_quarantine.rs validation runs first
+                tracing::warn!(
+                    "Fleet transport processing revocation with tenant_id=None - potential cross-tenant operation"
+                );
             }
+
             validate_action_text_field("revoke extension_id", extension_id)?;
             validate_action_text_field("revoke reason", &scope.reason)?;
         }

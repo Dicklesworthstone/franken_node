@@ -2,12 +2,12 @@
 
 use chrono::{DateTime, Utc};
 use frankenengine_node::ops::validation_broker::{
-    ProofStatusKind, ValidationExitKind, ValidationFlightRecorderRef, ValidationProofStatus,
-    ValidationReceipt, RchMode, ValidationExitCode,
+    ProofStatusKind, RchMode, ValidationExitCode, ValidationExitKind, ValidationFlightRecorderRef,
+    ValidationProofStatus, ValidationReceipt,
 };
 use frankenengine_node::ops::validation_readiness::{
-    summarize_validation_readiness_report, ValidationReadinessInput,
-    FailedAttemptSummary, RecoveryPlanSummary,
+    FailedAttemptSummary, RecoveryPlanSummary, ValidationReadinessInput,
+    summarize_validation_readiness_report,
 };
 use std::collections::BTreeMap;
 
@@ -54,6 +54,7 @@ fn test_flight_recorder_refs_count() {
         receipts: vec![],
         rch_workers: vec![],
         proof_lane_readiness: vec![],
+        swarm_scheduler_decisions: vec![],
         resource_governor: None,
         max_receipt_age_secs: 3600,
     };
@@ -73,7 +74,10 @@ fn test_flight_recorder_refs_count() {
     let failed_attempt = &report.summary.failed_attempt_details[0];
     assert_eq!(failed_attempt.bead_id, "bead-123");
     assert_eq!(failed_attempt.thread_id, "cargo_test");
-    assert_eq!(failed_attempt.flight_recorder_path, Some("/tmp/flight_rec_123.json".to_string()));
+    assert_eq!(
+        failed_attempt.flight_recorder_path,
+        Some("/tmp/flight_rec_123.json".to_string())
+    );
     assert_eq!(failed_attempt.outcome_class, "execution_failure");
     assert_eq!(failed_attempt.execution_mode, "remote");
     assert_eq!(failed_attempt.worker_id, Some("worker-001".to_string()));
@@ -141,6 +145,7 @@ fn test_flight_recorder_refs_from_receipts() {
         receipts: vec![receipt],
         rch_workers: vec![],
         proof_lane_readiness: vec![],
+        swarm_scheduler_decisions: vec![],
         resource_governor: None,
         max_receipt_age_secs: 3600,
     };
@@ -160,7 +165,10 @@ fn test_flight_recorder_refs_from_receipts() {
     let failed_attempt = &report.summary.failed_attempt_details[0];
     assert_eq!(failed_attempt.bead_id, "bead-456");
     assert_eq!(failed_attempt.thread_id, "cargo_build");
-    assert_eq!(failed_attempt.flight_recorder_path, Some("/tmp/flight_rec_456.json".to_string()));
+    assert_eq!(
+        failed_attempt.flight_recorder_path,
+        Some("/tmp/flight_rec_456.json".to_string())
+    );
     assert_eq!(failed_attempt.outcome_class, "resource_exhaustion");
     assert_eq!(failed_attempt.execution_mode, "local");
     assert_eq!(failed_attempt.worker_id, None);
@@ -202,6 +210,7 @@ fn test_no_flight_recorder_refs() {
         receipts: vec![],
         rch_workers: vec![],
         proof_lane_readiness: vec![],
+        swarm_scheduler_decisions: vec![],
         resource_governor: None,
         max_receipt_age_secs: 3600,
     };

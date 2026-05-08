@@ -3,9 +3,18 @@
 #[cfg(test)]
 mod tests {
     use crate::ops::doctor::{DoctorStatus, WorkspacePressureDoctor};
-    use crate::ops::workspace_pressure_policy::{PolicyThresholds, WorkspacePressureInputs};
-    use std::path::Path;
+    use crate::ops::workspace_pressure_policy::{
+        AdmissionDecision, PolicyDecision, PolicyThresholds, WorkCostClass,
+        WorkspacePressureInputs, WorkspacePressurePolicy,
+    };
+    use serde_json::{json, Value};
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+
+    const POLICY_DECISION_GOLDEN_RELATIVE_PATH: &str =
+        "../../tests/golden/workspace_pressure_policy_decisions.json";
+    const POLICY_DECISION_GOLDEN_SCHEMA_VERSION: &str = "bd-p9mpd.4/v1";
 
     fn sample_healthy_inputs() -> WorkspacePressureInputs {
         WorkspacePressureInputs {
@@ -62,12 +71,10 @@ mod tests {
         assert!(!output.resources.coordination_healthy);
         assert_eq!(output.policy_decisions.len(), 6);
         assert!(!output.recommended_actions.is_empty());
-        assert!(
-            output
-                .recommended_actions
-                .iter()
-                .any(|a| a.priority == "high")
-        );
+        assert!(output
+            .recommended_actions
+            .iter()
+            .any(|a| a.priority == "high"));
         assert_eq!(output.metadata.get("rch_available").unwrap(), "false");
     }
 
@@ -204,13 +211,11 @@ mod tests {
         // Check RCH status for saturated case
         assert!(output.resources.rch_status.available);
         assert_eq!(output.resources.rch_status.available_slots, Some(0));
-        assert!(
-            output
-                .resources
-                .rch_status
-                .status_desc
-                .contains("saturated")
-        );
+        assert!(output
+            .resources
+            .rch_status
+            .status_desc
+            .contains("saturated"));
     }
 
     #[test]
@@ -274,6 +279,32 @@ mod tests {
     }
 
     #[test]
+    fn workspace_pressure_policy_decision_golden_matches_real_policy() {
+        let actual = build_policy_decision_golden();
+        let actual_text =
+            serde_json::to_string_pretty(&actual).expect("policy golden should serialize");
+        let golden_path = policy_decision_golden_path();
+
+        if std::env::var_os("UPDATE_GOLDENS").is_some() {
+            fs::write(&golden_path, actual_text).expect("update policy decision golden");
+            return;
+        }
+
+        let expected_text = fs::read_to_string(&golden_path).unwrap_or_else(|err| {
+            panic!(
+                "failed to read workspace pressure policy golden at {}: {err}. \
+                 Run with UPDATE_GOLDENS=1 to create it.",
+                golden_path.display()
+            )
+        });
+        assert_eq!(
+            expected_text, actual_text,
+            "workspace pressure policy golden drifted from the real policy implementation; \
+             rerun this test with UPDATE_GOLDENS=1 only after reviewing the diff"
+        );
+    }
+
+    #[test]
     fn test_file_generation_integration() {
         let temp_dir = TempDir::new().expect("Should create temp directory");
         let json_path = temp_dir.path().join("doctor_report.json");
@@ -299,5 +330,170 @@ mod tests {
         let text_content = std::fs::read_to_string(&text_path).expect("Should read text file");
         assert!(text_content.contains("Workspace Pressure Report"));
         assert!(text_content.contains("CRITICAL"));
+    }
+
+    fn policy_decision_golden_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(POLICY_DECISION_GOLDEN_RELATIVE_PATH)
+    }
+
+    fn build_policy_decision_golden() -> Value {
+        let policy = WorkspacePressurePolicy::with_balanced_defaults();
+        let work_types = policy_decision_work_types();
+        let mut scenario_values = serde_json::Map::new();
+        let mut decision_matrix = Vec::new();
+
+        for (scenario_name, inputs) in policy_decision_scenarios() {
+            let mut work_decisions = serde_json::Map::new();
+
+            for (work_class, work_class_name, priority) in &work_types {
+                let decision = policy.decide_admission(*work_class, *priority, &inputs);
+                let cleanup_candidates = stable_cleanup_candidates(&decision);
+                let has_cleanup_candidates = !cleanup_candidates.is_empty();
+                let decision_value = json!({
+                    "admission": admission_name(&decision.admission),
+                    "cleanup_candidates": cleanup_candidates,
+                    "confidence": decision.confidence,
+                    "reason_code": decision.reason_code.as_str(),
+                });
+
+                decision_matrix.push(json!({
+                    "decision": admission_name(&decision.admission),
+                    "has_cleanup_candidates": has_cleanup_candidates,
+                    "priority": priority,
+                    "reason_code": decision.reason_code.as_str(),
+                    "scenario": scenario_name,
+                    "work_class": work_class_name,
+                }));
+                work_decisions.insert((*work_class_name).to_string(), decision_value);
+            }
+
+            scenario_values.insert(
+                scenario_name.to_string(),
+                json!({
+                    "inputs": inputs,
+                    "work_decisions": work_decisions,
+                }),
+            );
+        }
+
+        json!({
+            "decision_matrix": decision_matrix,
+            "description": "Workspace pressure policy decision golden artifacts",
+            "scenarios": scenario_values,
+            "schema_version": POLICY_DECISION_GOLDEN_SCHEMA_VERSION,
+        })
+    }
+
+    fn policy_decision_work_types() -> Vec<(WorkCostClass, &'static str, u32)> {
+        vec![
+            (WorkCostClass::SourceOnly, "SourceOnly", 2),
+            (WorkCostClass::DocsGate, "DocsGate", 2),
+            (WorkCostClass::Validation, "Validation", 1),
+            (WorkCostClass::Benchmark, "Benchmark", 1),
+            (WorkCostClass::Fuzzing, "Fuzzing", 1),
+            (WorkCostClass::Cleanup, "Cleanup", 3),
+        ]
+    }
+
+    fn policy_decision_scenarios() -> Vec<(&'static str, WorkspacePressureInputs)> {
+        vec![
+            (
+                "healthy",
+                WorkspacePressureInputs {
+                    free_disk_bytes: 5_000_000_000,
+                    target_dir_bytes: 1_000_000_000,
+                    active_build_count: 1,
+                    rch_available_slots: Some(8),
+                    memory_pressure: 0.3,
+                    active_reservations: 5,
+                    coordination_healthy: true,
+                },
+            ),
+            (
+                "disk_pressure",
+                WorkspacePressureInputs {
+                    free_disk_bytes: 200_000_000,
+                    target_dir_bytes: 12_000_000_000,
+                    active_build_count: 2,
+                    rch_available_slots: Some(5),
+                    memory_pressure: 0.4,
+                    active_reservations: 10,
+                    coordination_healthy: true,
+                },
+            ),
+            (
+                "build_pressure",
+                WorkspacePressureInputs {
+                    free_disk_bytes: 2_000_000_000,
+                    target_dir_bytes: 3_000_000_000,
+                    active_build_count: 8,
+                    rch_available_slots: Some(2),
+                    memory_pressure: 0.7,
+                    active_reservations: 15,
+                    coordination_healthy: true,
+                },
+            ),
+            (
+                "rch_unavailable",
+                WorkspacePressureInputs {
+                    free_disk_bytes: 1_500_000_000,
+                    target_dir_bytes: 2_000_000_000,
+                    active_build_count: 3,
+                    rch_available_slots: None,
+                    memory_pressure: 0.6,
+                    active_reservations: 20,
+                    coordination_healthy: true,
+                },
+            ),
+            (
+                "coordination_degraded",
+                WorkspacePressureInputs {
+                    free_disk_bytes: 1_000_000_000,
+                    target_dir_bytes: 4_000_000_000,
+                    active_build_count: 2,
+                    rch_available_slots: None,
+                    memory_pressure: 0.5,
+                    active_reservations: 60,
+                    coordination_healthy: false,
+                },
+            ),
+            (
+                "critical",
+                WorkspacePressureInputs {
+                    free_disk_bytes: 50_000_000,
+                    target_dir_bytes: 15_000_000_000,
+                    active_build_count: 10,
+                    rch_available_slots: Some(0),
+                    memory_pressure: 0.95,
+                    active_reservations: 100,
+                    coordination_healthy: false,
+                },
+            ),
+        ]
+    }
+
+    fn stable_cleanup_candidates(decision: &PolicyDecision) -> Vec<Value> {
+        decision
+            .cleanup_candidates
+            .iter()
+            .filter(|candidate| candidate.path.as_path() == Path::new("target"))
+            .map(|candidate| {
+                json!({
+                    "path": candidate.path.to_string_lossy().to_string(),
+                    "reason": candidate.reason.as_str(),
+                    "size_bytes": candidate.size_bytes,
+                })
+            })
+            .collect()
+    }
+
+    fn admission_name(admission: &AdmissionDecision) -> &'static str {
+        match admission {
+            AdmissionDecision::AllowLocal => "AllowLocal",
+            AdmissionDecision::RequireRch => "RequireRch",
+            AdmissionDecision::Queue { .. } => "Queue",
+            AdmissionDecision::Wait { .. } => "Wait",
+            AdmissionDecision::RefuseLocalFallback => "RefuseLocalFallback",
+        }
     }
 }

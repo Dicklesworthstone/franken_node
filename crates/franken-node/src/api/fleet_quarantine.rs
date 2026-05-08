@@ -2259,6 +2259,7 @@ impl FleetControlManager {
             return Err(FleetControlError::not_activated());
         }
         let zone_id = Self::validated_zone_id(&scope.zone_id)?;
+        let _tenant_id = Self::validated_tenant_id(&scope.tenant_id)?;
         self.ensure_decision_signing_material()?;
 
         let planned_slot = self.peek_operation_slot()?;
@@ -2406,6 +2407,7 @@ impl FleetControlManager {
             return Err(FleetControlError::not_activated());
         }
         let zone_id = Self::validated_zone_id(&scope.zone_id)?;
+        let _tenant_id = Self::validated_tenant_id(&scope.tenant_id)?;
         self.ensure_decision_signing_material()?;
 
         let planned_slot = self.peek_operation_slot()?;
@@ -2878,6 +2880,34 @@ impl FleetControlManager {
         let pending = self.pending_convergences_for_zone(zone_id);
         if let Some(zone) = self.zone_status.get_mut(zone_id) {
             zone.pending_convergences = pending;
+        }
+    }
+
+    /// bd-hstmy: Validates tenant_id when present for tenant isolation enforcement.
+    /// When tenant_id is None, logs a warning about potential cross-tenant operation.
+    fn validated_tenant_id(tenant_id: &Option<String>) -> Result<Option<&str>, FleetControlError> {
+        match tenant_id.as_deref() {
+            Some(tenant_id) => {
+                let tenant_id = tenant_id.trim();
+                if tenant_id.is_empty() {
+                    return Err(FleetControlError::scope_invalid(
+                        "tenant_id must not be empty when present",
+                    ));
+                }
+                if tenant_id.len() > 128 {
+                    return Err(FleetControlError::scope_invalid(
+                        "tenant_id must be at most 128 characters",
+                    ));
+                }
+                Ok(Some(tenant_id))
+            }
+            None => {
+                // bd-hstmy: Log warning about potential tenant isolation gap
+                tracing::warn!(
+                    "Operation executing with tenant_id=None - may affect multiple tenants in multi-tenant deployment"
+                );
+                Ok(None)
+            }
         }
     }
 

@@ -5,6 +5,14 @@ use frankenengine_node::ops::validation_broker::{
     SourceOnlyReason, TargetDirPolicy, TimeoutClass, ValidationErrorClass, ValidationExit,
     ValidationExitKind, ValidationProofStatus, ValidationReceipt, ValidationTiming,
 };
+use frankenengine_node::ops::validation_proof_cache::DirtyStatePolicy;
+use frankenengine_node::ops::validation_proof_coalescer::{
+    ValidationSwarmSchedulerCapacitySnapshot, ValidationSwarmSchedulerCoalescerState,
+    ValidationSwarmSchedulerDecision, ValidationSwarmSchedulerDigestRef,
+    ValidationSwarmSchedulerFlightRecorderState, ValidationSwarmSchedulerPolicy,
+    ValidationSwarmSchedulerPriority, ValidationSwarmSchedulerProofDebtClass,
+    ValidationSwarmSchedulerTargetDirClass, decide_validation_swarm_schedule,
+};
 use frankenengine_node::ops::validation_readiness::{
     PROOF_LANE_READINESS_FIXTURE_SCHEMA_VERSION, ProofLaneCapabilityStatus, ProofLaneCommandIntent,
     ProofLanePressureStatus, ProofLaneRchSnapshot, ProofLaneReadinessDecisionKind,
@@ -133,6 +141,7 @@ fn receipt(
             stderr_digest: DigestRef::sha256(b"stderr"),
         },
         readiness_ref: None,
+        flight_recorder_ref: None,
         trust: ReceiptTrust {
             generated_by: "validation-broker".to_string(),
             agent_name: "RusticPlateau".to_string(),
@@ -234,6 +243,73 @@ fn proof_lane_input() -> ProofLaneReadinessInput {
         worker_capabilities,
         observed_validation_error_class: None,
     }
+}
+
+fn scheduler_digest(material: &str) -> ValidationSwarmSchedulerDigestRef {
+    ValidationSwarmSchedulerDigestRef::sha256_material(material)
+}
+
+fn scheduler_capacity(
+    seed: &str,
+    slots_total: u16,
+    slots_available: u16,
+    queue_depth: u16,
+    stale_active_builds: u16,
+    disk_pressure_workers: u16,
+) -> ValidationSwarmSchedulerCapacitySnapshot {
+    ValidationSwarmSchedulerCapacitySnapshot {
+        snapshot_id: format!("cap-{seed}"),
+        captured_at: ts(20),
+        workers_total: 4,
+        workers_healthy: 3,
+        slots_total,
+        slots_available,
+        queue_depth,
+        stale_active_builds,
+        disk_pressure_workers,
+    }
+}
+
+fn scheduler_policy() -> ValidationSwarmSchedulerPolicy {
+    ValidationSwarmSchedulerPolicy::default_policy("validation-readiness-scheduler-policy/v1")
+}
+
+fn scheduler_input(
+    seed: &str,
+) -> frankenengine_node::ops::validation_proof_coalescer::ValidationSwarmSchedulerInput {
+    frankenengine_node::ops::validation_proof_coalescer::ValidationSwarmSchedulerInput {
+        schema_version: frankenengine_node::ops::validation_proof_coalescer::SWARM_SCHEDULER_INPUT_SCHEMA_VERSION.to_string(),
+        input_id: format!("input-{seed}"),
+        bead_id: format!("bd-{seed}"),
+        agent_name: format!("agent-{seed}"),
+        proof_work_key: scheduler_digest(&format!("proof-work/{seed}")),
+        command_digest: scheduler_digest(&format!("cargo test scheduler/{seed}")),
+        dirty_state_policy: DirtyStatePolicy::CleanRequired,
+        target_dir_class: ValidationSwarmSchedulerTargetDirClass::OffRepo,
+        capacity_snapshot: scheduler_capacity(seed, 8, 6, 0, 0, 0),
+        coalescer_state: ValidationSwarmSchedulerCoalescerState::None,
+        flight_recorder_state: ValidationSwarmSchedulerFlightRecorderState::None,
+        proof_debt_class: ValidationSwarmSchedulerProofDebtClass::None,
+        queue_age_ms: 10_000,
+        priority: ValidationSwarmSchedulerPriority::P2,
+        timeout_budget_ms: 600_000,
+        source_only_allowed: false,
+        product_failure: false,
+        worker_infra_retryable: false,
+        artifact_valid: true,
+    }
+}
+
+fn scheduler_decision(
+    seed: &str,
+    mutate: impl FnOnce(
+        &mut frankenengine_node::ops::validation_proof_coalescer::ValidationSwarmSchedulerInput,
+    ),
+) -> ValidationSwarmSchedulerDecision {
+    let mut input = scheduler_input(seed);
+    mutate(&mut input);
+    decide_validation_swarm_schedule(&scheduler_policy(), &input, ts(30))
+        .expect("scheduler decision")
 }
 
 fn assert_proof_lane_decision(
@@ -680,6 +756,101 @@ fn proof_lane_capsules_are_reported_in_readiness_json_and_human_output() {
     assert!(human.contains("selected_worker=none"));
     assert!(human.contains("capsule_path=none"));
     assert!(human.contains("required_action=regenerate_readiness_capsule"));
+}
+
+#[test]
+fn swarm_scheduler_slos_are_reported_in_readiness_json_and_human_output() {
+    let decisions = vec![
+        scheduler_decision("green", |_| {}),
+        scheduler_decision("coalesced", |input| {
+            input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Running;
+            input.queue_age_ms = 50_000;
+        }),
+        scheduler_decision("capacity", |input| {
+            input.capacity_snapshot = scheduler_capacity("capacity", 8, 1, 80, 0, 0);
+            input.queue_age_ms = 320_000;
+        }),
+        scheduler_decision("steal", |input| {
+            input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Stale;
+            input.queue_age_ms = 100_000;
+        }),
+        scheduler_decision("source-only", |input| {
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::SourceOnly;
+            input.flight_recorder_state =
+                ValidationSwarmSchedulerFlightRecorderState::SourceOnlyBlocker;
+        }),
+        scheduler_decision("product", |input| {
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::ProductFailure;
+            input.flight_recorder_state =
+                ValidationSwarmSchedulerFlightRecorderState::ProductFailure;
+            input.product_failure = true;
+            input.queue_age_ms = 30_000;
+        }),
+        scheduler_decision("worker-infra", |input| {
+            input.worker_infra_retryable = true;
+            input.capacity_snapshot = scheduler_capacity("worker-infra", 8, 6, 1, 0, 0);
+            input.queue_age_ms = 900_000;
+        }),
+    ];
+    let input = ValidationReadinessInput {
+        swarm_scheduler_decisions: decisions,
+        rch_workers: vec![remote_worker()],
+        resource_governor: Some(allow_resource_snapshot()),
+        ..ValidationReadinessInput::default()
+    };
+
+    let report = build_validation_readiness_report(&input, "vr-swarm-scheduler", ts(40));
+
+    assert_eq!(report.summary.swarm_scheduler.decisions, 7);
+    assert_eq!(report.summary.swarm_scheduler.capacity_waits, 2);
+    assert_eq!(report.summary.swarm_scheduler.work_steals, 1);
+    assert_eq!(report.summary.swarm_scheduler.source_only_blockers, 1);
+    assert_eq!(report.summary.swarm_scheduler.product_failures, 1);
+    assert_eq!(report.summary.swarm_scheduler.worker_infra_retries, 2);
+    assert_eq!(report.summary.swarm_scheduler.queue_age_p95_ms, 900_000);
+    assert!(report.summary.swarm_scheduler.slot_utilization > 0.20);
+    assert!(report.summary.swarm_scheduler.fairness_index > 0.0);
+    assert!(
+        report
+            .summary
+            .swarm_scheduler
+            .decision_details
+            .iter()
+            .any(
+                |decision| decision.scheduler_decision == "record_source_only_blocker"
+                    && decision.slo_breached
+            )
+    );
+
+    let scheduler_check = report
+        .checks
+        .iter()
+        .find(|check| check.code == "VR-SWARM-SCHEDULER-010")
+        .expect("swarm scheduler check");
+    assert_eq!(scheduler_check.status, ValidationReadinessStatus::Fail);
+
+    let json: Value =
+        serde_json::from_str(&render_validation_readiness_json(&report).expect("json report"))
+            .expect("parse report json");
+    assert_eq!(json["summary"]["swarm_scheduler"]["decisions"], 7);
+    assert_eq!(
+        json["summary"]["swarm_scheduler"]["decision_details"][0]["scheduler_decision"],
+        "run_now"
+    );
+    assert!(
+        json["summary"]["swarm_scheduler"]["decision_details"]
+            .as_array()
+            .expect("decision details array")
+            .iter()
+            .any(|decision| decision["proof_work_key"].as_str().is_some()
+                && decision["recorder_path"].as_str().is_some()
+                && decision["next_action"].as_str().is_some())
+    );
+
+    let human = render_validation_readiness_human(&report);
+    assert!(human.contains("swarm_scheduler=decisions:7"));
+    assert!(human.contains("swarm_scheduler_decision bead=bd-capacity"));
+    assert!(human.contains("slo_breached=true"));
 }
 
 fn known_proof_lane_reason_event_pair(reason_code: &str, event_code: &str) -> bool {

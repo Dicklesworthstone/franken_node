@@ -1418,6 +1418,10 @@ pub struct OpsValidationCloseoutArgs {
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub receipt: PathBuf,
 
+    /// Optional swarm scheduler decision JSON to include in closeout evidence.
+    #[arg(long = "swarm-scheduler-decision", value_parser = parse_safe_content_pathbuf)]
+    pub swarm_scheduler_decision: Option<PathBuf>,
+
     /// Optional stdout text path to include as a bounded excerpt.
     #[arg(long = "stdout-excerpt", value_parser = parse_safe_content_pathbuf)]
     pub stdout_excerpt: Option<PathBuf>,
@@ -2434,6 +2438,8 @@ mod parser_contract_extra_tests {
             "bd-y4mkq",
             "--receipt",
             "artifacts/validation_broker/bd-y4mkq/receipt.json",
+            "--swarm-scheduler-decision",
+            "artifacts/validation_broker/bd-y4mkq/scheduler-decision.json",
             "--stdout-excerpt",
             "artifacts/validation_broker/bd-y4mkq/stdout.txt",
             "--stderr-excerpt",
@@ -2458,6 +2464,12 @@ mod parser_contract_extra_tests {
         assert_eq!(
             args.receipt,
             PathBuf::from("artifacts/validation_broker/bd-y4mkq/receipt.json")
+        );
+        assert_eq!(
+            args.swarm_scheduler_decision,
+            Some(PathBuf::from(
+                "artifacts/validation_broker/bd-y4mkq/scheduler-decision.json"
+            ))
         );
         assert_eq!(
             args.stdout_excerpt,

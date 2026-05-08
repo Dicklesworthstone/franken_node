@@ -596,6 +596,22 @@ pub enum ValidationSwarmSchedulerCoalescerState {
     FailedClosed,
 }
 
+impl ValidationSwarmSchedulerCoalescerState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Running => "running",
+            Self::Joined => "joined",
+            Self::Completed => "completed",
+            Self::Stale => "stale",
+            Self::Fenced => "fenced",
+            Self::Rejected => "rejected",
+            Self::FailedClosed => "failed_closed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationSwarmSchedulerFlightRecorderState {
@@ -692,6 +708,20 @@ pub enum ValidationSwarmSchedulerFairnessBucket {
     Blocked,
 }
 
+impl ValidationSwarmSchedulerFairnessBucket {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Emergency => "emergency",
+            Self::High => "high",
+            Self::Normal => "normal",
+            Self::Low => "low",
+            Self::Aging => "aging",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationSwarmSchedulerStarvationRisk {
@@ -699,6 +729,23 @@ pub enum ValidationSwarmSchedulerStarvationRisk {
     Watch,
     Elevated,
     Breached,
+}
+
+impl ValidationSwarmSchedulerStarvationRisk {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Watch => "watch",
+            Self::Elevated => "elevated",
+            Self::Breached => "breached",
+        }
+    }
+
+    #[must_use]
+    pub const fn breaches_slo(self) -> bool {
+        matches!(self, Self::Breached)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -781,6 +828,8 @@ pub struct ValidationSwarmSchedulerDiagnostics {
     pub proof_work_key_hex: String,
     pub command_digest_hex: String,
     pub queue_age_ms: u64,
+    pub slots_total: u16,
+    pub slots_available: u16,
     pub worker_slots: u16,
     pub queue_depth: u16,
     pub coalescer_state: ValidationSwarmSchedulerCoalescerState,
@@ -1067,6 +1116,8 @@ fn build_swarm_scheduler_decision(
             proof_work_key_hex: input.proof_work_key.hex.clone(),
             command_digest_hex: input.command_digest.hex.clone(),
             queue_age_ms: input.queue_age_ms,
+            slots_total: input.capacity_snapshot.slots_total,
+            slots_available: input.capacity_snapshot.slots_available,
             worker_slots: input.capacity_snapshot.slots_available,
             queue_depth: input.capacity_snapshot.queue_depth,
             coalescer_state: input.coalescer_state,
