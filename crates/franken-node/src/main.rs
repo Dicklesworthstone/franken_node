@@ -6735,10 +6735,12 @@ fn latest_file_age_secs(dir: &Path) -> Option<u64> {
     }
 
     let modified = latest?;
+    // Use checked_duration_since to handle future timestamps fail-closed
+    // If file has future timestamp (clock skew), treat as very old to avoid bypass
     Some(
         SystemTime::now()
-            .duration_since(modified)
-            .unwrap_or_default()
+            .checked_duration_since(modified)
+            .unwrap_or(Duration::from_secs(u32::MAX as u64))  // Very large age = very stale
             .as_secs(),
     )
 }
@@ -9842,7 +9844,7 @@ fn evaluate_evidence_artifact_readiness(
 fn current_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
+        .map_or(u64::MAX, |duration| duration.as_secs())  // Fail-closed: very far future = fail expiry checks
 }
 
 fn evaluate_telemetry_exporter_readiness(
@@ -16545,7 +16547,7 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct IncidentCounterfactualCliSummary {
     bundle_id: String,
     incident_id: String,
@@ -16557,6 +16559,23 @@ struct IncidentCounterfactualCliSummary {
     changed_decisions: usize,
     severity_delta: i64,
     canonical_json: String,
+}
+
+impl std::fmt::Debug for IncidentCounterfactualCliSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IncidentCounterfactualCliSummary")
+            .field("bundle_id", &self.bundle_id)
+            .field("incident_id", &self.incident_id)
+            .field("bundle_created_at", &self.bundle_created_at)
+            .field("bundle_integrity_hash", &self.bundle_integrity_hash)
+            .field("bundle_policy_version", &self.bundle_policy_version)
+            .field("evidence_refs_count", &self.evidence_refs.len())
+            .field("total_decisions", &self.total_decisions)
+            .field("changed_decisions", &self.changed_decisions)
+            .field("severity_delta", &self.severity_delta)
+            .field("canonical_json_length", &self.canonical_json.len())
+            .finish_non_exhaustive()
+    }
 }
 
 const INCIDENT_COUNTERFACTUAL_REPORT_SCHEMA: &str =
