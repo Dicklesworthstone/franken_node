@@ -114,8 +114,14 @@ impl fmt::Display for DomainTag {
 /// A 32-byte content hash (SHA-256 of the raw content).
 /// The deriver never touches raw content — only this pre-computed hash
 /// (INV-SEED-BOUNDED).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentHash(#[serde(with = "hex_bytes")] pub [u8; 32]);
+
+impl std::fmt::Debug for ContentHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ContentHash([REDACTED; 32 bytes])")
+    }
+}
 
 impl ContentHash {
     pub fn from_bytes(b: [u8; 32]) -> Self {
@@ -2203,5 +2209,35 @@ mod additional_negative_path_tests {
                 "Full hex should start with prefix"
             );
         }
+    }
+
+    /// Test that ContentHash Debug output redacts hash bytes to prevent hash exposure
+    #[test]
+    fn redacted_debug_output_for_content_hash() {
+        // Create a ContentHash with non-zero test hash bytes
+        let test_bytes = [0x42u8; 32]; // Non-zero test hash
+        let content_hash = ContentHash::from_bytes(test_bytes);
+
+        let debug_output = format!("{:?}", content_hash);
+
+        // Ensure hash bytes are redacted
+        assert!(debug_output.contains("ContentHash([REDACTED; 32 bytes])"),
+                "Debug output should redact hash bytes: {}", debug_output);
+
+        // Ensure actual hash bytes do not appear in debug output
+        // Check for hex representation of test hash bytes
+        assert!(!debug_output.contains("42424242"),
+                "Debug output should not contain hex of hash bytes: {}", debug_output);
+        assert!(!debug_output.contains(&format!("{:02x}", test_bytes[0])),
+                "Debug output should not contain individual hash bytes: {}", debug_output);
+
+        // Test that normal hex conversion still works (not affected by Debug redaction)
+        let hex_output = content_hash.to_hex();
+        assert!(hex_output.contains("42424242"),
+                "Normal hex conversion should still work: {}", hex_output);
+        assert_eq!(hex_output.len(), 64, "Hex output should be 64 characters");
+
+        // Verify the actual hash is what we expect (sanity check)
+        assert_eq!(content_hash.0, test_bytes, "Test hash should match expected value");
     }
 }
