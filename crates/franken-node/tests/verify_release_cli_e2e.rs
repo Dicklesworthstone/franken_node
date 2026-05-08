@@ -764,6 +764,48 @@ fn verify_migration_fails_when_post_condition_is_missing() {
 }
 
 #[test]
+fn verify_migration_fails_when_string_post_condition_is_blank() {
+    let temp = TempDir::new().expect("temp dir");
+    write_text_fixture(
+        &temp.path().join("evidence/rewrite-validation.json"),
+        "{\"validated\":true}\n",
+    );
+    write_authoritative_migration_record(
+        temp.path(),
+        "rewrite",
+        serde_json::json!({
+            "schema_version": "franken-node/migration-evidence/v1",
+            "migration_id": "rewrite",
+            "project_root": temp.path().display().to_string(),
+            "status": "applied",
+            "post_conditions_met": true,
+            "validation_record_path": "evidence/rewrite-validation.json",
+            "post_conditions": [
+                ""
+            ]
+        }),
+    );
+
+    let output = run_cli_in_dir(temp.path(), &["verify", "migration", "rewrite", "--json"]);
+    assert!(
+        !output.status.success(),
+        "verify migration should fail blank string post-conditions"
+    );
+
+    let payload = parse_json_stdout(&output);
+    assert_eq!(payload["verdict"], "FAIL");
+    assert_eq!(payload["details"]["post_conditions_met"], false);
+    assert_eq!(
+        payload["details"]["invariant_failures"][0]["invariant_id"],
+        "MIGRATION_EVIDENCE_POST_CONDITIONS_FAILED"
+    );
+    assert_eq!(
+        payload["details"]["post_conditions"][0]["error"],
+        "post-condition string path must not be empty"
+    );
+}
+
+#[test]
 fn verify_migration_fails_when_record_schema_is_missing() {
     let temp = TempDir::new().expect("temp dir");
     write_text_fixture(

@@ -34,7 +34,9 @@ pub mod reason_codes {
     pub const ALLOW_LOW_PRIORITY_MODERATE_CONTENTION: &str =
         "RG_ALLOW_LOW_PRIORITY_MODERATE_CONTENTION";
     pub const DEDUPE_ACTIVE_PROOF_CLASS: &str = "RG_DEDUPE_ACTIVE_PROOF_CLASS";
+    pub const SOURCE_ONLY_CORRUPT_COORDINATION: &str = "RG_SOURCE_ONLY_CORRUPT_COORDINATION";
     pub const SOURCE_ONLY_CONTENTION: &str = "RG_SOURCE_ONLY_CONTENTION";
+    pub const DEFER_CORRUPT_COORDINATION: &str = "RG_DEFER_CORRUPT_COORDINATION";
     pub const DEFER_CONTENTION: &str = "RG_DEFER_CONTENTION";
     pub const DEFER_STALE_OBSERVATION: &str = "RG_DEFER_STALE_OBSERVATION";
 }
@@ -488,6 +490,8 @@ impl ResourcePressureSample {
             .and_then(|memory| memory.used_bytes)
             .map(bytes_to_mb);
         observation.cpu_load_permyriad = self.cpu.as_ref().and_then(|cpu| cpu.load_permyriad);
+        observation.coordination = self.coordination.clone();
+        observation.unavailable_signals = self.unavailable_signals.clone();
         observation
     }
 }
@@ -802,6 +806,10 @@ pub struct ResourceGovernorObservation {
     pub memory_used_mb: Option<u64>,
     pub cpu_load_permyriad: Option<u64>,
     pub artifact_inventory: ResourceArtifactInventory,
+    #[serde(default)]
+    pub coordination: ResourceCoordinationPressure,
+    #[serde(default)]
+    pub unavailable_signals: Vec<ResourceUnavailableSignal>,
 }
 
 impl ResourceGovernorObservation {
@@ -822,6 +830,8 @@ impl ResourceGovernorObservation {
             memory_used_mb: None,
             cpu_load_permyriad: None,
             artifact_inventory: ResourceArtifactInventory::default(),
+            coordination: ResourceCoordinationPressure::default(),
+            unavailable_signals: Vec::new(),
         }
     }
 
@@ -857,6 +867,8 @@ impl ResourceGovernorObservation {
         );
         observation.artifact_inventory =
             ResourceArtifactInventory::try_new(input.artifact_inventory)?;
+        observation.coordination = input.coordination;
+        observation.unavailable_signals = input.unavailable_signals;
         Ok(observation)
     }
 
@@ -921,6 +933,10 @@ pub struct ResourceGovernorSnapshotInput {
     pub cpu_load_permyriad: Option<u64>,
     #[serde(default)]
     pub artifact_inventory: Vec<ResourceArtifactInventoryEntry>,
+    #[serde(default)]
+    pub coordination: ResourceCoordinationPressure,
+    #[serde(default)]
+    pub unavailable_signals: Vec<ResourceUnavailableSignal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1207,6 +1223,26 @@ fn decide_resource_action(
         );
     }
 
+    if coordination_requires_fail_closed(observation) {
+        return if source_only_allowed {
+            decision(
+                ResourceGovernorDecisionKind::SourceOnly,
+                reason_codes::SOURCE_ONLY_CORRUPT_COORDINATION,
+                "coordination state is corrupt or stale; source-only work remains allowed",
+                60_000,
+                "record a source-only blocker and repair Agent Mail/Beads coordination before cargo/RCH proof",
+            )
+        } else {
+            decision(
+                ResourceGovernorDecisionKind::Defer,
+                reason_codes::DEFER_CORRUPT_COORDINATION,
+                "coordination state is corrupt or stale",
+                180_000,
+                "repair Agent Mail/Beads coordination and refresh reservations before cargo/RCH proof or cleanup",
+            )
+        };
+    }
+
     if let Some(requested) = requested_proof_class
         && observation
             .active_proof_classes
@@ -1313,6 +1349,22 @@ fn pressure_tier(
         ));
     }
     tier
+}
+
+fn coordination_requires_fail_closed(observation: &ResourceGovernorObservation) -> bool {
+    matches!(
+        observation.coordination.agent_mail_health,
+        ResourceCoordinationHealth::Corrupt
+    ) || matches!(
+        observation.coordination.beads_health,
+        ResourceCoordinationHealth::Corrupt
+    ) || observation.coordination.stale_lock_count > 0
+        || observation.unavailable_signals.iter().any(|signal| {
+            matches!(
+                signal.signal,
+                ResourcePressureSignal::Coordination | ResourcePressureSignal::Reservations
+            )
+        })
 }
 
 fn tier_for_value(
@@ -1955,6 +2007,125 @@ mod tests {
         assert_eq!(
             sample.unavailable_signals[0].signal,
             ResourcePressureSignal::Coordination
+        );
+    }
+
+    #[test]
+    fn pressure_sample_carries_coordination_into_governor_observation() {
+        let sample = ResourcePressureSample::from_input(
+            ResourcePressureSampleInput {
+                coordination: ResourceCoordinationPressure {
+                    agent_mail_health: ResourceCoordinationHealth::Corrupt,
+                    beads_health: ResourceCoordinationHealth::Healthy,
+                    recovery_mode: Some("mail-db-corrupt".to_string()),
+                    stale_lock_count: 2,
+                    active_reservation_count: 4,
+                },
+                unavailable_signals: vec![ResourceUnavailableSignal {
+                    signal: ResourcePressureSignal::Reservations,
+                    reason_code: "RG_RESERVATIONS_STALE".to_string(),
+                    detail: "reservation leases are stale".to_string(),
+                }],
+                ..ResourcePressureSampleInput::default()
+            },
+            sample_ts(0),
+        )
+        .expect("valid corrupt coordination sample");
+
+        let observation = sample.to_governor_observation();
+
+        assert_eq!(
+            observation.coordination.agent_mail_health,
+            ResourceCoordinationHealth::Corrupt
+        );
+        assert_eq!(observation.coordination.stale_lock_count, 2);
+        assert_eq!(observation.unavailable_signals.len(), 1);
+        assert_eq!(
+            observation.unavailable_signals[0].signal,
+            ResourcePressureSignal::Reservations
+        );
+    }
+
+    #[test]
+    fn corrupt_coordination_defers_remote_validation_even_when_pressure_is_idle() {
+        let sample = ResourcePressureSample::from_input(
+            ResourcePressureSampleInput {
+                coordination: ResourceCoordinationPressure {
+                    agent_mail_health: ResourceCoordinationHealth::Corrupt,
+                    beads_health: ResourceCoordinationHealth::Healthy,
+                    recovery_mode: Some("mail-db-corrupt".to_string()),
+                    stale_lock_count: 0,
+                    active_reservation_count: 0,
+                },
+                ..ResourcePressureSampleInput::default()
+            },
+            sample_ts(0),
+        )
+        .expect("valid corrupt coordination sample");
+
+        let report = evaluate_resource_governor(
+            ResourceGovernorRequest {
+                trace_id: "corrupt-coordination".to_string(),
+                requested_proof_class: Some("cargo-check".to_string()),
+                source_only_allowed: false,
+            },
+            sample.to_governor_observation(),
+            ResourceGovernorThresholds::default(),
+            sample_ts(1),
+        );
+
+        assert_eq!(report.decision.kind, ResourceGovernorDecisionKind::Defer);
+        assert_eq!(
+            report.decision.reason_code,
+            reason_codes::DEFER_CORRUPT_COORDINATION
+        );
+        assert_eq!(
+            report.structured_log.reason_code,
+            reason_codes::DEFER_CORRUPT_COORDINATION
+        );
+    }
+
+    #[test]
+    fn corrupt_coordination_uses_source_only_when_allowed() {
+        let sample = ResourcePressureSample::from_input(
+            ResourcePressureSampleInput {
+                coordination: ResourceCoordinationPressure {
+                    agent_mail_health: ResourceCoordinationHealth::Healthy,
+                    beads_health: ResourceCoordinationHealth::Corrupt,
+                    recovery_mode: Some("beads-locks-corrupt".to_string()),
+                    stale_lock_count: 1,
+                    active_reservation_count: 3,
+                },
+                ..ResourcePressureSampleInput::default()
+            },
+            sample_ts(0),
+        )
+        .expect("valid corrupt beads sample");
+
+        let report = evaluate_resource_governor(
+            ResourceGovernorRequest {
+                trace_id: "source-only-corrupt-coordination".to_string(),
+                requested_proof_class: Some("cargo-test".to_string()),
+                source_only_allowed: true,
+            },
+            sample.to_governor_observation(),
+            ResourceGovernorThresholds::default(),
+            sample_ts(1),
+        );
+
+        assert_eq!(
+            report.decision.kind,
+            ResourceGovernorDecisionKind::SourceOnly
+        );
+        assert_eq!(
+            report.decision.reason_code,
+            reason_codes::SOURCE_ONLY_CORRUPT_COORDINATION
+        );
+        assert!(
+            report
+                .decision
+                .next_action
+                .contains("repair Agent Mail/Beads coordination")
         );
     }
 

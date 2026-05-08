@@ -22030,16 +22030,25 @@ fn evaluate_migration_post_condition(
 ) -> serde_json::Value {
     match condition {
         serde_json::Value::String(path) => {
+            let raw_path = path.trim();
+            if raw_path.is_empty() {
+                return serde_json::json!({
+                    "index": index,
+                    "path": path,
+                    "passed": false,
+                    "error": "post-condition string path must not be empty",
+                });
+            }
             match resolve_relative_path_within_root(
                 project_root,
-                Path::new(path),
+                Path::new(raw_path),
                 "migration post-condition",
             ) {
                 Ok(resolved) => {
                     let exists = resolved.exists();
                     serde_json::json!({
                         "index": index,
-                        "path": path,
+                        "path": raw_path,
                         "resolved_path": resolved.display().to_string(),
                         "expected_exists": true,
                         "actual_exists": exists,
@@ -22048,7 +22057,7 @@ fn evaluate_migration_post_condition(
                 }
                 Err(err) => serde_json::json!({
                     "index": index,
-                    "path": path,
+                    "path": raw_path,
                     "expected_exists": true,
                     "actual_exists": false,
                     "passed": false,
