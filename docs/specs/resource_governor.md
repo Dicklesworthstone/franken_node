@@ -186,6 +186,115 @@ Structured events:
 | `RG-005` | Approved cleanup receipt emitted. |
 | `RG-006` | Doctor/readiness resource snapshot emitted. |
 
+## Doctor and Readiness Output Contract
+
+The resource governor integrates with `franken-node doctor` and `franken-node ops readiness` to provide actionable workspace pressure governance output. Doctor emits warnings when coordination state is corrupt or cleanup is needed; readiness provides structured status for automation.
+
+### Doctor Output
+
+Doctor output includes a "Workspace Pressure" section that summarizes state and recommends next actions:
+
+**Human output format:**
+```
+Workspace Pressure: GREEN
+  Protected: 2.1 GB (source, beads, mail, logs)
+  Rebuildable: 8.2 GB (cargo targets, temp outputs)
+  RCH: Available (queue depth: 2)
+  Action: Ready for local builds
+```
+
+**Structured warnings for yellow/red states:**
+```
+Workspace Pressure: YELLOW
+  Protected: 2.1 GB (source, beads, mail, logs)
+  Rebuildable: 47.8 GB (cargo targets exceeding threshold)
+  RCH: Available (queue depth: 8)
+  Action: Use RCH for validation, cleanup candidates available
+  Warning: 12 cleanup candidates found, run with --cleanup-mode to review
+```
+
+**Corrupt coordination state:**
+```
+Workspace Pressure: CORRUPT
+  Protected: 2.1 GB (source, beads, mail, logs)
+  Coordination: Agent Mail state inconsistent
+  Action: Source-only work allowed, avoid cleanup until coordination restored
+  Error: Detected stale file reservations, corrupted lease metadata
+```
+
+### Readiness JSON Contract
+
+Readiness output includes a `workspace_pressure` section using schema `franken-node/doctor-readiness/workspace-pressure/v1`:
+
+```json
+{
+  "workspace_pressure": {
+    "schema": "franken-node/doctor-readiness/workspace-pressure/v1",
+    "state": "green|yellow|red|corrupt-coordination",
+    "decision": "allow|require_rch|propose_cleanup|refuse_cleanup|source_only",
+    "reason_code": "RG_ALLOW_HEALTHY|RG_REQUIRE_RCH_CARGO_CONTENTION|...",
+    "inventory_summary": {
+      "protected_bytes": 2147483648,
+      "rebuildable_bytes": 8589934592,
+      "cleanup_candidates_count": 0,
+      "cleanup_candidates_bytes": 0
+    },
+    "infrastructure_state": {
+      "cargo_processes": 2,
+      "rch_available": true,
+      "rch_queue_depth": 2,
+      "coordination_health": "healthy|degraded|corrupt"
+    },
+    "recommendations": {
+      "next_action": "ready|use_rch|review_cleanup|source_only|wait",
+      "retry_after_ms": null,
+      "cleanup_mode_required": false,
+      "commands": []
+    },
+    "warnings": [
+      {
+        "code": "WP_CLEANUP_CANDIDATES_AVAILABLE",
+        "message": "12 cleanup candidates found",
+        "severity": "info"
+      }
+    ]
+  }
+}
+```
+
+### Event Code Details
+
+Doctor/readiness workspace pressure events:
+
+| Event Code | Severity | Description |
+|---|---|---|
+| `WP_STATE_GREEN` | info | Workspace pressure is healthy, local builds allowed |
+| `WP_STATE_YELLOW` | warning | Workspace pressure elevated, RCH or cleanup recommended |
+| `WP_STATE_RED` | error | Workspace pressure critical, cleanup or deferral required |
+| `WP_COORDINATION_CORRUPT` | error | Agent Mail/Beads coordination state is inconsistent |
+| `WP_CLEANUP_CANDIDATES_AVAILABLE` | info | Cleanup candidates found, approved cleanup mode available |
+| `WP_CLEANUP_BLOCKED_ALL_PROTECTED` | warning | All artifacts are protected/pinned, cleanup unavailable |
+| `WP_RCH_UNAVAILABLE` | warning | Remote compilation unavailable, local fallback policy applies |
+
+### Required Fields
+
+Doctor output must include:
+- State summary (GREEN/YELLOW/RED/CORRUPT)
+- Protected byte count with breakdown
+- Rebuildable byte count
+- RCH availability and queue depth
+- Clear next action recommendation
+- Structured warnings for automation parsing
+
+Readiness JSON must include:
+- `state`, `decision`, `reason_code` (required)
+- `inventory_summary` with protected/rebuildable byte counts
+- `infrastructure_state` with cargo/RCH status
+- `recommendations` with next action and any retry timing
+- `warnings` array with structured warning details
+
+No output may recommend destructive actions without explicit approved cleanup mode context.
+
 ## Required Fixture Scenarios
 
 Fixture replay must cover at least:

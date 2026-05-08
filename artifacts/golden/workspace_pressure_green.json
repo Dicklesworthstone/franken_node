@@ -1,0 +1,27 @@
+{
+  "workspace_pressure": {
+    "schema": "franken-node/doctor-readiness/workspace-pressure/v1",
+    "state": "green",
+    "decision": "allow",
+    "reason_code": "RG_ALLOW_HEALTHY",
+    "inventory_summary": {
+      "protected_bytes": 2147483648,
+      "rebuildable_bytes": 1073741824,
+      "cleanup_candidates_count": 0,
+      "cleanup_candidates_bytes": 0
+    },
+    "infrastructure_state": {
+      "cargo_processes": 1,
+      "rch_available": true,
+      "rch_queue_depth": 1,
+      "coordination_health": "healthy"
+    },
+    "recommendations": {
+      "next_action": "ready",
+      "retry_after_ms": null,
+      "cleanup_mode_required": false,
+      "commands": []
+    },
+    "warnings": []
+  }
+}

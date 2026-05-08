@@ -1,0 +1,41 @@
+{
+  "workspace_pressure": {
+    "schema": "franken-node/doctor-readiness/workspace-pressure/v1",
+    "state": "corrupt-coordination",
+    "decision": "source_only",
+    "reason_code": "RG_SOURCE_ONLY_ALLOWED",
+    "inventory_summary": {
+      "protected_bytes": 2147483648,
+      "rebuildable_bytes": 25769803776,
+      "cleanup_candidates_count": 6,
+      "cleanup_candidates_bytes": 4294967296
+    },
+    "infrastructure_state": {
+      "cargo_processes": 4,
+      "rch_available": true,
+      "rch_queue_depth": 4,
+      "coordination_health": "corrupt"
+    },
+    "recommendations": {
+      "next_action": "source_only",
+      "retry_after_ms": null,
+      "cleanup_mode_required": false,
+      "commands": [
+        "franken-node mail repair --check-reservations",
+        "franken-node ops coordination-health --repair"
+      ]
+    },
+    "warnings": [
+      {
+        "code": "WP_COORDINATION_CORRUPT",
+        "message": "Agent Mail coordination state inconsistent, cleanup disabled",
+        "severity": "error"
+      },
+      {
+        "code": "WP_CLEANUP_CANDIDATES_AVAILABLE",
+        "message": "6 cleanup candidates available but blocked by coordination issues",
+        "severity": "warning"
+      }
+    ]
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "workspace_pressure": {
+    "schema": "franken-node/doctor-readiness/workspace-pressure/v1",
+    "state": "yellow",
+    "decision": "require_rch",
+    "reason_code": "RG_REQUIRE_RCH_CARGO_CONTENTION",
+    "inventory_summary": {
+      "protected_bytes": 2147483648,
+      "rebuildable_bytes": 51539607552,
+      "cleanup_candidates_count": 12,
+      "cleanup_candidates_bytes": 8589934592
+    },
+    "infrastructure_state": {
+      "cargo_processes": 8,
+      "rch_available": true,
+      "rch_queue_depth": 8,
+      "coordination_health": "healthy"
+    },
+    "recommendations": {
+      "next_action": "use_rch",
+      "retry_after_ms": 30000,
+      "cleanup_mode_required": false,
+      "commands": [
+        "franken-node ops resource-governor --cleanup-mode --dry-run"
+      ]
+    },
+    "warnings": [
+      {
+        "code": "WP_CLEANUP_CANDIDATES_AVAILABLE",
+        "message": "12 cleanup candidates found totaling 8.0 GB",
+        "severity": "info"
+      },
+      {
+        "code": "WP_STATE_YELLOW",
+        "message": "Cargo contention detected, prefer RCH execution",
+        "severity": "warning"
+      }
+    ]
+  }
+}

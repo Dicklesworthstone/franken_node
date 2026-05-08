@@ -1,0 +1,38 @@
+{
+  "workspace_pressure": {
+    "schema": "franken-node/doctor-readiness/workspace-pressure/v1",
+    "state": "red",
+    "decision": "refuse_cleanup",
+    "reason_code": "RG_FAIL_CLOSED_UNCLASSIFIED",
+    "inventory_summary": {
+      "protected_bytes": 2147483648,
+      "rebuildable_bytes": 107374182400,
+      "cleanup_candidates_count": 0,
+      "cleanup_candidates_bytes": 0
+    },
+    "infrastructure_state": {
+      "cargo_processes": 16,
+      "rch_available": true,
+      "rch_queue_depth": 24,
+      "coordination_health": "degraded"
+    },
+    "recommendations": {
+      "next_action": "wait",
+      "retry_after_ms": 300000,
+      "cleanup_mode_required": false,
+      "commands": []
+    },
+    "warnings": [
+      {
+        "code": "WP_STATE_RED",
+        "message": "Critical workspace pressure, all validation deferred",
+        "severity": "error"
+      },
+      {
+        "code": "WP_CLEANUP_BLOCKED_ALL_PROTECTED",
+        "message": "No safe cleanup candidates found, all artifacts protected or pinned",
+        "severity": "warning"
+      }
+    ]
+  }
+}
