@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::fs::File;
 use std::io::{self, Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -25,8 +26,9 @@ const MAX_MIGRATION_FILE_BYTES: u64 = 10 << 20; // 10 MiB
 
 /// Read file with size limits to prevent DoS via oversized files.
 fn read_file_bounded(path: &Path) -> Result<String, io::Error> {
-    // Check file size before reading to prevent DoS via oversized migration files
-    let metadata = std::fs::metadata(path)?;
+    // Open file and check size atomically to prevent TOCTOU file swapping
+    let mut file = File::open(path)?;
+    let metadata = file.metadata()?;
     if metadata.len() > MAX_MIGRATION_FILE_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -37,7 +39,9 @@ fn read_file_bounded(path: &Path) -> Result<String, io::Error> {
             ),
         ));
     }
-    std::fs::read_to_string(path)
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    Ok(content)
 }
 
 #[cfg(any(test, feature = "admin-tools"))]

@@ -2,6 +2,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs::File,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -339,8 +341,9 @@ impl Config {
     /// ```
     #[allow(dead_code)]
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        // Check file size before reading to prevent DoS via oversized config files
-        let metadata = std::fs::metadata(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        // Open file and check size atomically to prevent TOCTOU file swapping
+        let mut file = File::open(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        let metadata = file.metadata().map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
         if metadata.len() > MAX_CONFIG_FILE_BYTES {
             return Err(ConfigError::ReadFailed(
                 path.into(),
@@ -352,8 +355,8 @@ impl Config {
             ));
         }
 
-        let content =
-            std::fs::read_to_string(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        let mut content = String::new();
+        file.read_to_string(&mut content).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
         let parsed: Self =
             toml::from_str(&content).map_err(|e| ConfigError::ParseFailed(path.into(), e))?;
         parsed.validate()?;
@@ -2296,8 +2299,9 @@ struct ConfigDocument {
 
 impl ConfigDocument {
     fn load(path: &Path) -> Result<Self, ConfigError> {
-        // Check file size before reading to prevent DoS via oversized config files
-        let metadata = std::fs::metadata(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        // Open file and check size atomically to prevent TOCTOU file swapping
+        let mut file = File::open(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        let metadata = file.metadata().map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
         if metadata.len() > MAX_CONFIG_FILE_BYTES {
             return Err(ConfigError::ReadFailed(
                 path.into(),
@@ -2309,8 +2313,8 @@ impl ConfigDocument {
             ));
         }
 
-        let content =
-            std::fs::read_to_string(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        let mut content = String::new();
+        file.read_to_string(&mut content).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
         toml::from_str(&content).map_err(|e| ConfigError::ParseFailed(path.into(), e))
     }
 
