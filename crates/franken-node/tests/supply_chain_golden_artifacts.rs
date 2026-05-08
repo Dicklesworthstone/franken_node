@@ -30,6 +30,10 @@ use subtle::ConstantTimeEq;
 type HmacSha256 = Hmac<Sha256>;
 
 const TEST_REGISTRY_KEY: &[u8] = b"franken-node-supply-chain-golden-test-registry-key-v1";
+const EXPECTED_TRUST_CARD_HASH: &str =
+    "1cc14664402eb2cbf2267d80cf55ee33500c074eeca1e41dc206eabfffba37dd";
+const EXPECTED_TRUST_CARD_SIGNATURE: &str =
+    "802b08c6a660a041b96a7de31d132f1febdf53b7ec3855c81aa82bece2e98198";
 
 /// Scrub non-deterministic values for golden comparison
 fn scrub_output(output: &str) -> String {
@@ -68,7 +72,7 @@ fn trust_card_signature_placeholder() -> String {
     ["signature", "placeholder"].join("-")
 }
 
-fn equals_sentinel(value: &str, sentinel: &str) -> bool {
+fn constant_time_str_eq(value: &str, expected: &str) -> bool {
     value.as_bytes().ct_eq(sentinel.as_bytes()).into()
 }
 

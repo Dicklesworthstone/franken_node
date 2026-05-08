@@ -1502,6 +1502,18 @@ mod tests {
     }
 
     #[test]
+    fn test_quarantine_order_fixture_uses_non_placeholder_signature() {
+        let order = make_order(
+            "q-signature",
+            QuarantineSeverity::High,
+            QuarantineMode::Soft,
+        );
+
+        assert_eq!(order.signature, "sig-fixture-quarantine-order-v1");
+        assert!(!order.signature.contains("placeholder"));
+    }
+
+    #[test]
     fn test_push_bounded_zero_capacity_drops_existing_and_new_items() {
         let mut items = vec![1, 2, 3];
 

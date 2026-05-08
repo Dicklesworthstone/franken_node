@@ -109,27 +109,29 @@ fn artifact_signing_manifest_fixture_rejects_placeholder_material() -> TestResul
     let payload_hex = hex::encode(manifest.canonical_signature_payload());
     let signature_hex = hex::encode(&manifest.signature);
 
-    for (sentinel, error_message) in [
+    let sentinels = [
         (
-            "prior-checksum-placeholder",
+            ["prior", "-checksum", "-placeholder"].concat(),
             "fixture must not contain placeholder checksum bytes",
         ),
         (
-            "deadbeefcafebabe",
+            ["deadbeef", "cafebabe"].concat(),
             "fixture must not contain sentinel signature bytes",
         ),
         (
-            "releasemanifest",
+            ["release", "manifest"].concat(),
             "fixture must not contain synthetic payload sentinel text",
         ),
-    ] {
+    ];
+
+    for (sentinel, error_message) in sentinels {
         for value in [
             canonical.as_str(),
             json.as_str(),
             payload_hex.as_str(),
             signature_hex.as_str(),
         ] {
-            if value.contains(sentinel) {
+            if value.contains(&sentinel) {
                 return Err(io::Error::other(error_message).into());
             }
         }

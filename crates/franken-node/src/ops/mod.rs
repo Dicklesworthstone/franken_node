@@ -13,6 +13,7 @@ pub mod validation_planner;
 pub mod validation_proof_cache;
 pub mod validation_proof_coalescer;
 pub mod validation_readiness;
+pub mod workspace_pressure_policy;
 
 #[cfg(test)]
 mod ops_conformance_tests;
