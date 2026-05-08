@@ -131,9 +131,7 @@ pub struct PolicyRule {
     pub rule_id: String,
     pub action_class: ActionClass,
     pub effect: RuleEffect,
-    #[serde(default)]
     pub required_capabilities: Vec<String>,
-    #[serde(default)]
     pub constraints: BTreeMap<String, String>,
 }
 

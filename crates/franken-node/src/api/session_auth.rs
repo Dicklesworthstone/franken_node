@@ -230,12 +230,10 @@ pub struct AuthenticatedSession {
     /// Next outbound sequence number.
     pub send_seq: u64,
     /// True once the terminal outbound sequence has been consumed.
-    #[serde(default)]
     pub send_seq_exhausted: bool,
     /// Next inbound sequence number.
     pub recv_seq: u64,
     /// True once the terminal inbound sequence has been consumed.
-    #[serde(default)]
     pub recv_seq_exhausted: bool,
     /// Configured replay window size.
     pub replay_window: u64,
