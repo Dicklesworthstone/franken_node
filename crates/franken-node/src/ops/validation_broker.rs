@@ -386,10 +386,26 @@ impl ValidationFlightRecorderRef {
                 ),
             );
         }
-        validate_repo_relative_path_with_code(&self.attempt_path, "flight_recorder_ref path", invalid_code)?;
-        validate_digest_with_code(&self.attempt_digest, "flight_recorder_ref digest", invalid_code)?;
-        validate_non_empty_field(&self.attempt_id, "flight_recorder_ref attempt_id", invalid_code)?;
-        validate_non_empty_field(&self.reason_code, "flight_recorder_ref reason_code", invalid_code)?;
+        validate_repo_relative_path_with_code(
+            &self.attempt_path,
+            "flight_recorder_ref path",
+            invalid_code,
+        )?;
+        validate_digest_with_code(
+            &self.attempt_digest,
+            "flight_recorder_ref digest",
+            invalid_code,
+        )?;
+        validate_non_empty_field(
+            &self.attempt_id,
+            "flight_recorder_ref attempt_id",
+            invalid_code,
+        )?;
+        validate_non_empty_field(
+            &self.reason_code,
+            "flight_recorder_ref reason_code",
+            invalid_code,
+        )?;
         if let Some(worker_id) = &self.worker_id {
             validate_non_empty_field(worker_id, "flight_recorder_ref worker_id", invalid_code)?;
         }
@@ -421,7 +437,8 @@ impl ValidationFlightRecorderRef {
             attempt_digest,
             attempt_id,
             generated_at,
-            freshness_expires_at: generated_at + chrono::Duration::seconds(freshness_ttl_secs as i64),
+            freshness_expires_at: generated_at
+                + chrono::Duration::seconds(freshness_ttl_secs as i64),
             outcome_class: adapter_outcome.outcome,
             execution_mode: adapter_outcome.execution_mode,
             worker_id: adapter_outcome.worker_id.clone(),
@@ -2893,13 +2910,17 @@ pub mod hygiene_detector {
 
         if !path.exists() {
             hygiene.status = FlightRecorderTargetDirHygieneStatus::Clean;
-            hygiene.diagnostic_details.push("Target directory does not exist - clean state".to_string());
+            hygiene
+                .diagnostic_details
+                .push("Target directory does not exist - clean state".to_string());
             return hygiene;
         }
 
         if !path.is_dir() {
             hygiene.status = FlightRecorderTargetDirHygieneStatus::Unknown;
-            hygiene.diagnostic_details.push("Target path exists but is not a directory".to_string());
+            hygiene
+                .diagnostic_details
+                .push("Target path exists but is not a directory".to_string());
             return hygiene;
         }
 
@@ -2916,17 +2937,23 @@ pub mod hygiene_detector {
                 if scan_result.total_entries > 0 {
                     hygiene.diagnostic_details.push(format!(
                         "Found {} artifacts ({} stale), total size: {} bytes",
-                        scan_result.total_entries, scan_result.stale_entries, scan_result.total_size
+                        scan_result.total_entries,
+                        scan_result.stale_entries,
+                        scan_result.total_size
                     ));
                 }
 
                 if scan_result.scan_limited {
-                    hygiene.diagnostic_details.push("Scan limited by entry count or depth restrictions".to_string());
+                    hygiene
+                        .diagnostic_details
+                        .push("Scan limited by entry count or depth restrictions".to_string());
                 }
             }
             Err(e) => {
                 hygiene.status = FlightRecorderTargetDirHygieneStatus::Unknown;
-                hygiene.diagnostic_details.push(format!("Failed to scan target directory: {}", e));
+                hygiene
+                    .diagnostic_details
+                    .push(format!("Failed to scan target directory: {}", e));
             }
         }
 
@@ -2948,19 +2975,29 @@ pub mod hygiene_detector {
         attempt.target_dir.sync_root_hygiene = sync_root_hygiene;
 
         // Update diagnostic with hygiene summary
-        if !attempt.target_dir.hygiene_status.diagnostic_details.is_empty() {
+        if !attempt
+            .target_dir
+            .hygiene_status
+            .diagnostic_details
+            .is_empty()
+        {
             let hygiene_summary = format!(
                 "Target hygiene: {:?} ({}), Sync hygiene: {:?} ({})",
                 attempt.target_dir.hygiene_status.status,
                 attempt.target_dir.hygiene_status.diagnostic_details.len(),
                 attempt.target_dir.sync_root_hygiene.status,
-                attempt.target_dir.sync_root_hygiene.diagnostic_details.len()
+                attempt
+                    .target_dir
+                    .sync_root_hygiene
+                    .diagnostic_details
+                    .len()
             );
 
             if attempt.target_dir.diagnostic.trim().is_empty() {
                 attempt.target_dir.diagnostic = hygiene_summary;
             } else {
-                attempt.target_dir.diagnostic = format!("{}; {}", attempt.target_dir.diagnostic, hygiene_summary);
+                attempt.target_dir.diagnostic =
+                    format!("{}; {}", attempt.target_dir.diagnostic, hygiene_summary);
             }
         }
     }
@@ -2971,7 +3008,9 @@ pub mod hygiene_detector {
 
         if !path.exists() {
             hygiene.status = FlightRecorderSyncRootHygieneStatus::Unknown;
-            hygiene.diagnostic_details.push("Sync root path does not exist".to_string());
+            hygiene
+                .diagnostic_details
+                .push("Sync root path does not exist".to_string());
             return hygiene;
         }
 
@@ -2979,7 +3018,9 @@ pub mod hygiene_detector {
         let git_dir = find_git_directory(path);
         if git_dir.is_none() {
             hygiene.status = FlightRecorderSyncRootHygieneStatus::Unknown;
-            hygiene.diagnostic_details.push("No git repository found".to_string());
+            hygiene
+                .diagnostic_details
+                .push("No git repository found".to_string());
             return hygiene;
         }
 
@@ -2994,25 +3035,37 @@ pub mod hygiene_detector {
                 hygiene.status = classify_sync_root_hygiene(&git_status);
 
                 if git_status.modified_count > 0 {
-                    hygiene.diagnostic_details.push(format!("{} modified files", git_status.modified_count));
+                    hygiene
+                        .diagnostic_details
+                        .push(format!("{} modified files", git_status.modified_count));
                 }
                 if git_status.untracked_count > 0 {
-                    hygiene.diagnostic_details.push(format!("{} untracked files", git_status.untracked_count));
+                    hygiene
+                        .diagnostic_details
+                        .push(format!("{} untracked files", git_status.untracked_count));
                 }
                 if git_status.staged_count > 0 {
-                    hygiene.diagnostic_details.push(format!("{} staged changes", git_status.staged_count));
+                    hygiene
+                        .diagnostic_details
+                        .push(format!("{} staged changes", git_status.staged_count));
                 }
                 if git_status.conflicted_count > 0 {
-                    hygiene.diagnostic_details.push(format!("{} conflicted files", git_status.conflicted_count));
+                    hygiene
+                        .diagnostic_details
+                        .push(format!("{} conflicted files", git_status.conflicted_count));
                 }
 
                 if hygiene.status == FlightRecorderSyncRootHygieneStatus::Clean {
-                    hygiene.diagnostic_details.push("Working directory is clean".to_string());
+                    hygiene
+                        .diagnostic_details
+                        .push("Working directory is clean".to_string());
                 }
             }
             Err(e) => {
                 hygiene.status = FlightRecorderSyncRootHygieneStatus::Unknown;
-                hygiene.diagnostic_details.push(format!("Failed to get git status: {}", e));
+                hygiene
+                    .diagnostic_details
+                    .push(format!("Failed to get git status: {}", e));
             }
         }
 
@@ -3054,7 +3107,8 @@ pub mod hygiene_detector {
         stale_threshold: Duration,
         depth: usize,
     ) -> std::io::Result<()> {
-        if depth > MAX_HYGIENE_SCAN_DEPTH || result.total_entries >= MAX_HYGIENE_SCAN_ENTRIES as u32 {
+        if depth > MAX_HYGIENE_SCAN_DEPTH || result.total_entries >= MAX_HYGIENE_SCAN_ENTRIES as u32
+        {
             result.scan_limited = true;
             return Ok(());
         }
@@ -3066,7 +3120,13 @@ pub mod hygiene_detector {
             process_entry(&entry, &metadata, result, now, stale_threshold)?;
 
             if metadata.is_dir() && result.total_entries < MAX_HYGIENE_SCAN_ENTRIES as u32 {
-                scan_directory_recursive(&entry.path(), result, now, stale_threshold, depth.saturating_add(1))?;
+                scan_directory_recursive(
+                    &entry.path(),
+                    result,
+                    now,
+                    stale_threshold,
+                    depth.saturating_add(1),
+                )?;
             }
 
             if result.total_entries >= MAX_HYGIENE_SCAN_ENTRIES as u32 {
@@ -3111,7 +3171,9 @@ pub mod hygiene_detector {
         Ok(())
     }
 
-    fn classify_target_dir_hygiene(scan_result: &DirectoryScanResult) -> FlightRecorderTargetDirHygieneStatus {
+    fn classify_target_dir_hygiene(
+        scan_result: &DirectoryScanResult,
+    ) -> FlightRecorderTargetDirHygieneStatus {
         if scan_result.total_entries == 0 {
             FlightRecorderTargetDirHygieneStatus::Clean
         } else if scan_result.stale_entries == scan_result.total_entries {
@@ -3166,10 +3228,18 @@ pub mod hygiene_detector {
             let worktree_status = line.chars().nth(1);
 
             match (index_status, worktree_status) {
-                (Some(' '), Some('M')) => result.modified_count = result.modified_count.saturating_add(1),
-                (Some('?'), Some('?')) => result.untracked_count = result.untracked_count.saturating_add(1),
-                (Some('U'), _) | (_, Some('U')) => result.conflicted_count = result.conflicted_count.saturating_add(1),
-                (Some(c), _) if c != ' ' && c != '?' => result.staged_count = result.staged_count.saturating_add(1),
+                (Some(' '), Some('M')) => {
+                    result.modified_count = result.modified_count.saturating_add(1)
+                }
+                (Some('?'), Some('?')) => {
+                    result.untracked_count = result.untracked_count.saturating_add(1)
+                }
+                (Some('U'), _) | (_, Some('U')) => {
+                    result.conflicted_count = result.conflicted_count.saturating_add(1)
+                }
+                (Some(c), _) if c != ' ' && c != '?' => {
+                    result.staged_count = result.staged_count.saturating_add(1)
+                }
                 _ => {}
             }
         }
@@ -3177,7 +3247,9 @@ pub mod hygiene_detector {
         Ok(result)
     }
 
-    fn classify_sync_root_hygiene(git_status: &GitStatusResult) -> FlightRecorderSyncRootHygieneStatus {
+    fn classify_sync_root_hygiene(
+        git_status: &GitStatusResult,
+    ) -> FlightRecorderSyncRootHygieneStatus {
         if git_status.conflicted_count > 0 {
             FlightRecorderSyncRootHygieneStatus::Conflicted
         } else if git_status.modified_count > 0 || git_status.staged_count > 0 {
@@ -4176,20 +4248,28 @@ mod tests {
 
     #[test]
     fn test_target_dir_hygiene_detection() {
-        use tempfile::TempDir;
         use std::fs;
         use std::io::Write;
+        use tempfile::TempDir;
 
         // Test non-existent directory
         let nonexistent_path = Path::new("/tmp/nonexistent_hygiene_test");
         let hygiene = hygiene_detector::detect_target_dir_hygiene(nonexistent_path);
         assert_eq!(hygiene.status, FlightRecorderTargetDirHygieneStatus::Clean);
-        assert!(hygiene.diagnostic_details.iter().any(|d| d.contains("does not exist")));
+        assert!(
+            hygiene
+                .diagnostic_details
+                .iter()
+                .any(|d| d.contains("does not exist"))
+        );
 
         // Test empty directory
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let empty_hygiene = hygiene_detector::detect_target_dir_hygiene(temp_dir.path());
-        assert_eq!(empty_hygiene.status, FlightRecorderTargetDirHygieneStatus::Clean);
+        assert_eq!(
+            empty_hygiene.status,
+            FlightRecorderTargetDirHygieneStatus::Clean
+        );
         assert_eq!(empty_hygiene.artifact_count, 0);
 
         // Test directory with fresh files
@@ -4199,7 +4279,10 @@ mod tests {
         drop(file);
 
         let fresh_hygiene = hygiene_detector::detect_target_dir_hygiene(temp_dir.path());
-        assert_eq!(fresh_hygiene.status, FlightRecorderTargetDirHygieneStatus::Dirty);
+        assert_eq!(
+            fresh_hygiene.status,
+            FlightRecorderTargetDirHygieneStatus::Dirty
+        );
         assert_eq!(fresh_hygiene.artifact_count, 1);
         assert_eq!(fresh_hygiene.stale_artifact_count, 0);
     }
@@ -4212,7 +4295,12 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let hygiene = hygiene_detector::detect_sync_root_hygiene(temp_dir.path());
         assert_eq!(hygiene.status, FlightRecorderSyncRootHygieneStatus::Unknown);
-        assert!(hygiene.diagnostic_details.iter().any(|d| d.contains("No git repository")));
+        assert!(
+            hygiene
+                .diagnostic_details
+                .iter()
+                .any(|d| d.contains("No git repository"))
+        );
     }
 
     #[test]
@@ -4228,7 +4316,10 @@ mod tests {
         hygiene_detector::populate_flight_recorder_hygiene(&mut attempt);
 
         // Should have populated hygiene information
-        assert_eq!(attempt.target_dir.hygiene_status.status, FlightRecorderTargetDirHygieneStatus::Clean);
+        assert_eq!(
+            attempt.target_dir.hygiene_status.status,
+            FlightRecorderTargetDirHygieneStatus::Clean
+        );
         assert!(attempt.target_dir.diagnostic.contains("Target hygiene:"));
     }
 

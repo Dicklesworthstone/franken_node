@@ -1402,3 +1402,177 @@ fn flight_recorder_recovery_rejects_required_action_mismatch()
 
     Ok(())
 }
+
+#[test]
+fn validation_flight_recorder_ref_from_rch_adapter_outcome() -> Result<(), Box<dyn std::error::Error>> {
+    use frankenengine_node::ops::validation_broker::{
+        FlightRecorderAdapterOutcome, FlightRecorderAdapterOutcomeClass,
+        RchMode, TimeoutClass, ValidationFlightRecorderRef,
+    };
+
+    let adapter_outcome = FlightRecorderAdapterOutcome {
+        outcome: FlightRecorderAdapterOutcomeClass::Passed,
+        execution_mode: RchMode::Remote,
+        worker_id: Some("worker-123".to_string()),
+        timeout_class: TimeoutClass::None,
+        exit_code: Some(0),
+        retryable: false,
+        product_failure: false,
+        reason_code: "RCH-S000".to_string(),
+        detail: "successful validation".to_string(),
+    };
+
+    let attempt_id = "attempt-456".to_string();
+    let attempt_path = "artifacts/flight-recorder/attempt-456.json".to_string();
+    let attempt_digest = DigestRef {
+        algorithm: "sha256".to_string(),
+        hex: "deadbeefcafebabe0123456789abcdef".to_string(),
+    };
+    let generated_at = ts(100);
+    let ttl_secs = 3600;
+
+    let flight_ref = ValidationFlightRecorderRef::from_rch_adapter_outcome(
+        &adapter_outcome,
+        attempt_id.clone(),
+        attempt_path.clone(),
+        attempt_digest.clone(),
+        generated_at,
+        ttl_secs,
+    );
+
+    assert_eq!(flight_ref.attempt_id, attempt_id);
+    assert_eq!(flight_ref.attempt_path, attempt_path);
+    assert_eq!(flight_ref.attempt_digest, attempt_digest);
+    assert_eq!(flight_ref.outcome_class, FlightRecorderAdapterOutcomeClass::Passed);
+    assert_eq!(flight_ref.execution_mode, RchMode::Remote);
+    assert_eq!(flight_ref.worker_id, Some("worker-123".to_string()));
+    assert_eq!(flight_ref.reason_code, "RCH-S000");
+    assert_eq!(flight_ref.generated_at, generated_at);
+    assert_eq!(flight_ref.freshness_expires_at, generated_at + Duration::seconds(ttl_secs as i64));
+
+    // Validate the created reference
+    flight_ref.validate_at(ts(200))?;
+
+    Ok(())
+}
+
+#[test]
+fn validation_flight_recorder_ref_validation_fails_when_stale() -> Result<(), Box<dyn std::error::Error>> {
+    use frankenengine_node::ops::validation_broker::{
+        FlightRecorderAdapterOutcome, FlightRecorderAdapterOutcomeClass,
+        RchMode, TimeoutClass, ValidationFlightRecorderRef,
+    };
+
+    let adapter_outcome = FlightRecorderAdapterOutcome {
+        outcome: FlightRecorderAdapterOutcomeClass::WorkerTimeout,
+        execution_mode: RchMode::Unavailable,
+        worker_id: None,
+        timeout_class: TimeoutClass::SshCommand,
+        exit_code: None,
+        retryable: true,
+        product_failure: false,
+        reason_code: "RCH-E104".to_string(),
+        detail: "worker ssh connection timeout".to_string(),
+    };
+
+    let flight_ref = ValidationFlightRecorderRef::from_rch_adapter_outcome(
+        &adapter_outcome,
+        "attempt-789".to_string(),
+        "artifacts/flight-recorder/attempt-789.json".to_string(),
+        DigestRef {
+            algorithm: "sha256".to_string(),
+            hex: "abcdef0123456789deadbeefcafebabe".to_string(),
+        },
+        ts(100),
+        300, // 5 minutes TTL
+    );
+
+    // Should validate when fresh
+    flight_ref.validate_at(ts(200))?;
+
+    // Should fail when stale (after TTL expires)
+    let stale_result = flight_ref.validate_at(ts(500));
+    assert!(stale_result.is_err());
+    if let Err(ValidationBrokerError::ContractViolation { code, .. }) = stale_result {
+        assert_eq!(code, "ERR_VFR_STALE_FLIGHT_RECORDER_REF");
+    } else {
+        return Err("Expected stale flight recorder ref error".into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn validation_receipt_with_flight_recorder_ref_validates() -> Result<(), Box<dyn std::error::Error>> {
+    use frankenengine_node::ops::validation_broker::{
+        FlightRecorderAdapterOutcomeClass, ValidationFlightRecorderRef,
+    };
+
+    let mut receipt = base_receipt()?;
+    receipt.rch.mode = RchMode::Remote;
+    receipt.rch.worker_id = Some("worker-456".to_string());
+
+    let flight_ref = ValidationFlightRecorderRef {
+        schema_version: "franken-node/validation-flight-recorder-ref/v1".to_string(),
+        attempt_path: "artifacts/flight-recorder/attempt-123.json".to_string(),
+        attempt_digest: DigestRef {
+            algorithm: "sha256".to_string(),
+            hex: "1234567890abcdefdeadbeefcafebabe".to_string(),
+        },
+        attempt_id: "attempt-123".to_string(),
+        generated_at: ts(100),
+        freshness_expires_at: ts(3700), // 1 hour TTL
+        outcome_class: FlightRecorderAdapterOutcomeClass::Passed,
+        execution_mode: RchMode::Remote,
+        worker_id: Some("worker-456".to_string()),
+        reason_code: "RCH-S000".to_string(),
+    };
+
+    receipt.flight_recorder_ref = Some(flight_ref);
+
+    // Should validate successfully
+    receipt.validate_at(ts(200))?;
+
+    Ok(())
+}
+
+#[test]
+fn validation_receipt_rejects_mismatched_flight_recorder_ref() -> Result<(), Box<dyn std::error::Error>> {
+    use frankenengine_node::ops::validation_broker::{
+        FlightRecorderAdapterOutcomeClass, ValidationFlightRecorderRef,
+    };
+
+    let mut receipt = base_receipt()?;
+    receipt.rch.mode = RchMode::Remote;
+    receipt.rch.worker_id = Some("worker-456".to_string());
+
+    // Create flight recorder ref with mismatched worker ID
+    let flight_ref = ValidationFlightRecorderRef {
+        schema_version: "franken-node/validation-flight-recorder-ref/v1".to_string(),
+        attempt_path: "artifacts/flight-recorder/attempt-123.json".to_string(),
+        attempt_digest: DigestRef {
+            algorithm: "sha256".to_string(),
+            hex: "1234567890abcdefdeadbeefcafebabe".to_string(),
+        },
+        attempt_id: "attempt-123".to_string(),
+        generated_at: ts(100),
+        freshness_expires_at: ts(3700), // 1 hour TTL
+        outcome_class: FlightRecorderAdapterOutcomeClass::Passed,
+        execution_mode: RchMode::Remote,
+        worker_id: Some("different-worker".to_string()), // Mismatch!
+        reason_code: "RCH-S000".to_string(),
+    };
+
+    receipt.flight_recorder_ref = Some(flight_ref);
+
+    // Should fail validation due to worker ID mismatch
+    let result = receipt.validate_at(ts(200));
+    assert!(result.is_err());
+    if let Err(ValidationBrokerError::ContractViolation { code, .. }) = result {
+        assert_eq!(code, "ERR_VFR_INVALID_FLIGHT_RECORDER_REF");
+    } else {
+        return Err("Expected flight recorder ref validation error".into());
+    }
+
+    Ok(())
+}
