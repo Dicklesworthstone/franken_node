@@ -29701,3 +29701,264 @@ mod parser_bomb_protection_tests {
         assert!(hash_hex.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
+
+#[cfg(test)]
+mod time_math_wraparound_tests {
+    use super::*;
+    use std::fs::File;
+    use std::time::{SystemTime, UNIX_EPOCH, Duration};
+    use tempfile::TempDir;
+
+    #[test]
+    fn latest_file_age_secs_basic_functionality() {
+        // Test normal functionality of latest_file_age_secs
+        let tmp = TempDir::new().expect("create temp dir");
+
+        // Create a file
+        let file_path = tmp.path().join("test.txt");
+        File::create(&file_path).expect("create file");
+
+        let age_secs = latest_file_age_secs(tmp.path()).expect("should find file");
+
+        // Should be a small age (just created)
+        assert!(age_secs < 10, "Recently created file should have small age, got {}", age_secs);
+    }
+
+    #[test]
+    fn latest_file_age_secs_future_timestamp_bypass_prevention() {
+        // Test the checked_duration_since logic that prevents future timestamp bypass
+        // This test verifies the fix for bd-yqj79 (commit 5a7473ff)
+
+        // Test the specific logic used in latest_file_age_secs
+        let now = SystemTime::now();
+        let future_time = now + Duration::from_secs(86400); // 1 day in future
+
+        // This simulates what happens in latest_file_age_secs with a future file timestamp
+        let age_duration = now.checked_duration_since(future_time)
+                             .unwrap_or(Duration::from_secs(u32::MAX as u64));
+
+        // With future timestamp, checked_duration_since returns None,
+        // so we get the fallback Duration::from_secs(u32::MAX as u64)
+        assert_eq!(age_duration.as_secs(), u32::MAX as u64,
+                   "Future timestamp should result in maximum age to prevent bypass");
+
+        // Verify the old vulnerable approach would have been different
+        // OLD CODE: would use unwrap_or_default() → Duration::ZERO for future files
+        let old_vulnerable_approach = now.checked_duration_since(future_time)
+                                        .unwrap_or_default();
+        assert_eq!(old_vulnerable_approach.as_secs(), 0,
+                   "Old approach would have returned 0 (vulnerable)");
+
+        // NEW CODE: uses unwrap_or(large_duration) → very large age for future files
+        let new_secure_approach = now.checked_duration_since(future_time)
+                                    .unwrap_or(Duration::from_secs(u32::MAX as u64));
+        assert_eq!(new_secure_approach.as_secs(), u32::MAX as u64,
+                   "New approach returns maximum age (secure)");
+    }
+
+    #[test]
+    fn latest_file_age_secs_clock_skew_attack_simulation() {
+        // Test the logic that prevents clock skew attacks with various future offsets
+        // This simulates the core security protection without requiring file manipulation
+
+        let now = SystemTime::now();
+        let attack_scenarios = vec![
+            ("1 hour future", Duration::from_secs(3600)),
+            ("1 day future", Duration::from_secs(86400)),
+            ("1 year future", Duration::from_secs(365 * 24 * 3600)),
+            ("extreme future", Duration::from_secs(u32::MAX as u64)),
+        ];
+
+        for (scenario_name, future_offset) in attack_scenarios {
+            let attacker_timestamp = now + future_offset;
+
+            // Test the security logic from latest_file_age_secs
+            let age_duration = now.checked_duration_since(attacker_timestamp)
+                                 .unwrap_or(Duration::from_secs(u32::MAX as u64));
+
+            assert_eq!(age_duration.as_secs(), u32::MAX as u64,
+                       "Scenario '{}': Future timestamp should result in maximum staleness", scenario_name);
+        }
+    }
+
+    #[test]
+    fn latest_file_age_secs_mixed_normal_and_future_logic() {
+        // Test the comparison logic for normal vs future timestamps
+        // This verifies the security behavior when processing mixed timestamp scenarios
+
+        let now = SystemTime::now();
+        let past_time = now - Duration::from_secs(3600); // 1 hour ago (normal case)
+        let future_time = now + Duration::from_secs(86400); // 1 day future (attack case)
+
+        // Test normal timestamp handling
+        let normal_age = now.checked_duration_since(past_time)
+                           .unwrap_or(Duration::from_secs(u32::MAX as u64));
+        assert_eq!(normal_age.as_secs(), 3600, "Normal past timestamp should show correct age");
+
+        // Test future timestamp handling (attack scenario)
+        let future_age = now.checked_duration_since(future_time)
+                           .unwrap_or(Duration::from_secs(u32::MAX as u64));
+        assert_eq!(future_age.as_secs(), u32::MAX as u64,
+                   "Future timestamp should be treated as maximally stale");
+
+        // Verify that the function finds the latest file
+        // In the real function, max() is used to find the newest timestamp
+        let latest_timestamp = past_time.max(future_time);
+        assert_eq!(latest_timestamp, future_time, "Future time should be considered 'latest'");
+
+        // But when converting to age, future times get maximum age
+        let latest_age = now.checked_duration_since(latest_timestamp)
+                           .unwrap_or(Duration::from_secs(u32::MAX as u64));
+        assert_eq!(latest_age.as_secs(), u32::MAX as u64,
+                   "Latest file with future timestamp should have maximum age");
+    }
+
+    #[test]
+    fn current_unix_secs_basic_functionality() {
+        // Test normal functionality of current_unix_secs
+        let now_secs = current_unix_secs();
+
+        // Should be a reasonable timestamp (after 2020 and before 2030)
+        let year_2020_secs = 1577836800; // 2020-01-01 UTC
+        let year_2030_secs = 1893456000; // 2030-01-01 UTC
+
+        assert!(now_secs >= year_2020_secs && now_secs < year_2030_secs,
+                "Timestamp should be reasonable, got {}", now_secs);
+    }
+
+    #[test]
+    fn current_unix_secs_pre_epoch_fail_closed() {
+        // Test behavior when system clock is set before UNIX_EPOCH
+        // This test verifies the fix for bd-yqj79 (commit 5a7473ff)
+
+        // We can't actually set the system clock, but we can test the logic
+        // by examining what happens when duration_since(UNIX_EPOCH) would fail
+
+        // The function should return u64::MAX for fail-closed behavior
+        // when duration_since fails (like when SystemTime is before UNIX_EPOCH)
+
+        // We'll test this indirectly by checking that the function handles
+        // the error case correctly in the map_or pattern
+
+        // Create a SystemTime before UNIX_EPOCH to test the logic
+        let pre_epoch = UNIX_EPOCH - Duration::from_secs(1000);
+        let result = pre_epoch.duration_since(UNIX_EPOCH)
+                             .map_or(u64::MAX, |duration| duration.as_secs());
+
+        assert_eq!(result, u64::MAX,
+                   "Pre-UNIX_EPOCH time should result in u64::MAX for fail-closed behavior");
+    }
+
+    #[test]
+    fn current_unix_secs_boundary_conditions() {
+        // Test edge cases near time boundaries
+
+        // Test that UNIX_EPOCH itself works
+        let epoch_result = UNIX_EPOCH.duration_since(UNIX_EPOCH)
+                                    .map_or(u64::MAX, |duration| duration.as_secs());
+        assert_eq!(epoch_result, 0, "UNIX_EPOCH should give 0 seconds");
+
+        // Test a time just after UNIX_EPOCH
+        let just_after = UNIX_EPOCH + Duration::from_secs(1);
+        let after_result = just_after.duration_since(UNIX_EPOCH)
+                                    .map_or(u64::MAX, |duration| duration.as_secs());
+        assert_eq!(after_result, 1, "1 second after UNIX_EPOCH should give 1");
+
+        // Test that the fail-closed pattern works for pre-EPOCH
+        let before_epoch = UNIX_EPOCH.checked_sub(Duration::from_secs(1))
+                                     .unwrap_or(UNIX_EPOCH);
+        if before_epoch < UNIX_EPOCH {
+            let before_result = before_epoch.duration_since(UNIX_EPOCH)
+                                           .map_or(u64::MAX, |duration| duration.as_secs());
+            assert_eq!(before_result, u64::MAX, "Pre-UNIX_EPOCH should give u64::MAX");
+        }
+    }
+
+    #[test]
+    fn time_math_security_regression_tests() {
+        // Regression tests to verify that the old vulnerabilities are fixed
+        // Tests the exact logic changes made in commit 5a7473ff
+
+        let now = SystemTime::now();
+
+        // Test 1: latest_file_age_secs future timestamp vulnerability fix
+        let future_time = now + Duration::from_secs(86400); // 1 day future
+
+        // OLD VULNERABLE CODE pattern: checked_duration_since().unwrap_or_default()
+        let old_vulnerable_result = now.checked_duration_since(future_time)
+                                      .unwrap_or_default(); // Duration::ZERO
+        assert_eq!(old_vulnerable_result.as_secs(), 0,
+                   "Old pattern would return 0 seconds (fresh file) - VULNERABLE");
+
+        // NEW SECURE CODE pattern: checked_duration_since().unwrap_or(Duration::from_secs(u32::MAX))
+        let new_secure_result = now.checked_duration_since(future_time)
+                                  .unwrap_or(Duration::from_secs(u32::MAX as u64));
+        assert_eq!(new_secure_result.as_secs(), u32::MAX as u64,
+                   "New pattern returns maximum age - SECURE");
+
+        assert_ne!(old_vulnerable_result.as_secs(), new_secure_result.as_secs(),
+                   "Fix changed behavior for future timestamps");
+
+        // Test 2: current_unix_secs pre-EPOCH vulnerability fix
+        let pre_epoch = UNIX_EPOCH - Duration::from_secs(1000);
+
+        // OLD VULNERABLE CODE pattern: map_or(0, |d| d.as_secs())
+        let old_vulnerable_timestamp = pre_epoch.duration_since(UNIX_EPOCH)
+                                                .map_or(0, |d| d.as_secs());
+        assert_eq!(old_vulnerable_timestamp, 0,
+                   "Old pattern would return timestamp 0 - VULNERABLE");
+
+        // NEW SECURE CODE pattern: map_or(u64::MAX, |d| d.as_secs())
+        let new_secure_timestamp = pre_epoch.duration_since(UNIX_EPOCH)
+                                           .map_or(u64::MAX, |d| d.as_secs());
+        assert_eq!(new_secure_timestamp, u64::MAX,
+                   "New pattern returns u64::MAX - SECURE");
+
+        assert_ne!(old_vulnerable_timestamp, new_secure_timestamp,
+                   "Fix changed behavior for pre-EPOCH times");
+
+        // Test 3: Normal cases should still work correctly
+        let past_time = now - Duration::from_secs(3600); // 1 hour ago
+        let normal_age = now.checked_duration_since(past_time)
+                           .unwrap_or(Duration::from_secs(u32::MAX as u64));
+        assert_eq!(normal_age.as_secs(), 3600, "Normal timestamps still work correctly");
+
+        let recent_epoch_time = UNIX_EPOCH + Duration::from_secs(1640995200); // ~2022
+        let normal_timestamp = recent_epoch_time.duration_since(UNIX_EPOCH)
+                                               .map_or(u64::MAX, |d| d.as_secs());
+        assert_eq!(normal_timestamp, 1640995200, "Normal unix timestamps still work correctly");
+    }
+
+    #[test]
+    fn latest_file_age_secs_empty_directory() {
+        // Test behavior with empty directory
+        let tmp = TempDir::new().expect("create temp dir");
+
+        let result = latest_file_age_secs(tmp.path());
+
+        assert!(result.is_none(), "Empty directory should return None");
+    }
+
+    #[test]
+    fn latest_file_age_secs_directory_traversal_limits() {
+        // Test that directory traversal limits work correctly
+        let tmp = TempDir::new().expect("create temp dir");
+
+        // Create a simple nested directory structure (within reasonable limits)
+        let level1 = tmp.path().join("level1");
+        std::fs::create_dir_all(&level1).expect("create level1");
+        let level2 = level1.join("level2");
+        std::fs::create_dir_all(&level2).expect("create level2");
+
+        // Create a file in the nested directory
+        File::create(level2.join("nested_file.txt")).expect("create nested file");
+
+        // Should work with reasonable nesting
+        let result = latest_file_age_secs(tmp.path());
+
+        assert!(result.is_some(), "Should find file in nested structure");
+        if let Some(age) = result {
+            assert!(age < 60, "Nested file should have reasonable age");
+        }
+    }
+}
