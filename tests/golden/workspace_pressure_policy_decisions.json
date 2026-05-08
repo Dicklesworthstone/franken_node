@@ -1,0 +1,656 @@
+{
+  "decision_matrix": [
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 2,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "healthy",
+      "work_class": "SourceOnly"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 2,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "healthy",
+      "work_class": "DocsGate"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 1,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "healthy",
+      "work_class": "Validation"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 1,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "healthy",
+      "work_class": "Benchmark"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 1,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "healthy",
+      "work_class": "Fuzzing"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 3,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "healthy",
+      "work_class": "Cleanup"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": true,
+      "priority": 2,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "disk_pressure",
+      "work_class": "SourceOnly"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": true,
+      "priority": 2,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "disk_pressure",
+      "work_class": "DocsGate"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": true,
+      "priority": 1,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "disk_pressure",
+      "work_class": "Validation"
+    },
+    {
+      "decision": "Queue",
+      "has_cleanup_candidates": true,
+      "priority": 1,
+      "reason_code": "QUEUE_PRESSURE",
+      "scenario": "disk_pressure",
+      "work_class": "Benchmark"
+    },
+    {
+      "decision": "Queue",
+      "has_cleanup_candidates": true,
+      "priority": 1,
+      "reason_code": "QUEUE_PRESSURE",
+      "scenario": "disk_pressure",
+      "work_class": "Fuzzing"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": true,
+      "priority": 3,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "disk_pressure",
+      "work_class": "Cleanup"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 2,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "build_pressure",
+      "work_class": "SourceOnly"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 2,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "build_pressure",
+      "work_class": "DocsGate"
+    },
+    {
+      "decision": "RequireRch",
+      "has_cleanup_candidates": false,
+      "priority": 1,
+      "reason_code": "REQUIRE_RCH",
+      "scenario": "build_pressure",
+      "work_class": "Validation"
+    },
+    {
+      "decision": "RequireRch",
+      "has_cleanup_candidates": false,
+      "priority": 1,
+      "reason_code": "REQUIRE_RCH",
+      "scenario": "build_pressure",
+      "work_class": "Benchmark"
+    },
+    {
+      "decision": "RequireRch",
+      "has_cleanup_candidates": false,
+      "priority": 1,
+      "reason_code": "REQUIRE_RCH",
+      "scenario": "build_pressure",
+      "work_class": "Fuzzing"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 3,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "build_pressure",
+      "work_class": "Cleanup"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 2,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "rch_unavailable",
+      "work_class": "SourceOnly"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 2,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "rch_unavailable",
+      "work_class": "DocsGate"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 1,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "rch_unavailable",
+      "work_class": "Validation"
+    },
+    {
+      "decision": "RefuseLocalFallback",
+      "has_cleanup_candidates": false,
+      "priority": 1,
+      "reason_code": "REFUSE_CRITICAL",
+      "scenario": "rch_unavailable",
+      "work_class": "Benchmark"
+    },
+    {
+      "decision": "RefuseLocalFallback",
+      "has_cleanup_candidates": false,
+      "priority": 1,
+      "reason_code": "REFUSE_CRITICAL",
+      "scenario": "rch_unavailable",
+      "work_class": "Fuzzing"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 3,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "rch_unavailable",
+      "work_class": "Cleanup"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 2,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "coordination_degraded",
+      "work_class": "SourceOnly"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 2,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "coordination_degraded",
+      "work_class": "DocsGate"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 1,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "coordination_degraded",
+      "work_class": "Validation"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 1,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "coordination_degraded",
+      "work_class": "Benchmark"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 1,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "coordination_degraded",
+      "work_class": "Fuzzing"
+    },
+    {
+      "decision": "Wait",
+      "has_cleanup_candidates": false,
+      "priority": 3,
+      "reason_code": "WAIT_THROTTLE",
+      "scenario": "coordination_degraded",
+      "work_class": "Cleanup"
+    },
+    {
+      "decision": "AllowLocal",
+      "has_cleanup_candidates": false,
+      "priority": 2,
+      "reason_code": "ADMIT_LOCAL",
+      "scenario": "critical",
+      "work_class": "SourceOnly"
+    },
+    {
+      "decision": "RefuseLocalFallback",
+      "has_cleanup_candidates": true,
+      "priority": 2,
+      "reason_code": "REFUSE_CRITICAL",
+      "scenario": "critical",
+      "work_class": "DocsGate"
+    },
+    {
+      "decision": "RefuseLocalFallback",
+      "has_cleanup_candidates": true,
+      "priority": 1,
+      "reason_code": "REFUSE_CRITICAL",
+      "scenario": "critical",
+      "work_class": "Validation"
+    },
+    {
+      "decision": "RefuseLocalFallback",
+      "has_cleanup_candidates": true,
+      "priority": 1,
+      "reason_code": "REFUSE_CRITICAL",
+      "scenario": "critical",
+      "work_class": "Benchmark"
+    },
+    {
+      "decision": "RefuseLocalFallback",
+      "has_cleanup_candidates": true,
+      "priority": 1,
+      "reason_code": "REFUSE_CRITICAL",
+      "scenario": "critical",
+      "work_class": "Fuzzing"
+    },
+    {
+      "decision": "RefuseLocalFallback",
+      "has_cleanup_candidates": true,
+      "priority": 3,
+      "reason_code": "REFUSE_CRITICAL",
+      "scenario": "critical",
+      "work_class": "Cleanup"
+    }
+  ],
+  "description": "Workspace pressure policy decision golden artifacts",
+  "scenarios": {
+    "build_pressure": {
+      "inputs": {
+        "active_build_count": 8,
+        "active_reservations": 15,
+        "coordination_healthy": true,
+        "free_disk_bytes": 2000000000,
+        "memory_pressure": 0.7,
+        "rch_available_slots": 2,
+        "target_dir_bytes": 3000000000
+      },
+      "work_decisions": {
+        "Benchmark": {
+          "admission": "RequireRch",
+          "cleanup_candidates": [],
+          "confidence": 0.85,
+          "reason_code": "REQUIRE_RCH"
+        },
+        "Cleanup": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "DocsGate": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "Fuzzing": {
+          "admission": "RequireRch",
+          "cleanup_candidates": [],
+          "confidence": 0.85,
+          "reason_code": "REQUIRE_RCH"
+        },
+        "SourceOnly": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "Validation": {
+          "admission": "RequireRch",
+          "cleanup_candidates": [],
+          "confidence": 0.85,
+          "reason_code": "REQUIRE_RCH"
+        }
+      }
+    },
+    "coordination_degraded": {
+      "inputs": {
+        "active_build_count": 2,
+        "active_reservations": 60,
+        "coordination_healthy": false,
+        "free_disk_bytes": 1000000000,
+        "memory_pressure": 0.5,
+        "rch_available_slots": 3,
+        "target_dir_bytes": 4000000000
+      },
+      "work_decisions": {
+        "Benchmark": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "Cleanup": {
+          "admission": "Wait",
+          "cleanup_candidates": [],
+          "confidence": 0.75,
+          "reason_code": "WAIT_THROTTLE"
+        },
+        "DocsGate": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "Fuzzing": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "SourceOnly": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "Validation": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        }
+      }
+    },
+    "critical": {
+      "inputs": {
+        "active_build_count": 10,
+        "active_reservations": 100,
+        "coordination_healthy": false,
+        "free_disk_bytes": 50000000,
+        "memory_pressure": 0.95,
+        "rch_available_slots": 0,
+        "target_dir_bytes": 15000000000
+      },
+      "work_decisions": {
+        "Benchmark": {
+          "admission": "RefuseLocalFallback",
+          "cleanup_candidates": [
+            {
+              "path": "target",
+              "reason": "Large target directory",
+              "size_bytes": 5000000000
+            }
+          ],
+          "confidence": 0.95,
+          "reason_code": "REFUSE_CRITICAL"
+        },
+        "Cleanup": {
+          "admission": "RefuseLocalFallback",
+          "cleanup_candidates": [
+            {
+              "path": "target",
+              "reason": "Large target directory",
+              "size_bytes": 5000000000
+            }
+          ],
+          "confidence": 0.95,
+          "reason_code": "REFUSE_CRITICAL"
+        },
+        "DocsGate": {
+          "admission": "RefuseLocalFallback",
+          "cleanup_candidates": [
+            {
+              "path": "target",
+              "reason": "Large target directory",
+              "size_bytes": 5000000000
+            }
+          ],
+          "confidence": 0.95,
+          "reason_code": "REFUSE_CRITICAL"
+        },
+        "Fuzzing": {
+          "admission": "RefuseLocalFallback",
+          "cleanup_candidates": [
+            {
+              "path": "target",
+              "reason": "Large target directory",
+              "size_bytes": 5000000000
+            }
+          ],
+          "confidence": 0.95,
+          "reason_code": "REFUSE_CRITICAL"
+        },
+        "SourceOnly": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "Validation": {
+          "admission": "RefuseLocalFallback",
+          "cleanup_candidates": [
+            {
+              "path": "target",
+              "reason": "Large target directory",
+              "size_bytes": 5000000000
+            }
+          ],
+          "confidence": 0.95,
+          "reason_code": "REFUSE_CRITICAL"
+        }
+      }
+    },
+    "disk_pressure": {
+      "inputs": {
+        "active_build_count": 2,
+        "active_reservations": 10,
+        "coordination_healthy": true,
+        "free_disk_bytes": 200000000,
+        "memory_pressure": 0.4,
+        "rch_available_slots": 5,
+        "target_dir_bytes": 8000000000
+      },
+      "work_decisions": {
+        "Benchmark": {
+          "admission": "Queue",
+          "cleanup_candidates": [
+            {
+              "path": "target",
+              "reason": "Target directory cleanup",
+              "size_bytes": 3000000000
+            }
+          ],
+          "confidence": 0.8,
+          "reason_code": "QUEUE_PRESSURE"
+        },
+        "Cleanup": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [
+            {
+              "path": "target",
+              "reason": "Target directory cleanup",
+              "size_bytes": 3000000000
+            }
+          ],
+          "confidence": 0.8,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "DocsGate": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [
+            {
+              "path": "target",
+              "reason": "Target directory cleanup",
+              "size_bytes": 3000000000
+            }
+          ],
+          "confidence": 0.8,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "Fuzzing": {
+          "admission": "Queue",
+          "cleanup_candidates": [
+            {
+              "path": "target",
+              "reason": "Target directory cleanup",
+              "size_bytes": 3000000000
+            }
+          ],
+          "confidence": 0.8,
+          "reason_code": "QUEUE_PRESSURE"
+        },
+        "SourceOnly": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [
+            {
+              "path": "target",
+              "reason": "Target directory cleanup",
+              "size_bytes": 3000000000
+            }
+          ],
+          "confidence": 0.8,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "Validation": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [
+            {
+              "path": "target",
+              "reason": "Target directory cleanup",
+              "size_bytes": 3000000000
+            }
+          ],
+          "confidence": 0.8,
+          "reason_code": "ADMIT_LOCAL"
+        }
+      }
+    },
+    "healthy": {
+      "inputs": {
+        "active_build_count": 1,
+        "active_reservations": 5,
+        "coordination_healthy": true,
+        "free_disk_bytes": 5000000000,
+        "memory_pressure": 0.3,
+        "rch_available_slots": 8,
+        "target_dir_bytes": 1000000000
+      },
+      "work_decisions": {
+        "Benchmark": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "Cleanup": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "DocsGate": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "Fuzzing": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "SourceOnly": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "Validation": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        }
+      }
+    },
+    "rch_unavailable": {
+      "inputs": {
+        "active_build_count": 3,
+        "active_reservations": 20,
+        "coordination_healthy": true,
+        "free_disk_bytes": 1500000000,
+        "memory_pressure": 0.6,
+        "rch_available_slots": null,
+        "target_dir_bytes": 2000000000
+      },
+      "work_decisions": {
+        "Benchmark": {
+          "admission": "RefuseLocalFallback",
+          "cleanup_candidates": [],
+          "confidence": 0.8,
+          "reason_code": "REFUSE_CRITICAL"
+        },
+        "Cleanup": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "DocsGate": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "Fuzzing": {
+          "admission": "RefuseLocalFallback",
+          "cleanup_candidates": [],
+          "confidence": 0.8,
+          "reason_code": "REFUSE_CRITICAL"
+        },
+        "SourceOnly": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        },
+        "Validation": {
+          "admission": "AllowLocal",
+          "cleanup_candidates": [],
+          "confidence": 0.9,
+          "reason_code": "ADMIT_LOCAL"
+        }
+      }
+    }
+  },
+  "schema_version": "bd-p9mpd.4/v1"
+}

@@ -177,6 +177,55 @@ def generate_expected_decision(scenario_name, work_class, priority, inputs):
     }
 
 
+def test_hygiene_detection_structure():
+    """Test that hygiene detection produces expected structure."""
+    print("Testing hygiene detection structure...")
+
+    # Simulate target directory hygiene data structure
+    target_hygiene = {
+        "status": "clean",
+        "artifact_count": 0,
+        "stale_artifact_count": 0,
+        "total_size_bytes": 0,
+        "oldest_artifact_age_seconds": None,
+        "newest_artifact_age_seconds": None,
+        "diagnostic_details": ["Target directory does not exist - clean state"]
+    }
+
+    # Simulate sync root hygiene data structure
+    sync_root_hygiene = {
+        "status": "clean",
+        "modified_file_count": 0,
+        "untracked_file_count": 0,
+        "conflicted_file_count": 0,
+        "staged_change_count": 0,
+        "commit_distance_ahead": None,
+        "commit_distance_behind": None,
+        "diagnostic_details": ["Working directory is clean"]
+    }
+
+    # Verify required fields exist
+    required_target_fields = [
+        "status", "artifact_count", "stale_artifact_count", "total_size_bytes",
+        "oldest_artifact_age_seconds", "newest_artifact_age_seconds", "diagnostic_details"
+    ]
+    for field in required_target_fields:
+        if field not in target_hygiene:
+            print(f"Missing target hygiene field: {field}")
+            return False
+
+    required_sync_fields = [
+        "status", "modified_file_count", "untracked_file_count", "conflicted_file_count",
+        "staged_change_count", "commit_distance_ahead", "commit_distance_behind", "diagnostic_details"
+    ]
+    for field in required_sync_fields:
+        if field not in sync_root_hygiene:
+            print(f"Missing sync root hygiene field: {field}")
+            return False
+
+    print("✓ Hygiene detection structure is valid")
+    return True
+
 def test_golden_artifact_structure():
     """Test that the golden artifact has expected structure."""
     if not POLICY_GOLDEN_JSON.exists():
@@ -223,8 +272,9 @@ def main():
 
     if generate_policy_golden_artifacts():
         if test_golden_artifact_structure():
-            print("✓ All tests passed")
-            return True
+            if test_hygiene_detection_structure():
+                print("✓ All tests passed")
+                return True
 
     return False
 

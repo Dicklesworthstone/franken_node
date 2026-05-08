@@ -65,6 +65,8 @@ pub mod error_codes {
     pub const ERR_VFR_UNBOUNDED_SNIPPET: &str = "ERR_VFR_UNBOUNDED_SNIPPET";
     pub const ERR_VFR_UNREDACTED_ENVIRONMENT: &str = "ERR_VFR_UNREDACTED_ENVIRONMENT";
     pub const ERR_VFR_INVALID_RECOVERY_DECISION: &str = "ERR_VFR_INVALID_RECOVERY_DECISION";
+    pub const ERR_VFR_INVALID_FLIGHT_RECORDER_REF: &str = "ERR_VFR_INVALID_FLIGHT_RECORDER_REF";
+    pub const ERR_VFR_STALE_FLIGHT_RECORDER_REF: &str = "ERR_VFR_STALE_FLIGHT_RECORDER_REF";
     pub const ERR_VFR_INVALID_READINESS_REF: &str = "ERR_VFR_INVALID_READINESS_REF";
     pub const ERR_VFR_STALE_READINESS_REF: &str = "ERR_VFR_STALE_READINESS_REF";
 }
@@ -287,6 +289,20 @@ pub struct ValidationReadinessRef {
     pub required_action: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationFlightRecorderRef {
+    pub schema_version: String,
+    pub attempt_path: String,
+    pub attempt_digest: DigestRef,
+    pub attempt_id: String,
+    pub generated_at: DateTime<Utc>,
+    pub freshness_expires_at: DateTime<Utc>,
+    pub outcome_class: FlightRecorderAdapterOutcomeClass,
+    pub execution_mode: RchMode,
+    pub worker_id: Option<String>,
+    pub reason_code: String,
+}
+
 impl ValidationReadinessRef {
     pub fn validate_for_receipt_at(&self, now: DateTime<Utc>) -> Result<(), ValidationBrokerError> {
         self.validate_at(
@@ -344,6 +360,76 @@ impl ValidationReadinessRef {
     }
 }
 
+const FLIGHT_RECORDER_REF_SCHEMA_VERSION: &str = "franken-node/validation-flight-recorder-ref/v1";
+
+impl ValidationFlightRecorderRef {
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ValidationBrokerError> {
+        self.validate_at_with_codes(
+            now,
+            error_codes::ERR_VFR_INVALID_FLIGHT_RECORDER_REF,
+            error_codes::ERR_VFR_STALE_FLIGHT_RECORDER_REF,
+        )
+    }
+
+    fn validate_at_with_codes(
+        &self,
+        now: DateTime<Utc>,
+        invalid_code: &'static str,
+        stale_code: &'static str,
+    ) -> Result<(), ValidationBrokerError> {
+        if !constant_time::ct_eq(&self.schema_version, FLIGHT_RECORDER_REF_SCHEMA_VERSION) {
+            return contract_err(
+                invalid_code,
+                format!(
+                    "unsupported flight_recorder_ref schema_version={}",
+                    self.schema_version
+                ),
+            );
+        }
+        validate_repo_relative_path_with_code(&self.attempt_path, "flight_recorder_ref path", invalid_code)?;
+        validate_digest_with_code(&self.attempt_digest, "flight_recorder_ref digest", invalid_code)?;
+        validate_non_empty_field(&self.attempt_id, "flight_recorder_ref attempt_id", invalid_code)?;
+        validate_non_empty_field(&self.reason_code, "flight_recorder_ref reason_code", invalid_code)?;
+        if let Some(worker_id) = &self.worker_id {
+            validate_non_empty_field(worker_id, "flight_recorder_ref worker_id", invalid_code)?;
+        }
+        if self.freshness_expires_at < self.generated_at {
+            return contract_err(
+                invalid_code,
+                "flight_recorder_ref freshness_expires_at cannot predate generated_at",
+            );
+        }
+        if self.freshness_expires_at < now {
+            return contract_err(stale_code, "flight_recorder_ref freshness has expired");
+        }
+        Ok(())
+    }
+
+    /// Create a flight recorder reference from RCH adapter outcome and attempt details
+    #[must_use]
+    pub fn from_rch_adapter_outcome(
+        adapter_outcome: &FlightRecorderAdapterOutcome,
+        attempt_id: String,
+        attempt_path: String,
+        attempt_digest: DigestRef,
+        generated_at: DateTime<Utc>,
+        freshness_ttl_secs: u64,
+    ) -> Self {
+        Self {
+            schema_version: FLIGHT_RECORDER_REF_SCHEMA_VERSION.to_string(),
+            attempt_path,
+            attempt_digest,
+            attempt_id,
+            generated_at,
+            freshness_expires_at: generated_at + chrono::Duration::seconds(freshness_ttl_secs as i64),
+            outcome_class: adapter_outcome.outcome,
+            execution_mode: adapter_outcome.execution_mode,
+            worker_id: adapter_outcome.worker_id.clone(),
+            reason_code: adapter_outcome.reason_code.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlightRecorderTargetDirClass {
@@ -353,6 +439,90 @@ pub enum FlightRecorderTargetDirClass {
     Unwritable,
     Missing,
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlightRecorderTargetDirHygieneStatus {
+    Clean,
+    Stale,
+    Dirty,
+    Mixed,
+    Unknown,
+}
+
+impl Default for FlightRecorderTargetDirHygieneStatus {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlightRecorderTargetDirHygiene {
+    pub status: FlightRecorderTargetDirHygieneStatus,
+    pub artifact_count: u32,
+    pub stale_artifact_count: u32,
+    pub total_size_bytes: u64,
+    pub oldest_artifact_age_seconds: Option<u32>,
+    pub newest_artifact_age_seconds: Option<u32>,
+    pub diagnostic_details: Vec<String>,
+}
+
+impl Default for FlightRecorderTargetDirHygiene {
+    fn default() -> Self {
+        Self {
+            status: FlightRecorderTargetDirHygieneStatus::Unknown,
+            artifact_count: 0,
+            stale_artifact_count: 0,
+            total_size_bytes: 0,
+            oldest_artifact_age_seconds: None,
+            newest_artifact_age_seconds: None,
+            diagnostic_details: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlightRecorderSyncRootHygieneStatus {
+    Clean,
+    Modified,
+    Untracked,
+    Conflicted,
+    Unknown,
+}
+
+impl Default for FlightRecorderSyncRootHygieneStatus {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlightRecorderSyncRootHygiene {
+    pub status: FlightRecorderSyncRootHygieneStatus,
+    pub modified_file_count: u32,
+    pub untracked_file_count: u32,
+    pub conflicted_file_count: u32,
+    pub staged_change_count: u32,
+    pub commit_distance_ahead: Option<u32>,
+    pub commit_distance_behind: Option<u32>,
+    pub diagnostic_details: Vec<String>,
+}
+
+impl Default for FlightRecorderSyncRootHygiene {
+    fn default() -> Self {
+        Self {
+            status: FlightRecorderSyncRootHygieneStatus::Unknown,
+            modified_file_count: 0,
+            untracked_file_count: 0,
+            conflicted_file_count: 0,
+            staged_change_count: 0,
+            commit_distance_ahead: None,
+            commit_distance_behind: None,
+            diagnostic_details: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -525,6 +695,10 @@ pub struct FlightRecorderTargetDir {
     pub writable_parent: Option<bool>,
     pub sync_root_digest: Option<DigestRef>,
     pub diagnostic: String,
+    #[serde(default)]
+    pub hygiene_status: FlightRecorderTargetDirHygiene,
+    #[serde(default)]
+    pub sync_root_hygiene: FlightRecorderSyncRootHygiene,
 }
 
 impl FlightRecorderTargetDir {
@@ -573,6 +747,32 @@ impl FlightRecorderTargetDir {
         }
         if let Some(sync_root_digest) = &self.sync_root_digest {
             validate_digest(sync_root_digest, "target_dir sync_root_digest")?;
+        }
+
+        // Validate hygiene fields
+        if self.hygiene_status.artifact_count < self.hygiene_status.stale_artifact_count {
+            return flight_recorder_err(
+                error_codes::ERR_VFR_MALFORMED_ATTEMPT,
+                "target_dir stale_artifact_count cannot exceed total artifact_count",
+            );
+        }
+
+        for detail in &self.hygiene_status.diagnostic_details {
+            validate_bounded_snippet(detail, "target_dir hygiene diagnostic detail")?;
+            validate_no_nul(
+                detail,
+                error_codes::ERR_VFR_MALFORMED_ATTEMPT,
+                "target_dir hygiene diagnostic detail",
+            )?;
+        }
+
+        for detail in &self.sync_root_hygiene.diagnostic_details {
+            validate_bounded_snippet(detail, "sync_root hygiene diagnostic detail")?;
+            validate_no_nul(
+                detail,
+                error_codes::ERR_VFR_MALFORMED_ATTEMPT,
+                "sync_root hygiene diagnostic detail",
+            )?;
         }
 
         Ok(())
@@ -1382,6 +1582,8 @@ pub struct ValidationProofStatus {
     pub proof_cache: Option<ValidationProofCacheReuseEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness_ref: Option<ValidationReadinessRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flight_recorder_ref: Option<ValidationFlightRecorderRef>,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -1405,6 +1607,7 @@ impl ValidationProofStatus {
             reason: Some("no validation broker request or receipt matched".to_string()),
             proof_cache: None,
             readiness_ref: None,
+            flight_recorder_ref: None,
             observed_at,
         }
     }
@@ -1440,6 +1643,7 @@ impl ValidationProofStatus {
             reason: None,
             proof_cache: None,
             readiness_ref: None,
+            flight_recorder_ref: None,
             observed_at,
         }
     }
@@ -1851,6 +2055,8 @@ pub struct ValidationReceipt {
     pub artifacts: ReceiptArtifacts,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness_ref: Option<ValidationReadinessRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flight_recorder_ref: Option<ValidationFlightRecorderRef>,
     pub trust: ReceiptTrust,
     pub classifications: ReceiptClassifications,
 }
@@ -1938,6 +2144,7 @@ impl ValidationReceipt {
             });
         }
         validate_receipt_readiness_ref(self, now)?;
+        validate_receipt_flight_recorder_ref(self, now)?;
 
         Ok(())
     }
@@ -2143,6 +2350,47 @@ fn validate_receipt_readiness_ref(
             );
         }
         (None, _) => {}
+    }
+    Ok(())
+}
+
+fn validate_receipt_flight_recorder_ref(
+    receipt: &ValidationReceipt,
+    now: DateTime<Utc>,
+) -> Result<(), ValidationBrokerError> {
+    // Flight recorder ref is required for RCH validation attempts
+    let has_rch_execution = receipt.rch.mode != RchMode::NotUsed;
+
+    match (&receipt.flight_recorder_ref, has_rch_execution) {
+        (Some(flight_ref), true) => {
+            flight_ref.validate_at(now)?;
+            // Verify flight recorder ref matches receipt context
+            if flight_ref.execution_mode != receipt.rch.mode {
+                return contract_err(
+                    error_codes::ERR_VFR_INVALID_FLIGHT_RECORDER_REF,
+                    "flight_recorder_ref execution_mode does not match RCH mode",
+                );
+            }
+            if flight_ref.worker_id != receipt.rch.worker_id {
+                return contract_err(
+                    error_codes::ERR_VFR_INVALID_FLIGHT_RECORDER_REF,
+                    "flight_recorder_ref worker_id does not match RCH worker_id",
+                );
+            }
+        }
+        (Some(_), false) => {
+            return contract_err(
+                error_codes::ERR_VFR_INVALID_FLIGHT_RECORDER_REF,
+                "flight_recorder_ref requires RCH execution mode",
+            );
+        }
+        (None, true) => {
+            // For now, flight recorder refs are optional but recommended for RCH execution
+            // In the future this could be made required
+        }
+        (None, false) => {
+            // No flight recorder ref needed for non-RCH execution
+        }
     }
     Ok(())
 }
@@ -2625,6 +2873,337 @@ impl Drop for TempFileGuard {
         if self.active {
             let _ = fs::remove_file(&self.path);
         }
+    }
+}
+
+/// Hygiene detection functions for target directories and sync roots
+pub mod hygiene_detector {
+    use super::*;
+    use std::fs::{DirEntry, Metadata};
+    use std::process::Command;
+    use std::time::{Duration, SystemTime};
+
+    const STALE_THRESHOLD_HOURS: u64 = 24;
+    const MAX_HYGIENE_SCAN_ENTRIES: usize = 1000;
+    const MAX_HYGIENE_SCAN_DEPTH: usize = 3;
+
+    /// Detect hygiene status of a target directory
+    pub fn detect_target_dir_hygiene(path: &Path) -> FlightRecorderTargetDirHygiene {
+        let mut hygiene = FlightRecorderTargetDirHygiene::default();
+
+        if !path.exists() {
+            hygiene.status = FlightRecorderTargetDirHygieneStatus::Clean;
+            hygiene.diagnostic_details.push("Target directory does not exist - clean state".to_string());
+            return hygiene;
+        }
+
+        if !path.is_dir() {
+            hygiene.status = FlightRecorderTargetDirHygieneStatus::Unknown;
+            hygiene.diagnostic_details.push("Target path exists but is not a directory".to_string());
+            return hygiene;
+        }
+
+        match scan_directory_artifacts(path) {
+            Ok(scan_result) => {
+                hygiene.artifact_count = scan_result.total_entries;
+                hygiene.stale_artifact_count = scan_result.stale_entries;
+                hygiene.total_size_bytes = scan_result.total_size;
+                hygiene.oldest_artifact_age_seconds = scan_result.oldest_age_seconds;
+                hygiene.newest_artifact_age_seconds = scan_result.newest_age_seconds;
+
+                hygiene.status = classify_target_dir_hygiene(&scan_result);
+
+                if scan_result.total_entries > 0 {
+                    hygiene.diagnostic_details.push(format!(
+                        "Found {} artifacts ({} stale), total size: {} bytes",
+                        scan_result.total_entries, scan_result.stale_entries, scan_result.total_size
+                    ));
+                }
+
+                if scan_result.scan_limited {
+                    hygiene.diagnostic_details.push("Scan limited by entry count or depth restrictions".to_string());
+                }
+            }
+            Err(e) => {
+                hygiene.status = FlightRecorderTargetDirHygieneStatus::Unknown;
+                hygiene.diagnostic_details.push(format!("Failed to scan target directory: {}", e));
+            }
+        }
+
+        hygiene
+    }
+
+    /// Populate hygiene information for a validation flight recorder attempt
+    pub fn populate_flight_recorder_hygiene(attempt: &mut ValidationFlightRecorderAttempt) {
+        // Detect target directory hygiene
+        if let Some(target_path_str) = &attempt.target_dir.path {
+            let target_path = Path::new(target_path_str);
+            let target_hygiene = detect_target_dir_hygiene(target_path);
+            attempt.target_dir.hygiene_status = target_hygiene;
+        }
+
+        // Detect sync root hygiene by looking up from current working directory
+        let cwd_path = Path::new(&attempt.command.cwd);
+        let sync_root_hygiene = detect_sync_root_hygiene(cwd_path);
+        attempt.target_dir.sync_root_hygiene = sync_root_hygiene;
+
+        // Update diagnostic with hygiene summary
+        if !attempt.target_dir.hygiene_status.diagnostic_details.is_empty() {
+            let hygiene_summary = format!(
+                "Target hygiene: {:?} ({}), Sync hygiene: {:?} ({})",
+                attempt.target_dir.hygiene_status.status,
+                attempt.target_dir.hygiene_status.diagnostic_details.len(),
+                attempt.target_dir.sync_root_hygiene.status,
+                attempt.target_dir.sync_root_hygiene.diagnostic_details.len()
+            );
+
+            if attempt.target_dir.diagnostic.trim().is_empty() {
+                attempt.target_dir.diagnostic = hygiene_summary;
+            } else {
+                attempt.target_dir.diagnostic = format!("{}; {}", attempt.target_dir.diagnostic, hygiene_summary);
+            }
+        }
+    }
+
+    /// Detect hygiene status of a sync root (git repository)
+    pub fn detect_sync_root_hygiene(path: &Path) -> FlightRecorderSyncRootHygiene {
+        let mut hygiene = FlightRecorderSyncRootHygiene::default();
+
+        if !path.exists() {
+            hygiene.status = FlightRecorderSyncRootHygieneStatus::Unknown;
+            hygiene.diagnostic_details.push("Sync root path does not exist".to_string());
+            return hygiene;
+        }
+
+        // Check if this is a git repository
+        let git_dir = find_git_directory(path);
+        if git_dir.is_none() {
+            hygiene.status = FlightRecorderSyncRootHygieneStatus::Unknown;
+            hygiene.diagnostic_details.push("No git repository found".to_string());
+            return hygiene;
+        }
+
+        // Run git status to get hygiene information
+        match get_git_status(path) {
+            Ok(git_status) => {
+                hygiene.modified_file_count = git_status.modified_count;
+                hygiene.untracked_file_count = git_status.untracked_count;
+                hygiene.conflicted_file_count = git_status.conflicted_count;
+                hygiene.staged_change_count = git_status.staged_count;
+
+                hygiene.status = classify_sync_root_hygiene(&git_status);
+
+                if git_status.modified_count > 0 {
+                    hygiene.diagnostic_details.push(format!("{} modified files", git_status.modified_count));
+                }
+                if git_status.untracked_count > 0 {
+                    hygiene.diagnostic_details.push(format!("{} untracked files", git_status.untracked_count));
+                }
+                if git_status.staged_count > 0 {
+                    hygiene.diagnostic_details.push(format!("{} staged changes", git_status.staged_count));
+                }
+                if git_status.conflicted_count > 0 {
+                    hygiene.diagnostic_details.push(format!("{} conflicted files", git_status.conflicted_count));
+                }
+
+                if hygiene.status == FlightRecorderSyncRootHygieneStatus::Clean {
+                    hygiene.diagnostic_details.push("Working directory is clean".to_string());
+                }
+            }
+            Err(e) => {
+                hygiene.status = FlightRecorderSyncRootHygieneStatus::Unknown;
+                hygiene.diagnostic_details.push(format!("Failed to get git status: {}", e));
+            }
+        }
+
+        hygiene
+    }
+
+    #[derive(Debug)]
+    struct DirectoryScanResult {
+        total_entries: u32,
+        stale_entries: u32,
+        total_size: u64,
+        oldest_age_seconds: Option<u32>,
+        newest_age_seconds: Option<u32>,
+        scan_limited: bool,
+    }
+
+    fn scan_directory_artifacts(path: &Path) -> std::io::Result<DirectoryScanResult> {
+        let mut result = DirectoryScanResult {
+            total_entries: 0,
+            stale_entries: 0,
+            total_size: 0,
+            oldest_age_seconds: None,
+            newest_age_seconds: None,
+            scan_limited: false,
+        };
+
+        let now = SystemTime::now();
+        let stale_threshold = Duration::from_secs(STALE_THRESHOLD_HOURS * 3600);
+
+        scan_directory_recursive(path, &mut result, now, stale_threshold, 0)?;
+
+        Ok(result)
+    }
+
+    fn scan_directory_recursive(
+        path: &Path,
+        result: &mut DirectoryScanResult,
+        now: SystemTime,
+        stale_threshold: Duration,
+        depth: usize,
+    ) -> std::io::Result<()> {
+        if depth > MAX_HYGIENE_SCAN_DEPTH || result.total_entries >= MAX_HYGIENE_SCAN_ENTRIES as u32 {
+            result.scan_limited = true;
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+
+            process_entry(&entry, &metadata, result, now, stale_threshold)?;
+
+            if metadata.is_dir() && result.total_entries < MAX_HYGIENE_SCAN_ENTRIES as u32 {
+                scan_directory_recursive(&entry.path(), result, now, stale_threshold, depth.saturating_add(1))?;
+            }
+
+            if result.total_entries >= MAX_HYGIENE_SCAN_ENTRIES as u32 {
+                result.scan_limited = true;
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn process_entry(
+        entry: &DirEntry,
+        metadata: &Metadata,
+        result: &mut DirectoryScanResult,
+        now: SystemTime,
+        stale_threshold: Duration,
+    ) -> std::io::Result<()> {
+        result.total_entries = result.total_entries.saturating_add(1);
+        result.total_size = result.total_size.saturating_add(metadata.len());
+
+        if let Ok(modified) = metadata.modified() {
+            if let Ok(age) = now.duration_since(modified) {
+                let age_seconds = age.as_secs().min(u32::MAX as u64) as u32;
+
+                if age > stale_threshold {
+                    result.stale_entries = result.stale_entries.saturating_add(1);
+                }
+
+                match result.oldest_age_seconds {
+                    None => result.oldest_age_seconds = Some(age_seconds),
+                    Some(current) => result.oldest_age_seconds = Some(age_seconds.max(current)),
+                }
+
+                match result.newest_age_seconds {
+                    None => result.newest_age_seconds = Some(age_seconds),
+                    Some(current) => result.newest_age_seconds = Some(age_seconds.min(current)),
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn classify_target_dir_hygiene(scan_result: &DirectoryScanResult) -> FlightRecorderTargetDirHygieneStatus {
+        if scan_result.total_entries == 0 {
+            FlightRecorderTargetDirHygieneStatus::Clean
+        } else if scan_result.stale_entries == scan_result.total_entries {
+            FlightRecorderTargetDirHygieneStatus::Stale
+        } else if scan_result.stale_entries > 0 {
+            FlightRecorderTargetDirHygieneStatus::Mixed
+        } else {
+            FlightRecorderTargetDirHygieneStatus::Dirty
+        }
+    }
+
+    #[derive(Debug)]
+    struct GitStatusResult {
+        modified_count: u32,
+        untracked_count: u32,
+        conflicted_count: u32,
+        staged_count: u32,
+    }
+
+    fn get_git_status(path: &Path) -> Result<GitStatusResult, String> {
+        let output = Command::new("git")
+            .args(["status", "--porcelain=v1"])
+            .current_dir(path)
+            .output()
+            .map_err(|e| format!("Failed to execute git status: {}", e))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "git status failed with exit code: {:?}",
+                output.status.code()
+            ));
+        }
+
+        let status_output = String::from_utf8_lossy(&output.stdout);
+        parse_git_status(&status_output)
+    }
+
+    fn parse_git_status(status_output: &str) -> Result<GitStatusResult, String> {
+        let mut result = GitStatusResult {
+            modified_count: 0,
+            untracked_count: 0,
+            conflicted_count: 0,
+            staged_count: 0,
+        };
+
+        for line in status_output.lines() {
+            if line.len() < 2 {
+                continue;
+            }
+
+            let index_status = line.chars().nth(0);
+            let worktree_status = line.chars().nth(1);
+
+            match (index_status, worktree_status) {
+                (Some(' '), Some('M')) => result.modified_count = result.modified_count.saturating_add(1),
+                (Some('?'), Some('?')) => result.untracked_count = result.untracked_count.saturating_add(1),
+                (Some('U'), _) | (_, Some('U')) => result.conflicted_count = result.conflicted_count.saturating_add(1),
+                (Some(c), _) if c != ' ' && c != '?' => result.staged_count = result.staged_count.saturating_add(1),
+                _ => {}
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn classify_sync_root_hygiene(git_status: &GitStatusResult) -> FlightRecorderSyncRootHygieneStatus {
+        if git_status.conflicted_count > 0 {
+            FlightRecorderSyncRootHygieneStatus::Conflicted
+        } else if git_status.modified_count > 0 || git_status.staged_count > 0 {
+            FlightRecorderSyncRootHygieneStatus::Modified
+        } else if git_status.untracked_count > 0 {
+            FlightRecorderSyncRootHygieneStatus::Untracked
+        } else {
+            FlightRecorderSyncRootHygieneStatus::Clean
+        }
+    }
+
+    fn find_git_directory(path: &Path) -> Option<PathBuf> {
+        let mut current = path.to_path_buf();
+
+        loop {
+            let git_dir = current.join(".git");
+            if git_dir.exists() {
+                return Some(git_dir);
+            }
+
+            if !current.pop() {
+                break;
+            }
+        }
+
+        None
     }
 }
 
@@ -3137,6 +3716,8 @@ mod tests {
                 writable_parent: Some(true),
                 sync_root_digest: Some(DigestRef::sha256(b"rch-sync-root-summary")),
                 diagnostic: "off-repo target dir selected for RCH validation".to_string(),
+                hygiene_status: FlightRecorderTargetDirHygiene::default(),
+                sync_root_hygiene: FlightRecorderSyncRootHygiene::default(),
             },
             input_digests: vec![InputDigest::new(
                 "crates/franken-node/src/ops/validation_broker.rs",
@@ -3591,6 +4172,64 @@ mod tests {
 
         let result = serde_json::from_value::<ValidationReceipt>(value);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_target_dir_hygiene_detection() {
+        use tempfile::TempDir;
+        use std::fs;
+        use std::io::Write;
+
+        // Test non-existent directory
+        let nonexistent_path = Path::new("/tmp/nonexistent_hygiene_test");
+        let hygiene = hygiene_detector::detect_target_dir_hygiene(nonexistent_path);
+        assert_eq!(hygiene.status, FlightRecorderTargetDirHygieneStatus::Clean);
+        assert!(hygiene.diagnostic_details.iter().any(|d| d.contains("does not exist")));
+
+        // Test empty directory
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let empty_hygiene = hygiene_detector::detect_target_dir_hygiene(temp_dir.path());
+        assert_eq!(empty_hygiene.status, FlightRecorderTargetDirHygieneStatus::Clean);
+        assert_eq!(empty_hygiene.artifact_count, 0);
+
+        // Test directory with fresh files
+        let fresh_file = temp_dir.path().join("fresh.txt");
+        let mut file = fs::File::create(&fresh_file).expect("Failed to create fresh file");
+        writeln!(file, "fresh content").expect("Failed to write fresh file");
+        drop(file);
+
+        let fresh_hygiene = hygiene_detector::detect_target_dir_hygiene(temp_dir.path());
+        assert_eq!(fresh_hygiene.status, FlightRecorderTargetDirHygieneStatus::Dirty);
+        assert_eq!(fresh_hygiene.artifact_count, 1);
+        assert_eq!(fresh_hygiene.stale_artifact_count, 0);
+    }
+
+    #[test]
+    fn test_sync_root_hygiene_detection() {
+        use tempfile::TempDir;
+
+        // Test non-git directory
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let hygiene = hygiene_detector::detect_sync_root_hygiene(temp_dir.path());
+        assert_eq!(hygiene.status, FlightRecorderSyncRootHygieneStatus::Unknown);
+        assert!(hygiene.diagnostic_details.iter().any(|d| d.contains("No git repository")));
+    }
+
+    #[test]
+    fn test_populate_flight_recorder_hygiene() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut attempt = flight_attempt(FlightRecorderAdapterOutcomeClass::Success);
+
+        // Set target path to our temp directory
+        attempt.target_dir.path = Some(temp_dir.path().to_string_lossy().to_string());
+
+        hygiene_detector::populate_flight_recorder_hygiene(&mut attempt);
+
+        // Should have populated hygiene information
+        assert_eq!(attempt.target_dir.hygiene_status.status, FlightRecorderTargetDirHygieneStatus::Clean);
+        assert!(attempt.target_dir.diagnostic.contains("Target hygiene:"));
     }
 
     #[test]
