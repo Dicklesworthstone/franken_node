@@ -5625,9 +5625,19 @@ fn load_safe_mode_controller(
     state_path: &Path,
     missing_as_inactive: bool,
 ) -> Result<runtime::safe_mode::SafeModeController> {
+    // Prevent DoS via oversized state files - 16 MiB should be more than sufficient for state
+    const MAX_STATE_FILE_BYTES: u64 = 16 << 20; // 16 MiB
+
     match std::fs::read(state_path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .with_context(|| format!("failed parsing safe-mode state {}", state_path.display())),
+        Ok(bytes) => {
+            // Check size after read but before JSON parsing to prevent parser bombs
+            if bytes.len() as u64 > MAX_STATE_FILE_BYTES {
+                anyhow::bail!("Safe-mode state file too large: {} bytes (limit: {} bytes)",
+                             bytes.len(), MAX_STATE_FILE_BYTES);
+            }
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("failed parsing safe-mode state {}", state_path.display()))
+        },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && missing_as_inactive => {
             Ok(runtime::safe_mode::SafeModeController::with_default_config())
         }
@@ -6025,10 +6035,19 @@ fn remotecap_cli_capability_gate(signing_key: &str, cap: &RemoteCap) -> Result<C
 }
 
 fn load_remotecap_cli_state() -> Result<RemoteCapCliState> {
+    // Prevent DoS via oversized state files - 4 MiB should be sufficient for CLI state
+    const MAX_CLI_STATE_BYTES: u64 = 4 << 20; // 4 MiB
+
     let path = remotecap_cli_state_path();
     match std::fs::read(&path) {
-        Ok(raw) => serde_json::from_slice(&raw)
-            .with_context(|| format!("failed parsing remotecap state {}", path.display())),
+        Ok(raw) => {
+            if raw.len() as u64 > MAX_CLI_STATE_BYTES {
+                anyhow::bail!("RemoteCap CLI state file too large: {} bytes (limit: {} bytes)",
+                             raw.len(), MAX_CLI_STATE_BYTES);
+            }
+            serde_json::from_slice(&raw)
+                .with_context(|| format!("failed parsing remotecap state {}", path.display()))
+        },
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
             Ok(RemoteCapCliState::default())
         }
@@ -6049,8 +6068,17 @@ fn store_remotecap_cli_state(state: &RemoteCapCliState) -> Result<()> {
 }
 
 fn read_remotecap_token(path: &Path) -> Result<RemoteCap> {
+    // Prevent DoS via oversized token files - 1 MiB should be more than sufficient for tokens
+    const MAX_TOKEN_FILE_BYTES: u64 = 1 << 20; // 1 MiB
+
     let raw = std::fs::read(path)
         .with_context(|| format!("failed reading remotecap token {}", path.display()))?;
+
+    if raw.len() as u64 > MAX_TOKEN_FILE_BYTES {
+        anyhow::bail!("RemoteCap token file too large: {} bytes (limit: {} bytes)",
+                     raw.len(), MAX_TOKEN_FILE_BYTES);
+    }
+
     let value: serde_json::Value = serde_json::from_slice(&raw)
         .with_context(|| format!("failed parsing remotecap token JSON {}", path.display()))?;
     if let Some(token) = value.get("token") {
