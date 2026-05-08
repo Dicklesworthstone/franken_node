@@ -520,7 +520,7 @@ impl WorkspacePressurePolicy {
         &self,
         admission: &AdmissionDecision,
         work_class: WorkCostClass,
-        diagnostics: &[String],
+        _diagnostics: &[String],
     ) -> (String, String) {
         let reason_code = match admission {
             AdmissionDecision::AllowLocal => "ADMIT_LOCAL",

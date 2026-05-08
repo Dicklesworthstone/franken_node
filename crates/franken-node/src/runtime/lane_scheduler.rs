@@ -502,13 +502,13 @@ impl std::fmt::Debug for LaneSchedulerError {
                     .field("lane", lane)
                     .finish()
             }
-            LaneSchedulerError::InvalidPolicy { reason } => {
+            LaneSchedulerError::InvalidPolicy { detail } => {
                 f.debug_struct("InvalidPolicy")
-                    .field("reason", reason)
+                    .field("detail", detail)
                     .finish()
             }
-            LaneSchedulerError::QueueTimeout { lane, queue_depth, elapsed_ms } => {
-                f.debug_struct("QueueTimeout")
+            LaneSchedulerError::Starvation { lane, queue_depth, elapsed_ms } => {
+                f.debug_struct("Starvation")
                     .field("lane", lane)
                     .field("queue_depth", queue_depth)
                     .field("elapsed_ms", elapsed_ms)

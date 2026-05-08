@@ -1034,7 +1034,7 @@ fn summarize_validation_readiness(
 
     // Process proof statuses for flight recorder data
     for status in &input.proof_statuses {
-        if let Some(ref flight_ref) = status.flight_recorder_ref {
+        if let Some(ref _flight_ref) = status.flight_recorder_ref {
             flight_recorder_refs_count = flight_recorder_refs_count.saturating_add(1);
         }
 

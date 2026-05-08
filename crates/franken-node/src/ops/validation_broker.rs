@@ -3476,7 +3476,7 @@ pub mod hygiene_detector {
     }
 
     fn process_entry(
-        entry: &DirEntry,
+        _entry: &DirEntry,
         metadata: &Metadata,
         result: &mut DirectoryScanResult,
         now: SystemTime,

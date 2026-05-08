@@ -455,8 +455,8 @@ impl QuarantineController {
         );
         let scope_matches = constant_time::ct_eq(&decision.scope, &decision.signed_evidence.scope);
         let action_matches = constant_time::ct_eq(
-            &decision.action.to_string(),
-            &decision.signed_evidence.action.to_string(),
+            decision.action.as_str(),
+            decision.signed_evidence.action.as_str(),
         );
         let posterior_matches = constant_time::ct_eq(
             &decision.posterior.to_bits().to_string(),
