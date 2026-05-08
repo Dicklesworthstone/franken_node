@@ -84,7 +84,7 @@ impl ChannelConfig {
 /// Replaces the old bare `auth_token: String` with structured HMAC evidence.
 /// The credential binds: channel_id, subject_id, audience, direction,
 /// sequence_number, payload_hash, epoch, and nonce.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ChannelCredential {
     /// Identity of the sender (subject).
     pub subject_id: String,
@@ -94,6 +94,17 @@ pub struct ChannelCredential {
     pub nonce: [u8; 16],
     /// HMAC-SHA256 over the transcript preimage.
     pub mac: [u8; SIGNATURE_LEN],
+}
+
+impl std::fmt::Debug for ChannelCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelCredential")
+            .field("subject_id", &self.subject_id)
+            .field("epoch", &self.epoch)
+            .field("nonce", &"[REDACTED]")
+            .field("mac", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// A control channel message.

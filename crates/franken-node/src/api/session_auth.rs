@@ -209,7 +209,7 @@ impl Default for SessionConfig {
 /// };
 /// assert_eq!(session.state, SessionState::Active);
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AuthenticatedSession {
     /// Unique session identifier.
     pub session_id: String,
@@ -247,6 +247,28 @@ pub struct AuthenticatedSession {
     /// secret at establishment time.
     #[serde(serialize_with = "serialize_mac", deserialize_with = "deserialize_mac")]
     pub handshake_mac: [u8; SIGNATURE_LEN],
+}
+
+impl std::fmt::Debug for AuthenticatedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthenticatedSession")
+            .field("session_id", &self.session_id)
+            .field("state", &self.state)
+            .field("client_identity", &self.client_identity)
+            .field("server_identity", &self.server_identity)
+            .field("encryption_key_id", &self.encryption_key_id)
+            .field("signing_key_id", &self.signing_key_id)
+            .field("established_at", &self.established_at)
+            .field("last_activity_at", &self.last_activity_at)
+            .field("send_seq", &self.send_seq)
+            .field("send_seq_exhausted", &self.send_seq_exhausted)
+            .field("recv_seq", &self.recv_seq)
+            .field("recv_seq_exhausted", &self.recv_seq_exhausted)
+            .field("replay_window", &self.replay_window)
+            .field("epoch", &self.epoch)
+            .field("handshake_mac", &"[REDACTED]")
+            .finish()
+    }
 }
 
 fn serialize_mac<S: serde::Serializer>(mac: &[u8; SIGNATURE_LEN], s: S) -> Result<S::Ok, S::Error> {
@@ -415,7 +437,7 @@ impl AuthenticatedSession {
 // ---------------------------------------------------------------------------
 
 /// A message authenticated within a session context.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AuthenticatedMessage {
     /// Owning session.
     pub session_id: String,
@@ -434,6 +456,18 @@ pub struct AuthenticatedMessage {
     /// concurrent/shared callers.
     #[serde(serialize_with = "serialize_mac", deserialize_with = "deserialize_mac")]
     pub verified_mac: [u8; SIGNATURE_LEN],
+}
+
+impl std::fmt::Debug for AuthenticatedMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthenticatedMessage")
+            .field("session_id", &self.session_id)
+            .field("sequence", &self.sequence)
+            .field("direction", &self.direction)
+            .field("payload_hash", &self.payload_hash)
+            .field("verified_mac", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Direction of an authenticated message. Maps to connector::Direction.
@@ -6762,5 +6796,55 @@ mod session_auth_boundary_negative_tests {
         println!(
             "SECURITY NOTE: All sequence number arithmetic should use saturating_add to prevent overflow"
         );
+    }
+
+    #[test]
+    fn redacted_debug_output_for_authenticated_session_and_message() {
+        let sensitive_mac = [0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe].repeat(4);
+        let sensitive_mac: [u8; SIGNATURE_LEN] = sensitive_mac.try_into().unwrap();
+
+        let session = AuthenticatedSession {
+            session_id: "test-session".to_string(),
+            state: SessionState::Active,
+            client_identity: "test-client".to_string(),
+            server_identity: "test-server".to_string(),
+            encryption_key_id: "enc-key".to_string(),
+            signing_key_id: "sign-key".to_string(),
+            established_at: 1640995200000,
+            last_activity_at: 1640995200000,
+            send_seq: 0,
+            send_seq_exhausted: false,
+            recv_seq: 0,
+            recv_seq_exhausted: false,
+            replay_window: 1000,
+            epoch: 123,
+            handshake_mac: sensitive_mac,
+        };
+
+        let message = AuthenticatedMessage {
+            session_id: "test-session".to_string(),
+            sequence: 1,
+            direction: MessageDirection::Send,
+            payload_hash: "abcd1234".to_string(),
+            verified_mac: sensitive_mac,
+        };
+
+        let session_debug = format!("{:?}", session);
+        let message_debug = format!("{:?}", message);
+
+        // Critical: Verify HMAC material is redacted in debug output
+        assert!(session_debug.contains("[REDACTED]"), "handshake_mac must be redacted in session debug");
+        assert!(message_debug.contains("[REDACTED]"), "verified_mac must be redacted in message debug");
+
+        // Verify actual MAC bytes don't appear in debug output
+        let sensitive_hex = hex::encode(&sensitive_mac);
+        assert!(!session_debug.contains(&sensitive_hex), "actual MAC hex must not appear in session debug");
+        assert!(!message_debug.contains(&sensitive_hex), "actual MAC hex must not appear in message debug");
+
+        // Verify other fields are still visible
+        assert!(session_debug.contains("test-session"));
+        assert!(session_debug.contains("test-client"));
+        assert!(message_debug.contains("test-session"));
+        assert!(message_debug.contains("abcd1234"));
     }
 }
