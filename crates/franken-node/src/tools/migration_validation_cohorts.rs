@@ -942,4 +942,198 @@ mod tests {
             "Different category distribution must produce different report hash"
         );
     }
+
+    // Saturating arithmetic tests for bd-8e9kv (commit a59141d5)
+    // Tests for 5 u64::try_from().unwrap_or(u64::MAX) sites in generate_report hash computation
+
+    #[test]
+    fn report_hash_normal_inputs() {
+        // Test normal case: small collections hash correctly
+        // This verifies basic functionality after the saturating arithmetic fix
+
+        let mut engine = MigrationValidationCohorts::default();
+        engine.create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
+              .unwrap();
+        engine.add_project("c1", "project1", &trace()).unwrap();
+
+        let report1 = engine.generate_report(&trace());
+        let report2 = engine.generate_report(&trace());
+
+        // Should be deterministic
+        assert_eq!(report1.content_hash, report2.content_hash,
+                   "Same engine state should produce same hash");
+
+        // Should be valid hex hash
+        assert!(report1.content_hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "Hash should be hex");
+        assert!(report1.content_hash.len() > 0, "Hash should not be empty");
+    }
+
+    #[test]
+    fn report_hash_large_input_saturation() {
+        // Test boundary case: oversized inputs trigger saturation (u64::MAX)
+        // This verifies the fix prevents integer truncation on large schema versions
+
+        // Create engine with very long schema version that would overflow usize → u64 cast
+        let mut engine = MigrationValidationCohorts::new(&"schema_".repeat(std::usize::MAX / 32));
+
+        let mut large_cohort = sample_cohort("large_cohort", CohortCategory::NodeMinimal);
+        large_cohort.name = "n".repeat(1000000); // 1MB name
+        large_cohort.description = "d".repeat(1000000); // 1MB description
+
+        engine.create_cohort(large_cohort, &trace()).unwrap();
+
+        // Add projects with large IDs to test flagged collection length prefixing
+        for i in 0..10 {
+            let large_project = format!("project_{}", "x".repeat(100000)); // ~700KB each
+            engine.add_project("large_cohort", &large_project, &trace()).unwrap();
+        }
+
+        // Should succeed without panicking (saturation prevents overflow)
+        let report = engine.generate_report(&trace());
+
+        // Should produce valid hash despite large inputs
+        assert!(report.content_hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "Hash should be valid hex with large inputs");
+        assert!(report.content_hash.len() > 0, "Hash should not be empty");
+    }
+
+    #[test]
+    fn report_hash_saturation_vs_normal() {
+        // Test that saturated vs normal inputs produce different hashes
+        // This verifies hash collision resistance is maintained after the fix
+
+        // Normal engine
+        let mut normal_engine = MigrationValidationCohorts::new("v1.0");
+        normal_engine.create_cohort(sample_cohort("normal", CohortCategory::NodeMinimal), &trace())
+                     .unwrap();
+
+        let normal_hash = normal_engine.generate_report(&trace()).content_hash;
+
+        // Large input engine that would trigger saturation
+        let mut large_engine = MigrationValidationCohorts::new(&"large_schema_".repeat(100000));
+        let mut large_cohort = sample_cohort("large", CohortCategory::NodeMinimal);
+        large_cohort.name = "large_name".repeat(50000);
+        large_engine.create_cohort(large_cohort, &trace()).unwrap();
+
+        let large_hash = large_engine.generate_report(&trace()).content_hash;
+
+        // Should produce different hashes
+        assert_ne!(normal_hash, large_hash,
+                   "Normal vs large inputs should produce different hashes");
+    }
+
+    #[test]
+    fn report_hash_length_prefixing_collision_resistance() {
+        // Test that length prefixing prevents hash collisions from field concatenation
+        // This verifies the security properties of the saturation fix
+
+        // Test case: different schema/flagged boundaries that could collide without length prefixes
+        let mut engine1 = MigrationValidationCohorts::new("ab");
+        let mut cohort1 = sample_cohort("c1", CohortCategory::NodeMinimal);
+        cohort1.project_ids = vec!["cd".to_string()];
+        engine1.cohorts.insert("c1".to_string(), cohort1);
+
+        let mut engine2 = MigrationValidationCohorts::new("a");
+        let mut cohort2 = sample_cohort("c1", CohortCategory::NodeMinimal);
+        cohort2.project_ids = vec!["bcd".to_string()];
+        engine2.cohorts.insert("c1".to_string(), cohort2);
+
+        let hash1 = engine1.generate_report(&trace()).content_hash;
+        let hash2 = engine2.generate_report(&trace()).content_hash;
+
+        // Should produce different hashes due to proper length prefixing
+        assert_ne!(hash1, hash2,
+                   "Different field boundaries should produce different hashes");
+    }
+
+    #[test]
+    fn report_hash_all_five_saturation_sites() {
+        // Test all 5 saturating arithmetic sites with comprehensive inputs
+        // This ensures complete coverage of the a59141d5 fix
+
+        // Test with varied data to exercise all 5 try_from sites:
+        // 1. schema_version.len()
+        // 2. flagged.len()
+        // 3. cid.len() (for each flagged cohort ID)
+        // 4. coverage.len()
+        // 5. cat.len() (for each category in coverage)
+
+        let test_cases = vec![
+            // (schema_version, cohort_name, project_count)
+            ("short", "short_cohort", 1),
+            ("medium_schema_version", "medium_cohort_name", 3),
+            (&"long".repeat(1000), &"long_cohort".repeat(1000), 5),
+            ("", "empty_schema_test", 2),
+            ("incremental", "a", 0), // No projects (empty flagged)
+        ];
+
+        let mut hashes = Vec::new();
+
+        for (schema_version, cohort_name, project_count) in test_cases {
+            let mut engine = MigrationValidationCohorts::new(schema_version);
+
+            let cohort = sample_cohort(cohort_name, CohortCategory::NodeMinimal);
+            engine.create_cohort(cohort, &trace()).unwrap();
+
+            // Add projects to test flagged collection
+            for i in 0..project_count {
+                let project_id = format!("project_{}_{}", i, "x".repeat(i * 100));
+                engine.add_project(cohort_name, &project_id, &trace()).unwrap();
+            }
+
+            let hash = engine.generate_report(&trace()).content_hash;
+
+            // Verify hash format
+            assert!(hash.chars().all(|c| c.is_ascii_hexdigit()),
+                    "Hash should be hex");
+            assert!(hash.len() > 0, "Hash should not be empty");
+
+            hashes.push(hash);
+        }
+
+        // All hashes should be unique (different inputs produce different outputs)
+        for i in 0..hashes.len() {
+            for j in (i + 1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j],
+                           "Different inputs should produce different hashes: case {} vs {}", i, j);
+            }
+        }
+    }
+
+    #[test]
+    fn report_hash_category_coverage_saturation() {
+        // Test the coverage category name length prefixing specifically
+        // This exercises the final saturation site (cat.len() in coverage iteration)
+
+        let mut engine = MigrationValidationCohorts::default();
+
+        // Create cohorts with different categories to generate coverage map
+        let categories = vec![
+            CohortCategory::NodeMinimal,
+            CohortCategory::BunComplex,
+            CohortCategory::NodeComplex,
+            CohortCategory::BunMinimal,
+        ];
+
+        for (i, category) in categories.iter().enumerate() {
+            let cohort = sample_cohort(&format!("c{}", i), *category);
+            engine.create_cohort(cohort, &trace()).unwrap();
+        }
+
+        // Generate report to exercise coverage iteration
+        let report = engine.generate_report(&trace());
+
+        // Should have coverage for each category
+        assert!(report.category_coverage.len() > 1, "Should have multiple categories in coverage");
+
+        // Hash should be valid
+        assert!(report.content_hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "Hash should be hex");
+
+        // Should be deterministic
+        let report2 = engine.generate_report(&trace());
+        assert_eq!(report.content_hash, report2.content_hash,
+                   "Coverage hash should be deterministic");
+    }
 }

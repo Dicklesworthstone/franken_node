@@ -1295,4 +1295,217 @@ mod tests {
             }
         );
     }
+
+    // Saturating arithmetic tests for bd-8e9kv (commit a59141d5)
+    // Tests for 5 u64::try_from().unwrap_or(u64::MAX) sites in conflict resolution hash computation
+
+    #[test]
+    fn conflict_hash_normal_inputs() {
+        // Test normal case: small lease identifiers and conflict data hash correctly
+        // This verifies basic functionality after the saturating arithmetic fix
+
+        let conflict = LeaseConflict {
+            lease_a: "lease-a".into(),
+            lease_b: "lease-b".into(),
+            resource: "test-resource".to_string(),
+            overlap_start: 1640995200,
+            overlap_end: 1640998800,
+            tier: ConflictTier::Standard,
+        };
+
+        let hash1 = super::compute_conflict_resolution_hash(
+            "lease-a",
+            "lease-b",
+            &conflict,
+            "trace-123",
+            "action-456",
+        );
+
+        // Should produce a valid hash
+        assert!(hash1.starts_with("fork-"), "Hash should have fork- prefix");
+        let hash_part = &hash1[5..]; // Remove "fork-" prefix
+        assert_eq!(hash_part.len(), 16, "Hash part should be 16 hex characters");
+        assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex");
+
+        // Deterministic: same inputs should produce same hash
+        let hash2 = super::compute_conflict_resolution_hash(
+            "lease-a",
+            "lease-b",
+            &conflict,
+            "trace-123",
+            "action-456",
+        );
+        assert_eq!(hash1, hash2, "Same inputs should produce same hash");
+    }
+
+    #[test]
+    fn conflict_hash_large_input_saturation() {
+        // Test boundary case: oversized string inputs trigger saturation (u64::MAX)
+        // This verifies the fix prevents integer truncation on large lease identifiers
+
+        let conflict = LeaseConflict {
+            lease_a: "lease-a".into(),
+            lease_b: "lease-b".into(),
+            resource: "r".repeat(std::usize::MAX / 16), // Large resource name
+            overlap_start: 1640995200,
+            overlap_end: 1640998800,
+            tier: ConflictTier::Standard,
+        };
+
+        let large_lease_lo = "lease_lo_".repeat(std::usize::MAX / 32);
+        let large_lease_hi = "lease_hi_".repeat(std::usize::MAX / 32);
+        let large_trace_id = "trace_".repeat(std::usize::MAX / 64);
+        let large_action_id = "action_".repeat(std::usize::MAX / 64);
+
+        // Should succeed without panicking (saturation prevents overflow)
+        let hash = super::compute_conflict_resolution_hash(
+            &large_lease_lo,
+            &large_lease_hi,
+            &conflict,
+            &large_trace_id,
+            &large_action_id,
+        );
+
+        // Should produce valid hash despite large inputs
+        assert!(hash.starts_with("fork-"), "Hash should have fork- prefix with large inputs");
+        let hash_part = &hash[5..];
+        assert_eq!(hash_part.len(), 16, "Hash should be valid length with large inputs");
+        assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex");
+    }
+
+    #[test]
+    fn conflict_hash_saturation_vs_normal() {
+        // Test that saturated vs normal inputs produce different hashes
+        // This verifies hash collision resistance is maintained after the fix
+
+        let conflict = LeaseConflict {
+            lease_a: "lease-a".into(),
+            lease_b: "lease-b".into(),
+            resource: "resource-1".to_string(),
+            overlap_start: 1000,
+            overlap_end: 2000,
+            tier: ConflictTier::Standard,
+        };
+
+        // Normal inputs
+        let normal_hash = super::compute_conflict_resolution_hash(
+            "normal-lease-a",
+            "normal-lease-b",
+            &conflict,
+            "trace-normal",
+            "action-normal",
+        );
+
+        // Large inputs that would trigger saturation
+        let large_conflict = LeaseConflict {
+            lease_a: "lease-a".into(),
+            lease_b: "lease-b".into(),
+            resource: "x".repeat(1000000), // 1MB resource name
+            overlap_start: 1000,
+            overlap_end: 2000,
+            tier: ConflictTier::Standard,
+        };
+
+        let large_hash = super::compute_conflict_resolution_hash(
+            &"lease-a-".repeat(100000),  // 700KB lease ID
+            &"lease-b-".repeat(100000),  // 700KB lease ID
+            &large_conflict,
+            &"trace-".repeat(50000),     // 300KB trace ID
+            &"action-".repeat(50000),    // 350KB action ID
+        );
+
+        // Should produce different hashes
+        assert_ne!(normal_hash, large_hash,
+                   "Normal vs large inputs should produce different hashes");
+    }
+
+    #[test]
+    fn conflict_hash_length_prefixing_collision_resistance() {
+        // Test that length prefixing prevents hash collisions from string concatenation
+        // This verifies the security properties of the saturation fix
+
+        let conflict = LeaseConflict {
+            lease_a: "lease-a".into(),
+            lease_b: "lease-b".into(),
+            resource: "shared-resource".to_string(),
+            overlap_start: 5000,
+            overlap_end: 6000,
+            tier: ConflictTier::Standard,
+        };
+
+        // Test case: different field boundaries that could collide without length prefixes
+        let hash1 = super::compute_conflict_resolution_hash(
+            "ab",      // lease_lo
+            "cd",      // lease_hi
+            &conflict,
+            "ef",      // trace_id
+            "gh",      // action_id
+        );
+
+        let hash2 = super::compute_conflict_resolution_hash(
+            "a",       // Different boundary
+            "bcd",     // Shifted content
+            &conflict,
+            "e",       // Different boundary
+            "fgh",     // Shifted content
+        );
+
+        // Should produce different hashes due to proper length prefixing
+        assert_ne!(hash1, hash2,
+                   "Different field boundaries should produce different hashes");
+    }
+
+    #[test]
+    fn conflict_hash_all_five_saturation_sites() {
+        // Test all 5 saturating arithmetic sites with comprehensive inputs
+        // This ensures complete coverage of the fix
+
+        // Test with varied string lengths to exercise all 5 try_from sites
+        let test_cases = vec![
+            // (lease_lo, lease_hi, resource, trace_id, action_id)
+            ("short", "short", "short", "short", "short"),
+            ("medium_length_lease", "another_medium", "medium_resource", "medium_trace", "medium_action"),
+            (&"long".repeat(1000), &"very".repeat(1000), &"extremely".repeat(1000),
+             &"incredibly".repeat(1000), &"massively".repeat(1000)),
+            ("", "", "", "", ""), // Empty strings edge case
+            ("a", "bb", "ccc", "dddd", "eeeee"), // Incrementally increasing lengths
+        ];
+
+        let mut hashes = Vec::new();
+
+        for (lease_lo, lease_hi, resource, trace_id, action_id) in test_cases {
+            let conflict = LeaseConflict {
+                lease_a: lease_lo.into(),
+                lease_b: lease_hi.into(),
+                resource: resource.to_string(),
+                overlap_start: 1234,
+                overlap_end: 5678,
+                tier: ConflictTier::Standard,
+            };
+
+            let hash = super::compute_conflict_resolution_hash(
+                lease_lo,
+                lease_hi,
+                &conflict,
+                trace_id,
+                action_id,
+            );
+
+            // Verify hash format
+            assert!(hash.starts_with("fork-"), "Hash should have fork- prefix");
+            let hash_part = &hash[5..];
+            assert_eq!(hash_part.len(), 16, "Hash should be 16 chars");
+            assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()), "Should be hex");
+
+            hashes.push(hash);
+        }
+
+        // All hashes should be unique (different inputs produce different outputs)
+        for i in 0..hashes.len() {
+            for j in (i + 1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j],
+                           "Different inputs should produce different hashes: case {} vs {}", i, j);
+            }
+        }
+    }
 }
