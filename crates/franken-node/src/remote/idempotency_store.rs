@@ -193,7 +193,7 @@ pub fn hash_payload(payload: &[u8]) -> String {
 /// Provides at-most-once execution semantics by tracking idempotency keys
 /// and their outcomes.  Same key + same payload returns the cached result;
 /// same key + different payload is rejected as a conflict.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IdempotencyDedupeStore {
     entries: BTreeMap<String, DedupeEntry>,
     ttl_secs: u64,
@@ -205,6 +205,22 @@ pub struct IdempotencyDedupeStore {
     total_conflict: u64,
     total_expired: u64,
     total_recovered: u64,
+}
+
+impl std::fmt::Debug for IdempotencyDedupeStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdempotencyDedupeStore")
+            .field("entries_count", &self.entries.len())
+            .field("ttl_secs", &self.ttl_secs)
+            .field("audit_log_count", &self.audit_log.len())
+            .field("max_audit_records", &self.max_audit_records)
+            .field("total_new", &self.total_new)
+            .field("total_duplicate", &self.total_duplicate)
+            .field("total_conflict", &self.total_conflict)
+            .field("total_expired", &self.total_expired)
+            .field("total_recovered", &self.total_recovered)
+            .finish_non_exhaustive()
+    }
 }
 
 impl IdempotencyDedupeStore {
@@ -1697,5 +1713,43 @@ mod tests {
 
         assert!(!entry.is_expired(u64::MAX - 1));
         assert!(entry.is_expired(u64::MAX));
+    }
+
+    #[test]
+    fn redacted_debug_output_for_idempotency_dedupe_store() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+
+        // Add some test audit entries with trace IDs
+        let key1 = test_key(42);
+        let payload1 = b"test-payload-42";
+        let _result1 = store.process(&key1, hash_payload(payload1), 1000);
+
+        let key2 = test_key(43);
+        let payload2 = b"test-payload-43";
+        let _result2 = store.process(&key2, hash_payload(payload2), 1000);
+
+        let debug_output = format!("{:?}", store);
+
+        // Critical: Verify sensitive audit data is not exposed
+        assert!(!debug_output.contains("entries: {"),
+                "Debug output should not expose entry details");
+        assert!(!debug_output.contains("audit_log: ["),
+                "Debug output should not expose audit log entries");
+
+        // Verify counts are shown instead
+        assert!(debug_output.contains("entries_count"),
+                "Debug should show entries count");
+        assert!(debug_output.contains("audit_log_count"),
+                "Debug should show audit log count");
+
+        // Verify other safe fields are visible
+        assert!(debug_output.contains("ttl_secs: 3600"),
+                "Debug should show TTL");
+        assert!(debug_output.contains("total_new"),
+                "Debug should show total counts");
+
+        // Should use finish_non_exhaustive() pattern
+        assert!(debug_output.contains(".."),
+                "Debug output should indicate hidden fields with '..'");
     }
 }

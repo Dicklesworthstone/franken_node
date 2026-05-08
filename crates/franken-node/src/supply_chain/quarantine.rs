@@ -522,7 +522,7 @@ pub struct QuarantineRecord {
 // ── Quarantine registry ──────────────────────────────────────────────────────
 
 /// The quarantine registry manages all quarantine/recall lifecycle state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct QuarantineRegistry {
     /// Active and historical quarantine records keyed by order_id.
     records: BTreeMap<String, QuarantineRecord>,
@@ -540,6 +540,21 @@ pub struct QuarantineRegistry {
     total_quarantines: u64,
     /// Total recalls completed.
     total_recalls: u64,
+}
+
+impl std::fmt::Debug for QuarantineRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuarantineRegistry")
+            .field("records_count", &self.records.len())
+            .field("active_quarantines_count", &self.active_quarantines.len())
+            .field("audit_trail_count", &self.audit_trail.len())
+            .field("chain_anchor_hash", &self.chain_anchor_hash)
+            .field("next_sequence", &self.next_sequence)
+            .field("propagation_status_count", &self.propagation_status.len())
+            .field("total_quarantines", &self.total_quarantines)
+            .field("total_recalls", &self.total_recalls)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for QuarantineRegistry {

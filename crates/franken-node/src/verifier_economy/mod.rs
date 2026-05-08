@@ -539,7 +539,7 @@ pub struct Dispute {
 }
 
 /// Replay capsule for independent verification.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ReplayCapsule {
     pub capsule_id: String,
     pub schema_version: String,
@@ -555,6 +555,27 @@ pub struct ReplayCapsule {
     pub expected_result_hash: String,
     pub integrity_hash: String,
     pub signature: AttestationSignature,
+}
+
+impl std::fmt::Debug for ReplayCapsule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplayCapsule")
+            .field("capsule_id", &self.capsule_id)
+            .field("schema_version", &self.schema_version)
+            .field("attestation_id", &self.attestation_id)
+            .field("verifier_id", &self.verifier_id)
+            .field("claim_metadata_hash", &self.claim_metadata_hash)
+            .field("issued_at", &self.issued_at)
+            .field("expires_at", &self.expires_at)
+            .field("input_state_hash", &self.input_state_hash)
+            .field("trace_chunk_count", &self.trace_chunk_hashes.len())
+            .field("trace_commitment_root", &self.trace_commitment_root)
+            .field("output_state_hash", &self.output_state_hash)
+            .field("expected_result_hash", &self.expected_result_hash)
+            .field("integrity_hash", &self.integrity_hash)
+            .field("signature", &self.signature)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Scoreboard entry for a single verifier.

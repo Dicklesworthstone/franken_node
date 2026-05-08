@@ -53,12 +53,23 @@ pub struct LogRoot {
 }
 
 /// A Merkle inclusion proof.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InclusionProof {
     pub leaf_index: u64,
     pub tree_size: u64,
     pub leaf_hash: String,
     pub audit_path: Vec<String>,
+}
+
+impl std::fmt::Debug for InclusionProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InclusionProof")
+            .field("leaf_index", &self.leaf_index)
+            .field("tree_size", &self.tree_size)
+            .field("leaf_hash", &self.leaf_hash)
+            .field("audit_path_count", &self.audit_path.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Policy for transparency log verification.

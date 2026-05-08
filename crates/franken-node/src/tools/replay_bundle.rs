@@ -332,7 +332,7 @@ pub struct BundleChunk {
     pub events: Vec<TimelineEvent>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayBundle {
     pub bundle_id: Uuid,
     pub incident_id: String,
@@ -349,6 +349,25 @@ pub struct ReplayBundle {
     pub integrity_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<ReplayBundleSignature>,
+}
+
+impl std::fmt::Debug for ReplayBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplayBundle")
+            .field("bundle_id", &self.bundle_id)
+            .field("incident_id", &self.incident_id)
+            .field("created_at", &self.created_at)
+            .field("timeline_count", &self.timeline.len())
+            .field("initial_state_snapshot", &"[PRESENT]")
+            .field("policy_version", &self.policy_version)
+            .field("manifest", &self.manifest)
+            .field("chunks_count", &self.chunks.len())
+            .field("evidence_refs_count", &self.evidence_refs.len())
+            .field("trust_artifact_refs_count", &self.trust_artifact_refs.len())
+            .field("integrity_hash", &self.integrity_hash)
+            .field("signature", &self.signature)
+            .finish_non_exhaustive()
+    }
 }
 
 pub struct ReplayBundleSigningMaterial<'a> {
