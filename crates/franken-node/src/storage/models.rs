@@ -368,7 +368,7 @@ impl ControlChannelStateRecord {
 /// Owner: `connector::artifact_persistence`
 /// Classification: mandatory
 /// Source: codegen
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactJournalRecord {
     pub entry_id: String,
     pub artifact_hash: String,
@@ -377,6 +377,20 @@ pub struct ArtifactJournalRecord {
     pub epoch: u64,
     pub timestamp: String,
     pub metadata_json: Option<String>,
+}
+
+impl std::fmt::Debug for ArtifactJournalRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArtifactJournalRecord")
+            .field("entry_id", &self.entry_id)
+            .field("artifact_hash", &"[REDACTED]")
+            .field("operation", &self.operation)
+            .field("actor_id", &self.actor_id)
+            .field("epoch", &self.epoch)
+            .field("timestamp", &self.timestamp)
+            .field("metadata_json", &self.metadata_json)
+            .finish()
+    }
 }
 
 impl ArtifactJournalRecord {
@@ -410,7 +424,7 @@ impl ArtifactJournalRecord {
 /// Owner: `connector::tiered_trust_storage`
 /// Classification: mandatory
 /// Source: codegen
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TieredTrustArtifactRecord {
     pub artifact_id: String,
     pub trust_tier: String,
@@ -420,6 +434,21 @@ pub struct TieredTrustArtifactRecord {
     pub created_at: String,
     pub expires_at: Option<String>,
     pub revoked: bool,
+}
+
+impl std::fmt::Debug for TieredTrustArtifactRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TieredTrustArtifactRecord")
+            .field("artifact_id", &self.artifact_id)
+            .field("trust_tier", &self.trust_tier)
+            .field("publisher_id", &self.publisher_id)
+            .field("signature", &"[REDACTED]")
+            .field("assurance_level", &self.assurance_level)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("revoked", &self.revoked)
+            .finish()
+    }
 }
 
 impl TieredTrustArtifactRecord {
@@ -454,13 +483,25 @@ impl TieredTrustArtifactRecord {
 /// Owner: `connector::state_model`
 /// Classification: mandatory
 /// Source: hand_authored
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalStateRootRecord {
     pub root_hash: String,
     pub epoch: u64,
     pub computed_at: String,
     pub input_count: u64,
     pub algorithm: String,
+}
+
+impl std::fmt::Debug for CanonicalStateRootRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CanonicalStateRootRecord")
+            .field("root_hash", &"[REDACTED]")
+            .field("epoch", &self.epoch)
+            .field("computed_at", &self.computed_at)
+            .field("input_count", &self.input_count)
+            .field("algorithm", &self.algorithm)
+            .finish()
+    }
 }
 
 impl CanonicalStateRootRecord {
@@ -694,7 +735,7 @@ impl CrdtMergeStateRecord {
 /// Owner: `connector::quarantine_store`
 /// Classification: should_use
 /// Source: codegen
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuarantineEntryRecord {
     pub entry_id: String,
     pub artifact_hash: String,
@@ -703,6 +744,20 @@ pub struct QuarantineEntryRecord {
     pub quarantined_at: String,
     pub quarantined_by: String,
     pub released: bool,
+}
+
+impl std::fmt::Debug for QuarantineEntryRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuarantineEntryRecord")
+            .field("entry_id", &self.entry_id)
+            .field("artifact_hash", &"[REDACTED]")
+            .field("reason", &self.reason)
+            .field("severity", &self.severity)
+            .field("quarantined_at", &self.quarantined_at)
+            .field("quarantined_by", &self.quarantined_by)
+            .field("released", &self.released)
+            .finish()
+    }
 }
 
 impl QuarantineEntryRecord {

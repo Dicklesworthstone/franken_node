@@ -338,11 +338,21 @@ pub struct GateEvent {
 }
 
 /// Simulated target tier state for proof checking.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TargetTierState {
     pub content_hash: String,
     pub reachable: bool,
     pub fetch_latency_ms: u64,
+}
+
+impl std::fmt::Debug for TargetTierState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TargetTierState")
+            .field("content_hash", &"[REDACTED]")
+            .field("reachable", &self.reachable)
+            .field("fetch_latency_ms", &self.fetch_latency_ms)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------

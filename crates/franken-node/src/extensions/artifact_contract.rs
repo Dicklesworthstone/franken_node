@@ -141,7 +141,7 @@ pub struct CapabilityEntry {
 }
 
 /// An embedded capability contract carried by an extension artifact.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityContract {
     pub contract_id: String,
     pub extension_id: String,
@@ -155,14 +155,43 @@ pub struct CapabilityContract {
     pub issued_epoch_ms: u64,
 }
 
+impl std::fmt::Debug for CapabilityContract {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CapabilityContract")
+            .field("contract_id", &self.contract_id)
+            .field("extension_id", &self.extension_id)
+            .field("extension_version", &self.extension_version)
+            .field("artifact_id", &self.artifact_id)
+            .field("payload_hash", &"[REDACTED]")
+            .field("capabilities", &self.capabilities)
+            .field("signer_id", &self.signer_id)
+            .field("signature", &"[REDACTED]")
+            .field("schema_version", &self.schema_version)
+            .field("issued_epoch_ms", &self.issued_epoch_ms)
+            .finish()
+    }
+}
+
 /// An extension artifact that may or may not carry a capability contract.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtensionArtifact {
     pub artifact_id: String,
     pub extension_id: String,
     pub extension_version: String,
     pub capability_contract: Option<CapabilityContract>,
     pub payload_hash: String,
+}
+
+impl std::fmt::Debug for ExtensionArtifact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionArtifact")
+            .field("artifact_id", &self.artifact_id)
+            .field("extension_id", &self.extension_id)
+            .field("extension_version", &self.extension_version)
+            .field("capability_contract", &self.capability_contract)
+            .field("payload_hash", &"[REDACTED]")
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
