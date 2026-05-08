@@ -436,7 +436,7 @@ impl LaneCounters {
 }
 
 /// Errors from lane scheduler operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum LaneSchedulerError {
     /// Task class not mapped to any lane.
     /// INV-LANE-MISCLASS-REJECT
@@ -467,6 +467,63 @@ pub enum LaneSchedulerError {
     TaskIdExhausted { last_counter: u64 },
     /// Invalid priority weight.
     InvalidWeight { lane: SchedulerLane, weight: u32 },
+}
+
+impl std::fmt::Debug for LaneSchedulerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LaneSchedulerError::UnknownClass { task_class: _ } => {
+                f.debug_struct("UnknownClass")
+                    .field("task_class", &"<redacted>")
+                    .finish()
+            }
+            LaneSchedulerError::CapExceeded { lane, cap, current } => {
+                f.debug_struct("CapExceeded")
+                    .field("lane", lane)
+                    .field("cap", cap)
+                    .field("current", current)
+                    .finish()
+            }
+            LaneSchedulerError::UnknownLane { lane } => {
+                f.debug_struct("UnknownLane")
+                    .field("lane", lane)
+                    .finish()
+            }
+            LaneSchedulerError::DuplicateLane { lane } => {
+                f.debug_struct("DuplicateLane")
+                    .field("lane", lane)
+                    .finish()
+            }
+            LaneSchedulerError::InvalidPolicy { reason } => {
+                f.debug_struct("InvalidPolicy")
+                    .field("reason", reason)
+                    .finish()
+            }
+            LaneSchedulerError::QueueTimeout { lane, queue_depth, elapsed_ms } => {
+                f.debug_struct("QueueTimeout")
+                    .field("lane", lane)
+                    .field("queue_depth", queue_depth)
+                    .field("elapsed_ms", elapsed_ms)
+                    .finish()
+            }
+            LaneSchedulerError::TaskNotFound { task_id: _ } => {
+                f.debug_struct("TaskNotFound")
+                    .field("task_id", &"<redacted>")
+                    .finish()
+            }
+            LaneSchedulerError::TaskIdExhausted { last_counter } => {
+                f.debug_struct("TaskIdExhausted")
+                    .field("last_counter", last_counter)
+                    .finish()
+            }
+            LaneSchedulerError::InvalidWeight { lane, weight } => {
+                f.debug_struct("InvalidWeight")
+                    .field("lane", lane)
+                    .field("weight", weight)
+                    .finish()
+            }
+        }
+    }
 }
 
 impl LaneSchedulerError {
@@ -558,7 +615,7 @@ impl fmt::Display for LaneSchedulerError {
 }
 
 /// Task assignment record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskAssignment {
     pub task_id: String,
     pub task_class: TaskClass,
@@ -567,8 +624,20 @@ pub struct TaskAssignment {
     pub trace_id: String,
 }
 
+impl std::fmt::Debug for TaskAssignment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskAssignment")
+            .field("task_id", &"<redacted>")
+            .field("task_class", &"<redacted>")
+            .field("lane", &self.lane)
+            .field("assigned_at_ms", &self.assigned_at_ms)
+            .field("trace_id", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Queued task identity retained when a lane is at capacity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedTaskAssignment {
     pub task_id: String,
     pub task_class: TaskClass,
@@ -577,8 +646,20 @@ pub struct QueuedTaskAssignment {
     pub trace_id: String,
 }
 
+impl std::fmt::Debug for QueuedTaskAssignment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueuedTaskAssignment")
+            .field("task_id", &"<redacted>")
+            .field("task_class", &"<redacted>")
+            .field("lane", &self.lane)
+            .field("queued_at_ms", &self.queued_at_ms)
+            .field("trace_id", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Audit record for JSONL export.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneAuditRecord {
     pub event_code: String,
     pub task_id: String,
@@ -588,6 +669,21 @@ pub struct LaneAuditRecord {
     pub detail: String,
     pub trace_id: String,
     pub schema_version: String,
+}
+
+impl std::fmt::Debug for LaneAuditRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaneAuditRecord")
+            .field("event_code", &self.event_code)
+            .field("task_id", &"<redacted>")
+            .field("task_class", &"<redacted>")
+            .field("lane", &self.lane)
+            .field("timestamp_ms", &self.timestamp_ms)
+            .field("detail", &"<redacted>")
+            .field("trace_id", &"<redacted>")
+            .field("schema_version", &self.schema_version)
+            .finish()
+    }
 }
 
 /// Telemetry snapshot for export.
@@ -3389,5 +3485,78 @@ mod tests {
             larger_nanos <= smaller_nanos.saturating_mul(8),
             "queue promotion regressed toward quadratic cost: 256={smaller:?} 1024={larger:?}"
         );
+    }
+
+    #[test]
+    fn debug_output_redacts_sensitive_scheduler_data() {
+        // Test that Debug implementations properly redact sensitive task/audit data
+        // This test verifies the fix for bd-awvya
+
+        // Test LaneSchedulerError debug redaction
+        let error = LaneSchedulerError::UnknownClass {
+            task_class: "sensitive-task-class".to_string(),
+        };
+        let debug_output = format!("{:?}", error);
+        assert!(debug_output.contains("<redacted>"));
+        assert!(!debug_output.contains("sensitive-task-class"));
+
+        let error2 = LaneSchedulerError::TaskNotFound {
+            task_id: "sensitive-task-123".to_string(),
+        };
+        let debug_output2 = format!("{:?}", error2);
+        assert!(debug_output2.contains("<redacted>"));
+        assert!(!debug_output2.contains("sensitive-task-123"));
+
+        // Test TaskAssignment debug redaction
+        let assignment = TaskAssignment {
+            task_id: "sensitive-task-456".to_string(),
+            task_class: TaskClass("sensitive-class".to_string()),
+            lane: SchedulerLane::Critical,
+            assigned_at_ms: 1000,
+            trace_id: "sensitive-trace-789".to_string(),
+        };
+        let debug_output = format!("{:?}", assignment);
+        assert!(debug_output.contains("<redacted>"));
+        assert!(!debug_output.contains("sensitive-task-456"));
+        assert!(!debug_output.contains("sensitive-class"));
+        assert!(!debug_output.contains("sensitive-trace-789"));
+        assert!(debug_output.contains("1000")); // timestamp should remain
+        assert!(debug_output.contains("Critical")); // lane should remain
+
+        // Test QueuedTaskAssignment debug redaction
+        let queued = QueuedTaskAssignment {
+            task_id: "sensitive-queued-123".to_string(),
+            task_class: TaskClass("sensitive-queued-class".to_string()),
+            lane: SchedulerLane::Background,
+            queued_at_ms: 2000,
+            trace_id: "sensitive-queued-trace".to_string(),
+        };
+        let debug_output = format!("{:?}", queued);
+        assert!(debug_output.contains("<redacted>"));
+        assert!(!debug_output.contains("sensitive-queued-123"));
+        assert!(!debug_output.contains("sensitive-queued-class"));
+        assert!(!debug_output.contains("sensitive-queued-trace"));
+        assert!(debug_output.contains("2000")); // timestamp should remain
+
+        // Test LaneAuditRecord debug redaction
+        let audit = LaneAuditRecord {
+            event_code: "TASK_ASSIGNED".to_string(),
+            task_id: "sensitive-audit-task".to_string(),
+            task_class: "sensitive-audit-class".to_string(),
+            lane: "critical".to_string(),
+            timestamp_ms: 3000,
+            detail: "sensitive audit detail".to_string(),
+            trace_id: "sensitive-audit-trace".to_string(),
+            schema_version: "v1".to_string(),
+        };
+        let debug_output = format!("{:?}", audit);
+        assert!(debug_output.contains("<redacted>"));
+        assert!(!debug_output.contains("sensitive-audit-task"));
+        assert!(!debug_output.contains("sensitive-audit-class"));
+        assert!(!debug_output.contains("sensitive audit detail"));
+        assert!(!debug_output.contains("sensitive-audit-trace"));
+        assert!(debug_output.contains("TASK_ASSIGNED")); // event code should remain
+        assert!(debug_output.contains("3000")); // timestamp should remain
+        assert!(debug_output.contains("v1")); // schema version should remain
     }
 }
