@@ -1151,6 +1151,43 @@ mod tests {
             "feed_into_hasher must work correctly with empty payload");
     }
 
+    proptest! {
+        #[test]
+        fn test_feed_into_hasher_proptest_byte_identity(
+            version: u8,
+            domain_tag_0: u8,
+            domain_tag_1: u8,
+            payload: Vec<u8>
+        ) {
+            // Constrain payload size to be realistic (up to 64KB)
+            prop_assume!(payload.len() <= 65536);
+
+            let preimage = SignaturePreimage::build(
+                version,
+                [domain_tag_0, domain_tag_1],
+                payload
+            );
+
+            // Hash via to_bytes() method
+            let via_to_bytes = {
+                let mut h = Sha256::new();
+                h.update(&preimage.to_bytes());
+                h.finalize()
+            };
+
+            // Hash via feed_into_hasher() method
+            let via_feed = {
+                let mut h = Sha256::new();
+                preimage.feed_into_hasher(&mut h);
+                h.finalize()
+            };
+
+            // Must produce identical hash digests
+            assert_eq!(via_to_bytes, via_feed,
+                "feed_into_hasher and to_bytes must produce identical SHA256 digests");
+        }
+    }
+
     #[test]
     fn test_preimage_byte_len() {
         let pi = SignaturePreimage::build(1, [0x10, 0x01], vec![0u8; 100]);
