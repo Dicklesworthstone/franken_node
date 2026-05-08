@@ -78,8 +78,8 @@ pub enum GateVerdict {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateEvent {
-    pub code: String,
-    pub level: String,
+    pub code: &'static str,
+    pub level: &'static str,
     pub trace_id: String,
     pub message: String,
 }
@@ -144,10 +144,10 @@ pub struct BpetMigrationReport {
     pub admission: AdmissionDecision,
 }
 
-fn gate_event(code: &str, level: &str, trace_id: &str, message: String) -> GateEvent {
+fn gate_event(code: &'static str, level: &'static str, trace_id: &str, message: String) -> GateEvent {
     GateEvent {
-        code: code.to_string(),
-        level: level.to_string(),
+        code,
+        level,
         trace_id: trace_id.to_string(),
         message,
     }
@@ -2415,5 +2415,28 @@ mod tests {
         assert!(matches!(rollout.canary.phase, RolloutPhase::Canary));
         assert!(rollout.canary.max_instability_score.is_finite());
         assert!(rollout.canary.max_regime_shift_probability.is_finite());
+    }
+
+    #[test]
+    fn test_gate_event_optimized_format_identical() {
+        // Test that optimized gate_event produces identical logical output
+        let event = gate_event(
+            event_codes::ROLLBACK_TRIGGERED,
+            "error",
+            "trace-123",
+            "rollback triggered at phase=Canary: observed instability=0.8500/0.7500".to_string()
+        );
+
+        // Verify static string fields use &'static str (no allocation)
+        assert_eq!(event.code, "BPET-MIGRATE-005");
+        assert_eq!(event.level, "error");
+        assert_eq!(event.trace_id, "trace-123");
+        assert_eq!(event.message, "rollback triggered at phase=Canary: observed instability=0.8500/0.7500");
+
+        // Verify serialization works correctly with new field types
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(serialized.contains("BPET-MIGRATE-005"));
+        assert!(serialized.contains("error"));
+        assert!(serialized.contains("trace-123"));
     }
 }
