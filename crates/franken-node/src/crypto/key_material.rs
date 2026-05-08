@@ -83,13 +83,25 @@ pub trait KeyMaterial: Send + Sync {
 /// This is a basic implementation suitable for testing and development.
 /// Production systems should use hardware security modules or other
 /// secure key storage mechanisms.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Ed25519KeyMaterial {
     key_id: String,
     public_key: [u8; 32],
     secret_key: [u8; 32],
     created_at: std::time::SystemTime,
     expires_at: std::time::SystemTime,
+}
+
+impl std::fmt::Debug for Ed25519KeyMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ed25519KeyMaterial")
+            .field("key_id", &self.key_id)
+            .field("public_key", &format!("[{} bytes]", self.public_key.len()))
+            .field("secret_key", &"[REDACTED]")
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl Ed25519KeyMaterial {
