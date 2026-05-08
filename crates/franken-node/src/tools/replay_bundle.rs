@@ -9,6 +9,7 @@
 //! - INV-RB-CHUNKING: bundles larger than 10 MiB are split into indexed chunks
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as FmtWrite;
 use std::io::Write;
 use std::path::Path;
 
@@ -566,12 +567,18 @@ pub fn validate_incident_evidence_package(
         .collect::<BTreeSet<_>>();
     let mut event_ids = BTreeSet::new();
     let mut previous_timestamp: Option<(usize, i64)> = None;
+    // Pre-allocate buffer for field path construction to avoid per-event format! allocations
+    let mut field_path = String::with_capacity(64);
     for (idx, event) in package.events.iter().enumerate() {
-        validate_nonempty_field(&format!("events[{idx}].event_id"), &event.event_id)?;
-        validate_nonempty_field(
-            &format!("events[{idx}].provenance_ref"),
-            &event.provenance_ref,
-        )?;
+        // Reuse buffer for event_id field path
+        field_path.clear();
+        write!(field_path, "events[{}].event_id", idx).expect("write to String never fails");
+        validate_nonempty_field(&field_path, &event.event_id)?;
+
+        // Reuse buffer for provenance_ref field path
+        field_path.clear();
+        write!(field_path, "events[{}].provenance_ref", idx).expect("write to String never fails");
+        validate_nonempty_field(&field_path, &event.provenance_ref)?;
         if !event_ids.insert(event.event_id.as_str()) {
             return Err(ReplayBundleError::EvidenceDuplicateEventId {
                 event_id: event.event_id.clone(),
@@ -589,12 +596,22 @@ pub fn validate_incident_evidence_package(
         }
         previous_timestamp = Some((idx, timestamp_micros));
 
-        canonicalize_value(&event.payload, &format!("$.events[{idx}].payload"))?;
+        // Reuse buffer for payload field path
+        field_path.clear();
+        write!(field_path, "$.events[{}].payload", idx).expect("write to String never fails");
+        canonicalize_value(&event.payload, &field_path)?;
+
         if let Some(snapshot) = &event.state_snapshot {
-            canonicalize_value(snapshot, &format!("$.events[{idx}].state_snapshot"))?;
+            // Reuse buffer for state_snapshot field path
+            field_path.clear();
+            write!(field_path, "$.events[{}].state_snapshot", idx).expect("write to String never fails");
+            canonicalize_value(snapshot, &field_path)?;
         }
         if let Some(policy_version) = &event.policy_version {
-            validate_nonempty_field(&format!("events[{idx}].policy_version"), policy_version)?;
+            // Reuse buffer for policy_version field path
+            field_path.clear();
+            write!(field_path, "events[{}].policy_version", idx).expect("write to String never fails");
+            validate_nonempty_field(&field_path, policy_version)?;
         }
         if !evidence_refs.contains(event.provenance_ref.as_str()) {
             return Err(ReplayBundleError::EvidenceUnknownProvenanceRef {
@@ -1539,15 +1556,21 @@ fn reject_non_monotonic_chunk_timestamps(bundle: &ReplayBundle) -> Result<(), Re
 
 fn reject_future_bundle_timestamps(bundle: &ReplayBundle) -> Result<(), ReplayBundleError> {
     reject_future_timestamp("$.created_at", &bundle.created_at)?;
+
+    // Pre-allocate buffer for timestamp path construction to avoid per-event format! allocations
+    let mut timestamp_path = String::with_capacity(64);
+
     for (idx, event) in bundle.timeline.iter().enumerate() {
-        reject_future_timestamp(&format!("$.timeline[{idx}].timestamp"), &event.timestamp)?;
+        timestamp_path.clear();
+        write!(timestamp_path, "$.timeline[{}].timestamp", idx).expect("write to String never fails");
+        reject_future_timestamp(&timestamp_path, &event.timestamp)?;
     }
+
     for (chunk_idx, chunk) in bundle.chunks.iter().enumerate() {
         for (event_idx, event) in chunk.events.iter().enumerate() {
-            reject_future_timestamp(
-                &format!("$.chunks[{chunk_idx}].events[{event_idx}].timestamp"),
-                &event.timestamp,
-            )?;
+            timestamp_path.clear();
+            write!(timestamp_path, "$.chunks[{}].events[{}].timestamp", chunk_idx, event_idx).expect("write to String never fails");
+            reject_future_timestamp(&timestamp_path, &event.timestamp)?;
         }
     }
     Ok(())
