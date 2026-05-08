@@ -123,10 +123,19 @@ pub struct ActivationInput {
 }
 
 /// Tracks ephemeral secrets mounted during activation for cleanup.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct EphemeralSecretTracker {
     mounted: Vec<String>,
     cleaned: bool,
+}
+
+impl std::fmt::Debug for EphemeralSecretTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EphemeralSecretTracker")
+            .field("mounted_count", &self.mounted.len())
+            .field("cleaned", &self.cleaned)
+            .finish_non_exhaustive()
+    }
 }
 
 impl EphemeralSecretTracker {
