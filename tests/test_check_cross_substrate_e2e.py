@@ -4,6 +4,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -99,7 +100,10 @@ class TestJsonCliOutput(unittest.TestCase):
             text=True,
             timeout=30,
         )
-        parsed = json.loads(proc.stdout)
+        try:
+            parsed = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            self.fail(f"--json output was not valid JSON: {exc}")
         self.assertEqual(parsed["bead_id"], "bd-8l9k")
         self.assertIn("verdict", parsed)
         self.assertIn("checks", parsed)
@@ -135,6 +139,103 @@ class TestMissingEvidenceCausesFail(unittest.TestCase):
             )
         finally:
             mod.EVIDENCE_FILE = original
+
+
+class TestPersistenceContractChecks(unittest.TestCase):
+    """Test that the cross-substrate gate rejects weak persistence evidence."""
+
+    def test_mock_persistence_marker_fails(self):
+        original = mod.IMPL_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "adjacent_substrate_flow.rs"
+            src.write_text(
+                "pub fn scenario_operator_status() {}\n"
+                "// Mock Persistence\n"
+                "struct MockPersistence;\n",
+                encoding="utf-8",
+            )
+            mod.IMPL_FILE = src
+            try:
+                result = mod.run_all()
+                persistence_checks = [
+                    c for c in result["checks"]
+                    if c["check"] == "Persistence harness is tempfile-backed"
+                ]
+                self.assertTrue(persistence_checks)
+                self.assertFalse(persistence_checks[0]["passed"])
+            finally:
+                mod.IMPL_FILE = original
+
+    def test_replay_report_without_frankensqlite_fails(self):
+        original = mod.REPORT_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "adjacent_substrate_e2e_report.json"
+            report.write_text(
+                json.dumps({
+                    "scenarios": [
+                        {
+                            "name": "replay_determinism",
+                            "substrates": ["frankentui", "fastapi_rust"],
+                        }
+                    ],
+                    "trace_coverage": {},
+                    "replay_results": {
+                        "persistence_backend": "tempfile-backed-frankensqlite-contract",
+                        "persistence_state_match": True,
+                        "persistence_state_hash_match": True,
+                    },
+                }),
+                encoding="utf-8",
+            )
+            mod.REPORT_FILE = report
+            try:
+                result = mod.run_all()
+                replay_checks = [
+                    c for c in result["checks"]
+                    if c["check"] == "Replay report covers frankensqlite persistence"
+                ]
+                self.assertTrue(replay_checks)
+                self.assertFalse(replay_checks[0]["passed"])
+            finally:
+                mod.REPORT_FILE = original
+
+    def test_replay_report_without_persistence_match_fails(self):
+        original = mod.REPORT_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "adjacent_substrate_e2e_report.json"
+            report.write_text(
+                json.dumps({
+                    "scenarios": [
+                        {
+                            "name": "replay_determinism",
+                            "substrates": [
+                                "frankentui",
+                                "fastapi_rust",
+                                "sqlmodel_rust",
+                                "frankensqlite",
+                            ],
+                        }
+                    ],
+                    "trace_coverage": {},
+                    "replay_results": {
+                        "persistence_backend": "tempfile-backed-frankensqlite-contract",
+                        "persistence_state_match": False,
+                        "persistence_state_hash_match": True,
+                    },
+                }),
+                encoding="utf-8",
+            )
+            mod.REPORT_FILE = report
+            try:
+                result = mod.run_all()
+                match_checks = [
+                    c for c in result["checks"]
+                    if c["check"] == "Replay report records persistence state match"
+                ]
+                self.assertTrue(match_checks)
+                self.assertFalse(match_checks[0]["passed"])
+            finally:
+                mod.REPORT_FILE = original
 
 
 class TestResultFields(unittest.TestCase):

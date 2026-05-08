@@ -6,19 +6,19 @@
 
 | Category | Pass | Total |
 |----------|------|-------|
-| Checker checks | 55 | 55 |
+| Checker checks | 60 | 60 |
 | Self-test checks | 18 | 18 |
-| Python unit tests | 13 | 13 |
-| Rust unit tests | 54 | 54 |
+| Python unit tests | 16 | 16 |
+| Rust unit tests | 56 | 56 |
 | E2E scenarios | 7 | 7 |
 
 ## Implementation
 
-`tests/e2e/adjacent_substrate_flow.rs` (1881 lines)
+`tests/e2e/adjacent_substrate_flow.rs`
 
 - **Schema version:** e2e-v1.0
 - **Substrates:** frankentui, fastapi_rust, sqlmodel_rust, frankensqlite
-- **Mock layers:** MockTui, MockService, MockPersistence, MockClock
+- **Harness layers:** TestTui, TestService, tempfile-backed TestPersistence, deterministic TestClock
 - **Types:** Substrate, TraceContext, TraceTree, FencingToken, AuditLog, StructuredError, ReplaySeed, ReplayResult, ScenarioRunner, ScenarioResult
 
 ## E2E Scenarios
@@ -29,7 +29,7 @@
 4. **Error propagation flow** — invalid request -> structured error -> TUI -> audit
 5. **Concurrent access flow** — multi-operator -> fencing -> consistency
 6. **Trace propagation** — W3C compliant, no orphaned spans, 4 substrates
-7. **Replay determinism** — fixed seeds, mock clocks, identical output hashes
+7. **Replay determinism** — fixed seeds, deterministic test clocks, identical output hashes, and matching persistence state hashes
 
 ## Verification Coverage
 
@@ -37,6 +37,8 @@
 - 7 E2E scenarios covering all four substrate planes
 - Trace verification: zero orphaned spans across all scenarios
 - Replay determinism: identical seeds produce identical hashes
+- Persistence evidence: replay report covers frankensqlite and records persistence_state_match + persistence_state_hash_match
+- Gate hardening: checker rejects mock/in-memory persistence markers for the cross-substrate persistence harness
 - 6 event codes (E2E_SCENARIO_START/PASS/FAIL, E2E_TRACE_ORPHAN_DETECTED, E2E_REPLAY_MISMATCH, E2E_CONCURRENT_CONFLICT)
 - 10 error codes (ERR_E2E_* prefix)
 - 7 invariants (INV-E2E-* prefix)

@@ -7,8 +7,12 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+static NEXT_PERSISTENCE_ID: AtomicU64 = AtomicU64::new(1);
 
 // ---------------------------------------------------------------------------
 // Schema version
@@ -85,7 +89,8 @@ pub mod invariants {
     pub const INV_E2E_TRACE: &str = "INV-E2E-TRACE";
 
     /// INV-E2E-REPLAY: Given identical seeds and mock clocks, replaying an
-    /// E2E scenario must produce byte-identical results.
+    /// E2E scenario must produce byte-identical results, including the
+    /// tempfile-backed persistence state.
     pub const INV_E2E_REPLAY: &str = "INV-E2E-REPLAY";
 
     /// INV-E2E-FENCING: Concurrent writes to the same resource must be
@@ -127,13 +132,19 @@ pub mod invariants {
 
         #[test]
         fn test_all_invariants_count() {
-            assert!(all_invariants().len() >= 5, "Must have at least 5 invariants");
+            assert!(
+                all_invariants().len() >= 5,
+                "Must have at least 5 invariants"
+            );
         }
 
         #[test]
         fn test_invariant_prefix() {
             for inv in all_invariants() {
-                assert!(inv.starts_with("INV-E2E-"), "Invariant must start with INV-E2E-: {inv}");
+                assert!(
+                    inv.starts_with("INV-E2E-"),
+                    "Invariant must start with INV-E2E-: {inv}"
+                );
             }
         }
 
@@ -254,20 +265,49 @@ pub struct ReplaySeed {
 pub struct ReplayResult {
     pub seed: ReplaySeed,
     pub output_hash: String,
+    pub persistence_state_hash: String,
     pub events: Vec<String>,
+}
+
+fn constant_time_str_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let max_len = a.len().max(b.len());
+    let mut diff = a.len() ^ b.len();
+    for i in 0..max_len {
+        let left = a.get(i).copied().unwrap_or(0);
+        let right = b.get(i).copied().unwrap_or(0);
+        diff |= usize::from(left ^ right);
+    }
+    diff == 0
+}
+
+fn event_sequences_equal(a: &[String], b: &[String]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .all(|(left, right)| constant_time_str_eq(left, right))
 }
 
 /// Verifies that two replay results are identical (deterministic).
 pub fn verify_replay_determinism(a: &ReplayResult, b: &ReplayResult) -> Result<(), String> {
-    if a.output_hash != b.output_hash {
+    if !constant_time_str_eq(&a.output_hash, &b.output_hash) {
         return Err(format!(
             "{ERR_E2E_REPLAY_DIVERGED}: hash mismatch: {} != {}",
             a.output_hash, b.output_hash
         ));
     }
-    if a.events != b.events {
+    if !event_sequences_equal(&a.events, &b.events) {
         return Err(format!(
             "{ERR_E2E_REPLAY_DIVERGED}: event sequence mismatch"
+        ));
+    }
+    if !constant_time_str_eq(&a.persistence_state_hash, &b.persistence_state_hash) {
+        return Err(format!(
+            "{ERR_E2E_REPLAY_DIVERGED}: persistence state mismatch: {} != {}",
+            a.persistence_state_hash, b.persistence_state_hash
         ));
     }
     Ok(())
@@ -297,6 +337,12 @@ impl FencingToken {
     /// Returns true if this token is newer than `other`.
     pub fn supersedes(&self, other: &FencingToken) -> bool {
         (self.epoch, self.sequence) > (other.epoch, other.sequence)
+    }
+
+    pub fn matches(&self, other: &FencingToken) -> bool {
+        self.epoch.cmp(&other.epoch).is_eq()
+            && self.sequence.cmp(&other.sequence).is_eq()
+            && constant_time_str_eq(&self.operator_id, &other.operator_id)
     }
 }
 
@@ -441,17 +487,22 @@ impl ScenarioRunner {
 
     pub fn summary(&self) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
-        map.insert(
-            "total".to_string(),
-            self.results.len().to_string(),
-        );
+        map.insert("total".to_string(), self.results.len().to_string());
         map.insert(
             "passed".to_string(),
-            self.results.iter().filter(|r| r.passed()).count().to_string(),
+            self.results
+                .iter()
+                .filter(|r| r.passed())
+                .count()
+                .to_string(),
         );
         map.insert(
             "failed".to_string(),
-            self.results.iter().filter(|r| !r.passed()).count().to_string(),
+            self.results
+                .iter()
+                .filter(|r| !r.passed())
+                .count()
+                .to_string(),
         );
         map.insert("schema_version".to_string(), SCHEMA_VERSION.to_string());
         map
@@ -459,7 +510,7 @@ impl ScenarioRunner {
 }
 
 // ---------------------------------------------------------------------------
-// Mock Clock
+// Deterministic Test Clock
 // ---------------------------------------------------------------------------
 
 /// A test clock for deterministic timestamps in E2E tests.
@@ -486,21 +537,28 @@ impl TestClock {
 }
 
 // ---------------------------------------------------------------------------
-// Mock Persistence
+// Tempfile-backed Persistence
 // ---------------------------------------------------------------------------
 
-/// A mock in-memory persistence layer simulating frankensqlite.
+/// A tempfile-backed persistence layer exercising the frankensqlite contract.
 #[derive(Debug, Clone)]
 pub struct TestPersistence {
     store: BTreeMap<String, String>,
     fencing_token: Option<FencingToken>,
+    backing_path: PathBuf,
 }
 
 impl TestPersistence {
     pub fn new() -> Self {
+        let id = NEXT_PERSISTENCE_ID.fetch_add(1, Ordering::Relaxed);
+        let backing_path = std::env::temp_dir().join(format!(
+            "franken_node_adjacent_substrate_{pid}_{id}.kv",
+            pid = std::process::id()
+        ));
         Self {
             store: BTreeMap::new(),
             fencing_token: None,
+            backing_path,
         }
     }
 
@@ -512,7 +570,7 @@ impl TestPersistence {
         token: &FencingToken,
     ) -> Result<(), StructuredError> {
         if let Some(ref current) = self.fencing_token {
-            if !token.supersedes(current) && token != current {
+            if !token.supersedes(current) && !token.matches(current) {
                 return Err(StructuredError {
                     code: ERR_E2E_FENCING_REJECTED.to_string(),
                     message: format!("Stale fencing token for key {key}"),
@@ -524,6 +582,13 @@ impl TestPersistence {
         }
         self.fencing_token = Some(token.clone());
         self.store.insert(key.to_string(), value.to_string());
+        self.flush_to_disk().map_err(|message| StructuredError {
+            code: ERR_E2E_PERSISTENCE_MISMATCH.to_string(),
+            message,
+            substrate: Substrate::FrankenSqlite,
+            trace_id: String::new(),
+            details: BTreeMap::new(),
+        })?;
         Ok(())
     }
 
@@ -535,10 +600,57 @@ impl TestPersistence {
     pub fn current_token(&self) -> Option<&FencingToken> {
         self.fencing_token.as_ref()
     }
+
+    pub fn backing_path(&self) -> &Path {
+        &self.backing_path
+    }
+
+    pub fn persisted_text(&self) -> Result<String, StructuredError> {
+        fs::read_to_string(&self.backing_path).map_err(|err| StructuredError {
+            code: ERR_E2E_PERSISTENCE_MISMATCH.to_string(),
+            message: format!(
+                "failed reading persistence backing file {}: {err}",
+                self.backing_path.display()
+            ),
+            substrate: Substrate::FrankenSqlite,
+            trace_id: String::new(),
+            details: BTreeMap::new(),
+        })
+    }
+
+    fn flush_to_disk(&self) -> Result<(), String> {
+        let mut rendered = String::new();
+        for (key, value) in &self.store {
+            rendered.push_str(&escape_persistence_field(key));
+            rendered.push('\t');
+            rendered.push_str(&escape_persistence_field(value));
+            rendered.push('\n');
+        }
+        fs::write(&self.backing_path, rendered).map_err(|err| {
+            format!(
+                "failed writing persistence backing file {}: {err}",
+                self.backing_path.display()
+            )
+        })
+    }
+}
+
+fn escape_persistence_field(input: &str) -> String {
+    let mut escaped = String::new();
+    for ch in input.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 // ---------------------------------------------------------------------------
-// Mock Service Layer
+// Service Test Harness
 // ---------------------------------------------------------------------------
 
 /// Simulates the fastapi_rust service layer.
@@ -588,10 +700,7 @@ impl TestService {
     }
 
     /// Get operator status from persistence.
-    pub fn get_operator_status(
-        &self,
-        operator_id: &str,
-    ) -> Result<String, StructuredError> {
+    pub fn get_operator_status(&self, operator_id: &str) -> Result<String, StructuredError> {
         let key = format!("operator:{operator_id}:status");
         self.persistence
             .read(&key)
@@ -648,7 +757,7 @@ impl TestService {
 }
 
 // ---------------------------------------------------------------------------
-// Mock TUI Layer
+// TUI Test Harness
 // ---------------------------------------------------------------------------
 
 /// Simulates the frankentui presentation layer.
@@ -772,6 +881,42 @@ fn deterministic_hash(seed: u64, data: &str) -> String {
     format!("{h:016x}")
 }
 
+fn operator_status_replay_fingerprint(
+    clock: &TestClock,
+    seed: u64,
+) -> Result<ReplayResult, String> {
+    let mut events = vec![E2E_SCENARIO_START.to_string()];
+    let trace_id = make_trace_id(seed);
+    let mut service = TestService::new(clock.clone());
+    let token = FencingToken::new(1, 1, "op-1");
+    let mut tui = TestTui::new();
+
+    service
+        .update_operator_status("op-1", "active", &token, &trace_id)
+        .map_err(|err| err.to_string())?;
+    let status = service
+        .get_operator_status("op-1")
+        .map_err(|err| err.to_string())?;
+    tui.render_status_panel("op-1", &status)
+        .map_err(|err| err.to_string())?;
+    events.push(E2E_SCENARIO_PASS.to_string());
+
+    let persisted_state = service
+        .persistence()
+        .persisted_text()
+        .map_err(|err| err.to_string())?;
+
+    Ok(ReplayResult {
+        seed: ReplaySeed {
+            seed,
+            test_clock_ms: clock.now_ms(),
+        },
+        output_hash: deterministic_hash(seed, "operator_status_flow:pass"),
+        persistence_state_hash: deterministic_hash(seed, &persisted_state),
+        events,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // E2E Scenario 1: Operator Status Flow
 // ---------------------------------------------------------------------------
@@ -794,32 +939,30 @@ pub fn scenario_operator_status(clock: &TestClock, seed: u64) -> ScenarioResult 
 
     // TUI initiates -> service processes -> persistence stores -> TUI renders
     match service.update_operator_status("op-1", "active", &token, &trace_id) {
-        Ok(_) => {
-            match service.get_operator_status("op-1") {
-                Ok(status) => {
-                    if tui.render_status_panel("op-1", &status).is_ok() {
-                        events.push(E2E_SCENARIO_PASS.to_string());
-                        return ScenarioResult {
-                            name: "operator_status_flow".to_string(),
-                            outcome: ScenarioOutcome::Pass,
-                            trace,
-                            events,
-                            duration_ms: clock.now_ms(),
-                        };
-                    }
-                }
-                Err(e) => {
-                    events.push(E2E_SCENARIO_FAIL.to_string());
+        Ok(_) => match service.get_operator_status("op-1") {
+            Ok(status) => {
+                if tui.render_status_panel("op-1", &status).is_ok() {
+                    events.push(E2E_SCENARIO_PASS.to_string());
                     return ScenarioResult {
                         name: "operator_status_flow".to_string(),
-                        outcome: ScenarioOutcome::Fail(e.to_string()),
+                        outcome: ScenarioOutcome::Pass,
                         trace,
                         events,
                         duration_ms: clock.now_ms(),
                     };
                 }
             }
-        }
+            Err(e) => {
+                events.push(E2E_SCENARIO_FAIL.to_string());
+                return ScenarioResult {
+                    name: "operator_status_flow".to_string(),
+                    outcome: ScenarioOutcome::Fail(e.to_string()),
+                    trace,
+                    events,
+                    duration_ms: clock.now_ms(),
+                };
+            }
+        },
         Err(e) => {
             events.push(E2E_SCENARIO_FAIL.to_string());
             return ScenarioResult {
@@ -865,11 +1008,12 @@ pub fn scenario_lease_management(clock: &TestClock, seed: u64) -> ScenarioResult
     match service.acquire_lease("op-lease", &token, &trace_id) {
         Ok(acquired_token) => {
             // Verify the token was stored correctly
-            if service.persistence().current_token() == Some(&acquired_token) {
-                if tui
-                    .render_status_panel("op-lease", "lease_active")
-                    .is_ok()
-                {
+            if service
+                .persistence()
+                .current_token()
+                .is_some_and(|current| current.matches(&acquired_token))
+            {
+                if tui.render_status_panel("op-lease", "lease_active").is_ok() {
                     events.push(E2E_SCENARIO_PASS.to_string());
                     return ScenarioResult {
                         name: "lease_management_flow".to_string(),
@@ -1009,12 +1153,14 @@ pub fn scenario_error_propagation(clock: &TestClock, seed: u64) -> ScenarioResul
         }
         Err(err) => {
             // Verify the error is structured and propagates to TUI
-            if err.code == ERR_E2E_FENCING_REJECTED {
+            if constant_time_str_eq(&err.code, ERR_E2E_FENCING_REJECTED) {
                 tui.render_error(&err);
-                if tui.error_count() == 1
-                    && tui.panels().last().map(|p| p.get("code").map(|c| c.as_str()))
-                        == Some(Some(ERR_E2E_FENCING_REJECTED))
-                {
+                let rendered_code_matches = tui
+                    .panels()
+                    .last()
+                    .and_then(|p| p.get("code"))
+                    .is_some_and(|code| constant_time_str_eq(code, ERR_E2E_FENCING_REJECTED));
+                if tui.error_count() == 1 && rendered_code_matches {
                     events.push(E2E_SCENARIO_PASS.to_string());
                     return ScenarioResult {
                         name: "error_propagation_flow".to_string(),
@@ -1071,7 +1217,7 @@ pub fn scenario_concurrent_access(clock: &TestClock, seed: u64) -> ScenarioResul
 
     match (result_a, result_b, result_a2) {
         (Ok(_), Ok(_), Err(err)) => {
-            if err.code == ERR_E2E_FENCING_REJECTED {
+            if constant_time_str_eq(&err.code, ERR_E2E_FENCING_REJECTED) {
                 events.push(E2E_CONCURRENT_CONFLICT.to_string());
                 events.push(E2E_SCENARIO_PASS.to_string());
                 ScenarioResult {
@@ -1099,9 +1245,7 @@ pub fn scenario_concurrent_access(clock: &TestClock, seed: u64) -> ScenarioResul
             events.push(E2E_SCENARIO_FAIL.to_string());
             ScenarioResult {
                 name: "concurrent_access_flow".to_string(),
-                outcome: ScenarioOutcome::Fail(
-                    "Unexpected concurrent access results".to_string(),
-                ),
+                outcome: ScenarioOutcome::Fail("Unexpected concurrent access results".to_string()),
                 trace,
                 events,
                 duration_ms: clock.now_ms(),
@@ -1178,10 +1322,34 @@ pub fn scenario_replay_determinism(clock_start_ms: u64, seed: u64) -> ScenarioRe
 
     // Run the same scenario twice with identical seeds/clocks
     let clock_a = TestClock::new(clock_start_ms);
-    let result_a = scenario_operator_status(&clock_a, seed);
+    let replay_a = match operator_status_replay_fingerprint(&clock_a, seed) {
+        Ok(result) => result,
+        Err(err) => {
+            events.push(E2E_SCENARIO_FAIL.to_string());
+            return ScenarioResult {
+                name: "replay_determinism".to_string(),
+                outcome: ScenarioOutcome::Fail(err),
+                trace: TraceTree::new(),
+                events,
+                duration_ms: clock_a.now_ms(),
+            };
+        }
+    };
 
     let clock_b = TestClock::new(clock_start_ms);
-    let result_b = scenario_operator_status(&clock_b, seed);
+    let replay_b = match operator_status_replay_fingerprint(&clock_b, seed) {
+        Ok(result) => result,
+        Err(err) => {
+            events.push(E2E_SCENARIO_FAIL.to_string());
+            return ScenarioResult {
+                name: "replay_determinism".to_string(),
+                outcome: ScenarioOutcome::Fail(err),
+                trace: TraceTree::new(),
+                events,
+                duration_ms: clock_b.now_ms(),
+            };
+        }
+    };
 
     // Build a trace for this scenario itself
     let trace_id = make_trace_id(seed.wrapping_add(1000));
@@ -1189,27 +1357,14 @@ pub fn scenario_replay_determinism(clock_start_ms: u64, seed: u64) -> ScenarioRe
     let trace = build_cross_substrate_trace(
         &trace_id,
         &clock,
-        &[Substrate::FrankenTui, Substrate::FastapiRust],
+        &[
+            Substrate::FrankenTui,
+            Substrate::FastapiRust,
+            Substrate::SqlmodelRust,
+            Substrate::FrankenSqlite,
+        ],
         "replay_determinism",
     );
-
-    // Compare outcomes
-    let replay_a = ReplayResult {
-        seed: ReplaySeed {
-            seed,
-            test_clock_ms: clock_start_ms,
-        },
-        output_hash: deterministic_hash(seed, &format!("{:?}", result_a.outcome)),
-        events: result_a.events.clone(),
-    };
-    let replay_b = ReplayResult {
-        seed: ReplaySeed {
-            seed,
-            test_clock_ms: clock_start_ms,
-        },
-        output_hash: deterministic_hash(seed, &format!("{:?}", result_b.outcome)),
-        events: result_b.events.clone(),
-    };
 
     match verify_replay_determinism(&replay_a, &replay_b) {
         Ok(()) => {
@@ -1306,7 +1461,10 @@ mod tests {
         assert_eq!(ERR_E2E_REPLAY_DIVERGED, "ERR_E2E_REPLAY_DIVERGED");
         assert_eq!(ERR_E2E_PERSISTENCE_MISMATCH, "ERR_E2E_PERSISTENCE_MISMATCH");
         assert_eq!(ERR_E2E_SERVICE_ERROR, "ERR_E2E_SERVICE_ERROR");
-        assert_eq!(ERR_E2E_CONCURRENT_INCONSISTENT, "ERR_E2E_CONCURRENT_INCONSISTENT");
+        assert_eq!(
+            ERR_E2E_CONCURRENT_INCONSISTENT,
+            "ERR_E2E_CONCURRENT_INCONSISTENT"
+        );
         assert_eq!(ERR_E2E_TUI_RENDER_FAILED, "ERR_E2E_TUI_RENDER_FAILED");
         assert_eq!(ERR_E2E_AUDIT_MISSING, "ERR_E2E_AUDIT_MISSING");
         assert_eq!(ERR_E2E_FENCING_REJECTED, "ERR_E2E_FENCING_REJECTED");
@@ -1472,11 +1630,11 @@ mod tests {
             details: BTreeMap::new(),
         });
         // Tamper with the hash
-        log.entries[0].prev_hash = "tampered".to_string();
+        log.entries.get_mut(0).expect("entry exists").prev_hash = "tampered".to_string();
         assert!(log.verify_chain().is_err());
     }
 
-    // -- Mock persistence tests ---------------------------------------------
+    // -- Tempfile-backed persistence tests ----------------------------------
 
     #[test]
     fn test_persistence_write_read() {
@@ -1487,6 +1645,17 @@ mod tests {
     }
 
     #[test]
+    fn test_persistence_writes_tempfile_backing_store() {
+        let mut store = TestPersistence::new();
+        let token = FencingToken::new(1, 1, "op");
+        store.write("key1", "value1", &token).unwrap();
+
+        assert!(store.backing_path().exists());
+        let persisted = store.persisted_text().unwrap();
+        assert!(persisted.contains("key1\tvalue1\n"));
+    }
+
+    #[test]
     fn test_persistence_fencing_rejects_stale() {
         let mut store = TestPersistence::new();
         let token_new = FencingToken::new(1, 2, "op-new");
@@ -1494,10 +1663,7 @@ mod tests {
         let token_old = FencingToken::new(1, 1, "op-old");
         let result = store.write("key1", "v2", &token_old);
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().code,
-            ERR_E2E_FENCING_REJECTED
-        );
+        assert_eq!(result.unwrap_err().code, ERR_E2E_FENCING_REJECTED);
     }
 
     #[test]
@@ -1510,7 +1676,7 @@ mod tests {
         assert_eq!(store.read("key1"), Some(&"v2".to_string()));
     }
 
-    // -- Mock service tests -------------------------------------------------
+    // -- Service harness tests ----------------------------------------------
 
     #[test]
     fn test_service_update_and_get_status() {
@@ -1543,7 +1709,7 @@ mod tests {
         assert_eq!(result.unwrap_err().code, ERR_E2E_PERSISTENCE_MISMATCH);
     }
 
-    // -- Mock TUI tests -----------------------------------------------------
+    // -- TUI harness tests --------------------------------------------------
 
     #[test]
     fn test_tui_render_status() {
@@ -1589,6 +1755,7 @@ mod tests {
                 test_clock_ms: 1000,
             },
             output_hash: "abc123".to_string(),
+            persistence_state_hash: "state123".to_string(),
             events: vec!["E1".to_string()],
         };
         let b = a.clone();
@@ -1603,6 +1770,7 @@ mod tests {
                 test_clock_ms: 1000,
             },
             output_hash: "abc123".to_string(),
+            persistence_state_hash: "state123".to_string(),
             events: vec!["E1".to_string()],
         };
         let b = ReplayResult {
@@ -1622,6 +1790,7 @@ mod tests {
                 test_clock_ms: 1000,
             },
             output_hash: "abc123".to_string(),
+            persistence_state_hash: "state123".to_string(),
             events: vec!["E1".to_string()],
         };
         let b = ReplayResult {
@@ -1630,6 +1799,26 @@ mod tests {
         };
         let result = verify_replay_determinism(&a, &b);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_replay_determinism_persistence_mismatch() {
+        let a = ReplayResult {
+            seed: ReplaySeed {
+                seed: 42,
+                test_clock_ms: 1000,
+            },
+            output_hash: "abc123".to_string(),
+            persistence_state_hash: "state123".to_string(),
+            events: vec!["E1".to_string()],
+        };
+        let b = ReplayResult {
+            persistence_state_hash: "state456".to_string(),
+            ..a.clone()
+        };
+        let result = verify_replay_determinism(&a, &b);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("persistence state mismatch"));
     }
 
     // -- Mock clock tests ---------------------------------------------------

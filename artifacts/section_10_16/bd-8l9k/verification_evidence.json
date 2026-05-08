@@ -19,7 +19,7 @@
   "checker": {
     "command": "python3 scripts/check_cross_substrate_e2e.py --json",
     "exit_code": 0,
-    "passed_checks": 55,
+    "passed_checks": 60,
     "failed_checks": 0
   },
   "self_test": {
@@ -31,9 +31,9 @@
   "unit_tests": {
     "command": "python3 -m pytest -q tests/test_check_cross_substrate_e2e.py",
     "exit_code": 0,
-    "summary": "13 passed in 0.14s"
+    "summary": "16 passed in 0.19s"
   },
-  "rust_tests": 54,
+  "rust_tests": 56,
   "scenarios": 7,
   "event_codes": [
     "E2E_SCENARIO_START",
@@ -82,7 +82,9 @@
   },
   "notes": [
     "All 7 E2E scenarios pass covering all four substrate planes.",
-    "54 Rust unit tests validate trace propagation, fencing, audit chain, replay determinism, and concurrent access.",
+    "Replay determinism now includes frankensqlite coverage and a persistence state hash match.",
+    "56 Rust unit tests validate trace propagation, fencing, tempfile-backed persistence, audit chain, replay determinism, and concurrent access.",
+    "The checker rejects mock/in-memory persistence markers in the cross-substrate persistence harness.",
     "Workspace-level clippy/fmt baseline issues remain outside this bead scope."
   ]
 }

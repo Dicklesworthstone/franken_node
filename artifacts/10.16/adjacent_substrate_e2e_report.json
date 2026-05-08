@@ -61,8 +61,8 @@
     },
     {
       "name": "replay_determinism",
-      "description": "Replay with fixed seeds and mock clocks produces byte-identical results",
-      "substrates": ["frankentui", "fastapi_rust"],
+      "description": "Replay with fixed seeds, deterministic test clocks, and tempfile-backed persistence produces byte-identical results",
+      "substrates": ["frankentui", "fastapi_rust", "sqlmodel_rust", "frankensqlite"],
       "outcome": "PASS",
       "trace_complete": true,
       "orphaned_spans": 0,
@@ -82,6 +82,9 @@
     "runs": 2,
     "deterministic": true,
     "hash_match": true,
+    "persistence_backend": "tempfile-backed-frankensqlite-contract",
+    "persistence_state_match": true,
+    "persistence_state_hash_match": true,
     "event_sequence_match": true
   },
   "event_codes": [
@@ -113,6 +116,6 @@
     "INV-E2E-SCHEMA-COMPAT",
     "INV-E2E-CONCURRENT-SAFETY"
   ],
-  "rust_test_count": 45,
+  "rust_test_count": 56,
   "verdict": "PASS"
 }

@@ -78,6 +78,19 @@ def _read(path: Path) -> str:
     return ""
 
 
+def _load_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _is_json_true(value: object) -> bool:
+    return isinstance(value, bool) and value
+
+
 def _check(name: str, ok: bool, detail: str = "") -> dict:
     return {"check": name, "passed": ok, "detail": detail or ("ok" if ok else "FAIL")}
 
@@ -113,21 +126,43 @@ def _checks() -> list:
     ))
 
     # 4. Report artifact exists
-    report_valid = False
-    if REPORT_FILE.exists():
-        try:
-            report = json.loads(REPORT_FILE.read_text(encoding="utf-8"))
-            report_valid = (
-                "scenarios" in report
-                and "trace_coverage" in report
-                and "replay_results" in report
-            )
-        except (json.JSONDecodeError, OSError):
-            pass
+    report = _load_json(REPORT_FILE)
+    report_valid = (
+        "scenarios" in report
+        and "trace_coverage" in report
+        and "replay_results" in report
+    )
     checks.append(_check(
         "Report artifact exists and valid",
         report_valid,
         str(REPORT_FILE),
+    ))
+
+    replay_scenario = next(
+        (
+            scenario
+            for scenario in report.get("scenarios", [])
+            if scenario.get("name") == "replay_determinism"
+        ),
+        {},
+    )
+    replay_substrates = set(replay_scenario.get("substrates", []))
+    replay_results = report.get("replay_results", {})
+    checks.append(_check(
+        "Replay report covers frankensqlite persistence",
+        "frankensqlite" in replay_substrates,
+        f"replay substrates={sorted(replay_substrates)}",
+    ))
+    checks.append(_check(
+        "Replay report records persistence state match",
+        _is_json_true(replay_results.get("persistence_state_match"))
+        and _is_json_true(replay_results.get("persistence_state_hash_match")),
+        "requires persistence_state_match=true and persistence_state_hash_match=true",
+    ))
+    checks.append(_check(
+        "Replay report names tempfile-backed persistence",
+        replay_results.get("persistence_backend") == "tempfile-backed-frankensqlite-contract",
+        f"persistence_backend={replay_results.get('persistence_backend')!r}",
     ))
 
     # 5. Test file exists
@@ -236,13 +271,35 @@ def _checks() -> list:
         "BTreeMap" in src,
     ))
 
-    # 20. Serde derives
+    # 20. Persistence contract is tempfile-backed, not in-memory-only
+    mocked_persistence_markers = [
+        "Mock Persistence",
+        "mock in-memory persistence",
+        "MockPersistence",
+    ]
+    checks.append(_check(
+        "Persistence harness is tempfile-backed",
+        not any(marker in src for marker in mocked_persistence_markers)
+        and "Tempfile-backed Persistence" in src
+        and "backing_path" in src
+        and "persisted_text" in src,
+        "must not use mock in-memory persistence markers",
+    ))
+
+    checks.append(_check(
+        "Replay verification includes persistence state hash",
+        "persistence_state_hash" in src
+        and "persistence state mismatch" in src,
+        "ReplayResult must compare persistence_state_hash",
+    ))
+
+    # 21. Serde derives
     checks.append(_check(
         "Serialize/Deserialize derives",
         "Serialize" in src and "Deserialize" in src,
     ))
 
-    # 21. Rust unit tests count
+    # 22. Rust unit tests count
     test_count = src.count("#[test]")
     checks.append(_check(
         f"Rust unit tests ({test_count})",
