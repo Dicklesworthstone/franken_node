@@ -1,3 +1,4 @@
+pub mod cleanup_executor;
 pub mod close_condition;
 pub mod doctor;
 pub mod engine_dispatcher;
@@ -12,9 +13,10 @@ pub mod validation_broker;
 pub mod validation_closeout;
 pub mod validation_planner;
 pub mod validation_proof_cache;
-pub mod validation_recovery_planner;
 pub mod validation_proof_coalescer;
+pub mod validation_proof_debt_ledger;
 pub mod validation_readiness;
+pub mod validation_recovery_planner;
 pub mod workspace_pressure_policy;
 
 #[cfg(test)]
