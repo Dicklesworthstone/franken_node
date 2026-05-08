@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::clock;
+use frankenengine_node::runtime::clock;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;

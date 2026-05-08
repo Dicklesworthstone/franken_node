@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![cfg(not(test))]
 
-pub use frankenengine_node::{ActionableError, bounded_read_to_string, lock_utils};
+pub use frankenengine_node::{ActionableError, bounded_read, bounded_read_to_string, lock_utils};
 
 /// Maximum file size limits to prevent DoS via parser bombs
 const MAX_EVIDENCE_INPUT_BYTES: u64 = 10 << 20; // 10 MiB for evidence input files
@@ -70,7 +70,7 @@ mod security {
     pub mod epoch_scoped_keys;
 }
 #[allow(dead_code)]
-mod runtime {
+mod local_runtime {
     #[path = "resource_governor.rs"]
     pub mod resource_governor;
 }
@@ -11077,7 +11077,7 @@ fn build_doctor_report_with_cwd_and_policy_input(
         || {
             // Check if we can create a basic resource governor observation
             let now = chrono::Utc::now();
-            match crate::runtime::resource_governor::ResourceGovernorObservation::new(
+            match crate::local_runtime::resource_governor::ResourceGovernorObservation::new(
                 now,
                 "doctor-check".to_string(),
                 vec![], // Empty processes for check

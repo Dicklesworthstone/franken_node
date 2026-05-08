@@ -20,7 +20,7 @@ pub(crate) fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 
 /// Read file with size limits to prevent DoS via parser bombs.
 /// Returns file content as String if within size limit, error otherwise.
-pub(crate) fn bounded_read_to_string(
+pub fn bounded_read_to_string(
     path: &std::path::Path,
     max_bytes: u64,
 ) -> std::io::Result<String> {
@@ -48,7 +48,7 @@ pub(crate) fn bounded_read_to_string(
 
 /// Read file with size limits to prevent DoS via parser bombs.
 /// Returns file content as Vec<u8> if within size limit, error otherwise.
-pub(crate) fn bounded_read(path: &std::path::Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+pub fn bounded_read(path: &std::path::Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
     use std::fs::File;
     use std::io::Read;
 
