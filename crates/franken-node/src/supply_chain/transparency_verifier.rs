@@ -1443,4 +1443,29 @@ mod tests {
         assert!(!f_leaf.to_string().contains("expected-leaf"));
         assert!(!f_leaf.to_string().contains("actual-leaf"));
     }
+
+    #[test]
+    fn log_root_debug_redacts_root_hash() {
+        // Test that LogRoot Debug implementation properly redacts root_hash
+        // This test verifies the fix for bd-rl3sw (commit efc07d20)
+
+        let log_root = LogRoot {
+            tree_size: 12345,
+            root_hash: "sensitive-root-hash-data-that-should-be-redacted".to_string(),
+        };
+
+        let debug_output = format!("{:?}", log_root);
+
+        // Positive test: Assert redaction marker appears
+        assert!(debug_output.contains("[REDACTED]"), "Debug output should contain redaction marker");
+
+        // Negative test: Assert sensitive root hash data does NOT appear
+        assert!(!debug_output.contains("sensitive-root-hash-data-that-should-be-redacted"),
+                "Sensitive root hash data should not appear in debug output");
+
+        // Format verification: Assert non-sensitive fields still appear correctly
+        assert!(debug_output.contains("12345"), "Tree size should appear");
+        assert!(debug_output.contains("tree_size"), "Field name should appear");
+        assert!(debug_output.contains("root_hash"), "Field name should appear (but not value)");
+    }
 }

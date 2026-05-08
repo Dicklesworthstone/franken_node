@@ -3678,5 +3678,41 @@ mod tests {
             let safe_counter = vulnerable_counter.saturating_add(1);
             assert_eq!(safe_counter, u64::MAX, "safe increment should saturate");
         }
+
+        #[test]
+        fn quarantine_order_debug_redacts_signature() {
+            // Test that QuarantineOrder Debug implementation properly redacts signature
+            // This test verifies the fix for bd-rl3sw (commit efc07d20)
+
+            let order = QuarantineOrder {
+                order_id: "test-order-123".to_string(),
+                scope: QuarantineScope::SingleNode("test-node".to_string()),
+                mode: QuarantineMode::Soft,
+                severity: QuarantineSeverity::Medium,
+                reason: QuarantineReason::VulnerabilityDisclosed,
+                justification: "Test quarantine justification".to_string(),
+                issued_by: "test-operator".to_string(),
+                issued_at: "2024-01-01T00:00:00Z".to_string(),
+                signature: "sensitive-signature-data-that-should-be-redacted".to_string(),
+                trace_id: "test-trace-456".to_string(),
+                grace_period_secs: 3600,
+            };
+
+            let debug_output = format!("{:?}", order);
+
+            // Positive test: Assert redaction marker appears
+            assert!(debug_output.contains("[REDACTED]"), "Debug output should contain redaction marker");
+
+            // Negative test: Assert sensitive signature data does NOT appear
+            assert!(!debug_output.contains("sensitive-signature-data-that-should-be-redacted"),
+                    "Sensitive signature data should not appear in debug output");
+
+            // Format verification: Assert non-sensitive fields still appear correctly
+            assert!(debug_output.contains("test-order-123"), "Order ID should appear");
+            assert!(debug_output.contains("test-operator"), "Issued by should appear");
+            assert!(debug_output.contains("test-trace-456"), "Trace ID should appear");
+            assert!(debug_output.contains("Test quarantine justification"), "Justification should appear");
+            assert!(debug_output.contains("3600"), "Grace period should appear");
+        }
     }
 }

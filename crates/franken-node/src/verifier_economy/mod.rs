@@ -4913,4 +4913,67 @@ mod tests {
         // When there's an error, should return u64::MAX (fail-closed)
         assert_eq!(result_error, u64::MAX);
     }
+
+    #[test]
+    fn attestation_signature_debug_redacts_crypto_fields() {
+        // Test that AttestationSignature Debug implementation properly redacts crypto fields
+        // This test verifies the fix for bd-rl3sw (commit efc07d20)
+
+        let signature = AttestationSignature {
+            algorithm: "ed25519".to_string(),
+            public_key: "sensitive-public-key-data-that-should-be-redacted".to_string(),
+            value: "sensitive-signature-value-that-should-be-redacted".to_string(),
+        };
+
+        let debug_output = format!("{:?}", signature);
+
+        // Positive test: Assert redaction markers appear (should be 2 for public_key + value)
+        let redacted_count = debug_output.matches("[REDACTED]").count();
+        assert_eq!(redacted_count, 2, "Debug output should contain 2 redaction markers");
+
+        // Negative test: Assert sensitive crypto data does NOT appear
+        assert!(!debug_output.contains("sensitive-public-key-data-that-should-be-redacted"),
+                "Sensitive public key data should not appear in debug output");
+        assert!(!debug_output.contains("sensitive-signature-value-that-should-be-redacted"),
+                "Sensitive signature value data should not appear in debug output");
+
+        // Format verification: Assert non-sensitive fields still appear correctly
+        assert!(debug_output.contains("ed25519"), "Algorithm should appear");
+        assert!(debug_output.contains("algorithm"), "Field name should appear");
+        assert!(debug_output.contains("public_key"), "Field name should appear (but not value)");
+        assert!(debug_output.contains("value"), "Field name should appear (but not value)");
+    }
+
+    #[test]
+    fn verifier_registration_debug_redacts_sensitive_fields() {
+        // Test that VerifierRegistration Debug implementation properly redacts sensitive fields
+        // This test verifies the fix for bd-rl3sw (commit efc07d20)
+
+        let registration = VerifierRegistration {
+            name: "test-verifier".to_string(),
+            contact: "sensitive-contact-info@example.com".to_string(),
+            public_key: "sensitive-verifier-public-key-data".to_string(),
+            capabilities: vec![VerificationDimension::Compliance],
+            tier: VerifierTier::Enterprise,
+        };
+
+        let debug_output = format!("{:?}", registration);
+
+        // Positive test: Assert redaction markers appear (should be 2 for contact + public_key)
+        let redacted_count = debug_output.matches("[REDACTED]").count();
+        assert_eq!(redacted_count, 2, "Debug output should contain 2 redaction markers");
+
+        // Negative test: Assert sensitive data does NOT appear
+        assert!(!debug_output.contains("sensitive-contact-info@example.com"),
+                "Sensitive contact info should not appear in debug output");
+        assert!(!debug_output.contains("sensitive-verifier-public-key-data"),
+                "Sensitive public key data should not appear in debug output");
+
+        // Format verification: Assert non-sensitive fields still appear correctly
+        assert!(debug_output.contains("test-verifier"), "Name should appear");
+        assert!(debug_output.contains("Compliance"), "Capabilities should appear");
+        assert!(debug_output.contains("Enterprise"), "Tier should appear");
+        assert!(debug_output.contains("contact"), "Field name should appear (but not value)");
+        assert!(debug_output.contains("public_key"), "Field name should appear (but not value)");
+    }
 }
