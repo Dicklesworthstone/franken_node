@@ -4,7 +4,6 @@
 //! candidates based on workspace pressure, RCH availability, and resource constraints.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::push_bounded;
