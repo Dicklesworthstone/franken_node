@@ -490,7 +490,7 @@ impl WorkspacePressurePolicy {
 
 /// Estimate size of temporary artifacts for cleanup analysis.
 fn estimate_temp_artifacts_size() -> std::io::Result<u64> {
-    let mut total = 0;
+    let mut total: u64 = 0;
 
     // Check common temp locations
     let temp_patterns = ["/tmp/cargo-*", "/tmp/rust-*", "/tmp/rch-*"];
@@ -521,8 +521,7 @@ fn calculate_directory_size_safe<P: AsRef<Path>>(path: P) -> std::io::Result<u64
         return Ok(0);
     }
 
-    let mut total = 0;
-    let mut depth = 0;
+    let mut total: u64 = 0;
     const MAX_DEPTH: usize = 10; // Prevent infinite recursion
 
     fn calculate_recursive(path: &Path, depth: usize, total: &mut u64) -> std::io::Result<()> {
