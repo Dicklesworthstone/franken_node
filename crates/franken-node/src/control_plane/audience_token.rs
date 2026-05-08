@@ -315,7 +315,11 @@ impl AudienceBoundToken {
     }
 
     /// Compute the SHA-256 hash of this token for chain integrity.
-    pub fn hash(&self) -> String {
+    /// Compute token hash as raw bytes without hex encoding.
+    ///
+    /// For performance-critical paths where only byte comparison is needed.
+    /// Use this in verification loops to avoid String allocation overhead.
+    pub fn hash_bytes(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"audience_auth_v1:");
         let tid = self.token_id.as_str();
@@ -344,7 +348,11 @@ impl AudienceBoundToken {
         }
         update_len_prefixed(&mut hasher, &self.signature);
         hasher.update([self.max_delegation_depth]);
-        hex::encode(hasher.finalize())
+        hasher.finalize().into()
+    }
+
+    pub fn hash(&self) -> String {
+        hex::encode(self.hash_bytes())
     }
 
     /// Check whether this token is expired at `now_ms`.
@@ -1664,6 +1672,30 @@ mod tests {
             t1.hash().as_bytes(),
             t2.hash().as_bytes()
         ));
+    }
+
+    #[test]
+    fn test_hash_bytes_identical_to_hash() {
+        // Test that hash_bytes() produces identical output to hex::decode(hash())
+        let token = root_token("test-hash-bytes", 5);
+
+        // Get hash via hash_bytes() method (optimized)
+        let hash_bytes_result = token.hash_bytes();
+
+        // Get hash via hash() method and decode hex (original approach)
+        let hash_string = token.hash();
+        let hash_decoded = hex::decode(&hash_string).expect("hash() should produce valid hex");
+
+        // Results must be byte-identical
+        assert_eq!(hash_bytes_result.len(), 32, "SHA256 should produce 32 bytes");
+        assert_eq!(hash_decoded.len(), 32, "Decoded hex should be 32 bytes");
+        assert_eq!(hash_bytes_result.as_slice(), hash_decoded.as_slice(),
+            "hash_bytes() must produce identical bytes to hex::decode(hash())");
+
+        // Also verify round-trip: hex::encode(hash_bytes()) == hash()
+        let reconstructed_hex = hex::encode(hash_bytes_result);
+        assert_eq!(reconstructed_hex, hash_string,
+            "hex::encode(hash_bytes()) must equal hash()");
     }
 
     #[test]
