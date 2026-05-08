@@ -527,7 +527,7 @@ pub struct AuditRecord {
     pub trace_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustCard {
     pub schema_version: String,
     pub trust_card_version: u64,
@@ -550,6 +550,33 @@ pub struct TrustCard {
     pub derivation_evidence: Option<DerivationMetadata>,
     pub card_hash: String,
     pub registry_signature: String,
+}
+
+impl std::fmt::Debug for TrustCard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrustCard")
+            .field("schema_version", &self.schema_version)
+            .field("trust_card_version", &self.trust_card_version)
+            .field("previous_version_hash", &self.previous_version_hash)
+            .field("extension", &self.extension)
+            .field("publisher", &self.publisher)
+            .field("certification_level", &self.certification_level)
+            .field("capability_declarations", &self.capability_declarations)
+            .field("behavioral_profile", &self.behavioral_profile)
+            .field("revocation_status", &self.revocation_status)
+            .field("provenance_summary", &self.provenance_summary)
+            .field("reputation_score_basis_points", &self.reputation_score_basis_points)
+            .field("reputation_trend", &self.reputation_trend)
+            .field("active_quarantine", &self.active_quarantine)
+            .field("dependency_trust_summary", &self.dependency_trust_summary)
+            .field("last_verified_timestamp", &self.last_verified_timestamp)
+            .field("user_facing_risk_assessment", &self.user_facing_risk_assessment)
+            .field("audit_history", &self.audit_history)
+            .field("derivation_evidence", &self.derivation_evidence)
+            .field("card_hash", &"[REDACTED]")
+            .field("registry_signature", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -651,7 +678,7 @@ pub struct TrustCardSyncReport {
     pub forced_refreshes: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustCardRegistrySnapshot {
     pub schema_version: String,
@@ -670,6 +697,20 @@ struct TrustCardRegistrySnapshotHighWater {
     snapshot_epoch: u64,
     snapshot_hash: String,
     high_water_signature: String,
+}
+
+impl std::fmt::Debug for TrustCardRegistrySnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrustCardRegistrySnapshot")
+            .field("schema_version", &self.schema_version)
+            .field("snapshot_epoch", &self.snapshot_epoch)
+            .field("previous_snapshot_hash", &self.previous_snapshot_hash)
+            .field("cache_ttl_secs", &self.cache_ttl_secs)
+            .field("cards_by_extension", &format!("{} extensions", self.cards_by_extension.len()))
+            .field("snapshot_hash", &"[REDACTED]")
+            .field("registry_signature", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl TrustCardRegistrySnapshot {
