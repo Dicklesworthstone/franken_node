@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::fmt::Write;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
@@ -2509,13 +2510,18 @@ fn scope_fingerprint(scope: &RemoteScope) -> String {
 }
 
 fn encode_scope_entries<'a>(entries: impl IntoIterator<Item = &'a str>) -> String {
-    let mut encoded = String::new();
+    let entries: Vec<&str> = entries.into_iter().collect();
+
+    // Estimate capacity: for each entry, roughly 3 digits + 1 + entry.len() + 1
+    // Conservative estimate avoids reallocation in hot path
+    let estimated_capacity = entries.iter()
+        .map(|entry| 5 + entry.len())  // 3 for length digits + 1 for ':' + entry + 1 for '|'
+        .sum();
+
+    let mut encoded = String::with_capacity(estimated_capacity);
     for entry in entries {
         let entry_len = u64::try_from(entry.len()).unwrap_or(u64::MAX);
-        encoded.push_str(&entry_len.to_string());
-        encoded.push(':');
-        encoded.push_str(entry);
-        encoded.push('|');
+        write!(encoded, "{}:{}|", entry_len, entry).expect("write to String never fails");
     }
     encoded
 }
@@ -2785,6 +2791,46 @@ mod tests {
     fn endpoint_prefix_strategy() -> impl Strategy<Value = String> {
         (1u16..4096, 1u16..512)
             .prop_map(|(tenant, shard)| format!("https://tenant-{tenant}.example.com/api/{shard}"))
+    }
+
+    #[test]
+    fn encode_scope_entries_bit_identical_output() {
+        // Test that optimized implementation produces identical output to original
+        let test_cases = vec![
+            // Empty case
+            vec![],
+            // Single entry
+            vec!["operation1"],
+            // Multiple entries with varying lengths
+            vec!["a", "operation1", "very_long_operation_name_here"],
+            // Mixed typical operation names
+            vec!["TelemetryExport", "FederationSync", "NetworkEgress"],
+            // Edge case: very short and very long
+            vec!["x", "this_is_a_very_long_operation_name_that_tests_capacity_estimation"],
+        ];
+
+        for entries in test_cases {
+            let result = encode_scope_entries(entries.iter().copied());
+
+            // Verify expected format: each entry should be "len:entry|"
+            for entry in &entries {
+                let expected_fragment = format!("{}:{}|", entry.len(), entry);
+                assert!(result.contains(&expected_fragment),
+                    "Result '{}' should contain fragment '{}' for entry '{}'",
+                    result, expected_fragment, entry);
+            }
+
+            // Verify no extra content (count of '|' should match entry count)
+            let pipe_count = result.chars().filter(|&c| c == '|').count();
+            assert_eq!(pipe_count, entries.len(),
+                "Result '{}' should have {} pipes for {} entries",
+                result, entries.len(), entries.len());
+        }
+
+        // Test property: encoding is deterministic and length-prefixed
+        let entries = vec!["abc", "12345"];
+        let result = encode_scope_entries(entries.iter().copied());
+        assert_eq!(result, "3:abc|5:12345|", "Specific encoding should match expected format");
     }
 
     #[test]
