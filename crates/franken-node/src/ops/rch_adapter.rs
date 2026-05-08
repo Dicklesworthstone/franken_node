@@ -6,7 +6,9 @@
 //! and classifies worker/toolchain/timeout problems separately from compile and
 //! test failures.
 
-use crate::ops::validation_broker::{FlightRecorderAdapterOutcome, FlightRecorderAdapterOutcomeClass, RchMode, TimeoutClass};
+use crate::ops::validation_broker::{
+    FlightRecorderAdapterOutcome, FlightRecorderAdapterOutcomeClass, RchMode, TimeoutClass,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -14,7 +16,21 @@ use thiserror::Error;
 
 pub const RCH_ADAPTER_SCHEMA_VERSION: &str = "franken-node/rch-adapter/outcome/v1";
 pub const DEFAULT_MAX_ACTIVE_CARGO_PROCESSES: usize = 2;
+const RCH_COMMAND_DIGEST_DOMAIN: &str = "franken-node/rch-command-digest/v1";
 const SNIPPET_MAX_BYTES: usize = 4_096;
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+fn push_len_prefixed_field(material: &mut String, label: &str, value: &str) {
+    material.push_str(label);
+    material.push(':');
+    material.push_str(&len_to_u64(value.len()).to_string());
+    material.push(':');
+    material.push_str(value);
+    material.push('\0');
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -126,13 +142,27 @@ impl RchInvocation {
 
     #[must_use]
     pub fn canonical_command(&self) -> String {
-        let env = self
-            .env
-            .iter()
-            .map(|(key, value)| format!("{key}={value}"))
-            .collect::<Vec<_>>()
-            .join("\0");
-        format!("cwd={}\0env={env}\0argv={}", self.cwd, self.argv.join("\0"))
+        let mut material = String::from(RCH_COMMAND_DIGEST_DOMAIN);
+        material.push('\0');
+
+        push_len_prefixed_field(&mut material, "cwd", &self.cwd);
+
+        material.push_str("env_count:");
+        material.push_str(&len_to_u64(self.env.len()).to_string());
+        material.push('\0');
+        for (key, value) in &self.env {
+            push_len_prefixed_field(&mut material, "env_key", key);
+            push_len_prefixed_field(&mut material, "env_value", value);
+        }
+
+        material.push_str("argv_count:");
+        material.push_str(&len_to_u64(self.argv.len()).to_string());
+        material.push('\0');
+        for arg in &self.argv {
+            push_len_prefixed_field(&mut material, "argv", arg);
+        }
+
+        material
     }
 
     #[must_use]
@@ -250,11 +280,21 @@ impl RchAdapterOutcome {
             RchOutcomeClass::CompileFailed => FlightRecorderAdapterOutcomeClass::CompileFailed,
             RchOutcomeClass::TestFailed => FlightRecorderAdapterOutcomeClass::TestFailed,
             RchOutcomeClass::WorkerTimeout => FlightRecorderAdapterOutcomeClass::WorkerTimeout,
-            RchOutcomeClass::WorkerMissingToolchain => FlightRecorderAdapterOutcomeClass::WorkerMissingToolchain,
-            RchOutcomeClass::WorkerFilesystemError => FlightRecorderAdapterOutcomeClass::WorkerFilesystemError,
-            RchOutcomeClass::LocalFallbackRefused => FlightRecorderAdapterOutcomeClass::LocalFallbackRefused,
-            RchOutcomeClass::ContentionDeferred => FlightRecorderAdapterOutcomeClass::ContentionDeferred,
-            RchOutcomeClass::BrokerInternalError => FlightRecorderAdapterOutcomeClass::BrokerInternalError,
+            RchOutcomeClass::WorkerMissingToolchain => {
+                FlightRecorderAdapterOutcomeClass::WorkerMissingToolchain
+            }
+            RchOutcomeClass::WorkerFilesystemError => {
+                FlightRecorderAdapterOutcomeClass::WorkerFilesystemError
+            }
+            RchOutcomeClass::LocalFallbackRefused => {
+                FlightRecorderAdapterOutcomeClass::LocalFallbackRefused
+            }
+            RchOutcomeClass::ContentionDeferred => {
+                FlightRecorderAdapterOutcomeClass::ContentionDeferred
+            }
+            RchOutcomeClass::BrokerInternalError => {
+                FlightRecorderAdapterOutcomeClass::BrokerInternalError
+            }
         }
     }
 
@@ -316,7 +356,10 @@ mod tests {
 
         let flight_outcome = rch_outcome.to_flight_recorder_adapter_outcome();
 
-        assert_eq!(flight_outcome.outcome, FlightRecorderAdapterOutcomeClass::Passed);
+        assert_eq!(
+            flight_outcome.outcome,
+            FlightRecorderAdapterOutcomeClass::Passed
+        );
         assert_eq!(flight_outcome.execution_mode, RchMode::Remote);
         assert_eq!(flight_outcome.worker_id, Some("worker-123".to_string()));
         assert_eq!(flight_outcome.timeout_class, TimeoutClass::None);
@@ -358,7 +401,10 @@ mod tests {
 
         let flight_outcome = rch_outcome.to_flight_recorder_adapter_outcome();
 
-        assert_eq!(flight_outcome.outcome, FlightRecorderAdapterOutcomeClass::WorkerTimeout);
+        assert_eq!(
+            flight_outcome.outcome,
+            FlightRecorderAdapterOutcomeClass::WorkerTimeout
+        );
         assert_eq!(flight_outcome.execution_mode, RchMode::Unavailable);
         assert_eq!(flight_outcome.worker_id, None);
         assert_eq!(flight_outcome.timeout_class, TimeoutClass::SshCommand);
@@ -809,6 +855,38 @@ mod tests {
             stderr: stderr.to_string(),
             duration_ms: 1_234,
         }
+    }
+
+    #[test]
+    fn command_digest_length_prefixes_ambiguous_env_assignments() {
+        let mut left_env = BTreeMap::new();
+        left_env.insert("A".to_string(), "B=C".to_string());
+        let left = RchInvocation {
+            argv: vec!["cargo".to_string(), "check".to_string()],
+            env: left_env,
+            cwd: "/repo".to_string(),
+        };
+
+        let mut right_env = BTreeMap::new();
+        right_env.insert("A=B".to_string(), "C".to_string());
+        let right = RchInvocation {
+            argv: vec!["cargo".to_string(), "check".to_string()],
+            env: right_env,
+            cwd: "/repo".to_string(),
+        };
+
+        let ambiguous_left = ["A", "B=C"].join("=");
+        let ambiguous_right = ["A=B", "C"].join("=");
+        let left_material = left.canonical_command();
+        let right_material = right.canonical_command();
+
+        assert_eq!("A=B=C", ambiguous_left);
+        assert_eq!("A=B=C", ambiguous_right);
+        assert!(left_material.starts_with("franken-node/rch-command-digest/v1\0"));
+        assert!(left_material.contains("env_key:1:A\0env_value:3:B=C\0"));
+        assert!(right_material.contains("env_key:3:A=B\0env_value:1:C\0"));
+        assert_ne!(left_material, right_material);
+        assert_ne!(left.command_digest(), right.command_digest());
     }
 
     #[test]
