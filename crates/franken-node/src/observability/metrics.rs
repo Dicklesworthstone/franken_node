@@ -187,7 +187,6 @@ impl MetricsRegistry {
             // Write metric value directly to output buffer (no intermediate allocation)
             render_metric_value_to_buffer(metric.value, &mut output);
             output.push('\n');
-            .expect("render prometheus sample line");
         }
         output
     }
