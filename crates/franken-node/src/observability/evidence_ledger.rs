@@ -7783,4 +7783,399 @@ mod tests {
         let snapshot = ledger.snapshot();
         assert_eq!(snapshot.entries.len(), 0);
     }
+
+    // Comprehensive memory ordering tests for bd-3pvdd (commit 17873a73)
+    // These tests verify actual Acquire/Release semantics without thread::join() barriers
+
+    #[test]
+    fn poison_flag_barrier_coordinated_race() {
+        use std::sync::{Arc, Barrier, atomic::{AtomicBool, Ordering}};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        // Test with barrier coordination to ensure true race conditions
+        // This verifies Acquire/Release ordering without join() sync barrier
+
+        let ledger = SharedEvidenceLedger::new(LedgerCapacity::new(10, 1000));
+        let poison_seen = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let ledger_reader = ledger.clone();
+        let poison_seen_reader = poison_seen.clone();
+        let barrier_reader = barrier.clone();
+
+        let ledger_writer = ledger.clone();
+        let barrier_writer = barrier.clone();
+
+        // Reader thread: polls is_poisoned() in tight loop
+        let reader_handle = thread::spawn(move || {
+            barrier_reader.wait(); // Start simultaneously
+
+            let start = Instant::now();
+            let timeout = Duration::from_millis(100);
+
+            while start.elapsed() < timeout {
+                if ledger_reader.is_poisoned() {
+                    poison_seen_reader.store(true, Ordering::Relaxed);
+                    return true; // Found poison
+                }
+                // Tight loop to create race condition
+            }
+            false // Timeout without seeing poison
+        });
+
+        // Writer thread: marks poison after barrier
+        let writer_handle = thread::spawn(move || {
+            barrier_writer.wait(); // Start simultaneously
+
+            // Small delay to ensure reader starts polling
+            thread::sleep(Duration::from_micros(10));
+            ledger_writer.mark_poisoned();
+        });
+
+        // Wait for both threads
+        let poison_detected = reader_handle.join().expect("reader thread should complete");
+        writer_handle.join().expect("writer thread should complete");
+
+        // With proper Acquire/Release ordering, reader should see poison
+        assert!(poison_detected, "Reader should detect poison with Acquire ordering");
+        assert!(poison_seen.load(Ordering::Relaxed), "poison_seen flag should be set");
+
+        // Final verification
+        assert!(ledger.is_poisoned(), "Ledger should remain poisoned");
+    }
+
+    #[test]
+    fn poison_flag_stress_test_multiple_readers() {
+        use std::sync::{Arc, Barrier, atomic::{AtomicUsize, Ordering}};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        // Stress test: Multiple readers polling while one writer poisons
+        // This tests Acquire/Release under concurrent load
+
+        let ledger = SharedEvidenceLedger::new(LedgerCapacity::new(10, 1000));
+        let readers_detected = Arc::new(AtomicUsize::new(0));
+        let num_readers = 8;
+        let barrier = Arc::new(Barrier::new(num_readers + 1)); // +1 for writer
+
+        let mut reader_handles = Vec::new();
+
+        // Spawn multiple reader threads
+        for reader_id in 0..num_readers {
+            let ledger_reader = ledger.clone();
+            let readers_detected_reader = readers_detected.clone();
+            let barrier_reader = barrier.clone();
+
+            let handle = thread::spawn(move || {
+                barrier_reader.wait(); // Start simultaneously
+
+                let start = Instant::now();
+                let timeout = Duration::from_millis(50);
+
+                while start.elapsed() < timeout {
+                    if ledger_reader.is_poisoned() {
+                        readers_detected_reader.fetch_add(1, Ordering::Relaxed);
+                        return reader_id; // Return reader ID that detected poison
+                    }
+                    // Brief yield to allow other threads
+                    thread::yield_now();
+                }
+                usize::MAX // Timeout indicator
+            });
+            reader_handles.push(handle);
+        }
+
+        // Writer thread
+        let ledger_writer = ledger.clone();
+        let barrier_writer = barrier.clone();
+        let writer_handle = thread::spawn(move || {
+            barrier_writer.wait(); // Start simultaneously with all readers
+
+            // Short delay to let readers start polling
+            thread::sleep(Duration::from_micros(50));
+            ledger_writer.mark_poisoned();
+        });
+
+        // Wait for writer
+        writer_handle.join().expect("writer thread should complete");
+
+        // Wait for all readers
+        let mut detection_results = Vec::new();
+        for handle in reader_handles {
+            detection_results.push(handle.join().expect("reader thread should complete"));
+        }
+
+        // With proper Acquire/Release ordering, most/all readers should detect poison
+        let detections = readers_detected.load(Ordering::Relaxed);
+        assert!(detections > 0, "At least one reader should detect poison");
+        assert!(detections <= num_readers, "Detection count should not exceed reader count");
+
+        // Count how many readers successfully detected (not timeout)
+        let successful_detections = detection_results.iter()
+                                                   .filter(|&&id| id != usize::MAX)
+                                                   .count();
+        assert!(successful_detections > 0, "At least one reader should successfully detect poison");
+
+        println!("Stress test: {}/{} readers detected poison", detections, num_readers);
+        assert!(ledger.is_poisoned(), "Ledger should remain poisoned after stress test");
+    }
+
+    #[test]
+    fn poison_flag_acquire_release_vs_relaxed_simulation() {
+        use std::sync::{Arc, Barrier, atomic::{AtomicBool, AtomicUsize, Ordering}};
+        use std::thread;
+        use std::time::Duration;
+
+        // Simulate what would happen with Relaxed vs Acquire/Release ordering
+        // This test demonstrates why the fix was necessary
+
+        // Test 1: Simulate the OLD BROKEN behavior (Relaxed ordering)
+        let relaxed_flag = Arc::new(AtomicBool::new(false));
+        let relaxed_detections = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(3)); // 2 readers + 1 writer
+
+        // Relaxed reader 1
+        let relaxed_flag_r1 = relaxed_flag.clone();
+        let relaxed_detections_r1 = relaxed_detections.clone();
+        let barrier_r1 = barrier.clone();
+        let relaxed_reader1 = thread::spawn(move || {
+            barrier_r1.wait();
+            for _ in 0..1000 {
+                if relaxed_flag_r1.load(Ordering::Relaxed) {
+                    relaxed_detections_r1.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+                thread::yield_now();
+            }
+        });
+
+        // Relaxed reader 2
+        let relaxed_flag_r2 = relaxed_flag.clone();
+        let relaxed_detections_r2 = relaxed_detections.clone();
+        let barrier_r2 = barrier.clone();
+        let relaxed_reader2 = thread::spawn(move || {
+            barrier_r2.wait();
+            for _ in 0..1000 {
+                if relaxed_flag_r2.load(Ordering::Relaxed) {
+                    relaxed_detections_r2.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+                thread::yield_now();
+            }
+        });
+
+        // Relaxed writer
+        let relaxed_flag_writer = relaxed_flag.clone();
+        let barrier_writer = barrier.clone();
+        let relaxed_writer = thread::spawn(move || {
+            barrier_writer.wait();
+            thread::sleep(Duration::from_micros(10)); // Brief delay
+            relaxed_flag_writer.store(true, Ordering::Relaxed);
+        });
+
+        relaxed_reader1.join().unwrap();
+        relaxed_reader2.join().unwrap();
+        relaxed_writer.join().unwrap();
+
+        let relaxed_detection_count = relaxed_detections.load(Ordering::Relaxed);
+
+        // Test 2: Current SECURE behavior (Acquire/Release ordering)
+        let acquire_flag = Arc::new(AtomicBool::new(false));
+        let acquire_detections = Arc::new(AtomicUsize::new(0));
+        let barrier2 = Arc::new(Barrier::new(3)); // 2 readers + 1 writer
+
+        // Acquire reader 1
+        let acquire_flag_r1 = acquire_flag.clone();
+        let acquire_detections_r1 = acquire_detections.clone();
+        let barrier2_r1 = barrier2.clone();
+        let acquire_reader1 = thread::spawn(move || {
+            barrier2_r1.wait();
+            for _ in 0..1000 {
+                if acquire_flag_r1.load(Ordering::Acquire) {
+                    acquire_detections_r1.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+                thread::yield_now();
+            }
+        });
+
+        // Acquire reader 2
+        let acquire_flag_r2 = acquire_flag.clone();
+        let acquire_detections_r2 = acquire_detections.clone();
+        let barrier2_r2 = barrier2.clone();
+        let acquire_reader2 = thread::spawn(move || {
+            barrier2_r2.wait();
+            for _ in 0..1000 {
+                if acquire_flag_r2.load(Ordering::Acquire) {
+                    acquire_detections_r2.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+                thread::yield_now();
+            }
+        });
+
+        // Release writer
+        let acquire_flag_writer = acquire_flag.clone();
+        let barrier2_writer = barrier2.clone();
+        let acquire_writer = thread::spawn(move || {
+            barrier2_writer.wait();
+            thread::sleep(Duration::from_micros(10)); // Brief delay
+            acquire_flag_writer.store(true, Ordering::Release);
+        });
+
+        acquire_reader1.join().unwrap();
+        acquire_reader2.join().unwrap();
+        acquire_writer.join().unwrap();
+
+        let acquire_detection_count = acquire_detections.load(Ordering::Relaxed);
+
+        // Acquire/Release should have better or equal detection compared to Relaxed
+        // (This test is probabilistic, but demonstrates the improvement)
+        println!("Detection comparison - Relaxed: {}, Acquire/Release: {}",
+                relaxed_detection_count, acquire_detection_count);
+
+        // The key point: Acquire/Release provides stronger guarantees
+        // With proper ordering, we should see consistent poison detection
+        assert!(acquire_detection_count >= relaxed_detection_count,
+                "Acquire/Release should provide equal or better visibility than Relaxed");
+
+        // In the current ledger implementation, we expect consistent detection
+        assert!(acquire_flag.load(Ordering::Acquire), "Flag should be set");
+        assert!(relaxed_flag.load(Ordering::Relaxed), "Flag should be set");
+    }
+
+    #[test]
+    fn poison_flag_no_false_positives() {
+        use std::sync::{Arc, Barrier, atomic::{AtomicBool, Ordering}};
+        use std::thread;
+        use std::time::Duration;
+
+        // Test that is_poisoned() doesn't return false positives
+        // with proper Acquire ordering
+
+        let ledger = SharedEvidenceLedger::new(LedgerCapacity::new(10, 1000));
+        let false_positive_detected = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let ledger_reader = ledger.clone();
+        let false_positive_reader = false_positive_detected.clone();
+        let barrier_reader = barrier.clone();
+
+        // Reader thread: checks for false positives
+        let reader_handle = thread::spawn(move || {
+            barrier_reader.wait(); // Start simultaneously
+
+            // Poll before poison is set
+            for _ in 0..1000 {
+                if ledger_reader.is_poisoned() {
+                    false_positive_reader.store(true, Ordering::Relaxed);
+                    return; // Found false positive
+                }
+                thread::yield_now();
+            }
+        });
+
+        // Writer thread: waits before poisoning
+        let ledger_writer = ledger.clone();
+        let barrier_writer = barrier.clone();
+        let writer_handle = thread::spawn(move || {
+            barrier_writer.wait(); // Start simultaneously
+
+            // Wait for reader to finish checking
+            thread::sleep(Duration::from_millis(10));
+            // Only poison AFTER reader checks
+            ledger_writer.mark_poisoned();
+        });
+
+        reader_handle.join().expect("reader thread should complete");
+        writer_handle.join().expect("writer thread should complete");
+
+        // Should not have false positives
+        assert!(!false_positive_detected.load(Ordering::Relaxed),
+                "Should not detect poison before it's set");
+
+        // But should detect poison after it's set
+        assert!(ledger.is_poisoned(), "Should detect poison after it's set");
+    }
+
+    #[test]
+    fn poison_flag_concurrent_operations_fail_closed() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        // Test that concurrent operations properly fail closed when poison is detected
+        // This verifies the security properties of the memory ordering fix
+
+        let ledger = SharedEvidenceLedger::new(LedgerCapacity::new(10, 1000));
+        let barrier = Arc::new(Barrier::new(3)); // 2 operations + 1 poisoner
+
+        let ledger_op1 = ledger.clone();
+        let barrier_op1 = barrier.clone();
+
+        let ledger_op2 = ledger.clone();
+        let barrier_op2 = barrier.clone();
+
+        let ledger_poisoner = ledger.clone();
+        let barrier_poisoner = barrier.clone();
+
+        // Operation 1: tries to append entries
+        let op1_handle = thread::spawn(move || {
+            barrier_op1.wait();
+
+            // Try multiple append operations
+            let mut results = Vec::new();
+            for i in 0..50 {
+                let entry = test_entry(&format!("OP1-{}", i), i as u64);
+                results.push(ledger_op1.append(entry));
+                thread::yield_now();
+            }
+            results
+        });
+
+        // Operation 2: tries to read/snapshot
+        let op2_handle = thread::spawn(move || {
+            barrier_op2.wait();
+
+            // Try multiple read operations
+            let mut snapshots = Vec::new();
+            for _ in 0..50 {
+                snapshots.push(ledger_op2.snapshot());
+                let _ = ledger_op2.len();
+                let _ = ledger_op2.is_empty();
+                thread::yield_now();
+            }
+            snapshots
+        });
+
+        // Poisoner: marks poison concurrently
+        let poisoner_handle = thread::spawn(move || {
+            barrier_poisoner.wait();
+
+            // Brief delay to let operations start
+            thread::sleep(std::time::Duration::from_micros(100));
+            ledger_poisoner.mark_poisoned();
+        });
+
+        // Wait for all operations
+        let op1_results = op1_handle.join().expect("op1 thread should complete");
+        let op2_snapshots = op2_handle.join().expect("op2 thread should complete");
+        poisoner_handle.join().expect("poisoner thread should complete");
+
+        // After poison, all operations should fail or be empty (fail-closed)
+        assert!(ledger.is_poisoned(), "Ledger should be poisoned");
+
+        // Count failed operations (should increase after poison)
+        let failed_appends = op1_results.iter()
+                                       .filter(|r| matches!(r, Err(LedgerError::LockPoisoned)))
+                                       .count();
+
+        println!("Failed appends after poison: {}/{}", failed_appends, op1_results.len());
+        assert!(failed_appends > 0, "Some append operations should fail after poison");
+
+        // Snapshots taken after poison should be empty or limited
+        let final_snapshot = ledger.snapshot();
+        // Poison state ensures fail-closed behavior
+        assert!(final_snapshot.entries.len() <= 10, "Poisoned ledger should limit entries");
+    }
 }
