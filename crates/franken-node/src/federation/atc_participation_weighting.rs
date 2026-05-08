@@ -86,7 +86,7 @@ pub mod invariants {
 // ---------------------------------------------------------------------------
 
 /// Attestation evidence backing a participant identity.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttestationEvidence {
     /// Unique attestation certificate identifier.
     pub attestation_id: String,
@@ -100,6 +100,19 @@ pub struct AttestationEvidence {
     pub expires_at: String,
     /// Hex-encoded signature over the attestation payload.
     pub signature_hex: String,
+}
+
+impl std::fmt::Debug for AttestationEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttestationEvidence")
+            .field("attestation_id", &self.attestation_id)
+            .field("issuer", &self.issuer)
+            .field("level", &self.level)
+            .field("issued_at", &self.issued_at)
+            .field("expires_at", &self.expires_at)
+            .field("signature_hex", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Attestation verification strength levels.
