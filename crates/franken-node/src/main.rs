@@ -71,7 +71,7 @@ mod security {
 }
 #[allow(dead_code)]
 mod local_runtime {
-    #[path = "resource_governor.rs"]
+    #[path = "runtime/resource_governor.rs"]
     pub mod resource_governor;
 }
 #[allow(dead_code)]
