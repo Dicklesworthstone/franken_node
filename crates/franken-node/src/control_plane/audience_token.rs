@@ -1687,15 +1687,70 @@ mod tests {
         let hash_decoded = hex::decode(&hash_string).expect("hash() should produce valid hex");
 
         // Results must be byte-identical
-        assert_eq!(hash_bytes_result.len(), 32, "SHA256 should produce 32 bytes");
+        assert_eq!(
+            hash_bytes_result.len(),
+            32,
+            "SHA256 should produce 32 bytes"
+        );
         assert_eq!(hash_decoded.len(), 32, "Decoded hex should be 32 bytes");
-        assert_eq!(hash_bytes_result.as_slice(), hash_decoded.as_slice(),
-            "hash_bytes() must produce identical bytes to hex::decode(hash())");
+        assert_eq!(
+            hash_bytes_result.as_slice(),
+            hash_decoded.as_slice(),
+            "hash_bytes() must produce identical bytes to hex::decode(hash())"
+        );
 
         // Also verify round-trip: hex::encode(hash_bytes()) == hash()
         let reconstructed_hex = hex::encode(hash_bytes_result);
-        assert_eq!(reconstructed_hex, hash_string,
-            "hex::encode(hash_bytes()) must equal hash()");
+        assert_eq!(
+            reconstructed_hex, hash_string,
+            "hex::encode(hash_bytes()) must equal hash()"
+        );
+    }
+
+    #[test]
+    fn test_hash_bytes_deterministic_and_ct_eq_usage_verification() {
+        // SECURITY: Verify hash_bytes() is deterministic and call sites use constant-time comparison
+        let token1 = root_token("security-test-token", 5);
+        let token2 = root_token("security-test-token", 5);
+
+        // 1. Assert deterministic output: identical input produces identical bytes
+        let hash1 = token1.hash_bytes();
+        let hash2 = token2.hash_bytes();
+        assert_eq!(hash1, hash2, "hash_bytes() must be deterministic for identical input");
+        assert_eq!(hash1.len(), 32, "hash_bytes() must return SHA256 digest (32 bytes)");
+
+        // 2. Verify existing call sites use constant-time comparison (snapshot test)
+        // This test captures the current source code pattern to ensure ct_eq_bytes is used
+        let source_content = include_str!("audience_token.rs");
+
+        // Assert that hash comparison call sites use constant_time::ct_eq_bytes, NOT ==
+        let ct_eq_pattern = "constant_time::ct_eq_bytes(";
+        let ct_eq_count = source_content.matches(ct_eq_pattern).count();
+        assert!(ct_eq_count >= 4,
+            "Expected at least 4 ct_eq_bytes calls for hash comparison, found: {}", ct_eq_count);
+
+        // Assert no direct == comparison on .hash().as_bytes() pattern (timing oracle vulnerability)
+        let dangerous_patterns = [
+            ".hash().as_bytes() ==",
+            "== token.hash().as_bytes()",
+            ".hash_bytes() ==",
+            "== token.hash_bytes()"
+        ];
+        for pattern in &dangerous_patterns {
+            assert!(!source_content.contains(pattern),
+                "SECURITY VIOLATION: Found timing oracle pattern '{}' - must use ct_eq_bytes", pattern);
+        }
+
+        // 3. Demonstrate correct usage pattern for hash_bytes() comparison
+        let different_token = root_token("different-token", 5);
+        let different_hash = different_token.hash_bytes();
+
+        // CORRECT: Use constant-time comparison for security
+        assert!(!constant_time::ct_eq_bytes(&hash1, &different_hash),
+            "Different tokens must produce different hashes");
+
+        // INCORRECT pattern (commented out to prevent timing oracle):
+        // assert_ne!(hash1, different_hash); // <-- This would be a timing oracle!
     }
 
     #[test]
