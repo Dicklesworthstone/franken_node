@@ -57,18 +57,21 @@ const CLOCK_DRIFT_TOLERANCE_NS: u64 = 1_000_000_000;
 /// control characters, newlines, and other characters that could be used
 /// for log injection attacks.
 fn sanitize_log_identifier(identifier: &str) -> String {
-    identifier
-        .chars()
-        .map(|c| match c {
-            '\n' => "\\n".to_string(),
-            '\r' => "\\r".to_string(),
-            '\t' => "\\t".to_string(),
-            '\0' => "\\0".to_string(),
-            '\\' => "\\\\".to_string(),
-            c if c.is_control() => format!("\\u{{{:04x}}}", c as u32),
-            c => c.to_string(),
-        })
-        .collect()
+    let mut output = String::with_capacity(identifier.len());
+    for c in identifier.chars() {
+        match c {
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\0' => output.push_str("\\0"),
+            '\\' => output.push_str("\\\\"),
+            c if c.is_control() => {
+                output.push_str(&format!("\\u{{{:04x}}}", c as u32));
+            }
+            c => output.push(c),
+        }
+    }
+    output
 }
 
 fn reindex_trace_steps(steps: &mut [TraceStep]) {
@@ -1479,6 +1482,47 @@ mod tests {
     }
 
     // --- Invariant constants are defined ---
+
+    #[test]
+    fn test_sanitize_log_identifier_optimized_byte_identical() {
+        // Test that optimized sanitize_log_identifier produces identical output
+        // to the original implementation for various attack patterns
+
+        // Normal identifier
+        let normal = "normal_identifier_123";
+        let result_normal = sanitize_log_identifier(normal);
+        assert_eq!(result_normal, "normal_identifier_123");
+
+        // Common attack characters
+        let attack_chars = "inject\nlog\rlines\ttabs\0nulls\\backslashes";
+        let result_attack = sanitize_log_identifier(attack_chars);
+        assert_eq!(result_attack, "inject\\nlog\\rlines\\ttabs\\0nulls\\\\backslashes");
+
+        // Control characters (unicode escaping)
+        let control_chars = "bell\x07alarm\x1B[31mred";
+        let result_control = sanitize_log_identifier(control_chars);
+        assert_eq!(result_control, "bell\\u{0007}alarm\\u{001b}[31mred");
+
+        // Mixed content with unicode
+        let mixed = "user\nid=\ttrace\0end\\path";
+        let result_mixed = sanitize_log_identifier(mixed);
+        assert_eq!(result_mixed, "user\\nid=\\ttrace\\0end\\\\path");
+
+        // Empty string
+        let empty = "";
+        let result_empty = sanitize_log_identifier(empty);
+        assert_eq!(result_empty, "");
+
+        // All special chars
+        let all_special = "\n\r\t\0\\";
+        let result_all = sanitize_log_identifier(all_special);
+        assert_eq!(result_all, "\\n\\r\\t\\0\\\\");
+
+        // Test that control character formatting is identical
+        let control_only = "\x01\x02\x1F";
+        let result_ctrl = sanitize_log_identifier(control_only);
+        assert_eq!(result_ctrl, "\\u{0001}\\u{0002}\\u{001f}");
+    }
 
     #[test]
     fn invariant_constants_defined() {
