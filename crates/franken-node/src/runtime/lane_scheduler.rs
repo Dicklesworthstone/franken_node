@@ -485,11 +485,12 @@ impl std::fmt::Debug for LaneSchedulerError {
                     .field("task_class", &"<redacted>")
                     .finish()
             }
-            LaneSchedulerError::CapExceeded { lane, cap, current } => {
+            LaneSchedulerError::CapExceeded { lane, cap, current, queued_task_id } => {
                 f.debug_struct("CapExceeded")
                     .field("lane", lane)
                     .field("cap", cap)
                     .field("current", current)
+                    .field("queued_task_id", queued_task_id)
                     .finish()
             }
             LaneSchedulerError::UnknownLane { lane } => {
