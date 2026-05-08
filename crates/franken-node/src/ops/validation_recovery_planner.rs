@@ -850,9 +850,11 @@ mod tests {
         let decision = planner.plan_recovery(&input).unwrap();
         assert_eq!(decision.action, RecoveryAction::FailClosed);
         assert!(decision.fail_closed);
-        assert!(decision
-            .operator_message
-            .contains("Persistent filesystem errors"));
+        assert!(
+            decision
+                .operator_message
+                .contains("Persistent filesystem errors")
+        );
     }
 
     #[test]
@@ -949,10 +951,12 @@ mod tests {
 
         let result = planner.plan_recovery(&input);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("request_id cannot be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("request_id cannot be empty")
+        );
     }
 
     #[test]
@@ -963,10 +967,12 @@ mod tests {
 
         let result = planner.plan_recovery(&input);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("trace_id cannot be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("trace_id cannot be empty")
+        );
     }
 
     #[test]
