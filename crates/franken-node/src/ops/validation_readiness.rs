@@ -8,6 +8,9 @@ use crate::ops::validation_broker::{
     DigestRef, ProofEvidenceSource, ProofStatusKind, RchMode, SourceOnlyReason,
     ValidationErrorClass, ValidationExitKind, ValidationProofStatus, ValidationReceipt,
 };
+use crate::ops::validation_recovery_planner::{
+    recovery_decision_for_exit, RecoveryDecision, RecoveryAction,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -503,6 +506,32 @@ pub struct ProofLaneReadinessSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedAttemptSummary {
+    pub bead_id: String,
+    pub thread_id: String,
+    pub flight_recorder_path: Option<String>,
+    pub outcome_class: String,
+    pub execution_mode: String,
+    pub worker_id: Option<String>,
+    pub reason_code: String,
+    pub retryable: bool,
+    pub product_failure: bool,
+    pub last_attempt_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryPlanSummary {
+    pub bead_id: String,
+    pub thread_id: String,
+    pub action: String,
+    pub reason_code: String,
+    pub required_action: String,
+    pub retry_after_ms: Option<u64>,
+    pub worker_preference: Option<String>,
+    pub fail_closed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationReadinessSummary {
     pub tracked_beads: usize,
     pub receipts: usize,
@@ -521,6 +550,12 @@ pub struct ValidationReadinessSummary {
     pub contention_state: String,
     #[serde(default)]
     pub proof_lane_readiness: Vec<ProofLaneReadinessSummary>,
+    #[serde(default)]
+    pub flight_recorder_refs: usize,
+    #[serde(default)]
+    pub failed_attempt_details: Vec<FailedAttemptSummary>,
+    #[serde(default)]
+    pub pending_recoveries: Vec<RecoveryPlanSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -830,6 +865,119 @@ fn summarize_validation_readiness(
         }
     }
 
+    // Collect flight recorder information
+    let mut flight_recorder_refs_count = 0usize;
+    let mut failed_attempt_details = Vec::new();
+    let mut pending_recoveries = Vec::new();
+
+    // Process proof statuses for flight recorder data
+    for status in &input.proof_statuses {
+        if let Some(ref flight_ref) = status.flight_recorder_ref {
+            flight_recorder_refs_count = flight_recorder_refs_count.saturating_add(1);
+        }
+
+        if status.status == ProofStatusKind::Failed {
+            if let Some(ref flight_ref) = status.flight_recorder_ref {
+                // Extract failure domain information
+                let domain = status
+                    .exit
+                    .as_ref()
+                    .map_or(ValidationFailureDomain::Unknown, failure_domain_for_exit);
+
+                // Determine if this failure is retryable based on recovery planner
+                let (retryable, recovery_plan) = if let Some(ref exit) = status.exit {
+                    let decision = recovery_decision_for_exit(exit, status.proof_kind);
+                    let is_retryable = matches!(decision.action, RecoveryAction::RetryLocal | RecoveryAction::RetryRemote | RecoveryAction::RetryRemotePreferWorker(_));
+                    (is_retryable, Some(decision))
+                } else {
+                    (false, None)
+                };
+
+                failed_attempt_details.push(FailedAttemptSummary {
+                    bead_id: flight_ref.attempt_digest.clone().unwrap_or_else(|| "unknown".to_string()),
+                    thread_id: status.proof_kind.clone(),
+                    flight_recorder_path: flight_ref.attempt_path.clone(),
+                    outcome_class: flight_ref.outcome_class.clone(),
+                    execution_mode: flight_ref.execution_mode.clone(),
+                    worker_id: flight_ref.worker_id.clone(),
+                    reason_code: flight_ref.reason_code.clone(),
+                    retryable,
+                    product_failure: domain == ValidationFailureDomain::Product,
+                    last_attempt_at: status.timing.finished_at,
+                });
+
+                // Add recovery plan if retryable
+                if let Some(recovery) = recovery_plan {
+                    if retryable {
+                        pending_recoveries.push(RecoveryPlanSummary {
+                            bead_id: flight_ref.attempt_digest.clone().unwrap_or_else(|| "unknown".to_string()),
+                            thread_id: status.proof_kind.clone(),
+                            action: format!("{:?}", recovery.action),
+                            reason_code: recovery.reason_code,
+                            required_action: recovery.required_action,
+                            retry_after_ms: recovery.retry_after_ms,
+                            worker_preference: match recovery.action {
+                                RecoveryAction::RetryRemotePreferWorker(worker_id) => Some(worker_id),
+                                _ => None,
+                            },
+                            fail_closed: matches!(recovery.action, RecoveryAction::FailClosed),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Process receipts for additional flight recorder data
+    for receipt in &input.receipts {
+        if let Some(ref flight_ref) = receipt.flight_recorder_ref {
+            flight_recorder_refs_count = flight_recorder_refs_count.saturating_add(1);
+
+            // If this receipt indicates a failure, add to failed attempts
+            if receipt.exit.kind != ValidationExitKind::Success {
+                let domain = failure_domain_for_receipt(receipt);
+
+                let (retryable, recovery_plan) = {
+                    let decision = recovery_decision_for_exit(&receipt.exit, receipt.proof_kind.clone());
+                    let is_retryable = matches!(decision.action, RecoveryAction::RetryLocal | RecoveryAction::RetryRemote | RecoveryAction::RetryRemotePreferWorker(_));
+                    (is_retryable, Some(decision))
+                };
+
+                failed_attempt_details.push(FailedAttemptSummary {
+                    bead_id: flight_ref.attempt_digest.clone().unwrap_or_else(|| "unknown".to_string()),
+                    thread_id: receipt.proof_kind.clone(),
+                    flight_recorder_path: flight_ref.attempt_path.clone(),
+                    outcome_class: flight_ref.outcome_class.clone(),
+                    execution_mode: flight_ref.execution_mode.clone(),
+                    worker_id: flight_ref.worker_id.clone(),
+                    reason_code: flight_ref.reason_code.clone(),
+                    retryable,
+                    product_failure: domain == ValidationFailureDomain::Product,
+                    last_attempt_at: receipt.timing.finished_at,
+                });
+
+                // Add recovery plan if retryable
+                if let Some(recovery) = recovery_plan {
+                    if retryable {
+                        pending_recoveries.push(RecoveryPlanSummary {
+                            bead_id: flight_ref.attempt_digest.clone().unwrap_or_else(|| "unknown".to_string()),
+                            thread_id: receipt.proof_kind.clone(),
+                            action: format!("{:?}", recovery.action),
+                            reason_code: recovery.reason_code,
+                            required_action: recovery.required_action,
+                            retry_after_ms: recovery.retry_after_ms,
+                            worker_preference: match recovery.action {
+                                RecoveryAction::RetryRemotePreferWorker(worker_id) => Some(worker_id),
+                                _ => None,
+                            },
+                            fail_closed: matches!(recovery.action, RecoveryAction::FailClosed),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     let valid_receipts = input
         .receipts
         .iter()
@@ -865,6 +1013,9 @@ fn summarize_validation_readiness(
             .iter()
             .map(summarize_proof_lane_capsule)
             .collect(),
+        flight_recorder_refs: flight_recorder_refs_count,
+        failed_attempt_details,
+        pending_recoveries,
     }
 }
 
