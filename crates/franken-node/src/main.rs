@@ -6382,8 +6382,393 @@ fn get_memory_pressure() -> Result<f32> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoordinationHealth {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+impl CoordinationHealth {
+    const fn is_healthy(self) -> bool {
+        matches!(self, Self::Healthy)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CoordinationHealthReport {
+    status: CoordinationHealth,
+    reason: String,
+}
+
+impl CoordinationHealthReport {
+    fn is_healthy(&self) -> bool {
+        self.status.is_healthy()
+    }
+}
+
 fn get_coordination_health() -> Result<bool> {
-    Ok(true) // Placeholder - would check Agent Mail connectivity in production
+    let report = collect_coordination_health();
+    if !report.is_healthy() {
+        eprintln!("Warning: Agent coordination degraded: {}", report.reason);
+    }
+    Ok(report.is_healthy())
+}
+
+fn collect_coordination_health() -> CoordinationHealthReport {
+    let mail_health = probe_agent_mail_health();
+    let active_reservations = coordination_active_reservation_count();
+    let latest_message_age_secs = latest_agent_mail_message_age_secs();
+
+    assess_coordination_health(mail_health, active_reservations, latest_message_age_secs)
+}
+
+fn assess_coordination_health(
+    mail_health: CoordinationHealthReport,
+    active_reservations: Option<u32>,
+    latest_message_age_secs: Option<u64>,
+) -> CoordinationHealthReport {
+    let mut status = mail_health.status;
+    let mut reasons = vec![mail_health.reason];
+
+    match active_reservations {
+        Some(count) => {
+            reasons.push(format!("active_reservations={count}"));
+            if count > 100 {
+                status = worst_coordination_health(status, CoordinationHealth::Degraded);
+                reasons.push("active_reservations_above_safe_threshold".to_string());
+            }
+        }
+        None => {
+            status = worst_coordination_health(status, CoordinationHealth::Degraded);
+            reasons.push("active_reservations=unknown".to_string());
+        }
+    }
+
+    match latest_message_age_secs {
+        Some(age_secs) => {
+            reasons.push(format!("latest_message_age_secs={age_secs}"));
+            if age_secs > 3_600 {
+                status = worst_coordination_health(status, CoordinationHealth::Degraded);
+                reasons.push("latest_agent_mail_message_stale".to_string());
+            }
+        }
+        None => {
+            status = worst_coordination_health(status, CoordinationHealth::Degraded);
+            reasons.push("latest_message_age_secs=unknown".to_string());
+        }
+    }
+
+    CoordinationHealthReport {
+        status,
+        reason: reasons.join("; "),
+    }
+}
+
+fn worst_coordination_health(
+    left: CoordinationHealth,
+    right: CoordinationHealth,
+) -> CoordinationHealth {
+    if coordination_health_rank(left) >= coordination_health_rank(right) {
+        left
+    } else {
+        right
+    }
+}
+
+const fn coordination_health_rank(health: CoordinationHealth) -> u8 {
+    match health {
+        CoordinationHealth::Healthy => 0,
+        CoordinationHealth::Degraded => 1,
+        CoordinationHealth::Unhealthy => 2,
+    }
+}
+
+fn probe_agent_mail_health() -> CoordinationHealthReport {
+    let url = std::env::var("FRANKEN_NODE_AGENT_MAIL_HEALTH_URL")
+        .or_else(|_| std::env::var("AGENT_MAIL_HEALTH_URL"))
+        .unwrap_or_else(|_| "http://127.0.0.1:8765/health".to_string());
+
+    let output = std::process::Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--max-time",
+            "2",
+            &url,
+        ])
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            match serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                Ok(payload) => coordination_health_from_agent_mail_payload(&payload),
+                Err(err) => CoordinationHealthReport {
+                    status: CoordinationHealth::Degraded,
+                    reason: format!("agent_mail_health_unparseable={err}"),
+                },
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            CoordinationHealthReport {
+                status: CoordinationHealth::Unhealthy,
+                reason: format!(
+                    "agent_mail_health_probe_failed=status:{} stderr:{}",
+                    output.status,
+                    stderr.trim()
+                ),
+            }
+        }
+        Err(err) => CoordinationHealthReport {
+            status: CoordinationHealth::Unhealthy,
+            reason: format!("agent_mail_health_probe_unavailable={err}"),
+        },
+    }
+}
+
+fn coordination_health_from_agent_mail_payload(
+    payload: &serde_json::Value,
+) -> CoordinationHealthReport {
+    let mut status = CoordinationHealth::Healthy;
+    let mut reasons = Vec::new();
+
+    match payload.get("status").and_then(serde_json::Value::as_str) {
+        Some(value) => {
+            let health = agent_mail_status_value_health(value);
+            status = worst_coordination_health(status, health);
+            reasons.push(format!("agent_mail_status={value}"));
+        }
+        None => {
+            status = worst_coordination_health(status, CoordinationHealth::Degraded);
+            reasons.push("agent_mail_status=missing".to_string());
+        }
+    }
+
+    match payload
+        .get("durability_state")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(value) => {
+            let health = agent_mail_status_value_health(value);
+            status = worst_coordination_health(status, health);
+            reasons.push(format!("agent_mail_durability={value}"));
+        }
+        None => reasons.push("agent_mail_durability=unknown".to_string()),
+    }
+
+    if let Some(count) = payload
+        .get("message_count")
+        .and_then(serde_json::Value::as_u64)
+    {
+        reasons.push(format!("agent_mail_message_count={count}"));
+    }
+
+    CoordinationHealthReport {
+        status,
+        reason: reasons.join("; "),
+    }
+}
+
+fn agent_mail_status_value_health(value: &str) -> CoordinationHealth {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "ready" | "healthy" | "ok" | "pass" => CoordinationHealth::Healthy,
+        "degraded" | "degraded_read_only" | "read_only" | "warning" | "warn" => {
+            CoordinationHealth::Degraded
+        }
+        "unhealthy" | "failed" | "fail" | "error" | "corrupt" | "locked" => {
+            CoordinationHealth::Unhealthy
+        }
+        _ => CoordinationHealth::Degraded,
+    }
+}
+
+fn coordination_active_reservation_count() -> Option<u32> {
+    active_reservation_count_from_agent_mail_http()
+        .or_else(active_reservation_count_from_agent_mail_archive)
+}
+
+fn active_reservation_count_from_agent_mail_http() -> Option<u32> {
+    let url = std::env::var("FRANKEN_NODE_AGENT_MAIL_RESERVATIONS_URL")
+        .or_else(|_| std::env::var("AGENT_MAIL_RESERVATIONS_URL"))
+        .unwrap_or_else(|_| {
+            "http://127.0.0.1:8765/mail/api/file-reservations/active/count".to_string()
+        });
+
+    let output = std::process::Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--max-time",
+            "2",
+            &url,
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let response = String::from_utf8_lossy(&output.stdout);
+    response.trim().parse::<u32>().ok()
+}
+
+fn active_reservation_count_from_agent_mail_archive() -> Option<u32> {
+    for dir in agent_mail_archive_dirs("file_reservations") {
+        if let Some(count) = count_active_reservations_in_dir(&dir) {
+            return Some(count);
+        }
+    }
+    None
+}
+
+fn count_active_reservations_in_dir(dir: &Path) -> Option<u32> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let now = Utc::now();
+    let mut count = 0_u32;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&contents) else {
+            continue;
+        };
+
+        if payload
+            .get("released_ts")
+            .is_some_and(|value| !value.is_null())
+        {
+            continue;
+        }
+
+        let Some(expires_ts) = payload
+            .get("expires_ts")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+
+        let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_ts) else {
+            continue;
+        };
+
+        if expires_at.with_timezone(&Utc) > now {
+            count = count.saturating_add(1);
+        }
+    }
+
+    Some(count)
+}
+
+fn latest_agent_mail_message_age_secs() -> Option<u64> {
+    for dir in agent_mail_archive_dirs("messages") {
+        if let Some(age_secs) = latest_file_age_secs(&dir) {
+            return Some(age_secs);
+        }
+    }
+    None
+}
+
+fn latest_file_age_secs(dir: &Path) -> Option<u64> {
+    let mut latest: Option<SystemTime> = None;
+    let mut stack = vec![(dir.to_path_buf(), 0_usize)];
+    let mut visited = 0_usize;
+
+    while let Some((path, depth)) = stack.pop() {
+        visited = visited.saturating_add(1);
+        if visited > 20_000 || depth > 8 {
+            break;
+        }
+
+        let entries = std::fs::read_dir(path).ok()?;
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+
+            if metadata.is_dir() {
+                stack.push((entry.path(), depth.saturating_add(1)));
+            } else if metadata.is_file()
+                && let Ok(modified) = metadata.modified()
+            {
+                latest = Some(latest.map_or(modified, |current| current.max(modified)));
+            }
+        }
+    }
+
+    let modified = latest?;
+    Some(
+        SystemTime::now()
+            .duration_since(modified)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+}
+
+fn agent_mail_archive_dirs(child: &str) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Ok(root) = std::env::var("FRANKEN_NODE_AGENT_MAIL_PROJECT_ARCHIVE") {
+        dirs.push(PathBuf::from(root).join(child));
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd.join(child));
+
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(
+                PathBuf::from(home)
+                    .join(".mcp_agent_mail_git_mailbox_repo")
+                    .join("projects")
+                    .join(agent_mail_project_slug(&cwd))
+                    .join(child),
+            );
+        }
+    }
+
+    dirs
+}
+
+fn agent_mail_project_slug(path: &Path) -> String {
+    let mut parts = Vec::new();
+
+    for component in path.components() {
+        let Component::Normal(value) = component else {
+            continue;
+        };
+        let Some(value) = value.to_str() else {
+            continue;
+        };
+
+        let mut part = String::new();
+        let mut last_was_separator = false;
+        for ch in value.chars() {
+            if ch.is_ascii_alphanumeric() {
+                part.push(ch.to_ascii_lowercase());
+                last_was_separator = false;
+            } else if !last_was_separator {
+                part.push('-');
+                last_was_separator = true;
+            }
+        }
+
+        let part = part.trim_matches('-');
+        if !part.is_empty() {
+            parts.push(part.to_string());
+        }
+    }
+
+    parts.join("-")
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -15275,9 +15660,12 @@ fn build_trust_scan_evidence_ref(
 ) -> VerifiedEvidenceRef {
     let mut hasher = sha2::Sha256::new();
     hasher.update(b"trust_scan_manifest_admission_v1:");
+    hasher.update((dependency.extension_id.len() as u64).to_le_bytes());
     hasher.update(dependency.extension_id.as_bytes());
+    hasher.update((version.len() as u64).to_le_bytes());
     hasher.update(version.as_bytes());
     for artifact_hash in artifact_hashes {
+        hasher.update((artifact_hash.len() as u64).to_le_bytes());
         hasher.update(artifact_hash.as_bytes());
     }
 
