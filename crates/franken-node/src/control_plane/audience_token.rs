@@ -1309,16 +1309,10 @@ impl TokenValidator {
             }
         }
 
-        // In multi-token chains the root token is allowed to appear in multiple
-        // delegation chains (different leaves), so its nonce is skipped during
-        // the check.  In single-token (root-only) chains the root IS checked.
-        // All delegated (non-root) nonces are always checked to block prefix
-        // replay attacks where an attacker strips the leaf.
-        let is_multi = tokens.len() > 1;
+        // Check and immediately record all token nonces to prevent replay timing attacks.
+        // Previously root tokens in multi-token chains were exempt from replay checks,
+        // but this created a timing window where failed verifications didn't record nonces.
         for token in tokens.iter() {
-            if is_multi && token.parent_token_hash.is_none() {
-                continue; // root in multi-token chain — skip replay check
-            }
             if self.seen_nonces.contains(&token.nonce) {
                 self.tokens_rejected = self.tokens_rejected.saturating_add(1);
                 let err = TokenError::replay_detected(&token.nonce);
@@ -1337,6 +1331,13 @@ impl TokenValidator {
                 );
                 return Err(err);
             }
+            // Immediately record nonce to prevent reuse in failed verification attempts
+            insert_nonce_bounded(
+                &mut self.seen_nonces,
+                &mut self.seen_nonces_queue,
+                token.nonce.clone(),
+                MAX_NONCES,
+            );
         }
 
         // Verify chain hash integrity.
@@ -1412,15 +1413,8 @@ impl TokenValidator {
             return Err(err);
         }
 
-        // All checks passed: record all token nonces and emit success event.
-        for token in tokens.iter() {
-            insert_nonce_bounded(
-                &mut self.seen_nonces,
-                &mut self.seen_nonces_queue,
-                token.nonce.clone(),
-                MAX_NONCES,
-            );
-        }
+        // All checks passed: emit success event.
+        // (Nonces were already recorded during replay check to prevent timing attacks)
         self.tokens_verified = self.tokens_verified.saturating_add(1);
         push_bounded(
             &mut self.events,
