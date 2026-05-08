@@ -402,7 +402,6 @@ pub struct AtcVerifierReport {
 pub struct AtcVerificationRequest {
     pub metric_snapshot_root_hash: Option<String>,
     pub proof_chain_root_hash: Option<String>,
-    #[serde(default)]
     pub verifier_parameters: BTreeMap<String, String>,
 }
 
@@ -2673,5 +2672,36 @@ mod tests {
             invalid_data.decision, "fail",
             "Invalid hash should result in fail"
         );
+    }
+
+    #[test]
+    fn atc_verification_request_requires_verifier_parameters_field() {
+        // Test that AtcVerificationRequest fails deserialization when verifier_parameters field is missing
+        // This test verifies the fix for bd-68jy5 (fail-closed deserialization)
+
+        // Valid request with verifier_parameters field should deserialize successfully
+        let valid_json = r#"{
+            "metric_snapshot_root_hash": "abc123",
+            "proof_chain_root_hash": "def456",
+            "verifier_parameters": {"min_confidence": "0.95", "algorithm": "ed25519"}
+        }"#;
+
+        let request: AtcVerificationRequest = serde_json::from_str(valid_json)
+            .expect("valid request should deserialize");
+        assert_eq!(request.verifier_parameters.len(), 2);
+        assert_eq!(request.verifier_parameters.get("min_confidence"), Some(&"0.95".to_string()));
+
+        // Request missing verifier_parameters field should fail deserialization (fail-closed)
+        let invalid_json = r#"{
+            "metric_snapshot_root_hash": "abc123",
+            "proof_chain_root_hash": "def456"
+        }"#;
+
+        let result: Result<AtcVerificationRequest, _> = serde_json::from_str(invalid_json);
+        assert!(result.is_err(), "Missing verifier_parameters field should cause deserialization failure");
+
+        // Verify the error is about the missing field
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("verifier_parameters") || error_msg.contains("missing field"));
     }
 }
