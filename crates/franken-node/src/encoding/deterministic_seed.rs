@@ -763,6 +763,7 @@ fn derive_seed_raw(
 // ---------------------------------------------------------------------------
 
 mod hex_bytes {
+    use hex::FromHex;
     use serde::{self, Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
