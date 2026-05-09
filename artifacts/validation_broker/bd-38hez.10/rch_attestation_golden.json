@@ -1,0 +1,74 @@
+{
+  "schema_version": "franken-node/rch-attested-proof-receipt/v1",
+  "outcome": {
+    "schema_version": "franken-node/rch-adapter/outcome/v1",
+    "command_digest": "6bd858c27249a661529e209b2282ef939cec44ebb5e982fbed70b6129e523e66",
+    "action": "check",
+    "package": "frankenengine-node",
+    "outcome": "passed",
+    "execution_mode": "remote",
+    "worker_id": "vmi1293453",
+    "timeout_class": "none",
+    "exit_code": 0,
+    "retryable": false,
+    "product_failure": false,
+    "reason_code": "RCH-PASSED",
+    "detail": "remote RCH command completed successfully",
+    "stdout_digest": {
+      "algorithm": "sha256",
+      "hex": "eaa21ee355c64c2bc2ed33b07d4bc5eaebb891207d3bf1e3ec411b95d5e65fe8",
+      "snippet": "Finished `dev` profile [unoptimized + debuginfo]\n[RCH] remote vmi1293453 (803.3s)\n"
+    },
+    "stderr_digest": {
+      "algorithm": "sha256",
+      "hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "snippet": ""
+    },
+    "duration_ms": 42000
+  },
+  "attestation": {
+    "schema_version": "franken-node/rch-proof-attestation/v1",
+    "command_digest": {
+      "algorithm": "sha256",
+      "hex": "6bd858c27249a661529e209b2282ef939cec44ebb5e982fbed70b6129e523e66"
+    },
+    "env_allowlist_fingerprint": {
+      "algorithm": "sha256",
+      "hex": "509dbe5ed39bd19933b33c26dd6c6efd918db6f4892b8097d956c112d2171206"
+    },
+    "toolchain_fingerprint": {
+      "algorithm": "sha256",
+      "hex": "fcb2012e4b1635cfea766e06048cd6ca3994376162641b0a2c176e6f514406ab"
+    },
+    "worker_id": "vmi1293453",
+    "worker_fingerprint": {
+      "algorithm": "sha256",
+      "hex": "327c84643f8f64152c8106cf37f3004b5194aa99225d251f17c94a1ba17ab5ff"
+    },
+    "sync_root_fingerprint": {
+      "algorithm": "sha256",
+      "hex": "14117491260c192f5b0e1c8992dd18f7e3ade5084f80383ca206757c939e0bfa"
+    },
+    "target_dir_fingerprint": {
+      "algorithm": "sha256",
+      "hex": "f5e36be2552a379db64b6d11241e18453c1b184511bf3ae37ed9ca1430beb15f"
+    },
+    "source_fingerprints": [
+      {
+        "path": "crates/franken-node/src/lib.rs",
+        "algorithm": "sha256",
+        "hex": "00b9663f777ba95488c13fc4032323f086c198ba9af241be86e7fccb6cb967f1",
+        "source": "git"
+      },
+      {
+        "path": "crates/franken-node/src/main.rs",
+        "algorithm": "sha256",
+        "hex": "ac399b157a539220c85bb2a2fb8188e996beedf1f8a9bcddf63cd1abf52dd052",
+        "source": "git"
+      }
+    ],
+    "redacted_env_keys": [
+      "API_TOKEN"
+    ]
+  }
+}

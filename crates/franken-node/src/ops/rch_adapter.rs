@@ -7,16 +7,22 @@
 //! test failures.
 
 use crate::ops::validation_broker::{
-    FlightRecorderAdapterOutcome, FlightRecorderAdapterOutcomeClass, RchMode, TimeoutClass,
+    DigestRef, FlightRecorderAdapterOutcome, FlightRecorderAdapterOutcomeClass, InputDigest,
+    RchMode, TimeoutClass,
 };
+use crate::security::constant_time;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
 pub const RCH_ADAPTER_SCHEMA_VERSION: &str = "franken-node/rch-adapter/outcome/v1";
+pub const RCH_ATTESTED_PROOF_RECEIPT_SCHEMA_VERSION: &str =
+    "franken-node/rch-attested-proof-receipt/v1";
+pub const RCH_PROOF_ATTESTATION_SCHEMA_VERSION: &str = "franken-node/rch-proof-attestation/v1";
 pub const DEFAULT_MAX_ACTIVE_CARGO_PROCESSES: usize = 2;
 const RCH_COMMAND_DIGEST_DOMAIN: &str = "franken-node/rch-command-digest/v1";
+const RCH_ATTESTATION_DIGEST_DOMAIN: &str = "franken-node/rch-attestation-digest/v1";
 const SNIPPET_MAX_BYTES: usize = 4_096;
 
 fn len_to_u64(len: usize) -> u64 {
@@ -30,6 +36,14 @@ fn push_len_prefixed_field(material: &mut String, label: &str, value: &str) {
     material.push(':');
     material.push_str(value);
     material.push('\0');
+}
+
+fn option_str_ct_eq(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => constant_time::ct_eq(left, right),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +241,173 @@ impl RchArtifactDigest {
             snippet,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RchToolchainFingerprintInput {
+    pub cargo_version: String,
+    pub rustc_version: String,
+    pub toolchain_channel: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RchProofAttestationInput {
+    pub env_allowlist: Vec<String>,
+    pub toolchain: RchToolchainFingerprintInput,
+    pub sync_root: Option<String>,
+    pub target_dir: Option<String>,
+    pub source_fingerprints: Vec<InputDigest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RchProofAttestation {
+    pub schema_version: String,
+    pub command_digest: DigestRef,
+    pub env_allowlist_fingerprint: DigestRef,
+    pub toolchain_fingerprint: DigestRef,
+    pub worker_id: Option<String>,
+    pub worker_fingerprint: Option<DigestRef>,
+    pub sync_root_fingerprint: Option<DigestRef>,
+    pub target_dir_fingerprint: DigestRef,
+    pub source_fingerprints: Vec<InputDigest>,
+    pub redacted_env_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RchAttestedProofReceipt {
+    pub schema_version: String,
+    pub outcome: RchAdapterOutcome,
+    pub attestation: RchProofAttestation,
+}
+
+impl RchAttestedProofReceipt {
+    pub fn validate(&self) -> Result<(), RchAdapterError> {
+        if self.schema_version != RCH_ATTESTED_PROOF_RECEIPT_SCHEMA_VERSION {
+            return Err(RchAdapterError::InvalidAttestationSchema {
+                schema_version: self.schema_version.clone(),
+            });
+        }
+        self.attestation.validate()?;
+        if !constant_time::ct_eq(
+            &self.outcome.command_digest,
+            &self.attestation.command_digest.hex,
+        ) {
+            return Err(RchAdapterError::AttestationMismatch {
+                field: "command_digest",
+            });
+        }
+        if !option_str_ct_eq(
+            self.outcome.worker_id.as_deref(),
+            self.attestation.worker_id.as_deref(),
+        ) {
+            return Err(RchAdapterError::AttestationMismatch { field: "worker_id" });
+        }
+        if self.outcome.execution_mode == RchExecutionMode::Remote
+            && self.attestation.worker_fingerprint.is_none()
+        {
+            return Err(RchAdapterError::MissingWorkerMetadata);
+        }
+        Ok(())
+    }
+}
+
+impl RchProofAttestation {
+    fn validate(&self) -> Result<(), RchAdapterError> {
+        if self.schema_version != RCH_PROOF_ATTESTATION_SCHEMA_VERSION {
+            return Err(RchAdapterError::InvalidAttestationSchema {
+                schema_version: self.schema_version.clone(),
+            });
+        }
+        for (field, digest) in [
+            ("command_digest", &self.command_digest),
+            ("env_allowlist_fingerprint", &self.env_allowlist_fingerprint),
+            ("toolchain_fingerprint", &self.toolchain_fingerprint),
+            ("target_dir_fingerprint", &self.target_dir_fingerprint),
+        ] {
+            if !digest.is_valid_sha256() {
+                return Err(RchAdapterError::InvalidAttestationDigest { field });
+            }
+        }
+        for (field, digest) in [
+            ("worker_fingerprint", self.worker_fingerprint.as_ref()),
+            ("sync_root_fingerprint", self.sync_root_fingerprint.as_ref()),
+        ] {
+            if let Some(digest) = digest
+                && !digest.is_valid_sha256()
+            {
+                return Err(RchAdapterError::InvalidAttestationDigest { field });
+            }
+        }
+        if self.source_fingerprints.is_empty() {
+            return Err(RchAdapterError::MissingSourceFingerprints);
+        }
+        for fingerprint in &self.source_fingerprints {
+            if !fingerprint.is_valid() {
+                return Err(RchAdapterError::InvalidSourceFingerprint {
+                    path: fingerprint.path.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn build_rch_attested_proof_receipt(
+    invocation: &RchInvocation,
+    outcome: RchAdapterOutcome,
+    input: RchProofAttestationInput,
+) -> Result<RchAttestedProofReceipt, RchAdapterError> {
+    if outcome.execution_mode == RchExecutionMode::Remote && outcome.worker_id.is_none() {
+        return Err(RchAdapterError::MissingWorkerMetadata);
+    }
+
+    let (_, inferred_target_dir) = normalize_cargo_argv(invocation)?;
+    let target_dir = input
+        .target_dir
+        .clone()
+        .or(inferred_target_dir)
+        .unwrap_or_else(|| "unknown".to_string());
+    let (env_allowlist_fingerprint, redacted_env_keys) =
+        env_allowlist_fingerprint(invocation, &input.env_allowlist);
+
+    let mut source_fingerprints = input.source_fingerprints.clone();
+    source_fingerprints.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then(left.algorithm.cmp(&right.algorithm))
+            .then(left.hex.cmp(&right.hex))
+            .then(left.source.cmp(&right.source))
+    });
+
+    let attestation = RchProofAttestation {
+        schema_version: RCH_PROOF_ATTESTATION_SCHEMA_VERSION.to_string(),
+        command_digest: DigestRef {
+            algorithm: "sha256".to_string(),
+            hex: invocation.command_digest(),
+        },
+        env_allowlist_fingerprint,
+        toolchain_fingerprint: toolchain_fingerprint(&input.toolchain),
+        worker_id: outcome.worker_id.clone(),
+        worker_fingerprint: outcome
+            .worker_id
+            .as_deref()
+            .map(|worker_id| digest_fields("worker", &[("worker_id", worker_id)])),
+        sync_root_fingerprint: input
+            .sync_root
+            .as_deref()
+            .map(|sync_root| digest_fields("sync_root", &[("path", sync_root)])),
+        target_dir_fingerprint: digest_fields("target_dir", &[("path", &target_dir)]),
+        source_fingerprints,
+        redacted_env_keys,
+    };
+
+    let receipt = RchAttestedProofReceipt {
+        schema_version: RCH_ATTESTED_PROOF_RECEIPT_SCHEMA_VERSION.to_string(),
+        outcome,
+        attestation,
+    };
+    receipt.validate()?;
+    Ok(receipt)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,6 +649,18 @@ pub enum RchAdapterError {
     DisallowedPackage { expected: String, actual: String },
     #[error("RCH_REQUIRE_REMOTE=1 is required for this validation command")]
     MissingRemoteRequirement,
+    #[error("remote RCH attestation requires worker metadata")]
+    MissingWorkerMetadata,
+    #[error("invalid RCH attestation schema version `{schema_version}`")]
+    InvalidAttestationSchema { schema_version: String },
+    #[error("invalid RCH attestation digest field `{field}`")]
+    InvalidAttestationDigest { field: &'static str },
+    #[error("RCH attestation source fingerprints are required")]
+    MissingSourceFingerprints,
+    #[error("invalid RCH attestation source fingerprint for `{path}`")]
+    InvalidSourceFingerprint { path: String },
+    #[error("RCH attestation field `{field}` does not match adapter outcome")]
+    AttestationMismatch { field: &'static str },
 }
 
 pub fn validate_allowed_rch_command(
@@ -806,6 +999,77 @@ fn worker_id_from_output(output: &str) -> Option<String> {
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn digest_fields(domain: &str, fields: &[(&str, &str)]) -> DigestRef {
+    let mut material = String::from(RCH_ATTESTATION_DIGEST_DOMAIN);
+    material.push('\0');
+    push_len_prefixed_field(&mut material, "domain", domain);
+    material.push_str("field_count:");
+    material.push_str(&len_to_u64(fields.len()).to_string());
+    material.push('\0');
+    for (key, value) in fields {
+        push_len_prefixed_field(&mut material, "key", key);
+        push_len_prefixed_field(&mut material, "value", value);
+    }
+    DigestRef::sha256(material.as_bytes())
+}
+
+fn toolchain_fingerprint(input: &RchToolchainFingerprintInput) -> DigestRef {
+    digest_fields(
+        "toolchain",
+        &[
+            ("cargo_version", &input.cargo_version),
+            ("rustc_version", &input.rustc_version),
+            ("toolchain_channel", &input.toolchain_channel),
+        ],
+    )
+}
+
+fn env_allowlist_fingerprint(
+    invocation: &RchInvocation,
+    allowlist: &[String],
+) -> (DigestRef, Vec<String>) {
+    let mut keys = allowlist.to_vec();
+    keys.sort();
+    keys.dedup();
+
+    let mut material = String::from(RCH_ATTESTATION_DIGEST_DOMAIN);
+    material.push('\0');
+    push_len_prefixed_field(&mut material, "domain", "env_allowlist");
+    material.push_str("env_count:");
+    material.push_str(&len_to_u64(keys.len()).to_string());
+    material.push('\0');
+
+    let mut redacted = Vec::new();
+    for key in &keys {
+        push_len_prefixed_field(&mut material, "env_key", key);
+        if is_sensitive_env_key(key) {
+            redacted.push(key.clone());
+            push_len_prefixed_field(&mut material, "env_value", "<redacted>");
+        } else if let Some(value) = invocation.env.get(key) {
+            push_len_prefixed_field(&mut material, "env_value", value);
+        } else {
+            push_len_prefixed_field(&mut material, "env_value", "<missing>");
+        }
+    }
+
+    (DigestRef::sha256(material.as_bytes()), redacted)
+}
+
+fn is_sensitive_env_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    contains_any(
+        &upper,
+        &[
+            "TOKEN",
+            "SECRET",
+            "PASSWORD",
+            "API_KEY",
+            "CREDENTIAL",
+            "AUTH",
+        ],
+    )
 }
 
 fn bounded_snippet(output: &str) -> String {

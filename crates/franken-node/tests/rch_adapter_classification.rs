@@ -1,8 +1,10 @@
 use frankenengine_node::ops::rch_adapter::{
-    RchAdapterOutcome, RchCommandOutput, RchCommandPolicy, RchExecutionMode, RchInvocation,
-    RchOutcomeClass, RchProcessSnapshot, RchTimeoutClass, RchValidationAction, classify_rch_output,
-    validate_allowed_rch_command,
+    RchAdapterError, RchAdapterOutcome, RchAttestedProofReceipt, RchCommandOutput,
+    RchCommandPolicy, RchExecutionMode, RchInvocation, RchOutcomeClass, RchProcessSnapshot,
+    RchProofAttestationInput, RchTimeoutClass, RchToolchainFingerprintInput, RchValidationAction,
+    build_rch_attested_proof_receipt, classify_rch_output, validate_allowed_rch_command,
 };
+use frankenengine_node::ops::validation_broker::InputDigest;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -23,6 +25,76 @@ fn command_output(exit_code: i32, stdout: &str, stderr: &str) -> RchCommandOutpu
         stderr: stderr.to_string(),
         duration_ms: 42_000,
     }
+}
+
+fn successful_attestation_invocation() -> RchInvocation {
+    let mut env = BTreeMap::new();
+    env.insert("RCH_REQUIRE_REMOTE".to_string(), "1".to_string());
+    env.insert(
+        "CARGO_TARGET_DIR".to_string(),
+        "/data/tmp/franken_node-rch-adapter-target".to_string(),
+    );
+    env.insert("API_TOKEN".to_string(), "super-secret-token".to_string());
+    RchInvocation {
+        argv: vec![
+            "env".to_string(),
+            "CARGO_TARGET_DIR=/data/tmp/franken_node-rch-adapter-target".to_string(),
+            "cargo".to_string(),
+            "+nightly-2026-02-19".to_string(),
+            "check".to_string(),
+            "-p".to_string(),
+            "frankenengine-node".to_string(),
+            "--all-targets".to_string(),
+        ],
+        env,
+        cwd: "/data/projects/franken_node".to_string(),
+    }
+}
+
+fn successful_attestation_outcome(invocation: &RchInvocation) -> RchAdapterOutcome {
+    let output = command_output(
+        0,
+        "Finished `dev` profile [unoptimized + debuginfo]\n[RCH] remote vmi1293453 (803.3s)\n",
+        "",
+    );
+    classify_rch_output(
+        invocation,
+        &output,
+        &RchProcessSnapshot::quiet(),
+        &RchCommandPolicy::default(),
+    )
+}
+
+fn attestation_input(toolchain_channel: &str) -> RchProofAttestationInput {
+    RchProofAttestationInput {
+        env_allowlist: vec![
+            "API_TOKEN".to_string(),
+            "CARGO_TARGET_DIR".to_string(),
+            "RCH_REQUIRE_REMOTE".to_string(),
+        ],
+        toolchain: RchToolchainFingerprintInput {
+            cargo_version: "cargo 1.91.0".to_string(),
+            rustc_version: "rustc 1.91.0".to_string(),
+            toolchain_channel: toolchain_channel.to_string(),
+        },
+        sync_root: Some("/data/projects/franken_node".to_string()),
+        target_dir: None,
+        source_fingerprints: vec![
+            InputDigest::new("crates/franken-node/src/lib.rs", b"lib-source", "git"),
+            InputDigest::new("crates/franken-node/src/main.rs", b"main-source", "git"),
+        ],
+    }
+}
+
+fn successful_attested_receipt() -> RchAttestedProofReceipt {
+    let invocation = successful_attestation_invocation();
+    let outcome = successful_attestation_outcome(&invocation);
+    build_rch_attested_proof_receipt(
+        &invocation,
+        outcome,
+        attestation_input("nightly-2026-02-19"),
+    )
+    .expect("attested receipt should build")
 }
 
 #[test]
@@ -61,6 +133,101 @@ fn fixture_remote_success_is_ci_consumable_green() {
     assert_eq!(outcome.execution_mode, RchExecutionMode::Remote);
     assert_eq!(outcome.worker_id.as_deref(), Some("vmi1293453"));
     assert!(outcome.is_green());
+}
+
+#[test]
+fn attested_receipt_fingerprints_are_stable_and_redact_env_secrets() {
+    let first = successful_attested_receipt();
+    let second = successful_attested_receipt();
+
+    assert_eq!(first, second);
+    assert_eq!(first.attestation.worker_id.as_deref(), Some("vmi1293453"));
+    assert_eq!(
+        first.attestation.redacted_env_keys,
+        vec!["API_TOKEN".to_string()]
+    );
+    let serialized = serde_json::to_string_pretty(&first).expect("receipt serializes");
+    assert!(!serialized.contains("super-secret-token"));
+    first.validate().expect("attested receipt validates");
+}
+
+#[test]
+fn changed_toolchain_changes_attestation_fingerprint() {
+    let invocation = successful_attestation_invocation();
+    let outcome = successful_attestation_outcome(&invocation);
+    let nightly = build_rch_attested_proof_receipt(
+        &invocation,
+        outcome.clone(),
+        attestation_input("nightly-2026-02-19"),
+    )
+    .expect("nightly attestation");
+    let stable =
+        build_rch_attested_proof_receipt(&invocation, outcome, attestation_input("stable"))
+            .expect("stable attestation");
+
+    assert_ne!(
+        nightly.attestation.toolchain_fingerprint.hex,
+        stable.attestation.toolchain_fingerprint.hex
+    );
+}
+
+#[test]
+fn missing_remote_worker_metadata_fails_closed() {
+    let invocation = successful_attestation_invocation();
+    let mut outcome = successful_attestation_outcome(&invocation);
+    outcome.worker_id = None;
+
+    let err = build_rch_attested_proof_receipt(
+        &invocation,
+        outcome,
+        attestation_input("nightly-2026-02-19"),
+    )
+    .expect_err("remote worker metadata is required");
+
+    assert!(matches!(err, RchAdapterError::MissingWorkerMetadata));
+}
+
+#[test]
+fn receipt_command_digest_mismatch_fails_closed() {
+    let mut receipt = successful_attested_receipt();
+    receipt.outcome.command_digest = "0".repeat(64);
+
+    let err = receipt
+        .validate()
+        .expect_err("mismatched digest should fail");
+
+    assert!(matches!(
+        err,
+        RchAdapterError::AttestationMismatch {
+            field: "command_digest"
+        }
+    ));
+}
+
+#[test]
+fn receipt_worker_mismatch_fails_closed() {
+    let mut receipt = successful_attested_receipt();
+    receipt.attestation.worker_id = Some("vmi-different".to_string());
+
+    let err = receipt
+        .validate()
+        .expect_err("mismatched worker metadata should fail");
+
+    assert!(matches!(
+        err,
+        RchAdapterError::AttestationMismatch { field: "worker_id" }
+    ));
+}
+
+#[test]
+fn checked_in_attestation_golden_is_deterministic() {
+    let expected: Value = serde_json::from_str(include_str!(
+        "../../../artifacts/validation_broker/bd-38hez.10/rch_attestation_golden.json"
+    ))
+    .expect("attestation golden parses");
+    let actual = serde_json::to_value(successful_attested_receipt()).expect("receipt serializes");
+
+    assert_eq!(actual, expected);
 }
 
 #[test]
