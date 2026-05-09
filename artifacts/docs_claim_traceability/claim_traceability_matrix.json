@@ -1,0 +1,148 @@
+{
+  "schema_version": "franken-node/docs-claim-traceability/v1",
+  "bead_id": "bd-38hez.8",
+  "generated_at_utc": "2026-05-09T00:00:00Z",
+  "summary": {
+    "total_claims": 4,
+    "covered": 4,
+    "weakly_covered": 0,
+    "stale": 0,
+    "aspirational": 0,
+    "missing_proof": 0,
+    "verdict": "PASS"
+  },
+  "claims": [
+    {
+      "claim_id": "DOC-CLI-DOCTOR-POLICY",
+      "claim_kind": "current",
+      "source": {
+        "path": "README.md",
+        "line": 194,
+        "claim_text": "| `franken-node doctor` | Diagnose environment and policy setup (optionally with live policy activation telemetry) | `franken-node doctor --verbose --policy-activation-input ./fixtures/policy_activation/doctor_policy_activation_pass.json` |"
+      },
+      "command_surfaces": [
+        "franken-node doctor"
+      ],
+      "docs_refs": [
+        "docs/specs/bootstrap_doctor_contract.md"
+      ],
+      "evidence_refs": [
+        {
+          "evidence_id": "doctor-policy-activation-e2e",
+          "kind": "test",
+          "coverage": "direct",
+          "status": "fresh",
+          "path": "crates/franken-node/tests/doctor_policy_activation_e2e.rs",
+          "description": "Exercises policy activation input, JSON output, structured logs, malformed input, and no-input doctor behavior."
+        },
+        {
+          "evidence_id": "doctor-diagnostics-gate",
+          "kind": "gate",
+          "coverage": "direct",
+          "status": "fresh",
+          "path": "tests/test_doctor_command_diagnostics_gate.py",
+          "description": "Checks the doctor diagnostics matrix and command contract artifacts."
+        }
+      ],
+      "classification": "covered",
+      "required_action": "none"
+    },
+    {
+      "claim_id": "DOC-CLI-FLEET-STATUS",
+      "claim_kind": "current",
+      "source": {
+        "path": "README.md",
+        "line": 182,
+        "claim_text": "| `franken-node fleet status` | Show policy and quarantine state across nodes | `franken-node fleet status --zone prod-us-east` |"
+      },
+      "command_surfaces": [
+        "franken-node fleet status"
+      ],
+      "docs_refs": [
+        "docs/runbooks/fleet_quarantine_activation.md"
+      ],
+      "evidence_refs": [
+        {
+          "evidence_id": "fleet-cli-e2e",
+          "kind": "test",
+          "coverage": "direct",
+          "status": "fresh",
+          "path": "crates/franken-node/tests/fleet_cli_e2e.rs",
+          "description": "Covers fleet status JSON and human command behavior."
+        }
+      ],
+      "classification": "covered",
+      "required_action": "none"
+    },
+    {
+      "claim_id": "DOC-CLI-MIGRATE-AUDIT",
+      "claim_kind": "current",
+      "source": {
+        "path": "README.md",
+        "line": 171,
+        "claim_text": "| `franken-node migrate audit` | Inventory migration risk and emit findings | `franken-node migrate audit ./my-app --format json` |"
+      },
+      "command_surfaces": [
+        "franken-node migrate audit"
+      ],
+      "docs_refs": [
+        "docs/migration/to_frankensqlite.md"
+      ],
+      "evidence_refs": [
+        {
+          "evidence_id": "migrate-cli-e2e",
+          "kind": "test",
+          "coverage": "direct",
+          "status": "fresh",
+          "path": "crates/franken-node/tests/migrate_cli_e2e.rs",
+          "description": "Exercises migrate audit CLI output and migration workflow behavior."
+        },
+        {
+          "evidence_id": "migration-pathways-gate",
+          "kind": "gate",
+          "coverage": "direct",
+          "status": "fresh",
+          "path": "tests/test_check_migration_pathways.py",
+          "description": "Validates migration pathway gate coverage for documented migration claims."
+        }
+      ],
+      "classification": "covered",
+      "required_action": "none"
+    },
+    {
+      "claim_id": "DOC-CLI-VERIFY-RELEASE",
+      "claim_kind": "current",
+      "source": {
+        "path": "docs/policy/artifact_signing_verification.md",
+        "line": 89,
+        "claim_text": "`franken-node verify release <path>` performs:"
+      },
+      "command_surfaces": [
+        "franken-node verify release"
+      ],
+      "docs_refs": [
+        "docs/policy/artifact_signing_verification.md"
+      ],
+      "evidence_refs": [
+        {
+          "evidence_id": "verify-release-cli-e2e",
+          "kind": "test",
+          "coverage": "direct",
+          "status": "fresh",
+          "path": "crates/franken-node/tests/verify_release_cli_e2e.rs",
+          "description": "Exercises release verification success and rejection JSON output contracts."
+        },
+        {
+          "evidence_id": "release-gate-tests",
+          "kind": "gate",
+          "coverage": "direct",
+          "status": "fresh",
+          "path": "tests/test_check_release_gate.py",
+          "description": "Validates release gate artifact and policy checks."
+        }
+      ],
+      "classification": "covered",
+      "required_action": "none"
+    }
+  ]
+}
