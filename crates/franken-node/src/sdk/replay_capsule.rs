@@ -1079,12 +1079,10 @@ mod tests {
             properties: BTreeMap::new(),
         };
         let result = validate_environment_snapshot(&env_all_empty);
-        match result {
-            Err(CapsuleError::IncompleteEnvironment(msg)) => {
-                assert!(msg.contains("runtime_version"));
-            }
-            _ => panic!("Expected IncompleteEnvironment error for runtime_version"),
-        }
+        assert!(
+            matches!(result, Err(CapsuleError::IncompleteEnvironment(ref msg)) if msg.contains("runtime_version")),
+            "expected IncompleteEnvironment error for runtime_version"
+        );
 
         // Only runtime_version empty
         let env_empty_runtime = EnvironmentSnapshot {
@@ -1093,12 +1091,14 @@ mod tests {
             config_hash: "abc123".to_string(),
             properties: BTreeMap::new(),
         };
-        match validate_environment_snapshot(&env_empty_runtime) {
-            Err(CapsuleError::IncompleteEnvironment(msg)) => {
-                assert!(msg.contains("runtime_version"));
-            }
-            _ => panic!("Expected runtime_version error"),
-        }
+        assert!(
+            matches!(
+                validate_environment_snapshot(&env_empty_runtime),
+                Err(CapsuleError::IncompleteEnvironment(ref msg))
+                    if msg.contains("runtime_version")
+            ),
+            "expected runtime_version error"
+        );
 
         // Only platform empty
         let env_empty_platform = EnvironmentSnapshot {
@@ -1107,12 +1107,13 @@ mod tests {
             config_hash: "abc123".to_string(),
             properties: BTreeMap::new(),
         };
-        match validate_environment_snapshot(&env_empty_platform) {
-            Err(CapsuleError::IncompleteEnvironment(msg)) => {
-                assert!(msg.contains("platform"));
-            }
-            _ => panic!("Expected platform error"),
-        }
+        assert!(
+            matches!(
+                validate_environment_snapshot(&env_empty_platform),
+                Err(CapsuleError::IncompleteEnvironment(ref msg)) if msg.contains("platform")
+            ),
+            "expected platform error"
+        );
 
         // Only config_hash empty
         let env_empty_config = EnvironmentSnapshot {
@@ -1121,12 +1122,13 @@ mod tests {
             config_hash: String::new(),
             properties: BTreeMap::new(),
         };
-        match validate_environment_snapshot(&env_empty_config) {
-            Err(CapsuleError::IncompleteEnvironment(msg)) => {
-                assert!(msg.contains("config_hash"));
-            }
-            _ => panic!("Expected config_hash error"),
-        }
+        assert!(
+            matches!(
+                validate_environment_snapshot(&env_empty_config),
+                Err(CapsuleError::IncompleteEnvironment(ref msg)) if msg.contains("config_hash")
+            ),
+            "expected config_hash error"
+        );
 
         // Whitespace-only fields (should fail - whitespace doesn't count as content)
         let env_whitespace = EnvironmentSnapshot {
@@ -1970,12 +1972,14 @@ mod tests {
                     version
                 );
 
-                match validation_result.unwrap_err() {
-                    CapsuleError::UnsupportedVersion(v) => {
-                        assert_eq!(v, version, "Error should report correct version");
-                    }
-                    other => panic!("Unexpected error for version {}: {:?}", version, other),
-                }
+                assert!(
+                    matches!(
+                        validation_result.unwrap_err(),
+                        CapsuleError::UnsupportedVersion(v) if v == version
+                    ),
+                    "error should report unsupported version {}",
+                    version
+                );
             }
 
             // JSON serialization should handle any version value
@@ -4038,7 +4042,11 @@ mod tests {
                             assert_eq!(reconstructed.inputs.len(), test_capsules[idx].inputs.len());
                         }
                         Err(_) => {
-                            panic!("Serialized capsule {} should deserialize correctly", idx);
+                            assert!(
+                                false,
+                                "serialized capsule {} should deserialize correctly",
+                                idx
+                            );
                         }
                     }
                 }

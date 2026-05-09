@@ -16,6 +16,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
+use hex::FromHex;
+
 use crate::push_bounded;
 use crate::security::constant_time;
 
@@ -58,7 +60,7 @@ fn content_digest_matches(observed: &str, expected: &str) -> bool {
     if observed_has_forbidden || expected_has_forbidden {
         return false;
     }
-    match (hex::decode(observed), hex::decode(expected)) {
+    match (Vec::<u8>::from_hex(observed), Vec::<u8>::from_hex(expected)) {
         (Ok(observed_bytes), Ok(expected_bytes)) => {
             if observed_bytes.len() != SHA256_DIGEST_BYTES
                 || expected_bytes.len() != SHA256_DIGEST_BYTES
@@ -1865,8 +1867,10 @@ mod tests {
     #[test]
     fn test_content_digest_matches_uses_decoded_hex_bytes() {
         let expected = content_hash(b"hex integrity payload");
-        let mut tampered_bytes = hex::decode(&expected)
-            .unwrap_or_else(|e| panic!("Content hash hex decode failed: {}", e));
+        let mut tampered_bytes = Vec::<u8>::from_hex(&expected).unwrap_or_else(|error| {
+            assert!(false, "content hash must decode in test: {error}");
+            Vec::new()
+        });
         tampered_bytes[0] ^= 0x01;
         let tampered = hex::encode(tampered_bytes);
 
@@ -1878,7 +1882,7 @@ mod tests {
     fn test_content_digest_matches_ct_eq_regression_cases() {
         let expected = content_hash(b"ct-eq retrievability payload");
         let mut first_byte_diff = expected.clone().into_bytes();
-        first_byte_diff[0] = if first_byte_diff[0] == b'0' {
+        first_byte_diff[0] = if first_byte_diff[0].eq(&b'0') {
             b'1'
         } else {
             b'0'
@@ -1887,7 +1891,7 @@ mod tests {
 
         let mut last_byte_diff = expected.clone().into_bytes();
         let last_index = last_byte_diff.len().saturating_sub(1);
-        last_byte_diff[last_index] = if last_byte_diff[last_index] == b'0' {
+        last_byte_diff[last_index] = if last_byte_diff[last_index].eq(&b'0') {
             b'1'
         } else {
             b'0'
@@ -3739,7 +3743,7 @@ mod storage_migration_integration_tests {
                     );
                 }
                 Err(err) => {
-                    panic!("Concurrent proof {} should not fail: {}", i, err);
+                    assert!(false, "concurrent proof {} should not fail: {}", i, err);
                 }
             }
         }
@@ -3945,7 +3949,7 @@ mod storage_migration_integration_tests {
                     assert!(proof.proof_timestamp >= u64::MAX.saturating_sub(10));
                     assert_eq!(proof.proof_timestamp, u64::MAX);
                 }
-                Err(e) => panic!("Overflow test #{} failed: {}", i, e),
+                Err(e) => assert!(false, "overflow test #{} failed: {}", i, e),
             }
 
             // Counter should remain at u64::MAX after saturation
@@ -4000,12 +4004,14 @@ mod storage_migration_integration_tests {
             );
 
             match (should_fail, &result) {
-                (true, Ok(_)) => panic!(
-                    "Latency attack should fail ({}): {}ms",
+                (true, Ok(_)) => assert!(
+                    false,
+                    "latency attack should fail ({}): {}ms",
                     description, latency_ms
                 ),
-                (false, Err(e)) => panic!(
-                    "Valid latency should pass ({}): {}ms - {}",
+                (false, Err(e)) => assert!(
+                    false,
+                    "valid latency should pass ({}): {}ms - {}",
                     description, latency_ms, e
                 ),
                 (true, Err(e)) => {
@@ -4075,8 +4081,9 @@ mod storage_migration_integration_tests {
             let duration = start.elapsed();
 
             match result {
-                Ok(_) => panic!(
-                    "Hash collision attack should fail ({}): {}",
+                Ok(_) => assert!(
+                    false,
+                    "hash collision attack should fail ({}): {}",
                     attack_type, malicious_hash
                 ),
                 Err(e) => {

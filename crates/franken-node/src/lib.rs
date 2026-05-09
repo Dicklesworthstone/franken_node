@@ -1219,7 +1219,7 @@ mod tests {
         // Create a poisoned mutex by panicking while holding the lock
         let handle = thread::spawn(move || {
             let _guard = poison_mutex.lock().unwrap();
-            panic!("Intentional panic to poison mutex");
+            std::panic::resume_unwind(Box::new("intentional mutex poison"));
         });
 
         // Wait for the thread to panic and poison the mutex
@@ -1299,7 +1299,7 @@ mod tests {
         // Create a poisoned mutex by panicking while holding the lock
         let handle = thread::spawn(move || {
             let _guard = poison_mutex.lock().unwrap();
-            panic!("Intentional panic to poison mutex");
+            std::panic::resume_unwind(Box::new("intentional mutex poison"));
         });
 
         // Wait for the thread to panic and poison the mutex

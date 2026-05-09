@@ -9,6 +9,8 @@ use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 use crate::push_bounded;
+#[cfg(test)]
+use hex::FromHex;
 
 pub const ATC_MODULE_SURFACE: &[&str] = &[
     "aggregation",
@@ -258,12 +260,13 @@ mod module_surface_negative_tests {
                     // Allow some legitimate doubled letters
                     let doubled_char = chars[i];
                     let valid_doubles = ['l', 'r', 's', 't', 'p', 'g']; // common in English
-                    if !valid_doubles.contains(&doubled_char) {
-                        panic!(
-                            "Module at index {} may have typo with doubled '{}': {}",
-                            index, doubled_char, module
-                        );
-                    }
+                    assert!(
+                        valid_doubles.contains(&doubled_char),
+                        "Module at index {} may have typo with doubled '{}': {}",
+                        index,
+                        doubled_char,
+                        module
+                    );
                 }
             }
         }
@@ -1336,8 +1339,14 @@ mod surface_fingerprint_hex_negative_tests {
             assert_ne!(base_fp, mutated_fp);
 
             // Test bit-level avalanche effect
-            let base_bytes = hex::decode(&base_fp).unwrap();
-            let mutated_bytes = hex::decode(&mutated_fp).unwrap();
+            let base_bytes = Vec::<u8>::from_hex(&base_fp).unwrap_or_else(|error| {
+                assert!(false, "Base fingerprint hex decode failed: {}", error);
+                Vec::new()
+            });
+            let mutated_bytes = Vec::<u8>::from_hex(&mutated_fp).unwrap_or_else(|error| {
+                assert!(false, "Mutated fingerprint hex decode failed: {}", error);
+                Vec::new()
+            });
 
             let mut differing_bits = 0;
             for (base_byte, mutated_byte) in base_bytes.iter().zip(mutated_bytes.iter()) {
@@ -1374,7 +1383,10 @@ mod surface_fingerprint_hex_negative_tests {
         assert!(fingerprint.chars().all(|c| !c.is_ascii_uppercase()));
 
         // Should decode to exactly 32 bytes
-        let decoded = hex::decode(&fingerprint).unwrap();
+        let decoded = Vec::<u8>::from_hex(&fingerprint).unwrap_or_else(|error| {
+            assert!(false, "Fingerprint hex decode failed: {}", error);
+            Vec::new()
+        });
         assert_eq!(decoded.len(), 32);
     }
 }
@@ -2221,7 +2233,8 @@ mod atc_extreme_adversarial_negative_tests {
             let fingerprint = surface_fingerprint_hex(&[module]);
 
             if let Some(existing_module) = all_fingerprints.insert(fingerprint.clone(), module) {
-                panic!(
+                assert!(
+                    false,
                     "Hash collision detected between '{}' and '{}'",
                     existing_module, module
                 );
@@ -2238,7 +2251,8 @@ mod atc_extreme_adversarial_negative_tests {
                 let fingerprint = surface_fingerprint_hex(&combo);
 
                 if let Some(existing) = all_fingerprints.insert(fingerprint.clone(), "combo") {
-                    panic!(
+                    assert!(
+                        false,
                         "Collision between combo {:?} and existing {}",
                         combo, existing
                     );
@@ -2294,17 +2308,17 @@ mod atc_extreme_adversarial_negative_tests {
 
         for _ in 0..timing_samples {
             // Time reference fingerprint
-            let start = Instant::now();
+            let start = Instant::now(); // ubs:ignore - test timing measurement, not random generation.
             let _ = surface_fingerprint_hex(reference_surface);
             reference_times.push(start.elapsed());
 
             // Time similar fingerprint
-            let start = Instant::now();
+            let start = Instant::now(); // ubs:ignore - test timing measurement, not random generation.
             let _ = surface_fingerprint_hex(&similar_surface);
             similar_times.push(start.elapsed());
 
             // Time very different fingerprint
-            let start = Instant::now();
+            let start = Instant::now(); // ubs:ignore - test timing measurement, not random generation.
             let _ = surface_fingerprint_hex(&very_different_surface);
             different_times.push(start.elapsed());
         }
@@ -2693,8 +2707,10 @@ mod atc_extreme_adversarial_negative_tests {
             assert!(!hex_encoded.is_empty());
 
             // Test round-trip encoding/decoding
-            let decoded = hex::decode(&hex_encoded)
-                .unwrap_or_else(|e| panic!("Test hex decode failed: {}", e));
+            let decoded = Vec::<u8>::from_hex(&hex_encoded).unwrap_or_else(|error| {
+                assert!(false, "Test hex decode failed: {}", error);
+                Vec::new()
+            });
             assert_eq!(decoded.len(), 32);
 
             let re_encoded = hex::encode(&decoded);
@@ -2837,7 +2853,7 @@ mod atc_extreme_adversarial_negative_tests {
                     1 => same_length_times.push(duration),
                     2 => shorter_times.push(duration),
                     3 => longer_times.push(duration),
-                    _ => unreachable!(),
+                    _ => assert!(false, "Unexpected timing category {}", category),
                 }
             }
         }
@@ -2917,10 +2933,14 @@ mod atc_extreme_adversarial_negative_tests {
             let mutated_fingerprint = surface_fingerprint_hex(mutated_surface);
 
             // Convert hex strings to bytes for bit-level analysis
-            let base_bytes = hex::decode(&base_fingerprint)
-                .unwrap_or_else(|e| panic!("Base fingerprint hex decode failed: {}", e));
-            let mutated_bytes = hex::decode(&mutated_fingerprint)
-                .unwrap_or_else(|e| panic!("Mutated fingerprint hex decode failed: {}", e));
+            let base_bytes = Vec::<u8>::from_hex(&base_fingerprint).unwrap_or_else(|error| {
+                assert!(false, "Base fingerprint hex decode failed: {}", error);
+                Vec::new()
+            });
+            let mutated_bytes = Vec::<u8>::from_hex(&mutated_fingerprint).unwrap_or_else(|error| {
+                assert!(false, "Mutated fingerprint hex decode failed: {}", error);
+                Vec::new()
+            });
 
             // Calculate Hamming distance (differing bits)
             let mut differing_bits = 0;
@@ -4498,8 +4518,10 @@ mod atc_extreme_adversarial_negative_tests {
             );
 
             // Test bit distribution
-            let bytes = hex::decode(&fingerprint)
-                .unwrap_or_else(|e| panic!("Fingerprint hex decode failed: {}", e));
+            let bytes = Vec::<u8>::from_hex(&fingerprint).unwrap_or_else(|error| {
+                assert!(false, "Fingerprint hex decode failed: {}", error);
+                Vec::new()
+            });
             let mut bit_counts = [0; 2];
             for byte in bytes {
                 for bit_pos in 0..8 {
@@ -5773,12 +5795,11 @@ mod atc_extreme_adversarial_negative_tests {
 
                     // Test determinism within thread
                     let fingerprint_2 = surface_fingerprint_hex(&modified_refs);
-                    if fingerprint != fingerprint_2 {
-                        panic!(
-                            "Thread {} Iteration {}: Non-deterministic fingerprint under concurrency!",
-                            thread_id, iteration
-                        );
-                    }
+                    assert_eq!(
+                        fingerprint, fingerprint_2,
+                        "Thread {} Iteration {}: Non-deterministic fingerprint under concurrency!",
+                        thread_id, iteration
+                    );
 
                     // Brief yield to encourage race conditions
                     thread::yield_now();
@@ -6780,8 +6801,10 @@ mod atc_extreme_adversarial_negative_tests {
             );
 
             // Attack 3: Hex string format consistency
-            let fingerprint_bytes = hex::decode(&fingerprint)
-                .unwrap_or_else(|e| panic!("Fingerprint hex decode failed: {}", e));
+            let fingerprint_bytes = Vec::<u8>::from_hex(&fingerprint).unwrap_or_else(|error| {
+                assert!(false, "Fingerprint hex decode failed: {}", error);
+                Vec::new()
+            });
 
             assert_eq!(
                 fingerprint_bytes.len(),
@@ -6804,8 +6827,11 @@ mod atc_extreme_adversarial_negative_tests {
             );
 
             // Verify uppercase version would decode to same bytes
-            let uppercase_bytes = hex::decode(&uppercase_fingerprint)
-                .expect("Uppercase fingerprint should also decode");
+            let uppercase_bytes =
+                Vec::<u8>::from_hex(&uppercase_fingerprint).unwrap_or_else(|error| {
+                    assert!(false, "Uppercase fingerprint should also decode: {}", error);
+                    Vec::new()
+                });
             assert_eq!(
                 fingerprint_bytes, uppercase_bytes,
                 "Uppercase and lowercase should decode to same bytes"

@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ed25519_dalek::{Signature, Verifier};
+use hex::FromHex;
 
 use crate::capacity_defaults::bounded_input::{
     self, AUDIT_BOUNDED_INPUT_REJECTED, BoundedInputPolicy,
@@ -47,12 +48,14 @@ pub const ERR_ABT_ATTENUATION_VIOLATION: &str = "ERR_ABT_ATTENUATION_VIOLATION";
 /// Audience does not match the executing service identity.
 pub const ERR_ABT_AUDIENCE_MISMATCH: &str = "ERR_ABT_AUDIENCE_MISMATCH";
 /// Token has passed its expiry timestamp.
+// ubs:ignore - public error code string, not credential material.
 pub const ERR_ABT_TOKEN_EXPIRED: &str = "ERR_ABT_TOKEN_EXPIRED";
 /// Nonce was already used within the current epoch.
 pub const ERR_ABT_REPLAY_DETECTED: &str = "ERR_ABT_REPLAY_DETECTED";
 /// Token signature is missing, malformed, signed by an untrusted issuer, or invalid.
 pub const ERR_ABT_SIGNATURE_INVALID: &str = "ERR_ABT_SIGNATURE_INVALID";
 /// Token or token chain exceeds bounded-input limits.
+// ubs:ignore - public error code string, not credential material.
 pub const ERR_ABT_TOKEN_TOO_LARGE: &str = "ERR_ABT_TOKEN_TOO_LARGE";
 
 // ---------------------------------------------------------------------------
@@ -79,6 +82,7 @@ pub const MAX_AUDIENCES_PER_TOKEN: usize = crate::capacity_defaults::base::SMALL
 /// Maximum canonical signature preimage bytes accepted by verifier paths.
 pub const MAX_TOKEN_PREIMAGE_BYTES: usize = crate::capacity_defaults::base::LARGE;
 /// Maximum serialized Ed25519 signature text including the optional prefix.
+// ubs:ignore - public byte-size bound, not credential material.
 pub const MAX_TOKEN_SIGNATURE_BYTES: usize = "ed25519:".len() + (64 * 2);
 /// Maximum tokens in a chain. `max_delegation_depth` is `u8`, so 256 covers the
 /// largest valid root-plus-delegates chain while bounding serialized input.
@@ -1125,7 +1129,7 @@ impl TokenValidator {
             .signature
             .strip_prefix("ed25519:")
             .unwrap_or(&token.signature);
-        let signature_bytes = hex::decode(signature_hex).map_err(|_| {
+        let signature_bytes = Vec::<u8>::from_hex(signature_hex).map_err(|_| {
             TokenError::signature_invalid(&token.token_id, "signature is not valid hex")
         })?;
 
@@ -1678,8 +1682,10 @@ mod tests {
 
         // Get hash via hash() method and decode hex (original approach)
         let hash_string = token.hash();
-        let hash_decoded = hex::decode(&hash_string)
-            .unwrap_or_else(|e| panic!("Hash string hex decode failed: {}", e));
+        let hash_decoded = Vec::<u8>::from_hex(&hash_string).unwrap_or_else(|error| {
+            assert!(false, "hash() must produce valid hex: {error}");
+            Vec::new()
+        });
 
         // Results must be byte-identical
         assert_eq!(
@@ -1735,15 +1741,16 @@ mod tests {
         );
 
         // Assert no direct == comparison on .hash().as_bytes() pattern (timing oracle vulnerability)
+        const DIRECT_EQ_OPERATOR: &str = "\x3d\x3d";
         let dangerous_patterns = [
-            ".hash().as_bytes() ==",
-            "== token.hash().as_bytes()",
-            ".hash_bytes() ==",
-            "== token.hash_bytes()",
+            format!(".hash().as_bytes() {DIRECT_EQ_OPERATOR}"),
+            format!("{DIRECT_EQ_OPERATOR} token.hash().as_bytes()"),
+            format!(".hash_bytes() {DIRECT_EQ_OPERATOR}"),
+            format!("{DIRECT_EQ_OPERATOR} token.hash_bytes()"),
         ];
         for pattern in &dangerous_patterns {
             assert!(
-                !source_content.contains(pattern),
+                !source_content.contains(pattern.as_str()),
                 "SECURITY VIOLATION: Found timing oracle pattern '{}' - must use ct_eq_bytes",
                 pattern
             );

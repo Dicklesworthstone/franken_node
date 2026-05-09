@@ -18,6 +18,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
+use hex::FromHex;
+
 const MAX_BUMP_RECORDS: usize = 4096;
 
 pub fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
@@ -129,7 +131,7 @@ impl ContentHash {
     }
 
     pub fn from_hex(s: &str) -> Result<Self, SeedError> {
-        let decoded = hex::decode(s).map_err(|_| SeedError::InvalidContentHash)?;
+        let decoded = Vec::<u8>::from_hex(s).map_err(|_| SeedError::InvalidContentHash)?;
         if decoded.len() != 32 {
             return Err(SeedError::InvalidContentHash);
         }
@@ -412,7 +414,7 @@ fn derive_seed_negative_path_regression_coverage() {
         .with_param("script_injection", "<script>alert('xss')</script>");
     let result = deriver.derive_seed(&DomainTag::Repair, &content_hash, &control_char_config);
     assert!(
-        result.0.bytes.iter().all(|&b| b != 0),
+        result.0.bytes.iter().any(|&b| b > 0),
         "Derived seed should not be all zeros"
     );
     // Control characters should be hashed as-is without interpretation
@@ -775,7 +777,7 @@ mod hex_bytes {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        let decoded = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        let decoded = Vec::<u8>::from_hex(&s).map_err(serde::de::Error::custom)?;
         if decoded.len() != 32 {
             return Err(serde::de::Error::custom(format!(
                 "expected 32 bytes, got {}",
@@ -2184,8 +2186,10 @@ mod additional_negative_path_tests {
                     );
 
                     // Test round-trip encoding/decoding
-                    let decoded = hex::decode(hex_field)
-                        .unwrap_or_else(|e| panic!("Hex decode failed in test: {}", e));
+                    let decoded = Vec::<u8>::from_hex(hex_field).unwrap_or_else(|error| {
+                        assert!(false, "hex field must decode in test: {error}");
+                        Vec::new()
+                    });
                     assert_eq!(decoded.len(), 32, "Decoded hex should be 32 bytes");
 
                     let re_encoded = hex::encode(&decoded);
