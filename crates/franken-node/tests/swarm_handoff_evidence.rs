@@ -7,8 +7,10 @@ use frankenengine_node::ops::swarm_handoff::{
     SwarmHandoffIssueEvidence, SwarmHandoffIssueStatus, SwarmHandoffPolicyConfig,
     SwarmHandoffPolicyDecision, SwarmHandoffRchBuildEvidence, SwarmHandoffRchBuildState,
     SwarmHandoffReservationEvidence, SwarmHandoffVerificationCommandFamily,
-    build_swarm_handoff_readiness_report, handoff_reason_codes,
-    render_swarm_handoff_readiness_json,
+    SwarmOverlapCandidateWork, SwarmOverlapGitActivityEvidence, SwarmOverlapRiskLevel,
+    SwarmOverlapSuggestedAction, build_swarm_handoff_readiness_report, handoff_reason_codes,
+    overlap_reason_codes, render_cross_agent_overlap_risk_human,
+    render_swarm_handoff_readiness_json, score_cross_agent_overlap_risk,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -107,6 +109,23 @@ fn policy_config() -> SwarmHandoffPolicyConfig {
     }
 }
 
+fn empty_handoff_input() -> SwarmHandoffEvidenceInput {
+    SwarmHandoffEvidenceInput {
+        schema_version: SWARM_HANDOFF_EVIDENCE_SCHEMA_VERSION.to_string(),
+        observed_at: ts(100),
+        issues: Vec::new(),
+        agents: Vec::new(),
+        reservations: Vec::new(),
+        rch_builds: Vec::new(),
+        git_activity: Vec::new(),
+        cross_repo_blockers: Vec::new(),
+    }
+}
+
+fn overlap_candidate(path: &str) -> SwarmOverlapCandidateWork {
+    SwarmOverlapCandidateWork::new("bd-38hez.7", [path]).with_agent_name("RainyAspen")
+}
+
 fn policy_input() -> SwarmHandoffEvidenceInput {
     let mut input = valid_input();
     let issue = input
@@ -139,6 +158,23 @@ fn issue(
         dependency_ids: Vec::new(),
         dependent_ids: Vec::new(),
         blocker_summary: None,
+    }
+}
+
+fn overlap_reservation(
+    holder: &str,
+    path_pattern: &str,
+    reason: Option<&str>,
+    expires_at: DateTime<Utc>,
+) -> SwarmHandoffReservationEvidence {
+    SwarmHandoffReservationEvidence {
+        holder_agent: holder.to_string(),
+        project_key: "/data/projects/franken_node".to_string(),
+        path_pattern: path_pattern.to_string(),
+        exclusive: true,
+        reason: reason.map(str::to_string),
+        expires_at,
+        released_at: None,
     }
 }
 
@@ -326,6 +362,212 @@ fn serde_round_trip_preserves_fixture() {
         serde_json::from_str(&json).expect("fixture should deserialize");
 
     assert_eq!(parsed, input);
+}
+
+#[test]
+fn overlap_risk_empty_swarm_allows_claim() {
+    let input = empty_handoff_input();
+    let candidate = overlap_candidate("crates/franken-node/src/ops/swarm_handoff.rs");
+
+    let report = score_cross_agent_overlap_risk(&input, &candidate, &[], &policy_config());
+
+    assert_eq!(report.risk_level, SwarmOverlapRiskLevel::Clear);
+    assert_eq!(report.suggested_action, SwarmOverlapSuggestedAction::Claim);
+    assert_eq!(report.risk_score, 0);
+    assert!(
+        report
+            .reason_codes
+            .contains(&overlap_reason_codes::OVERLAP_CLEAR_NO_SIGNALS.to_string())
+    );
+    let human = render_cross_agent_overlap_risk_human(&report);
+    assert!(human.contains("action=claim"));
+    assert!(human.len() < 512);
+}
+
+#[test]
+fn overlap_risk_active_owner_requires_handoff() {
+    let mut input = empty_handoff_input();
+    input.issues = vec![issue(
+        "bd-38hez.7",
+        "overlap scorer",
+        SwarmHandoffIssueStatus::InProgress,
+        Some("CalmSnow"),
+        Some(ts(99)),
+    )];
+    input.agents = vec![SwarmHandoffAgentEvidence {
+        agent_name: "CalmSnow".to_string(),
+        project_key: "/data/projects/franken_node".to_string(),
+        task_description: Some("active owner".to_string()),
+        last_active_at: Some(ts(99)),
+        contact_policy: Some("auto".to_string()),
+        ack_required_count: 0,
+    }];
+    let candidate = overlap_candidate("crates/franken-node/src/ops/swarm_handoff.rs");
+
+    let report = score_cross_agent_overlap_risk(&input, &candidate, &[], &policy_config());
+
+    assert_eq!(report.risk_level, SwarmOverlapRiskLevel::HardConflict);
+    assert_eq!(
+        report.suggested_action,
+        SwarmOverlapSuggestedAction::AskForHandoff
+    );
+    assert!(
+        report
+            .reason_codes
+            .contains(&overlap_reason_codes::OVERLAP_ACTIVE_OWNER.to_string())
+    );
+}
+
+#[test]
+fn overlap_risk_stale_owner_does_not_block_claim() {
+    let mut input = empty_handoff_input();
+    input.issues = vec![issue(
+        "bd-38hez.7",
+        "overlap scorer",
+        SwarmHandoffIssueStatus::InProgress,
+        Some("CalmSnow"),
+        Some(ts(20)),
+    )];
+    input.agents = vec![SwarmHandoffAgentEvidence {
+        agent_name: "CalmSnow".to_string(),
+        project_key: "/data/projects/franken_node".to_string(),
+        task_description: Some("stale owner".to_string()),
+        last_active_at: Some(ts(20)),
+        contact_policy: Some("auto".to_string()),
+        ack_required_count: 0,
+    }];
+    let candidate = overlap_candidate("crates/franken-node/src/ops/swarm_handoff.rs");
+
+    let report = score_cross_agent_overlap_risk(&input, &candidate, &[], &policy_config());
+
+    assert_eq!(report.risk_level, SwarmOverlapRiskLevel::StaleConflict);
+    assert_eq!(report.suggested_action, SwarmOverlapSuggestedAction::Claim);
+    assert!(
+        report
+            .reason_codes
+            .contains(&overlap_reason_codes::OVERLAP_STALE_OWNER.to_string())
+    );
+}
+
+#[test]
+fn overlap_risk_overlapping_glob_waits_on_reservation() {
+    let mut input = empty_handoff_input();
+    input.reservations = vec![overlap_reservation(
+        "CalmSnow",
+        "crates/franken-node/src/ops/*.rs",
+        Some("bd-other"),
+        ts(200),
+    )];
+    let candidate = overlap_candidate("crates/franken-node/src/ops/swarm_handoff.rs");
+
+    let report = score_cross_agent_overlap_risk(&input, &candidate, &[], &policy_config());
+
+    assert_eq!(report.risk_level, SwarmOverlapRiskLevel::HardConflict);
+    assert_eq!(report.suggested_action, SwarmOverlapSuggestedAction::Wait);
+    assert!(
+        report
+            .reason_codes
+            .contains(&overlap_reason_codes::OVERLAP_ACTIVE_RESERVATION.to_string())
+    );
+}
+
+#[test]
+fn overlap_risk_sibling_path_prefixes_do_not_conflict() {
+    let mut input = empty_handoff_input();
+    input.reservations = vec![overlap_reservation(
+        "CalmSnow",
+        "crates/franken-node/src/ops/swarm",
+        Some("bd-other"),
+        ts(200),
+    )];
+    let candidate = overlap_candidate("crates/franken-node/src/ops/swarm_handoff.rs");
+
+    let report = score_cross_agent_overlap_risk(&input, &candidate, &[], &policy_config());
+
+    assert_eq!(report.risk_level, SwarmOverlapRiskLevel::Clear);
+    assert_eq!(report.suggested_action, SwarmOverlapSuggestedAction::Claim);
+}
+
+#[test]
+fn overlap_risk_disjoint_test_surface_gets_advisory_action() {
+    let mut input = empty_handoff_input();
+    input.reservations = vec![overlap_reservation(
+        "CalmSnow",
+        "crates/franken-node/src/**",
+        Some("bd-other"),
+        ts(200),
+    )];
+    let candidate = overlap_candidate("crates/franken-node/tests/swarm_handoff_evidence.rs");
+
+    let report = score_cross_agent_overlap_risk(&input, &candidate, &[], &policy_config());
+
+    assert_eq!(report.risk_level, SwarmOverlapRiskLevel::Advisory);
+    assert_eq!(
+        report.suggested_action,
+        SwarmOverlapSuggestedAction::PickTestOnlySurface
+    );
+    assert!(
+        report
+            .reason_codes
+            .contains(&overlap_reason_codes::OVERLAP_DISJOINT_TEST_SURFACE.to_string())
+    );
+}
+
+#[test]
+fn overlap_risk_br_mail_disagreement_requires_handoff() {
+    let mut input = empty_handoff_input();
+    input.issues = vec![issue(
+        "bd-38hez.7",
+        "overlap scorer",
+        SwarmHandoffIssueStatus::Open,
+        None,
+        Some(ts(90)),
+    )];
+    input.reservations = vec![overlap_reservation(
+        "CalmSnow",
+        "crates/franken-node/src/ops/swarm_handoff.rs",
+        Some("bd-38hez.7"),
+        ts(200),
+    )];
+    let candidate = overlap_candidate("crates/franken-node/src/ops/swarm_handoff.rs");
+
+    let report = score_cross_agent_overlap_risk(&input, &candidate, &[], &policy_config());
+
+    assert_eq!(report.risk_level, SwarmOverlapRiskLevel::HardConflict);
+    assert_eq!(
+        report.suggested_action,
+        SwarmOverlapSuggestedAction::AskForHandoff
+    );
+    assert!(
+        report
+            .reason_codes
+            .contains(&overlap_reason_codes::OVERLAP_BR_MAIL_DISAGREE.to_string())
+    );
+}
+
+#[test]
+fn overlap_risk_recent_git_touch_is_advisory() {
+    let input = empty_handoff_input();
+    let candidate = overlap_candidate("crates/franken-node/src/ops/swarm_handoff.rs");
+    let git_activity = vec![SwarmOverlapGitActivityEvidence {
+        project_key: "/data/projects/franken_node".to_string(),
+        agent_name: Some("SnowyBeaver".to_string()),
+        commit_hash: Some("abc1234".to_string()),
+        summary: "touch swarm handoff".to_string(),
+        touched_paths: vec!["crates/franken-node/src/ops/swarm_handoff.rs".to_string()],
+        authored_at: ts(99),
+    }];
+
+    let report =
+        score_cross_agent_overlap_risk(&input, &candidate, &git_activity, &policy_config());
+
+    assert_eq!(report.risk_level, SwarmOverlapRiskLevel::Advisory);
+    assert_eq!(report.suggested_action, SwarmOverlapSuggestedAction::Claim);
+    assert!(
+        report
+            .reason_codes
+            .contains(&overlap_reason_codes::OVERLAP_RECENT_GIT_TOUCH.to_string())
+    );
 }
 
 #[test]

@@ -6,13 +6,13 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::error::Error;
-use std::fmt;
+use std::{collections::BTreeSet, error::Error, fmt};
 
 pub const SWARM_HANDOFF_EVIDENCE_SCHEMA_VERSION: &str = "franken-node/swarm-handoff/evidence/v1";
 pub const SWARM_HANDOFF_SUMMARY_SCHEMA_VERSION: &str = "franken-node/swarm-handoff/summary/v1";
 pub const SWARM_HANDOFF_POLICY_SCHEMA_VERSION: &str = "franken-node/swarm-handoff/policy/v1";
 pub const SWARM_HANDOFF_READINESS_SCHEMA_VERSION: &str = "franken-node/swarm-handoff/readiness/v1";
+pub const SWARM_OVERLAP_RISK_SCHEMA_VERSION: &str = "franken-node/swarm-overlap-risk/v1";
 
 pub const MAX_HANDOFF_ISSUES: usize = 256;
 pub const MAX_HANDOFF_AGENTS: usize = 256;
@@ -23,6 +23,8 @@ pub const MAX_HANDOFF_CROSS_REPO_BLOCKERS: usize = 128;
 pub const MAX_HANDOFF_LIST_ITEMS: usize = 64;
 pub const MAX_HANDOFF_STRING_BYTES: usize = 512;
 pub const MAX_HANDOFF_SUMMARY_BYTES: usize = 2048;
+pub const MAX_OVERLAP_CANDIDATE_PATHS: usize = 128;
+pub const MAX_OVERLAP_CONFLICTS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -131,6 +133,19 @@ pub mod handoff_reason_codes {
     pub const HANDOFF_MANUAL_REVIEW_CLOSED_ISSUE: &str = "HANDOFF_MANUAL_REVIEW_CLOSED_ISSUE";
 }
 
+pub mod overlap_reason_codes {
+    pub const OVERLAP_CLEAR_NO_SIGNALS: &str = "OVERLAP_CLEAR_NO_SIGNALS";
+    pub const OVERLAP_ACTIVE_OWNER: &str = "OVERLAP_ACTIVE_OWNER";
+    pub const OVERLAP_STALE_OWNER: &str = "OVERLAP_STALE_OWNER";
+    pub const OVERLAP_ACTIVE_RESERVATION: &str = "OVERLAP_ACTIVE_RESERVATION";
+    pub const OVERLAP_STALE_RESERVATION: &str = "OVERLAP_STALE_RESERVATION";
+    pub const OVERLAP_BR_MAIL_DISAGREE: &str = "OVERLAP_BR_MAIL_DISAGREE";
+    pub const OVERLAP_RECENT_GIT_TOUCH: &str = "OVERLAP_RECENT_GIT_TOUCH";
+    pub const OVERLAP_DEPENDENCY_DISTANCE: &str = "OVERLAP_DEPENDENCY_DISTANCE";
+    pub const OVERLAP_DISJOINT_TEST_SURFACE: &str = "OVERLAP_DISJOINT_TEST_SURFACE";
+    pub const OVERLAP_MALFORMED_INPUT: &str = "OVERLAP_MALFORMED_INPUT";
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SwarmHandoffPolicyDecision {
@@ -158,6 +173,64 @@ impl SwarmHandoffPolicyDecision {
             Self::ManualReviewRequired => "manual_review_required",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmOverlapRiskLevel {
+    Clear,
+    Advisory,
+    StaleConflict,
+    HardConflict,
+}
+
+impl SwarmOverlapRiskLevel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clear => "clear",
+            Self::Advisory => "advisory",
+            Self::StaleConflict => "stale_conflict",
+            Self::HardConflict => "hard_conflict",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmOverlapSuggestedAction {
+    Claim,
+    AskForHandoff,
+    PickTestOnlySurface,
+    Wait,
+    RefreshEvidence,
+}
+
+impl SwarmOverlapSuggestedAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claim => "claim",
+            Self::AskForHandoff => "ask_for_handoff",
+            Self::PickTestOnlySurface => "pick_test_only_surface",
+            Self::Wait => "wait",
+            Self::RefreshEvidence => "refresh_evidence",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmOverlapConflictKind {
+    NoOverlap,
+    ActiveOwner,
+    StaleOwner,
+    ReservationOverlap,
+    BrMailDisagreement,
+    RecentGitTouch,
+    DependencyDistance,
+    DisjointTestSurface,
+    MalformedInput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,6 +363,102 @@ pub struct SwarmHandoffCrossRepoBlockerEvidence {
     pub cleared_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clearing_commit_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmOverlapCandidateWork {
+    pub bead_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(default)]
+    pub candidate_paths: Vec<String>,
+    #[serde(default)]
+    pub dependency_ids: Vec<String>,
+    #[serde(default)]
+    pub dependent_ids: Vec<String>,
+}
+
+impl SwarmOverlapCandidateWork {
+    #[must_use]
+    pub fn new(
+        bead_id: impl Into<String>,
+        candidate_paths: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            bead_id: bead_id.into(),
+            agent_name: None,
+            candidate_paths: candidate_paths.into_iter().map(Into::into).collect(),
+            dependency_ids: Vec::new(),
+            dependent_ids: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_agent_name(mut self, agent_name: impl Into<String>) -> Self {
+        self.agent_name = Some(agent_name.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_dependency_ids(
+        mut self,
+        dependency_ids: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.dependency_ids = dependency_ids.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_dependent_ids(
+        mut self,
+        dependent_ids: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.dependent_ids = dependent_ids.into_iter().map(Into::into).collect();
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmOverlapGitActivityEvidence {
+    pub project_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_hash: Option<String>,
+    pub summary: String,
+    #[serde(default)]
+    pub touched_paths: Vec<String>,
+    pub authored_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmOverlapRiskConflict {
+    pub kind: SwarmOverlapConflictKind,
+    pub risk_level: SwarmOverlapRiskLevel,
+    pub score: u8,
+    pub subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub reason_code: String,
+    pub evidence_pointer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_secs: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmOverlapRiskReport {
+    pub schema_version: String,
+    pub bead_id: String,
+    pub observed_at: DateTime<Utc>,
+    pub candidate_paths: Vec<String>,
+    pub risk_level: SwarmOverlapRiskLevel,
+    pub risk_score: u8,
+    pub suggested_action: SwarmOverlapSuggestedAction,
+    pub reason_codes: Vec<String>,
+    pub conflicts: Vec<SwarmOverlapRiskConflict>,
+    pub operator_message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1064,6 +1233,272 @@ impl SwarmHandoffEvidenceInput {
             })
             .map(|activity| (HANDOFF_ACTIVE_RECENT_GIT_ACTIVITY, git_pointer(activity)))
     }
+}
+
+#[must_use]
+pub fn score_cross_agent_overlap_risk(
+    input: &SwarmHandoffEvidenceInput,
+    candidate: &SwarmOverlapCandidateWork,
+    git_activity: &[SwarmOverlapGitActivityEvidence],
+    config: &SwarmHandoffPolicyConfig,
+) -> SwarmOverlapRiskReport {
+    use overlap_reason_codes::{
+        OVERLAP_ACTIVE_OWNER, OVERLAP_ACTIVE_RESERVATION, OVERLAP_BR_MAIL_DISAGREE,
+        OVERLAP_CLEAR_NO_SIGNALS, OVERLAP_DEPENDENCY_DISTANCE, OVERLAP_DISJOINT_TEST_SURFACE,
+        OVERLAP_MALFORMED_INPUT, OVERLAP_RECENT_GIT_TOUCH, OVERLAP_STALE_OWNER,
+        OVERLAP_STALE_RESERVATION,
+    };
+
+    let mut conflicts = Vec::new();
+    let candidate_paths = normalize_overlap_paths(&candidate.candidate_paths);
+    if validate_overlap_candidate(candidate, &candidate_paths).is_err()
+        || input.validate_and_summarize().is_err()
+    {
+        conflicts.push(overlap_conflict(
+            SwarmOverlapConflictKind::MalformedInput,
+            SwarmOverlapRiskLevel::HardConflict,
+            100,
+            &candidate.bead_id,
+            candidate.agent_name.as_deref(),
+            None,
+            OVERLAP_MALFORMED_INPUT,
+            "overlap_input:malformed".to_string(),
+            None,
+        ));
+        return overlap_report(input.observed_at, candidate, candidate_paths, conflicts);
+    }
+
+    let issue = input
+        .issues
+        .iter()
+        .find(|issue| issue.bead_id == candidate.bead_id);
+    if let Some(issue) = issue {
+        let same_agent = issue.assignee.as_deref() == candidate.agent_name.as_deref();
+        if issue.assignee.is_some() && !same_agent {
+            if owner_has_recent_signal(input, issue, config) {
+                conflicts.push(overlap_conflict(
+                    SwarmOverlapConflictKind::ActiveOwner,
+                    SwarmOverlapRiskLevel::HardConflict,
+                    95,
+                    &issue.bead_id,
+                    issue.assignee.as_deref(),
+                    None,
+                    OVERLAP_ACTIVE_OWNER,
+                    issue_pointer(issue),
+                    freshness_age_secs(input, issue),
+                ));
+            } else {
+                conflicts.push(overlap_conflict(
+                    SwarmOverlapConflictKind::StaleOwner,
+                    SwarmOverlapRiskLevel::StaleConflict,
+                    55,
+                    &issue.bead_id,
+                    issue.assignee.as_deref(),
+                    None,
+                    OVERLAP_STALE_OWNER,
+                    issue_pointer(issue),
+                    freshness_age_secs(input, issue),
+                ));
+            }
+        }
+    }
+
+    for reservation in input
+        .reservations
+        .iter()
+        .filter(|reservation| reservation.released_at.is_none())
+    {
+        let holder_is_candidate =
+            candidate.agent_name.as_deref() == Some(reservation.holder_agent.as_str());
+        let matched_path = candidate_paths
+            .iter()
+            .find(|path| path_patterns_overlap(&reservation.path_pattern, path));
+        let reason_matches_candidate = reservation.reason.as_deref().is_some_and(|reason| {
+            reason.contains(&candidate.bead_id)
+                || issue
+                    .and_then(|issue| issue.assignee.as_deref())
+                    .is_some_and(|assignee| reason.contains(assignee))
+        });
+        let br_mail_disagrees = reason_matches_candidate
+            && !holder_is_candidate
+            && issue
+                .and_then(|issue| issue.assignee.as_deref())
+                .map_or(true, |assignee| assignee != reservation.holder_agent);
+
+        if br_mail_disagrees {
+            conflicts.push(overlap_conflict(
+                SwarmOverlapConflictKind::BrMailDisagreement,
+                if reservation_is_active(reservation, input.observed_at) {
+                    SwarmOverlapRiskLevel::HardConflict
+                } else {
+                    SwarmOverlapRiskLevel::StaleConflict
+                },
+                if reservation_is_active(reservation, input.observed_at) {
+                    90
+                } else {
+                    50
+                },
+                &candidate.bead_id,
+                Some(&reservation.holder_agent),
+                Some(&reservation.path_pattern),
+                OVERLAP_BR_MAIL_DISAGREE,
+                reservation_pointer(reservation),
+                Some(
+                    input
+                        .observed_at
+                        .signed_duration_since(reservation.expires_at)
+                        .num_seconds(),
+                ),
+            ));
+        }
+
+        if let Some(path) = matched_path {
+            if holder_is_candidate {
+                continue;
+            }
+            let active = reservation_is_active(reservation, input.observed_at);
+            conflicts.push(overlap_conflict(
+                SwarmOverlapConflictKind::ReservationOverlap,
+                if active {
+                    SwarmOverlapRiskLevel::HardConflict
+                } else {
+                    SwarmOverlapRiskLevel::StaleConflict
+                },
+                if active { 100 } else { 60 },
+                &candidate.bead_id,
+                Some(&reservation.holder_agent),
+                Some(path),
+                if active {
+                    OVERLAP_ACTIVE_RESERVATION
+                } else {
+                    OVERLAP_STALE_RESERVATION
+                },
+                reservation_pointer(reservation),
+                Some(
+                    input
+                        .observed_at
+                        .signed_duration_since(reservation.expires_at)
+                        .num_seconds(),
+                ),
+            ));
+        } else if reservation_is_active(reservation, input.observed_at)
+            && !holder_is_candidate
+            && candidate_paths
+                .iter()
+                .all(|path| overlap_path_is_test_surface(path))
+        {
+            conflicts.push(overlap_conflict(
+                SwarmOverlapConflictKind::DisjointTestSurface,
+                SwarmOverlapRiskLevel::Advisory,
+                20,
+                &candidate.bead_id,
+                Some(&reservation.holder_agent),
+                Some(&reservation.path_pattern),
+                OVERLAP_DISJOINT_TEST_SURFACE,
+                reservation_pointer(reservation),
+                None,
+            ));
+        }
+    }
+
+    for activity in git_activity {
+        let owner_is_candidate = candidate.agent_name.as_deref() == activity.agent_name.as_deref();
+        if owner_is_candidate
+            || !git_timestamp_is_recent(activity.authored_at, input.observed_at, config)
+        {
+            continue;
+        }
+        let touched_paths = normalize_overlap_paths(&activity.touched_paths);
+        let matched_path = candidate_paths
+            .iter()
+            .find(|candidate_path| {
+                touched_paths
+                    .iter()
+                    .any(|touched_path| path_patterns_overlap(touched_path, candidate_path))
+            })
+            .cloned();
+        if let Some(path) = matched_path {
+            conflicts.push(overlap_conflict(
+                SwarmOverlapConflictKind::RecentGitTouch,
+                SwarmOverlapRiskLevel::Advisory,
+                30,
+                &candidate.bead_id,
+                activity.agent_name.as_deref(),
+                Some(path.as_str()),
+                OVERLAP_RECENT_GIT_TOUCH,
+                overlap_git_pointer(activity),
+                age_secs(input.observed_at, Some(activity.authored_at)),
+            ));
+        }
+    }
+
+    for issue in input
+        .issues
+        .iter()
+        .filter(|issue| issue.bead_id != candidate.bead_id)
+        .filter(|issue| {
+            matches!(
+                issue.status,
+                SwarmHandoffIssueStatus::InProgress | SwarmHandoffIssueStatus::Blocked
+            )
+        })
+    {
+        if dependency_context_overlaps(candidate, issue) {
+            conflicts.push(overlap_conflict(
+                SwarmOverlapConflictKind::DependencyDistance,
+                SwarmOverlapRiskLevel::Advisory,
+                25,
+                &issue.bead_id,
+                issue.assignee.as_deref(),
+                None,
+                OVERLAP_DEPENDENCY_DISTANCE,
+                issue_pointer(issue),
+                freshness_age_secs(input, issue),
+            ));
+        }
+    }
+
+    if conflicts.is_empty() {
+        conflicts.push(overlap_conflict(
+            SwarmOverlapConflictKind::NoOverlap,
+            SwarmOverlapRiskLevel::Clear,
+            0,
+            &candidate.bead_id,
+            None,
+            None,
+            OVERLAP_CLEAR_NO_SIGNALS,
+            format!("issue:{}:clear", candidate.bead_id),
+            None,
+        ));
+    }
+
+    overlap_report(input.observed_at, candidate, candidate_paths, conflicts)
+}
+
+#[must_use]
+pub fn render_cross_agent_overlap_risk_human(report: &SwarmOverlapRiskReport) -> String {
+    let mut lines = vec![
+        format!(
+            "{} overlap_risk={} score={} action={}",
+            report.bead_id,
+            report.risk_level.as_str(),
+            report.risk_score,
+            report.suggested_action.as_str()
+        ),
+        format!("reason_codes={}", report.reason_codes.join(",")),
+    ];
+    for conflict in report.conflicts.iter().take(5) {
+        lines.push(format!(
+            "- kind={:?} level={} owner={} path={} reason={} evidence={}",
+            conflict.kind,
+            conflict.risk_level.as_str(),
+            conflict.owner.as_deref().unwrap_or(""),
+            conflict.path.as_deref().unwrap_or(""),
+            conflict.reason_code,
+            conflict.evidence_pointer
+        ));
+    }
+    truncate_policy_string(&lines.join("\n"))
 }
 
 #[must_use]
@@ -2083,6 +2518,295 @@ fn git_activity_matches_issue(
 ) -> bool {
     activity.agent_name.as_deref() == issue.assignee.as_deref()
         || activity.summary.contains(&issue.bead_id)
+}
+
+fn validate_overlap_candidate(
+    candidate: &SwarmOverlapCandidateWork,
+    candidate_paths: &[String],
+) -> SwarmHandoffEvidenceResult<()> {
+    require_non_empty_string("overlap_candidate.bead_id", &candidate.bead_id)?;
+    require_optional_string(
+        "overlap_candidate.agent_name",
+        candidate.agent_name.as_deref(),
+    )?;
+    require_len(
+        "overlap_candidate.candidate_paths",
+        candidate_paths.len(),
+        MAX_OVERLAP_CANDIDATE_PATHS,
+    )?;
+    if candidate_paths.is_empty() {
+        return Err(SwarmHandoffEvidenceError::EmptyField {
+            field: "overlap_candidate.candidate_paths",
+        });
+    }
+    for path in candidate_paths {
+        require_path_pattern("overlap_candidate.candidate_paths", path)?;
+    }
+    require_string_list(
+        "overlap_candidate.dependency_ids",
+        &candidate.dependency_ids,
+    )?;
+    require_string_list("overlap_candidate.dependent_ids", &candidate.dependent_ids)?;
+    Ok(())
+}
+
+fn overlap_report(
+    observed_at: DateTime<Utc>,
+    candidate: &SwarmOverlapCandidateWork,
+    candidate_paths: Vec<String>,
+    mut conflicts: Vec<SwarmOverlapRiskConflict>,
+) -> SwarmOverlapRiskReport {
+    conflicts.sort_by(|left, right| {
+        right
+            .risk_level
+            .cmp(&left.risk_level)
+            .then_with(|| right.score.cmp(&left.score))
+            .then_with(|| left.reason_code.cmp(&right.reason_code))
+            .then_with(|| left.subject.cmp(&right.subject))
+    });
+    conflicts.truncate(MAX_OVERLAP_CONFLICTS);
+    let risk_level = conflicts
+        .iter()
+        .map(|conflict| conflict.risk_level)
+        .max()
+        .unwrap_or(SwarmOverlapRiskLevel::Clear);
+    let risk_score = conflicts
+        .iter()
+        .map(|conflict| conflict.score)
+        .max()
+        .unwrap_or(0);
+    let suggested_action = overlap_suggested_action(risk_level, &conflicts);
+    let mut reason_codes = conflicts
+        .iter()
+        .map(|conflict| conflict.reason_code.clone())
+        .collect::<Vec<_>>();
+    reason_codes.sort();
+    reason_codes.dedup();
+    let operator_message = truncate_policy_string(&format!(
+        "{}: overlap_risk={} score={} suggested_action={} reason_codes={}",
+        candidate.bead_id,
+        risk_level.as_str(),
+        risk_score,
+        suggested_action.as_str(),
+        reason_codes.join(",")
+    ));
+    SwarmOverlapRiskReport {
+        schema_version: SWARM_OVERLAP_RISK_SCHEMA_VERSION.to_string(),
+        bead_id: candidate.bead_id.clone(),
+        observed_at,
+        candidate_paths,
+        risk_level,
+        risk_score,
+        suggested_action,
+        reason_codes,
+        conflicts,
+        operator_message,
+    }
+}
+
+fn overlap_suggested_action(
+    risk_level: SwarmOverlapRiskLevel,
+    conflicts: &[SwarmOverlapRiskConflict],
+) -> SwarmOverlapSuggestedAction {
+    if conflicts
+        .iter()
+        .any(|conflict| conflict.kind == SwarmOverlapConflictKind::MalformedInput)
+    {
+        return SwarmOverlapSuggestedAction::RefreshEvidence;
+    }
+    if conflicts
+        .iter()
+        .any(|conflict| conflict.kind == SwarmOverlapConflictKind::BrMailDisagreement)
+    {
+        return SwarmOverlapSuggestedAction::AskForHandoff;
+    }
+    if conflicts.iter().any(|conflict| {
+        conflict.kind == SwarmOverlapConflictKind::ReservationOverlap
+            && conflict.risk_level == SwarmOverlapRiskLevel::HardConflict
+    }) {
+        return SwarmOverlapSuggestedAction::Wait;
+    }
+    if conflicts.iter().any(|conflict| {
+        conflict.kind == SwarmOverlapConflictKind::ActiveOwner
+            && conflict.risk_level == SwarmOverlapRiskLevel::HardConflict
+    }) {
+        return SwarmOverlapSuggestedAction::AskForHandoff;
+    }
+    if conflicts
+        .iter()
+        .any(|conflict| conflict.kind == SwarmOverlapConflictKind::DisjointTestSurface)
+    {
+        return SwarmOverlapSuggestedAction::PickTestOnlySurface;
+    }
+    match risk_level {
+        SwarmOverlapRiskLevel::Clear
+        | SwarmOverlapRiskLevel::Advisory
+        | SwarmOverlapRiskLevel::StaleConflict => SwarmOverlapSuggestedAction::Claim,
+        SwarmOverlapRiskLevel::HardConflict => SwarmOverlapSuggestedAction::AskForHandoff,
+    }
+}
+
+fn overlap_conflict(
+    kind: SwarmOverlapConflictKind,
+    risk_level: SwarmOverlapRiskLevel,
+    score: u8,
+    subject: &str,
+    owner: Option<&str>,
+    path: Option<&str>,
+    reason_code: &'static str,
+    evidence_pointer: String,
+    age_secs: Option<i64>,
+) -> SwarmOverlapRiskConflict {
+    SwarmOverlapRiskConflict {
+        kind,
+        risk_level,
+        score,
+        subject: truncate_policy_string(subject),
+        owner: owner.map(truncate_policy_string),
+        path: path.map(truncate_policy_string),
+        reason_code: reason_code.to_string(),
+        evidence_pointer: truncate_policy_string(&evidence_pointer),
+        age_secs,
+    }
+}
+
+fn owner_has_recent_signal(
+    input: &SwarmHandoffEvidenceInput,
+    issue: &SwarmHandoffIssueEvidence,
+    config: &SwarmHandoffPolicyConfig,
+) -> bool {
+    issue_timestamp_is_recent(issue.updated_at, input.observed_at, config)
+        || issue_timestamp_is_recent(issue.last_comment_at, input.observed_at, config)
+        || issue.assignee.as_deref().is_some_and(|assignee| {
+            input.agents.iter().any(|agent| {
+                agent.agent_name == assignee
+                    && agent_timestamp_is_recent(agent.last_active_at, input.observed_at, config)
+            }) || input.git_activity.iter().any(|activity| {
+                git_activity_matches_issue(activity, issue)
+                    && git_timestamp_is_recent(activity.authored_at, input.observed_at, config)
+            })
+        })
+}
+
+fn dependency_context_overlaps(
+    candidate: &SwarmOverlapCandidateWork,
+    issue: &SwarmHandoffIssueEvidence,
+) -> bool {
+    if candidate
+        .dependency_ids
+        .iter()
+        .any(|id| id == &issue.bead_id)
+        || candidate
+            .dependent_ids
+            .iter()
+            .any(|id| id == &issue.bead_id)
+        || issue
+            .dependency_ids
+            .iter()
+            .any(|id| id == &candidate.bead_id)
+        || issue
+            .dependent_ids
+            .iter()
+            .any(|id| id == &candidate.bead_id)
+    {
+        return true;
+    }
+    let candidate_context = candidate
+        .dependency_ids
+        .iter()
+        .chain(candidate.dependent_ids.iter())
+        .collect::<BTreeSet<_>>();
+    issue
+        .dependency_ids
+        .iter()
+        .chain(issue.dependent_ids.iter())
+        .any(|id| candidate_context.contains(id))
+}
+
+fn normalize_overlap_paths(paths: &[String]) -> Vec<String> {
+    let mut normalized = paths
+        .iter()
+        .take(MAX_OVERLAP_CANDIDATE_PATHS)
+        .map(|path| {
+            path.trim()
+                .trim_start_matches("./")
+                .trim_end_matches('/')
+                .replace('\\', "/")
+        })
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn path_patterns_overlap(left: &str, right: &str) -> bool {
+    let left = normalize_overlap_pattern(left);
+    let right = normalize_overlap_pattern(right);
+    if left == right || path_pattern_matches(&left, &right) || path_pattern_matches(&right, &left) {
+        return true;
+    }
+    let left_prefix = glob_literal_prefix(&left);
+    let right_prefix = glob_literal_prefix(&right);
+    !left_prefix.is_empty()
+        && !right_prefix.is_empty()
+        && overlap_prefix_contains(&left_prefix, &right_prefix)
+}
+
+fn overlap_prefix_contains(left: &str, right: &str) -> bool {
+    left == right
+        || left.starts_with(&format!("{right}/"))
+        || right.starts_with(&format!("{left}/"))
+}
+
+fn path_pattern_matches(pattern: &str, path: &str) -> bool {
+    if pattern == path {
+        return true;
+    }
+    if pattern.ends_with("/**") {
+        let prefix = pattern.trim_end_matches("/**");
+        return path == prefix || path.starts_with(&format!("{prefix}/"));
+    }
+    if pattern.ends_with("/*") {
+        let prefix = pattern.trim_end_matches("/*");
+        return path
+            .strip_prefix(&format!("{prefix}/"))
+            .is_some_and(|suffix| !suffix.contains('/'));
+    }
+    if pattern.contains('*') {
+        let prefix = pattern.split('*').next().unwrap_or_default();
+        let suffix = pattern.rsplit('*').next().unwrap_or_default();
+        return path.starts_with(prefix) && (suffix.is_empty() || path.ends_with(suffix));
+    }
+    path.starts_with(&format!("{pattern}/"))
+}
+
+fn normalize_overlap_pattern(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .replace('\\', "/")
+}
+
+fn glob_literal_prefix(pattern: &str) -> String {
+    let prefix = pattern.split(['*', '?', '[']).next().unwrap_or_default();
+    prefix.trim_end_matches('/').to_string()
+}
+
+fn overlap_path_is_test_surface(path: &str) -> bool {
+    path == "tests"
+        || path.starts_with("tests/")
+        || path.contains("/tests/")
+        || path.ends_with("_test.rs")
+        || path.ends_with("_tests.rs")
+}
+
+fn overlap_git_pointer(activity: &SwarmOverlapGitActivityEvidence) -> String {
+    match activity.commit_hash.as_deref() {
+        Some(commit) => format!("git:{commit}:{}", activity.authored_at.to_rfc3339()),
+        None => format!("git:{}", activity.authored_at.to_rfc3339()),
+    }
 }
 
 fn validate_schema(schema_version: &str) -> SwarmHandoffEvidenceResult<()> {
