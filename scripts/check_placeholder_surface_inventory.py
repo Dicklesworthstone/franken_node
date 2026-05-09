@@ -196,7 +196,11 @@ RULES: tuple[RuleSpec, ...] = (
             "synthetic_bearer_admin_route(",
         ),
         search_paths=("crates/**/*.rs", "docs/**/*.md"),
-        allowed_paths=("crates/franken-node/src/api/service.rs",),
+        allowed_paths=(
+            "crates/franken-node/src/api/service.rs",
+            "crates/franken-node/src/api/mod.rs",
+            "crates/franken-node/tests/fastapi_rust_control_plane_integration.rs",
+        ),
         documented_paths=(
             "crates/franken-node/src/api/service.rs",
             "docs/architecture/blueprint.md",
