@@ -1,11 +1,13 @@
 use frankenengine_node::ops::validation_planner::{
     BUILD_GRAPH_WATCHER_SCHEMA_VERSION, GateStrength, MultiRepoBuildGraphWatchInput,
-    PlannedCommandKind, PlannerInput, SIBLING_DRIFT_PREFLIGHT_SCHEMA_VERSION, SiblingBlockerRef,
-    SiblingBlockerStatus, SiblingBuildGraphInput, SiblingDriftDecision,
-    SiblingDriftDiagnosticSeverity, SiblingDriftPreflightInput, SiblingRepoDriftInput,
-    VALIDATION_PLANNER_SCHEMA_VERSION, ValidationPlannerError, build_graph_reason_codes,
-    build_multi_repo_build_graph_watch, build_sibling_drift_preflight,
-    parse_registered_tests_from_manifest, plan_validation, sibling_drift_reason_codes,
+    PlannedCommandKind, PlannerDependencyContext, PlannerInput,
+    SIBLING_DRIFT_PREFLIGHT_SCHEMA_VERSION, SiblingBlockerRef, SiblingBlockerStatus,
+    SiblingBuildGraphInput, SiblingDriftDecision, SiblingDriftDiagnosticSeverity,
+    SiblingDriftPreflightInput, SiblingRepoDriftInput, VALIDATION_PLANNER_SCHEMA_VERSION,
+    ValidationCostClass, ValidationExecutionPolicy, ValidationPlanUrgency, ValidationPlannerError,
+    build_graph_reason_codes, build_multi_repo_build_graph_watch, build_sibling_drift_preflight,
+    impact_mapper_reason_codes, parse_registered_tests_from_manifest, plan_validation,
+    sibling_drift_reason_codes,
 };
 use serde::Deserialize;
 
@@ -20,9 +22,20 @@ fn plan_for(
     labels: &[&str],
     acceptance: &str,
 ) -> frankenengine_node::ops::validation_planner::ValidationPlan {
+    plan_for_priority(bead_id, changed_paths, labels, 2, acceptance)
+}
+
+fn plan_for_priority(
+    bead_id: &str,
+    changed_paths: &[&str],
+    labels: &[&str],
+    priority: u8,
+    acceptance: &str,
+) -> frankenengine_node::ops::validation_planner::ValidationPlan {
     plan_validation(
         &PlannerInput::new(bead_id, changed_paths.iter().copied(), registered_tests())
             .with_labels(labels.iter().copied())
+            .with_priority(priority)
             .with_acceptance(acceptance),
     )
 }
@@ -72,9 +85,20 @@ fn direct_test_file_maps_to_exact_rch_test_command() {
         .expect("direct test file should map to registered test");
     assert_eq!(command.kind, PlannedCommandKind::RchCargo);
     assert_eq!(command.strength, GateStrength::Required);
+    assert_eq!(
+        command.reason_code,
+        impact_mapper_reason_codes::REGISTERED_TEST
+    );
+    assert_eq!(command.cost_class, ValidationCostClass::RemoteFocused);
+    assert_eq!(
+        command.execution_policy,
+        ValidationExecutionPolicy::RchRequired
+    );
     assert!(command.shell.contains("rch exec -- env"));
     assert!(command.shell.contains("--test rch_adapter_classification"));
     assert!(command.shell.contains("RCH_REQUIRE_REMOTE=1"));
+    assert!(plan.command("source-rustfmt-check").is_some());
+    assert!(plan.command("source-ubs-scope").is_some());
     let cache_index = plan
         .commands
         .iter()
@@ -94,6 +118,8 @@ fn direct_test_file_maps_to_exact_rch_test_command() {
     assert!(cache_index < coalescer_index);
     assert!(coalescer_index < cargo_index);
     assert!(!plan.source_only_allowed);
+    assert_eq!(plan.urgency, ValidationPlanUrgency::High);
+    assert!(plan.human_summary.contains("rch_commands=1"));
 }
 
 #[test]
@@ -114,6 +140,42 @@ fn feature_gated_integration_test_preserves_required_features() {
 }
 
 #[test]
+fn priority_and_labels_drive_urgency_and_summary() {
+    let plan = plan_for_priority(
+        "bd-urgent",
+        &["crates/franken-node/src/security/remote_cap.rs"],
+        &["security", "validation"],
+        0,
+        "Security validation should not wait behind routine proof work.",
+    );
+
+    assert_eq!(plan.bead_priority, 0);
+    assert_eq!(plan.urgency, ValidationPlanUrgency::Urgent);
+    assert!(plan.labels.contains(&"security".to_string()));
+    assert!(plan.human_summary.contains("urgency=urgent"));
+    assert!(plan.human_summary.contains("priority=0"));
+}
+
+#[test]
+fn dependency_context_is_sorted_and_reported_in_summary() {
+    let plan = plan_validation(
+        &PlannerInput::new(
+            "bd-deps",
+            ["crates/franken-node/src/ops/validation_planner.rs"],
+            registered_tests(),
+        )
+        .with_dependency_context([
+            PlannerDependencyContext::new("bd-z", "closed", "later dependency"),
+            PlannerDependencyContext::new("bd-a", "closed", "earlier dependency"),
+        ]),
+    );
+
+    assert_eq!(plan.dependency_context[0].bead_id, "bd-a");
+    assert_eq!(plan.dependency_context[1].bead_id, "bd-z");
+    assert!(plan.human_summary.contains("dependencies=2"));
+}
+
+#[test]
 fn docs_and_validation_artifacts_use_source_only_contract_gates() {
     let plan = plan_for(
         "bd-docs",
@@ -130,10 +192,55 @@ fn docs_and_validation_artifacts_use_source_only_contract_gates() {
     assert!(plan.commands.iter().any(|command| {
         command.kind == PlannedCommandKind::SourceOnly && command.shell.contains("json.tool")
     }));
+    assert_eq!(
+        plan.command("source-ubs-scope")
+            .expect("UBS scope should be planned")
+            .reason_code,
+        impact_mapper_reason_codes::UBS_SCOPE
+    );
     assert_eq!(plan.rch_commands().count(), 0);
     assert!(plan.skipped_gates.iter().any(|gate| {
         gate.gate == "rch cargo test" && gate.reason.contains("docs or contract artifacts")
     }));
+}
+
+#[test]
+fn mixed_cli_and_registered_test_surface_keeps_both_focused_proofs() {
+    let plan = plan_for(
+        "bd-mixed",
+        &[
+            "crates/franken-node/src/cli.rs",
+            "crates/franken-node/tests/fleet_cli_e2e.rs",
+        ],
+        &["cli", "testing"],
+        "CLI argument shape and a registered integration test changed.",
+    );
+
+    assert!(plan.command("cargo-test-cli_arg_validation").is_some());
+    assert!(plan.command("cargo-test-fleet_cli_e2e").is_some());
+    assert_eq!(plan.rch_commands().count(), 2);
+    assert!(plan.skipped_gates.iter().any(|gate| {
+        gate.reason_code == impact_mapper_reason_codes::BROAD_GATE_SKIPPED
+            && gate.gate == "cargo check --all-targets"
+    }));
+}
+
+#[test]
+fn empty_changed_paths_fail_closed_to_no_known_proof() {
+    let plan = plan_for(
+        "bd-empty",
+        &[],
+        &["validation"],
+        "No changed paths were collected for this bead.",
+    );
+
+    assert!(plan.source_only_allowed);
+    assert!(plan.commands.is_empty());
+    assert!(plan.skipped_gates.iter().any(|gate| {
+        gate.reason_code == impact_mapper_reason_codes::NO_KNOWN_PROOF
+            && gate.gate == "cargo validation"
+    }));
+    assert!(plan.human_summary.contains("changed_paths=0"));
 }
 
 #[test]
@@ -720,7 +827,13 @@ struct Fixture {
     labels: Vec<String>,
     acceptance: String,
     expect_command_ids: Vec<String>,
+    #[serde(default)]
+    expect_reason_codes: Vec<String>,
+    #[serde(default)]
+    expect_skipped_reason_codes: Vec<String>,
     expect_shell_contains: Vec<String>,
+    #[serde(default)]
+    expect_summary_contains: Vec<String>,
     source_only_allowed: bool,
 }
 
@@ -754,6 +867,30 @@ fn checked_in_fixture_catalog_matches_planner_output() {
                 fixture.name
             );
         }
+        let reason_codes = plan
+            .commands
+            .iter()
+            .map(|command| command.reason_code.as_str())
+            .collect::<Vec<_>>();
+        for expected in &fixture.expect_reason_codes {
+            assert!(
+                reason_codes.contains(&expected.as_str()),
+                "{} expected reason code {expected}",
+                fixture.name
+            );
+        }
+        let skipped_reason_codes = plan
+            .skipped_gates
+            .iter()
+            .map(|gate| gate.reason_code.as_str())
+            .collect::<Vec<_>>();
+        for expected in &fixture.expect_skipped_reason_codes {
+            assert!(
+                skipped_reason_codes.contains(&expected.as_str()),
+                "{} expected skipped reason code {expected}",
+                fixture.name
+            );
+        }
         let joined_shell = plan
             .commands
             .iter()
@@ -764,6 +901,13 @@ fn checked_in_fixture_catalog_matches_planner_output() {
             assert!(
                 joined_shell.contains(expected),
                 "{} expected shell to contain {expected}",
+                fixture.name
+            );
+        }
+        for expected in &fixture.expect_summary_contains {
+            assert!(
+                plan.human_summary.contains(expected),
+                "{} expected summary to contain {expected}",
                 fixture.name
             );
         }

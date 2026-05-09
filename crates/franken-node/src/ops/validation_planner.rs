@@ -50,6 +50,24 @@ pub mod build_graph_reason_codes {
     pub const CLOSED_BLOCKER_CARRYOVER: &str = "BGW_CLOSED_BLOCKER_CARRYOVER";
 }
 
+pub mod impact_mapper_reason_codes {
+    pub const DIFF_CHECK: &str = "VIM_DIFF_CHECK";
+    pub const RUSTFMT_SCOPE: &str = "VIM_RUSTFMT_SCOPE";
+    pub const UBS_SCOPE: &str = "VIM_UBS_SCOPE";
+    pub const JSON_PARSE: &str = "VIM_JSON_PARSE";
+    pub const PYTHON_GATE: &str = "VIM_PYTHON_GATE";
+    pub const VALIDATION_CONTRACT: &str = "VIM_VALIDATION_CONTRACT";
+    pub const PROOF_CACHE_LOOKUP: &str = "VIM_PROOF_CACHE_LOOKUP";
+    pub const PROOF_COALESCER_LOOKUP: &str = "VIM_PROOF_COALESCER_LOOKUP";
+    pub const REGISTERED_TEST: &str = "VIM_REGISTERED_TEST";
+    pub const PACKAGE_CHECK: &str = "VIM_PACKAGE_CHECK";
+    pub const DOCS_ONLY: &str = "VIM_DOCS_ONLY";
+    pub const SIBLING_PREFLIGHT: &str = "VIM_SIBLING_PREFLIGHT";
+    pub const SIBLING_BLOCKED: &str = "VIM_SIBLING_BLOCKED";
+    pub const NO_KNOWN_PROOF: &str = "VIM_NO_KNOWN_PROOF";
+    pub const BROAD_GATE_SKIPPED: &str = "VIM_BROAD_GATE_SKIPPED";
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredTest {
     pub name: String,
@@ -83,7 +101,9 @@ pub struct PlannerInput {
     pub thread_id: String,
     pub changed_paths: Vec<String>,
     pub labels: Vec<String>,
+    pub priority: u8,
     pub acceptance: String,
+    pub dependency_context: Vec<PlannerDependencyContext>,
     pub registered_tests: Vec<RegisteredTest>,
     pub workspace_root: String,
     pub package: String,
@@ -107,7 +127,9 @@ impl PlannerInput {
             bead_id,
             changed_paths: sorted_unique(changed_paths),
             labels: Vec::new(),
+            priority: 2,
             acceptance: String::new(),
+            dependency_context: Vec::new(),
             registered_tests,
             workspace_root: DEFAULT_WORKSPACE_ROOT.to_string(),
             package: DEFAULT_PACKAGE.to_string(),
@@ -123,8 +145,25 @@ impl PlannerInput {
     }
 
     #[must_use]
+    pub const fn with_priority(mut self, priority: u8) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    #[must_use]
     pub fn with_acceptance(mut self, acceptance: impl Into<String>) -> Self {
         self.acceptance = acceptance.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_dependency_context(
+        mut self,
+        dependency_context: impl IntoIterator<Item = PlannerDependencyContext>,
+    ) -> Self {
+        self.dependency_context = dependency_context.into_iter().collect();
+        self.dependency_context
+            .sort_by(|left, right| left.bead_id.cmp(&right.bead_id));
         self
     }
 
@@ -132,6 +171,28 @@ impl PlannerInput {
     pub fn with_sibling_preflight(mut self, preflight: SiblingDriftPreflightReport) -> Self {
         self.sibling_preflight = Some(preflight);
         self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannerDependencyContext {
+    pub bead_id: String,
+    pub status: String,
+    pub summary: String,
+}
+
+impl PlannerDependencyContext {
+    #[must_use]
+    pub fn new(
+        bead_id: impl Into<String>,
+        status: impl Into<String>,
+        summary: impl Into<String>,
+    ) -> Self {
+        Self {
+            bead_id: bead_id.into(),
+            status: status.into(),
+            summary: summary.into(),
+        }
     }
 }
 
@@ -152,11 +213,53 @@ pub enum GateStrength {
     Recommended,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationCostClass {
+    SourceOnly,
+    LocalFast,
+    ExternalGate,
+    CacheLookup,
+    RemoteFocused,
+    RemoteBroad,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationExecutionPolicy {
+    SourceOnly,
+    SafeLocal,
+    PythonGate,
+    ProofLookup,
+    RchRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationPlanUrgency {
+    Routine,
+    High,
+    Urgent,
+}
+
+impl ValidationPlanUrgency {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Routine => "routine",
+            Self::High => "high",
+            Self::Urgent => "urgent",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedCommand {
     pub command_id: String,
     pub kind: PlannedCommandKind,
     pub strength: GateStrength,
+    pub reason_code: String,
+    pub cost_class: ValidationCostClass,
+    pub execution_policy: ValidationExecutionPolicy,
     pub shell: String,
     pub env: BTreeMap<String, String>,
     pub argv: Vec<String>,
@@ -167,6 +270,7 @@ pub struct PlannedCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedGate {
     pub gate: String,
+    pub reason_code: String,
     pub reason: String,
 }
 
@@ -553,6 +657,11 @@ pub struct ValidationPlan {
     pub schema_version: String,
     pub bead_id: String,
     pub thread_id: String,
+    pub labels: Vec<String>,
+    pub bead_priority: u8,
+    pub urgency: ValidationPlanUrgency,
+    pub human_summary: String,
+    pub dependency_context: Vec<PlannerDependencyContext>,
     pub changed_paths: Vec<String>,
     pub commands: Vec<PlannedCommand>,
     pub skipped_gates: Vec<SkippedGate>,
@@ -981,39 +1090,19 @@ pub fn plan_validation(input: &PlannerInput) -> ValidationPlan {
     if changed_paths.is_empty() {
         builder.add_skipped_gate(
             "cargo validation",
+            impact_mapper_reason_codes::NO_KNOWN_PROOF,
             "no changed paths were supplied; require a concrete Beads diff before cargo proof",
         );
         builder.add_escalation("rerun planner with changed paths before closing the bead");
         return builder.finish(true);
     }
 
-    builder.add_git_diff_check();
-
-    if let Some(preflight) = &input.sibling_preflight {
-        builder.add_sibling_preflight(preflight);
-        if preflight.blocks_broad_validation() {
-            builder.add_skipped_gate(
-                "rch cargo validation",
-                format!(
-                    "sibling drift preflight {} blocks broad validation",
-                    preflight.decision_reason_code
-                ),
-            );
-            for diagnostic in preflight
-                .diagnostics
-                .iter()
-                .filter(|diagnostic| diagnostic.severity == SiblingDriftDiagnosticSeverity::Blocker)
-            {
-                builder.add_escalation(format!(
-                    "resolve sibling drift {} for {} before broad validation",
-                    diagnostic.reason_code, diagnostic.repo_id
-                ));
-            }
-            return builder.finish(true);
-        }
-    }
-
-    let has_rust = changed_paths.iter().any(|path| path.ends_with(".rs"));
+    let rust_paths = changed_paths
+        .iter()
+        .filter(|path| path.ends_with(".rs"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let has_rust = !rust_paths.is_empty();
     let has_manifest = changed_paths
         .iter()
         .any(|path| path.ends_with("Cargo.toml"));
@@ -1034,6 +1123,37 @@ pub fn plan_validation(input: &PlannerInput) -> ValidationPlan {
             || path.ends_with(".json")
     });
 
+    builder.add_git_diff_check();
+    builder.add_ubs_scope();
+    if has_rust {
+        builder.add_rustfmt_check(rust_paths.clone());
+    }
+
+    if let Some(preflight) = &input.sibling_preflight {
+        builder.add_sibling_preflight(preflight);
+        if preflight.blocks_broad_validation() {
+            builder.add_skipped_gate(
+                "rch cargo validation",
+                impact_mapper_reason_codes::SIBLING_BLOCKED,
+                format!(
+                    "sibling drift preflight {} blocks broad validation",
+                    preflight.decision_reason_code
+                ),
+            );
+            for diagnostic in preflight
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.severity == SiblingDriftDiagnosticSeverity::Blocker)
+            {
+                builder.add_escalation(format!(
+                    "resolve sibling drift {} for {} before broad validation",
+                    diagnostic.reason_code, diagnostic.repo_id
+                ));
+            }
+            return builder.finish(true);
+        }
+    }
+
     for path in &changed_paths {
         if path.ends_with(".json") {
             builder.add_json_tool_check(path);
@@ -1050,6 +1170,7 @@ pub fn plan_validation(input: &PlannerInput) -> ValidationPlan {
     if has_docs_only && !has_rust && !has_manifest && !has_script {
         builder.add_skipped_gate(
             "rch cargo test",
+            impact_mapper_reason_codes::DOCS_ONLY,
             "changed paths are docs or contract artifacts only; source-only and contract gates are sufficient",
         );
         builder.add_escalation(
@@ -1125,15 +1246,18 @@ pub fn plan_validation(input: &PlannerInput) -> ValidationPlan {
     if builder.rch_command_count == 0 {
         builder.add_skipped_gate(
             "cargo check --all-targets",
+            impact_mapper_reason_codes::NO_KNOWN_PROOF,
             "no Rust, Cargo manifest, or sibling dependency path changed",
         );
     } else {
         builder.add_skipped_gate(
             "cargo check --all-targets",
+            impact_mapper_reason_codes::BROAD_GATE_SKIPPED,
             "focused registered tests or package checks cover this patch; broaden only after focused failure or changed shared API",
         );
         builder.add_skipped_gate(
             "cargo clippy --all-targets -- -D warnings",
+            impact_mapper_reason_codes::BROAD_GATE_SKIPPED,
             "defer broad clippy until focused plan is green or the patch touches shared lint-sensitive APIs",
         );
     }
@@ -1174,12 +1298,61 @@ impl<'a> PlanBuilder<'a> {
             command_id: "source-diff-check".to_string(),
             kind: PlannedCommandKind::SourceOnly,
             strength: GateStrength::Required,
+            reason_code: impact_mapper_reason_codes::DIFF_CHECK.to_string(),
+            cost_class: ValidationCostClass::SourceOnly,
+            execution_policy: ValidationExecutionPolicy::SourceOnly,
             shell: shell_command(&BTreeMap::new(), &argv),
             env: BTreeMap::new(),
             argv,
             rationale: "detect whitespace and conflict-marker errors on the exact changed paths"
                 .to_string(),
             covers: self.changed_paths.clone(),
+        });
+    }
+
+    fn add_ubs_scope(&mut self) {
+        let mut env = BTreeMap::new();
+        env.insert("UBS_SKIP_RUST_BUILD".to_string(), "1".to_string());
+        let mut argv = vec!["ubs".to_string()];
+        argv.extend(self.changed_paths.clone());
+        argv.extend(["--format=jsonl".to_string()]);
+        self.add_command(PlannedCommand {
+            command_id: "source-ubs-scope".to_string(),
+            kind: PlannedCommandKind::SourceOnly,
+            strength: GateStrength::Required,
+            reason_code: impact_mapper_reason_codes::UBS_SCOPE.to_string(),
+            cost_class: ValidationCostClass::LocalFast,
+            execution_policy: ValidationExecutionPolicy::SafeLocal,
+            shell: shell_command(&env, &argv),
+            env,
+            argv,
+            rationale: "run UBS on the exact changed file set without invoking cargo build hooks"
+                .to_string(),
+            covers: self.changed_paths.clone(),
+        });
+    }
+
+    fn add_rustfmt_check(&mut self, rust_paths: Vec<String>) {
+        let mut argv = vec![
+            "rustfmt".to_string(),
+            "--edition".to_string(),
+            "2024".to_string(),
+            "--check".to_string(),
+        ];
+        argv.extend(rust_paths.clone());
+        self.add_command(PlannedCommand {
+            command_id: "source-rustfmt-check".to_string(),
+            kind: PlannedCommandKind::SourceOnly,
+            strength: GateStrength::Required,
+            reason_code: impact_mapper_reason_codes::RUSTFMT_SCOPE.to_string(),
+            cost_class: ValidationCostClass::LocalFast,
+            execution_policy: ValidationExecutionPolicy::SafeLocal,
+            shell: shell_command(&BTreeMap::new(), &argv),
+            env: BTreeMap::new(),
+            argv,
+            rationale: "format-check only the changed Rust files before scheduling cargo proof"
+                .to_string(),
+            covers: rust_paths,
         });
     }
 
@@ -1194,6 +1367,9 @@ impl<'a> PlanBuilder<'a> {
             command_id: format!("json-tool-{}", stable_token(path)),
             kind: PlannedCommandKind::SourceOnly,
             strength: GateStrength::Required,
+            reason_code: impact_mapper_reason_codes::JSON_PARSE.to_string(),
+            cost_class: ValidationCostClass::LocalFast,
+            execution_policy: ValidationExecutionPolicy::SafeLocal,
             shell: shell_command(&BTreeMap::new(), &argv),
             env: BTreeMap::new(),
             argv,
@@ -1213,6 +1389,9 @@ impl<'a> PlanBuilder<'a> {
             command_id: format!("python-gate-{}", stable_token(path)),
             kind: PlannedCommandKind::PythonGate,
             strength: GateStrength::Recommended,
+            reason_code: impact_mapper_reason_codes::PYTHON_GATE.to_string(),
+            cost_class: ValidationCostClass::ExternalGate,
+            execution_policy: ValidationExecutionPolicy::PythonGate,
             shell: shell_command(&BTreeMap::new(), &argv),
             env: BTreeMap::new(),
             argv,
@@ -1233,6 +1412,9 @@ impl<'a> PlanBuilder<'a> {
             command_id: "python-validation-broker-contract".to_string(),
             kind: PlannedCommandKind::PythonGate,
             strength: GateStrength::Required,
+            reason_code: impact_mapper_reason_codes::VALIDATION_CONTRACT.to_string(),
+            cost_class: ValidationCostClass::ExternalGate,
+            execution_policy: ValidationExecutionPolicy::PythonGate,
             shell: shell_command(&BTreeMap::new(), &argv),
             env: BTreeMap::new(),
             argv,
@@ -1245,6 +1427,7 @@ impl<'a> PlanBuilder<'a> {
     fn add_sibling_preflight(&mut self, preflight: &SiblingDriftPreflightReport) {
         self.add_skipped_gate(
             "sibling drift preflight",
+            impact_mapper_reason_codes::SIBLING_PREFLIGHT,
             format!(
                 "{} produced {} diagnostics",
                 preflight.decision_reason_code,
@@ -1278,6 +1461,9 @@ impl<'a> PlanBuilder<'a> {
             command_id: "cache-lookup".to_string(),
             kind: PlannedCommandKind::ProofCacheLookup,
             strength: GateStrength::Recommended,
+            reason_code: impact_mapper_reason_codes::PROOF_CACHE_LOOKUP.to_string(),
+            cost_class: ValidationCostClass::CacheLookup,
+            execution_policy: ValidationExecutionPolicy::ProofLookup,
             shell: shell_command(&BTreeMap::new(), &argv),
             env: BTreeMap::new(),
             argv,
@@ -1312,6 +1498,9 @@ impl<'a> PlanBuilder<'a> {
             command_id: "cache-proof-coalescer-lookup".to_string(),
             kind: PlannedCommandKind::ProofCoalescerLookup,
             strength: GateStrength::Recommended,
+            reason_code: impact_mapper_reason_codes::PROOF_COALESCER_LOOKUP.to_string(),
+            cost_class: ValidationCostClass::CacheLookup,
+            execution_policy: ValidationExecutionPolicy::ProofLookup,
             shell: shell_command(&BTreeMap::new(), &argv),
             env: BTreeMap::new(),
             argv,
@@ -1341,6 +1530,8 @@ impl<'a> PlanBuilder<'a> {
 
         let command = self.rch_cargo_command(
             format!("cargo-test-{}", test.name),
+            impact_mapper_reason_codes::REGISTERED_TEST,
+            ValidationCostClass::RemoteFocused,
             cargo_args,
             format!(
                 "registered Cargo test `{}` directly covers the changed surface",
@@ -1364,7 +1555,14 @@ impl<'a> PlanBuilder<'a> {
             self.input.package.clone(),
             "--tests".to_string(),
         ];
-        let command = self.rch_cargo_command(command_id, cargo_args, rationale, covers);
+        let command = self.rch_cargo_command(
+            command_id,
+            impact_mapper_reason_codes::PACKAGE_CHECK,
+            ValidationCostClass::RemoteBroad,
+            cargo_args,
+            rationale,
+            covers,
+        );
         self.add_command(command);
         self.rch_command_count = self.rch_command_count.saturating_add(1);
     }
@@ -1372,6 +1570,8 @@ impl<'a> PlanBuilder<'a> {
     fn rch_cargo_command(
         &self,
         command_id: impl Into<String>,
+        reason_code: impl Into<String>,
+        cost_class: ValidationCostClass,
         cargo_args: Vec<String>,
         rationale: impl Into<String>,
         covers: Vec<String>,
@@ -1398,6 +1598,9 @@ impl<'a> PlanBuilder<'a> {
             command_id: command_id.into(),
             kind: PlannedCommandKind::RchCargo,
             strength: GateStrength::Required,
+            reason_code: reason_code.into(),
+            cost_class,
+            execution_policy: ValidationExecutionPolicy::RchRequired,
             shell: shell_command(&env, &argv),
             env,
             argv,
@@ -1410,11 +1613,17 @@ impl<'a> PlanBuilder<'a> {
         self.commands.insert(command.command_id.clone(), command);
     }
 
-    fn add_skipped_gate(&mut self, gate: impl Into<String>, reason: impl Into<String>) {
+    fn add_skipped_gate(
+        &mut self,
+        gate: impl Into<String>,
+        reason_code: impl Into<String>,
+        reason: impl Into<String>,
+    ) {
         push_bounded(
             &mut self.skipped_gates,
             SkippedGate {
                 gate: gate.into(),
+                reason_code: reason_code.into(),
                 reason: reason.into(),
             },
             MAX_SKIPPED_GATES,
@@ -1429,15 +1638,34 @@ impl<'a> PlanBuilder<'a> {
         self.skipped_gates.sort_by(|left, right| {
             left.gate
                 .cmp(&right.gate)
+                .then(left.reason_code.cmp(&right.reason_code))
                 .then(left.reason.cmp(&right.reason))
         });
-        self.skipped_gates
-            .dedup_by(|left, right| left.gate == right.gate && left.reason == right.reason);
+        self.skipped_gates.dedup_by(|left, right| {
+            left.gate == right.gate
+                && left.reason_code == right.reason_code
+                && left.reason == right.reason
+        });
+
+        let urgency = validation_plan_urgency(self.input.priority, &self.input.labels);
+        let command_count = self.commands.len();
+        let rch_command_count = self.rch_command_count;
 
         ValidationPlan {
             schema_version: VALIDATION_PLANNER_SCHEMA_VERSION.to_string(),
             bead_id: self.input.bead_id.clone(),
             thread_id: self.input.thread_id.clone(),
+            labels: self.input.labels.clone(),
+            bead_priority: self.input.priority,
+            urgency,
+            human_summary: render_validation_plan_summary(
+                self.input,
+                urgency,
+                command_count,
+                rch_command_count,
+                source_only_allowed,
+            ),
+            dependency_context: self.input.dependency_context.clone(),
             changed_paths: self.changed_paths,
             commands: self.commands.into_values().collect(),
             skipped_gates: self.skipped_gates,
@@ -1445,6 +1673,52 @@ impl<'a> PlanBuilder<'a> {
             source_only_allowed,
         }
     }
+}
+
+fn validation_plan_urgency(priority: u8, labels: &[String]) -> ValidationPlanUrgency {
+    if priority == 0
+        || labels.iter().any(|label| {
+            matches!(
+                label.as_str(),
+                "urgent" | "security" | "prod" | "production" | "incident"
+            )
+        })
+    {
+        return ValidationPlanUrgency::Urgent;
+    }
+
+    if priority <= 1
+        || labels.iter().any(|label| {
+            matches!(
+                label.as_str(),
+                "validation" | "rch" | "testing" | "operator-safety"
+            )
+        })
+    {
+        return ValidationPlanUrgency::High;
+    }
+
+    ValidationPlanUrgency::Routine
+}
+
+fn render_validation_plan_summary(
+    input: &PlannerInput,
+    urgency: ValidationPlanUrgency,
+    command_count: usize,
+    rch_command_count: usize,
+    source_only_allowed: bool,
+) -> String {
+    format!(
+        "{} validation plan: priority={} urgency={} changed_paths={} commands={} rch_commands={} source_only_allowed={} dependencies={}",
+        input.bead_id,
+        input.priority,
+        urgency.as_str(),
+        input.changed_paths.len(),
+        command_count,
+        rch_command_count,
+        source_only_allowed,
+        input.dependency_context.len()
+    )
 }
 
 fn matching_registered_tests<'a>(

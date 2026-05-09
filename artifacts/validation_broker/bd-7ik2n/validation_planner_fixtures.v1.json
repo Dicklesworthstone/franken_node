@@ -15,18 +15,65 @@
       "acceptance": "Run the exact registered RCH adapter classification test.",
       "expect_command_ids": [
         "source-diff-check",
+        "source-rustfmt-check",
+        "source-ubs-scope",
         "cache-lookup",
+        "cache-proof-coalescer-lookup",
         "cargo-test-rch_adapter_classification"
+      ],
+      "expect_reason_codes": [
+        "VIM_DIFF_CHECK",
+        "VIM_RUSTFMT_SCOPE",
+        "VIM_UBS_SCOPE",
+        "VIM_PROOF_CACHE_LOOKUP",
+        "VIM_PROOF_COALESCER_LOOKUP",
+        "VIM_REGISTERED_TEST"
       ],
       "expect_shell_contains": [
         "validation-proof-cache lookup",
+        "validation-proof-coalescer lookup",
+        "rustfmt --edition 2024 --check",
+        "UBS_SKIP_RUST_BUILD=1 ubs",
         "RCH_REQUIRE_REMOTE=1",
         "--test rch_adapter_classification"
+      ],
+      "expect_summary_contains": [
+        "commands=6",
+        "rch_commands=1",
+        "source_only_allowed=false"
       ],
       "source_only_allowed": false
     },
     {
-      "name": "docs plus broker artifact",
+      "name": "docs spec only",
+      "bead_id": "bd-fixture-docs-only",
+      "changed_paths": [
+        "docs/specs/validation_closeout.md"
+      ],
+      "labels": [
+        "docs",
+        "validation"
+      ],
+      "acceptance": "Validation closeout docs changed without Rust source.",
+      "expect_command_ids": [
+        "source-diff-check",
+        "source-ubs-scope"
+      ],
+      "expect_reason_codes": [
+        "VIM_DIFF_CHECK",
+        "VIM_UBS_SCOPE"
+      ],
+      "expect_shell_contains": [
+        "git diff --check -- docs/specs/validation_closeout.md",
+        "UBS_SKIP_RUST_BUILD=1 ubs docs/specs/validation_closeout.md --format=jsonl"
+      ],
+      "expect_summary_contains": [
+        "source_only_allowed=true"
+      ],
+      "source_only_allowed": true
+    },
+    {
+      "name": "artifact gate for validation broker contract",
       "bead_id": "bd-fixture-docs",
       "changed_paths": [
         "docs/specs/validation_broker.md",
@@ -38,7 +85,16 @@
       "acceptance": "Validation broker contract artifact changed.",
       "expect_command_ids": [
         "source-diff-check",
+        "source-ubs-scope",
+        "json-tool-artifacts-validation_broker-validation_broker_fixtures-v1-json",
         "python-validation-broker-contract"
+      ],
+      "expect_reason_codes": [
+        "VIM_VALIDATION_CONTRACT",
+        "VIM_JSON_PARSE"
+      ],
+      "expect_skipped_reason_codes": [
+        "VIM_DOCS_ONLY"
       ],
       "expect_shell_contains": [
         "python3 scripts/check_validation_broker_contract.py --json",
@@ -58,13 +114,57 @@
       "acceptance": "Feature gated fleet CLI coverage changed.",
       "expect_command_ids": [
         "source-diff-check",
+        "source-rustfmt-check",
+        "source-ubs-scope",
         "cache-lookup",
+        "cache-proof-coalescer-lookup",
         "cargo-test-fleet_cli_e2e"
+      ],
+      "expect_reason_codes": [
+        "VIM_REGISTERED_TEST",
+        "VIM_RUSTFMT_SCOPE",
+        "VIM_UBS_SCOPE"
       ],
       "expect_shell_contains": [
         "validation-proof-cache lookup",
         "--no-default-features --features test-support",
         "--test fleet_cli_e2e"
+      ],
+      "source_only_allowed": false
+    },
+    {
+      "name": "mixed cli plus registered test",
+      "bead_id": "bd-fixture-mixed",
+      "changed_paths": [
+        "crates/franken-node/src/cli.rs",
+        "crates/franken-node/tests/fleet_cli_e2e.rs"
+      ],
+      "labels": [
+        "cli",
+        "testing"
+      ],
+      "acceptance": "CLI arguments and a feature-gated integration test changed together.",
+      "expect_command_ids": [
+        "source-diff-check",
+        "source-rustfmt-check",
+        "source-ubs-scope",
+        "cache-lookup",
+        "cache-proof-coalescer-lookup",
+        "cargo-test-cli_arg_validation",
+        "cargo-test-fleet_cli_e2e"
+      ],
+      "expect_reason_codes": [
+        "VIM_REGISTERED_TEST",
+        "VIM_PROOF_CACHE_LOOKUP",
+        "VIM_PROOF_COALESCER_LOOKUP"
+      ],
+      "expect_shell_contains": [
+        "--test cli_arg_validation",
+        "--test fleet_cli_e2e",
+        "RCH_REQUIRE_REMOTE=1"
+      ],
+      "expect_summary_contains": [
+        "rch_commands=2"
       ],
       "source_only_allowed": false
     },
@@ -80,14 +180,37 @@
       "acceptance": "Sibling franken_engine compile drift blocked default validation.",
       "expect_command_ids": [
         "source-diff-check",
+        "source-ubs-scope",
         "cache-lookup",
+        "cache-proof-coalescer-lookup",
         "cargo-check-sibling-drift"
+      ],
+      "expect_reason_codes": [
+        "VIM_PACKAGE_CHECK",
+        "VIM_UBS_SCOPE"
       ],
       "expect_shell_contains": [
         "validation-proof-cache lookup",
         "cargo +nightly-2026-02-19 check -p frankenengine-node --tests"
       ],
       "source_only_allowed": false
+    },
+    {
+      "name": "no known proof without changed paths",
+      "bead_id": "bd-fixture-empty",
+      "changed_paths": [],
+      "labels": [
+        "validation"
+      ],
+      "acceptance": "No concrete changed paths were collected.",
+      "expect_command_ids": [],
+      "expect_reason_codes": [],
+      "expect_shell_contains": [],
+      "expect_summary_contains": [
+        "changed_paths=0",
+        "source_only_allowed=true"
+      ],
+      "source_only_allowed": true
     }
   ]
 }
