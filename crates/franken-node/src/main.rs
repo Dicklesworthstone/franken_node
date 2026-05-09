@@ -70,9 +70,11 @@ mod security {
     pub mod epoch_scoped_keys;
 }
 #[allow(dead_code)]
+#[path = "runtime/resource_governor.rs"]
+pub(crate) mod local_runtime_resource_governor;
+#[allow(dead_code)]
 mod local_runtime {
-    #[path = "runtime/resource_governor.rs"]
-    pub mod resource_governor;
+    pub(crate) use crate::local_runtime_resource_governor as resource_governor;
 }
 #[allow(dead_code)]
 mod policy {

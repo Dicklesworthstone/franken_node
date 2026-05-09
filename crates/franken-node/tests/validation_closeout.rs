@@ -8,8 +8,11 @@ use frankenengine_node::ops::validation_broker::{
     ValidationTiming, readiness_ref_reason_codes,
 };
 use frankenengine_node::ops::validation_closeout::{
-    ValidationCloseoutError, ValidationCloseoutOptions, ValidationCloseoutStatus,
-    build_validation_closeout_report, redact_output_excerpt, render_validation_closeout_json,
+    CompletionAuditCoverage, CompletionAuditEvidenceKind, CompletionAuditEvidenceRef,
+    CompletionAuditEvidenceStatus, CompletionAuditLedgerError, CompletionAuditLedgerStatus,
+    CompletionAuditRequirement, PromptToArtifactCompletionAuditLedger, ValidationCloseoutError,
+    ValidationCloseoutOptions, ValidationCloseoutStatus, build_validation_closeout_report,
+    completion_audit_reason_codes, redact_output_excerpt, render_validation_closeout_json,
     render_validation_closeout_structured_log_jsonl,
 };
 use frankenengine_node::ops::validation_proof_cache::DirtyStatePolicy;
@@ -21,7 +24,7 @@ use frankenengine_node::ops::validation_proof_coalescer::{
     ValidationSwarmSchedulerProofDebtClass, ValidationSwarmSchedulerTargetDirClass,
     decide_validation_swarm_schedule,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -259,6 +262,33 @@ fn scheduler_decision(
     .expect("scheduler decision")
 }
 
+fn audit_evidence(
+    id: &str,
+    kind: CompletionAuditEvidenceKind,
+    coverage: CompletionAuditCoverage,
+    status: CompletionAuditEvidenceStatus,
+) -> CompletionAuditEvidenceRef {
+    CompletionAuditEvidenceRef::new(id, kind, coverage, status, format!("{id} evidence"))
+}
+
+fn audit_requirement(
+    id: &str,
+    evidence: Vec<CompletionAuditEvidenceRef>,
+) -> CompletionAuditRequirement {
+    CompletionAuditRequirement::new(id, format!("{id} requirement"), evidence)
+}
+
+fn completion_audit(
+    requirements: Vec<CompletionAuditRequirement>,
+) -> Result<PromptToArtifactCompletionAuditLedger, CompletionAuditLedgerError> {
+    PromptToArtifactCompletionAuditLedger::new(
+        "bd-38hez.1",
+        "Prompt-to-artifact completion audit ledger",
+        requirements,
+    )
+    .validated()
+}
+
 #[test]
 fn ready_receipt_renders_close_reason_and_agent_mail_summary() {
     let now = ts(1);
@@ -280,6 +310,252 @@ fn ready_receipt_renders_close_reason_and_agent_mail_summary() {
     assert!(report.close_reason.contains("worker=ts2"));
     assert!(report.agent_mail_markdown.contains("validation closeout"));
     assert!(report.agent_mail_markdown.contains("summary_artifact"));
+}
+
+#[test]
+fn completion_audit_normalizes_sorted_direct_evidence_golden_json() -> TestResult {
+    let audit = PromptToArtifactCompletionAuditLedger::new(
+        "bd-38hez.1",
+        "Prompt-to-artifact completion audit ledger",
+        vec![
+            audit_requirement(
+                "req-2-tests",
+                vec![
+                    audit_evidence(
+                        "ev-z-test",
+                        CompletionAuditEvidenceKind::Test,
+                        CompletionAuditCoverage::Direct,
+                        CompletionAuditEvidenceStatus::Fresh,
+                    )
+                    .with_command(
+                        "rch exec -- cargo test -p frankenengine-node validation_closeout",
+                    ),
+                ],
+            ),
+            audit_requirement(
+                "req-1-schema",
+                vec![
+                    audit_evidence(
+                        "ev-a-spec",
+                        CompletionAuditEvidenceKind::File,
+                        CompletionAuditCoverage::Direct,
+                        CompletionAuditEvidenceStatus::Fresh,
+                    )
+                    .with_path("docs/specs/validation_closeout.md"),
+                ],
+            ),
+        ],
+    )
+    .validated()?;
+
+    assert_eq!(audit.status, CompletionAuditLedgerStatus::Proven);
+    assert_eq!(audit.direct_evidence_count, 2);
+    assert_eq!(audit.proxy_evidence_count, 0);
+    assert_eq!(audit.requirements[0].requirement_id, "req-1-schema");
+    assert_eq!(audit.requirements[1].requirement_id, "req-2-tests");
+
+    let audit_json = serde_json::to_value(&audit)?;
+    assert_eq!(
+        audit_json,
+        json!({
+            "schema_version": "franken-node/completion-audit-ledger/v1",
+            "objective_id": "bd-38hez.1",
+            "objective_summary": "Prompt-to-artifact completion audit ledger",
+            "status": "proven",
+            "reason_code": "VC_AUDIT_PROVEN",
+            "event_code": "VC-AUDIT-001",
+            "required_action": "close_with_direct_evidence",
+            "direct_evidence_count": 2,
+            "proxy_evidence_count": 0,
+            "requirements": [
+                {
+                    "requirement_id": "req-1-schema",
+                    "requirement_text": "req-1-schema requirement",
+                    "status": "proven",
+                    "reason_code": "VC_AUDIT_PROVEN",
+                    "required_action": "close_with_direct_evidence",
+                    "evidence": [
+                        {
+                            "evidence_id": "ev-a-spec",
+                            "kind": "file",
+                            "coverage": "direct",
+                            "status": "fresh",
+                            "description": "ev-a-spec evidence",
+                            "path": "docs/specs/validation_closeout.md"
+                        }
+                    ]
+                },
+                {
+                    "requirement_id": "req-2-tests",
+                    "requirement_text": "req-2-tests requirement",
+                    "status": "proven",
+                    "reason_code": "VC_AUDIT_PROVEN",
+                    "required_action": "close_with_direct_evidence",
+                    "evidence": [
+                        {
+                            "evidence_id": "ev-z-test",
+                            "kind": "test",
+                            "coverage": "direct",
+                            "status": "fresh",
+                            "description": "ev-z-test evidence",
+                            "command": "rch exec -- cargo test -p frankenengine-node validation_closeout"
+                        }
+                    ]
+                }
+            ]
+        })
+    );
+
+    Ok(())
+}
+
+#[test]
+fn completion_audit_proxy_only_false_green_surfaces_warning_and_json() -> TestResult {
+    let audit = completion_audit(vec![audit_requirement(
+        "req-direct-test",
+        vec![
+            audit_evidence(
+                "ev-green-manifest",
+                CompletionAuditEvidenceKind::Manifest,
+                CompletionAuditCoverage::Proxy,
+                CompletionAuditEvidenceStatus::Fresh,
+            )
+            .with_path("artifacts/validation_broker/bd-y4mkq/summary.md"),
+        ],
+    )])?;
+    let receipt = receipt(
+        "bd-y4mkq",
+        ts(1),
+        ValidationExitKind::Success,
+        ValidationErrorClass::None,
+        TimeoutClass::None,
+        ts(60),
+    );
+    let options =
+        ValidationCloseoutOptions::new("bd-y4mkq", "vc-proxy-audit").with_completion_audit(audit);
+
+    let report = build_validation_closeout_report(&receipt, &options, ts(2))?;
+
+    assert_eq!(report.status, ValidationCloseoutStatus::Ready);
+    let audit = report.completion_audit.as_ref().expect("completion audit");
+    assert_eq!(audit.status, CompletionAuditLedgerStatus::ProxyOnly);
+    assert_eq!(audit.reason_code, completion_audit_reason_codes::PROXY_ONLY);
+    assert!(
+        report
+            .close_reason
+            .contains("completion_audit_status=PROXY_ONLY")
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("completion audit is PROXY_ONLY"))
+    );
+    assert!(
+        report
+            .agent_mail_markdown
+            .contains("- completion_audit: status=`PROXY_ONLY`")
+    );
+
+    let json: Value = serde_json::from_str(&render_validation_closeout_json(&report)?)?;
+    assert_eq!(json["completion_audit"]["status"], "proxy_only");
+    assert_eq!(
+        json["completion_audit"]["requirements"][0]["evidence"][0]["coverage"],
+        "proxy"
+    );
+
+    let log: Value =
+        serde_json::from_str(render_validation_closeout_structured_log_jsonl(&report)?.trim())?;
+    assert_eq!(log["detail"]["completion_audit_status"], "PROXY_ONLY");
+    assert_eq!(
+        log["detail"]["completion_audit_required_action"],
+        "replace_proxy_with_direct_evidence"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn completion_audit_missing_evidence_fails_closed_with_reason_code() -> TestResult {
+    let audit = completion_audit(vec![audit_requirement("req-missing-proof", Vec::new())])?;
+
+    assert_eq!(audit.status, CompletionAuditLedgerStatus::MissingEvidence);
+    assert_eq!(
+        audit.reason_code,
+        completion_audit_reason_codes::MISSING_EVIDENCE
+    );
+    assert_eq!(audit.required_action, "collect_missing_evidence");
+    Ok(())
+}
+
+#[test]
+fn completion_audit_stale_bead_state_requires_refresh() -> TestResult {
+    let audit = completion_audit(vec![audit_requirement(
+        "req-current-bead-state",
+        vec![
+            audit_evidence(
+                "ev-stale-bead",
+                CompletionAuditEvidenceKind::Bead,
+                CompletionAuditCoverage::Direct,
+                CompletionAuditEvidenceStatus::Stale,
+            )
+            .with_bead_id("bd-y4mkq")
+            .with_agent_mail_thread_id("bd-y4mkq"),
+        ],
+    )])?;
+
+    assert_eq!(audit.status, CompletionAuditLedgerStatus::Stale);
+    assert_eq!(
+        audit.reason_code,
+        completion_audit_reason_codes::STALE_EVIDENCE
+    );
+    assert_eq!(audit.required_action, "refresh_stale_evidence");
+    Ok(())
+}
+
+#[test]
+fn completion_audit_blocked_rch_proof_records_blocker_action() -> TestResult {
+    let audit =
+        completion_audit(vec![audit_requirement(
+            "req-rch-proof",
+            vec![audit_evidence(
+            "ev-blocked-rch",
+            CompletionAuditEvidenceKind::Command,
+            CompletionAuditCoverage::Direct,
+            CompletionAuditEvidenceStatus::Blocked,
+        )
+        .with_command(
+            "rch exec -- cargo test -p frankenengine-node validation_closeout -- --nocapture",
+        )
+        .with_bead_id("bd-dpfyo")],
+        )])?;
+
+    assert_eq!(audit.status, CompletionAuditLedgerStatus::Blocked);
+    assert_eq!(
+        audit.reason_code,
+        completion_audit_reason_codes::BLOCKED_PROOF
+    );
+    assert_eq!(audit.required_action, "record_blocker_and_retry");
+    Ok(())
+}
+
+#[test]
+fn completion_audit_rejects_protected_workspace_paths() {
+    let err = completion_audit(vec![audit_requirement(
+        "req-protected-path",
+        vec![
+            audit_evidence(
+                "ev-beads-jsonl",
+                CompletionAuditEvidenceKind::File,
+                CompletionAuditCoverage::Direct,
+                CompletionAuditEvidenceStatus::Fresh,
+            )
+            .with_path("/data/projects/franken_node/.beads/issues.jsonl"),
+        ],
+    )])
+    .expect_err("protected bead state path should be rejected as evidence");
+
+    assert_eq!(err.code(), "ERR_VC_AUDIT_PROTECTED_PATH");
 }
 
 #[test]

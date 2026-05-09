@@ -19,7 +19,28 @@ use thiserror::Error;
 
 pub const VALIDATION_CLOSEOUT_REPORT_SCHEMA_VERSION: &str =
     "franken-node/validation-closeout/report/v1";
+pub const COMPLETION_AUDIT_LEDGER_SCHEMA_VERSION: &str = "franken-node/completion-audit-ledger/v1";
 pub const DEFAULT_MAX_OUTPUT_EXCERPT_BYTES: usize = 4096;
+pub const MAX_COMPLETION_AUDIT_REQUIREMENTS: usize = 128;
+pub const MAX_COMPLETION_AUDIT_EVIDENCE_REFS: usize = 512;
+pub const MAX_COMPLETION_AUDIT_STRING_BYTES: usize = 1024;
+pub const MAX_COMPLETION_AUDIT_PATH_BYTES: usize = 4096;
+
+pub mod completion_audit_reason_codes {
+    pub const PROVEN: &str = "VC_AUDIT_PROVEN";
+    pub const PROXY_ONLY: &str = "VC_AUDIT_PROXY_ONLY";
+    pub const MISSING_EVIDENCE: &str = "VC_AUDIT_MISSING_EVIDENCE";
+    pub const STALE_EVIDENCE: &str = "VC_AUDIT_STALE_EVIDENCE";
+    pub const BLOCKED_PROOF: &str = "VC_AUDIT_BLOCKED_PROOF";
+}
+
+pub mod completion_audit_event_codes {
+    pub const DIRECT_EVIDENCE_READY: &str = "VC-AUDIT-001";
+    pub const PROXY_EVIDENCE_ONLY: &str = "VC-AUDIT-002";
+    pub const EVIDENCE_MISSING: &str = "VC-AUDIT-003";
+    pub const STALE_STATE: &str = "VC-AUDIT-004";
+    pub const PROOF_BLOCKED: &str = "VC-AUDIT-005";
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +78,8 @@ pub struct ValidationCloseoutOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub swarm_scheduler: Option<ValidationCloseoutSwarmSchedulerEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_audit: Option<PromptToArtifactCompletionAuditLedger>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr_text: Option<String>,
@@ -73,6 +96,7 @@ impl ValidationCloseoutOptions {
             proof_cache: None,
             proof_coalescer: None,
             swarm_scheduler: None,
+            completion_audit: None,
             stdout_text: None,
             stderr_text: None,
         }
@@ -109,6 +133,15 @@ impl ValidationCloseoutOptions {
         ));
         self
     }
+
+    #[must_use]
+    pub fn with_completion_audit(
+        mut self,
+        completion_audit: PromptToArtifactCompletionAuditLedger,
+    ) -> Self {
+        self.completion_audit = Some(completion_audit);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +163,8 @@ pub struct ValidationCloseoutReport {
     pub proof_coalescer: Option<ValidationProofCoalescerEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub swarm_scheduler: Option<ValidationCloseoutSwarmSchedulerEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_audit: Option<PromptToArtifactCompletionAuditLedger>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_ref: Option<ValidationReadinessRef>,
     pub close_reason: String,
@@ -175,6 +210,333 @@ pub struct ValidationCloseoutOutputExcerpt {
     pub original_bytes: usize,
     pub included_bytes: usize,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionAuditLedgerStatus {
+    Proven,
+    ProxyOnly,
+    MissingEvidence,
+    Stale,
+    Blocked,
+}
+
+impl CompletionAuditLedgerStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proven => "PROVEN",
+            Self::ProxyOnly => "PROXY_ONLY",
+            Self::MissingEvidence => "MISSING_EVIDENCE",
+            Self::Stale => "STALE",
+            Self::Blocked => "BLOCKED",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionAuditEvidenceKind {
+    File,
+    Command,
+    Test,
+    Gate,
+    Artifact,
+    Bead,
+    AgentMailThread,
+    Manifest,
+    Verifier,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionAuditCoverage {
+    Direct,
+    Proxy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionAuditEvidenceStatus {
+    Fresh,
+    Stale,
+    Missing,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptToArtifactCompletionAuditLedger {
+    pub schema_version: String,
+    pub objective_id: String,
+    pub objective_summary: String,
+    pub status: CompletionAuditLedgerStatus,
+    pub reason_code: String,
+    pub event_code: String,
+    pub required_action: String,
+    pub direct_evidence_count: usize,
+    pub proxy_evidence_count: usize,
+    pub requirements: Vec<CompletionAuditRequirement>,
+}
+
+impl PromptToArtifactCompletionAuditLedger {
+    #[must_use]
+    pub fn new(
+        objective_id: impl Into<String>,
+        objective_summary: impl Into<String>,
+        requirements: Vec<CompletionAuditRequirement>,
+    ) -> Self {
+        Self {
+            schema_version: COMPLETION_AUDIT_LEDGER_SCHEMA_VERSION.to_string(),
+            objective_id: objective_id.into(),
+            objective_summary: objective_summary.into(),
+            status: CompletionAuditLedgerStatus::MissingEvidence,
+            reason_code: completion_audit_reason_codes::MISSING_EVIDENCE.to_string(),
+            event_code: completion_audit_event_codes::EVIDENCE_MISSING.to_string(),
+            required_action: "collect_missing_evidence".to_string(),
+            direct_evidence_count: 0,
+            proxy_evidence_count: 0,
+            requirements,
+        }
+    }
+
+    pub fn validated(mut self) -> Result<Self, CompletionAuditLedgerError> {
+        validate_completion_audit_string(
+            "schema_version",
+            &self.schema_version,
+            MAX_COMPLETION_AUDIT_STRING_BYTES,
+        )?;
+        if self.schema_version != COMPLETION_AUDIT_LEDGER_SCHEMA_VERSION {
+            return Err(CompletionAuditLedgerError::InvalidSchema {
+                found: self.schema_version,
+            });
+        }
+        validate_completion_audit_required_string("objective_id", &self.objective_id)?;
+        validate_completion_audit_required_string("objective_summary", &self.objective_summary)?;
+        if self.requirements.is_empty() {
+            return Err(CompletionAuditLedgerError::EmptyRequirements);
+        }
+        if self.requirements.len() > MAX_COMPLETION_AUDIT_REQUIREMENTS {
+            return Err(CompletionAuditLedgerError::TooManyRequirements {
+                count: self.requirements.len(),
+                max: MAX_COMPLETION_AUDIT_REQUIREMENTS,
+            });
+        }
+
+        self.direct_evidence_count = 0;
+        self.proxy_evidence_count = 0;
+        for requirement in &mut self.requirements {
+            requirement.validate_and_normalize()?;
+            self.direct_evidence_count += requirement
+                .evidence
+                .iter()
+                .filter(|evidence| evidence.coverage == CompletionAuditCoverage::Direct)
+                .count();
+            self.proxy_evidence_count += requirement
+                .evidence
+                .iter()
+                .filter(|evidence| evidence.coverage == CompletionAuditCoverage::Proxy)
+                .count();
+        }
+        self.requirements
+            .sort_by(|left, right| left.requirement_id.cmp(&right.requirement_id));
+
+        self.status = self
+            .requirements
+            .iter()
+            .map(|requirement| requirement.status)
+            .max()
+            .unwrap_or(CompletionAuditLedgerStatus::MissingEvidence);
+        let (reason_code, event_code, required_action) =
+            completion_audit_status_contract(self.status);
+        self.reason_code = reason_code.to_string();
+        self.event_code = event_code.to_string();
+        self.required_action = required_action.to_string();
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionAuditRequirement {
+    pub requirement_id: String,
+    pub requirement_text: String,
+    pub status: CompletionAuditLedgerStatus,
+    pub reason_code: String,
+    pub required_action: String,
+    pub evidence: Vec<CompletionAuditEvidenceRef>,
+}
+
+impl CompletionAuditRequirement {
+    #[must_use]
+    pub fn new(
+        requirement_id: impl Into<String>,
+        requirement_text: impl Into<String>,
+        evidence: Vec<CompletionAuditEvidenceRef>,
+    ) -> Self {
+        Self {
+            requirement_id: requirement_id.into(),
+            requirement_text: requirement_text.into(),
+            status: CompletionAuditLedgerStatus::MissingEvidence,
+            reason_code: completion_audit_reason_codes::MISSING_EVIDENCE.to_string(),
+            required_action: "collect_missing_evidence".to_string(),
+            evidence,
+        }
+    }
+
+    fn validate_and_normalize(&mut self) -> Result<(), CompletionAuditLedgerError> {
+        validate_completion_audit_required_string("requirement_id", &self.requirement_id)?;
+        validate_completion_audit_required_string("requirement_text", &self.requirement_text)?;
+        if self.evidence.len() > MAX_COMPLETION_AUDIT_EVIDENCE_REFS {
+            return Err(CompletionAuditLedgerError::TooManyEvidenceRefs {
+                requirement_id: self.requirement_id.clone(),
+                count: self.evidence.len(),
+                max: MAX_COMPLETION_AUDIT_EVIDENCE_REFS,
+            });
+        }
+        for evidence in &self.evidence {
+            evidence.validate()?;
+        }
+        self.evidence
+            .sort_by(|left, right| left.evidence_id.cmp(&right.evidence_id));
+        self.status = derive_requirement_status(&self.evidence);
+        let (reason_code, _event_code, required_action) =
+            completion_audit_status_contract(self.status);
+        self.reason_code = reason_code.to_string();
+        self.required_action = required_action.to_string();
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionAuditEvidenceRef {
+    pub evidence_id: String,
+    pub kind: CompletionAuditEvidenceKind,
+    pub coverage: CompletionAuditCoverage,
+    pub status: CompletionAuditEvidenceStatus,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bead_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_mail_thread_id: Option<String>,
+}
+
+impl CompletionAuditEvidenceRef {
+    #[must_use]
+    pub fn new(
+        evidence_id: impl Into<String>,
+        kind: CompletionAuditEvidenceKind,
+        coverage: CompletionAuditCoverage,
+        status: CompletionAuditEvidenceStatus,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            evidence_id: evidence_id.into(),
+            kind,
+            coverage,
+            status,
+            description: description.into(),
+            path: None,
+            command: None,
+            bead_id: None,
+            agent_mail_thread_id: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+        self.command = Some(command.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_bead_id(mut self, bead_id: impl Into<String>) -> Self {
+        self.bead_id = Some(bead_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_agent_mail_thread_id(mut self, thread_id: impl Into<String>) -> Self {
+        self.agent_mail_thread_id = Some(thread_id.into());
+        self
+    }
+
+    fn validate(&self) -> Result<(), CompletionAuditLedgerError> {
+        validate_completion_audit_required_string("evidence_id", &self.evidence_id)?;
+        validate_completion_audit_required_string("description", &self.description)?;
+        if let Some(path) = &self.path {
+            validate_completion_audit_path("path", path)?;
+        }
+        if let Some(command) = &self.command {
+            validate_completion_audit_required_string("command", command)?;
+        }
+        if let Some(bead_id) = &self.bead_id {
+            validate_completion_audit_required_string("bead_id", bead_id)?;
+        }
+        if let Some(thread_id) = &self.agent_mail_thread_id {
+            validate_completion_audit_required_string("agent_mail_thread_id", thread_id)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CompletionAuditLedgerError {
+    #[error("ERR_VC_AUDIT_INVALID_SCHEMA: invalid completion audit schema {found}")]
+    InvalidSchema { found: String },
+    #[error("ERR_VC_AUDIT_EMPTY_REQUIREMENTS: completion audit must include requirements")]
+    EmptyRequirements,
+    #[error("ERR_VC_AUDIT_EMPTY_FIELD: {field} is required")]
+    EmptyField { field: &'static str },
+    #[error("ERR_VC_AUDIT_TOO_MANY_REQUIREMENTS: {count} requirements exceed max {max}")]
+    TooManyRequirements { count: usize, max: usize },
+    #[error(
+        "ERR_VC_AUDIT_TOO_MANY_EVIDENCE_REFS: requirement {requirement_id} has {count} refs, max {max}"
+    )]
+    TooManyEvidenceRefs {
+        requirement_id: String,
+        count: usize,
+        max: usize,
+    },
+    #[error("ERR_VC_AUDIT_STRING_TOO_LONG: {field} is {len} bytes, max {max}")]
+    StringTooLong {
+        field: &'static str,
+        len: usize,
+        max: usize,
+    },
+    #[error("ERR_VC_AUDIT_PATH_CONTAINS_NUL: {field} contains a NUL byte")]
+    PathContainsNul { field: &'static str },
+    #[error("ERR_VC_AUDIT_PATH_TRAVERSAL: {field} contains parent traversal")]
+    PathTraversal { field: &'static str },
+    #[error("ERR_VC_AUDIT_PROTECTED_PATH: {field} is protected workspace state: {path}")]
+    ProtectedPath { field: &'static str, path: String },
+}
+
+impl CompletionAuditLedgerError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidSchema { .. } => "ERR_VC_AUDIT_INVALID_SCHEMA",
+            Self::EmptyRequirements => "ERR_VC_AUDIT_EMPTY_REQUIREMENTS",
+            Self::EmptyField { .. } => "ERR_VC_AUDIT_EMPTY_FIELD",
+            Self::TooManyRequirements { .. } => "ERR_VC_AUDIT_TOO_MANY_REQUIREMENTS",
+            Self::TooManyEvidenceRefs { .. } => "ERR_VC_AUDIT_TOO_MANY_EVIDENCE_REFS",
+            Self::StringTooLong { .. } => "ERR_VC_AUDIT_STRING_TOO_LONG",
+            Self::PathContainsNul { .. } => "ERR_VC_AUDIT_PATH_CONTAINS_NUL",
+            Self::PathTraversal { .. } => "ERR_VC_AUDIT_PATH_TRAVERSAL",
+            Self::ProtectedPath { .. } => "ERR_VC_AUDIT_PROTECTED_PATH",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,6 +630,12 @@ pub struct ValidationCloseoutStructuredLogDetail {
     pub scheduler_fairness_bucket: Option<String>,
     pub scheduler_starvation_risk: Option<String>,
     pub scheduler_slo_breached: Option<bool>,
+    pub completion_audit_status: Option<String>,
+    pub completion_audit_reason_code: Option<String>,
+    pub completion_audit_event_code: Option<String>,
+    pub completion_audit_required_action: Option<String>,
+    pub completion_audit_direct_evidence_count: Option<usize>,
+    pub completion_audit_proxy_evidence_count: Option<usize>,
 }
 
 #[derive(Debug, Error)]
@@ -297,6 +665,8 @@ pub enum ValidationCloseoutError {
         path: String,
         source: serde_json::Error,
     },
+    #[error("completion audit ledger failed validation: {0}")]
+    CompletionAudit(#[from] CompletionAuditLedgerError),
     #[error("failed encoding validation closeout report JSON: {0}")]
     Encode(serde_json::Error),
 }
@@ -343,8 +713,16 @@ pub fn build_validation_closeout_report(
     }
 
     let validation_error = receipt.validate_at(now).err();
+    let completion_audit = options
+        .completion_audit
+        .clone()
+        .map(PromptToArtifactCompletionAuditLedger::validated)
+        .transpose()?;
     let status = closeout_status(receipt, validation_error.as_ref());
-    let warnings = closeout_warnings(receipt, validation_error.as_ref());
+    let mut warnings = closeout_warnings(receipt, validation_error.as_ref());
+    if let Some(audit) = &completion_audit {
+        warnings.extend(completion_audit_warnings(audit));
+    }
     let summary = receipt_summary(receipt);
     let output_excerpts = closeout_output_excerpts(options);
     let proof_source = closeout_proof_source(receipt, options);
@@ -355,6 +733,7 @@ pub fn build_validation_closeout_report(
         options.proof_cache.as_ref(),
         options.proof_coalescer.as_ref(),
         options.swarm_scheduler.as_ref(),
+        completion_audit.as_ref(),
         &warnings,
     );
     let agent_mail_markdown = render_agent_mail_markdown(
@@ -364,6 +743,7 @@ pub fn build_validation_closeout_report(
         options.proof_cache.as_ref(),
         options.proof_coalescer.as_ref(),
         options.swarm_scheduler.as_ref(),
+        completion_audit.as_ref(),
         &summary,
         &warnings,
         &output_excerpts,
@@ -384,6 +764,7 @@ pub fn build_validation_closeout_report(
         proof_cache: options.proof_cache.clone(),
         proof_coalescer: options.proof_coalescer.clone(),
         swarm_scheduler: options.swarm_scheduler.clone(),
+        completion_audit,
         readiness_ref: receipt.readiness_ref.clone(),
         close_reason,
         agent_mail_markdown,
@@ -451,6 +832,118 @@ pub fn redact_output_excerpt(
     }
 }
 
+fn derive_requirement_status(
+    evidence: &[CompletionAuditEvidenceRef],
+) -> CompletionAuditLedgerStatus {
+    if evidence.iter().any(|item| {
+        item.coverage == CompletionAuditCoverage::Direct
+            && item.status == CompletionAuditEvidenceStatus::Blocked
+    }) {
+        return CompletionAuditLedgerStatus::Blocked;
+    }
+    if evidence.iter().any(|item| {
+        item.coverage == CompletionAuditCoverage::Direct
+            && item.status == CompletionAuditEvidenceStatus::Stale
+    }) {
+        return CompletionAuditLedgerStatus::Stale;
+    }
+    if evidence.iter().any(|item| {
+        item.coverage == CompletionAuditCoverage::Direct
+            && item.status == CompletionAuditEvidenceStatus::Fresh
+    }) {
+        return CompletionAuditLedgerStatus::Proven;
+    }
+    if evidence.iter().any(|item| {
+        item.coverage == CompletionAuditCoverage::Proxy
+            && item.status == CompletionAuditEvidenceStatus::Fresh
+    }) {
+        return CompletionAuditLedgerStatus::ProxyOnly;
+    }
+    CompletionAuditLedgerStatus::MissingEvidence
+}
+
+fn completion_audit_status_contract(
+    status: CompletionAuditLedgerStatus,
+) -> (&'static str, &'static str, &'static str) {
+    match status {
+        CompletionAuditLedgerStatus::Proven => (
+            completion_audit_reason_codes::PROVEN,
+            completion_audit_event_codes::DIRECT_EVIDENCE_READY,
+            "close_with_direct_evidence",
+        ),
+        CompletionAuditLedgerStatus::ProxyOnly => (
+            completion_audit_reason_codes::PROXY_ONLY,
+            completion_audit_event_codes::PROXY_EVIDENCE_ONLY,
+            "replace_proxy_with_direct_evidence",
+        ),
+        CompletionAuditLedgerStatus::MissingEvidence => (
+            completion_audit_reason_codes::MISSING_EVIDENCE,
+            completion_audit_event_codes::EVIDENCE_MISSING,
+            "collect_missing_evidence",
+        ),
+        CompletionAuditLedgerStatus::Stale => (
+            completion_audit_reason_codes::STALE_EVIDENCE,
+            completion_audit_event_codes::STALE_STATE,
+            "refresh_stale_evidence",
+        ),
+        CompletionAuditLedgerStatus::Blocked => (
+            completion_audit_reason_codes::BLOCKED_PROOF,
+            completion_audit_event_codes::PROOF_BLOCKED,
+            "record_blocker_and_retry",
+        ),
+    }
+}
+
+fn validate_completion_audit_required_string(
+    field: &'static str,
+    value: &str,
+) -> Result<(), CompletionAuditLedgerError> {
+    if value.trim().is_empty() {
+        return Err(CompletionAuditLedgerError::EmptyField { field });
+    }
+    validate_completion_audit_string(field, value, MAX_COMPLETION_AUDIT_STRING_BYTES)
+}
+
+fn validate_completion_audit_string(
+    field: &'static str,
+    value: &str,
+    max: usize,
+) -> Result<(), CompletionAuditLedgerError> {
+    let len = value.len();
+    if len > max {
+        return Err(CompletionAuditLedgerError::StringTooLong { field, len, max });
+    }
+    Ok(())
+}
+
+fn validate_completion_audit_path(
+    field: &'static str,
+    value: &str,
+) -> Result<(), CompletionAuditLedgerError> {
+    if value.trim().is_empty() {
+        return Err(CompletionAuditLedgerError::EmptyField { field });
+    }
+    validate_completion_audit_string(field, value, MAX_COMPLETION_AUDIT_PATH_BYTES)?;
+    if value.contains('\0') {
+        return Err(CompletionAuditLedgerError::PathContainsNul { field });
+    }
+    if value.split(['/', '\\']).any(|component| component == "..") {
+        return Err(CompletionAuditLedgerError::PathTraversal { field });
+    }
+    if path_is_protected_workspace_state(value) {
+        return Err(CompletionAuditLedgerError::ProtectedPath {
+            field,
+            path: value.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn path_is_protected_workspace_state(path: &str) -> bool {
+    path.split(['/', '\\'])
+        .any(|component| matches!(component, ".beads" | ".agent-mail" | "agent-mail"))
+}
+
 fn closeout_status(
     receipt: &ValidationReceipt,
     validation_error: Option<&ValidationBrokerError>,
@@ -511,6 +1004,16 @@ fn closeout_warnings(
         );
     }
     warnings
+}
+
+fn completion_audit_warnings(audit: &PromptToArtifactCompletionAuditLedger) -> Vec<String> {
+    if audit.status == CompletionAuditLedgerStatus::Proven {
+        return Vec::new();
+    }
+    vec![format!(
+        "completion audit is {}; green closeout requires direct evidence for every requirement",
+        audit.status.as_str()
+    )]
 }
 
 fn receipt_summary(receipt: &ValidationReceipt) -> ValidationCloseoutReceiptSummary {
@@ -575,6 +1078,7 @@ fn structured_log_for_closeout(
 ) -> ValidationCloseoutStructuredLog {
     let coalescer = report.proof_coalescer.as_ref();
     let scheduler = report.swarm_scheduler.as_ref();
+    let audit = report.completion_audit.as_ref();
     ValidationCloseoutStructuredLog {
         ts: report.generated_at_utc,
         event: "validation_closeout".to_string(),
@@ -610,6 +1114,15 @@ fn structured_log_for_closeout(
             scheduler_fairness_bucket: scheduler.map(|evidence| evidence.fairness_bucket.clone()),
             scheduler_starvation_risk: scheduler.map(|evidence| evidence.starvation_risk.clone()),
             scheduler_slo_breached: scheduler.map(|evidence| evidence.slo_breached),
+            completion_audit_status: audit.map(|evidence| evidence.status.as_str().to_string()),
+            completion_audit_reason_code: audit.map(|evidence| evidence.reason_code.clone()),
+            completion_audit_event_code: audit.map(|evidence| evidence.event_code.clone()),
+            completion_audit_required_action: audit
+                .map(|evidence| evidence.required_action.clone()),
+            completion_audit_direct_evidence_count: audit
+                .map(|evidence| evidence.direct_evidence_count),
+            completion_audit_proxy_evidence_count: audit
+                .map(|evidence| evidence.proxy_evidence_count),
         },
     }
 }
@@ -639,6 +1152,7 @@ fn render_close_reason(
     proof_cache: Option<&ValidationProofCacheReuseEvidence>,
     proof_coalescer: Option<&ValidationProofCoalescerEvidence>,
     swarm_scheduler: Option<&ValidationCloseoutSwarmSchedulerEvidence>,
+    completion_audit: Option<&PromptToArtifactCompletionAuditLedger>,
     warnings: &[String],
 ) -> String {
     let worker = receipt.rch.worker_id.as_deref().unwrap_or("unknown-worker");
@@ -700,8 +1214,18 @@ fn render_close_reason(
             ref_.freshness_expires_at.to_rfc3339()
         )
     });
+    let completion_audit_suffix = completion_audit.map_or_else(String::new, |audit| {
+        format!(
+            " completion_audit_status={} completion_audit_reason={} completion_audit_action={} completion_audit_direct={} completion_audit_proxy={}",
+            audit.status.as_str(),
+            audit.reason_code,
+            audit.required_action,
+            audit.direct_evidence_count,
+            audit.proxy_evidence_count
+        )
+    });
     format!(
-        "{} validation receipt {} status={} proof_source={} exit={} error_class={} worker={} command=\"{}\" artifacts={}{}{}{}{}{}",
+        "{} validation receipt {} status={} proof_source={} exit={} error_class={} worker={} command=\"{}\" artifacts={}{}{}{}{}{}{}",
         receipt.bead_id,
         receipt.receipt_id,
         status.as_str(),
@@ -715,6 +1239,7 @@ fn render_close_reason(
         coalescer_suffix,
         scheduler_suffix,
         readiness_suffix,
+        completion_audit_suffix,
         warning_suffix
     )
 }
@@ -726,6 +1251,7 @@ fn render_agent_mail_markdown(
     proof_cache: Option<&ValidationProofCacheReuseEvidence>,
     proof_coalescer: Option<&ValidationProofCoalescerEvidence>,
     swarm_scheduler: Option<&ValidationCloseoutSwarmSchedulerEvidence>,
+    completion_audit: Option<&PromptToArtifactCompletionAuditLedger>,
     summary: &ValidationCloseoutReceiptSummary,
     warnings: &[String],
     output_excerpts: &[ValidationCloseoutOutputExcerpt],
@@ -843,6 +1369,26 @@ fn render_agent_mail_markdown(
             "- readiness_fresh_until: `{}`",
             readiness_ref.freshness_expires_at.to_rfc3339()
         ));
+    }
+
+    if let Some(audit) = completion_audit {
+        lines.push(format!(
+            "- completion_audit: status=`{}` reason=`{}` action=`{}` direct={} proxy={}",
+            audit.status.as_str(),
+            audit.reason_code,
+            audit.required_action,
+            audit.direct_evidence_count,
+            audit.proxy_evidence_count
+        ));
+        for requirement in &audit.requirements {
+            lines.push(format!(
+                "  - requirement `{}`: status=`{}` reason=`{}` evidence={}",
+                requirement.requirement_id,
+                requirement.status.as_str(),
+                requirement.reason_code,
+                requirement.evidence.len()
+            ));
+        }
     }
 
     if warnings.is_empty() {
