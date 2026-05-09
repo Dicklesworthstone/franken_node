@@ -15,6 +15,8 @@ pub const SIBLING_DRIFT_PREFLIGHT_SCHEMA_VERSION: &str =
     "franken-node/validation-planner/sibling-drift-preflight/v1";
 pub const BUILD_GRAPH_WATCHER_SCHEMA_VERSION: &str =
     "franken-node/validation-planner/build-graph-watcher/v1";
+pub const VALIDATION_SHARD_PLANNER_SCHEMA_VERSION: &str =
+    "franken-node/validation-planner/shards/v1";
 pub const DEFAULT_CARGO_TOOLCHAIN: &str = "nightly-2026-02-19";
 pub const DEFAULT_PACKAGE: &str = "frankenengine-node";
 pub const DEFAULT_WORKSPACE_ROOT: &str = "/data/projects/franken_node";
@@ -22,6 +24,7 @@ pub const DEFAULT_RCH_PRIORITY: &str = "low";
 
 /// Maximum skipped gates per validation plan to prevent DoS attacks.
 const MAX_SKIPPED_GATES: usize = 1_000;
+pub const MAX_VALIDATION_SHARDS: usize = 128;
 pub const MAX_SIBLING_PREFLIGHT_REPOS: usize = 32;
 pub const MAX_SIBLING_PREFLIGHT_BLOCKERS: usize = 128;
 pub const MAX_SIBLING_PREFLIGHT_DIAGNOSTICS: usize = 256;
@@ -48,6 +51,17 @@ pub mod build_graph_reason_codes {
     pub const MISSING_PATH_DEPENDENCY: &str = "BGW_MISSING_PATH_DEPENDENCY";
     pub const FEATURE_FLAG_DRIFT: &str = "BGW_FEATURE_FLAG_DRIFT";
     pub const CLOSED_BLOCKER_CARRYOVER: &str = "BGW_CLOSED_BLOCKER_CARRYOVER";
+}
+
+pub mod validation_shard_reason_codes {
+    pub const SOURCE_ONLY_READY: &str = "VSP_SOURCE_ONLY_READY";
+    pub const SOURCE_LANE_SATURATED: &str = "VSP_SOURCE_LANE_SATURATED";
+    pub const PROOF_CACHE_HIT: &str = "VSP_PROOF_CACHE_HIT";
+    pub const PROOF_COALESCER_IN_FLIGHT: &str = "VSP_PROOF_COALESCER_IN_FLIGHT";
+    pub const RCH_FOCUSED_READY: &str = "VSP_RCH_FOCUSED_READY";
+    pub const RCH_QUEUE_SATURATED: &str = "VSP_RCH_QUEUE_SATURATED";
+    pub const RCH_UNAVAILABLE: &str = "VSP_RCH_UNAVAILABLE";
+    pub const SHARED_TARGET_DIR_SERIALIZED: &str = "VSP_SHARED_TARGET_DIR_SERIALIZED";
 }
 
 pub mod impact_mapper_reason_codes {
@@ -682,6 +696,515 @@ impl ValidationPlan {
             .iter()
             .filter(|command| command.kind == PlannedCommandKind::RchCargo)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationShardKind {
+    SourceOnly,
+    ProofReuse,
+    RchCargo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationShardStatus {
+    Ready,
+    Waiting,
+    Blocked,
+    Reused,
+}
+
+impl ValidationShardStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Waiting => "waiting",
+            Self::Blocked => "blocked",
+            Self::Reused => "reused",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationShardProofState {
+    CacheHit,
+    CoalescerInFlight,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationShardProofEvidence {
+    pub command_id: String,
+    pub state: ValidationShardProofState,
+    pub evidence_ref: String,
+}
+
+impl ValidationShardProofEvidence {
+    #[must_use]
+    pub fn cache_hit(command_id: impl Into<String>, evidence_ref: impl Into<String>) -> Self {
+        Self {
+            command_id: command_id.into(),
+            state: ValidationShardProofState::CacheHit,
+            evidence_ref: evidence_ref.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn coalescer_in_flight(
+        command_id: impl Into<String>,
+        evidence_ref: impl Into<String>,
+    ) -> Self {
+        Self {
+            command_id: command_id.into(),
+            state: ValidationShardProofState::CoalescerInFlight,
+            evidence_ref: evidence_ref.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationShardRchQueueState {
+    pub rch_available: bool,
+    pub workers_available: u16,
+    pub queued_builds: u16,
+    pub active_builds: u16,
+    pub oldest_queued_age_secs: u64,
+}
+
+impl Default for ValidationShardRchQueueState {
+    fn default() -> Self {
+        Self {
+            rch_available: true,
+            workers_available: 1,
+            queued_builds: 0,
+            active_builds: 0,
+            oldest_queued_age_secs: 0,
+        }
+    }
+}
+
+impl ValidationShardRchQueueState {
+    #[must_use]
+    pub const fn unavailable() -> Self {
+        Self {
+            rch_available: false,
+            workers_available: 0,
+            queued_builds: 0,
+            active_builds: 0,
+            oldest_queued_age_secs: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn saturated(queued_builds: u16, active_builds: u16) -> Self {
+        Self {
+            rch_available: true,
+            workers_available: 0,
+            queued_builds,
+            active_builds,
+            oldest_queued_age_secs: 0,
+        }
+    }
+
+    const fn is_saturated(&self) -> bool {
+        self.rch_available
+            && (self.workers_available == 0 || self.queued_builds > self.workers_available)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationShardCommandBudget {
+    pub max_parallel_rch: usize,
+    pub local_source_slots_available: usize,
+}
+
+impl Default for ValidationShardCommandBudget {
+    fn default() -> Self {
+        Self {
+            max_parallel_rch: 2,
+            local_source_slots_available: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationShardPlannerInput {
+    pub plan: ValidationPlan,
+    pub rch_queue: ValidationShardRchQueueState,
+    pub command_budget: ValidationShardCommandBudget,
+    #[serde(default)]
+    pub proof_evidence: Vec<ValidationShardProofEvidence>,
+    #[serde(default)]
+    pub target_dir_overrides: BTreeMap<String, String>,
+}
+
+impl ValidationShardPlannerInput {
+    #[must_use]
+    pub fn new(plan: ValidationPlan) -> Self {
+        Self {
+            plan,
+            rch_queue: ValidationShardRchQueueState::default(),
+            command_budget: ValidationShardCommandBudget::default(),
+            proof_evidence: Vec::new(),
+            target_dir_overrides: BTreeMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_rch_queue(mut self, rch_queue: ValidationShardRchQueueState) -> Self {
+        self.rch_queue = rch_queue;
+        self
+    }
+
+    #[must_use]
+    pub fn with_command_budget(mut self, command_budget: ValidationShardCommandBudget) -> Self {
+        self.command_budget = command_budget;
+        self
+    }
+
+    #[must_use]
+    pub fn with_proof_evidence(
+        mut self,
+        proof_evidence: impl IntoIterator<Item = ValidationShardProofEvidence>,
+    ) -> Self {
+        self.proof_evidence = proof_evidence.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_target_dir_override(
+        mut self,
+        command_id: impl Into<String>,
+        target_dir: impl Into<String>,
+    ) -> Self {
+        self.target_dir_overrides
+            .insert(command_id.into(), normalize_path(target_dir.into()));
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationShard {
+    pub shard_id: String,
+    pub kind: ValidationShardKind,
+    pub status: ValidationShardStatus,
+    pub reason_code: String,
+    pub command_ids: Vec<String>,
+    pub target_dir: Option<String>,
+    pub parallel_slot: usize,
+    pub blocked_by: Vec<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationShardDecisionLog {
+    pub command_id: String,
+    pub shard_id: String,
+    pub reason_code: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationShardPlan {
+    pub schema_version: String,
+    pub bead_id: String,
+    pub thread_id: String,
+    pub source_only_allowed: bool,
+    pub max_parallel_rch: usize,
+    pub shards: Vec<ValidationShard>,
+    pub decision_log: Vec<ValidationShardDecisionLog>,
+    pub human_summary: String,
+}
+
+impl ValidationShardPlan {
+    #[must_use]
+    pub fn shard(&self, shard_id: &str) -> Option<&ValidationShard> {
+        self.shards
+            .iter()
+            .find(|shard| shard.shard_id.as_str().eq(shard_id))
+    }
+}
+
+#[must_use]
+pub fn plan_validation_shards(input: &ValidationShardPlannerInput) -> ValidationShardPlan {
+    let proof_evidence = input
+        .proof_evidence
+        .iter()
+        .map(|evidence| (evidence.command_id.as_str(), evidence))
+        .collect::<BTreeMap<_, _>>();
+    let mut source_commands = Vec::new();
+    let mut rch_groups: BTreeMap<String, Vec<&PlannedCommand>> = BTreeMap::new();
+    let mut shards = Vec::new();
+    let mut decision_log = Vec::new();
+
+    for command in &input.plan.commands {
+        if let Some(evidence) = proof_evidence.get(command.command_id.as_str()) {
+            let (status, reason_code, summary) = match evidence.state {
+                ValidationShardProofState::CacheHit => (
+                    ValidationShardStatus::Reused,
+                    validation_shard_reason_codes::PROOF_CACHE_HIT,
+                    format!(
+                        "proof cache hit for {} via {}",
+                        command.command_id, evidence.evidence_ref
+                    ),
+                ),
+                ValidationShardProofState::CoalescerInFlight => (
+                    ValidationShardStatus::Waiting,
+                    validation_shard_reason_codes::PROOF_COALESCER_IN_FLIGHT,
+                    format!(
+                        "join in-flight proof for {} via {}",
+                        command.command_id, evidence.evidence_ref
+                    ),
+                ),
+            };
+            let shard_id = format!("proof-{}", stable_token(&command.command_id));
+            push_shard(
+                &mut shards,
+                ValidationShard {
+                    shard_id: shard_id.clone(),
+                    kind: ValidationShardKind::ProofReuse,
+                    status,
+                    reason_code: reason_code.to_string(),
+                    command_ids: vec![command.command_id.clone()],
+                    target_dir: None,
+                    parallel_slot: 0,
+                    blocked_by: Vec::new(),
+                    summary: summary.clone(),
+                },
+            );
+            decision_log.push(ValidationShardDecisionLog {
+                command_id: command.command_id.clone(),
+                shard_id,
+                reason_code: reason_code.to_string(),
+                detail: summary,
+            });
+            continue;
+        }
+
+        match command.kind {
+            PlannedCommandKind::RchCargo => {
+                let target_dir = input
+                    .target_dir_overrides
+                    .get(&command.command_id)
+                    .cloned()
+                    .or_else(|| command_target_dir(command))
+                    .unwrap_or_else(|| "unknown-target-dir".to_string());
+                rch_groups.entry(target_dir).or_default().push(command);
+            }
+            PlannedCommandKind::SourceOnly
+            | PlannedCommandKind::ProofCacheLookup
+            | PlannedCommandKind::ProofCoalescerLookup
+            | PlannedCommandKind::PythonGate => {
+                source_commands.push(command);
+            }
+        }
+    }
+
+    if !source_commands.is_empty() {
+        let waiting = input.command_budget.local_source_slots_available == 0;
+        let reason_code = if waiting {
+            validation_shard_reason_codes::SOURCE_LANE_SATURATED
+        } else {
+            validation_shard_reason_codes::SOURCE_ONLY_READY
+        };
+        let status = if waiting {
+            ValidationShardStatus::Waiting
+        } else {
+            ValidationShardStatus::Ready
+        };
+        let command_ids = source_commands
+            .iter()
+            .map(|command| command.command_id.clone())
+            .collect::<Vec<_>>();
+        let summary = if waiting {
+            format!(
+                "source-only lane is saturated; wait before running {} local commands",
+                command_ids.len()
+            )
+        } else {
+            format!(
+                "run {} source-only, Python, and proof-lookup commands locally",
+                command_ids.len()
+            )
+        };
+        push_shard(
+            &mut shards,
+            ValidationShard {
+                shard_id: "source-only".to_string(),
+                kind: ValidationShardKind::SourceOnly,
+                status,
+                reason_code: reason_code.to_string(),
+                command_ids: command_ids.clone(),
+                target_dir: None,
+                parallel_slot: 0,
+                blocked_by: Vec::new(),
+                summary: summary.clone(),
+            },
+        );
+        for command_id in command_ids {
+            decision_log.push(ValidationShardDecisionLog {
+                command_id,
+                shard_id: "source-only".to_string(),
+                reason_code: reason_code.to_string(),
+                detail: summary.clone(),
+            });
+        }
+    }
+
+    let mut rch_slot = 0usize;
+    for (target_dir, commands) in rch_groups {
+        let command_ids = commands
+            .iter()
+            .map(|command| command.command_id.clone())
+            .collect::<Vec<_>>();
+        let shared_target = command_ids.len() > 1;
+        let (status, reason_code, blocked_by, summary) = if !input.rch_queue.rch_available {
+            (
+                ValidationShardStatus::Blocked,
+                validation_shard_reason_codes::RCH_UNAVAILABLE,
+                vec!["rch unavailable".to_string()],
+                format!(
+                    "RCH is unavailable; cannot run {} cargo commands for {}",
+                    command_ids.len(),
+                    target_dir
+                ),
+            )
+        } else if input.rch_queue.is_saturated() {
+            (
+                ValidationShardStatus::Waiting,
+                validation_shard_reason_codes::RCH_QUEUE_SATURATED,
+                vec![format!(
+                    "workers_available={} queued_builds={} active_builds={}",
+                    input.rch_queue.workers_available,
+                    input.rch_queue.queued_builds,
+                    input.rch_queue.active_builds
+                )],
+                format!(
+                    "RCH queue is saturated; wait before running {} cargo commands for {}",
+                    command_ids.len(),
+                    target_dir
+                ),
+            )
+        } else if shared_target {
+            (
+                ValidationShardStatus::Ready,
+                validation_shard_reason_codes::SHARED_TARGET_DIR_SERIALIZED,
+                Vec::new(),
+                format!(
+                    "serialize {} cargo commands through shared target dir {}",
+                    command_ids.len(),
+                    target_dir
+                ),
+            )
+        } else {
+            (
+                ValidationShardStatus::Ready,
+                validation_shard_reason_codes::RCH_FOCUSED_READY,
+                Vec::new(),
+                format!(
+                    "run focused RCH cargo command {} in isolated target dir {}",
+                    command_ids[0], target_dir
+                ),
+            )
+        };
+        let shard_id = format!("rch-{}", stable_token(&target_dir));
+        let parallel_slot = if status == ValidationShardStatus::Ready {
+            let slot = rch_slot % input.command_budget.max_parallel_rch.max(1);
+            rch_slot = rch_slot.saturating_add(1);
+            slot
+        } else {
+            0
+        };
+        push_shard(
+            &mut shards,
+            ValidationShard {
+                shard_id: shard_id.clone(),
+                kind: ValidationShardKind::RchCargo,
+                status,
+                reason_code: reason_code.to_string(),
+                command_ids: command_ids.clone(),
+                target_dir: Some(target_dir.clone()),
+                parallel_slot,
+                blocked_by,
+                summary: summary.clone(),
+            },
+        );
+        for command_id in command_ids {
+            decision_log.push(ValidationShardDecisionLog {
+                command_id,
+                shard_id: shard_id.clone(),
+                reason_code: reason_code.to_string(),
+                detail: summary.clone(),
+            });
+        }
+    }
+
+    shards.sort_by(|left, right| {
+        left.status
+            .cmp(&right.status)
+            .then(left.kind_label().cmp(right.kind_label()))
+            .then(left.shard_id.cmp(&right.shard_id))
+    });
+    decision_log.sort_by(|left, right| left.command_id.cmp(&right.command_id));
+    let ready = shards
+        .iter()
+        .filter(|shard| shard.status == ValidationShardStatus::Ready)
+        .count();
+    let waiting = shards
+        .iter()
+        .filter(|shard| shard.status == ValidationShardStatus::Waiting)
+        .count();
+    let blocked = shards
+        .iter()
+        .filter(|shard| shard.status == ValidationShardStatus::Blocked)
+        .count();
+    let reused = shards
+        .iter()
+        .filter(|shard| shard.status == ValidationShardStatus::Reused)
+        .count();
+
+    ValidationShardPlan {
+        schema_version: VALIDATION_SHARD_PLANNER_SCHEMA_VERSION.to_string(),
+        bead_id: input.plan.bead_id.clone(),
+        thread_id: input.plan.thread_id.clone(),
+        source_only_allowed: input.plan.source_only_allowed,
+        max_parallel_rch: input.command_budget.max_parallel_rch,
+        human_summary: format!(
+            "{} validation shards: shards={} ready={} waiting={} blocked={} reused={} max_parallel_rch={}",
+            input.plan.bead_id,
+            shards.len(),
+            ready,
+            waiting,
+            blocked,
+            reused,
+            input.command_budget.max_parallel_rch
+        ),
+        shards,
+        decision_log,
+    }
+}
+
+impl ValidationShard {
+    fn kind_label(&self) -> &'static str {
+        match self.kind {
+            ValidationShardKind::SourceOnly => "source_only",
+            ValidationShardKind::ProofReuse => "proof_reuse",
+            ValidationShardKind::RchCargo => "rch_cargo",
+        }
+    }
+}
+
+fn push_shard(shards: &mut Vec<ValidationShard>, shard: ValidationShard) {
+    push_bounded(shards, shard, MAX_VALIDATION_SHARDS);
+}
+
+fn command_target_dir(command: &PlannedCommand) -> Option<String> {
+    command.argv.iter().find_map(|arg| {
+        arg.strip_prefix("CARGO_TARGET_DIR=")
+            .map(|target_dir| normalize_path(target_dir.to_string()))
+    })
 }
 
 #[derive(Debug, thiserror::Error)]

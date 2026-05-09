@@ -4,10 +4,13 @@ use frankenengine_node::ops::validation_planner::{
     SIBLING_DRIFT_PREFLIGHT_SCHEMA_VERSION, SiblingBlockerRef, SiblingBlockerStatus,
     SiblingBuildGraphInput, SiblingDriftDecision, SiblingDriftDiagnosticSeverity,
     SiblingDriftPreflightInput, SiblingRepoDriftInput, VALIDATION_PLANNER_SCHEMA_VERSION,
-    ValidationCostClass, ValidationExecutionPolicy, ValidationPlanUrgency, ValidationPlannerError,
-    build_graph_reason_codes, build_multi_repo_build_graph_watch, build_sibling_drift_preflight,
-    impact_mapper_reason_codes, parse_registered_tests_from_manifest, plan_validation,
-    sibling_drift_reason_codes,
+    VALIDATION_SHARD_PLANNER_SCHEMA_VERSION, ValidationCostClass, ValidationExecutionPolicy,
+    ValidationPlanUrgency, ValidationPlannerError, ValidationShardCommandBudget,
+    ValidationShardPlannerInput, ValidationShardProofEvidence, ValidationShardRchQueueState,
+    ValidationShardStatus, build_graph_reason_codes, build_multi_repo_build_graph_watch,
+    build_sibling_drift_preflight, impact_mapper_reason_codes,
+    parse_registered_tests_from_manifest, plan_validation, plan_validation_shards,
+    sibling_drift_reason_codes, validation_shard_reason_codes,
 };
 use serde::Deserialize;
 
@@ -283,6 +286,224 @@ fn sibling_dependency_drift_escalates_to_package_check() {
             .iter()
             .any(|condition| condition.contains("sibling blocker bead"))
     );
+}
+
+#[test]
+fn validation_shard_planner_runs_single_focused_test_after_source_lane() {
+    let plan = plan_for(
+        "bd-shard-single",
+        &["crates/franken-node/tests/validation_planner.rs"],
+        &["validation"],
+        "Run one exact focused validation planner test.",
+    );
+
+    let shards = plan_validation_shards(&ValidationShardPlannerInput::new(plan));
+
+    assert_eq!(
+        shards.schema_version,
+        VALIDATION_SHARD_PLANNER_SCHEMA_VERSION
+    );
+    assert!(shards.human_summary.contains("ready=2"));
+    let rch_shard = shards
+        .shards
+        .iter()
+        .find(|shard| {
+            shard
+                .command_ids
+                .contains(&"cargo-test-validation_planner".to_string())
+        })
+        .expect("focused validation planner command should be sharded");
+    assert_eq!(rch_shard.status, ValidationShardStatus::Ready);
+    assert_eq!(
+        rch_shard.reason_code,
+        validation_shard_reason_codes::RCH_FOCUSED_READY
+    );
+    assert_eq!(rch_shard.parallel_slot, 0);
+    assert!(
+        shards
+            .decision_log
+            .iter()
+            .any(|entry| entry.command_id == "cargo-test-validation_planner"
+                && entry.detail.contains("focused RCH cargo command"))
+    );
+}
+
+#[test]
+fn validation_shard_planner_splits_independent_rch_target_dirs() {
+    let plan = plan_for(
+        "bd-shard-independent",
+        &[
+            "crates/franken-node/src/cli.rs",
+            "crates/franken-node/tests/fleet_cli_e2e.rs",
+        ],
+        &["validation"],
+        "Run independent validation shards for CLI and fleet coverage.",
+    );
+
+    let shards = plan_validation_shards(
+        &ValidationShardPlannerInput::new(plan)
+            .with_target_dir_override(
+                "cargo-test-cli_arg_validation",
+                "/data/tmp/franken_node-bd-shard-independent-cli",
+            )
+            .with_target_dir_override(
+                "cargo-test-fleet_cli_e2e",
+                "/data/tmp/franken_node-bd-shard-independent-fleet",
+            )
+            .with_command_budget(ValidationShardCommandBudget {
+                max_parallel_rch: 4,
+                local_source_slots_available: 1,
+            }),
+    );
+
+    let ready_rch = shards
+        .shards
+        .iter()
+        .filter(|shard| shard.reason_code == validation_shard_reason_codes::RCH_FOCUSED_READY)
+        .collect::<Vec<_>>();
+    assert_eq!(ready_rch.len(), 2);
+    assert_ne!(ready_rch[0].target_dir, ready_rch[1].target_dir);
+    assert!(
+        ready_rch
+            .iter()
+            .all(|shard| shard.status == ValidationShardStatus::Ready)
+    );
+}
+
+#[test]
+fn validation_shard_planner_serializes_shared_target_dir() {
+    let plan = plan_for(
+        "bd-shard-shared-target",
+        &[
+            "crates/franken-node/src/cli.rs",
+            "crates/franken-node/tests/fleet_cli_e2e.rs",
+        ],
+        &["validation"],
+        "Shared target directory should serialize RCH cargo commands.",
+    );
+
+    let shards = plan_validation_shards(&ValidationShardPlannerInput::new(plan));
+
+    let shared = shards
+        .shards
+        .iter()
+        .find(|shard| {
+            shard.reason_code == validation_shard_reason_codes::SHARED_TARGET_DIR_SERIALIZED
+        })
+        .expect("shared target dir shard should be present");
+    assert_eq!(shared.status, ValidationShardStatus::Ready);
+    assert_eq!(shared.command_ids.len(), 2);
+    assert!(shared.summary.contains("serialize 2 cargo commands"));
+}
+
+#[test]
+fn validation_shard_planner_waits_when_rch_queue_is_saturated() {
+    let plan = plan_for(
+        "bd-shard-rch-saturated",
+        &["crates/franken-node/tests/validation_planner.rs"],
+        &["validation"],
+        "RCH queue saturation should wait instead of duplicating proof.",
+    );
+
+    let shards = plan_validation_shards(
+        &ValidationShardPlannerInput::new(plan)
+            .with_rch_queue(ValidationShardRchQueueState::saturated(9, 12)),
+    );
+
+    let rch_shard = shards
+        .shards
+        .iter()
+        .find(|shard| shard.reason_code == validation_shard_reason_codes::RCH_QUEUE_SATURATED)
+        .expect("saturated RCH queue should produce waiting shard");
+    assert_eq!(rch_shard.status, ValidationShardStatus::Waiting);
+    assert!(
+        rch_shard
+            .blocked_by
+            .iter()
+            .any(|blocker| blocker.contains("queued_builds=9"))
+    );
+}
+
+#[test]
+fn validation_shard_planner_blocks_when_rch_is_unavailable() {
+    let plan = plan_for(
+        "bd-shard-rch-unavailable",
+        &["crates/franken-node/tests/validation_planner.rs"],
+        &["validation"],
+        "Unavailable RCH must fail closed for cargo-heavy validation.",
+    );
+
+    let shards = plan_validation_shards(
+        &ValidationShardPlannerInput::new(plan)
+            .with_rch_queue(ValidationShardRchQueueState::unavailable()),
+    );
+
+    let rch_shard = shards
+        .shards
+        .iter()
+        .find(|shard| shard.reason_code == validation_shard_reason_codes::RCH_UNAVAILABLE)
+        .expect("unavailable RCH should block cargo shard");
+    assert_eq!(rch_shard.status, ValidationShardStatus::Blocked);
+    assert!(rch_shard.summary.contains("RCH is unavailable"));
+}
+
+#[test]
+fn validation_shard_planner_waits_on_saturated_source_lane() {
+    let plan = plan_for(
+        "bd-shard-source-saturated",
+        &["docs/specs/validation_planner.md"],
+        &["validation"],
+        "Source-only validation should respect local command budget.",
+    );
+
+    let shards = plan_validation_shards(
+        &ValidationShardPlannerInput::new(plan).with_command_budget(ValidationShardCommandBudget {
+            max_parallel_rch: 2,
+            local_source_slots_available: 0,
+        }),
+    );
+
+    let source = shards
+        .shard("source-only")
+        .expect("docs-only plan should create source-only shard");
+    assert_eq!(source.status, ValidationShardStatus::Waiting);
+    assert_eq!(
+        source.reason_code,
+        validation_shard_reason_codes::SOURCE_LANE_SATURATED
+    );
+}
+
+#[test]
+fn validation_shard_planner_reuses_proof_cache_hit() {
+    let plan = plan_for(
+        "bd-shard-cache-hit",
+        &["crates/franken-node/tests/validation_planner.rs"],
+        &["validation"],
+        "Fresh proof cache receipt should prevent duplicate RCH work.",
+    );
+
+    let shards = plan_validation_shards(
+        &ValidationShardPlannerInput::new(plan).with_proof_evidence([
+            ValidationShardProofEvidence::cache_hit(
+                "cargo-test-validation_planner",
+                "artifacts/proof-cache/bd-shard-cache-hit.json",
+            ),
+        ]),
+    );
+
+    let proof = shards
+        .shards
+        .iter()
+        .find(|shard| shard.reason_code == validation_shard_reason_codes::PROOF_CACHE_HIT)
+        .expect("proof cache hit should render reusable shard");
+    assert_eq!(proof.status, ValidationShardStatus::Reused);
+    assert_eq!(proof.command_ids, vec!["cargo-test-validation_planner"]);
+    assert!(!shards.shards.iter().any(|shard| {
+        shard
+            .command_ids
+            .contains(&"cargo-test-validation_planner".to_string())
+            && shard.reason_code == validation_shard_reason_codes::RCH_FOCUSED_READY
+    }));
 }
 
 fn healthy_franken_engine() -> SiblingRepoDriftInput {

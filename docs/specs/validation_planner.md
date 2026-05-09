@@ -87,3 +87,38 @@ They cover:
 - docs plus validation broker artifact changes;
 - feature-gated integration tests;
 - sibling dependency drift.
+
+## Adaptive Shard Planner
+
+**Schema:** `franken-node/validation-planner/shards/v1`
+
+The shard planner consumes a `ValidationPlan` after command selection and groups
+the commands into deterministic execution lanes. It does not mark validation as
+passed. It decides whether each command should run now, wait, reuse proof, or
+block because the required execution lane is unavailable.
+
+Shard decisions consider:
+
+- source-only, Python, proof-cache, and proof-coalescer commands as the local
+  source lane;
+- RCH cargo commands by target directory, so commands sharing a target directory
+  are serialized rather than run concurrently;
+- RCH queue state, including unavailable workers and saturated queues;
+- proof-cache hits and proof-coalescer in-flight evidence;
+- command budget limits for local source work and maximum parallel RCH shards.
+
+Stable shard reason codes include:
+
+- `VSP_SOURCE_ONLY_READY`;
+- `VSP_SOURCE_LANE_SATURATED`;
+- `VSP_PROOF_CACHE_HIT`;
+- `VSP_PROOF_COALESCER_IN_FLIGHT`;
+- `VSP_RCH_FOCUSED_READY`;
+- `VSP_RCH_QUEUE_SATURATED`;
+- `VSP_RCH_UNAVAILABLE`;
+- `VSP_SHARED_TARGET_DIR_SERIALIZED`.
+
+Every report includes a `decision_log` entry per planned command, with the
+selected shard ID, reason code, and compact detail text suitable for Agent Mail
+or Beads comments. A reused proof or ready shard is still only scheduling
+evidence; closeout must cite the concrete proof receipt or command output.
