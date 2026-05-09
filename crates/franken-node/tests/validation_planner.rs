@@ -1,9 +1,11 @@
 use frankenengine_node::ops::validation_planner::{
-    GateStrength, PlannedCommandKind, PlannerInput, SIBLING_DRIFT_PREFLIGHT_SCHEMA_VERSION,
-    SiblingBlockerRef, SiblingBlockerStatus, SiblingDriftDecision, SiblingDriftDiagnosticSeverity,
-    SiblingDriftPreflightInput, SiblingRepoDriftInput, VALIDATION_PLANNER_SCHEMA_VERSION,
-    ValidationPlannerError, build_sibling_drift_preflight, parse_registered_tests_from_manifest,
-    plan_validation, sibling_drift_reason_codes,
+    BUILD_GRAPH_WATCHER_SCHEMA_VERSION, GateStrength, MultiRepoBuildGraphWatchInput,
+    PlannedCommandKind, PlannerInput, SIBLING_DRIFT_PREFLIGHT_SCHEMA_VERSION, SiblingBlockerRef,
+    SiblingBlockerStatus, SiblingBuildGraphInput, SiblingDriftDecision,
+    SiblingDriftDiagnosticSeverity, SiblingDriftPreflightInput, SiblingRepoDriftInput,
+    VALIDATION_PLANNER_SCHEMA_VERSION, ValidationPlannerError, build_graph_reason_codes,
+    build_multi_repo_build_graph_watch, build_sibling_drift_preflight,
+    parse_registered_tests_from_manifest, plan_validation, sibling_drift_reason_codes,
 };
 use serde::Deserialize;
 
@@ -424,6 +426,283 @@ fn sibling_drift_preflight_json_order_is_deterministic() {
     assert!(
         json.find("/data/projects/sqlmodel_rust/a.rs").unwrap()
             < json.find("/data/projects/sqlmodel_rust/z.rs").unwrap()
+    );
+}
+
+fn build_graph_package_manifest(dep_path: Option<&str>, dep_features: &[&str]) -> String {
+    let dependency = dep_path.map_or_else(String::new, |path| {
+        let features = if dep_features.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", features = [{}]",
+                dep_features
+                    .iter()
+                    .map(|feature| format!("\"{feature}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        format!("frankenengine-engine = {{ path = \"{path}\", optional = true{features} }}\n")
+    });
+
+    format!(
+        r#"
+[features]
+default = ["engine"]
+engine = ["dep:frankenengine-engine"]
+
+[dependencies]
+{dependency}
+
+[[test]]
+name = "native_engine_compat"
+path = "tests/native_engine_compat.rs"
+
+[[test]]
+name = "engine_dispatcher_profile_conformance"
+path = "tests/engine_dispatcher_profile_conformance.rs"
+required-features = ["engine"]
+
+[[test]]
+name = "validation_planner"
+path = "tests/validation_planner.rs"
+"#
+    )
+}
+
+fn sibling_engine_manifest(features: &[&str]) -> String {
+    let feature_lines = features
+        .iter()
+        .map(|feature| format!("{feature} = []"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"
+[package]
+name = "frankenengine-engine"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+{feature_lines}
+"#
+    )
+}
+
+fn sibling_build_graph_input() -> SiblingBuildGraphInput {
+    SiblingBuildGraphInput::new(
+        "franken_engine",
+        "/data/projects/franken_engine",
+        "/data/projects/franken_engine",
+        "/data/projects/franken_engine/crates/franken-engine/Cargo.toml",
+        sibling_engine_manifest(&["jit"]),
+    )
+    .with_head_sha("feedface")
+}
+
+#[test]
+fn build_graph_watcher_records_unchanged_sibling_dependency_deterministically() {
+    let report = build_multi_repo_build_graph_watch(MultiRepoBuildGraphWatchInput::new(
+        "/data/projects/franken_node",
+        "/data/projects/franken_node/crates/franken-node/Cargo.toml",
+        build_graph_package_manifest(Some("../../../franken_engine/crates/franken-engine"), &[]),
+        [sibling_build_graph_input()],
+    ))
+    .expect("unchanged build graph should parse");
+
+    assert_eq!(report.schema_version, BUILD_GRAPH_WATCHER_SCHEMA_VERSION);
+    assert_eq!(
+        report.sibling_preflight.decision,
+        SiblingDriftDecision::AllowBroadValidation
+    );
+    assert!(report.invalidations.is_empty());
+    assert!(report.proof_cache_invalidation_reasons.is_empty());
+    assert_eq!(report.dependencies.len(), 1);
+    let dependency = report
+        .dependencies
+        .first()
+        .expect("unchanged graph should record one dependency");
+    assert_eq!(dependency.repo_id, "franken_engine");
+    assert_eq!(dependency.dependency_name, "frankenengine-engine");
+    assert_eq!(
+        dependency.dependency_path,
+        "/data/projects/franken_engine/crates/franken-engine"
+    );
+    assert_eq!(dependency.local_feature_gates, vec!["default", "engine"]);
+    assert!(
+        dependency
+            .affected_tests
+            .contains(&"engine_dispatcher_profile_conformance".to_string())
+    );
+    assert!(
+        dependency
+            .affected_tests
+            .contains(&"native_engine_compat".to_string())
+    );
+    assert_eq!(
+        report.sibling_preflight.siblings[0].head_sha.as_deref(),
+        Some("feedface")
+    );
+}
+
+#[test]
+fn build_graph_watcher_invalidates_for_franken_engine_api_drift() {
+    let report = build_multi_repo_build_graph_watch(MultiRepoBuildGraphWatchInput::new(
+        "/data/projects/franken_node",
+        "/data/projects/franken_node/crates/franken-node/Cargo.toml",
+        build_graph_package_manifest(Some("../../../franken_engine/crates/franken-engine"), &[]),
+        [sibling_build_graph_input().with_changed_paths([
+            "/data/projects/franken_engine/crates/franken-engine/src/lib.rs",
+        ])],
+    ))
+    .expect("api drift report should build");
+
+    let invalidation = report
+        .invalidations
+        .iter()
+        .find(|invalidation| {
+            invalidation.reason_code == build_graph_reason_codes::SIBLING_API_DRIFT
+        })
+        .expect("api drift invalidation");
+    assert_eq!(
+        invalidation.severity,
+        SiblingDriftDiagnosticSeverity::Blocker
+    );
+    assert!(!invalidation.proof_cache_reusable);
+    assert_eq!(invalidation.affected_features, vec!["default", "engine"]);
+    assert!(
+        invalidation
+            .affected_tests
+            .contains(&"native_engine_compat".to_string())
+    );
+    assert!(
+        report
+            .proof_cache_invalidation_reasons
+            .contains(&build_graph_reason_codes::SIBLING_API_DRIFT.to_string())
+    );
+    assert!(
+        report
+            .validation_plan_invalidation_reasons
+            .contains(&build_graph_reason_codes::SIBLING_API_DRIFT.to_string())
+    );
+}
+
+#[test]
+fn build_graph_watcher_blocks_missing_path_dependency() {
+    let report = build_multi_repo_build_graph_watch(MultiRepoBuildGraphWatchInput::new(
+        "/data/projects/franken_node",
+        "/data/projects/franken_node/crates/franken-node/Cargo.toml",
+        build_graph_package_manifest(None, &[]),
+        [sibling_build_graph_input()],
+    ))
+    .expect("missing dependency report should build");
+
+    assert_eq!(
+        report.sibling_preflight.decision,
+        SiblingDriftDecision::BlockBroadValidation
+    );
+    assert!(report.invalidations.iter().any(|invalidation| {
+        invalidation.reason_code == build_graph_reason_codes::MISSING_PATH_DEPENDENCY
+            && !invalidation.proof_cache_reusable
+    }));
+    assert!(
+        report
+            .sibling_preflight
+            .diagnostics
+            .iter()
+            .any(|diagnostic| {
+                diagnostic.reason_code == sibling_drift_reason_codes::MANIFEST_PATH_MISMATCH
+                    && diagnostic.severity == SiblingDriftDiagnosticSeverity::Blocker
+            })
+    );
+}
+
+#[test]
+fn build_graph_watcher_invalidates_changed_dependency_feature_flags() {
+    let report = build_multi_repo_build_graph_watch(MultiRepoBuildGraphWatchInput::new(
+        "/data/projects/franken_node",
+        "/data/projects/franken_node/crates/franken-node/Cargo.toml",
+        build_graph_package_manifest(
+            Some("../../../franken_engine/crates/franken-engine"),
+            &["jit"],
+        ),
+        [SiblingBuildGraphInput::new(
+            "franken_engine",
+            "/data/projects/franken_engine",
+            "/data/projects/franken_engine",
+            "/data/projects/franken_engine/crates/franken-engine/Cargo.toml",
+            sibling_engine_manifest(&[]),
+        )],
+    ))
+    .expect("feature drift report should build");
+
+    assert!(report.invalidations.iter().any(|invalidation| {
+        invalidation.reason_code == build_graph_reason_codes::FEATURE_FLAG_DRIFT
+            && invalidation.summary.contains("jit")
+            && invalidation.affected_features == vec!["default", "engine"]
+    }));
+    assert!(
+        report
+            .sibling_preflight
+            .diagnostics
+            .iter()
+            .any(|diagnostic| {
+                diagnostic.reason_code == sibling_drift_reason_codes::FEATURE_MISMATCH
+                    && diagnostic.summary.contains("jit")
+            })
+    );
+}
+
+#[test]
+fn build_graph_watcher_carries_closed_blocker_without_invalidating_cache() {
+    let report = build_multi_repo_build_graph_watch(
+        MultiRepoBuildGraphWatchInput::new(
+            "/data/projects/franken_node",
+            "/data/projects/franken_node/crates/franken-node/Cargo.toml",
+            build_graph_package_manifest(
+                Some("../../../franken_engine/crates/franken-engine"),
+                &[],
+            ),
+            [sibling_build_graph_input()],
+        )
+        .with_known_blockers([SiblingBlockerRef::new(
+            "franken_engine",
+            "bd-closed",
+            SiblingBlockerStatus::Closed,
+            "prior default-feature compile blocker was closed",
+        )]),
+    )
+    .expect("closed blocker carryover should build");
+
+    assert_eq!(
+        report.sibling_preflight.decision,
+        SiblingDriftDecision::AllowBroadValidation
+    );
+    let invalidation = report
+        .invalidations
+        .iter()
+        .find(|invalidation| {
+            invalidation.reason_code == build_graph_reason_codes::CLOSED_BLOCKER_CARRYOVER
+        })
+        .expect("closed blocker carryover invalidation");
+    assert_eq!(invalidation.severity, SiblingDriftDiagnosticSeverity::Info);
+    assert!(invalidation.proof_cache_reusable);
+    assert!(
+        !report
+            .proof_cache_invalidation_reasons
+            .contains(&build_graph_reason_codes::CLOSED_BLOCKER_CARRYOVER.to_string())
+    );
+    assert!(
+        report
+            .sibling_preflight
+            .diagnostics
+            .iter()
+            .any(|diagnostic| {
+                diagnostic.reason_code == sibling_drift_reason_codes::CLOSED_BLOCKER
+                    && diagnostic.bead_id.as_deref() == Some("bd-closed")
+            })
     );
 }
 

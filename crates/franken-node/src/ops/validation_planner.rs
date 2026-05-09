@@ -6,12 +6,15 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path, PathBuf};
 
 use crate::push_bounded;
 
 pub const VALIDATION_PLANNER_SCHEMA_VERSION: &str = "franken-node/validation-planner/plan/v1";
 pub const SIBLING_DRIFT_PREFLIGHT_SCHEMA_VERSION: &str =
     "franken-node/validation-planner/sibling-drift-preflight/v1";
+pub const BUILD_GRAPH_WATCHER_SCHEMA_VERSION: &str =
+    "franken-node/validation-planner/build-graph-watcher/v1";
 pub const DEFAULT_CARGO_TOOLCHAIN: &str = "nightly-2026-02-19";
 pub const DEFAULT_PACKAGE: &str = "frankenengine-node";
 pub const DEFAULT_WORKSPACE_ROOT: &str = "/data/projects/franken_node";
@@ -26,6 +29,8 @@ pub const MAX_SIBLING_PREFLIGHT_PATHS: usize = 512;
 pub const MAX_SIBLING_PREFLIGHT_FEATURES: usize = 128;
 pub const MAX_SIBLING_PREFLIGHT_PATH_BYTES: usize = 4_096;
 pub const MAX_SIBLING_PREFLIGHT_FIELD_BYTES: usize = 1_024;
+pub const MAX_BUILD_GRAPH_PATH_DEPS: usize = 256;
+pub const MAX_BUILD_GRAPH_INVALIDATIONS: usize = 512;
 
 pub mod sibling_drift_reason_codes {
     pub const HEALTHY: &str = "SDP_HEALTHY";
@@ -36,6 +41,13 @@ pub mod sibling_drift_reason_codes {
     pub const ACTIVE_BLOCKER: &str = "SDP_ACTIVE_BLOCKER";
     pub const CLOSED_BLOCKER: &str = "SDP_CLOSED_BLOCKER";
     pub const STALE_BLOCKER: &str = "SDP_STALE_BLOCKER";
+}
+
+pub mod build_graph_reason_codes {
+    pub const SIBLING_API_DRIFT: &str = "BGW_SIBLING_API_DRIFT";
+    pub const MISSING_PATH_DEPENDENCY: &str = "BGW_MISSING_PATH_DEPENDENCY";
+    pub const FEATURE_FLAG_DRIFT: &str = "BGW_FEATURE_FLAG_DRIFT";
+    pub const CLOSED_BLOCKER_CARRYOVER: &str = "BGW_CLOSED_BLOCKER_CARRYOVER";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,6 +398,157 @@ impl SiblingDriftPreflightReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiblingBuildGraphInput {
+    pub repo_id: String,
+    pub checkout_path: String,
+    pub expected_path: String,
+    pub manifest_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_toml: Option<String>,
+    pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    pub dirty_paths: Vec<String>,
+    pub changed_paths: Vec<String>,
+}
+
+impl SiblingBuildGraphInput {
+    #[must_use]
+    pub fn new(
+        repo_id: impl Into<String>,
+        checkout_path: impl Into<String>,
+        expected_path: impl Into<String>,
+        manifest_path: impl Into<String>,
+        manifest_toml: impl Into<String>,
+    ) -> Self {
+        Self {
+            repo_id: repo_id.into(),
+            checkout_path: checkout_path.into(),
+            expected_path: expected_path.into(),
+            manifest_path: manifest_path.into(),
+            manifest_toml: Some(manifest_toml.into()),
+            exists: true,
+            head_sha: None,
+            dirty_paths: Vec::new(),
+            changed_paths: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn missing(
+        repo_id: impl Into<String>,
+        checkout_path: impl Into<String>,
+        expected_path: impl Into<String>,
+        manifest_path: impl Into<String>,
+    ) -> Self {
+        Self {
+            repo_id: repo_id.into(),
+            checkout_path: checkout_path.into(),
+            expected_path: expected_path.into(),
+            manifest_path: manifest_path.into(),
+            manifest_toml: None,
+            exists: false,
+            head_sha: None,
+            dirty_paths: Vec::new(),
+            changed_paths: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_head_sha(mut self, head_sha: impl Into<String>) -> Self {
+        self.head_sha = Some(head_sha.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_dirty_paths(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.dirty_paths = sorted_unique(paths);
+        self
+    }
+
+    #[must_use]
+    pub fn with_changed_paths(
+        mut self,
+        paths: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.changed_paths = sorted_unique(paths);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiRepoBuildGraphWatchInput {
+    pub workspace_root: String,
+    pub package_manifest_path: String,
+    pub package_manifest_toml: String,
+    pub siblings: Vec<SiblingBuildGraphInput>,
+    pub known_blockers: Vec<SiblingBlockerRef>,
+}
+
+impl MultiRepoBuildGraphWatchInput {
+    #[must_use]
+    pub fn new(
+        workspace_root: impl Into<String>,
+        package_manifest_path: impl Into<String>,
+        package_manifest_toml: impl Into<String>,
+        siblings: impl IntoIterator<Item = SiblingBuildGraphInput>,
+    ) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+            package_manifest_path: package_manifest_path.into(),
+            package_manifest_toml: package_manifest_toml.into(),
+            siblings: siblings.into_iter().collect(),
+            known_blockers: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_known_blockers(
+        mut self,
+        blockers: impl IntoIterator<Item = SiblingBlockerRef>,
+    ) -> Self {
+        self.known_blockers = blockers.into_iter().collect();
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildGraphDependency {
+    pub repo_id: String,
+    pub dependency_name: String,
+    pub manifest_path: String,
+    pub dependency_path: String,
+    pub expected_path: String,
+    pub local_feature_gates: Vec<String>,
+    pub requested_features: Vec<String>,
+    pub available_features: Vec<String>,
+    pub affected_tests: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildGraphInvalidation {
+    pub repo_id: String,
+    pub reason_code: String,
+    pub severity: SiblingDriftDiagnosticSeverity,
+    pub summary: String,
+    pub affected_features: Vec<String>,
+    pub affected_tests: Vec<String>,
+    pub proof_cache_reusable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiRepoBuildGraphWatchReport {
+    pub schema_version: String,
+    pub workspace_root: String,
+    pub package_manifest_path: String,
+    pub dependencies: Vec<BuildGraphDependency>,
+    pub sibling_preflight: SiblingDriftPreflightReport,
+    pub invalidations: Vec<BuildGraphInvalidation>,
+    pub proof_cache_invalidation_reasons: Vec<String>,
+    pub validation_plan_invalidation_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationPlan {
     pub schema_version: String,
     pub bead_id: String,
@@ -422,6 +585,8 @@ pub enum ValidationPlannerError {
     SiblingPreflightLimit { field: &'static str },
     #[error("sibling drift preflight field {field} contains invalid text")]
     SiblingPreflightText { field: &'static str },
+    #[error("build graph watcher field {field} exceeded a bounded limit")]
+    BuildGraphLimit { field: &'static str },
 }
 
 pub fn parse_registered_tests_from_manifest(
@@ -531,6 +696,280 @@ pub fn build_sibling_drift_preflight(
         diagnostics,
         agent_mail_markdown: br_comment_markdown.clone(),
         br_comment_markdown,
+    })
+}
+
+pub fn build_multi_repo_build_graph_watch(
+    input: MultiRepoBuildGraphWatchInput,
+) -> Result<MultiRepoBuildGraphWatchReport, ValidationPlannerError> {
+    validate_sibling_preflight_string(
+        "build_graph.workspace_root",
+        &input.workspace_root,
+        MAX_SIBLING_PREFLIGHT_PATH_BYTES,
+    )?;
+    validate_sibling_preflight_string(
+        "build_graph.package_manifest_path",
+        &input.package_manifest_path,
+        MAX_SIBLING_PREFLIGHT_PATH_BYTES,
+    )?;
+    validate_sibling_preflight_len(
+        "build_graph.siblings",
+        input.siblings.len(),
+        MAX_SIBLING_PREFLIGHT_REPOS,
+    )?;
+    validate_sibling_preflight_len(
+        "build_graph.known_blockers",
+        input.known_blockers.len(),
+        MAX_SIBLING_PREFLIGHT_BLOCKERS,
+    )?;
+
+    let package_manifest: toml::Value = toml::from_str(&input.package_manifest_toml)?;
+    let registered_tests = parse_registered_tests_from_manifest(&input.package_manifest_toml)?;
+    let package_manifest_path = normalize_resolved_path(Path::new(&input.package_manifest_path));
+    let path_deps = extract_manifest_path_dependencies(&package_manifest, &package_manifest_path)?;
+    validate_sibling_preflight_len(
+        "build_graph.path_dependencies",
+        path_deps.len(),
+        MAX_BUILD_GRAPH_PATH_DEPS,
+    )?;
+    let feature_map = manifest_feature_map(&package_manifest);
+
+    let mut preflight_siblings = Vec::with_capacity(input.siblings.len());
+    let mut dependencies = Vec::new();
+    let mut invalidations = Vec::new();
+
+    for sibling in input.siblings {
+        let sibling = normalize_build_graph_sibling(sibling)?;
+        let available_features = sibling
+            .manifest_toml
+            .as_deref()
+            .map(parse_manifest_feature_names)
+            .transpose()?
+            .unwrap_or_default();
+        let related_deps = path_deps
+            .iter()
+            .filter(|dependency| dependency_matches_sibling(dependency, &sibling))
+            .cloned()
+            .collect::<Vec<_>>();
+        let matching_deps = related_deps
+            .iter()
+            .filter(|dependency| {
+                path_is_at_or_under(&dependency.resolved_path, &sibling.expected_path)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if matching_deps.is_empty() {
+            push_build_graph_invalidation(
+                &mut invalidations,
+                BuildGraphInvalidation {
+                    repo_id: sibling.repo_id.clone(),
+                    reason_code: build_graph_reason_codes::MISSING_PATH_DEPENDENCY.to_string(),
+                    severity: SiblingDriftDiagnosticSeverity::Blocker,
+                    summary: format!(
+                        "package manifest has no path dependency under {} for {}",
+                        sibling.expected_path, sibling.repo_id
+                    ),
+                    affected_features: Vec::new(),
+                    affected_tests: Vec::new(),
+                    proof_cache_reusable: false,
+                },
+            )?;
+        }
+
+        let mut sibling_requested_features = BTreeSet::new();
+        for dependency in related_deps {
+            let local_feature_gates = feature_gates_for_dependency(&dependency.name, &feature_map);
+            let affected_tests = affected_tests_for_dependency(
+                &dependency.name,
+                &sibling.repo_id,
+                &local_feature_gates,
+                &registered_tests,
+            );
+            sibling_requested_features.extend(dependency.requested_features.iter().cloned());
+            dependencies.push(BuildGraphDependency {
+                repo_id: sibling.repo_id.clone(),
+                dependency_name: dependency.name,
+                manifest_path: package_manifest_path.clone(),
+                dependency_path: dependency.resolved_path,
+                expected_path: sibling.expected_path.clone(),
+                local_feature_gates,
+                requested_features: dependency.requested_features,
+                available_features: available_features.clone(),
+                affected_tests,
+            });
+        }
+
+        if !sibling.changed_paths.is_empty() || !sibling.dirty_paths.is_empty() {
+            let affected_features = dependencies
+                .iter()
+                .filter(|dependency| dependency.repo_id == sibling.repo_id)
+                .flat_map(|dependency| dependency.local_feature_gates.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let affected_tests = dependencies
+                .iter()
+                .filter(|dependency| dependency.repo_id == sibling.repo_id)
+                .flat_map(|dependency| dependency.affected_tests.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let changed = sorted_unique(
+                sibling
+                    .changed_paths
+                    .iter()
+                    .chain(sibling.dirty_paths.iter())
+                    .cloned(),
+            );
+            push_build_graph_invalidation(
+                &mut invalidations,
+                BuildGraphInvalidation {
+                    repo_id: sibling.repo_id.clone(),
+                    reason_code: build_graph_reason_codes::SIBLING_API_DRIFT.to_string(),
+                    severity: SiblingDriftDiagnosticSeverity::Blocker,
+                    summary: format!(
+                        "sibling {} changed build/API inputs: {}",
+                        sibling.repo_id,
+                        changed.join(",")
+                    ),
+                    affected_features,
+                    affected_tests,
+                    proof_cache_reusable: false,
+                },
+            )?;
+        }
+
+        let missing_features = sibling_requested_features
+            .iter()
+            .filter(|feature| !available_features.contains(*feature))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_features.is_empty() {
+            let affected_features = dependencies
+                .iter()
+                .filter(|dependency| dependency.repo_id == sibling.repo_id)
+                .flat_map(|dependency| dependency.local_feature_gates.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let affected_tests = dependencies
+                .iter()
+                .filter(|dependency| dependency.repo_id == sibling.repo_id)
+                .flat_map(|dependency| dependency.affected_tests.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            push_build_graph_invalidation(
+                &mut invalidations,
+                BuildGraphInvalidation {
+                    repo_id: sibling.repo_id.clone(),
+                    reason_code: build_graph_reason_codes::FEATURE_FLAG_DRIFT.to_string(),
+                    severity: SiblingDriftDiagnosticSeverity::Blocker,
+                    summary: format!(
+                        "sibling {} is missing requested dependency features: {}",
+                        sibling.repo_id,
+                        missing_features.join(",")
+                    ),
+                    affected_features,
+                    affected_tests,
+                    proof_cache_reusable: false,
+                },
+            )?;
+        }
+
+        let dependency_paths = dependencies
+            .iter()
+            .filter(|dependency| dependency.repo_id == sibling.repo_id)
+            .map(|dependency| dependency.dependency_path.clone())
+            .collect::<Vec<_>>();
+        let drift = SiblingRepoDriftInput::new(
+            sibling.repo_id,
+            sibling.checkout_path,
+            sibling.expected_path,
+            sibling.manifest_path,
+        )
+        .with_dirty_paths(sibling.dirty_paths)
+        .with_dependency_paths(dependency_paths)
+        .with_required_features(sibling_requested_features)
+        .with_available_features(available_features);
+        let drift = if sibling.exists {
+            drift
+        } else {
+            drift.missing()
+        };
+        let drift = if let Some(head_sha) = sibling.head_sha {
+            drift.with_head_sha(head_sha)
+        } else {
+            drift
+        };
+        preflight_siblings.push(drift);
+    }
+
+    for blocker in &input.known_blockers {
+        if blocker.status == SiblingBlockerStatus::Closed {
+            push_build_graph_invalidation(
+                &mut invalidations,
+                BuildGraphInvalidation {
+                    repo_id: blocker.repo_id.clone(),
+                    reason_code: build_graph_reason_codes::CLOSED_BLOCKER_CARRYOVER.to_string(),
+                    severity: SiblingDriftDiagnosticSeverity::Info,
+                    summary: blocker.summary.clone(),
+                    affected_features: Vec::new(),
+                    affected_tests: Vec::new(),
+                    proof_cache_reusable: true,
+                },
+            )?;
+        }
+    }
+
+    dependencies.sort_by(|left, right| {
+        left.repo_id
+            .cmp(&right.repo_id)
+            .then(left.dependency_name.cmp(&right.dependency_name))
+            .then(left.dependency_path.cmp(&right.dependency_path))
+    });
+    invalidations.sort_by(|left, right| {
+        left.severity
+            .cmp(&right.severity)
+            .then(left.repo_id.cmp(&right.repo_id))
+            .then(left.reason_code.cmp(&right.reason_code))
+            .then(left.summary.cmp(&right.summary))
+    });
+    invalidations.dedup_by(|left, right| {
+        left.repo_id == right.repo_id
+            && left.reason_code == right.reason_code
+            && left.summary == right.summary
+    });
+
+    let proof_cache_invalidation_reasons = invalidations
+        .iter()
+        .filter(|invalidation| !invalidation.proof_cache_reusable)
+        .map(|invalidation| invalidation.reason_code.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let validation_plan_invalidation_reasons = invalidations
+        .iter()
+        .map(|invalidation| invalidation.reason_code.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let sibling_preflight = build_sibling_drift_preflight(
+        SiblingDriftPreflightInput::new(&input.workspace_root, preflight_siblings)
+            .with_known_blockers(input.known_blockers),
+    )?;
+
+    Ok(MultiRepoBuildGraphWatchReport {
+        schema_version: BUILD_GRAPH_WATCHER_SCHEMA_VERSION.to_string(),
+        workspace_root: normalize_resolved_path(Path::new(&input.workspace_root)),
+        package_manifest_path,
+        dependencies,
+        sibling_preflight,
+        invalidations,
+        proof_cache_invalidation_reasons,
+        validation_plan_invalidation_reasons,
     })
 }
 
@@ -1048,6 +1487,300 @@ fn is_sibling_dependency_path(path: &str) -> bool {
         || path.starts_with("franken_engine/")
 }
 
+#[derive(Debug, Clone)]
+struct ManifestPathDependency {
+    name: String,
+    resolved_path: String,
+    requested_features: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct NormalizedSiblingBuildGraphInput {
+    repo_id: String,
+    checkout_path: String,
+    expected_path: String,
+    manifest_path: String,
+    manifest_toml: Option<String>,
+    exists: bool,
+    head_sha: Option<String>,
+    dirty_paths: Vec<String>,
+    changed_paths: Vec<String>,
+}
+
+fn normalize_build_graph_sibling(
+    input: SiblingBuildGraphInput,
+) -> Result<NormalizedSiblingBuildGraphInput, ValidationPlannerError> {
+    validate_sibling_preflight_string(
+        "build_graph.sibling.repo_id",
+        &input.repo_id,
+        MAX_SIBLING_PREFLIGHT_FIELD_BYTES,
+    )?;
+    validate_sibling_preflight_string(
+        "build_graph.sibling.checkout_path",
+        &input.checkout_path,
+        MAX_SIBLING_PREFLIGHT_PATH_BYTES,
+    )?;
+    validate_sibling_preflight_string(
+        "build_graph.sibling.expected_path",
+        &input.expected_path,
+        MAX_SIBLING_PREFLIGHT_PATH_BYTES,
+    )?;
+    validate_sibling_preflight_string(
+        "build_graph.sibling.manifest_path",
+        &input.manifest_path,
+        MAX_SIBLING_PREFLIGHT_PATH_BYTES,
+    )?;
+    validate_optional_sibling_preflight_string(
+        "build_graph.sibling.head_sha",
+        input.head_sha.as_deref(),
+        MAX_SIBLING_PREFLIGHT_FIELD_BYTES,
+    )?;
+    validate_sibling_preflight_len(
+        "build_graph.sibling.dirty_paths",
+        input.dirty_paths.len(),
+        MAX_SIBLING_PREFLIGHT_PATHS,
+    )?;
+    validate_sibling_preflight_len(
+        "build_graph.sibling.changed_paths",
+        input.changed_paths.len(),
+        MAX_SIBLING_PREFLIGHT_PATHS,
+    )?;
+
+    Ok(NormalizedSiblingBuildGraphInput {
+        repo_id: input.repo_id,
+        checkout_path: normalize_resolved_path(Path::new(&input.checkout_path)),
+        expected_path: normalize_resolved_path(Path::new(&input.expected_path)),
+        manifest_path: normalize_resolved_path(Path::new(&input.manifest_path)),
+        manifest_toml: input.manifest_toml,
+        exists: input.exists,
+        head_sha: input.head_sha,
+        dirty_paths: normalize_sibling_paths(input.dirty_paths)?,
+        changed_paths: normalize_sibling_paths(input.changed_paths)?,
+    })
+}
+
+fn extract_manifest_path_dependencies(
+    manifest: &toml::Value,
+    manifest_path: &str,
+) -> Result<Vec<ManifestPathDependency>, ValidationPlannerError> {
+    let manifest_dir = Path::new(manifest_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let mut dependencies = Vec::new();
+    collect_manifest_path_dependencies(manifest, manifest_dir, &mut dependencies)?;
+    dependencies.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.resolved_path.cmp(&right.resolved_path))
+    });
+    dependencies.dedup_by(|left, right| {
+        left.name == right.name && left.resolved_path == right.resolved_path
+    });
+    Ok(dependencies)
+}
+
+fn collect_manifest_path_dependencies(
+    value: &toml::Value,
+    manifest_dir: &Path,
+    dependencies: &mut Vec<ManifestPathDependency>,
+) -> Result<(), ValidationPlannerError> {
+    let Some(table) = value.as_table() else {
+        return Ok(());
+    };
+
+    for (key, value) in table {
+        if is_dependency_table_name(key) {
+            if let Some(dependency_table) = value.as_table() {
+                collect_dependency_entries(dependency_table, manifest_dir, dependencies)?;
+            }
+        } else if key != "features" {
+            collect_manifest_path_dependencies(value, manifest_dir, dependencies)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_dependency_entries(
+    dependency_table: &toml::map::Map<String, toml::Value>,
+    manifest_dir: &Path,
+    dependencies: &mut Vec<ManifestPathDependency>,
+) -> Result<(), ValidationPlannerError> {
+    for (name, value) in dependency_table {
+        let Some(path) = value.get("path").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        validate_sibling_preflight_string(
+            "build_graph.dependency.name",
+            name,
+            MAX_SIBLING_PREFLIGHT_FIELD_BYTES,
+        )?;
+        validate_sibling_preflight_string(
+            "build_graph.dependency.path",
+            path,
+            MAX_SIBLING_PREFLIGHT_PATH_BYTES,
+        )?;
+        dependencies.push(ManifestPathDependency {
+            name: name.clone(),
+            resolved_path: resolve_dependency_path(manifest_dir, path),
+            requested_features: dependency_requested_features(value)?,
+        });
+    }
+    Ok(())
+}
+
+fn is_dependency_table_name(name: &str) -> bool {
+    matches!(
+        name,
+        "dependencies" | "dev-dependencies" | "build-dependencies"
+    )
+}
+
+fn dependency_requested_features(
+    value: &toml::Value,
+) -> Result<Vec<String>, ValidationPlannerError> {
+    let features = value
+        .get("features")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    normalize_sibling_features(features)
+}
+
+fn parse_manifest_feature_names(
+    manifest_toml: &str,
+) -> Result<Vec<String>, ValidationPlannerError> {
+    let manifest: toml::Value = toml::from_str(manifest_toml)?;
+    Ok(manifest
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .map(|features| features.keys().cloned().collect::<BTreeSet<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .collect())
+}
+
+fn manifest_feature_map(manifest: &toml::Value) -> BTreeMap<String, Vec<String>> {
+    manifest
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .map(|features| {
+            features
+                .iter()
+                .map(|(feature, members)| {
+                    let members = members
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(toml::Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect::<Vec<_>>();
+                    (feature.clone(), members)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn feature_gates_for_dependency(
+    dependency_name: &str,
+    feature_map: &BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut gates = feature_map
+        .iter()
+        .filter_map(|(feature, members)| {
+            let direct_dep = format!("dep:{dependency_name}");
+            members
+                .iter()
+                .any(|member| member == &direct_dep || member == dependency_name)
+                .then(|| feature.clone())
+        })
+        .collect::<BTreeSet<_>>();
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (feature, members) in feature_map {
+            if gates.contains(feature) {
+                continue;
+            }
+            if members.iter().any(|member| gates.contains(member)) {
+                gates.insert(feature.clone());
+                changed = true;
+            }
+        }
+    }
+
+    gates.into_iter().collect()
+}
+
+fn affected_tests_for_dependency(
+    dependency_name: &str,
+    repo_id: &str,
+    local_feature_gates: &[String],
+    registered_tests: &[RegisteredTest],
+) -> Vec<String> {
+    let feature_gates = local_feature_gates
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let dependency_token = tokenish(dependency_name);
+    let repo_token = tokenish(repo_id);
+
+    registered_tests
+        .iter()
+        .filter(|test| {
+            test.required_features
+                .iter()
+                .any(|feature| feature_gates.contains(feature.as_str()))
+                || test_matches_token(test, &dependency_token)
+                || test_matches_token(test, &repo_token)
+                || local_feature_gates
+                    .iter()
+                    .any(|feature| test_matches_token(test, &tokenish(feature)))
+        })
+        .map(|test| test.name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn test_matches_token(test: &RegisteredTest, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    tokenish(&test.name).contains(token) || tokenish(&test.path).contains(token)
+}
+
+fn tokenish(value: &str) -> String {
+    stable_token(value).replace('-', "_")
+}
+
+fn dependency_matches_sibling(
+    dependency: &ManifestPathDependency,
+    sibling: &NormalizedSiblingBuildGraphInput,
+) -> bool {
+    path_is_at_or_under(&dependency.resolved_path, &sibling.expected_path)
+        || path_is_at_or_under(&dependency.resolved_path, &sibling.checkout_path)
+        || tokenish(&dependency.name).contains(&tokenish(&sibling.repo_id))
+}
+
+fn push_build_graph_invalidation(
+    invalidations: &mut Vec<BuildGraphInvalidation>,
+    invalidation: BuildGraphInvalidation,
+) -> Result<(), ValidationPlannerError> {
+    if invalidations.len() >= MAX_BUILD_GRAPH_INVALIDATIONS {
+        return Err(ValidationPlannerError::BuildGraphLimit {
+            field: "invalidations",
+        });
+    }
+    invalidations.push(invalidation);
+    Ok(())
+}
+
 fn normalize_sibling_input(
     input: SiblingRepoDriftInput,
 ) -> Result<SiblingRepoDrift, ValidationPlannerError> {
@@ -1208,8 +1941,24 @@ fn append_sibling_drift_diagnostics(
         )?;
     }
 
+    if sibling.dependency_paths.is_empty() {
+        push_sibling_diagnostic(
+            diagnostics,
+            SiblingDriftDiagnostic {
+                repo_id: sibling.repo_id.clone(),
+                reason_code: sibling_drift_reason_codes::MANIFEST_PATH_MISMATCH.to_string(),
+                severity: SiblingDriftDiagnosticSeverity::Blocker,
+                summary: format!(
+                    "manifest has no dependency path for expected sibling {}",
+                    sibling.expected_path
+                ),
+                bead_id: None,
+            },
+        )?;
+    }
+
     for dependency_path in &sibling.dependency_paths {
-        if dependency_path != &sibling.expected_path {
+        if !path_is_at_or_under(dependency_path, &sibling.expected_path) {
             push_sibling_diagnostic(
                 diagnostics,
                 SiblingDriftDiagnostic {
@@ -1410,6 +2159,59 @@ fn normalize_path(path: impl Into<String>) -> String {
         normalized = stripped.to_string();
     }
     normalized
+}
+
+fn resolve_dependency_path(manifest_dir: &Path, dependency_path: &str) -> String {
+    let dependency_path = Path::new(dependency_path);
+    if dependency_path.is_absolute() {
+        return normalize_resolved_path(dependency_path);
+    }
+
+    let mut resolved = manifest_dir.to_path_buf();
+    for component in dependency_path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::Normal(part) => resolved.push(part),
+        }
+    }
+    normalize_resolved_path(&resolved)
+}
+
+fn normalize_resolved_path(path: &Path) -> String {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    let rendered = normalized.to_string_lossy().replace('\\', "/");
+    if rendered.is_empty() {
+        ".".to_string()
+    } else if rendered.len() > 1 {
+        rendered.trim_end_matches('/').to_string()
+    } else {
+        rendered
+    }
+}
+
+fn path_is_at_or_under(path: &str, root: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let root = root.trim_end_matches('/');
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn file_stem(path: &str) -> Option<&str> {
