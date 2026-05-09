@@ -3,19 +3,32 @@
 //! Tests conformance with bd-jjm specification for CanonicalSerializer.
 //! Validates all INV-CAN-* invariants by exercising the actual CanonicalSerializer API.
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::BTreeMap;
-
 // Import the canonical serializer module - actually use it!
 use frankenengine_node::connector::canonical_serializer::{
     CanonicalSerializer, SerializerError, TrustObjectType,
 };
 
-/// Test fixture for canonical serialization
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TestFixture {
-    payload_json: Value,
+fn canonical_payload_for_type(trust_type: TrustObjectType) -> &'static [u8] {
+    match trust_type {
+        TrustObjectType::PolicyCheckpoint => {
+            br#"{"checkpoint_id":"cp-001","epoch":1,"sequence":1,"policy_hash":"sha256:policy","timestamp":"2026-04-21T00:00:00Z"}"#
+        }
+        TrustObjectType::DelegationToken => {
+            br#"{"token_id":"tok-001","issuer":"issuer-a","delegate":"delegate-b","scope":"read:fleet","expiry":4102444800}"#
+        }
+        TrustObjectType::RevocationAssertion => {
+            br#"{"assertion_id":"rev-001","target_id":"tok-001","reason":"compromise","effective_at":"2026-04-21T00:00:00Z","evidence_hash":"sha256:evidence"}"#
+        }
+        TrustObjectType::SessionTicket => {
+            br#"{"session_id":"sess-001","client_id":"client-a","server_id":"server-b","issued_at":"2026-04-21T00:00:00Z","ttl":300}"#
+        }
+        TrustObjectType::ZoneBoundaryClaim => {
+            br#"{"zone_id":"zone-a","boundary_type":"trust","peer_zone":"zone-b","trust_level":"strict","established_at":"2026-04-21T00:00:00Z"}"#
+        }
+        TrustObjectType::OperatorReceipt => {
+            br#"{"receipt_id":"rec-001","operator_id":"operator-a","action":"approve","artifact_hash":"sha256:artifact","timestamp":"2026-04-21T00:00:00Z"}"#
+        }
+    }
 }
 
 /// Main conformance test function - now actually uses CanonicalSerializer!
@@ -69,13 +82,12 @@ fn test_canonical_serializer_conformance() {
     }
 
     // BD_JJM_DETERMINISM_001: Test actual deterministic serialization
-    let test_payload = r#"{"field1": "value1", "field2": 42, "field3": true}"#;
-    let test_payload_bytes = test_payload.as_bytes();
-
     for &trust_type in &[
         TrustObjectType::PolicyCheckpoint,
         TrustObjectType::DelegationToken,
     ] {
+        let test_payload_bytes = canonical_payload_for_type(trust_type);
+
         // Test determinism by serializing the same payload multiple times
         let result1 = serializer.serialize(trust_type, test_payload_bytes, "determinism-test-1");
         let result2 = serializer.serialize(trust_type, test_payload_bytes, "determinism-test-2");
@@ -99,6 +111,7 @@ fn test_canonical_serializer_conformance() {
         TrustObjectType::SessionTicket,
         TrustObjectType::ZoneBoundaryClaim,
     ] {
+        let test_payload_bytes = canonical_payload_for_type(trust_type);
         let round_trip_result =
             serializer.round_trip_canonical(trust_type, test_payload_bytes, "round-trip-test");
 
@@ -124,6 +137,7 @@ fn test_canonical_serializer_conformance() {
         TrustObjectType::RevocationAssertion,
         TrustObjectType::OperatorReceipt,
     ] {
+        let test_payload_bytes = canonical_payload_for_type(trust_type);
         let preimage_result =
             serializer.build_preimage(trust_type, test_payload_bytes, "preimage-test");
 

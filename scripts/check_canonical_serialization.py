@@ -9,21 +9,22 @@ Usage:
 
 import hashlib
 import json
-import struct
+import re
 import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
 
 
 # ── File paths ─────────────────────────────────────────────────────────────
 
 IMPL_FILE = ROOT / "crates/franken-node/src/connector/canonical_serializer.rs"
+CARGO_MANIFEST = ROOT / "crates/franken-node/Cargo.toml"
 SPEC_FILE = ROOT / "docs/specs/section_10_10/bd-jjm_contract.md"
 EVIDENCE_FILE = ROOT / "artifacts/section_10_10/bd-jjm/verification_evidence.json"
 SUMMARY_FILE = ROOT / "artifacts/section_10_10/bd-jjm/verification_summary.md"
+GOLDEN_PREIMAGE_FILE = ROOT / "crates/franken-node/tests/goldens/canonical_serializer/policy_checkpoint_preimage.hex"
 
 # ── Required elements ──────────────────────────────────────────────────────
 
@@ -69,7 +70,7 @@ REQUIRED_FUNCTIONS = [
     "to_bytes",
     "byte_len",
     "content_hash_prefix",
-    "demo_canonical_serialization",
+    "canonical_serialization_round_trips",
     "canonical_encode",
     "canonical_decode",
     "contains_float_marker",
@@ -82,6 +83,43 @@ TRUST_OBJECT_TYPES = [
     "SessionTicket",
     "ZoneBoundaryClaim",
     "OperatorReceipt",
+]
+
+PRODUCTION_RUST_TESTS = [
+    {
+        "target": "canonical_serializer_real_inputs",
+        "path": "tests/canonical_serializer_real_inputs.rs",
+        "checks": [
+            ("batch round-trip API", "canonical_serialization_round_trips"),
+            ("real serializer type", "CanonicalSerializer"),
+            ("length-prefixed decode assertion", "decode_len_prefixed"),
+            ("golden preimage bytes", "POLICY_CHECKPOINT_PREIMAGE_GOLDEN_HEX"),
+            ("preimage byte comparison", "signature_preimage.to_bytes()"),
+            ("non-canonical error code", "ERR_CAN_NON_CANONICAL"),
+        ],
+    },
+    {
+        "target": "canonical_serializer_conformance",
+        "path": "tests/canonical_serializer_conformance.rs",
+        "checks": [
+            ("production serializer construction", "CanonicalSerializer::with_all_schemas"),
+            ("serialize API", ".serialize("),
+            ("round-trip API", ".round_trip_canonical("),
+            ("preimage API", ".build_preimage("),
+            ("float rejection", "FloatingPointRejected"),
+        ],
+    },
+    {
+        "target": "canonical_serializer_metamorphic",
+        "path": "tests/canonical_serializer_metamorphic.rs",
+        "checks": [
+            ("production serializer construction", "CanonicalSerializer::with_all_schemas"),
+            ("serialize API", ".serialize("),
+            ("deserialize API", ".deserialize("),
+            ("round-trip API", ".round_trip_canonical("),
+            ("field-order permutation assertion", "field-order permutation"),
+        ],
+    },
 ]
 
 REQUIRED_SPEC_SECTIONS = [
@@ -111,6 +149,17 @@ def _read(path: Path) -> str:
 
 def _check(name: str, ok: bool, detail: str = "") -> dict:
     return {"check": name, "pass": ok, "detail": detail or ("ok" if ok else "FAIL")}
+
+
+def _cargo_test_targets() -> dict:
+    manifest = _read(CARGO_MANIFEST)
+    targets = {}
+    for block in manifest.split("[[test]]")[1:]:
+        name_match = re.search(r'(?m)^\s*name\s*=\s*"([^"]+)"', block)
+        path_match = re.search(r'(?m)^\s*path\s*=\s*"([^"]+)"', block)
+        if name_match and path_match:
+            targets[name_match.group(1)] = path_match.group(1)
+    return targets
 
 
 # ── Check groups ───────────────────────────────────────────────────────────
@@ -212,7 +261,7 @@ def check_tests() -> list:
         ("error codes test", "test_error_codes"),
         ("serde roundtrip", "test_trust_object_type_serde"),
         ("send+sync", "test_types_send_sync"),
-        ("demo function", "test_demo_canonical_serialization"),
+        ("batch round-trip API", "canonical_serialization_round_trips"),
         ("encode/decode round-trip", "test_canonical_encode_decode_round_trip"),
     ]
     for name, pattern in test_categories:
@@ -237,7 +286,12 @@ def check_acceptance_criteria() -> list:
     checks.append(_check("AC1: 6 trust object types registered", ac1))
     ac2 = "round_trip_canonical" in src and "test_round_trip_all_types" in src
     checks.append(_check("AC2: round_trip_canonical for all types", ac2))
-    ac3 = "golden_vectors" in src or "golden" in src.lower() or "test_demo" in src
+    real_inputs_src = _read(ROOT / "crates/franken-node/tests/canonical_serializer_real_inputs.rs")
+    ac3 = (
+        GOLDEN_PREIMAGE_FILE.exists()
+        and "POLICY_CHECKPOINT_PREIMAGE_GOLDEN_HEX" in real_inputs_src
+        and "signature_preimage.to_bytes()" in real_inputs_src
+    )
     checks.append(_check("AC3: golden vector integration", ac3))
     ac4 = "INV-CAN-NO-BYPASS" in src
     checks.append(_check("AC4: no bypass invariant", ac4))
@@ -252,44 +306,43 @@ def check_acceptance_criteria() -> list:
     return checks
 
 
-def simulate_canonical_serialization() -> dict:
-    results = {}
+def check_production_serializer_evidence() -> list:
+    checks = []
+    cargo_targets = _cargo_test_targets()
+    checks.append(_check("prod: Cargo test manifest available", CARGO_MANIFEST.exists(), str(CARGO_MANIFEST)))
 
-    # Deterministic: same input → same output
-    data = b"test-payload"
-    e1 = struct.pack(">I", len(data)) + data
-    e2 = struct.pack(">I", len(data)) + data
-    results["deterministic"] = e1 == e2
+    for spec in PRODUCTION_RUST_TESTS:
+        target = spec["target"]
+        rel_path = spec["path"]
+        actual_path = cargo_targets.get(target)
+        checks.append(_check(
+            f"prod: registered Rust test target {target}",
+            actual_path == rel_path,
+            f"expected {rel_path}, got {actual_path or 'missing'}",
+        ))
 
-    # Round-trip: encode → decode → re-encode
-    decoded = e1[4:]
-    re_encoded = struct.pack(">I", len(decoded)) + decoded
-    results["round_trip_stable"] = e1 == re_encoded
+        test_file = ROOT / "crates/franken-node" / rel_path
+        test_src = _read(test_file)
+        checks.append(_check(f"prod: Rust test source exists {rel_path}", test_file.exists(), str(test_file)))
+        for label, token in spec["checks"]:
+            checks.append(_check(
+                f"prod: {target}: {label}",
+                token in test_src,
+                f"requires `{token}` in {rel_path}",
+            ))
 
-    # Preimage includes domain tag
-    version = 1
-    domain_tag = bytes([0x10, 0x01])
-    preimage = bytes([version]) + domain_tag + e1
-    results["preimage_has_domain_tag"] = preimage[1:3] == domain_tag
-
-    # Different domain tags produce different preimages
-    preimage2 = bytes([version]) + bytes([0x10, 0x02]) + e1
-    results["different_domains_differ"] = preimage != preimage2
-
-    # Float detection
-    json_float = b'{"value": 3.14}'
-    results["float_detected"] = b"3.14" in json_float
-
-    # 6 object types
-    results["object_type_count"] = len(TRUST_OBJECT_TYPES)
-
-    # 3 event codes
-    results["event_code_count"] = len(REQUIRED_EVENT_CODES)
-
-    # 5 error codes
-    results["error_code_count"] = len(REQUIRED_ERROR_CODES)
-
-    return results
+    golden_text = _read(GOLDEN_PREIMAGE_FILE).strip()
+    try:
+        golden_bytes = bytes.fromhex(golden_text)
+    except ValueError:
+        golden_bytes = b""
+    checks.append(_check("prod: policy checkpoint preimage golden exists", GOLDEN_PREIMAGE_FILE.exists(), str(GOLDEN_PREIMAGE_FILE)))
+    checks.append(_check(
+        "prod: golden preimage has schema and domain prefix",
+        len(golden_bytes) >= 3 and golden_bytes[0] == 1 and golden_bytes[1:3] == bytes([0x10, 0x01]),
+        "expected version=1 and domain_tag=1001 in golden preimage bytes",
+    ))
+    return checks
 
 
 # ── Main check runner ──────────────────────────────────────────────────────
@@ -309,16 +362,7 @@ def run_checks() -> dict:
     checks.extend(check_tests())
     checks.extend(check_upstream_integration())
     checks.extend(check_acceptance_criteria())
-
-    sim = simulate_canonical_serialization()
-    checks.append(_check("sim: deterministic encoding", sim["deterministic"]))
-    checks.append(_check("sim: round-trip stable", sim["round_trip_stable"]))
-    checks.append(_check("sim: preimage has domain tag", sim["preimage_has_domain_tag"]))
-    checks.append(_check("sim: different domains differ", sim["different_domains_differ"]))
-    checks.append(_check("sim: float detection", sim["float_detected"]))
-    checks.append(_check("sim: 6 object types", sim["object_type_count"] == 6))
-    checks.append(_check("sim: 3 event codes", sim["event_code_count"] == 3))
-    checks.append(_check("sim: 5 error codes", sim["error_code_count"] == 5))
+    checks.extend(check_production_serializer_evidence())
 
     passed = sum(1 for c in checks if c["pass"])
     failed = sum(1 for c in checks if not c["pass"])
@@ -348,8 +392,9 @@ def self_test() -> tuple:
     checks.append(_check("REQUIRED_FUNCTIONS count", len(REQUIRED_FUNCTIONS) >= 15))
     checks.append(_check("TRUST_OBJECT_TYPES count", len(TRUST_OBJECT_TYPES) == 6))
 
-    sim = simulate_canonical_serialization()
-    checks.append(_check("simulation returns dict", isinstance(sim, dict)))
+    production_checks = check_production_serializer_evidence()
+    checks.append(_check("production evidence checks present", len(production_checks) >= 20))
+    checks.append(_check("production evidence checks pass", all(c["pass"] for c in production_checks)))
 
     result = run_checks()
     checks.append(_check("run_checks has bead_id", result.get("bead_id") == "bd-jjm"))

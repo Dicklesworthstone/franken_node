@@ -203,6 +203,14 @@ Structured audit event emitted by the canonical serializer:
 - Evidence: `artifacts/section_10_10/bd-jjm/verification_evidence.json`
 - Summary: `artifacts/section_10_10/bd-jjm/verification_summary.md`
 
+The verification script must not satisfy behavior checks with a Python mirror
+of the serializer. Observable behavior evidence comes from registered Rust test
+targets that exercise the production `CanonicalSerializer`,
+`canonical_serialization_round_trips()`, canonical preimage construction,
+decode/re-encode behavior, and golden preimage bytes. If those Rust targets,
+their source files, or the policy-checkpoint preimage golden are unavailable,
+the script reports a failing production-evidence check.
+
 ## Artifacts
 
 | Artifact                                                             | Purpose                        |

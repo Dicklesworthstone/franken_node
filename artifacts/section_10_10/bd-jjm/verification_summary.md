@@ -6,9 +6,9 @@
 
 | Category | Pass | Total |
 |----------|------|-------|
-| Python verification checks | 92 | 92 |
-| Rust unit tests | 52 | 52 |
-| Simulation checks | 8 | 8 |
+| Python verification checks | 109 | 109 |
+| Rust unit test inventory | 135 | 135 |
+| Production Rust evidence checks | 25 | 25 |
 
 ## Implementation
 
@@ -28,7 +28,7 @@
 - `round_trip_canonical(type, payload)` — byte-stability proof
 - `build_preimage(type, payload)` — domain-separated signature preimage
 - `with_all_schemas()` — pre-loaded with all 6 canonical schemas
-- `demo_canonical_serialization()` — end-to-end demonstration
+- `canonical_serialization_round_trips()` — batch API over production serializer records
 
 ### Event Codes (3)
 | Code | Description |
@@ -56,7 +56,14 @@ domain separation, and compliance requirements.
 
 ## Verification Commands
 
+The Python gate no longer uses a Python serializer simulation as behavior
+evidence. It requires registered Rust test targets that exercise
+`CanonicalSerializer`, `canonical_serialization_round_trips()`,
+`round_trip_canonical()`, `build_preimage()`, `deserialize()`, and the reviewed
+policy-checkpoint preimage golden.
+
 ```bash
-python3 scripts/check_canonical_serialization.py --json    # 92/92 PASS
-python3 -m pytest tests/test_check_canonical_serialization.py -v  # 27/27 PASS
+python3 scripts/check_canonical_serialization.py --json    # 109/109 PASS
+python3 -m unittest tests.test_check_canonical_serialization  # 23/23 PASS
+rch exec -- cargo test -p frankenengine-node --test canonical_serializer_real_inputs --test canonical_serializer_conformance --test canonical_serializer_metamorphic
 ```

@@ -31,38 +31,40 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(len(mod.TRUST_OBJECT_TYPES), 6)
 
 
-class TestSimulation(unittest.TestCase):
-    def test_deterministic(self):
-        result = mod.simulate_canonical_serialization()
-        self.assertTrue(result["deterministic"])
+class TestProductionEvidence(unittest.TestCase):
+    def test_simulation_helper_removed(self):
+        self.assertFalse(hasattr(mod, "simulate_canonical_serialization"))
 
-    def test_round_trip(self):
-        result = mod.simulate_canonical_serialization()
-        self.assertTrue(result["round_trip_stable"])
+    def test_registered_rust_targets_required(self):
+        targets = mod._cargo_test_targets()
+        self.assertEqual(
+            targets["canonical_serializer_real_inputs"],
+            "tests/canonical_serializer_real_inputs.rs",
+        )
+        self.assertEqual(
+            targets["canonical_serializer_conformance"],
+            "tests/canonical_serializer_conformance.rs",
+        )
+        self.assertEqual(
+            targets["canonical_serializer_metamorphic"],
+            "tests/canonical_serializer_metamorphic.rs",
+        )
 
-    def test_preimage_domain_tag(self):
-        result = mod.simulate_canonical_serialization()
-        self.assertTrue(result["preimage_has_domain_tag"])
+    def test_production_evidence_checks_pass(self):
+        checks = mod.check_production_serializer_evidence()
+        failures = [c for c in checks if not c["pass"]]
+        self.assertFalse(failures, failures[:5])
 
-    def test_different_domains(self):
-        result = mod.simulate_canonical_serialization()
-        self.assertTrue(result["different_domains_differ"])
-
-    def test_float_detected(self):
-        result = mod.simulate_canonical_serialization()
-        self.assertTrue(result["float_detected"])
-
-    def test_object_type_count(self):
-        result = mod.simulate_canonical_serialization()
-        self.assertEqual(result["object_type_count"], 6)
-
-    def test_event_code_count(self):
-        result = mod.simulate_canonical_serialization()
-        self.assertEqual(result["event_code_count"], 3)
-
-    def test_error_code_count(self):
-        result = mod.simulate_canonical_serialization()
-        self.assertEqual(result["error_code_count"], 5)
+    def test_run_checks_has_no_simulated_checks(self):
+        result = mod.run_checks()
+        self.assertFalse(
+            [c for c in result["checks"] if c["check"].startswith("sim:")],
+            "checker must not accept Python simulation as behavior evidence",
+        )
+        self.assertTrue(
+            [c for c in result["checks"] if c["check"].startswith("prod:")],
+            "checker must include production Rust evidence checks",
+        )
 
 
 class TestRunChecks(unittest.TestCase):
@@ -84,7 +86,7 @@ class TestRunChecks(unittest.TestCase):
 
     def test_many_checks(self):
         result = mod.run_checks()
-        self.assertGreaterEqual(result["total"], 80)
+        self.assertGreaterEqual(result["total"], 95)
 
     def _failing(self, result):
         failures = [c for c in result["checks"] if not c["pass"]]

@@ -12,23 +12,23 @@
     "python_tests": "tests/test_check_canonical_serialization.py"
   },
   "metrics": {
-    "python_checks_total": 92,
-    "python_checks_passing": 92,
+    "python_checks_total": 109,
+    "python_checks_passing": 109,
     "python_checks_failing": 0,
-    "rust_unit_tests": 52,
+    "rust_unit_tests": 135,
     "structs_verified": 6,
     "event_codes_verified": 3,
     "error_codes_verified": 5,
     "invariants_verified": 4,
     "functions_verified": 15,
     "trust_object_types_verified": 6,
-    "simulation_checks": 8,
+    "production_evidence_checks": 25,
     "acceptance_criteria_verified": 8
   },
   "acceptance_criteria": {
     "AC1_object_types": "PASS — 6 trust object types with canonical schemas",
     "AC2_round_trip": "PASS — round_trip_canonical passes for all types",
-    "AC3_golden_vectors": "PASS — integration with 10.13 golden vector corpus",
+    "AC3_golden_vectors": "PASS — registered Rust real-input test compares signature preimage bytes against reviewed golden",
     "AC4_no_bypass": "PASS — INV-CAN-NO-BYPASS enforced",
     "AC5_preimage_deterministic": "PASS — SignaturePreimage byte-identical",
     "AC6_structured_logging": "PASS — CAN_SERIALIZE, CAN_PREIMAGE_CONSTRUCT, CAN_REJECT with trace IDs",
