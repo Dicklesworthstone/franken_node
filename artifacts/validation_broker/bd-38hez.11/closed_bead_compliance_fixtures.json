@@ -1,0 +1,251 @@
+{
+  "schema_version": "franken-node/closed-bead-compliance/fixtures/v1",
+  "scenarios": [
+    {
+      "name": "clean_closed_bead_passes",
+      "input": {
+        "schema_version": "franken-node/closed-bead-compliance/input/v1",
+        "bead": {
+          "bead_id": "bd-clean",
+          "title": "Clean closed bead",
+          "status": "closed",
+          "description": "Acceptance:\n- Implementation commit updates the authoritative source file.\n- Tests cover edge cases.\n- Evidence artifact records the verifier output.\n- RCH validation proof is attached.",
+          "close_reason": "Implemented in abc123 with direct tests and evidence.",
+          "comments": [
+            {
+              "author": "GreenHill",
+              "body": "RCH validation completed and artifact uploaded."
+            }
+          ]
+        },
+        "evidence": [
+          {
+            "evidence_id": "commit-clean",
+            "bead_id": "bd-clean",
+            "kind": "implementation_commit",
+            "coverage": "direct",
+            "status": "fresh",
+            "description": "implementation commit",
+            "git_commit": "abc123"
+          },
+          {
+            "evidence_id": "test-clean",
+            "bead_id": "bd-clean",
+            "kind": "test",
+            "coverage": "direct",
+            "status": "fresh",
+            "description": "focused integration test",
+            "command": "rch exec -- cargo test -p frankenengine-node --test clean"
+          },
+          {
+            "evidence_id": "source-clean",
+            "bead_id": "bd-clean",
+            "kind": "source_file",
+            "coverage": "direct",
+            "status": "fresh",
+            "description": "authoritative source file",
+            "path": "crates/franken-node/src/ops/example.rs"
+          },
+          {
+            "evidence_id": "artifact-clean",
+            "bead_id": "bd-clean",
+            "kind": "artifact",
+            "coverage": "direct",
+            "status": "fresh",
+            "description": "machine-readable evidence artifact",
+            "path": "artifacts/validation_broker/bd-clean/evidence.json"
+          },
+          {
+            "evidence_id": "gate-clean",
+            "bead_id": "bd-clean",
+            "kind": "gate",
+            "coverage": "direct",
+            "status": "fresh",
+            "description": "verifier gate output",
+            "command": "python3 scripts/check_clean.py --json"
+          },
+          {
+            "evidence_id": "rch-clean",
+            "bead_id": "bd-clean",
+            "kind": "rch_receipt",
+            "coverage": "direct",
+            "status": "fresh",
+            "description": "RCH validation receipt"
+          }
+        ]
+      },
+      "expected_status": "PASS",
+      "expected_reason_code": "CBC_PASS"
+    },
+    {
+      "name": "closed_with_blocker_warns",
+      "input": {
+        "schema_version": "franken-node/closed-bead-compliance/input/v1",
+        "bead": {
+          "bead_id": "bd-blocked",
+          "title": "Closed with blocker",
+          "status": "closed",
+          "description": "Acceptance:\n- Blocked validation proof is documented in a close reason comment.",
+          "close_reason": "Closed with explicit blocker after source inspection.",
+          "comments": [
+            {
+              "author": "BlueField",
+              "body": "Blocking sibling workspace compile drift is documented."
+            }
+          ]
+        },
+        "evidence": [
+          {
+            "evidence_id": "blocked-rch",
+            "bead_id": "bd-blocked",
+            "kind": "rch_receipt",
+            "coverage": "direct",
+            "status": "blocked",
+            "description": "RCH proof blocked by sibling workspace compile drift"
+          },
+          {
+            "evidence_id": "blocked-comment",
+            "bead_id": "bd-blocked",
+            "kind": "br_comment",
+            "coverage": "direct",
+            "status": "fresh",
+            "description": "closeout blocker comment"
+          }
+        ]
+      },
+      "expected_status": "WARN",
+      "expected_reason_code": "CBC_WARN_BLOCKED_PROOF"
+    },
+    {
+      "name": "source_only_proof_warns",
+      "input": {
+        "schema_version": "franken-node/closed-bead-compliance/input/v1",
+        "bead": {
+          "bead_id": "bd-source-only",
+          "title": "Source-only proof",
+          "status": "closed",
+          "description": "Acceptance:\n- Source validation proof is allowed when the close reason documents limits.",
+          "close_reason": "Source-only validation was used because cargo was intentionally disabled.",
+          "comments": [
+            {
+              "author": "SilverDune",
+              "body": "Source-only proof limits documented in closeout."
+            }
+          ]
+        },
+        "evidence": [
+          {
+            "evidence_id": "source-only-commit",
+            "bead_id": "bd-source-only",
+            "kind": "implementation_commit",
+            "coverage": "direct",
+            "status": "source_only",
+            "description": "source inspection proof"
+          },
+          {
+            "evidence_id": "source-only-rch",
+            "bead_id": "bd-source-only",
+            "kind": "rch_receipt",
+            "coverage": "direct",
+            "status": "source_only",
+            "description": "RCH intentionally not run"
+          },
+          {
+            "evidence_id": "source-only-comment",
+            "bead_id": "bd-source-only",
+            "kind": "br_comment",
+            "coverage": "direct",
+            "status": "fresh",
+            "description": "source-only limitation comment"
+          }
+        ]
+      },
+      "expected_status": "WARN",
+      "expected_reason_code": "CBC_WARN_SOURCE_ONLY"
+    },
+    {
+      "name": "missing_tests_fail",
+      "input": {
+        "schema_version": "franken-node/closed-bead-compliance/input/v1",
+        "bead": {
+          "bead_id": "bd-missing-tests",
+          "title": "Missing tests",
+          "status": "closed",
+          "description": "Acceptance:\n- Tests cover edge cases.",
+          "close_reason": "Closed after implementation only.",
+          "comments": []
+        },
+        "evidence": [
+          {
+            "evidence_id": "commit-only",
+            "bead_id": "bd-missing-tests",
+            "kind": "implementation_commit",
+            "coverage": "direct",
+            "status": "fresh",
+            "description": "implementation commit without tests"
+          }
+        ]
+      },
+      "expected_status": "FAIL",
+      "expected_reason_code": "CBC_FAIL_MISSING_EVIDENCE"
+    },
+    {
+      "name": "unrelated_test_pass_fails",
+      "input": {
+        "schema_version": "franken-node/closed-bead-compliance/input/v1",
+        "bead": {
+          "bead_id": "bd-unrelated",
+          "title": "Unrelated test proxy",
+          "status": "closed",
+          "description": "Acceptance:\n- Tests cover edge cases.",
+          "close_reason": "Closed after citing a broad unrelated test.",
+          "comments": []
+        },
+        "evidence": [
+          {
+            "evidence_id": "other-test",
+            "bead_id": "bd-other",
+            "kind": "test",
+            "coverage": "unrelated",
+            "status": "fresh",
+            "description": "test belongs to another bead",
+            "command": "rch exec -- cargo test -p frankenengine-node unrelated"
+          }
+        ]
+      },
+      "expected_status": "FAIL",
+      "expected_reason_code": "CBC_FAIL_UNRELATED_EVIDENCE"
+    },
+    {
+      "name": "reopened_stale_bead_fails",
+      "input": {
+        "schema_version": "franken-node/closed-bead-compliance/input/v1",
+        "bead": {
+          "bead_id": "bd-reopened",
+          "title": "Reopened stale bead",
+          "status": "open",
+          "description": "Acceptance:\n- RCH validation proof is attached.",
+          "close_reason": "Previously closed but reopened after stale proof.",
+          "comments": [
+            {
+              "author": "OrangeHarbor",
+              "body": "Reopened because the proof no longer covers the current code."
+            }
+          ]
+        },
+        "evidence": [
+          {
+            "evidence_id": "stale-rch",
+            "bead_id": "bd-reopened",
+            "kind": "rch_receipt",
+            "coverage": "direct",
+            "status": "stale",
+            "description": "stale RCH receipt"
+          }
+        ]
+      },
+      "expected_status": "FAIL",
+      "expected_reason_code": "CBC_FAIL_BEAD_NOT_CLOSED"
+    }
+  ]
+}
