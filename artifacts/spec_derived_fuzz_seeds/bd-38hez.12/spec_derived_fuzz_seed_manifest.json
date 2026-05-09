@@ -1,0 +1,203 @@
+{
+  "schema_version": "franken-node/spec-derived-fuzz-seeds/v1",
+  "bead_id": "bd-38hez.12",
+  "generated_at": "2026-05-09T16:12:00Z",
+  "required_seed_classes": [
+    "valid",
+    "missing_field",
+    "oversized",
+    "stale",
+    "malformed_signature_or_hash",
+    "path_safety"
+  ],
+  "source_specs": [
+    "docs/specs/replay_capsule_format.md",
+    "docs/specs/validation_closeout.md",
+    "crates/franken-node/src/security/remote_cap.rs",
+    "crates/franken-node/src/supply_chain/trust_card.rs",
+    "crates/franken-node/src/migration/mod.rs",
+    "crates/franken-node/src/ops/validation_broker.rs"
+  ],
+  "surfaces": [
+    {
+      "name": "trust_card",
+      "parser_entrypoint": "serde_json::from_value::<TrustCard> + to_canonical_json",
+      "seeds": [
+        {
+          "id": "trust-card-valid-minimal",
+          "class": "valid",
+          "payload_variant": "trust_card_valid"
+        },
+        {
+          "id": "trust-card-missing-schema-version",
+          "class": "missing_field",
+          "payload_variant": "trust_card_missing_schema"
+        },
+        {
+          "id": "trust-card-oversized-audit-history",
+          "class": "oversized",
+          "payload_variant": "trust_card_oversized_audit"
+        },
+        {
+          "id": "trust-card-stale-verification-timestamp",
+          "class": "stale",
+          "payload_variant": "trust_card_stale_timestamp"
+        },
+        {
+          "id": "trust-card-malformed-card-hash",
+          "class": "malformed_signature_or_hash",
+          "payload_variant": "trust_card_bad_hash"
+        },
+        {
+          "id": "trust-card-path-traversal-source-uri",
+          "class": "path_safety",
+          "payload_variant": "trust_card_path_source"
+        }
+      ]
+    },
+    {
+      "name": "replay_bundle",
+      "parser_entrypoint": "serde_json::from_value::<ReplayBundle> + replay_bundle_with_trusted_key; replay_bundle_adversarial_fuzz_one rejection probes",
+      "seeds": [
+        {
+          "id": "replay-bundle-valid-generated",
+          "class": "valid",
+          "payload_variant": "replay_valid"
+        },
+        {
+          "id": "replay-bundle-missing-chunks",
+          "class": "missing_field",
+          "payload_variant": "replay_missing_chunks"
+        },
+        {
+          "id": "replay-bundle-oversized-event-payload",
+          "class": "oversized",
+          "payload_variant": "replay_oversized_payload"
+        },
+        {
+          "id": "replay-bundle-future-timestamp",
+          "class": "stale",
+          "payload_variant": "replay_timestamp_in_future"
+        },
+        {
+          "id": "replay-bundle-id-hash-mismatch",
+          "class": "malformed_signature_or_hash",
+          "payload_variant": "replay_bundle_id_mismatch"
+        },
+        {
+          "id": "replay-bundle-path-like-event-payload",
+          "class": "path_safety",
+          "payload_variant": "replay_path_payload"
+        }
+      ]
+    },
+    {
+      "name": "remote_capability",
+      "parser_entrypoint": "serde_json::from_value::<RemoteCap> + CapabilityGate::authorize_network",
+      "seeds": [
+        {
+          "id": "remote-cap-valid-issued-token",
+          "class": "valid",
+          "payload_variant": "remote_cap_valid"
+        },
+        {
+          "id": "remote-cap-missing-scope",
+          "class": "missing_field",
+          "payload_variant": "remote_cap_missing_scope"
+        },
+        {
+          "id": "remote-cap-oversized-prefix-list",
+          "class": "oversized",
+          "payload_variant": "remote_cap_oversized_prefixes"
+        },
+        {
+          "id": "remote-cap-expired-token",
+          "class": "stale",
+          "payload_variant": "remote_cap_expired"
+        },
+        {
+          "id": "remote-cap-tampered-signature",
+          "class": "malformed_signature_or_hash",
+          "payload_variant": "remote_cap_bad_signature"
+        },
+        {
+          "id": "remote-cap-file-url-scope",
+          "class": "path_safety",
+          "payload_variant": "remote_cap_path_scope"
+        }
+      ]
+    },
+    {
+      "name": "migration_rollback",
+      "parser_entrypoint": "serde_json::from_value::<MigrationRollbackPlan> + validate_rollback_plan",
+      "seeds": [
+        {
+          "id": "migration-rollback-valid-plan",
+          "class": "valid",
+          "payload_variant": "migration_valid"
+        },
+        {
+          "id": "migration-rollback-missing-entries",
+          "class": "missing_field",
+          "payload_variant": "migration_missing_entries"
+        },
+        {
+          "id": "migration-rollback-too-many-entries",
+          "class": "oversized",
+          "payload_variant": "migration_oversized_entries"
+        },
+        {
+          "id": "migration-rollback-stale-schema",
+          "class": "stale",
+          "payload_variant": "migration_stale_schema"
+        },
+        {
+          "id": "migration-rollback-entry-count-mismatch",
+          "class": "malformed_signature_or_hash",
+          "payload_variant": "migration_count_mismatch"
+        },
+        {
+          "id": "migration-rollback-parent-traversal-path",
+          "class": "path_safety",
+          "payload_variant": "migration_parent_traversal"
+        }
+      ]
+    },
+    {
+      "name": "validation_receipt",
+      "parser_entrypoint": "serde_json::from_value::<ValidationReceipt> + validate_at",
+      "seeds": [
+        {
+          "id": "validation-receipt-valid-rch-proof",
+          "class": "valid",
+          "payload_variant": "validation_receipt_valid"
+        },
+        {
+          "id": "validation-receipt-missing-request-id",
+          "class": "missing_field",
+          "payload_variant": "validation_receipt_missing_request_id"
+        },
+        {
+          "id": "validation-receipt-oversized-input-digest-list",
+          "class": "oversized",
+          "payload_variant": "validation_receipt_oversized_inputs"
+        },
+        {
+          "id": "validation-receipt-expired-freshness",
+          "class": "stale",
+          "payload_variant": "validation_receipt_stale"
+        },
+        {
+          "id": "validation-receipt-command-digest-mismatch",
+          "class": "malformed_signature_or_hash",
+          "payload_variant": "validation_receipt_bad_digest"
+        },
+        {
+          "id": "validation-receipt-readiness-ref-traversal",
+          "class": "path_safety",
+          "payload_variant": "validation_receipt_bad_readiness_path"
+        }
+      ]
+    }
+  ]
+}

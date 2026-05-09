@@ -78,8 +78,8 @@ pub enum GateVerdict {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateEvent {
-    pub code: &'static str,
-    pub level: &'static str,
+    pub code: String,
+    pub level: String,
     pub trace_id: String,
     pub message: String,
 }
@@ -151,8 +151,8 @@ fn gate_event(
     message: String,
 ) -> GateEvent {
     GateEvent {
-        code,
-        level,
+        code: code.to_string(),
+        level: level.to_string(),
         trace_id: trace_id.to_string(),
         message,
     }
@@ -1874,12 +1874,11 @@ mod tests {
         }
 
         // Verify recent events are bounded (implementation detail, but should not grow unbounded)
-        if gate.recent_events.len() > MAX_EVENTS * 2 {
-            panic!(
-                "event storage should be bounded, got {} events",
-                gate.recent_events.len()
-            );
-        }
+        assert!(
+            gate.recent_events.len() <= MAX_EVENTS * 2,
+            "event storage should be bounded, got {} events",
+            gate.recent_events.len()
+        );
 
         // Test with malicious trace IDs that might cause memory issues
         let memory_stress_trajectory = TrajectorySnapshot {

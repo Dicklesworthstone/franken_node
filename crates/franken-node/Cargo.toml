@@ -338,6 +338,11 @@ name = "replay_bundle_adversarial_fuzz"
 path = "tests/replay_bundle_adversarial_fuzz.rs"
 
 [[test]]
+name = "spec_derived_fuzz_seeds"
+path = "tests/spec_derived_fuzz_seeds.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "replay_bundle_integrity_conformance"
 path = "tests/replay_bundle_integrity_conformance.rs"
 

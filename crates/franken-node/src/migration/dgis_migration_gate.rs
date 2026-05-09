@@ -92,8 +92,8 @@ pub struct RejectionReason {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateEvent {
-    pub code: &'static str,
-    pub level: &'static str,
+    pub code: String,
+    pub level: String,
     pub trace_id: String,
     pub message: String,
 }
@@ -202,8 +202,8 @@ fn gate_event(
     message: String,
 ) -> GateEvent {
     GateEvent {
-        code,
-        level,
+        code: code.to_string(),
+        level: level.to_string(),
         trace_id: trace_id.to_string(),
         message,
     }
