@@ -1,0 +1,76 @@
+{
+  "schema_version": "franken-node/swarm-bead-templates/fixtures/v1",
+  "input": {
+    "schema_version": "franken-node/swarm-bead-templates/input/v1",
+    "observations": [
+      {
+        "observation_id": "compile-drift-perf-wins",
+        "source_bead_id": "bd-ridez",
+        "blocker_kind": "compile_drift",
+        "command": "RCH_VISIBILITY=summary RCH_PRIORITY=low rch exec -- cargo check --all-targets",
+        "error_code": "E0560",
+        "file_path": "crates/franken-node/benches/perf_wins.rs",
+        "evidence_excerpt": "error[E0560]: struct InclusionProof has no field named root_hash",
+        "resolution_pattern": "sync benchmark fixture constructors and call sites with the current public API before rerunning the broad check"
+      },
+      {
+        "observation_id": "rch-stall-no-output",
+        "source_bead_id": "bd-38hez.13",
+        "blocker_kind": "rch_stall",
+        "command": "RCH_VISIBILITY=summary RCH_PRIORITY=low rch exec -- cargo check -p frankenengine-node --test operator_transcripts",
+        "error_code": "RCH_STALL_NO_OUTPUT",
+        "file_path": "crates/franken-node/tests/operator_transcripts.rs",
+        "evidence_excerpt": "remote job produced no output for 180s while typechecking the test surface",
+        "resolution_pattern": "poll the existing RCH session, avoid starting duplicate cargo work, and record worker plus command when surfacing a blocker"
+      },
+      {
+        "observation_id": "cargo-contention-queue-depth",
+        "source_bead_id": "bd-38hez.13",
+        "blocker_kind": "cargo_contention",
+        "command": "pgrep -af 'cargo|rustc' | wc -l",
+        "error_code": "LOCAL_CARGO_CONTENTION",
+        "evidence_excerpt": "pgrep count was greater than 2 before starting a heavy build",
+        "resolution_pattern": "back off or use an existing remote slot only after inspecting whether the local count is RCH sync, wrapper, or real rustc work"
+      },
+      {
+        "observation_id": "stale-assignee-soft-lock",
+        "source_bead_id": "bd-czf6g",
+        "blocker_kind": "stale_assignee",
+        "command": "br list --status=in_progress --json",
+        "error_code": "STALE_ASSIGNEE",
+        "file_path": ".beads/issues.jsonl",
+        "evidence_excerpt": "bd-czf6g remained in_progress by RainyAspen with an older updated_at while the queue needed anti-collision checks",
+        "resolution_pattern": "run br show plus exact in-progress lookup, treat active ownership as a soft lock, and pivot unless the bead is truly stale"
+      },
+      {
+        "observation_id": "missing-artifact-ledger",
+        "source_bead_id": "bd-38hez.11",
+        "blocker_kind": "missing_artifact",
+        "command": "python3 scripts/check_proof_carrying_execution_ledger.py --json",
+        "error_code": "ERR_MISSING_ARTIFACT",
+        "file_path": "artifacts/validation_broker/bd-missing/receipt.json",
+        "evidence_excerpt": "proof ledger expected receipt artifact artifacts/validation_broker/bd-missing/receipt.json but the file was absent",
+        "resolution_pattern": "create or refresh the machine-readable evidence artifact before claiming proof coverage"
+      },
+      {
+        "observation_id": "scanner-warning-source-only",
+        "source_bead_id": "bd-38hez.13",
+        "blocker_kind": "false_positive_scanner_warning",
+        "command": "ubs $(git diff --name-only --cached)",
+        "error_code": "UBS_WARNING_ASSERT_IN_TEST",
+        "file_path": "crates/franken-node/src/ops/operator_transcripts.rs",
+        "evidence_excerpt": "UBS exited 0 with warnings from test-only assert and fixture-auditor inventory",
+        "resolution_pattern": "record scanner exit status and classify warning-only source/test inventory separately from product bugs"
+      }
+    ],
+    "existing_beads": [
+      {
+        "bead_id": "bd-existing-cargo-contention",
+        "title": "Template: cargo contention backoff for LOCAL_CARGO_CONTENTION",
+        "description": "Existing reusable template for swarm-template:cargo_contention:pgrep-af-cargo-rustc-wc-l::local-cargo-contention"
+      }
+    ]
+  },
+  "expected_generated_count": 5,
+  "expected_deduped_count": 1
+}

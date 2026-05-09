@@ -9,6 +9,7 @@ pub mod mitigation_synthesis;
 pub mod operator_transcripts;
 pub mod proof_pipeline;
 pub mod rch_adapter;
+pub mod swarm_bead_templates;
 pub mod swarm_handoff;
 pub mod telemetry_bridge;
 pub mod tokio_drift_checker;
