@@ -1678,7 +1678,8 @@ mod tests {
 
         // Get hash via hash() method and decode hex (original approach)
         let hash_string = token.hash();
-        let hash_decoded = hex::decode(&hash_string).unwrap_or_else(|e| panic!("Hash string hex decode failed: {}", e));
+        let hash_decoded = hex::decode(&hash_string)
+            .unwrap_or_else(|e| panic!("Hash string hex decode failed: {}", e));
 
         // Results must be byte-identical
         assert_eq!(

@@ -2693,7 +2693,8 @@ mod atc_extreme_adversarial_negative_tests {
             assert!(!hex_encoded.is_empty());
 
             // Test round-trip encoding/decoding
-            let decoded = hex::decode(&hex_encoded).unwrap_or_else(|e| panic!("Test hex decode failed: {}", e));
+            let decoded = hex::decode(&hex_encoded)
+                .unwrap_or_else(|e| panic!("Test hex decode failed: {}", e));
             assert_eq!(decoded.len(), 32);
 
             let re_encoded = hex::encode(&decoded);
@@ -2916,8 +2917,10 @@ mod atc_extreme_adversarial_negative_tests {
             let mutated_fingerprint = surface_fingerprint_hex(mutated_surface);
 
             // Convert hex strings to bytes for bit-level analysis
-            let base_bytes = hex::decode(&base_fingerprint).unwrap_or_else(|e| panic!("Base fingerprint hex decode failed: {}", e));
-            let mutated_bytes = hex::decode(&mutated_fingerprint).unwrap_or_else(|e| panic!("Mutated fingerprint hex decode failed: {}", e));
+            let base_bytes = hex::decode(&base_fingerprint)
+                .unwrap_or_else(|e| panic!("Base fingerprint hex decode failed: {}", e));
+            let mutated_bytes = hex::decode(&mutated_fingerprint)
+                .unwrap_or_else(|e| panic!("Mutated fingerprint hex decode failed: {}", e));
 
             // Calculate Hamming distance (differing bits)
             let mut differing_bits = 0;
@@ -4495,7 +4498,8 @@ mod atc_extreme_adversarial_negative_tests {
             );
 
             // Test bit distribution
-            let bytes = hex::decode(&fingerprint).unwrap_or_else(|e| panic!("Fingerprint hex decode failed: {}", e));
+            let bytes = hex::decode(&fingerprint)
+                .unwrap_or_else(|e| panic!("Fingerprint hex decode failed: {}", e));
             let mut bit_counts = [0; 2];
             for byte in bytes {
                 for bit_pos in 0..8 {
@@ -6776,8 +6780,8 @@ mod atc_extreme_adversarial_negative_tests {
             );
 
             // Attack 3: Hex string format consistency
-            let fingerprint_bytes =
-                hex::decode(&fingerprint).unwrap_or_else(|e| panic!("Fingerprint hex decode failed: {}", e));
+            let fingerprint_bytes = hex::decode(&fingerprint)
+                .unwrap_or_else(|e| panic!("Fingerprint hex decode failed: {}", e));
 
             assert_eq!(
                 fingerprint_bytes.len(),

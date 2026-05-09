@@ -1865,7 +1865,8 @@ mod tests {
     #[test]
     fn test_content_digest_matches_uses_decoded_hex_bytes() {
         let expected = content_hash(b"hex integrity payload");
-        let mut tampered_bytes = hex::decode(&expected).unwrap_or_else(|e| panic!("Content hash hex decode failed: {}", e));
+        let mut tampered_bytes = hex::decode(&expected)
+            .unwrap_or_else(|e| panic!("Content hash hex decode failed: {}", e));
         tampered_bytes[0] ^= 0x01;
         let tampered = hex::encode(tampered_bytes);
 

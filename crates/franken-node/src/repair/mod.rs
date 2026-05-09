@@ -3104,7 +3104,8 @@ mod tests {
                 let algorithm = AlgorithmId::new(algorithm_name);
 
                 // Generate proof with first secret
-                let decode_result = if crate::security::constant_time::ct_eq(sign_secret, "secret1") {
+                let decode_result = if crate::security::constant_time::ct_eq(sign_secret, "secret1")
+                {
                     decoder1.decode(
                         "confusion_obj",
                         &fragments,
