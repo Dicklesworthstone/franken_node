@@ -1,0 +1,255 @@
+{
+  "schema_version": "franken-node/operator-transcripts/golden/v1",
+  "transcripts": [
+    {
+      "name": "clean_readiness",
+      "surface": "readiness",
+      "scenario_kind": "clean",
+      "command": "franken-node ops validation-readiness --input [PROJECT]/artifacts/validation_broker/bd-38hez.13/readiness-clean.json --json",
+      "sanitized_env": {
+        "AGENT_NAME": "[AGENT]",
+        "FRANKEN_NODE_PROFILE": "strict",
+        "RCH_PRIORITY": "low",
+        "RCH_VISIBILITY": "summary"
+      },
+      "normalized_human": "Validation readiness: READY\nReason codes: VSP_SOURCE_ONLY_READY, VIM_REGISTERED_TEST\nNext step: No action required; close bead after recording RCH receipt.\nRemediation: keep direct receipt attached to completion.",
+      "normalized_json": {
+        "surface": "readiness",
+        "status": "ready",
+        "reason_codes": [
+          "VSP_SOURCE_ONLY_READY",
+          "VIM_REGISTERED_TEST"
+        ],
+        "remediation": {
+          "next_step": "No action required; close bead after recording RCH receipt.",
+          "hints": [
+            "keep direct receipt attached to completion."
+          ]
+        },
+        "workspace": "[PROJECT]",
+        "normalized_at": "[TIMESTAMP]"
+      },
+      "expected_reason_codes": [
+        "VSP_SOURCE_ONLY_READY",
+        "VIM_REGISTERED_TEST"
+      ],
+      "expected_remediation_hints": [
+        "keep direct receipt attached to completion."
+      ],
+      "expected_next_step": "No action required; close bead after recording RCH receipt.",
+      "dynamic_fields": [
+        "workspace",
+        "normalized_at"
+      ]
+    },
+    {
+      "name": "blocked_validation_closeout",
+      "surface": "validation_closeout",
+      "scenario_kind": "blocked",
+      "command": "franken-node ops validation-closeout --receipt [PROJECT]/artifacts/validation_broker/bd-38hez.13/blocked-receipt.json --json",
+      "sanitized_env": {
+        "AGENT_NAME": "[AGENT]",
+        "CARGO_BUILD_JOBS": "1",
+        "CARGO_INCREMENTAL": "0",
+        "RCH_PRIORITY": "low",
+        "RCH_VISIBILITY": "summary"
+      },
+      "normalized_human": "Validation closeout: BLOCKED\nReason codes: VC_AUDIT_BLOCKED_PROOF\nNext step: rerun proof through rch exec and attach the fresh receipt before closing.\nRemediation: do not close the bead with blocked proof evidence.",
+      "normalized_json": {
+        "surface": "validation_closeout",
+        "status": "blocked",
+        "reason_codes": [
+          "VC_AUDIT_BLOCKED_PROOF"
+        ],
+        "remediation": {
+          "next_step": "rerun proof through rch exec and attach the fresh receipt before closing.",
+          "hints": [
+            "do not close the bead with blocked proof evidence."
+          ]
+        },
+        "receipt_path": "[PROJECT]/artifacts/validation_broker/bd-38hez.13/blocked-receipt.json",
+        "normalized_at": "[TIMESTAMP]"
+      },
+      "expected_reason_codes": [
+        "VC_AUDIT_BLOCKED_PROOF"
+      ],
+      "expected_remediation_hints": [
+        "do not close the bead with blocked proof evidence."
+      ],
+      "expected_next_step": "rerun proof through rch exec and attach the fresh receipt before closing.",
+      "dynamic_fields": [
+        "receipt_path",
+        "normalized_at"
+      ]
+    },
+    {
+      "name": "proxy_only_traceability_audit",
+      "surface": "traceability_audit",
+      "scenario_kind": "proxy_only",
+      "command": "franken-node ops closed-bead-compliance --input [PROJECT]/artifacts/validation_broker/bd-38hez.13/proxy-only.json --json",
+      "sanitized_env": {
+        "AGENT_NAME": "[AGENT]",
+        "FRANKEN_NODE_PROFILE": "strict",
+        "RCH_PRIORITY": "low",
+        "RCH_VISIBILITY": "summary"
+      },
+      "normalized_human": "Traceability audit: SOURCE_ONLY\nReason codes: CBC_WARN_SOURCE_ONLY, VC_AUDIT_PROXY_ONLY\nNext step: add direct implementation evidence before marking the bead proven.\nRemediation: source-only evidence is not enough for release closeout.",
+      "normalized_json": {
+        "surface": "traceability_audit",
+        "status": "source_only",
+        "reason_codes": [
+          "CBC_WARN_SOURCE_ONLY",
+          "VC_AUDIT_PROXY_ONLY"
+        ],
+        "remediation": {
+          "next_step": "add direct implementation evidence before marking the bead proven.",
+          "hints": [
+            "source-only evidence is not enough for release closeout."
+          ]
+        },
+        "evidence_path": "[PROJECT]/artifacts/validation_broker/bd-38hez.13/proxy-only.json",
+        "normalized_at": "[TIMESTAMP]"
+      },
+      "expected_reason_codes": [
+        "CBC_WARN_SOURCE_ONLY",
+        "VC_AUDIT_PROXY_ONLY"
+      ],
+      "expected_remediation_hints": [
+        "source-only evidence is not enough for release closeout."
+      ],
+      "expected_next_step": "add direct implementation evidence before marking the bead proven.",
+      "dynamic_fields": [
+        "evidence_path",
+        "normalized_at"
+      ]
+    },
+    {
+      "name": "stale_sibling_impact_mapper",
+      "surface": "impact_mapper",
+      "scenario_kind": "stale_sibling",
+      "command": "franken-node ops validation-plan --changed [PROJECT]/crates/franken-node/src/lib.rs --json",
+      "sanitized_env": {
+        "AGENT_NAME": "[AGENT]",
+        "FRANKEN_NODE_PROFILE": "strict",
+        "RCH_PRIORITY": "low",
+        "RCH_VISIBILITY": "summary"
+      },
+      "normalized_human": "Impact mapper: BLOCKED\nReason codes: VIM_SIBLING_BLOCKED, SDP_STALE_BLOCKER, BGW_SIBLING_API_DRIFT\nNext step: inspect sibling repo and rerun the preflight before starting cargo work.\nRemediation: carry the sibling blocker into the closeout notes.",
+      "normalized_json": {
+        "surface": "impact_mapper",
+        "status": "blocked",
+        "reason_codes": [
+          "VIM_SIBLING_BLOCKED",
+          "SDP_STALE_BLOCKER",
+          "BGW_SIBLING_API_DRIFT"
+        ],
+        "remediation": {
+          "next_step": "inspect sibling repo and rerun the preflight before starting cargo work.",
+          "hints": [
+            "carry the sibling blocker into the closeout notes."
+          ]
+        },
+        "changed_path": "[PROJECT]/crates/franken-node/src/lib.rs",
+        "sibling": "[SIBLING_REPO]",
+        "normalized_at": "[TIMESTAMP]"
+      },
+      "expected_reason_codes": [
+        "VIM_SIBLING_BLOCKED",
+        "SDP_STALE_BLOCKER",
+        "BGW_SIBLING_API_DRIFT"
+      ],
+      "expected_remediation_hints": [
+        "carry the sibling blocker into the closeout notes."
+      ],
+      "expected_next_step": "inspect sibling repo and rerun the preflight before starting cargo work.",
+      "dynamic_fields": [
+        "changed_path",
+        "sibling",
+        "normalized_at"
+      ]
+    },
+    {
+      "name": "rch_unavailable_command_budget",
+      "surface": "command_budget",
+      "scenario_kind": "rch_unavailable",
+      "command": "franken-node ops operator-what-if --scenario rch-unavailable --command 'cargo test -p frankenengine-node' --json",
+      "sanitized_env": {
+        "AGENT_NAME": "[AGENT]",
+        "CARGO_BUILD_JOBS": "1",
+        "CARGO_INCREMENTAL": "0",
+        "RCH_PRIORITY": "low",
+        "RCH_VISIBILITY": "summary"
+      },
+      "normalized_human": "Command budget: RCH_UNAVAILABLE\nReason codes: VSP_RCH_UNAVAILABLE, OP_WHATIF_REQUIRE_RCH\nNext step: file a blocker or wait for RCH; do not run local cargo.\nRemediation: keep cargo-heavy commands behind rch exec.",
+      "normalized_json": {
+        "surface": "command_budget",
+        "status": "rch_unavailable",
+        "reason_codes": [
+          "VSP_RCH_UNAVAILABLE",
+          "OP_WHATIF_REQUIRE_RCH"
+        ],
+        "remediation": {
+          "next_step": "file a blocker or wait for RCH; do not run local cargo.",
+          "hints": [
+            "keep cargo-heavy commands behind rch exec."
+          ]
+        },
+        "requested_command": "cargo test -p frankenengine-node",
+        "normalized_at": "[TIMESTAMP]"
+      },
+      "expected_reason_codes": [
+        "VSP_RCH_UNAVAILABLE",
+        "OP_WHATIF_REQUIRE_RCH"
+      ],
+      "expected_remediation_hints": [
+        "keep cargo-heavy commands behind rch exec."
+      ],
+      "expected_next_step": "file a blocker or wait for RCH; do not run local cargo.",
+      "dynamic_fields": [
+        "normalized_at"
+      ]
+    },
+    {
+      "name": "resource_saturated_doctor",
+      "surface": "doctor",
+      "scenario_kind": "resource_saturated",
+      "command": "franken-node doctor --workspace-pressure --json",
+      "sanitized_env": {
+        "AGENT_NAME": "[AGENT]",
+        "CARGO_TARGET_DIR": "[PROJECT]/target/operator-transcripts",
+        "FRANKEN_NODE_PROFILE": "strict",
+        "RCH_PRIORITY": "low",
+        "RCH_VISIBILITY": "summary"
+      },
+      "normalized_human": "Doctor: RESOURCE_SATURATED\nReason codes: OP_WHATIF_QUEUE_RCH_SATURATED, QUEUE_PRESSURE\nNext step: wait for capacity or run the audited cleanup dry-run before scheduling more builds.\nRemediation: resource saturation requires an operator-readable next step.",
+      "normalized_json": {
+        "surface": "doctor",
+        "status": "resource_saturated",
+        "reason_codes": [
+          "OP_WHATIF_QUEUE_RCH_SATURATED",
+          "QUEUE_PRESSURE"
+        ],
+        "remediation": {
+          "next_step": "wait for capacity or run the audited cleanup dry-run before scheduling more builds.",
+          "hints": [
+            "resource saturation requires an operator-readable next step."
+          ]
+        },
+        "workspace": "[PROJECT]",
+        "normalized_at": "[TIMESTAMP]"
+      },
+      "expected_reason_codes": [
+        "OP_WHATIF_QUEUE_RCH_SATURATED",
+        "QUEUE_PRESSURE"
+      ],
+      "expected_remediation_hints": [
+        "resource saturation requires an operator-readable next step."
+      ],
+      "expected_next_step": "wait for capacity or run the audited cleanup dry-run before scheduling more builds.",
+      "dynamic_fields": [
+        "workspace",
+        "normalized_at"
+      ]
+    }
+  ]
+}

@@ -148,6 +148,10 @@ name = "closed_bead_compliance"
 path = "tests/closed_bead_compliance.rs"
 
 [[test]]
+name = "operator_transcripts"
+path = "tests/operator_transcripts.rs"
+
+[[test]]
 name = "validation_planner"
 path = "tests/validation_planner.rs"
 

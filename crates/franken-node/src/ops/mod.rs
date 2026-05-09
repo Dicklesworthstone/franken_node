@@ -6,6 +6,7 @@ pub mod engine_dispatcher;
 pub mod evidence_index;
 #[cfg(feature = "admin-tools")]
 pub mod mitigation_synthesis;
+pub mod operator_transcripts;
 pub mod proof_pipeline;
 pub mod rch_adapter;
 pub mod swarm_handoff;
