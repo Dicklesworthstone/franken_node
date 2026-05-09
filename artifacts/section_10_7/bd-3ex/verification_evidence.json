@@ -2,9 +2,9 @@
   "bead_id": "bd-3ex",
   "section": "10.7",
   "title": "Verifier CLI conformance contract tests",
-  "generated_at_utc": "2026-02-22T02:58:13Z",
+  "generated_at_utc": "2026-05-09T19:43:28Z",
   "verdict": "PASS",
-  "status": "implemented_with_rch_worker_path_dependency_blockers",
+  "status": "implemented_with_real_runner_gate_and_local_target_retrieval_blocker",
   "implementation": {
     "rust_cli_surface": [
       "crates/franken-node/src/cli.rs",
@@ -18,9 +18,11 @@
   "contract_gate": {
     "report_path": "artifacts/section_10_7/bd-3ex/check_report.json",
     "verdict": "PASS",
-    "checks_passed": 26,
-    "checks_total": 26,
-    "snapshot_diff_count": 5
+    "checks_passed": 47,
+    "checks_total": 47,
+    "snapshot_diff_count": 5,
+    "runner_kind": "explicit subprocess fixture harness",
+    "fail_closed_without_runner": true
   },
   "validation_runs": [
     {
@@ -38,21 +40,38 @@
     },
     {
       "name": "gate_unit_tests",
-      "command": "python3 -m unittest tests/test_check_verifier_contract.py",
+      "command": "python3 -m unittest tests.test_check_verifier_contract",
       "exit_code": 0,
       "result": "pass",
+      "test_count": 11,
       "artifact": "artifacts/section_10_7/bd-3ex/unit_tests.txt"
     },
     {
-      "name": "gate_json_report",
-      "command": "python3 scripts/check_verifier_contract.py --json",
+      "name": "gate_json_report_with_fixture_harness",
+      "command": "python3 scripts/check_verifier_contract.py --json --binary <subprocess fixture harness>",
       "exit_code": 0,
       "result": "pass",
+      "checks_passed": 47,
+      "checks_total": 47,
       "artifact": "artifacts/section_10_7/bd-3ex/check_report.json"
+    },
+    {
+      "name": "gate_json_report_without_runner",
+      "command": "python3 scripts/check_verifier_contract.py --json",
+      "exit_code": 1,
+      "result": "expected_fail_closed",
+      "notable_error": "verifier_runner_available=false for missing target/debug/franken-node"
     }
   ],
   "rch_quality": {
     "commands": [
+      {
+        "name": "cargo build -p frankenengine-node --bin franken-node",
+        "runner": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1",
+        "exit_code": 0,
+        "status": "pass",
+        "notable_warning": "remote build completed, but artifact retrieval into local immutable target/ failed"
+      },
       {
         "name": "cargo fmt --check",
         "runner": "rch exec --",
@@ -103,10 +122,28 @@
         "check_verifier_contract.py --update-snapshots support",
         "tests/test_check_verifier_contract.py additive + breaking scenarios"
       ]
+    },
+    {
+      "criterion": "Checker uses subprocess-backed verifier evidence instead of simulated output.",
+      "status": "pass",
+      "evidence": [
+        "scripts/check_verifier_contract.py resolves --binary / FRANKEN_NODE_VERIFY_BIN / target/debug/franken-node",
+        "tests/test_check_verifier_contract.py creates an executable fixture harness and exercises the CLI through subprocess.run",
+        "check_report.json shows 47/47 checks with per-scenario runner_executed and exit_code_matches_process checks"
+      ]
+    },
+    {
+      "criterion": "Authoritative mode fails closed when no verifier binary or harness is available.",
+      "status": "pass",
+      "evidence": [
+        "test_missing_runner_fails_closed",
+        "python3 scripts/check_verifier_contract.py --json exits 1 when target/debug/franken-node is absent"
+      ]
     }
   ],
   "notes": [
-    "Contract gate is green and deterministic for bd-3ex scope.",
-    "rch cargo check/clippy failures are worker path-dependency environment blockers (missing franken_engine path on remote workspace sync), not checker logic regressions."
+    "Contract gate no longer uses in-process simulated verifier output.",
+    "The explicit subprocess fixture harness covers checker behavior when a local franken-node binary cannot be materialized.",
+    "The focused rch binary build succeeded; local binary execution is blocked by immutable target/ artifact retrieval, not by Rust compilation."
   ]
 }

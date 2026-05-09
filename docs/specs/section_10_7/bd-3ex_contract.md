@@ -42,6 +42,7 @@ All `--json` output from verify subcommands must include:
 - Adding new fields is non-breaking (additive-only).
 - Removing or changing existing fields is breaking and requires a major version bump.
 - `--update-snapshots` flag regenerates expected outputs for non-breaking changes only.
+- Authoritative checks execute a real verifier runner from `--binary`, `FRANKEN_NODE_VERIFY_BIN`, or `target/debug/franken-node`; missing runners fail closed.
 
 ## Invariants
 
@@ -66,8 +67,11 @@ The gate script `scripts/check_verifier_contract.py` validates:
 6. Main source (`main.rs`) routes all required verifier subcommands
 7. At least 5 contract scenarios exist
 8. Default scenario coverage for each required command
-9. Snapshot files exist, parse as valid JSON, and match simulated output
-10. Breaking change enforcement: no breaking changes without major version bump
+9. A configured verifier runner is executable
+10. Each scenario executes as a subprocess and emits parseable JSON
+11. Reported JSON `exit_code` matches the actual subprocess exit code
+12. Snapshot files exist, parse as valid JSON, and compare against real subprocess output
+13. Breaking change enforcement: no breaking changes without major version bump
 
 Exit 0 on PASS, exit 1 on FAIL.
 
@@ -86,8 +90,10 @@ Exit 0 on PASS, exit 1 on FAIL.
 - Python gate script with `--json`, `--self-test`, and `--update-snapshots` modes
 - Pytest/unittest suite covering:
   - Self-test validation
-  - Full contract PASS with real artifacts
+  - Full contract PASS with an explicit subprocess fixture harness
   - Snapshot comparison (exact, additive, breaking)
   - CLI subprocess JSON output
+  - Missing runner fail-closed behavior
+  - JSON/process exit-code mismatch rejection
   - Additive snapshot update path
   - Breaking change detection without major bump
