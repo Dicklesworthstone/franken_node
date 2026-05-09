@@ -337,6 +337,9 @@ pub enum TrustCardError {
     /// Operator remediation: retry with a one-based page number and a positive page size within operator policy limits.
     #[error("invalid pagination: page={page}, per_page={per_page}")]
     InvalidPagination { page: usize, per_page: usize },
+    /// Operator remediation: authenticate with an allowed method and role for the requested trust-card route.
+    #[error("trust-card route authentication failed: {0}")]
+    AuthenticationFailed(String),
     /// Operator remediation: correct the rejected input field named in the reason before deriving or mutating a card.
     #[error("invalid trust-card input: {reason}")]
     InvalidInput { reason: String },
@@ -391,6 +394,9 @@ impl TrustCardError {
             }
             TrustCardError::InvalidPagination { .. } => {
                 "Retry with a one-based page number and a positive page size within operator policy limits."
+            }
+            TrustCardError::AuthenticationFailed(_) => {
+                "Authenticate with an allowed method and role for the requested trust-card route."
             }
             TrustCardError::InvalidInput { .. } => {
                 "Correct the rejected input field named in the reason before deriving or mutating a card."

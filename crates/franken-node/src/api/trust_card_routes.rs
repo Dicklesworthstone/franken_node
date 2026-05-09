@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::security::constant_time;
 use crate::supply_chain::trust_card::{
     TrustCard, TrustCardComparison, TrustCardError, TrustCardListFilter, TrustCardRegistry,
     paginate,
@@ -16,7 +17,7 @@ use crate::supply_chain::trust_card::{
 #[cfg(any(test, feature = "control-plane"))]
 use crate::supply_chain::trust_card::{TrustCardInput, TrustCardMutation};
 
-use super::middleware::{AuthIdentity, TraceContext, enforce_handler_contract};
+use super::middleware::{AuthIdentity, AuthMethod, TraceContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
 pub struct Pagination {
@@ -78,6 +79,83 @@ fn paged_response<T: Clone>(
     })
 }
 
+struct TrustCardRouteContract {
+    method: &'static str,
+    path: &'static str,
+    auth_method: AuthMethod,
+    required_roles: &'static [&'static str],
+}
+
+fn trust_card_route_contracts() -> [TrustCardRouteContract; 4] {
+    [
+        TrustCardRouteContract {
+            method: "POST",
+            path: "/api/v1/trust-cards",
+            auth_method: AuthMethod::BearerToken,
+            required_roles: &["operator", "trust-admin"],
+        },
+        TrustCardRouteContract {
+            method: "PUT",
+            path: "/api/v1/trust-cards/{extension_id}",
+            auth_method: AuthMethod::BearerToken,
+            required_roles: &["operator", "trust-admin"],
+        },
+        TrustCardRouteContract {
+            method: "GET",
+            path: "/api/v1/trust-cards/{extension_id}",
+            auth_method: AuthMethod::BearerToken,
+            required_roles: &["reader", "operator", "verifier", "trust-admin"],
+        },
+        TrustCardRouteContract {
+            method: "GET",
+            path: "/api/v1/trust-cards",
+            auth_method: AuthMethod::BearerToken,
+            required_roles: &["reader", "operator", "verifier", "trust-admin"],
+        },
+    ]
+}
+
+fn identity_has_required_role(identity: &AuthIdentity, required_roles: &[&str]) -> bool {
+    required_roles.is_empty()
+        || identity.roles.iter().any(|role| {
+            required_roles
+                .iter()
+                .any(|required_role| constant_time::ct_eq(role, required_role))
+        })
+}
+
+fn trust_card_auth_error(trace: &TraceContext, detail: impl Into<String>) -> TrustCardError {
+    TrustCardError::AuthenticationFailed(format!("{} (trace_id={})", detail.into(), trace.trace_id))
+}
+
+fn enforce_handler_contract(
+    identity: &AuthIdentity,
+    trace: &TraceContext,
+    method: &str,
+    path: &str,
+) -> Result<(), TrustCardError> {
+    let route = trust_card_route_contracts()
+        .into_iter()
+        .find(|route| route.method == method && route.path == path)
+        .ok_or_else(|| {
+            trust_card_auth_error(trace, format!("missing route metadata for {method} {path}"))
+        })?;
+    let expected_method = &route.auth_method;
+    if !matches!(expected_method, AuthMethod::None) && &identity.method != expected_method {
+        return Err(trust_card_auth_error(
+            trace,
+            format!("authentication method not permitted for {method} {path}"),
+        ));
+    }
+    if !identity_has_required_role(identity, route.required_roles) {
+        return Err(trust_card_auth_error(
+            trace,
+            format!("principal lacks required role for {method} {path}"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(any(test, feature = "control-plane"))]
 /// Create a new trust card and wrap the created card in the stable API envelope.
 ///
@@ -100,9 +178,7 @@ pub fn create_trust_card(
     input: TrustCardInput,
     now_secs: u64,
 ) -> Result<ApiResponse<TrustCard>, TrustCardError> {
-    enforce_handler_contract(identity, trace, "POST", "/api/v1/trust-cards").map_err(|e| {
-        TrustCardError::AuthenticationFailed(format!("create_trust_card auth failed: {}", e))
-    })?;
+    enforce_handler_contract(identity, trace, "POST", "/api/v1/trust-cards")?;
     let card = registry.create(input, now_secs, &trace.trace_id)?;
     Ok(ApiResponse {
         ok: true,
@@ -135,10 +211,7 @@ pub fn update_trust_card(
     mutation: TrustCardMutation,
     now_secs: u64,
 ) -> Result<ApiResponse<TrustCard>, TrustCardError> {
-    enforce_handler_contract(identity, trace, "PUT", "/api/v1/trust-cards/{extension_id}")
-        .map_err(|e| {
-            TrustCardError::AuthenticationFailed(format!("update_trust_card auth failed: {}", e))
-        })?;
+    enforce_handler_contract(identity, trace, "PUT", "/api/v1/trust-cards/{extension_id}")?;
     let card = registry.update(extension_id, mutation, now_secs, &trace.trace_id)?;
     Ok(ApiResponse {
         ok: true,
@@ -169,10 +242,7 @@ pub fn get_trust_card(
     extension_id: &str,
     now_secs: u64,
 ) -> Result<ApiResponse<Option<TrustCard>>, TrustCardError> {
-    enforce_handler_contract(identity, trace, "GET", "/api/v1/trust-cards/{extension_id}")
-        .map_err(|e| {
-            TrustCardError::AuthenticationFailed(format!("get_trust_card auth failed: {}", e))
-        })?;
+    enforce_handler_contract(identity, trace, "GET", "/api/v1/trust-cards/{extension_id}")?;
     let card = registry.read(extension_id, now_secs, &trace.trace_id)?;
     Ok(ApiResponse {
         ok: true,
@@ -204,9 +274,7 @@ pub fn list_trust_cards(
     now_secs: u64,
     pagination: Pagination,
 ) -> Result<ApiResponse<Vec<TrustCard>>, TrustCardError> {
-    enforce_handler_contract(identity, trace, "GET", "/api/v1/trust-cards").map_err(|e| {
-        TrustCardError::AuthenticationFailed(format!("list_trust_cards auth failed: {}", e))
-    })?;
+    enforce_handler_contract(identity, trace, "GET", "/api/v1/trust-cards")?;
     let all = registry.list(filter, &trace.trace_id, now_secs)?;
     paged_response(&all, pagination)
 }
@@ -413,11 +481,38 @@ mod tests {
         }
     }
 
+    fn route_identity() -> AuthIdentity {
+        AuthIdentity {
+            principal: "trust-card-route-test".to_string(),
+            method: AuthMethod::BearerToken,
+            roles: vec![
+                "operator".to_string(),
+                "verifier".to_string(),
+                "reader".to_string(),
+                "trust-admin".to_string(),
+            ],
+        }
+    }
+
+    fn route_trace(trace_id: &str) -> TraceContext {
+        TraceContext {
+            trace_id: trace_id.to_string(),
+            span_id: "0000000000000001".to_string(),
+            trace_flags: 1,
+        }
+    }
+
     #[test]
     fn get_card_returns_data() {
         let mut registry = fixture_registry(1_000).expect("fixture registry");
-        let response = get_trust_card(&mut registry, "npm:@acme/auth-guard", 1_001, "trace")
-            .expect("response");
+        let response = get_trust_card(
+            &route_identity(),
+            &route_trace("trace"),
+            &mut registry,
+            "npm:@acme/auth-guard",
+            1_001,
+        )
+        .expect("response");
         assert!(response.ok);
         assert!(response.data.is_some());
     }
@@ -464,16 +559,19 @@ mod tests {
     fn create_and_update_route_round_trip() {
         let mut registry = TrustCardRegistry::default();
         let create = create_trust_card(
+            &route_identity(),
+            &route_trace("trace-create"),
             &mut registry,
             sample_input("npm:@unit/route"),
             2_000,
-            "trace-create",
         )
         .expect("create");
         assert!(create.ok);
         assert_eq!(create.data.trust_card_version, 1);
 
         let update = update_trust_card(
+            &route_identity(),
+            &route_trace("trace-update"),
             &mut registry,
             "npm:@unit/route",
             TrustCardMutation {
@@ -487,7 +585,6 @@ mod tests {
                 evidence_refs: Some(route_test_evidence_refs()),
             },
             2_100,
-            "trace-update",
         )
         .expect("update");
         assert!(update.ok);
@@ -498,6 +595,8 @@ mod tests {
     fn list_route_filters_by_publisher() {
         let mut registry = fixture_registry(1_000).expect("fixture registry");
         let response = list_trust_cards(
+            &route_identity(),
+            &route_trace("trace"),
             &mut registry,
             &TrustCardListFilter {
                 certification_level: None,
@@ -505,7 +604,6 @@ mod tests {
                 capability: None,
             },
             1_001,
-            "trace",
             Pagination {
                 page: 1,
                 per_page: 10,
@@ -520,10 +618,11 @@ mod tests {
     fn list_route_rejects_invalid_zero_per_page() {
         let mut registry = fixture_registry(1_000).expect("fixture registry");
         let err = list_trust_cards(
+            &route_identity(),
+            &route_trace("trace"),
             &mut registry,
             &TrustCardListFilter::empty(),
             1_001,
-            "trace",
             Pagination {
                 page: 1,
                 per_page: 0,
@@ -549,8 +648,14 @@ mod tests {
     #[test]
     fn get_nonexistent_card_returns_none() {
         let mut registry = TrustCardRegistry::default();
-        let response =
-            get_trust_card(&mut registry, "npm:@no/such", 1_000, "trace").expect("response");
+        let response = get_trust_card(
+            &route_identity(),
+            &route_trace("trace"),
+            &mut registry,
+            "npm:@no/such",
+            1_000,
+        )
+        .expect("response");
         assert!(response.ok);
         assert!(response.data.is_none());
     }
@@ -559,6 +664,8 @@ mod tests {
     fn list_empty_registry_returns_empty() {
         let mut registry = TrustCardRegistry::default();
         let response = list_trust_cards(
+            &route_identity(),
+            &route_trace("trace"),
             &mut registry,
             &TrustCardListFilter {
                 certification_level: None,
@@ -566,7 +673,6 @@ mod tests {
                 capability: None,
             },
             1_000,
-            "trace",
             Pagination::default(),
         )
         .expect("response");
@@ -593,9 +699,14 @@ mod tests {
     #[test]
     fn create_card_has_version_one() {
         let mut registry = TrustCardRegistry::default();
-        let response =
-            create_trust_card(&mut registry, sample_input("npm:@unit/new"), 2_000, "trace")
-                .expect("create");
+        let response = create_trust_card(
+            &route_identity(),
+            &route_trace("trace"),
+            &mut registry,
+            sample_input("npm:@unit/new"),
+            2_000,
+        )
+        .expect("create");
         assert!(response.ok);
         assert_eq!(response.data.trust_card_version, 1);
         assert!(response.page.is_none());
@@ -620,6 +731,8 @@ mod tests {
     fn list_filter_by_certification_level() {
         let mut registry = fixture_registry(1_000).expect("fixture registry");
         let response = list_trust_cards(
+            &route_identity(),
+            &route_trace("trace"),
             &mut registry,
             &TrustCardListFilter {
                 certification_level: Some(CertificationLevel::Silver),
@@ -627,7 +740,6 @@ mod tests {
                 capability: None,
             },
             1_001,
-            "trace",
             Pagination::default(),
         )
         .expect("response");
@@ -692,15 +804,27 @@ mod tests {
         let mut input = sample_input("npm:@unit/no-evidence");
         input.evidence_refs.clear();
 
-        let err = create_trust_card(&mut registry, input, 2_000, "trace-no-evidence")
-            .expect_err("create without evidence must fail closed");
+        let err = create_trust_card(
+            &route_identity(),
+            &route_trace("trace-no-evidence"),
+            &mut registry,
+            input,
+            2_000,
+        )
+        .expect_err("create without evidence must fail closed");
 
         assert!(matches!(err, TrustCardError::EvidenceMissing));
         assert!(
-            get_trust_card(&mut registry, "npm:@unit/no-evidence", 2_001, "trace-read")
-                .expect("read after rejected create")
-                .data
-                .is_none()
+            get_trust_card(
+                &route_identity(),
+                &route_trace("trace-read"),
+                &mut registry,
+                "npm:@unit/no-evidence",
+                2_001,
+            )
+            .expect("read after rejected create")
+            .data
+            .is_none()
         );
     }
 
@@ -709,11 +833,12 @@ mod tests {
         let mut registry = TrustCardRegistry::default();
 
         let err = update_trust_card(
+            &route_identity(),
+            &route_trace("trace-missing-update"),
             &mut registry,
             "npm:@unit/missing",
             empty_mutation(),
             2_000,
-            "trace-missing-update",
         )
         .expect_err("missing extension update must fail");
 
@@ -724,21 +849,23 @@ mod tests {
     fn update_route_rejects_certification_upgrade_without_evidence() {
         let mut registry = TrustCardRegistry::default();
         create_trust_card(
+            &route_identity(),
+            &route_trace("trace-create-upgrade"),
             &mut registry,
             sample_input("npm:@unit/upgrade-without-evidence"),
             2_000,
-            "trace-create-upgrade",
         )
         .expect("create");
         let mut mutation = empty_mutation();
         mutation.certification_level = Some(CertificationLevel::Gold);
 
         let err = update_trust_card(
+            &route_identity(),
+            &route_trace("trace-upgrade-denied"),
             &mut registry,
             "npm:@unit/upgrade-without-evidence",
             mutation,
             2_001,
-            "trace-upgrade-denied",
         )
         .expect_err("upgrade without evidence must fail");
 
@@ -749,21 +876,23 @@ mod tests {
     fn update_route_rejects_empty_evidence_refs_on_mutation() {
         let mut registry = TrustCardRegistry::default();
         create_trust_card(
+            &route_identity(),
+            &route_trace("trace-create-empty-evidence"),
             &mut registry,
             sample_input("npm:@unit/empty-evidence-update"),
             2_000,
-            "trace-create-empty-evidence",
         )
         .expect("create");
         let mut mutation = empty_mutation();
         mutation.evidence_refs = Some(Vec::new());
 
         let err = update_trust_card(
+            &route_identity(),
+            &route_trace("trace-empty-evidence-update"),
             &mut registry,
             "npm:@unit/empty-evidence-update",
             mutation,
             2_001,
-            "trace-empty-evidence-update",
         )
         .expect_err("empty mutation evidence must fail");
 
@@ -774,10 +903,11 @@ mod tests {
     fn update_route_rejects_revocation_reactivation() {
         let mut registry = TrustCardRegistry::default();
         create_trust_card(
+            &route_identity(),
+            &route_trace("trace-create-revoked"),
             &mut registry,
             sample_input("npm:@unit/revoked-route"),
             2_000,
-            "trace-create-revoked",
         )
         .expect("create");
         let mut revoke = empty_mutation();
@@ -786,22 +916,24 @@ mod tests {
             revoked_at: "2026-02-20T02:00:00Z".to_string(),
         });
         update_trust_card(
+            &route_identity(),
+            &route_trace("trace-revoke"),
             &mut registry,
             "npm:@unit/revoked-route",
             revoke,
             2_001,
-            "trace-revoke",
         )
         .expect("revoke");
 
         let mut reactivate = empty_mutation();
         reactivate.revocation_status = Some(RevocationStatus::Active);
         let err = update_trust_card(
+            &route_identity(),
+            &route_trace("trace-reactivate-denied"),
             &mut registry,
             "npm:@unit/revoked-route",
             reactivate,
             2_002,
-            "trace-reactivate-denied",
         )
         .expect_err("revocation must be irreversible");
 
@@ -902,10 +1034,11 @@ mod tests {
         let mut registry = fixture_registry(1_000).expect("fixture registry");
 
         let err = list_trust_cards(
+            &route_identity(),
+            &route_trace("trace-zero-page-list"),
             &mut registry,
             &TrustCardListFilter::empty(),
             1_001,
-            "trace-zero-page-list",
             Pagination {
                 page: 0,
                 per_page: 10,
@@ -1032,10 +1165,11 @@ mod tests {
     fn update_route_rejects_gold_upgrade_with_empty_evidence_refs() {
         let mut registry = TrustCardRegistry::default();
         create_trust_card(
+            &route_identity(),
+            &route_trace("trace-create-upgrade-empty"),
             &mut registry,
             sample_input("npm:@unit/upgrade-empty-evidence"),
             2_000,
-            "trace-create-upgrade-empty",
         )
         .expect("create");
         let mut mutation = empty_mutation();
@@ -1043,11 +1177,12 @@ mod tests {
         mutation.evidence_refs = Some(Vec::new());
 
         let err = update_trust_card(
+            &route_identity(),
+            &route_trace("trace-upgrade-empty-evidence"),
             &mut registry,
             "npm:@unit/upgrade-empty-evidence",
             mutation,
             2_001,
-            "trace-upgrade-empty-evidence",
         )
         .expect_err("empty evidence refs must fail before upgrade");
 
@@ -1061,16 +1196,23 @@ mod tests {
         input.reputation_score_basis_points = 999;
         input.evidence_refs = Vec::new();
 
-        let err = create_trust_card(&mut registry, input, 2_000, "trace-high-rep-no-evidence")
-            .expect_err("high reputation cannot replace evidence refs");
+        let err = create_trust_card(
+            &route_identity(),
+            &route_trace("trace-high-rep-no-evidence"),
+            &mut registry,
+            input,
+            2_000,
+        )
+        .expect_err("high reputation cannot replace evidence refs");
 
         assert!(matches!(err, TrustCardError::EvidenceMissing));
         assert!(
             get_trust_card(
+                &route_identity(),
+                &route_trace("trace-read-high-rep-no-evidence"),
                 &mut registry,
                 "npm:@unit/high-rep-no-evidence",
                 2_001,
-                "trace-read-high-rep-no-evidence"
             )
             .expect("read rejected card")
             .data
@@ -1426,10 +1568,11 @@ mod tests {
         let mut registry = TrustCardRegistry::default();
 
         let err = list_trust_cards(
+            &route_identity(),
+            &route_trace("trace-empty-invalid-page"),
             &mut registry,
             &TrustCardListFilter::empty(),
             1_001,
-            "trace-empty-invalid-page",
             Pagination {
                 page: 0,
                 per_page: 20,

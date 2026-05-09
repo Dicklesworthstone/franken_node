@@ -5212,6 +5212,27 @@ fn trust_card_not_found_error(extension_id: &str) -> ActionableError {
     )
 }
 
+fn trust_card_cli_identity() -> AuthIdentity {
+    AuthIdentity {
+        principal: "cli-trust-card-operator".to_string(),
+        method: AuthMethod::BearerToken,
+        roles: vec![
+            "operator".to_string(),
+            "verifier".to_string(),
+            "reader".to_string(),
+            "trust-admin".to_string(),
+        ],
+    }
+}
+
+fn trust_card_cli_trace(trace_id: &str) -> TraceContext {
+    TraceContext {
+        trace_id: trace_id.to_string(),
+        span_id: "0000000000000001".to_string(),
+        trace_flags: 1,
+    }
+}
+
 fn registry_publish_signing_key_required_error(package_path: &Path) -> ActionableError {
     ActionableError::new(
         format!(
@@ -6244,9 +6265,7 @@ fn handle_doctor_evidence_readiness(
 }
 
 fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Result<()> {
-    use crate::ops::doctor::{
-        WorkspacePressureDoctor, generate_doctor_report_file, generate_human_report_file,
-    };
+    use crate::ops::doctor::WorkspacePressureDoctor;
     use crate::ops::workspace_pressure_policy::{
         PolicyThresholds, WorkspacePressureInputs, get_workspace_disk_space,
         get_workspace_file_reservations,
@@ -6255,12 +6274,15 @@ fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Resul
 
     // Collect current workspace pressure inputs
     let inputs = WorkspacePressureInputs {
-        free_disk_bytes: get_workspace_disk_space()?,
+        free_disk_bytes: get_workspace_disk_space()
+            .map_err(|err| anyhow::anyhow!("failed collecting workspace disk space: {err}"))?,
         target_dir_bytes: get_target_directory_size()?,
         active_build_count: get_active_build_count()?,
         rch_available_slots: get_rch_available_slots(),
         memory_pressure: get_memory_pressure()?,
-        active_reservations: get_workspace_file_reservations()?,
+        active_reservations: get_workspace_file_reservations().map_err(|err| {
+            anyhow::anyhow!("failed collecting workspace file reservations: {err}")
+        })?,
         coordination_healthy: get_coordination_health()?,
     };
 
@@ -6726,11 +6748,11 @@ fn latest_file_age_secs(dir: &Path) -> Option<u64> {
     }
 
     let modified = latest?;
-    // Use checked_duration_since to handle future timestamps fail-closed
+    // Use duration_since to handle future timestamps fail-closed
     // If file has future timestamp (clock skew), treat as very old to avoid bypass
     Some(
         SystemTime::now()
-            .checked_duration_since(modified)
+            .duration_since(modified)
             .unwrap_or(Duration::from_secs(u32::MAX as u64)) // Very large age = very stale
             .as_secs(),
     )
@@ -8378,18 +8400,14 @@ fn count_active_fleet_quarantines(fleet_state_dir: &Path) -> Result<u64> {
         if line.trim().is_empty() {
             continue;
         }
-        // Parse with depth limit to prevent JSON parser bomb DoS
-        let mut deserializer = serde_json::Deserializer::from_str(&line);
-        let record: PersistedFleetActionRecord = serde::Deserialize::deserialize(
-            &mut deserializer.recursion_limit(64),
-        )
-        .with_context(|| {
-            format!(
-                "failed parsing fleet action log {} line {}",
-                actions_path.display(),
-                line_index.saturating_add(1)
-            )
-        })?;
+        let record: PersistedFleetActionRecord =
+            serde_json::from_str(&line).with_context(|| {
+                format!(
+                    "failed parsing fleet action log {} line {}",
+                    actions_path.display(),
+                    line_index.saturating_add(1)
+                )
+            })?;
         match record.action {
             PersistedFleetAction::Quarantine { incident_id, .. } => {
                 active_incidents.insert(incident_id);
@@ -10062,8 +10080,8 @@ fn evaluate_workspace_inventory_pressure() -> (DoctorStatus, String, String) {
             let message = format!(
                 "Workspace inventory: ~{} artifacts, {:.1}MB protected, {:.1}MB disposable",
                 estimated_artifacts,
-                protected_bytes / 1024.0 / 1024.0,
-                disposable_bytes / 1024.0 / 1024.0
+                protected_bytes as f64 / 1024.0 / 1024.0,
+                disposable_bytes as f64 / 1024.0 / 1024.0
             );
 
             if disposable_bytes > 500 * 1024 * 1024 {
@@ -10218,7 +10236,7 @@ fn evaluate_active_reservations() -> (DoctorStatus, String, String) {
 
 fn estimate_workspace_artifacts() -> usize {
     // Simple estimate based on common artifact locations
-    let mut count = 0;
+    let mut count: usize = 0;
 
     if let Ok(entries) = std::fs::read_dir("target") {
         count = count.saturating_add(entries.count());
@@ -10239,7 +10257,7 @@ fn estimate_workspace_artifacts() -> usize {
 
 fn estimate_protected_bytes() -> u64 {
     // Estimate protected bytes (source code, configs, logs)
-    let mut total = 0;
+    let mut total: u64 = 0;
 
     // Source directories
     for dir in ["src", "crates", "tests", "docs", "scripts"] {
@@ -10253,7 +10271,7 @@ fn estimate_protected_bytes() -> u64 {
 
 fn estimate_disposable_bytes() -> u64 {
     // Estimate disposable bytes (target dirs, temp files)
-    let mut total = 0;
+    let mut total: u64 = 0;
 
     if let Ok(size) = calculate_directory_size("target") {
         total = total.saturating_add(size);
@@ -10276,7 +10294,7 @@ fn estimate_disposable_bytes() -> u64 {
 }
 
 fn count_target_directories() -> usize {
-    let mut count = 0;
+    let mut count: usize = 0;
 
     if std::path::Path::new("target").exists() {
         count = count.saturating_add(1);
@@ -10341,7 +10359,7 @@ fn calculate_directory_size<P: AsRef<std::path::Path>>(path: P) -> std::io::Resu
         return Ok(0);
     }
 
-    let mut total = 0;
+    let mut total: u64 = 0;
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
         let metadata = entry.metadata()?;
@@ -11079,17 +11097,17 @@ fn build_doctor_report_with_cwd_and_policy_input(
         || {
             // Check if we can create a basic resource governor observation
             let now = chrono::Utc::now();
-            match crate::local_runtime::resource_governor::ResourceGovernorObservation::new(
-                now,
-                "doctor-check".to_string(),
-                vec![], // Empty processes for check
-            ) {
-                observation => (
-                    DoctorStatus::Pass,
-                    "Resource governor monitoring is available and functional.".to_string(),
-                    "No action required - workspace pressure monitoring is ready.".to_string(),
-                ),
-            }
+            let _observation =
+                crate::local_runtime::resource_governor::ResourceGovernorObservation::new(
+                    now,
+                    "doctor-check".to_string(),
+                    vec![], // Empty processes for check
+                );
+            (
+                DoctorStatus::Pass,
+                "Resource governor monitoring is available and functional.".to_string(),
+                "No action required - workspace pressure monitoring is ready.".to_string(),
+            )
         },
     ));
 
@@ -15022,6 +15040,7 @@ fn collect_trust_scan_dependencies(project_root: &Path) -> Result<Vec<RunPackage
     })
 }
 
+#[cfg(feature = "http-client")]
 fn trust_scan_user_agent() -> String {
     format!("franken-node/{}", env!("CARGO_PKG_VERSION"))
 }
@@ -22339,21 +22358,12 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
             continue;
         }
 
-        // Parse with depth limit to prevent JSON parser bomb DoS
-        let mut deserializer = serde_json::Deserializer::from_str(&line);
-        let entry: EvidenceEntry =
-            serde::Deserialize::deserialize(&mut deserializer.recursion_limit(64))
-                .with_context(|| format!("Invalid JSON at line {}: {}", line_number, line))?;
+        let entry: EvidenceEntry = serde_json::from_str(&line)
+            .with_context(|| format!("Invalid JSON at line {}: {}", line_number, line))?;
 
         // Prevent memory exhaustion from unbounded collection growth
         const MAX_EVIDENCE_ENTRIES_PER_OPERATION: usize = 10_000;
-        crate::security::push_bounded(&mut entries, entry, MAX_EVIDENCE_ENTRIES_PER_OPERATION)
-            .with_context(|| {
-                format!(
-                    "Too many evidence entries (limit: {})",
-                    MAX_EVIDENCE_ENTRIES_PER_OPERATION
-                )
-            })?;
+        push_bounded(&mut entries, entry, MAX_EVIDENCE_ENTRIES_PER_OPERATION);
     }
 
     if entries.is_empty() {
@@ -22456,9 +22466,7 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
 }
 
 fn handle_verify_recovery_runbook(args: &VerifyRecoveryRunbookArgs) -> Result<()> {
-    use crate::ops::validation_readiness::{
-        ValidationReadinessInput, build_validation_readiness_report,
-    };
+    use crate::ops::validation_readiness::build_validation_readiness_report;
     use chrono::{DateTime, Utc};
 
     // Parse fixed timestamp if provided, otherwise use current time
@@ -22505,7 +22513,7 @@ fn handle_verify_recovery_runbook(args: &VerifyRecoveryRunbookArgs) -> Result<()
 fn generate_test_scenario(
     scenario: &str,
     timestamp: DateTime<Utc>,
-) -> Result<ValidationReadinessInput> {
+) -> Result<crate::ops::validation_readiness::ValidationReadinessInput> {
     use crate::ops::validation_broker::{
         DigestRef, FlightRecorderAdapterOutcomeClass, ProofEvidenceSource, ProofStatusKind,
         RchMode, TimeoutClass, ValidationErrorClass, ValidationExit, ValidationExitKind,
@@ -22745,7 +22753,7 @@ fn generate_test_scenario(
         _ => return Err(anyhow::anyhow!("Unknown scenario: {}", scenario)),
     };
 
-    Ok(ValidationReadinessInput {
+    Ok(crate::ops::validation_readiness::ValidationReadinessInput {
         schema_version: "franken-node/validation-readiness/input/v1".to_string(),
         tracked_beads: vec![],
         proof_statuses,
@@ -25575,12 +25583,19 @@ fn emit_verify_corpus(args: &VerifyCorpusArgs) -> i32 {
 fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
     let now_secs = now_unix_secs();
     let trace_id = "trace-cli-trust-card";
+    let identity = trust_card_cli_identity();
+    let trace = trust_card_cli_trace(trace_id);
 
     match command {
         TrustCardCommand::Show(args) => {
             let mut state = trust_card_cli_registry(now_secs)?;
-            let response =
-                get_trust_card(&mut state.registry, &args.extension_id, now_secs, trace_id)?;
+            let response = get_trust_card(
+                &identity,
+                &trace,
+                &mut state.registry,
+                &args.extension_id,
+                now_secs,
+            )?;
             let card = response
                 .data
                 .ok_or_else(|| trust_card_not_found_error(&args.extension_id))?;
@@ -25595,8 +25610,13 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
                 anyhow::bail!("`trust-card export` requires `--json`");
             }
             let mut state = trust_card_cli_registry(now_secs)?;
-            let response =
-                get_trust_card(&mut state.registry, &args.extension_id, now_secs, trace_id)?;
+            let response = get_trust_card(
+                &identity,
+                &trace,
+                &mut state.registry,
+                &args.extension_id,
+                now_secs,
+            )?;
             let card = response
                 .data
                 .ok_or_else(|| trust_card_not_found_error(&args.extension_id))?;
@@ -25620,10 +25640,11 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
                 )?
             } else {
                 list_trust_cards(
+                    &identity,
+                    &trace,
                     &mut state.registry,
                     &TrustCardListFilter::empty(),
                     now_secs,
-                    trace_id,
                     pagination,
                 )?
             };
@@ -25674,7 +25695,6 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
 fn handle_debug_trace(args: &DebugTraceArgs) -> Result<()> {
     use crate::cli::validate_user_content_pathbuf;
     use serde_json::Value;
-    use std::fs;
 
     // Validate paths
     let policy_path = validate_user_content_pathbuf(&args.policy)
@@ -25741,7 +25761,6 @@ fn handle_debug_explain(args: &DebugExplainArgs) -> Result<()> {
     use frankenengine_node::security::decision_receipt::{Receipt, signing_key_id};
     use serde::{Deserialize, Serialize};
     use sha2::{Digest, Sha256};
-    use std::fs;
 
     #[derive(Debug, Clone, Serialize)]
     struct ExplainStep {
@@ -26541,12 +26560,17 @@ fn main() -> Result<()> {
 
         Command::Trust(sub) => match sub {
             TrustCommand::Card(args) => {
-                let mut state = trust_card_cli_registry(now_unix_secs())?;
+                let now_secs = now_unix_secs();
+                let trace_id = "trace-cli-trust-card";
+                let identity = trust_card_cli_identity();
+                let trace = trust_card_cli_trace(trace_id);
+                let mut state = trust_card_cli_registry(now_secs)?;
                 let response = get_trust_card(
+                    &identity,
+                    &trace,
                     &mut state.registry,
                     &args.extension_id,
-                    now_unix_secs(),
-                    "trace-cli-trust-card",
+                    now_secs,
                 )?;
                 let card = response
                     .data
@@ -30066,7 +30090,7 @@ mod time_math_wraparound_tests {
 
     #[test]
     fn latest_file_age_secs_future_timestamp_bypass_prevention() {
-        // Test the checked_duration_since logic that prevents future timestamp bypass
+        // Test the duration_since logic that prevents future timestamp bypass
         // This test verifies the fix for bd-yqj79 (commit 5a7473ff)
 
         // Test the specific logic used in latest_file_age_secs
@@ -30075,10 +30099,10 @@ mod time_math_wraparound_tests {
 
         // This simulates what happens in latest_file_age_secs with a future file timestamp
         let age_duration = now
-            .checked_duration_since(future_time)
+            .duration_since(future_time)
             .unwrap_or(Duration::from_secs(u32::MAX as u64));
 
-        // With future timestamp, checked_duration_since returns None,
+        // With future timestamp, duration_since returns Err,
         // so we get the fallback Duration::from_secs(u32::MAX as u64)
         assert_eq!(
             age_duration.as_secs(),
@@ -30088,7 +30112,7 @@ mod time_math_wraparound_tests {
 
         // Verify the old vulnerable approach would have been different
         // OLD CODE: would use unwrap_or_default() → Duration::ZERO for future files
-        let old_vulnerable_approach = now.checked_duration_since(future_time).unwrap_or_default();
+        let old_vulnerable_approach = now.duration_since(future_time).unwrap_or_default();
         assert_eq!(
             old_vulnerable_approach.as_secs(),
             0,
@@ -30097,7 +30121,7 @@ mod time_math_wraparound_tests {
 
         // NEW CODE: uses unwrap_or(large_duration) → very large age for future files
         let new_secure_approach = now
-            .checked_duration_since(future_time)
+            .duration_since(future_time)
             .unwrap_or(Duration::from_secs(u32::MAX as u64));
         assert_eq!(
             new_secure_approach.as_secs(),
@@ -30124,7 +30148,7 @@ mod time_math_wraparound_tests {
 
             // Test the security logic from latest_file_age_secs
             let age_duration = now
-                .checked_duration_since(attacker_timestamp)
+                .duration_since(attacker_timestamp)
                 .unwrap_or(Duration::from_secs(u32::MAX as u64));
 
             assert_eq!(
@@ -30147,7 +30171,7 @@ mod time_math_wraparound_tests {
 
         // Test normal timestamp handling
         let normal_age = now
-            .checked_duration_since(past_time)
+            .duration_since(past_time)
             .unwrap_or(Duration::from_secs(u32::MAX as u64));
         assert_eq!(
             normal_age.as_secs(),
@@ -30157,7 +30181,7 @@ mod time_math_wraparound_tests {
 
         // Test future timestamp handling (attack scenario)
         let future_age = now
-            .checked_duration_since(future_time)
+            .duration_since(future_time)
             .unwrap_or(Duration::from_secs(u32::MAX as u64));
         assert_eq!(
             future_age.as_secs(),
@@ -30175,7 +30199,7 @@ mod time_math_wraparound_tests {
 
         // But when converting to age, future times get maximum age
         let latest_age = now
-            .checked_duration_since(latest_timestamp)
+            .duration_since(latest_timestamp)
             .unwrap_or(Duration::from_secs(u32::MAX as u64));
         assert_eq!(
             latest_age.as_secs(),
@@ -30270,17 +30294,17 @@ mod time_math_wraparound_tests {
         // Test 1: latest_file_age_secs future timestamp vulnerability fix
         let future_time = now + Duration::from_secs(86400); // 1 day future
 
-        // OLD VULNERABLE CODE pattern: checked_duration_since().unwrap_or_default()
-        let old_vulnerable_result = now.checked_duration_since(future_time).unwrap_or_default(); // Duration::ZERO
+        // OLD VULNERABLE CODE pattern: duration_since().unwrap_or_default()
+        let old_vulnerable_result = now.duration_since(future_time).unwrap_or_default(); // Duration::ZERO
         assert_eq!(
             old_vulnerable_result.as_secs(),
             0,
             "Old pattern would return 0 seconds (fresh file) - VULNERABLE"
         );
 
-        // NEW SECURE CODE pattern: checked_duration_since().unwrap_or(Duration::from_secs(u32::MAX))
+        // NEW SECURE CODE pattern: duration_since().unwrap_or(Duration::from_secs(u32::MAX))
         let new_secure_result = now
-            .checked_duration_since(future_time)
+            .duration_since(future_time)
             .unwrap_or(Duration::from_secs(u32::MAX as u64));
         assert_eq!(
             new_secure_result.as_secs(),
@@ -30324,7 +30348,7 @@ mod time_math_wraparound_tests {
         // Test 3: Normal cases should still work correctly
         let past_time = now - Duration::from_secs(3600); // 1 hour ago
         let normal_age = now
-            .checked_duration_since(past_time)
+            .duration_since(past_time)
             .unwrap_or(Duration::from_secs(u32::MAX as u64));
         assert_eq!(
             normal_age.as_secs(),
