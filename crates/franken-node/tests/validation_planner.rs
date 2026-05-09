@@ -1,6 +1,9 @@
 use frankenengine_node::ops::validation_planner::{
-    GateStrength, PlannedCommandKind, PlannerInput, VALIDATION_PLANNER_SCHEMA_VERSION,
-    parse_registered_tests_from_manifest, plan_validation,
+    GateStrength, PlannedCommandKind, PlannerInput, SIBLING_DRIFT_PREFLIGHT_SCHEMA_VERSION,
+    SiblingBlockerRef, SiblingBlockerStatus, SiblingDriftDecision, SiblingDriftDiagnosticSeverity,
+    SiblingDriftPreflightInput, SiblingRepoDriftInput, VALIDATION_PLANNER_SCHEMA_VERSION,
+    ValidationPlannerError, build_sibling_drift_preflight, parse_registered_tests_from_manifest,
+    plan_validation, sibling_drift_reason_codes,
 };
 use serde::Deserialize;
 
@@ -170,6 +173,257 @@ fn sibling_dependency_drift_escalates_to_package_check() {
         plan.escalation_conditions
             .iter()
             .any(|condition| condition.contains("sibling blocker bead"))
+    );
+}
+
+fn healthy_franken_engine() -> SiblingRepoDriftInput {
+    SiblingRepoDriftInput::new(
+        "franken_engine",
+        "/data/projects/franken_engine",
+        "/data/projects/franken_engine",
+        "/data/projects/franken_engine/Cargo.toml",
+    )
+    .with_head_sha("0123456789abcdef")
+    .with_dependency_paths(["/data/projects/franken_engine"])
+    .with_required_features(["asupersync-integration"])
+    .with_available_features(["asupersync-integration", "legacy_lib_tests_bd_2j7uk"])
+}
+
+#[test]
+fn sibling_drift_preflight_allows_healthy_side_by_side_checkout() {
+    let report = build_sibling_drift_preflight(SiblingDriftPreflightInput::new(
+        "/data/projects/franken_node",
+        [healthy_franken_engine()],
+    ))
+    .expect("healthy preflight should build");
+
+    assert_eq!(
+        report.schema_version,
+        SIBLING_DRIFT_PREFLIGHT_SCHEMA_VERSION
+    );
+    assert_eq!(report.decision, SiblingDriftDecision::AllowBroadValidation);
+    assert_eq!(
+        report.decision_reason_code,
+        sibling_drift_reason_codes::HEALTHY
+    );
+    assert!(report.diagnostics.is_empty());
+    assert_eq!(report.siblings[0].repo_id, "franken_engine");
+    assert_eq!(
+        report.siblings[0].head_sha.as_deref(),
+        Some("0123456789abcdef")
+    );
+}
+
+#[test]
+fn sibling_drift_preflight_blocks_missing_checkout() {
+    let report = build_sibling_drift_preflight(SiblingDriftPreflightInput::new(
+        "/data/projects/franken_node",
+        [healthy_franken_engine().missing()],
+    ))
+    .expect("missing checkout report should build");
+
+    assert_eq!(report.decision, SiblingDriftDecision::BlockBroadValidation);
+    assert!(report.blocks_broad_validation());
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.reason_code == sibling_drift_reason_codes::MISSING_CHECKOUT
+            && diagnostic.severity == SiblingDriftDiagnosticSeverity::Blocker
+    }));
+}
+
+#[test]
+fn sibling_drift_preflight_blocks_dirty_sibling_source() {
+    let report = build_sibling_drift_preflight(SiblingDriftPreflightInput::new(
+        "/data/projects/franken_node",
+        [healthy_franken_engine().with_dirty_paths([
+            "/data/projects/franken_engine/crates/franken-engine/src/lib.rs",
+            "/data/projects/franken_engine/Cargo.toml",
+        ])],
+    ))
+    .expect("dirty sibling report should build");
+
+    assert_eq!(report.decision, SiblingDriftDecision::BlockBroadValidation);
+    assert_eq!(
+        report.diagnostics[0].reason_code,
+        sibling_drift_reason_codes::DIRTY_SOURCE
+    );
+    assert_eq!(
+        report.siblings[0].dirty_paths,
+        vec![
+            "/data/projects/franken_engine/Cargo.toml",
+            "/data/projects/franken_engine/crates/franken-engine/src/lib.rs",
+        ]
+    );
+}
+
+#[test]
+fn sibling_drift_preflight_blocks_manifest_path_mismatch_and_feature_gap() {
+    let report = build_sibling_drift_preflight(SiblingDriftPreflightInput::new(
+        "/data/projects/franken_node",
+        [healthy_franken_engine()
+            .with_dependency_paths(["/tmp/stale/franken_engine"])
+            .with_required_features(["engine", "missing-feature"])
+            .with_available_features(["engine"])],
+    ))
+    .expect("mismatch report should build");
+
+    assert_eq!(report.decision, SiblingDriftDecision::BlockBroadValidation);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.reason_code == sibling_drift_reason_codes::MANIFEST_PATH_MISMATCH
+    }));
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.reason_code == sibling_drift_reason_codes::FEATURE_MISMATCH
+            && diagnostic.summary.contains("missing-feature")
+    }));
+}
+
+#[test]
+fn sibling_drift_preflight_rejects_invalid_feature_text() {
+    let err = build_sibling_drift_preflight(SiblingDriftPreflightInput::new(
+        "/data/projects/franken_node",
+        [healthy_franken_engine().with_required_features(["engine", "bad\0feature"])],
+    ))
+    .expect_err("invalid feature text should fail closed");
+
+    assert!(matches!(
+        err,
+        ValidationPlannerError::SiblingPreflightText {
+            field: "sibling.feature"
+        }
+    ));
+}
+
+#[test]
+fn sibling_drift_preflight_records_closed_blocker_without_blocking() {
+    let report = build_sibling_drift_preflight(
+        SiblingDriftPreflightInput::new("/data/projects/franken_node", [healthy_franken_engine()])
+            .with_known_blockers([SiblingBlockerRef::new(
+                "franken_engine",
+                "bd-v2bb1",
+                SiblingBlockerStatus::Closed,
+                "previous franken_engine compile drift is closed",
+            )]),
+    )
+    .expect("closed blocker report should build");
+
+    assert_eq!(report.decision, SiblingDriftDecision::AllowBroadValidation);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.reason_code == sibling_drift_reason_codes::CLOSED_BLOCKER
+            && diagnostic.severity == SiblingDriftDiagnosticSeverity::Info
+            && diagnostic.bead_id.as_deref() == Some("bd-v2bb1")
+    }));
+}
+
+#[test]
+fn sibling_drift_preflight_blocks_active_and_stale_blockers() {
+    let report = build_sibling_drift_preflight(
+        SiblingDriftPreflightInput::new("/data/projects/franken_node", [healthy_franken_engine()])
+            .with_known_blockers([
+                SiblingBlockerRef::new(
+                    "franken_engine",
+                    "bd-active",
+                    SiblingBlockerStatus::Active,
+                    "active sibling proof failure",
+                ),
+                SiblingBlockerRef::new(
+                    "franken_engine",
+                    "bd-stale",
+                    SiblingBlockerStatus::Stale,
+                    "stale blocker comment needs refresh",
+                ),
+            ]),
+    )
+    .expect("blocker report should build");
+
+    assert_eq!(report.decision, SiblingDriftDecision::BlockBroadValidation);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.reason_code == sibling_drift_reason_codes::ACTIVE_BLOCKER
+            && diagnostic.bead_id.as_deref() == Some("bd-active")
+    }));
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.reason_code == sibling_drift_reason_codes::STALE_BLOCKER
+            && diagnostic.bead_id.as_deref() == Some("bd-stale")
+    }));
+}
+
+#[test]
+fn sibling_drift_preflight_blocks_planner_broad_validation() {
+    let preflight = build_sibling_drift_preflight(
+        SiblingDriftPreflightInput::new("/data/projects/franken_node", [healthy_franken_engine()])
+            .with_known_blockers([SiblingBlockerRef::new(
+                "franken_engine",
+                "bd-active",
+                SiblingBlockerStatus::Active,
+                "active sibling proof failure",
+            )]),
+    )
+    .expect("preflight should build");
+    let plan = plan_validation(
+        &PlannerInput::new(
+            "bd-preflight",
+            ["crates/franken-node/src/runtime/resource_governor.rs"],
+            registered_tests(),
+        )
+        .with_sibling_preflight(preflight),
+    );
+
+    assert!(plan.source_only_allowed);
+    assert_eq!(plan.rch_commands().count(), 0);
+    assert!(plan.skipped_gates.iter().any(|gate| {
+        gate.gate == "rch cargo validation"
+            && gate
+                .reason
+                .contains(sibling_drift_reason_codes::ACTIVE_BLOCKER)
+    }));
+    assert!(plan.escalation_conditions.iter().any(|condition| {
+        condition.contains("resolve sibling drift SDP_ACTIVE_BLOCKER")
+            && condition.contains("franken_engine")
+    }));
+}
+
+#[test]
+fn sibling_drift_preflight_json_order_is_deterministic() {
+    let report = build_sibling_drift_preflight(
+        SiblingDriftPreflightInput::new(
+            "/data/projects/franken_node",
+            [
+                SiblingRepoDriftInput::new(
+                    "sqlmodel",
+                    "/data/projects/sqlmodel_rust",
+                    "/data/projects/sqlmodel_rust",
+                    "/data/projects/sqlmodel_rust/Cargo.toml",
+                )
+                .with_dependency_paths(["/data/projects/sqlmodel_rust"])
+                .with_dirty_paths([
+                    "/data/projects/sqlmodel_rust/z.rs",
+                    "/data/projects/sqlmodel_rust/a.rs",
+                ]),
+                healthy_franken_engine(),
+            ],
+        )
+        .with_known_blockers([
+            SiblingBlockerRef::new(
+                "sqlmodel",
+                "bd-z",
+                SiblingBlockerStatus::Closed,
+                "closed sqlmodel blocker",
+            ),
+            SiblingBlockerRef::new(
+                "franken_engine",
+                "bd-a",
+                SiblingBlockerStatus::Closed,
+                "closed franken_engine blocker",
+            ),
+        ]),
+    )
+    .expect("deterministic report should build");
+    let json = serde_json::to_string(&report).expect("report serializes");
+
+    let franken_index = json.find("\"repo_id\":\"franken_engine\"").unwrap();
+    let sqlmodel_index = json.find("\"repo_id\":\"sqlmodel\"").unwrap();
+    assert!(franken_index < sqlmodel_index);
+    assert!(
+        json.find("/data/projects/sqlmodel_rust/a.rs").unwrap()
+            < json.find("/data/projects/sqlmodel_rust/z.rs").unwrap()
     );
 }
 

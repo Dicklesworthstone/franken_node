@@ -10,6 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::push_bounded;
 
 pub const VALIDATION_PLANNER_SCHEMA_VERSION: &str = "franken-node/validation-planner/plan/v1";
+pub const SIBLING_DRIFT_PREFLIGHT_SCHEMA_VERSION: &str =
+    "franken-node/validation-planner/sibling-drift-preflight/v1";
 pub const DEFAULT_CARGO_TOOLCHAIN: &str = "nightly-2026-02-19";
 pub const DEFAULT_PACKAGE: &str = "frankenengine-node";
 pub const DEFAULT_WORKSPACE_ROOT: &str = "/data/projects/franken_node";
@@ -17,6 +19,24 @@ pub const DEFAULT_RCH_PRIORITY: &str = "low";
 
 /// Maximum skipped gates per validation plan to prevent DoS attacks.
 const MAX_SKIPPED_GATES: usize = 1_000;
+pub const MAX_SIBLING_PREFLIGHT_REPOS: usize = 32;
+pub const MAX_SIBLING_PREFLIGHT_BLOCKERS: usize = 128;
+pub const MAX_SIBLING_PREFLIGHT_DIAGNOSTICS: usize = 256;
+pub const MAX_SIBLING_PREFLIGHT_PATHS: usize = 512;
+pub const MAX_SIBLING_PREFLIGHT_FEATURES: usize = 128;
+pub const MAX_SIBLING_PREFLIGHT_PATH_BYTES: usize = 4_096;
+pub const MAX_SIBLING_PREFLIGHT_FIELD_BYTES: usize = 1_024;
+
+pub mod sibling_drift_reason_codes {
+    pub const HEALTHY: &str = "SDP_HEALTHY";
+    pub const MISSING_CHECKOUT: &str = "SDP_MISSING_CHECKOUT";
+    pub const DIRTY_SOURCE: &str = "SDP_DIRTY_SOURCE";
+    pub const MANIFEST_PATH_MISMATCH: &str = "SDP_MANIFEST_PATH_MISMATCH";
+    pub const FEATURE_MISMATCH: &str = "SDP_FEATURE_MISMATCH";
+    pub const ACTIVE_BLOCKER: &str = "SDP_ACTIVE_BLOCKER";
+    pub const CLOSED_BLOCKER: &str = "SDP_CLOSED_BLOCKER";
+    pub const STALE_BLOCKER: &str = "SDP_STALE_BLOCKER";
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredTest {
@@ -57,6 +77,8 @@ pub struct PlannerInput {
     pub package: String,
     pub cargo_toolchain: String,
     pub target_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sibling_preflight: Option<SiblingDriftPreflightReport>,
 }
 
 impl PlannerInput {
@@ -78,6 +100,7 @@ impl PlannerInput {
             workspace_root: DEFAULT_WORKSPACE_ROOT.to_string(),
             package: DEFAULT_PACKAGE.to_string(),
             cargo_toolchain: DEFAULT_CARGO_TOOLCHAIN.to_string(),
+            sibling_preflight: None,
         }
     }
 
@@ -90,6 +113,12 @@ impl PlannerInput {
     #[must_use]
     pub fn with_acceptance(mut self, acceptance: impl Into<String>) -> Self {
         self.acceptance = acceptance.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_sibling_preflight(mut self, preflight: SiblingDriftPreflightReport) -> Self {
+        self.sibling_preflight = Some(preflight);
         self
     }
 }
@@ -129,6 +158,233 @@ pub struct SkippedGate {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SiblingDriftDecision {
+    AllowBroadValidation,
+    TargetedSiblingValidation,
+    SourceOnly,
+    BlockBroadValidation,
+}
+
+impl SiblingDriftDecision {
+    #[must_use]
+    pub const fn blocks_broad_validation(self) -> bool {
+        matches!(
+            self,
+            Self::SourceOnly | Self::BlockBroadValidation | Self::TargetedSiblingValidation
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SiblingDriftDiagnosticSeverity {
+    Info,
+    Warning,
+    Blocker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SiblingBlockerStatus {
+    Active,
+    Closed,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiblingBlockerRef {
+    pub repo_id: String,
+    pub bead_id: String,
+    pub status: SiblingBlockerStatus,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at_utc: Option<String>,
+}
+
+impl SiblingBlockerRef {
+    #[must_use]
+    pub fn new(
+        repo_id: impl Into<String>,
+        bead_id: impl Into<String>,
+        status: SiblingBlockerStatus,
+        summary: impl Into<String>,
+    ) -> Self {
+        Self {
+            repo_id: repo_id.into(),
+            bead_id: bead_id.into(),
+            status,
+            summary: summary.into(),
+            updated_at_utc: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_updated_at_utc(mut self, updated_at_utc: impl Into<String>) -> Self {
+        self.updated_at_utc = Some(updated_at_utc.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiblingRepoDriftInput {
+    pub repo_id: String,
+    pub path: String,
+    pub expected_path: String,
+    pub manifest_path: String,
+    pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    pub dirty_paths: Vec<String>,
+    pub dependency_paths: Vec<String>,
+    pub required_features: Vec<String>,
+    pub available_features: Vec<String>,
+}
+
+impl SiblingRepoDriftInput {
+    #[must_use]
+    pub fn new(
+        repo_id: impl Into<String>,
+        path: impl Into<String>,
+        expected_path: impl Into<String>,
+        manifest_path: impl Into<String>,
+    ) -> Self {
+        Self {
+            repo_id: repo_id.into(),
+            path: path.into(),
+            expected_path: expected_path.into(),
+            manifest_path: manifest_path.into(),
+            exists: true,
+            head_sha: None,
+            dirty_paths: Vec::new(),
+            dependency_paths: Vec::new(),
+            required_features: Vec::new(),
+            available_features: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn missing(mut self) -> Self {
+        self.exists = false;
+        self
+    }
+
+    #[must_use]
+    pub fn with_head_sha(mut self, head_sha: impl Into<String>) -> Self {
+        self.head_sha = Some(head_sha.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_dirty_paths(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.dirty_paths = sorted_unique(paths);
+        self
+    }
+
+    #[must_use]
+    pub fn with_dependency_paths(
+        mut self,
+        paths: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.dependency_paths = sorted_unique(paths);
+        self
+    }
+
+    #[must_use]
+    pub fn with_required_features(
+        mut self,
+        features: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.required_features = sorted_unique(features);
+        self
+    }
+
+    #[must_use]
+    pub fn with_available_features(
+        mut self,
+        features: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.available_features = sorted_unique(features);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiblingRepoDrift {
+    pub repo_id: String,
+    pub path: String,
+    pub expected_path: String,
+    pub manifest_path: String,
+    pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    pub dirty_paths: Vec<String>,
+    pub dependency_paths: Vec<String>,
+    pub required_features: Vec<String>,
+    pub available_features: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiblingDriftDiagnostic {
+    pub repo_id: String,
+    pub reason_code: String,
+    pub severity: SiblingDriftDiagnosticSeverity,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bead_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiblingDriftPreflightInput {
+    pub workspace_root: String,
+    pub siblings: Vec<SiblingRepoDriftInput>,
+    pub known_blockers: Vec<SiblingBlockerRef>,
+}
+
+impl SiblingDriftPreflightInput {
+    #[must_use]
+    pub fn new(
+        workspace_root: impl Into<String>,
+        siblings: impl IntoIterator<Item = SiblingRepoDriftInput>,
+    ) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+            siblings: siblings.into_iter().collect(),
+            known_blockers: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_known_blockers(
+        mut self,
+        blockers: impl IntoIterator<Item = SiblingBlockerRef>,
+    ) -> Self {
+        self.known_blockers = blockers.into_iter().collect();
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiblingDriftPreflightReport {
+    pub schema_version: String,
+    pub workspace_root: String,
+    pub decision: SiblingDriftDecision,
+    pub decision_reason_code: String,
+    pub siblings: Vec<SiblingRepoDrift>,
+    pub known_blockers: Vec<SiblingBlockerRef>,
+    pub diagnostics: Vec<SiblingDriftDiagnostic>,
+    pub br_comment_markdown: String,
+    pub agent_mail_markdown: String,
+}
+
+impl SiblingDriftPreflightReport {
+    #[must_use]
+    pub fn blocks_broad_validation(&self) -> bool {
+        self.decision.blocks_broad_validation()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationPlan {
     pub schema_version: String,
@@ -162,6 +418,10 @@ pub enum ValidationPlannerError {
     ManifestToml(#[from] toml::de::Error),
     #[error("Cargo manifest [[test]] entry is missing string name or path at index {index}")]
     InvalidTestEntry { index: usize },
+    #[error("sibling drift preflight field {field} exceeded a bounded limit")]
+    SiblingPreflightLimit { field: &'static str },
+    #[error("sibling drift preflight field {field} contains invalid text")]
+    SiblingPreflightText { field: &'static str },
 }
 
 pub fn parse_registered_tests_from_manifest(
@@ -195,6 +455,85 @@ pub fn parse_registered_tests_from_manifest(
     Ok(parsed)
 }
 
+pub fn build_sibling_drift_preflight(
+    input: SiblingDriftPreflightInput,
+) -> Result<SiblingDriftPreflightReport, ValidationPlannerError> {
+    validate_sibling_preflight_string(
+        "workspace_root",
+        &input.workspace_root,
+        MAX_SIBLING_PREFLIGHT_PATH_BYTES,
+    )?;
+    validate_sibling_preflight_len(
+        "siblings",
+        input.siblings.len(),
+        MAX_SIBLING_PREFLIGHT_REPOS,
+    )?;
+    validate_sibling_preflight_len(
+        "known_blockers",
+        input.known_blockers.len(),
+        MAX_SIBLING_PREFLIGHT_BLOCKERS,
+    )?;
+
+    let mut diagnostics = Vec::new();
+    let mut siblings = Vec::with_capacity(input.siblings.len());
+    for sibling in input.siblings {
+        let sibling = normalize_sibling_input(sibling)?;
+        append_sibling_drift_diagnostics(&sibling, &mut diagnostics)?;
+        siblings.push(sibling);
+    }
+    siblings.sort_by(|left, right| {
+        left.repo_id
+            .cmp(&right.repo_id)
+            .then(left.path.cmp(&right.path))
+    });
+
+    let mut known_blockers = input
+        .known_blockers
+        .into_iter()
+        .map(normalize_blocker_ref)
+        .collect::<Result<Vec<_>, _>>()?;
+    known_blockers.sort_by(|left, right| {
+        left.repo_id
+            .cmp(&right.repo_id)
+            .then(left.bead_id.cmp(&right.bead_id))
+    });
+    for blocker in &known_blockers {
+        append_blocker_diagnostic(blocker, &mut diagnostics)?;
+    }
+
+    diagnostics.sort_by(|left, right| {
+        left.severity
+            .cmp(&right.severity)
+            .then(left.repo_id.cmp(&right.repo_id))
+            .then(left.reason_code.cmp(&right.reason_code))
+            .then(left.summary.cmp(&right.summary))
+            .then(left.bead_id.cmp(&right.bead_id))
+    });
+    diagnostics.dedup_by(|left, right| {
+        left.repo_id == right.repo_id
+            && left.reason_code == right.reason_code
+            && left.summary == right.summary
+            && left.bead_id == right.bead_id
+    });
+
+    let decision = sibling_preflight_decision(&diagnostics);
+    let decision_reason_code = sibling_preflight_decision_reason(decision, &diagnostics);
+    let br_comment_markdown =
+        render_sibling_preflight_markdown(decision, &decision_reason_code, &diagnostics);
+
+    Ok(SiblingDriftPreflightReport {
+        schema_version: SIBLING_DRIFT_PREFLIGHT_SCHEMA_VERSION.to_string(),
+        workspace_root: normalize_path(input.workspace_root),
+        decision,
+        decision_reason_code: decision_reason_code.clone(),
+        siblings,
+        known_blockers,
+        diagnostics,
+        agent_mail_markdown: br_comment_markdown.clone(),
+        br_comment_markdown,
+    })
+}
+
 #[must_use]
 pub fn plan_validation(input: &PlannerInput) -> ValidationPlan {
     let changed_paths = sorted_unique(input.changed_paths.clone());
@@ -210,6 +549,30 @@ pub fn plan_validation(input: &PlannerInput) -> ValidationPlan {
     }
 
     builder.add_git_diff_check();
+
+    if let Some(preflight) = &input.sibling_preflight {
+        builder.add_sibling_preflight(preflight);
+        if preflight.blocks_broad_validation() {
+            builder.add_skipped_gate(
+                "rch cargo validation",
+                format!(
+                    "sibling drift preflight {} blocks broad validation",
+                    preflight.decision_reason_code
+                ),
+            );
+            for diagnostic in preflight
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.severity == SiblingDriftDiagnosticSeverity::Blocker)
+            {
+                builder.add_escalation(format!(
+                    "resolve sibling drift {} for {} before broad validation",
+                    diagnostic.reason_code, diagnostic.repo_id
+                ));
+            }
+            return builder.finish(true);
+        }
+    }
 
     let has_rust = changed_paths.iter().any(|path| path.ends_with(".rs"));
     let has_manifest = changed_paths
@@ -438,6 +801,20 @@ impl<'a> PlanBuilder<'a> {
                 .to_string(),
             covers: self.changed_paths.clone(),
         });
+    }
+
+    fn add_sibling_preflight(&mut self, preflight: &SiblingDriftPreflightReport) {
+        self.add_skipped_gate(
+            "sibling drift preflight",
+            format!(
+                "{} produced {} diagnostics",
+                preflight.decision_reason_code,
+                preflight.diagnostics.len()
+            ),
+        );
+        if preflight.decision == SiblingDriftDecision::TargetedSiblingValidation {
+            self.add_escalation("run targeted sibling validation before broad local proof");
+        }
     }
 
     fn add_proof_cache_lookup(&mut self) {
@@ -669,6 +1046,350 @@ fn is_sibling_dependency_path(path: &str) -> bool {
     path.starts_with("../franken_engine/")
         || path.starts_with("/data/projects/franken_engine/")
         || path.starts_with("franken_engine/")
+}
+
+fn normalize_sibling_input(
+    input: SiblingRepoDriftInput,
+) -> Result<SiblingRepoDrift, ValidationPlannerError> {
+    validate_sibling_preflight_string(
+        "sibling.repo_id",
+        &input.repo_id,
+        MAX_SIBLING_PREFLIGHT_FIELD_BYTES,
+    )?;
+    validate_sibling_preflight_string(
+        "sibling.path",
+        &input.path,
+        MAX_SIBLING_PREFLIGHT_PATH_BYTES,
+    )?;
+    validate_sibling_preflight_string(
+        "sibling.expected_path",
+        &input.expected_path,
+        MAX_SIBLING_PREFLIGHT_PATH_BYTES,
+    )?;
+    validate_sibling_preflight_string(
+        "sibling.manifest_path",
+        &input.manifest_path,
+        MAX_SIBLING_PREFLIGHT_PATH_BYTES,
+    )?;
+    validate_optional_sibling_preflight_string(
+        "sibling.head_sha",
+        input.head_sha.as_deref(),
+        MAX_SIBLING_PREFLIGHT_FIELD_BYTES,
+    )?;
+    validate_sibling_preflight_len(
+        "sibling.dirty_paths",
+        input.dirty_paths.len(),
+        MAX_SIBLING_PREFLIGHT_PATHS,
+    )?;
+    validate_sibling_preflight_len(
+        "sibling.dependency_paths",
+        input.dependency_paths.len(),
+        MAX_SIBLING_PREFLIGHT_PATHS,
+    )?;
+    validate_sibling_preflight_len(
+        "sibling.required_features",
+        input.required_features.len(),
+        MAX_SIBLING_PREFLIGHT_FEATURES,
+    )?;
+    validate_sibling_preflight_len(
+        "sibling.available_features",
+        input.available_features.len(),
+        MAX_SIBLING_PREFLIGHT_FEATURES,
+    )?;
+
+    Ok(SiblingRepoDrift {
+        repo_id: input.repo_id,
+        path: normalize_path(input.path),
+        expected_path: normalize_path(input.expected_path),
+        manifest_path: normalize_path(input.manifest_path),
+        exists: input.exists,
+        head_sha: input.head_sha,
+        dirty_paths: normalize_sibling_paths(input.dirty_paths)?,
+        dependency_paths: normalize_sibling_paths(input.dependency_paths)?,
+        required_features: normalize_sibling_features(input.required_features)?,
+        available_features: normalize_sibling_features(input.available_features)?,
+    })
+}
+
+fn normalize_blocker_ref(
+    blocker: SiblingBlockerRef,
+) -> Result<SiblingBlockerRef, ValidationPlannerError> {
+    validate_sibling_preflight_string(
+        "blocker.repo_id",
+        &blocker.repo_id,
+        MAX_SIBLING_PREFLIGHT_FIELD_BYTES,
+    )?;
+    validate_sibling_preflight_string(
+        "blocker.bead_id",
+        &blocker.bead_id,
+        MAX_SIBLING_PREFLIGHT_FIELD_BYTES,
+    )?;
+    validate_sibling_preflight_string(
+        "blocker.summary",
+        &blocker.summary,
+        MAX_SIBLING_PREFLIGHT_FIELD_BYTES,
+    )?;
+    validate_optional_sibling_preflight_string(
+        "blocker.updated_at_utc",
+        blocker.updated_at_utc.as_deref(),
+        MAX_SIBLING_PREFLIGHT_FIELD_BYTES,
+    )?;
+    Ok(SiblingBlockerRef {
+        repo_id: blocker.repo_id,
+        bead_id: blocker.bead_id,
+        status: blocker.status,
+        summary: blocker.summary,
+        updated_at_utc: blocker.updated_at_utc,
+    })
+}
+
+fn normalize_sibling_paths(paths: Vec<String>) -> Result<Vec<String>, ValidationPlannerError> {
+    paths
+        .into_iter()
+        .map(|path| {
+            validate_sibling_preflight_string(
+                "sibling.path_list",
+                &path,
+                MAX_SIBLING_PREFLIGHT_PATH_BYTES,
+            )?;
+            Ok(normalize_path(path))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map(|set| set.into_iter().collect())
+}
+
+fn normalize_sibling_features(
+    features: Vec<String>,
+) -> Result<Vec<String>, ValidationPlannerError> {
+    features
+        .into_iter()
+        .map(|feature| {
+            validate_sibling_preflight_string(
+                "sibling.feature",
+                &feature,
+                MAX_SIBLING_PREFLIGHT_FIELD_BYTES,
+            )?;
+            Ok(feature)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map(|set| set.into_iter().collect())
+}
+
+fn append_sibling_drift_diagnostics(
+    sibling: &SiblingRepoDrift,
+    diagnostics: &mut Vec<SiblingDriftDiagnostic>,
+) -> Result<(), ValidationPlannerError> {
+    if !sibling.exists {
+        push_sibling_diagnostic(
+            diagnostics,
+            SiblingDriftDiagnostic {
+                repo_id: sibling.repo_id.clone(),
+                reason_code: sibling_drift_reason_codes::MISSING_CHECKOUT.to_string(),
+                severity: SiblingDriftDiagnosticSeverity::Blocker,
+                summary: format!("sibling checkout {} is missing", sibling.path),
+                bead_id: None,
+            },
+        )?;
+    }
+
+    if !sibling.dirty_paths.is_empty() {
+        push_sibling_diagnostic(
+            diagnostics,
+            SiblingDriftDiagnostic {
+                repo_id: sibling.repo_id.clone(),
+                reason_code: sibling_drift_reason_codes::DIRTY_SOURCE.to_string(),
+                severity: SiblingDriftDiagnosticSeverity::Blocker,
+                summary: format!(
+                    "sibling checkout has dirty source: {}",
+                    sibling.dirty_paths.join(",")
+                ),
+                bead_id: None,
+            },
+        )?;
+    }
+
+    for dependency_path in &sibling.dependency_paths {
+        if dependency_path != &sibling.expected_path {
+            push_sibling_diagnostic(
+                diagnostics,
+                SiblingDriftDiagnostic {
+                    repo_id: sibling.repo_id.clone(),
+                    reason_code: sibling_drift_reason_codes::MANIFEST_PATH_MISMATCH.to_string(),
+                    severity: SiblingDriftDiagnosticSeverity::Blocker,
+                    summary: format!(
+                        "manifest dependency path {dependency_path} does not match expected {}",
+                        sibling.expected_path
+                    ),
+                    bead_id: None,
+                },
+            )?;
+        }
+    }
+
+    let available = sibling
+        .available_features
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let missing_features = sibling
+        .required_features
+        .iter()
+        .filter(|feature| !available.contains(*feature))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_features.is_empty() {
+        push_sibling_diagnostic(
+            diagnostics,
+            SiblingDriftDiagnostic {
+                repo_id: sibling.repo_id.clone(),
+                reason_code: sibling_drift_reason_codes::FEATURE_MISMATCH.to_string(),
+                severity: SiblingDriftDiagnosticSeverity::Blocker,
+                summary: format!("missing sibling features: {}", missing_features.join(",")),
+                bead_id: None,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+fn append_blocker_diagnostic(
+    blocker: &SiblingBlockerRef,
+    diagnostics: &mut Vec<SiblingDriftDiagnostic>,
+) -> Result<(), ValidationPlannerError> {
+    let (reason_code, severity) = match blocker.status {
+        SiblingBlockerStatus::Active => (
+            sibling_drift_reason_codes::ACTIVE_BLOCKER,
+            SiblingDriftDiagnosticSeverity::Blocker,
+        ),
+        SiblingBlockerStatus::Closed => (
+            sibling_drift_reason_codes::CLOSED_BLOCKER,
+            SiblingDriftDiagnosticSeverity::Info,
+        ),
+        SiblingBlockerStatus::Stale => (
+            sibling_drift_reason_codes::STALE_BLOCKER,
+            SiblingDriftDiagnosticSeverity::Blocker,
+        ),
+    };
+
+    push_sibling_diagnostic(
+        diagnostics,
+        SiblingDriftDiagnostic {
+            repo_id: blocker.repo_id.clone(),
+            reason_code: reason_code.to_string(),
+            severity,
+            summary: blocker.summary.clone(),
+            bead_id: Some(blocker.bead_id.clone()),
+        },
+    )
+}
+
+fn push_sibling_diagnostic(
+    diagnostics: &mut Vec<SiblingDriftDiagnostic>,
+    diagnostic: SiblingDriftDiagnostic,
+) -> Result<(), ValidationPlannerError> {
+    if diagnostics.len() >= MAX_SIBLING_PREFLIGHT_DIAGNOSTICS {
+        return Err(ValidationPlannerError::SiblingPreflightLimit {
+            field: "diagnostics",
+        });
+    }
+    diagnostics.push(diagnostic);
+    Ok(())
+}
+
+fn sibling_preflight_decision(diagnostics: &[SiblingDriftDiagnostic]) -> SiblingDriftDecision {
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == SiblingDriftDiagnosticSeverity::Blocker)
+    {
+        return SiblingDriftDecision::BlockBroadValidation;
+    }
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == SiblingDriftDiagnosticSeverity::Warning)
+    {
+        return SiblingDriftDecision::TargetedSiblingValidation;
+    }
+    SiblingDriftDecision::AllowBroadValidation
+}
+
+fn sibling_preflight_decision_reason(
+    decision: SiblingDriftDecision,
+    diagnostics: &[SiblingDriftDiagnostic],
+) -> String {
+    match decision {
+        SiblingDriftDecision::AllowBroadValidation => {
+            sibling_drift_reason_codes::HEALTHY.to_string()
+        }
+        SiblingDriftDecision::TargetedSiblingValidation => {
+            sibling_drift_reason_codes::DIRTY_SOURCE.to_string()
+        }
+        SiblingDriftDecision::SourceOnly => sibling_drift_reason_codes::DIRTY_SOURCE.to_string(),
+        SiblingDriftDecision::BlockBroadValidation => diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.severity == SiblingDriftDiagnosticSeverity::Blocker)
+            .map(|diagnostic| diagnostic.reason_code.clone())
+            .unwrap_or_else(|| sibling_drift_reason_codes::ACTIVE_BLOCKER.to_string()),
+    }
+}
+
+fn render_sibling_preflight_markdown(
+    decision: SiblingDriftDecision,
+    decision_reason_code: &str,
+    diagnostics: &[SiblingDriftDiagnostic],
+) -> String {
+    let mut lines = vec![format!(
+        "Sibling drift preflight: {:?} ({decision_reason_code})",
+        decision
+    )];
+    for diagnostic in diagnostics {
+        let bead = diagnostic
+            .bead_id
+            .as_ref()
+            .map(|bead_id| format!(" {bead_id}"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "- {} {}{}: {}",
+            diagnostic.repo_id, diagnostic.reason_code, bead, diagnostic.summary
+        ));
+    }
+    lines.join("\n")
+}
+
+fn validate_sibling_preflight_len(
+    field: &'static str,
+    len: usize,
+    max: usize,
+) -> Result<(), ValidationPlannerError> {
+    if len > max {
+        return Err(ValidationPlannerError::SiblingPreflightLimit { field });
+    }
+    Ok(())
+}
+
+fn validate_optional_sibling_preflight_string(
+    field: &'static str,
+    value: Option<&str>,
+    max_bytes: usize,
+) -> Result<(), ValidationPlannerError> {
+    if let Some(value) = value {
+        validate_sibling_preflight_string(field, value, max_bytes)?;
+    }
+    Ok(())
+}
+
+fn validate_sibling_preflight_string(
+    field: &'static str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), ValidationPlannerError> {
+    if value.len() > max_bytes {
+        return Err(ValidationPlannerError::SiblingPreflightLimit { field });
+    }
+    if value.contains('\0') {
+        return Err(ValidationPlannerError::SiblingPreflightText { field });
+    }
+    Ok(())
 }
 
 fn default_target_dir(bead_id: &str) -> String {
