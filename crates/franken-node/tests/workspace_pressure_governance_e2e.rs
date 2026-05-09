@@ -1,7 +1,10 @@
 use assert_cmd::Command;
 use frankenengine_node::ops::workspace_pressure_policy::{
-    AdmissionDecision, PolicyDecision, WorkCostClass, WorkspacePressureInputs,
-    WorkspacePressurePolicy,
+    AGENT_COMMAND_LEDGER_SCHEMA_VERSION, AdmissionDecision, AgentCommandBudgetEntry,
+    AgentCommandBudgetLedger, AgentCommandCostClass, AgentCommandExecutionPolicy,
+    AgentCommandFamily, AgentCommandLedgerError, AgentCommandPolicyViolation,
+    AgentCommandValidationOutcome, MAX_AGENT_COMMAND_LEDGER_ENTRIES, PolicyDecision, WorkCostClass,
+    WorkspacePressureInputs, WorkspacePressurePolicy, render_agent_command_ledger_human,
 };
 use frankenengine_node::runtime::resource_governor::{
     ResourceArtifactInventory, ResourceArtifactInventoryEntry, ResourceArtifactKind,
@@ -220,7 +223,7 @@ fn cli_subprocess_reads_real_snapshot_artifact_inventory() {
 }
 
 #[test]
-fn workspace_pressure_policy_decision_golden_matches_real_policy() {
+fn workspace_pressure_policy_decision_golden_matches_real_policy() -> std::io::Result<()> {
     let actual = build_policy_decision_golden();
     let mut actual_text =
         serde_json::to_string_pretty(&actual).expect("policy golden should serialize");
@@ -228,22 +231,225 @@ fn workspace_pressure_policy_decision_golden_matches_real_policy() {
     let golden_path = policy_decision_golden_path();
 
     if std::env::var_os("UPDATE_GOLDENS").is_some() {
-        fs::write(&golden_path, actual_text).expect("update policy decision golden");
-        return;
+        fs::write(&golden_path, actual_text)?;
+        return Ok(());
     }
 
-    let expected_text = fs::read_to_string(&golden_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read workspace pressure policy golden at {}: {err}. \
+    let expected_text = fs::read_to_string(&golden_path).map_err(|err| {
+        std::io::Error::new(
+            err.kind(),
+            format!(
+                "failed to read workspace pressure policy golden at {}: {err}. \
              Run with UPDATE_GOLDENS=1 to create it.",
-            golden_path.display()
+                golden_path.display()
+            ),
         )
     });
+    let expected_text = expected_text?;
     assert_eq!(
         expected_text, actual_text,
         "workspace pressure policy golden drifted from the real policy implementation; \
          rerun this test with UPDATE_GOLDENS=1 only after reviewing the diff"
     );
+    Ok(())
+}
+
+#[test]
+fn agent_command_budget_ledger_empty_and_entry_cap_are_stable() {
+    let empty = AgentCommandBudgetLedger::try_new(
+        "session-empty",
+        "CalmSnow",
+        Some("bd-38hez.4".to_string()),
+        Vec::new(),
+    )
+    .expect("empty ledger should validate");
+
+    assert_eq!(empty.schema_version, AGENT_COMMAND_LEDGER_SCHEMA_VERSION);
+    assert_eq!(empty.summary.command_count, 0);
+    assert_eq!(empty.summary.policy_violation_count, 0);
+
+    let encoded = serde_json::to_value(&empty).expect("ledger should serialize");
+    assert_eq!(
+        encoded["schema_version"],
+        "franken-node/agent-command-ledger/v1"
+    );
+    assert_eq!(encoded["summary"]["command_count"], 0);
+
+    let entries = (0..=MAX_AGENT_COMMAND_LEDGER_ENTRIES)
+        .map(|idx| {
+            AgentCommandBudgetEntry::new(
+                format!("cmd-{idx}"),
+                AgentCommandFamily::SourceOnly,
+                AgentCommandCostClass::SourceOnly,
+                AgentCommandExecutionPolicy::SourceOnly,
+                "ubs crates/franken-node/src/ops/workspace_pressure_policy.rs",
+            )
+        })
+        .collect();
+
+    let err = AgentCommandBudgetLedger::try_new("session-cap", "CalmSnow", None, entries)
+        .expect_err("entry cap should fail closed");
+
+    assert_eq!(
+        err,
+        AgentCommandLedgerError::TooManyEntries {
+            count: MAX_AGENT_COMMAND_LEDGER_ENTRIES + 1,
+            max: MAX_AGENT_COMMAND_LEDGER_ENTRIES
+        }
+    );
+}
+
+#[test]
+fn agent_command_budget_ledger_flags_bare_cargo_and_preserves_rch_proof() {
+    let bare_cargo = AgentCommandBudgetEntry::new(
+        "cmd-bare-cargo",
+        AgentCommandFamily::Cargo,
+        AgentCommandCostClass::LocalCpuSensitive,
+        AgentCommandExecutionPolicy::LocalAllowed,
+        "cargo test -p frankenengine-node",
+    )
+    .with_touched_paths(["crates/franken-node/src/lib.rs"]);
+
+    let bare_ledger = AgentCommandBudgetLedger::try_new(
+        "session-bare-cargo",
+        "CalmSnow",
+        Some("bd-38hez.4".to_string()),
+        vec![bare_cargo],
+    )
+    .expect("bare cargo ledger should validate with derived violations");
+
+    let bare_entry = bare_ledger.entries.first().expect("bare cargo entry");
+    assert!(
+        bare_entry
+            .violations
+            .contains(&AgentCommandPolicyViolation::BareCargo)
+    );
+    assert!(
+        bare_entry
+            .violations
+            .contains(&AgentCommandPolicyViolation::MissingRchForCargo)
+    );
+    assert!(
+        bare_entry
+            .violations
+            .contains(&AgentCommandPolicyViolation::UnreservedCodeEdit)
+    );
+    assert_eq!(bare_ledger.summary.commands_with_violations, 1);
+    assert_eq!(bare_ledger.summary.policy_violation_count, 3);
+
+    let rch_proof = AgentCommandBudgetEntry::new(
+        "cmd-rch-cargo",
+        AgentCommandFamily::Cargo,
+        AgentCommandCostClass::RchRemote,
+        AgentCommandExecutionPolicy::RchRequired,
+        "rch exec -- cargo test -p frankenengine-node validation_planner",
+    )
+    .with_elapsed_ms(42_000)
+    .with_target_dir(".rch-target-vmi1167313-job")
+    .with_touched_paths(["crates/franken-node/src/ops/workspace_pressure_policy.rs"])
+    .with_reservation_refs(["agent-mail-reservation-17248"])
+    .with_evidence_links(["rch://29833915539653001"])
+    .with_validation_outcome(AgentCommandValidationOutcome::Passed);
+
+    let rch_ledger = AgentCommandBudgetLedger::try_new(
+        "session-rch",
+        "CalmSnow",
+        Some("bd-38hez.4".to_string()),
+        vec![rch_proof],
+    )
+    .expect("rch proof ledger should validate");
+
+    assert!(
+        rch_ledger
+            .entries
+            .first()
+            .expect("rch entry")
+            .violations
+            .is_empty()
+    );
+    assert_eq!(rch_ledger.summary.rch_submissions, 1);
+    assert_eq!(rch_ledger.summary.validation_passed, 1);
+    assert_eq!(rch_ledger.summary.policy_violation_count, 0);
+}
+
+#[test]
+fn agent_command_budget_ledger_allows_source_only_and_redacts_protected_values() {
+    let source_only = AgentCommandBudgetEntry::new(
+        "cmd-ubs",
+        AgentCommandFamily::Ubs,
+        AgentCommandCostClass::SourceOnly,
+        AgentCommandExecutionPolicy::SourceOnly,
+        "UBS_SKIP_RUST_BUILD=1 ubs crates/franken-node/src/ops/workspace_pressure_policy.rs",
+    )
+    .with_touched_paths(["docs/specs/validation_closeout.md"])
+    .with_validation_outcome(AgentCommandValidationOutcome::Passed);
+
+    let source_ledger =
+        AgentCommandBudgetLedger::try_new("session-source", "CalmSnow", None, vec![source_only])
+            .expect("source-only ledger should validate");
+
+    assert!(
+        source_ledger
+            .entries
+            .first()
+            .expect("source-only entry")
+            .violations
+            .is_empty()
+    );
+    assert_eq!(source_ledger.summary.command_count, 1);
+    assert_eq!(source_ledger.summary.validation_passed, 1);
+
+    let secret_command = AgentCommandBudgetEntry::new(
+        "cmd-redact",
+        AgentCommandFamily::AgentMail,
+        AgentCommandCostClass::Coordination,
+        AgentCommandExecutionPolicy::CoordinationOnly,
+        "send_message SECRET_TOKEN=raw --password hunter2 --api-key=abcdef",
+    );
+
+    let redacted =
+        AgentCommandBudgetLedger::try_new("session-redact", "CalmSnow", None, vec![secret_command])
+            .expect("redacted ledger should validate");
+    let summary = &redacted
+        .entries
+        .first()
+        .expect("redacted entry")
+        .command_summary;
+
+    assert!(!summary.contains("raw"));
+    assert!(!summary.contains("hunter2"));
+    assert!(!summary.contains("abcdef"));
+    assert!(summary.contains("SECRET_TOKEN=<redacted>"));
+    assert!(summary.contains("--password <redacted>"));
+    assert!(summary.contains("--api-key=<redacted>"));
+}
+
+#[test]
+fn agent_command_budget_ledger_human_summary_is_stable() {
+    let ledger = AgentCommandBudgetLedger::try_new(
+        "session-human",
+        "CalmSnow",
+        Some("bd-38hez.4".to_string()),
+        vec![
+            AgentCommandBudgetEntry::new(
+                "cmd-human",
+                AgentCommandFamily::Cargo,
+                AgentCommandCostClass::LocalCpuSensitive,
+                AgentCommandExecutionPolicy::LocalAllowed,
+                "cargo test -p frankenengine-node",
+            )
+            .with_touched_paths(["crates/franken-node/src/lib.rs"]),
+        ],
+    )
+    .expect("ledger should validate");
+
+    let rendered = render_agent_command_ledger_human(&ledger);
+
+    assert!(rendered.contains("session=session-human"));
+    assert!(rendered.contains("agent=CalmSnow"));
+    assert!(rendered.contains("bead=bd-38hez.4"));
+    assert!(rendered.contains("commands=1"));
+    assert!(rendered.contains("policy_violations=3"));
 }
 
 struct RealWorkspace {

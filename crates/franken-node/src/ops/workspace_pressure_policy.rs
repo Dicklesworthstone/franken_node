@@ -4,7 +4,7 @@
 //! candidates based on workspace pressure, RCH availability, and resource constraints.
 
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 // External dependencies for disk space detection
 extern crate fs2;
@@ -16,6 +16,18 @@ const MAX_CLEANUP_CANDIDATES: usize = 100;
 
 /// Maximum diagnostic reasons to track per decision.
 const MAX_DIAGNOSTIC_REASONS: usize = 32;
+
+/// Schema version for agent command/resource budget ledgers.
+pub const AGENT_COMMAND_LEDGER_SCHEMA_VERSION: &str = "franken-node/agent-command-ledger/v1";
+
+/// Maximum command records to keep in one agent session ledger.
+pub const MAX_AGENT_COMMAND_LEDGER_ENTRIES: usize = 512;
+
+/// Maximum paths or references attached to one command record.
+const MAX_AGENT_COMMAND_LEDGER_ITEMS: usize = 128;
+
+/// Maximum byte length for command summaries and ledger fields.
+const MAX_AGENT_COMMAND_FIELD_BYTES: usize = 1024;
 
 /// Workspace cost classification for different types of work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -120,6 +132,378 @@ pub struct WorkspacePressureInputs {
     pub active_reservations: u32,
     /// Whether Agent Mail coordination is healthy.
     pub coordination_healthy: bool,
+}
+
+/// High-level command family for an agent operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandFamily {
+    Cargo,
+    Rch,
+    Rustfmt,
+    Ubs,
+    Git,
+    Beads,
+    AgentMail,
+    Filesystem,
+    SourceOnly,
+    Other,
+}
+
+/// Resource cost class for an agent command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandCostClass {
+    SourceOnly,
+    LocalFast,
+    LocalCpuSensitive,
+    RchRemote,
+    DiskImpacting,
+    Coordination,
+}
+
+/// Expected execution policy for a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandExecutionPolicy {
+    SourceOnly,
+    LocalAllowed,
+    RchRequired,
+    RchUsed,
+    CoordinationOnly,
+}
+
+/// Validation outcome attached to a command record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandValidationOutcome {
+    NotRun,
+    Passed,
+    Failed,
+    Blocked,
+}
+
+/// Machine-readable policy violations detected from a command ledger entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandPolicyViolation {
+    BareCargo,
+    MissingRchForCargo,
+    UnsafeDeleteAttempt,
+    UnreservedCodeEdit,
+    StaleInProgressClaim,
+}
+
+/// One bounded command/resource budget record for an agent session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCommandBudgetEntry {
+    pub command_id: String,
+    pub family: AgentCommandFamily,
+    pub cost_class: AgentCommandCostClass,
+    pub execution_policy: AgentCommandExecutionPolicy,
+    pub command_summary: String,
+    pub elapsed_ms: Option<u64>,
+    pub target_dir: Option<String>,
+    pub touched_paths: Vec<String>,
+    pub reservation_refs: Vec<String>,
+    pub evidence_links: Vec<String>,
+    pub uses_rch: bool,
+    pub local_cpu_sensitive: bool,
+    pub disk_impacting: bool,
+    pub validation_outcome: AgentCommandValidationOutcome,
+    pub stale_in_progress_claim: bool,
+    pub violations: Vec<AgentCommandPolicyViolation>,
+}
+
+impl AgentCommandBudgetEntry {
+    #[must_use]
+    pub fn new(
+        command_id: impl Into<String>,
+        family: AgentCommandFamily,
+        cost_class: AgentCommandCostClass,
+        execution_policy: AgentCommandExecutionPolicy,
+        command_summary: impl Into<String>,
+    ) -> Self {
+        Self {
+            command_id: command_id.into(),
+            family,
+            cost_class,
+            execution_policy,
+            command_summary: command_summary.into(),
+            elapsed_ms: None,
+            target_dir: None,
+            touched_paths: Vec::new(),
+            reservation_refs: Vec::new(),
+            evidence_links: Vec::new(),
+            uses_rch: matches!(
+                execution_policy,
+                AgentCommandExecutionPolicy::RchRequired | AgentCommandExecutionPolicy::RchUsed
+            ),
+            local_cpu_sensitive: matches!(
+                cost_class,
+                AgentCommandCostClass::LocalCpuSensitive | AgentCommandCostClass::RchRemote
+            ),
+            disk_impacting: matches!(cost_class, AgentCommandCostClass::DiskImpacting),
+            validation_outcome: AgentCommandValidationOutcome::NotRun,
+            stale_in_progress_claim: false,
+            violations: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub const fn with_elapsed_ms(mut self, elapsed_ms: u64) -> Self {
+        self.elapsed_ms = Some(elapsed_ms);
+        self
+    }
+
+    #[must_use]
+    pub fn with_target_dir(mut self, target_dir: impl Into<String>) -> Self {
+        self.target_dir = Some(target_dir.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_touched_paths<I, T>(mut self, touched_paths: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        self.touched_paths = touched_paths.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_reservation_refs<I, T>(mut self, reservation_refs: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        self.reservation_refs = reservation_refs.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_evidence_links<I, T>(mut self, evidence_links: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        self.evidence_links = evidence_links.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub const fn with_uses_rch(mut self, uses_rch: bool) -> Self {
+        self.uses_rch = uses_rch;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_local_cpu_sensitive(mut self, local_cpu_sensitive: bool) -> Self {
+        self.local_cpu_sensitive = local_cpu_sensitive;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_disk_impacting(mut self, disk_impacting: bool) -> Self {
+        self.disk_impacting = disk_impacting;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_validation_outcome(
+        mut self,
+        validation_outcome: AgentCommandValidationOutcome,
+    ) -> Self {
+        self.validation_outcome = validation_outcome;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_stale_in_progress_claim(mut self, stale_in_progress_claim: bool) -> Self {
+        self.stale_in_progress_claim = stale_in_progress_claim;
+        self
+    }
+
+    fn validated(mut self) -> Result<Self, AgentCommandLedgerError> {
+        validate_required_ledger_text("command_id", &self.command_id)?;
+        validate_required_ledger_text("command_summary", &self.command_summary)?;
+        self.command_summary = redact_protected_command_text(&self.command_summary);
+        validate_optional_ledger_path("target_dir", self.target_dir.as_deref())?;
+        validate_ledger_items("touched_paths", &self.touched_paths, true)?;
+        validate_ledger_items("reservation_refs", &self.reservation_refs, false)?;
+        validate_ledger_items("evidence_links", &self.evidence_links, false)?;
+        self.violations = self.derive_policy_violations();
+        Ok(self)
+    }
+
+    fn derive_policy_violations(&self) -> Vec<AgentCommandPolicyViolation> {
+        let mut violations = Vec::new();
+
+        if self.family == AgentCommandFamily::Cargo && !self.uses_rch {
+            violations.push(AgentCommandPolicyViolation::BareCargo);
+        }
+
+        if self.family == AgentCommandFamily::Cargo && self.local_cpu_sensitive && !self.uses_rch {
+            violations.push(AgentCommandPolicyViolation::MissingRchForCargo);
+        }
+
+        if command_summary_has_unsafe_delete(&self.command_summary) {
+            violations.push(AgentCommandPolicyViolation::UnsafeDeleteAttempt);
+        }
+
+        if self
+            .touched_paths
+            .iter()
+            .any(|path| path_requires_reservation(path))
+            && self.reservation_refs.is_empty()
+        {
+            violations.push(AgentCommandPolicyViolation::UnreservedCodeEdit);
+        }
+
+        if self.stale_in_progress_claim {
+            violations.push(AgentCommandPolicyViolation::StaleInProgressClaim);
+        }
+
+        violations.sort();
+        violations.dedup();
+        violations
+    }
+}
+
+/// Bounded summary computed from agent command budget entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCommandLedgerSummary {
+    pub command_count: usize,
+    pub rch_submissions: usize,
+    pub local_cpu_sensitive_operations: usize,
+    pub disk_impacting_operations: usize,
+    pub validation_passed: usize,
+    pub validation_failed: usize,
+    pub validation_blocked: usize,
+    pub commands_with_violations: usize,
+    pub policy_violation_count: usize,
+}
+
+impl AgentCommandLedgerSummary {
+    fn from_entries(entries: &[AgentCommandBudgetEntry]) -> Self {
+        Self {
+            command_count: entries.len(),
+            rch_submissions: entries.iter().filter(|entry| entry.uses_rch).count(),
+            local_cpu_sensitive_operations: entries
+                .iter()
+                .filter(|entry| entry.local_cpu_sensitive)
+                .count(),
+            disk_impacting_operations: entries.iter().filter(|entry| entry.disk_impacting).count(),
+            validation_passed: entries
+                .iter()
+                .filter(|entry| entry.validation_outcome == AgentCommandValidationOutcome::Passed)
+                .count(),
+            validation_failed: entries
+                .iter()
+                .filter(|entry| entry.validation_outcome == AgentCommandValidationOutcome::Failed)
+                .count(),
+            validation_blocked: entries
+                .iter()
+                .filter(|entry| entry.validation_outcome == AgentCommandValidationOutcome::Blocked)
+                .count(),
+            commands_with_violations: entries
+                .iter()
+                .filter(|entry| !entry.violations.is_empty())
+                .count(),
+            policy_violation_count: entries.iter().map(|entry| entry.violations.len()).sum(),
+        }
+    }
+}
+
+/// Agent session command/resource budget ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCommandBudgetLedger {
+    pub schema_version: String,
+    pub session_id: String,
+    pub agent_name: String,
+    pub bead_id: Option<String>,
+    pub entries: Vec<AgentCommandBudgetEntry>,
+    pub summary: AgentCommandLedgerSummary,
+}
+
+impl AgentCommandBudgetLedger {
+    pub fn try_new(
+        session_id: impl Into<String>,
+        agent_name: impl Into<String>,
+        bead_id: Option<String>,
+        entries: Vec<AgentCommandBudgetEntry>,
+    ) -> Result<Self, AgentCommandLedgerError> {
+        if entries.len() > MAX_AGENT_COMMAND_LEDGER_ENTRIES {
+            return Err(AgentCommandLedgerError::TooManyEntries {
+                count: entries.len(),
+                max: MAX_AGENT_COMMAND_LEDGER_ENTRIES,
+            });
+        }
+
+        let session_id = session_id.into();
+        let agent_name = agent_name.into();
+        validate_required_ledger_text("session_id", &session_id)?;
+        validate_required_ledger_text("agent_name", &agent_name)?;
+        validate_optional_ledger_text("bead_id", bead_id.as_deref())?;
+
+        let mut validated_entries = Vec::with_capacity(entries.len());
+        for entry in entries {
+            validated_entries.push(entry.validated()?);
+        }
+        let summary = AgentCommandLedgerSummary::from_entries(&validated_entries);
+
+        Ok(Self {
+            schema_version: AGENT_COMMAND_LEDGER_SCHEMA_VERSION.to_string(),
+            session_id,
+            agent_name,
+            bead_id,
+            entries: validated_entries,
+            summary,
+        })
+    }
+}
+
+pub fn render_agent_command_ledger_human(ledger: &AgentCommandBudgetLedger) -> String {
+    format!(
+        "agent command ledger: session={} agent={} bead={} commands={} rch_submissions={} local_cpu_sensitive={} disk_impacting={} validation_passed={} validation_failed={} validation_blocked={} commands_with_violations={} policy_violations={}",
+        ledger.session_id,
+        ledger.agent_name,
+        ledger.bead_id.as_deref().unwrap_or("none"),
+        ledger.summary.command_count,
+        ledger.summary.rch_submissions,
+        ledger.summary.local_cpu_sensitive_operations,
+        ledger.summary.disk_impacting_operations,
+        ledger.summary.validation_passed,
+        ledger.summary.validation_failed,
+        ledger.summary.validation_blocked,
+        ledger.summary.commands_with_violations,
+        ledger.summary.policy_violation_count
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AgentCommandLedgerError {
+    #[error("AGENT_COMMAND_LEDGER_TOO_MANY_ENTRIES: ledger has {count} entries, max {max}")]
+    TooManyEntries { count: usize, max: usize },
+    #[error("AGENT_COMMAND_LEDGER_TOO_MANY_ITEMS: {field} has {count} items, max {max}")]
+    TooManyItems {
+        field: &'static str,
+        count: usize,
+        max: usize,
+    },
+    #[error("AGENT_COMMAND_LEDGER_EMPTY_FIELD: {field} must not be empty")]
+    EmptyField { field: &'static str },
+    #[error("AGENT_COMMAND_LEDGER_STRING_TOO_LONG: {field} has {len} bytes, max {max}")]
+    StringTooLong {
+        field: &'static str,
+        len: usize,
+        max: usize,
+    },
+    #[error("AGENT_COMMAND_LEDGER_NUL_PATH: {field} contains a nul byte")]
+    PathContainsNul { field: &'static str },
+    #[error("AGENT_COMMAND_LEDGER_PATH_TRAVERSAL: {field} contains parent traversal")]
+    PathTraversal { field: &'static str },
 }
 
 /// Workspace build admission policy engine.
@@ -564,10 +948,13 @@ fn estimate_temp_artifacts_size() -> std::io::Result<u64> {
 
     for pattern in temp_patterns {
         if let Some(prefix) = pattern.strip_suffix('*') {
+            let Some(name_prefix) = prefix.strip_prefix("/tmp/") else {
+                continue;
+            };
             if let Ok(entries) = std::fs::read_dir("/tmp") {
                 for entry in entries.flatten() {
                     if let Some(name) = entry.file_name().to_str() {
-                        if name.starts_with(&prefix[5..]) {
+                        if name.starts_with(name_prefix) {
                             // Remove "/tmp/" prefix
                             if let Ok(size) = calculate_directory_size_safe(&entry.path()) {
                                 total = total.saturating_add(size);
@@ -627,6 +1014,145 @@ fn limit_diagnostics(mut diagnostics: Vec<String>) -> Vec<String> {
         diagnostics.push("... additional diagnostics truncated".to_string());
     }
     diagnostics
+}
+
+fn validate_required_ledger_text(
+    field: &'static str,
+    value: &str,
+) -> Result<(), AgentCommandLedgerError> {
+    if value.trim().is_empty() {
+        return Err(AgentCommandLedgerError::EmptyField { field });
+    }
+    validate_optional_ledger_text(field, Some(value))
+}
+
+fn validate_optional_ledger_text(
+    field: &'static str,
+    value: Option<&str>,
+) -> Result<(), AgentCommandLedgerError> {
+    if let Some(value) = value {
+        if value.len() > MAX_AGENT_COMMAND_FIELD_BYTES {
+            return Err(AgentCommandLedgerError::StringTooLong {
+                field,
+                len: value.len(),
+                max: MAX_AGENT_COMMAND_FIELD_BYTES,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_ledger_path(
+    field: &'static str,
+    value: Option<&str>,
+) -> Result<(), AgentCommandLedgerError> {
+    if let Some(value) = value {
+        validate_required_ledger_text(field, value)?;
+        if value.contains('\0') {
+            return Err(AgentCommandLedgerError::PathContainsNul { field });
+        }
+        if Path::new(value)
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(AgentCommandLedgerError::PathTraversal { field });
+        }
+    }
+    Ok(())
+}
+
+fn validate_ledger_items(
+    field: &'static str,
+    items: &[String],
+    paths: bool,
+) -> Result<(), AgentCommandLedgerError> {
+    if items.len() > MAX_AGENT_COMMAND_LEDGER_ITEMS {
+        return Err(AgentCommandLedgerError::TooManyItems {
+            field,
+            count: items.len(),
+            max: MAX_AGENT_COMMAND_LEDGER_ITEMS,
+        });
+    }
+
+    for item in items {
+        if paths {
+            validate_optional_ledger_path(field, Some(item))?;
+        } else {
+            validate_required_ledger_text(field, item)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn path_requires_reservation(path: &str) -> bool {
+    path.ends_with(".rs")
+        || path.ends_with("Cargo.toml")
+        || path.ends_with("Cargo.lock")
+        || path.starts_with("crates/")
+        || path.starts_with("src/")
+        || path.starts_with("tests/")
+        || path.starts_with("scripts/")
+}
+
+fn command_summary_has_unsafe_delete(command_summary: &str) -> bool {
+    let normalized = command_summary.to_ascii_lowercase();
+    normalized.contains("rm -rf")
+        || normalized.contains("git reset --hard")
+        || normalized.contains("git clean -fd")
+        || normalized.contains("git clean -df")
+}
+
+fn redact_protected_command_text(command_summary: &str) -> String {
+    let mut redacted = Vec::new();
+    let mut redact_next = false;
+
+    for token in command_summary.split_whitespace() {
+        if redact_next {
+            redacted.push("<redacted>".to_string());
+            redact_next = false;
+            continue;
+        }
+
+        if token_flag_requires_redaction(token) {
+            if let Some((flag, _value)) = token.split_once('=') {
+                redacted.push(format!("{flag}=<redacted>"));
+            } else {
+                redacted.push(token.to_string());
+                redact_next = true;
+            }
+            continue;
+        }
+
+        if let Some((key, _value)) = token.split_once('=') {
+            if contains_secret_marker(key) {
+                redacted.push(format!("{key}=<redacted>"));
+                continue;
+            }
+        }
+
+        redacted.push(token.to_string());
+    }
+
+    redacted.join(" ")
+}
+
+fn token_flag_requires_redaction(token: &str) -> bool {
+    let upper = token.to_ascii_uppercase();
+    upper.starts_with("--TOKEN")
+        || upper.starts_with("--SECRET")
+        || upper.starts_with("--PASSWORD")
+        || upper.starts_with("--API-KEY")
+        || upper.starts_with("--API_KEY")
+}
+
+fn contains_secret_marker(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    upper.contains("TOKEN")
+        || upper.contains("SECRET")
+        || upper.contains("PASSWORD")
+        || upper.contains("API_KEY")
+        || upper.contains("API-KEY")
 }
 
 /// Get available disk space for the current working directory.
@@ -715,6 +1241,193 @@ pub fn get_workspace_file_reservations() -> Result<u32, Box<dyn std::error::Erro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cargo_entry(command_id: &str) -> AgentCommandBudgetEntry {
+        AgentCommandBudgetEntry::new(
+            command_id,
+            AgentCommandFamily::Cargo,
+            AgentCommandCostClass::LocalCpuSensitive,
+            AgentCommandExecutionPolicy::LocalAllowed,
+            "cargo test -p frankenengine-node",
+        )
+        .with_touched_paths(["crates/franken-node/src/lib.rs"])
+    }
+
+    #[test]
+    fn empty_agent_command_ledger_has_stable_schema() {
+        let ledger = AgentCommandBudgetLedger::try_new(
+            "session-empty",
+            "CalmSnow",
+            Some("bd-38hez.4".to_string()),
+            Vec::new(),
+        )
+        .expect("empty ledger should be valid");
+
+        assert_eq!(ledger.schema_version, AGENT_COMMAND_LEDGER_SCHEMA_VERSION);
+        assert_eq!(ledger.summary.command_count, 0);
+        assert_eq!(ledger.summary.policy_violation_count, 0);
+
+        let encoded = serde_json::to_string_pretty(&ledger).expect("ledger serializes");
+        assert!(encoded.contains("franken-node/agent-command-ledger/v1"));
+        assert!(encoded.contains("\"command_count\": 0"));
+    }
+
+    #[test]
+    fn agent_command_ledger_caps_entries() {
+        let entries = (0..=MAX_AGENT_COMMAND_LEDGER_ENTRIES)
+            .map(|idx| {
+                AgentCommandBudgetEntry::new(
+                    format!("cmd-{idx}"),
+                    AgentCommandFamily::SourceOnly,
+                    AgentCommandCostClass::SourceOnly,
+                    AgentCommandExecutionPolicy::SourceOnly,
+                    "ubs crates/franken-node/src/ops/workspace_pressure_policy.rs",
+                )
+            })
+            .collect();
+
+        let err = AgentCommandBudgetLedger::try_new("session-cap", "CalmSnow", None, entries)
+            .expect_err("entry cap should fail closed");
+
+        assert_eq!(
+            err,
+            AgentCommandLedgerError::TooManyEntries {
+                count: MAX_AGENT_COMMAND_LEDGER_ENTRIES + 1,
+                max: MAX_AGENT_COMMAND_LEDGER_ENTRIES
+            }
+        );
+    }
+
+    #[test]
+    fn bare_cargo_command_records_policy_violations() {
+        let ledger = AgentCommandBudgetLedger::try_new(
+            "session-bare-cargo",
+            "CalmSnow",
+            Some("bd-38hez.4".to_string()),
+            vec![cargo_entry("cmd-bare-cargo")],
+        )
+        .expect("ledger should derive violations");
+
+        assert!(ledger.entries.first().is_some_and(|entry| {
+            entry
+                .violations
+                .contains(&AgentCommandPolicyViolation::BareCargo)
+                && entry
+                    .violations
+                    .contains(&AgentCommandPolicyViolation::MissingRchForCargo)
+                && entry
+                    .violations
+                    .contains(&AgentCommandPolicyViolation::UnreservedCodeEdit)
+        }));
+        assert_eq!(ledger.summary.commands_with_violations, 1);
+        assert_eq!(ledger.summary.policy_violation_count, 3);
+    }
+
+    #[test]
+    fn valid_rch_cargo_proof_has_no_policy_violations() {
+        let entry = AgentCommandBudgetEntry::new(
+            "cmd-rch-cargo",
+            AgentCommandFamily::Cargo,
+            AgentCommandCostClass::RchRemote,
+            AgentCommandExecutionPolicy::RchRequired,
+            "rch exec -- cargo test -p frankenengine-node validation_planner",
+        )
+        .with_elapsed_ms(42_000)
+        .with_target_dir(".rch-target-vmi1167313-job")
+        .with_touched_paths(["crates/franken-node/src/ops/workspace_pressure_policy.rs"])
+        .with_reservation_refs(["agent-mail-reservation-17248"])
+        .with_evidence_links(["rch://29833915539653001"])
+        .with_validation_outcome(AgentCommandValidationOutcome::Passed);
+
+        let ledger = AgentCommandBudgetLedger::try_new(
+            "session-rch",
+            "CalmSnow",
+            Some("bd-38hez.4".to_string()),
+            vec![entry],
+        )
+        .expect("rch proof ledger should validate");
+
+        assert!(
+            ledger
+                .entries
+                .first()
+                .is_some_and(|entry| entry.violations.is_empty())
+        );
+        assert_eq!(ledger.summary.rch_submissions, 1);
+        assert_eq!(ledger.summary.validation_passed, 1);
+        assert_eq!(ledger.summary.policy_violation_count, 0);
+    }
+
+    #[test]
+    fn non_cargo_source_only_proof_has_no_policy_violations() {
+        let entry = AgentCommandBudgetEntry::new(
+            "cmd-ubs",
+            AgentCommandFamily::Ubs,
+            AgentCommandCostClass::SourceOnly,
+            AgentCommandExecutionPolicy::SourceOnly,
+            "UBS_SKIP_RUST_BUILD=1 ubs crates/franken-node/src/ops/workspace_pressure_policy.rs",
+        )
+        .with_touched_paths(["docs/specs/validation_closeout.md"])
+        .with_validation_outcome(AgentCommandValidationOutcome::Passed);
+
+        let ledger =
+            AgentCommandBudgetLedger::try_new("session-source", "CalmSnow", None, vec![entry])
+                .expect("source-only ledger should validate");
+
+        assert!(
+            ledger
+                .entries
+                .first()
+                .is_some_and(|entry| entry.violations.is_empty())
+        );
+        assert_eq!(ledger.summary.command_count, 1);
+        assert_eq!(ledger.summary.validation_passed, 1);
+    }
+
+    #[test]
+    fn protected_command_values_are_redacted_in_ledger() {
+        let entry = AgentCommandBudgetEntry::new(
+            "cmd-redact",
+            AgentCommandFamily::AgentMail,
+            AgentCommandCostClass::Coordination,
+            AgentCommandExecutionPolicy::CoordinationOnly,
+            "send_message SECRET_TOKEN=raw --password hunter2 --api-key=abcdef",
+        );
+
+        let ledger =
+            AgentCommandBudgetLedger::try_new("session-redact", "CalmSnow", None, vec![entry])
+                .expect("redacted ledger should validate");
+
+        let summary = ledger
+            .entries
+            .first()
+            .map(|entry| entry.command_summary.as_str())
+            .unwrap_or("");
+        assert!(!summary.contains("raw"));
+        assert!(!summary.contains("hunter2"));
+        assert!(!summary.contains("abcdef"));
+        assert!(summary.contains("SECRET_TOKEN=<redacted>"));
+        assert!(summary.contains("--password <redacted>"));
+        assert!(summary.contains("--api-key=<redacted>"));
+    }
+
+    #[test]
+    fn human_agent_command_ledger_summary_is_stable() {
+        let ledger = AgentCommandBudgetLedger::try_new(
+            "session-human",
+            "CalmSnow",
+            Some("bd-38hez.4".to_string()),
+            vec![cargo_entry("cmd-human")],
+        )
+        .expect("ledger should validate");
+
+        let rendered = render_agent_command_ledger_human(&ledger);
+        assert!(rendered.contains("session=session-human"));
+        assert!(rendered.contains("agent=CalmSnow"));
+        assert!(rendered.contains("bead=bd-38hez.4"));
+        assert!(rendered.contains("commands=1"));
+        assert!(rendered.contains("policy_violations=3"));
+    }
 
     #[test]
     fn test_work_cost_classes() {
