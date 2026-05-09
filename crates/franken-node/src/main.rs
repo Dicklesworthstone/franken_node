@@ -10206,10 +10206,22 @@ fn evaluate_coordination_health() -> (DoctorStatus, String, String) {
 }
 
 fn evaluate_active_reservations() -> (DoctorStatus, String, String) {
-    // Check for active file reservations that might affect cleanup
-    let reservations = count_active_reservations();
+    evaluate_active_reservations_from_count(count_active_reservations())
+}
 
-    let message = format!("Active file reservations: {}", reservations);
+fn evaluate_active_reservations_from_count(
+    reservations: Option<u32>,
+) -> (DoctorStatus, String, String) {
+    let Some(reservations) = reservations else {
+        return (
+            DoctorStatus::Warn,
+            "Active file reservations: unknown".to_string(),
+            "Agent Mail reservation data unavailable - check coordination before cleanup"
+                .to_string(),
+        );
+    };
+
+    let message = format!("Active file reservations: {reservations}");
 
     if reservations > 10 {
         (
@@ -10344,13 +10356,8 @@ fn check_agent_mail_health() -> bool {
     std::path::Path::new(".agent-mail").exists() || std::path::Path::new("agents").exists()
 }
 
-fn count_active_reservations() -> usize {
-    // Count active file reservations (stub implementation)
-    if let Ok(entries) = std::fs::read_dir("file_reservations") {
-        entries.count()
-    } else {
-        0
-    }
+fn count_active_reservations() -> Option<u32> {
+    crate::ops::workspace_pressure_policy::try_get_workspace_file_reservations()
 }
 
 fn calculate_directory_size<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<u64> {

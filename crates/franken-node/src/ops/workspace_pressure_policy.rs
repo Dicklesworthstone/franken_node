@@ -3,13 +3,14 @@
 //! Provides deterministic admission decisions for expensive work and cleanup
 //! candidates based on workspace pressure, RCH availability, and resource constraints.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
 // External dependencies for disk space detection
 extern crate fs2;
 
-use crate::push_bounded;
+use crate::{bounded_read_to_string, push_bounded};
 
 /// Maximum cleanup candidates to suggest in one decision.
 const MAX_CLEANUP_CANDIDATES: usize = 100;
@@ -28,6 +29,9 @@ const MAX_AGENT_COMMAND_LEDGER_ITEMS: usize = 128;
 
 /// Maximum byte length for command summaries and ledger fields.
 const MAX_AGENT_COMMAND_FIELD_BYTES: usize = 1024;
+
+/// Maximum Agent Mail reservation lease JSON size accepted by live probes.
+const MAX_AGENT_MAIL_RESERVATION_FILE_BYTES: u64 = 64 * 1024;
 
 /// Schema version for operator what-if simulation reports.
 pub const OPERATOR_WHAT_IF_SCHEMA_VERSION: &str = "franken-node/operator-what-if/v1";
@@ -1605,53 +1609,158 @@ pub fn get_workspace_disk_space() -> Result<u64, Box<dyn std::error::Error>> {
 /// Queries the Agent Mail system for the current count of active file reservations.
 /// This replaces the hardcoded placeholder value in main.rs with real coordination data.
 pub fn get_active_file_reservations() -> Result<u32, Box<dyn std::error::Error>> {
-    use std::process::Command;
+    if let Some(count) = try_get_workspace_file_reservations() {
+        return Ok(count);
+    }
 
-    // Try to query Agent Mail for active reservations
-    match Command::new("curl")
+    eprintln!("Warning: Agent Mail reservation count unavailable. Using conservative estimate.");
+    Ok(5)
+}
+
+/// Return the live Agent Mail reservation count without inventing a fallback.
+pub fn try_get_workspace_file_reservations() -> Option<u32> {
+    active_reservation_count_from_agent_mail_http()
+        .or_else(active_reservation_count_from_agent_mail_archive)
+}
+
+fn active_reservation_count_from_agent_mail_http() -> Option<u32> {
+    let url = std::env::var("FRANKEN_NODE_AGENT_MAIL_RESERVATIONS_URL")
+        .or_else(|_| std::env::var("AGENT_MAIL_RESERVATIONS_URL"))
+        .unwrap_or_else(|_| {
+            "http://127.0.0.1:8765/mail/api/file-reservations/active/count".to_string()
+        });
+
+    let output = std::process::Command::new("curl")
         .args([
-            "-s",
-            "-f", // Fail on HTTP error codes
-            "--connect-timeout",
-            "5", // 5 second connection timeout
+            "--silent",
+            "--show-error",
+            "--fail",
             "--max-time",
-            "10", // 10 second total timeout
-            "-H",
-            "Content-Type: application/json",
-            "http://localhost:8765/mail/api/file-reservations/active/count",
+            "2",
+            &url,
         ])
         .output()
-    {
-        Ok(output) if output.status.success() => {
-            // Try to parse the JSON response
-            let response_text = String::from_utf8_lossy(&output.stdout);
-            match response_text.trim().parse::<u32>() {
-                Ok(count) => Ok(count),
-                Err(_) => {
-                    // If we can't parse the response, fall back to reasonable estimate
-                    eprintln!(
-                        "Warning: Could not parse Agent Mail reservation count response. Using fallback."
-                    );
-                    Ok(5) // Conservative fallback
-                }
-            }
-        }
-        Ok(_) => {
-            // Agent Mail returned an error - use fallback
-            eprintln!(
-                "Warning: Agent Mail query failed. Using conservative estimate for reservations."
-            );
-            Ok(5) // Conservative fallback
-        }
-        Err(e) => {
-            // Could not run curl or Agent Mail unavailable - use fallback
-            eprintln!(
-                "Warning: Agent Mail unavailable ({}). Using conservative estimate for reservations.",
-                e
-            );
-            Ok(5) // Conservative fallback
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+fn active_reservation_count_from_agent_mail_archive() -> Option<u32> {
+    for dir in agent_mail_archive_dirs("file_reservations") {
+        if let Some(count) = count_active_reservations_in_dir(&dir) {
+            return Some(count);
         }
     }
+    None
+}
+
+/// Count active Agent Mail file reservation leases in a reservation archive directory.
+pub fn count_active_reservations_in_dir(dir: &Path) -> Option<u32> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let now = Utc::now();
+    let mut count = 0_u32;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+
+        let Ok(contents) = bounded_read_to_string(&path, MAX_AGENT_MAIL_RESERVATION_FILE_BYTES)
+        else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&contents) else {
+            continue;
+        };
+
+        if payload
+            .get("released_ts")
+            .is_some_and(|value| !value.is_null())
+        {
+            continue;
+        }
+
+        let Some(expires_ts) = payload
+            .get("expires_ts")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+
+        let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_ts) else {
+            continue;
+        };
+
+        if expires_at.with_timezone(&Utc) > now {
+            count = count.saturating_add(1);
+        }
+    }
+
+    Some(count)
+}
+
+fn agent_mail_archive_dirs(child: &str) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Ok(root) = std::env::var("FRANKEN_NODE_AGENT_MAIL_PROJECT_ARCHIVE") {
+        dirs.push(PathBuf::from(root).join(child));
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd.join(child));
+
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(
+                PathBuf::from(home)
+                    .join(".mcp_agent_mail_git_mailbox_repo")
+                    .join("projects")
+                    .join(agent_mail_project_slug(&cwd))
+                    .join(child),
+            );
+        }
+    }
+
+    dirs
+}
+
+fn agent_mail_project_slug(path: &Path) -> String {
+    let mut parts = Vec::new();
+
+    for component in path.components() {
+        let Component::Normal(value) = component else {
+            continue;
+        };
+        let Some(value) = value.to_str() else {
+            continue;
+        };
+
+        let mut part = String::new();
+        let mut last_was_separator = false;
+        for ch in value.chars() {
+            if ch.is_ascii_alphanumeric() {
+                part.push(ch.to_ascii_lowercase());
+                last_was_separator = false;
+            } else if !last_was_separator {
+                part.push('-');
+                last_was_separator = true;
+            }
+        }
+
+        let part = part.trim_matches('-');
+        if !part.is_empty() {
+            parts.push(part.to_string());
+        }
+    }
+
+    parts.join("-")
 }
 
 /// Get workspace file reservation count with fallback.
@@ -1674,6 +1783,65 @@ mod tests {
             "cargo test -p frankenengine-node",
         )
         .with_touched_paths(["crates/franken-node/src/lib.rs"])
+    }
+
+    fn write_reservation_fixture(
+        dir: &Path,
+        name: &str,
+        expires_ts: &str,
+        released_ts: Option<&str>,
+    ) {
+        let payload = serde_json::json!({
+            "id": name,
+            "project": "/data/projects/franken_node",
+            "agent": "TestAgent",
+            "path_pattern": "crates/franken-node/src/main.rs",
+            "exclusive": true,
+            "reason": "test",
+            "created_ts": Utc::now().to_rfc3339(),
+            "expires_ts": expires_ts,
+            "released_ts": released_ts,
+        });
+
+        std::fs::write(
+            dir.join(format!("{name}.json")),
+            serde_json::to_vec_pretty(&payload).expect("serialize reservation fixture"),
+        )
+        .expect("write reservation fixture");
+    }
+
+    #[test]
+    fn active_reservation_archive_counter_ignores_expired_released_and_invalid_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reservations_dir = dir.path().join("file_reservations");
+        std::fs::create_dir_all(&reservations_dir).expect("create reservations dir");
+
+        let future = (Utc::now() + chrono::Duration::minutes(30)).to_rfc3339();
+        let past = (Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+        let released = Utc::now().to_rfc3339();
+
+        write_reservation_fixture(&reservations_dir, "active", &future, None);
+        write_reservation_fixture(&reservations_dir, "expired", &past, None);
+        write_reservation_fixture(&reservations_dir, "released", &future, Some(&released));
+        std::fs::write(
+            reservations_dir.join("missing_expiry.json"),
+            br#"{"released_ts":null}"#,
+        )
+        .expect("write missing expiry");
+        std::fs::write(reservations_dir.join("malformed.json"), b"{").expect("write malformed");
+        std::fs::write(reservations_dir.join("ignored.txt"), b"{}").expect("write ignored");
+
+        assert_eq!(count_active_reservations_in_dir(&reservations_dir), Some(1));
+    }
+
+    #[test]
+    fn active_reservation_archive_counter_returns_none_for_missing_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert_eq!(
+            count_active_reservations_in_dir(&dir.path().join("missing")),
+            None
+        );
     }
 
     #[test]

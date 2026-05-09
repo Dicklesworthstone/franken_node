@@ -7,7 +7,7 @@ use frankenengine_node::ops::workspace_pressure_policy::{
     OPERATOR_WHAT_IF_SCHEMA_VERSION, OperatorWhatIfAction, OperatorWhatIfArtifact,
     OperatorWhatIfArtifactSafetyClass, OperatorWhatIfInput, OperatorWhatIfRchQueueState,
     PolicyDecision, WorkCostClass, WorkspacePressureInputs, WorkspacePressurePolicy,
-    render_agent_command_ledger_human,
+    count_active_reservations_in_dir, render_agent_command_ledger_human,
 };
 use frankenengine_node::runtime::resource_governor::{
     ResourceArtifactInventory, ResourceArtifactInventoryEntry, ResourceArtifactKind,
@@ -35,6 +35,34 @@ const POLICY_DECISION_GOLDEN_SCHEMA_VERSION: &str = "bd-p9mpd.4/v1";
 const SPARSE_EIGHT_GIB: u64 = 8 * 1024 * 1024 * 1024;
 const SPARSE_FOUR_GIB: u64 = 4 * 1024 * 1024 * 1024;
 const SPARSE_ONE_GIB: u64 = 1024 * 1024 * 1024;
+
+#[test]
+fn agent_mail_reservation_counter_uses_active_unreleased_unexpired_leases() {
+    let dir = TempDir::new().expect("create tempdir");
+    let reservations_dir = dir.path().join("file_reservations");
+    fs::create_dir_all(&reservations_dir).expect("create reservations dir");
+
+    let future = (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339();
+    let past = (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+    let released = chrono::Utc::now().to_rfc3339();
+
+    write_reservation_fixture(&reservations_dir, "active", &future, None);
+    write_reservation_fixture(&reservations_dir, "expired", &past, None);
+    write_reservation_fixture(&reservations_dir, "released", &future, Some(&released));
+    fs::write(
+        reservations_dir.join("missing_expiry.json"),
+        br#"{"released_ts":null}"#,
+    )
+    .expect("write missing expiry fixture");
+    fs::write(reservations_dir.join("malformed.json"), b"{").expect("write malformed fixture");
+    fs::write(reservations_dir.join("ignored.txt"), b"{}").expect("write ignored fixture");
+
+    assert_eq!(count_active_reservations_in_dir(&reservations_dir), Some(1));
+    assert_eq!(
+        count_active_reservations_in_dir(&dir.path().join("missing")),
+        None
+    );
+}
 
 #[derive(Debug, Deserialize)]
 struct GoldenFixture {
@@ -827,6 +855,26 @@ fn write_bytes(path: PathBuf, contents: &[u8]) -> PathBuf {
     fs::create_dir_all(path.parent().expect("file parent")).expect("create parent");
     fs::write(&path, contents).expect("write file");
     path
+}
+
+fn write_reservation_fixture(dir: &Path, name: &str, expires_ts: &str, released_ts: Option<&str>) {
+    let payload = json!({
+        "id": name,
+        "project": REPO_KEY,
+        "agent": "TestAgent",
+        "path_pattern": "crates/franken-node/src/main.rs",
+        "exclusive": true,
+        "reason": "test",
+        "created_ts": chrono::Utc::now().to_rfc3339(),
+        "expires_ts": expires_ts,
+        "released_ts": released_ts,
+    });
+
+    fs::write(
+        dir.join(format!("{name}.json")),
+        serde_json::to_vec_pretty(&payload).expect("serialize reservation fixture"),
+    )
+    .expect("write reservation fixture");
 }
 
 fn write_sparse(path: PathBuf, len: u64) -> PathBuf {
