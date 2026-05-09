@@ -29,6 +29,15 @@ const MAX_AGENT_COMMAND_LEDGER_ITEMS: usize = 128;
 /// Maximum byte length for command summaries and ledger fields.
 const MAX_AGENT_COMMAND_FIELD_BYTES: usize = 1024;
 
+/// Schema version for operator what-if simulation reports.
+pub const OPERATOR_WHAT_IF_SCHEMA_VERSION: &str = "franken-node/operator-what-if/v1";
+
+/// Maximum structured log entries emitted by one what-if simulation.
+const MAX_OPERATOR_WHAT_IF_LOGS: usize = 32;
+
+/// Maximum cleanup actions returned by one what-if simulation.
+const MAX_OPERATOR_WHAT_IF_CLEANUP_ACTIONS: usize = 64;
+
 /// Workspace cost classification for different types of work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WorkCostClass {
@@ -132,6 +141,117 @@ pub struct WorkspacePressureInputs {
     pub active_reservations: u32,
     /// Whether Agent Mail coordination is healthy.
     pub coordination_healthy: bool,
+}
+
+/// RCH queue state visible to an operator simulation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorWhatIfRchQueueState {
+    pub available_slots: Option<u32>,
+    pub queued_jobs: u32,
+    pub degraded_workers: u32,
+    pub local_fallback_allowed: bool,
+}
+
+/// Cleanup safety class attached to an observed artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorWhatIfArtifactSafetyClass {
+    CleanupEligible,
+    Pinned,
+    Protected,
+}
+
+/// Bounded artifact observation for operator simulation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorWhatIfArtifact {
+    pub path: String,
+    pub size_bytes: u64,
+    pub safety_class: OperatorWhatIfArtifactSafetyClass,
+    pub reason: String,
+    pub pinned_by: Option<String>,
+}
+
+/// Operator-facing input for simulating a validation or cleanup decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorWhatIfInput {
+    pub scenario_id: String,
+    pub bead_id: Option<String>,
+    pub work_class: WorkCostClass,
+    pub bead_priority: u32,
+    pub requested_command: Option<String>,
+    pub workspace: WorkspacePressureInputs,
+    pub rch_queue: OperatorWhatIfRchQueueState,
+    pub artifacts: Vec<OperatorWhatIfArtifact>,
+    pub command_ledger: Option<AgentCommandBudgetLedger>,
+    pub stale_sibling_blocker: Option<String>,
+}
+
+/// Stable simulation action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorWhatIfAction {
+    Allow,
+    Wait,
+    Queue,
+    RequireRch,
+    RefuseLocalFallback,
+}
+
+impl OperatorWhatIfAction {
+    const fn from_admission(admission: &AdmissionDecision) -> Self {
+        match admission {
+            AdmissionDecision::AllowLocal => Self::Allow,
+            AdmissionDecision::RequireRch => Self::RequireRch,
+            AdmissionDecision::Queue { .. } => Self::Queue,
+            AdmissionDecision::Wait { .. } => Self::Wait,
+            AdmissionDecision::RefuseLocalFallback => Self::RefuseLocalFallback,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Wait => "wait",
+            Self::Queue => "queue",
+            Self::RequireRch => "require_rch",
+            Self::RefuseLocalFallback => "refuse_local_fallback",
+        }
+    }
+}
+
+/// Dry-run cleanup action that is safe to present to an operator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorWhatIfCleanupAction {
+    pub path: String,
+    pub size_bytes: u64,
+    pub reason: String,
+    pub dry_run_command: String,
+}
+
+/// Structured event emitted while simulating a decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorWhatIfLog {
+    pub event_code: String,
+    pub message: String,
+}
+
+/// Deterministic what-if report. This never mutates bead state or deletes files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorWhatIfReport {
+    pub schema_version: String,
+    pub scenario_id: String,
+    pub bead_id: Option<String>,
+    pub action: OperatorWhatIfAction,
+    pub reason_code: String,
+    pub retry_after_ms: Option<u32>,
+    pub simulated_command: Option<String>,
+    pub cleanup_actions: Vec<OperatorWhatIfCleanupAction>,
+    pub pinned_artifact_count: usize,
+    pub protected_artifact_count: usize,
+    pub command_ledger_summary: Option<AgentCommandLedgerSummary>,
+    pub policy_decision: PolicyDecision,
+    pub logs: Vec<OperatorWhatIfLog>,
+    pub human_summary: String,
 }
 
 /// High-level command family for an agent operation.
@@ -668,6 +788,161 @@ impl WorkspacePressurePolicy {
         candidates
     }
 
+    /// Simulate an operator decision without executing validation or cleanup.
+    pub fn simulate_operator_what_if(&self, input: OperatorWhatIfInput) -> OperatorWhatIfReport {
+        let mut logs = Vec::new();
+        push_operator_log(
+            &mut logs,
+            "OP-WHATIF-001",
+            format!(
+                "simulating scenario={} work_class={:?} priority={}",
+                input.scenario_id, input.work_class, input.bead_priority
+            ),
+        );
+
+        let policy_decision =
+            self.decide_admission(input.work_class, input.bead_priority, &input.workspace);
+        let mut action = OperatorWhatIfAction::from_admission(&policy_decision.admission);
+        let mut retry_after_ms = admission_retry_after_ms(&policy_decision.admission);
+        let mut reason_code = operator_reason_code_for_action(action).to_string();
+
+        if command_summary_has_unsafe_delete(input.requested_command.as_deref().unwrap_or_default())
+        {
+            action = OperatorWhatIfAction::RefuseLocalFallback;
+            retry_after_ms = None;
+            reason_code = "OP_WHATIF_REFUSE_UNSAFE_COMMAND".to_string();
+            push_operator_log(
+                &mut logs,
+                "OP-WHATIF-007",
+                "unsafe filesystem command refused during simulation".to_string(),
+            );
+        } else if input
+            .stale_sibling_blocker
+            .as_deref()
+            .is_some_and(|blocker| !blocker.trim().is_empty())
+        {
+            action = OperatorWhatIfAction::Wait;
+            retry_after_ms = Some(30_000);
+            reason_code = "OP_WHATIF_WAIT_SIBLING_BLOCKER".to_string();
+            push_operator_log(
+                &mut logs,
+                "OP-WHATIF-006",
+                "stale sibling blocker requires a fresh proof before launch".to_string(),
+            );
+        } else if input.rch_queue.available_slots == Some(0) && input.work_class.prefers_rch() {
+            action = OperatorWhatIfAction::Queue;
+            retry_after_ms = Some(60_000);
+            reason_code = "OP_WHATIF_QUEUE_RCH_SATURATED".to_string();
+            push_operator_log(
+                &mut logs,
+                "OP-WHATIF-003",
+                format!(
+                    "RCH queue saturated with {} queued jobs",
+                    input.rch_queue.queued_jobs
+                ),
+            );
+        }
+
+        let command_ledger_summary = input.command_ledger.as_ref().map(|ledger| {
+            push_operator_log(
+                &mut logs,
+                "OP-WHATIF-004",
+                format!(
+                    "command ledger commands={} violations={}",
+                    ledger.summary.command_count, ledger.summary.policy_violation_count
+                ),
+            );
+            ledger.summary.clone()
+        });
+
+        if action == OperatorWhatIfAction::Allow
+            && command_ledger_summary
+                .as_ref()
+                .is_some_and(|summary| summary.commands_with_violations > 0)
+        {
+            action = OperatorWhatIfAction::Wait;
+            retry_after_ms = Some(10_000);
+            reason_code = "OP_WHATIF_WAIT_COMMAND_LEDGER_VIOLATION".to_string();
+            push_operator_log(
+                &mut logs,
+                "OP-WHATIF-008",
+                "command ledger contains policy violations; operator should inspect first"
+                    .to_string(),
+            );
+        }
+
+        if input.rch_queue.degraded_workers > 0 {
+            push_operator_log(
+                &mut logs,
+                "OP-WHATIF-009",
+                format!(
+                    "{} degraded RCH workers observed",
+                    input.rch_queue.degraded_workers
+                ),
+            );
+        }
+
+        let cleanup_actions = build_operator_cleanup_actions(&input.artifacts, &mut logs);
+        let pinned_artifact_count = input
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.safety_class == OperatorWhatIfArtifactSafetyClass::Pinned)
+            .count();
+        let protected_artifact_count = input
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact.safety_class == OperatorWhatIfArtifactSafetyClass::Protected
+            })
+            .count();
+        let simulated_command = input
+            .requested_command
+            .as_deref()
+            .map(|command| render_simulated_command(input.work_class, action, command));
+
+        if matches!(
+            action,
+            OperatorWhatIfAction::RequireRch | OperatorWhatIfAction::Queue
+        ) && simulated_command
+            .as_deref()
+            .is_some_and(|command| command.starts_with("rch exec --"))
+        {
+            push_operator_log(
+                &mut logs,
+                "OP-WHATIF-002",
+                "cargo-heavy simulated command rendered through rch exec".to_string(),
+            );
+        }
+
+        let human_summary = render_operator_what_if_human_summary(
+            &input,
+            action,
+            &reason_code,
+            retry_after_ms,
+            simulated_command.as_deref(),
+            cleanup_actions.len(),
+            pinned_artifact_count,
+            protected_artifact_count,
+        );
+
+        OperatorWhatIfReport {
+            schema_version: OPERATOR_WHAT_IF_SCHEMA_VERSION.to_string(),
+            scenario_id: input.scenario_id,
+            bead_id: input.bead_id,
+            action,
+            reason_code,
+            retry_after_ms,
+            simulated_command,
+            cleanup_actions,
+            pinned_artifact_count,
+            protected_artifact_count,
+            command_ledger_summary,
+            policy_decision,
+            logs: limit_operator_logs(logs),
+            human_summary,
+        }
+    }
+
     fn analyze_disk_pressure(
         &self,
         inputs: &WorkspacePressureInputs,
@@ -937,6 +1212,154 @@ impl WorkspacePressurePolicy {
 
         (reason_code.to_string(), summary)
     }
+}
+
+fn admission_retry_after_ms(admission: &AdmissionDecision) -> Option<u32> {
+    match admission {
+        AdmissionDecision::Queue { retry_after_ms }
+        | AdmissionDecision::Wait { retry_after_ms } => Some(*retry_after_ms),
+        AdmissionDecision::AllowLocal
+        | AdmissionDecision::RequireRch
+        | AdmissionDecision::RefuseLocalFallback => None,
+    }
+}
+
+fn operator_reason_code_for_action(action: OperatorWhatIfAction) -> &'static str {
+    match action {
+        OperatorWhatIfAction::Allow => "OP_WHATIF_ALLOW",
+        OperatorWhatIfAction::Wait => "OP_WHATIF_WAIT",
+        OperatorWhatIfAction::Queue => "OP_WHATIF_QUEUE",
+        OperatorWhatIfAction::RequireRch => "OP_WHATIF_REQUIRE_RCH",
+        OperatorWhatIfAction::RefuseLocalFallback => "OP_WHATIF_REFUSE_LOCAL_FALLBACK",
+    }
+}
+
+fn push_operator_log(logs: &mut Vec<OperatorWhatIfLog>, event_code: &'static str, message: String) {
+    push_bounded(
+        logs,
+        OperatorWhatIfLog {
+            event_code: event_code.to_string(),
+            message,
+        },
+        MAX_OPERATOR_WHAT_IF_LOGS,
+    );
+}
+
+fn limit_operator_logs(mut logs: Vec<OperatorWhatIfLog>) -> Vec<OperatorWhatIfLog> {
+    if logs.len() > MAX_OPERATOR_WHAT_IF_LOGS {
+        logs.truncate(MAX_OPERATOR_WHAT_IF_LOGS);
+        logs.push(OperatorWhatIfLog {
+            event_code: "OP-WHATIF-TRUNCATED".to_string(),
+            message: "additional what-if logs truncated".to_string(),
+        });
+    }
+    logs
+}
+
+fn build_operator_cleanup_actions(
+    artifacts: &[OperatorWhatIfArtifact],
+    logs: &mut Vec<OperatorWhatIfLog>,
+) -> Vec<OperatorWhatIfCleanupAction> {
+    let mut actions = Vec::new();
+
+    for artifact in artifacts {
+        match artifact.safety_class {
+            OperatorWhatIfArtifactSafetyClass::CleanupEligible => {
+                if actions.len() < MAX_OPERATOR_WHAT_IF_CLEANUP_ACTIONS {
+                    actions.push(OperatorWhatIfCleanupAction {
+                        path: artifact.path.clone(),
+                        size_bytes: artifact.size_bytes,
+                        reason: artifact.reason.clone(),
+                        dry_run_command: format!(
+                            "franken-node ops resource-governor --cleanup-mode --dry-run --candidate {}",
+                            artifact.path
+                        ),
+                    });
+                }
+            }
+            OperatorWhatIfArtifactSafetyClass::Pinned => {
+                push_operator_log(
+                    logs,
+                    "OP-WHATIF-005",
+                    format!("pinned artifact excluded from cleanup: {}", artifact.path),
+                );
+            }
+            OperatorWhatIfArtifactSafetyClass::Protected => {
+                push_operator_log(
+                    logs,
+                    "OP-WHATIF-005",
+                    format!(
+                        "protected artifact excluded from cleanup: {}",
+                        artifact.path
+                    ),
+                );
+            }
+        }
+    }
+
+    actions.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then(left.size_bytes.cmp(&right.size_bytes))
+            .then(left.reason.cmp(&right.reason))
+    });
+    actions
+}
+
+fn render_simulated_command(
+    _work_class: WorkCostClass,
+    _action: OperatorWhatIfAction,
+    command: &str,
+) -> String {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.starts_with("rch exec --") {
+        return redact_protected_command_text(trimmed);
+    }
+
+    let cargo_heavy = command_is_cargo_heavy(trimmed);
+    if cargo_heavy {
+        return redact_protected_command_text(&format!("rch exec -- {trimmed}"));
+    }
+
+    redact_protected_command_text(trimmed)
+}
+
+fn command_is_cargo_heavy(command: &str) -> bool {
+    command == "cargo"
+        || command.starts_with("cargo ")
+        || command.starts_with("cargo\t")
+        || command.contains(" cargo ")
+}
+
+fn render_operator_what_if_human_summary(
+    input: &OperatorWhatIfInput,
+    action: OperatorWhatIfAction,
+    reason_code: &str,
+    retry_after_ms: Option<u32>,
+    simulated_command: Option<&str>,
+    cleanup_action_count: usize,
+    pinned_artifact_count: usize,
+    protected_artifact_count: usize,
+) -> String {
+    format!(
+        "operator what-if: scenario={} bead={} action={} reason={} retry_after_ms={} command={} cleanup_actions={} pinned_artifacts={} protected_artifacts={} rch_slots={:?} queued_jobs={}",
+        input.scenario_id,
+        input.bead_id.as_deref().unwrap_or("none"),
+        action.as_str(),
+        reason_code,
+        retry_after_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        simulated_command.unwrap_or("none"),
+        cleanup_action_count,
+        pinned_artifact_count,
+        protected_artifact_count,
+        input.rch_queue.available_slots,
+        input.rch_queue.queued_jobs,
+    )
 }
 
 /// Estimate size of temporary artifacts for cleanup analysis.

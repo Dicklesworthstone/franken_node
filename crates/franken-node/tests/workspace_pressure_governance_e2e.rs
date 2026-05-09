@@ -3,8 +3,11 @@ use frankenengine_node::ops::workspace_pressure_policy::{
     AGENT_COMMAND_LEDGER_SCHEMA_VERSION, AdmissionDecision, AgentCommandBudgetEntry,
     AgentCommandBudgetLedger, AgentCommandCostClass, AgentCommandExecutionPolicy,
     AgentCommandFamily, AgentCommandLedgerError, AgentCommandPolicyViolation,
-    AgentCommandValidationOutcome, MAX_AGENT_COMMAND_LEDGER_ENTRIES, PolicyDecision, WorkCostClass,
-    WorkspacePressureInputs, WorkspacePressurePolicy, render_agent_command_ledger_human,
+    AgentCommandValidationOutcome, MAX_AGENT_COMMAND_LEDGER_ENTRIES,
+    OPERATOR_WHAT_IF_SCHEMA_VERSION, OperatorWhatIfAction, OperatorWhatIfArtifact,
+    OperatorWhatIfArtifactSafetyClass, OperatorWhatIfInput, OperatorWhatIfRchQueueState,
+    PolicyDecision, WorkCostClass, WorkspacePressureInputs, WorkspacePressurePolicy,
+    render_agent_command_ledger_human,
 };
 use frankenengine_node::runtime::resource_governor::{
     ResourceArtifactInventory, ResourceArtifactInventoryEntry, ResourceArtifactKind,
@@ -23,6 +26,8 @@ use tempfile::TempDir;
 
 const GOLDEN: &str =
     include_str!("../../../artifacts/golden/workspace_pressure_governance_e2e.json");
+const OPERATOR_WHAT_IF_FIXTURES: &str =
+    include_str!("../../../artifacts/validation_broker/bd-38hez.6/operator_what_if_fixtures.json");
 const REPO_KEY: &str = "/data/projects/franken_node";
 const POLICY_DECISION_GOLDEN_RELATIVE_PATH: &str =
     "../../tests/golden/workspace_pressure_policy_decisions.json";
@@ -51,6 +56,33 @@ struct Scenario {
     expected_admission: String,
     expected_reason_code: String,
     minimum_cleanup_candidates: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorWhatIfFixture {
+    schema_version: String,
+    scenarios: Vec<OperatorWhatIfScenario>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorWhatIfScenario {
+    name: String,
+    bead_id: String,
+    work_class: WorkCostClass,
+    bead_priority: u32,
+    requested_command: String,
+    workspace: WorkspacePressureInputs,
+    rch_queue: OperatorWhatIfRchQueueState,
+    artifacts: Vec<OperatorWhatIfArtifact>,
+    ledger_kind: Option<String>,
+    stale_sibling_blocker: Option<String>,
+    expected_action: OperatorWhatIfAction,
+    expected_reason_code: String,
+    expected_command_prefix: Option<String>,
+    expected_cleanup_actions: usize,
+    expected_pinned_artifacts: usize,
+    expected_protected_artifacts: usize,
+    expected_log_event: String,
 }
 
 #[test]
@@ -450,6 +482,152 @@ fn agent_command_budget_ledger_human_summary_is_stable() {
     assert!(rendered.contains("bead=bd-38hez.4"));
     assert!(rendered.contains("commands=1"));
     assert!(rendered.contains("policy_violations=3"));
+}
+
+#[test]
+fn operator_what_if_fixture_replay_is_deterministic_and_safe() -> Result<(), String> {
+    let fixture: OperatorWhatIfFixture = serde_json::from_str(OPERATOR_WHAT_IF_FIXTURES)
+        .map_err(|err| format!("what-if fixtures should parse: {err}"))?;
+    assert_eq!(
+        fixture.schema_version,
+        "franken-node/operator-what-if-fixtures/v1"
+    );
+    assert_eq!(fixture.scenarios.len(), 6);
+
+    let policy = WorkspacePressurePolicy::with_balanced_defaults();
+    let mut names = BTreeSet::new();
+
+    for scenario in &fixture.scenarios {
+        assert!(names.insert(scenario.name.as_str()));
+        let input = OperatorWhatIfInput {
+            scenario_id: scenario.name.clone(),
+            bead_id: Some(scenario.bead_id.clone()),
+            work_class: scenario.work_class,
+            bead_priority: scenario.bead_priority,
+            requested_command: Some(scenario.requested_command.clone()),
+            workspace: scenario.workspace.clone(),
+            rch_queue: scenario.rch_queue.clone(),
+            artifacts: scenario.artifacts.clone(),
+            command_ledger: scenario
+                .ledger_kind
+                .as_deref()
+                .map(operator_what_if_fixture_ledger)
+                .transpose()?,
+            stale_sibling_blocker: scenario.stale_sibling_blocker.clone(),
+        };
+
+        let report = policy.simulate_operator_what_if(input);
+        assert_eq!(report.schema_version, OPERATOR_WHAT_IF_SCHEMA_VERSION);
+        assert_eq!(
+            report.action, scenario.expected_action,
+            "{} action drifted",
+            scenario.name
+        );
+        assert_eq!(
+            report.reason_code, scenario.expected_reason_code,
+            "{} reason code drifted",
+            scenario.name
+        );
+        if let Some(prefix) = &scenario.expected_command_prefix {
+            let command = report
+                .simulated_command
+                .as_deref()
+                .expect("scenario expected simulated command");
+            assert!(
+                command.starts_with(prefix),
+                "{} simulated command should start with `{}` but got `{}`",
+                scenario.name,
+                prefix,
+                command
+            );
+        }
+        assert_eq!(
+            report.cleanup_actions.len(),
+            scenario.expected_cleanup_actions,
+            "{} cleanup action count drifted",
+            scenario.name
+        );
+        assert_eq!(
+            report.pinned_artifact_count, scenario.expected_pinned_artifacts,
+            "{} pinned count drifted",
+            scenario.name
+        );
+        assert_eq!(
+            report.protected_artifact_count, scenario.expected_protected_artifacts,
+            "{} protected count drifted",
+            scenario.name
+        );
+
+        let blocked_paths = scenario
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact.safety_class != OperatorWhatIfArtifactSafetyClass::CleanupEligible
+            })
+            .map(|artifact| artifact.path.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            report
+                .cleanup_actions
+                .iter()
+                .all(|action| !blocked_paths.contains(action.path.as_str())),
+            "{} protected or pinned artifact became a cleanup action",
+            scenario.name
+        );
+        assert!(
+            report
+                .logs
+                .iter()
+                .any(|log| log.event_code == scenario.expected_log_event),
+            "{} did not emit expected event {}",
+            scenario.name,
+            scenario.expected_log_event
+        );
+        assert!(report.human_summary.contains(&scenario.name));
+        serde_json::to_string_pretty(&report)
+            .map_err(|err| format!("what-if report should serialize: {err}"))?;
+    }
+
+    Ok(())
+}
+
+fn operator_what_if_fixture_ledger(kind: &str) -> Result<AgentCommandBudgetLedger, String> {
+    match kind {
+        "clean_rch" => AgentCommandBudgetLedger::try_new(
+            "session-what-if-rch",
+            "CalmSnow",
+            Some("bd-38hez.6".to_string()),
+            vec![
+                AgentCommandBudgetEntry::new(
+                    "cmd-rch-proof",
+                    AgentCommandFamily::Cargo,
+                    AgentCommandCostClass::RchRemote,
+                    AgentCommandExecutionPolicy::RchRequired,
+                    "rch exec -- cargo test -p frankenengine-node workspace_pressure_governance_e2e",
+                )
+                .with_target_dir("/data/tmp/franken_node-what-if-target")
+                .with_touched_paths(["crates/franken-node/tests/workspace_pressure_governance_e2e.rs"])
+                .with_reservation_refs(["agent-mail-reservation-17314"])
+                .with_validation_outcome(AgentCommandValidationOutcome::Passed),
+            ],
+        )
+        .map_err(|err| format!("clean rch ledger should validate: {err}")),
+        "bare_cargo" => AgentCommandBudgetLedger::try_new(
+            "session-what-if-bare",
+            "CalmSnow",
+            Some("bd-38hez.6".to_string()),
+            vec![AgentCommandBudgetEntry::new(
+                "cmd-bare-cargo",
+                AgentCommandFamily::Cargo,
+                AgentCommandCostClass::LocalCpuSensitive,
+                AgentCommandExecutionPolicy::LocalAllowed,
+                "cargo test -p frankenengine-node workspace_pressure_governance_e2e",
+            )
+            .with_touched_paths(["crates/franken-node/tests/workspace_pressure_governance_e2e.rs"])],
+        )
+        .map_err(|err| format!("bare cargo ledger should validate: {err}")),
+        other => Err(format!("unknown what-if ledger kind: {other}")),
+    }
 }
 
 struct RealWorkspace {

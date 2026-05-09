@@ -1,0 +1,219 @@
+{
+  "schema_version": "franken-node/operator-what-if-fixtures/v1",
+  "scenarios": [
+    {
+      "name": "high_priority_proof",
+      "bead_id": "bd-38hez.6",
+      "work_class": "Validation",
+      "bead_priority": 1,
+      "requested_command": "cargo test -p frankenengine-node validation_planner",
+      "workspace": {
+        "free_disk_bytes": 5000000000,
+        "target_dir_bytes": 1000000000,
+        "active_build_count": 1,
+        "rch_available_slots": 6,
+        "memory_pressure": 0.25,
+        "active_reservations": 4,
+        "coordination_healthy": true
+      },
+      "rch_queue": {
+        "available_slots": 6,
+        "queued_jobs": 1,
+        "degraded_workers": 0,
+        "local_fallback_allowed": false
+      },
+      "artifacts": [],
+      "ledger_kind": "clean_rch",
+      "stale_sibling_blocker": null,
+      "expected_action": "require_rch",
+      "expected_reason_code": "OP_WHATIF_REQUIRE_RCH",
+      "expected_command_prefix": "rch exec -- cargo test",
+      "expected_cleanup_actions": 0,
+      "expected_pinned_artifacts": 0,
+      "expected_protected_artifacts": 0,
+      "expected_log_event": "OP-WHATIF-002"
+    },
+    {
+      "name": "saturated_workers",
+      "bead_id": "bd-38hez.6",
+      "work_class": "Benchmark",
+      "bead_priority": 1,
+      "requested_command": "cargo bench -p frankenengine-node validation_broker",
+      "workspace": {
+        "free_disk_bytes": 3000000000,
+        "target_dir_bytes": 2000000000,
+        "active_build_count": 8,
+        "rch_available_slots": 0,
+        "memory_pressure": 0.6,
+        "active_reservations": 9,
+        "coordination_healthy": true
+      },
+      "rch_queue": {
+        "available_slots": 0,
+        "queued_jobs": 12,
+        "degraded_workers": 1,
+        "local_fallback_allowed": false
+      },
+      "artifacts": [],
+      "ledger_kind": null,
+      "stale_sibling_blocker": null,
+      "expected_action": "queue",
+      "expected_reason_code": "OP_WHATIF_QUEUE_RCH_SATURATED",
+      "expected_command_prefix": "rch exec -- cargo bench",
+      "expected_cleanup_actions": 0,
+      "expected_pinned_artifacts": 0,
+      "expected_protected_artifacts": 0,
+      "expected_log_event": "OP-WHATIF-003"
+    },
+    {
+      "name": "disk_warning",
+      "bead_id": "bd-38hez.6",
+      "work_class": "SourceOnly",
+      "bead_priority": 2,
+      "requested_command": "cargo fmt --check",
+      "workspace": {
+        "free_disk_bytes": 750000000,
+        "target_dir_bytes": 11000000000,
+        "active_build_count": 1,
+        "rch_available_slots": 3,
+        "memory_pressure": 0.3,
+        "active_reservations": 5,
+        "coordination_healthy": true
+      },
+      "rch_queue": {
+        "available_slots": 3,
+        "queued_jobs": 0,
+        "degraded_workers": 0,
+        "local_fallback_allowed": false
+      },
+      "artifacts": [],
+      "ledger_kind": null,
+      "stale_sibling_blocker": null,
+      "expected_action": "require_rch",
+      "expected_reason_code": "OP_WHATIF_REQUIRE_RCH",
+      "expected_command_prefix": "rch exec -- cargo fmt",
+      "expected_cleanup_actions": 0,
+      "expected_pinned_artifacts": 0,
+      "expected_protected_artifacts": 0,
+      "expected_log_event": "OP-WHATIF-002"
+    },
+    {
+      "name": "pinned_artifacts",
+      "bead_id": "bd-38hez.6",
+      "work_class": "Cleanup",
+      "bead_priority": 1,
+      "requested_command": "franken-node ops resource-governor --cleanup-mode --dry-run",
+      "workspace": {
+        "free_disk_bytes": 100000000,
+        "target_dir_bytes": 15000000000,
+        "active_build_count": 2,
+        "rch_available_slots": 2,
+        "memory_pressure": 0.4,
+        "active_reservations": 6,
+        "coordination_healthy": true
+      },
+      "rch_queue": {
+        "available_slots": 2,
+        "queued_jobs": 0,
+        "degraded_workers": 0,
+        "local_fallback_allowed": false
+      },
+      "artifacts": [
+        {
+          "path": "target/debug/incremental/stale-object.o",
+          "size_bytes": 8589934592,
+          "safety_class": "cleanup_eligible",
+          "reason": "rebuildable stale target artifact",
+          "pinned_by": null
+        },
+        {
+          "path": "target/pinned/do-not-clean.rlib",
+          "size_bytes": 4294967296,
+          "safety_class": "pinned",
+          "reason": "active proof owns artifact",
+          "pinned_by": "bd-38hez.10"
+        },
+        {
+          "path": "src/lib.rs",
+          "size_bytes": 4096,
+          "safety_class": "protected",
+          "reason": "source file must never be cleanup action",
+          "pinned_by": null
+        }
+      ],
+      "ledger_kind": null,
+      "stale_sibling_blocker": null,
+      "expected_action": "refuse_local_fallback",
+      "expected_reason_code": "OP_WHATIF_REFUSE_LOCAL_FALLBACK",
+      "expected_command_prefix": "franken-node ops resource-governor --cleanup-mode --dry-run",
+      "expected_cleanup_actions": 1,
+      "expected_pinned_artifacts": 1,
+      "expected_protected_artifacts": 1,
+      "expected_log_event": "OP-WHATIF-005"
+    },
+    {
+      "name": "stale_sibling_blocker",
+      "bead_id": "bd-38hez.6",
+      "work_class": "Validation",
+      "bead_priority": 1,
+      "requested_command": "cargo test -p frankenengine-node trust_cli_e2e",
+      "workspace": {
+        "free_disk_bytes": 5000000000,
+        "target_dir_bytes": 1000000000,
+        "active_build_count": 1,
+        "rch_available_slots": 5,
+        "memory_pressure": 0.25,
+        "active_reservations": 4,
+        "coordination_healthy": true
+      },
+      "rch_queue": {
+        "available_slots": 5,
+        "queued_jobs": 0,
+        "degraded_workers": 0,
+        "local_fallback_allowed": false
+      },
+      "artifacts": [],
+      "ledger_kind": null,
+      "stale_sibling_blocker": "franken_engine parser validation failed in current head",
+      "expected_action": "wait",
+      "expected_reason_code": "OP_WHATIF_WAIT_SIBLING_BLOCKER",
+      "expected_command_prefix": "rch exec -- cargo test",
+      "expected_cleanup_actions": 0,
+      "expected_pinned_artifacts": 0,
+      "expected_protected_artifacts": 0,
+      "expected_log_event": "OP-WHATIF-006"
+    },
+    {
+      "name": "bare_cargo_ledger",
+      "bead_id": "bd-38hez.6",
+      "work_class": "SourceOnly",
+      "bead_priority": 2,
+      "requested_command": "cargo test -p frankenengine-node workspace_pressure_governance_e2e",
+      "workspace": {
+        "free_disk_bytes": 5000000000,
+        "target_dir_bytes": 1000000000,
+        "active_build_count": 1,
+        "rch_available_slots": 4,
+        "memory_pressure": 0.2,
+        "active_reservations": 2,
+        "coordination_healthy": true
+      },
+      "rch_queue": {
+        "available_slots": 4,
+        "queued_jobs": 0,
+        "degraded_workers": 0,
+        "local_fallback_allowed": false
+      },
+      "artifacts": [],
+      "ledger_kind": "bare_cargo",
+      "stale_sibling_blocker": null,
+      "expected_action": "wait",
+      "expected_reason_code": "OP_WHATIF_WAIT_COMMAND_LEDGER_VIOLATION",
+      "expected_command_prefix": "rch exec -- cargo test",
+      "expected_cleanup_actions": 0,
+      "expected_pinned_artifacts": 0,
+      "expected_protected_artifacts": 0,
+      "expected_log_event": "OP-WHATIF-008"
+    }
+  ]
+}
