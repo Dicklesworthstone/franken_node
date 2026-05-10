@@ -283,7 +283,7 @@ fn check_authorization(
         }
         CallerRole::ReadOnly => {
             // Read-only role can only read, and not from audit logs
-            if operation != "read" || class == PersistenceClass::AuditLog {
+            if !matches!(operation, "read") || matches!(class, PersistenceClass::AuditLog) {
                 Err(AuthorizationError::AccessDenied {
                     caller_id: caller.caller_id.clone(),
                     role: caller.role,
@@ -296,7 +296,7 @@ fn check_authorization(
         }
         CallerRole::Restricted => {
             // Restricted role can only access cache
-            if class != PersistenceClass::Cache {
+            if !matches!(class, PersistenceClass::Cache) {
                 Err(AuthorizationError::AccessDenied {
                     caller_id: caller.caller_id.clone(),
                     role: caller.role,
@@ -618,7 +618,7 @@ impl FrankensqliteAdapter {
         let key_string = key.to_string();
         let store_key = (class, key_string.clone());
 
-        if class == PersistenceClass::AuditLog && self.store.contains_key(&store_key) {
+        if matches!(class, PersistenceClass::AuditLog) && self.store.contains_key(&store_key) {
             return Err(self.reject_write(
                 class,
                 key,
@@ -643,7 +643,7 @@ impl FrankensqliteAdapter {
         *tier_writes = tier_writes.saturating_add(1);
         self.write_count = self.write_count.saturating_add(1);
 
-        if class == PersistenceClass::AuditLog {
+        if matches!(class, PersistenceClass::AuditLog) {
             if !self.audit_log_truncated && self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
                 self.audit_log_truncated = true;
                 self.emit_event(
@@ -1396,12 +1396,11 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         let _ = adapter.take_events();
         adapter.crash_recovery();
-        assert!(
-            adapter
-                .events()
-                .iter()
-                .any(|e| e.code == event_codes::FRANKENSQLITE_CRASH_RECOVERY)
-        );
+        assert!(adapter.events().iter().any(|e| {
+            e.code
+                .as_str()
+                .eq(event_codes::FRANKENSQLITE_CRASH_RECOVERY)
+        }));
     }
 
     // -- Schema migration tests --
@@ -2864,10 +2863,16 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
                 // Versions <= current should fail closed (using <=, not just <)
                 0 | 1 => {
                     assert!(result.is_err(), "version {version} should fail closed");
-                    if let Err(AdapterError::SchemaMigrationFailed { version: v, .. }) = result {
-                        assert_eq!(v, version);
-                    } else {
-                        panic!("wrong error type for version {version}");
+                    match result {
+                        Err(AdapterError::SchemaMigrationFailed { version: v, .. }) => {
+                            assert_eq!(v, version);
+                        }
+                        other => {
+                            assert!(
+                                matches!(other, Err(AdapterError::SchemaMigrationFailed { .. })),
+                                "wrong error type for version {version}"
+                            );
+                        }
                     }
                 }
                 // Very large versions may succeed or fail gracefully
@@ -3276,7 +3281,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
     fn test_key_string_optimization_preserves_identical_behavior() {
         // Verify that the key string optimization doesn't change read/write behavior
         let mut adapter = FrankensqliteAdapter::default();
-        let caller = CallerContext::new_system();
+        let caller = CallerContext::system("storage::tests", "key-string-optimization");
 
         // Test representative namespace.key combinations
         let test_cases = vec![

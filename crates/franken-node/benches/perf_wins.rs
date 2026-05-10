@@ -30,22 +30,42 @@ fn signature_preimage_hash_throughput(c: &mut Criterion) {
     });
 }
 
-/// Benchmark transparency verify_inclusion with 256-step audit path (dfd95547 win)
-fn transparency_verify_inclusion_path256(c: &mut Criterion) {
+/// Benchmark transparency verify_inclusion with a deep audit path (dfd95547 win)
+fn transparency_verify_inclusion_path64(c: &mut Criterion) {
     use frankenengine_node::supply_chain::transparency_verifier::{
-        InclusionProof, verify_inclusion,
+        InclusionProof, LogRoot, TransparencyPolicy, recompute_root, verify_inclusion,
     };
 
-    // Create a representative inclusion proof with substantial audit path
     let proof = InclusionProof {
         leaf_index: 12345,
+        tree_size: u64::MAX,
         leaf_hash: "a".repeat(64),
-        root_hash: "b".repeat(64),
-        audit_path: (0..256).map(|i| format!("{:064x}", i)).collect(),
+        audit_path: (0..64).map(|i| format!("{:064x}", i)).collect(),
+    };
+    let root_hash = recompute_root(&proof);
+    let policy = TransparencyPolicy {
+        required: true,
+        pinned_roots: vec![LogRoot {
+            tree_size: proof.tree_size,
+            root_hash,
+        }],
     };
 
-    c.bench_function("transparency_verify_inclusion_path256", |b| {
-        b.iter(|| black_box(verify_inclusion(&proof).is_ok()))
+    c.bench_function("transparency_verify_inclusion_path64", |b| {
+        b.iter(|| {
+            black_box(
+                verify_inclusion(
+                    &policy,
+                    Some(&proof),
+                    &proof.leaf_hash,
+                    "bench-connector",
+                    "bench-artifact",
+                    "bench-trace",
+                    "bench-timestamp",
+                )
+                .verified,
+            )
+        })
     });
 }
 
@@ -56,10 +76,17 @@ fn lane_scheduler_assign_throughput(c: &mut Criterion) {
     };
 
     let mut policy = LaneMappingPolicy::new();
-    policy.add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 10000));
-    policy.add_lane(LaneConfig::new(SchedulerLane::RemoteEffect, 80, 5000));
-    policy.add_lane(LaneConfig::new(SchedulerLane::Maintenance, 60, 2000));
-    policy.add_lane(LaneConfig::new(SchedulerLane::Background, 40, 1000));
+    for lane in [
+        LaneConfig::new(SchedulerLane::ControlCritical, 100, 10000),
+        LaneConfig::new(SchedulerLane::RemoteEffect, 80, 5000),
+        LaneConfig::new(SchedulerLane::Maintenance, 60, 2000),
+        LaneConfig::new(SchedulerLane::Background, 40, 1000),
+    ] {
+        assert!(
+            policy.add_lane(lane).is_ok(),
+            "benchmark lane config should be valid"
+        );
+    }
 
     policy.add_rule(
         &TaskClass::new("control.epoch"),
@@ -97,7 +124,7 @@ fn frankensqlite_read_throughput(c: &mut Criterion) {
         CallerContext, FrankensqliteAdapter, PersistenceClass,
     };
 
-    let caller = CallerContext::new_system();
+    let caller = CallerContext::system("storage::perf_wins", "bench-trace");
 
     c.bench_function("frankensqlite_read_throughput", |b| {
         b.iter(|| {
@@ -121,15 +148,10 @@ fn trace_digest_throughput(c: &mut Criterion) {
     use frankenengine_node::replay::time_travel_engine::{
         EnvironmentSnapshot, TraceStep, WorkflowTrace,
     };
+    use std::collections::BTreeMap;
 
-    let environment = EnvironmentSnapshot {
-        franken_node_version: "1.0.0".to_string(),
-        rust_version: "1.70.0".to_string(),
-        os_info: "linux".to_string(),
-        cpu_info: "x64".to_string(),
-        memory_mb: 8192,
-        environment_variables: vec![],
-    };
+    let environment =
+        EnvironmentSnapshot::new(1_000_000, BTreeMap::new(), "linux-x86_64", "bench-runtime");
 
     let steps: Vec<TraceStep> = (0..100)
         .map(|i| TraceStep {
@@ -157,7 +179,7 @@ fn trace_digest_throughput(c: &mut Criterion) {
 criterion_group!(
     perf_wins,
     signature_preimage_hash_throughput,
-    transparency_verify_inclusion_path256,
+    transparency_verify_inclusion_path64,
     lane_scheduler_assign_throughput,
     frankensqlite_read_throughput,
     trace_digest_throughput
