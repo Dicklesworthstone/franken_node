@@ -60,6 +60,7 @@ REQUIRED_SPEC_MARKERS = [
     "artifacts/validation_broker/<bead-id>/flight-recorder/",
     "fresh-heartbeat/no-output ambiguity",
     "Worker Reliability Ledger",
+    "Proof Debt SLO",
     "ValidationFlightRecorderAttempt",
     "ValidationFlightRecorderRecovery",
     "command digest is missing",
@@ -270,6 +271,29 @@ AMBIGUITY_NEXT_ACTIONS = {
 }
 
 WORKER_RELIABILITY_CLASSES = {"healthy", "degraded", "drain", "blocked", "unknown"}
+
+PROOF_DEBT_SLO_CLASSES = {
+    "fresh_green",
+    "stale_proof",
+    "worker_infra",
+    "product_failure",
+    "source_only",
+    "waiting_for_capacity",
+    "stale_lease",
+    "missing_proof",
+}
+
+PROOF_DEBT_SLO_ACTIONS = {
+    "use_reusable_proof",
+    "refresh_stale_proof",
+    "retry_different_worker",
+    "retry_priority_lane",
+    "wait_for_capacity",
+    "record_blocker",
+    "record_source_only_blocker",
+    "fail_closed_product",
+    "refresh_lease_fence",
+}
 
 
 def _read_text(path: Path) -> str:
@@ -857,6 +881,165 @@ def worker_reliability_ledger(attempts: list[dict[str, Any]]) -> list[dict[str, 
     return rows
 
 
+def _bounded_int(value: Any, *, minimum: int = 0, maximum: int = 1_000_000) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < minimum or value > maximum:
+        return None
+    return value
+
+
+def _proof_debt_retry_after_ms(bead_priority: int, command_class: str, aged: bool) -> int:
+    if bead_priority <= 1:
+        return 10_000
+    if aged:
+        return 45_000
+    if command_class == "broad_validation":
+        return 180_000
+    if bead_priority >= 4:
+        return 240_000
+    return 60_000
+
+
+def proof_debt_slo_decision(input_data: dict[str, Any]) -> dict[str, Any]:
+    bead_priority = _bounded_int(input_data.get("bead_priority"), maximum=4)
+    retry_count = _bounded_int(input_data.get("retry_count"))
+    retry_budget = _bounded_int(input_data.get("retry_budget"), minimum=1, maximum=64)
+    worker_diversity_count = _bounded_int(input_data.get("worker_diversity_count"))
+    worker_diversity_budget = _bounded_int(
+        input_data.get("worker_diversity_budget"),
+        minimum=1,
+        maximum=64,
+    )
+    queue_depth = _bounded_int(input_data.get("queue_depth"))
+    max_queue_depth = _bounded_int(input_data.get("max_queue_depth"), minimum=1)
+    active_cargo_processes = _bounded_int(input_data.get("active_cargo_processes"))
+    max_cargo_processes = _bounded_int(input_data.get("max_cargo_processes"), minimum=1)
+    healthy_workers = _bounded_int(input_data.get("healthy_workers"))
+    oldest_queued_age_seconds = _bounded_int(input_data.get("oldest_queued_age_seconds"))
+    stale_lease_age_seconds = _bounded_int(input_data.get("stale_lease_age_seconds"))
+    stale_lease_after_seconds = _bounded_int(input_data.get("stale_lease_after_seconds"), minimum=1)
+    debt_class = input_data.get("debt_class")
+    freshness = input_data.get("proof_freshness")
+    command_class = input_data.get("command_class")
+
+    invalid = (
+        bead_priority is None
+        or retry_count is None
+        or retry_budget is None
+        or worker_diversity_count is None
+        or worker_diversity_budget is None
+        or queue_depth is None
+        or max_queue_depth is None
+        or active_cargo_processes is None
+        or max_cargo_processes is None
+        or healthy_workers is None
+        or oldest_queued_age_seconds is None
+        or stale_lease_age_seconds is None
+        or stale_lease_after_seconds is None
+        or debt_class not in PROOF_DEBT_SLO_CLASSES
+        or freshness not in {"fresh", "stale", "missing"}
+        or command_class not in {"focused_validation", "broad_validation", "source_only_gate"}
+    )
+    if invalid:
+        return {
+            "debt_class": "invalid",
+            "budget_remaining": 0,
+            "worker_diversity_remaining": 0,
+            "next_action": "record_blocker",
+            "retry_after_ms": None,
+            "cooldown_hint": "none",
+            "escalation_reason": "invalid_slo_input",
+            "complete": False,
+            "br_comment_warranted": True,
+            "operator_summary": "record_blocker: invalid proof-debt SLO input",
+        }
+
+    budget_remaining = max(0, retry_budget - retry_count)
+    worker_diversity_remaining = max(0, worker_diversity_budget - worker_diversity_count)
+    aged = oldest_queued_age_seconds >= 3_600
+    saturated_queue = queue_depth >= max_queue_depth
+    cargo_saturated = active_cargo_processes >= max_cargo_processes
+    no_healthy_workers = healthy_workers == 0
+    stale_lease = stale_lease_age_seconds >= stale_lease_after_seconds
+    retry_after_ms = _proof_debt_retry_after_ms(bead_priority, command_class, aged)
+    escalation_reason = "within_budget"
+    next_action = "retry_different_worker"
+    complete = False
+    br_comment_warranted = False
+
+    if debt_class == "fresh_green" and freshness == "fresh":
+        next_action = "use_reusable_proof"
+        retry_after_ms = None
+        complete = True
+        escalation_reason = "fresh_green_proof"
+    elif debt_class == "product_failure":
+        next_action = "fail_closed_product"
+        retry_after_ms = None
+        escalation_reason = "product_failure"
+        br_comment_warranted = True
+    elif debt_class == "source_only":
+        next_action = "record_source_only_blocker"
+        retry_after_ms = None
+        escalation_reason = "source_only_not_green"
+        br_comment_warranted = True
+    elif debt_class == "stale_lease" or stale_lease:
+        next_action = "refresh_lease_fence"
+        escalation_reason = "stale_lease_fence_required"
+        br_comment_warranted = True
+    elif freshness == "stale" or debt_class == "stale_proof":
+        next_action = "refresh_stale_proof"
+        escalation_reason = "proof_freshness_expired"
+    elif no_healthy_workers:
+        next_action = "record_blocker"
+        retry_after_ms = None
+        escalation_reason = "no_healthy_workers"
+        br_comment_warranted = True
+    elif saturated_queue or cargo_saturated or debt_class == "waiting_for_capacity":
+        if bead_priority <= 1 and budget_remaining > 0 and not no_healthy_workers:
+            next_action = "retry_priority_lane"
+            escalation_reason = "priority_preemption"
+        else:
+            next_action = "wait_for_capacity"
+            escalation_reason = "capacity_saturated"
+            br_comment_warranted = saturated_queue and cargo_saturated
+    elif debt_class in {"worker_infra", "missing_proof"}:
+        if budget_remaining == 0 or worker_diversity_remaining == 0:
+            next_action = "record_blocker"
+            retry_after_ms = None
+            escalation_reason = "retry_budget_exhausted"
+            br_comment_warranted = True
+        else:
+            next_action = "retry_different_worker"
+            escalation_reason = "retryable_worker_infra"
+
+    if debt_class in {"source_only", "worker_infra", "waiting_for_capacity", "stale_lease"}:
+        complete = False
+    if next_action not in PROOF_DEBT_SLO_ACTIONS:
+        next_action = "record_blocker"
+        retry_after_ms = None
+        escalation_reason = "invalid_slo_action"
+        br_comment_warranted = True
+
+    cooldown_hint = "none" if retry_after_ms is None else f"retry_after_ms={retry_after_ms}"
+    operator_summary = (
+        f"{next_action}: class={debt_class}; budget_remaining={budget_remaining}; "
+        f"worker_diversity_remaining={worker_diversity_remaining}; reason={escalation_reason}"
+    )
+    return {
+        "debt_class": debt_class,
+        "budget_remaining": budget_remaining,
+        "worker_diversity_remaining": worker_diversity_remaining,
+        "next_action": next_action,
+        "retry_after_ms": retry_after_ms,
+        "cooldown_hint": cooldown_hint,
+        "escalation_reason": escalation_reason,
+        "complete": complete,
+        "br_comment_warranted": br_comment_warranted,
+        "operator_summary": operator_summary,
+    }
+
+
 def validate_artifacts(artifacts: Any) -> list[str]:
     errors: list[str] = []
     if not isinstance(artifacts, dict):
@@ -1252,6 +1435,129 @@ def _check_worker_reliability_cases(fixtures: dict[str, Any] | None) -> list[dic
     return checks
 
 
+def _check_proof_debt_slo_cases(fixtures: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if fixtures is None or not isinstance(fixtures.get("proof_debt_slo_cases"), list):
+        return [_check("proof_debt_slo_cases_present", False, "missing proof_debt_slo_cases")]
+    checks: list[dict[str, Any]] = []
+    represented = set()
+    for case in fixtures["proof_debt_slo_cases"]:
+        if not isinstance(case, dict):
+            checks.append(_check("proof_debt_slo_case_malformed", False, "case is not object"))
+            continue
+        name = case.get("case", "<unnamed>")
+        represented.add(name)
+        input_data = case.get("input")
+        if not isinstance(input_data, dict):
+            checks.append(_check(f"proof_debt_slo_case:{name}", False, "missing input"))
+            continue
+        decision = proof_debt_slo_decision(input_data)
+        checks.append(
+            _check(
+                f"proof_debt_slo_action:{name}",
+                decision.get("next_action") == case.get("expected_next_action"),
+                str(decision.get("next_action")),
+            )
+        )
+        checks.append(
+            _check(
+                f"proof_debt_slo_complete:{name}",
+                decision.get("complete") == case.get("expected_complete"),
+                str(decision.get("complete")),
+            )
+        )
+        checks.append(
+            _check(
+                f"proof_debt_slo_reason:{name}",
+                decision.get("escalation_reason") == case.get("expected_escalation_reason"),
+                str(decision.get("escalation_reason")),
+            )
+        )
+        if "expected_budget_remaining" in case:
+            checks.append(
+                _check(
+                    f"proof_debt_slo_budget:{name}",
+                    decision.get("budget_remaining") == case.get("expected_budget_remaining"),
+                    str(decision.get("budget_remaining")),
+                )
+            )
+        checks.append(
+            _check(
+                f"proof_debt_slo_summary:{name}",
+                _bounded(decision.get("operator_summary"))
+                and str(decision.get("next_action")) in str(decision.get("operator_summary")),
+                str(decision.get("operator_summary")),
+            )
+        )
+        if input_data.get("debt_class") in {"source_only", "worker_infra"}:
+            checks.append(
+                _check(
+                    f"proof_debt_slo_not_green:{name}",
+                    decision.get("complete") is False,
+                    str(decision.get("complete")),
+                )
+            )
+
+    required_cases = {
+        "fresh_green_proof",
+        "stale_proof_refresh",
+        "repeated_worker_infra_budget_exhausted",
+        "product_failure_fail_closed",
+        "p1_urgent_retry_budget",
+        "p4_fairness_aging",
+        "saturated_rch_queue",
+        "no_healthy_workers",
+        "stale_coalescer_lease",
+        "source_only_not_green",
+    }
+    for required_case in sorted(required_cases):
+        checks.append(
+            _check(
+                f"proof_debt_slo_matrix:{required_case}",
+                required_case in represented,
+                ",".join(sorted(str(case) for case in represented)),
+            )
+        )
+
+    stress_inputs = [
+        {
+            "debt_class": "worker_infra" if index % 3 else "waiting_for_capacity",
+            "bead_priority": index % 5,
+            "command_class": "focused_validation",
+            "proof_freshness": "missing",
+            "retry_count": index % 3,
+            "retry_budget": 3,
+            "worker_diversity_count": index % 2,
+            "worker_diversity_budget": 2,
+            "queue_depth": index % 17,
+            "max_queue_depth": 32,
+            "active_cargo_processes": index % 3,
+            "max_cargo_processes": 3,
+            "healthy_workers": 1 + (index % 4),
+            "oldest_queued_age_seconds": 4_000 if index % 7 == 0 else 100,
+            "stale_lease_age_seconds": 0,
+            "stale_lease_after_seconds": 600,
+        }
+        for index in range(1024)
+    ]
+    stress_decisions = [proof_debt_slo_decision(input_data) for input_data in stress_inputs]
+    stress_bytes = len(json.dumps(stress_decisions, sort_keys=True).encode("utf-8"))
+    checks.append(
+        _check(
+            "proof_debt_slo_stress_1024",
+            len(stress_decisions) == 1024 and stress_bytes <= 512 * 1024,
+            f"decisions={len(stress_decisions)} bytes={stress_bytes}",
+        )
+    )
+    checks.append(
+        _check(
+            "proof_debt_slo_stress_deterministic",
+            stress_decisions == [proof_debt_slo_decision(input_data) for input_data in stress_inputs],
+            "stable",
+        )
+    )
+    return checks
+
+
 def run_all() -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     checks.extend(_check_files())
@@ -1261,6 +1567,7 @@ def run_all() -> dict[str, Any]:
     checks.extend(_check_valid_cases(fixtures))
     checks.extend(_check_invalid_cases(fixtures))
     checks.extend(_check_worker_reliability_cases(fixtures))
+    checks.extend(_check_proof_debt_slo_cases(fixtures))
     passed = sum(1 for check in checks if check["passed"])
     failed = len(checks) - passed
     return {

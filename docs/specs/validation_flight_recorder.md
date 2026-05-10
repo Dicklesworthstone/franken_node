@@ -330,6 +330,45 @@ progress, missing toolchains, filesystem pressure, and local fallback refusal
 can lower reliability. A worker with only retryable worker-infra evidence must
 not be marked `healthy`.
 
+## Proof Debt SLO
+
+Proof debt SLO decisions are deterministic, offline decisions derived from
+proof-debt ledger entries, worker reliability rows, proof freshness, retry
+history, queue/cargo pressure, and coalescer lease age. They do not launch
+cargo, mutate Beads, or query live RCH. They exist to stop retry loops from
+burning worker slots while still giving low-priority work a bounded aging path.
+
+Each SLO input must include:
+
+| Field | Meaning |
+|-------|---------|
+| `debt_class` | `fresh_green`, `stale_proof`, `worker_infra`, `product_failure`, `source_only`, `waiting_for_capacity`, `stale_lease`, or `missing_proof` |
+| `bead_priority` | Beads priority `0..4` |
+| `command_class` | `focused_validation`, `broad_validation`, or `source_only_gate` |
+| `proof_freshness` | `fresh`, `stale`, or `missing` |
+| `retry_count` / `retry_budget` | Current attempts and maximum allowed attempts |
+| `worker_diversity_count` / `worker_diversity_budget` | Distinct workers already tried and maximum worker spread |
+| `queue_depth` / `max_queue_depth` | RCH queue saturation inputs |
+| `active_cargo_processes` / `max_cargo_processes` | Local cargo/rustc contention inputs |
+| `healthy_workers` | Healthy worker count from reliability/readiness evidence |
+| `oldest_queued_age_seconds` | Fairness aging signal for deferred low-priority work |
+| `stale_lease_age_seconds` / `stale_lease_after_seconds` | Coalescer lease fencing budget |
+
+Each SLO output must include `debt_class`, `budget_remaining`,
+`worker_diversity_remaining`, `next_action`, `retry_after_ms`, `cooldown_hint`,
+`escalation_reason`, `complete`, `br_comment_warranted`, and a bounded
+`operator_summary`. Valid next actions are `use_reusable_proof`,
+`refresh_stale_proof`, `retry_different_worker`, `retry_priority_lane`,
+`wait_for_capacity`, `record_blocker`, `record_source_only_blocker`,
+`fail_closed_product`, and `refresh_lease_fence`.
+
+The SLO must never mark `source_only`, `worker_infra`, `waiting_for_capacity`,
+or `stale_lease` as complete validation proof. Product failures are fail-closed
+product work. Exhausted retry or worker-diversity budgets must stop retrying and
+emit `record_blocker`. Priority `0`/`1` work may get shorter retry backoff when
+capacity evidence permits; priority `4` work must age into a bounded retry or
+queue path instead of disappearing forever.
+
 ## Consumer Requirements
 
 ### Validation Broker
