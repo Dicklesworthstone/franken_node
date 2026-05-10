@@ -632,7 +632,7 @@
               "observed_at": "2026-05-06T08:00:02Z",
               "phase": "progress_observed",
               "event_code": "VFR-001",
-              "worker_id": "vmi-cancelled",
+              "worker_id": "vmi-ambiguous",
               "rch_mode": "remote",
               "queue_state": "running",
               "message": "worker heartbeat fresh while remote_exec_start continued",
@@ -647,7 +647,7 @@
               "observed_at": "2026-05-06T08:07:02Z",
               "phase": "progress_stale",
               "event_code": "VFR-009",
-              "worker_id": "vmi-cancelled",
+              "worker_id": "vmi-ambiguous",
               "rch_mode": "remote",
               "queue_state": "running",
               "message": "fresh heartbeat/no-output ambiguity reached cancellation budget",
@@ -667,7 +667,7 @@
               "observed_at": "2026-05-06T08:07:05Z",
               "phase": "attempt_cancelled",
               "event_code": "VFR-009",
-              "worker_id": "vmi-cancelled",
+              "worker_id": "vmi-ambiguous",
               "rch_mode": "remote",
               "queue_state": "cancelled",
               "message": "attempt cancelled cleanly after ambiguity budget",
@@ -680,7 +680,7 @@
           "adapter_outcome": {
             "outcome": "worker_timeout",
             "execution_mode": "remote",
-            "worker_id": "vmi-cancelled",
+            "worker_id": "vmi-ambiguous",
             "timeout_class": "process_idle",
             "exit_code": null,
             "retryable": true,
@@ -1016,6 +1016,94 @@
           ]
         }
       }
+    }
+  ],
+  "worker_reliability_cases": [
+    {
+      "case": "remote_success_healthy",
+      "attempt_cases": [
+        "remote_success"
+      ],
+      "worker_id": "ts2",
+      "expected_class": "healthy",
+      "expected_next_action": "allow_worker",
+      "expected_reasons": []
+    },
+    {
+      "case": "repeated_stale_progress_drain",
+      "attempt_cases": [
+        "fresh_heartbeat_progress_ambiguous",
+        "clean_cancellation_after_ambiguity"
+      ],
+      "worker_id": "vmi-ambiguous",
+      "expected_class": "drain",
+      "expected_next_action": "drain_worker",
+      "expected_reasons": [
+        "fresh_heartbeat_no_output",
+        "repeated_stale_progress"
+      ]
+    },
+    {
+      "case": "product_failures_excluded",
+      "attempt_cases": [
+        "remote_success",
+        "compile_error",
+        "test_failure"
+      ],
+      "worker_id": "ts2",
+      "expected_class": "healthy",
+      "expected_next_action": "allow_worker",
+      "expected_reasons": [
+        "product_failure_excluded"
+      ]
+    },
+    {
+      "case": "fresh_heartbeat_ambiguity_degraded",
+      "attempt_cases": [
+        "fresh_heartbeat_progress_ambiguous"
+      ],
+      "worker_id": "vmi-ambiguous",
+      "expected_class": "degraded",
+      "expected_next_action": "retry_different_worker",
+      "expected_reasons": [
+        "fresh_heartbeat_no_output"
+      ]
+    },
+    {
+      "case": "filesystem_pressure_drain",
+      "attempt_cases": [
+        "disk_pressure"
+      ],
+      "worker_id": "vmi-disk",
+      "expected_class": "drain",
+      "expected_next_action": "drain_worker",
+      "expected_reasons": [
+        "worker_filesystem_error"
+      ]
+    },
+    {
+      "case": "missing_toolchain_degraded",
+      "attempt_cases": [
+        "missing_toolchain"
+      ],
+      "worker_id": "vmi-toolchain",
+      "expected_class": "degraded",
+      "expected_next_action": "retry_different_worker",
+      "expected_reasons": [
+        "worker_missing_toolchain"
+      ]
+    },
+    {
+      "case": "local_fallback_blocked",
+      "attempt_cases": [
+        "local_fallback_refused"
+      ],
+      "worker_id": "local",
+      "expected_class": "blocked",
+      "expected_next_action": "reject_worker",
+      "expected_reasons": [
+        "local_fallback_refused"
+      ]
     }
   ]
 }

@@ -59,6 +59,7 @@ REQUIRED_SPEC_MARKERS = [
     RECOVERY_SCHEMA_VERSION,
     "artifacts/validation_broker/<bead-id>/flight-recorder/",
     "fresh-heartbeat/no-output ambiguity",
+    "Worker Reliability Ledger",
     "ValidationFlightRecorderAttempt",
     "ValidationFlightRecorderRecovery",
     "command digest is missing",
@@ -267,6 +268,8 @@ AMBIGUITY_NEXT_ACTIONS = {
     "reroute_after_budget",
     "record_blocker",
 }
+
+WORKER_RELIABILITY_CLASSES = {"healthy", "degraded", "drain", "blocked", "unknown"}
 
 
 def _read_text(path: Path) -> str:
@@ -716,6 +719,144 @@ def validate_stale_progress_evidence(
     return sorted(set(errors))
 
 
+def _first_stale_progress_state(attempt: dict[str, Any]) -> str | None:
+    for observation in stale_progress_observations(attempt):
+        details = observation.get("details")
+        if isinstance(details, dict) and isinstance(details.get("stale_progress_state"), str):
+            return details["stale_progress_state"]
+    return None
+
+
+def _attempt_worker_id(attempt: dict[str, Any]) -> str | None:
+    adapter_outcome = attempt.get("adapter_outcome")
+    if isinstance(adapter_outcome, dict) and isinstance(adapter_outcome.get("worker_id"), str):
+        return adapter_outcome["worker_id"]
+    observations = attempt.get("observations")
+    if isinstance(observations, list):
+        for observation in observations:
+            if isinstance(observation, dict) and isinstance(observation.get("worker_id"), str):
+                return observation["worker_id"]
+    return None
+
+
+def _score_to_class(score: int, reasons: set[str]) -> str:
+    if not reasons and score == 100:
+        return "healthy"
+    if "local_fallback_refused" in reasons:
+        return "blocked"
+    if "worker_filesystem_error" in reasons or "repeated_stale_progress" in reasons or score < 50:
+        return "drain"
+    if score < 85:
+        return "degraded"
+    return "healthy"
+
+
+def _next_action_for_class(worker_class: str, reasons: set[str]) -> str:
+    if worker_class == "healthy":
+        return "allow_worker"
+    if worker_class == "blocked":
+        return "reject_worker"
+    if worker_class == "drain" or "worker_filesystem_error" in reasons:
+        return "drain_worker"
+    return "retry_different_worker"
+
+
+def worker_reliability_ledger(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for attempt in attempts:
+        worker_id = _attempt_worker_id(attempt)
+        if worker_id:
+            grouped.setdefault(worker_id, []).append(attempt)
+
+    rows: list[dict[str, Any]] = []
+    for worker_id in sorted(grouped):
+        score = 100
+        reasons: set[str] = set()
+        successes = 0
+        infra_failures = 0
+        product_failures = 0
+        stale_progress_count = 0
+        confidence = "high"
+        contributing_attempt_ids: list[str] = []
+
+        for attempt in grouped[worker_id]:
+            attempt_id = attempt.get("attempt_id")
+            if isinstance(attempt_id, str):
+                contributing_attempt_ids.append(attempt_id)
+            adapter_outcome = attempt.get("adapter_outcome")
+            exit_info = attempt.get("exit")
+            outcome = adapter_outcome.get("outcome") if isinstance(adapter_outcome, dict) else None
+            product_failure = bool(
+                isinstance(exit_info, dict)
+                and exit_info.get("product_failure")
+                or isinstance(adapter_outcome, dict)
+                and adapter_outcome.get("product_failure")
+            )
+            if product_failure:
+                product_failures += 1
+                reasons.add("product_failure_excluded")
+                continue
+            if outcome == "passed":
+                successes += 1
+                continue
+            if outcome == "worker_filesystem_error":
+                score -= 70
+                infra_failures += 1
+                reasons.add("worker_filesystem_error")
+            elif outcome == "worker_missing_toolchain":
+                score -= 45
+                infra_failures += 1
+                reasons.add("worker_missing_toolchain")
+            elif outcome == "local_fallback_refused":
+                score = 0
+                infra_failures += 1
+                reasons.add("local_fallback_refused")
+            elif outcome == "worker_timeout":
+                infra_failures += 1
+                state = _first_stale_progress_state(attempt)
+                if state == "fresh_heartbeat_no_output":
+                    score -= 45
+                    stale_progress_count += 1
+                    confidence = "medium"
+                    reasons.add("fresh_heartbeat_no_output")
+                elif state == "stale_heartbeat_no_output":
+                    score -= 65
+                    stale_progress_count += 1
+                    reasons.add("stale_heartbeat_no_output")
+                else:
+                    score -= 50
+                    reasons.add("worker_timeout")
+            elif outcome == "contention_deferred":
+                score -= 10
+                confidence = "medium"
+                reasons.add("contention_deferred")
+
+        if stale_progress_count > 1:
+            score -= 20
+            reasons.add("repeated_stale_progress")
+
+        score = max(0, min(100, score))
+        worker_class = _score_to_class(score, reasons - {"product_failure_excluded"})
+        rows.append(
+            {
+                "worker_id": worker_id,
+                "score": score,
+                "class": worker_class,
+                "sample_count": len(grouped[worker_id]),
+                "success_count": successes,
+                "infra_failure_count": infra_failures,
+                "product_failure_count": product_failures,
+                "confidence": confidence,
+                "drain_hint": worker_class == "drain",
+                "cooldown_hint": "none" if worker_class == "healthy" else "bounded_retry_budget",
+                "next_action": _next_action_for_class(worker_class, reasons),
+                "reasons": sorted(reasons),
+                "contributing_attempt_ids": sorted(contributing_attempt_ids),
+            }
+        )
+    return rows
+
+
 def validate_artifacts(artifacts: Any) -> list[str]:
     errors: list[str] = []
     if not isinstance(artifacts, dict):
@@ -1013,6 +1154,104 @@ def _check_invalid_cases(fixtures: dict[str, Any] | None) -> list[dict[str, Any]
     return checks
 
 
+def _valid_case_attempts_by_name(fixtures: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    attempts: dict[str, dict[str, Any]] = {}
+    for case in fixtures.get("valid_cases", []):
+        if isinstance(case, dict) and isinstance(case.get("case"), str):
+            attempt, _ = _fixture_attempt_and_recovery(fixtures, case)
+            attempts[case["case"]] = attempt
+    return attempts
+
+
+def _check_worker_reliability_cases(fixtures: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if fixtures is None or not isinstance(fixtures.get("worker_reliability_cases"), list):
+        return [_check("worker_reliability_cases_present", False, "missing worker_reliability_cases")]
+    attempts_by_name = _valid_case_attempts_by_name(fixtures)
+    checks: list[dict[str, Any]] = []
+    represented = set()
+    for case in fixtures["worker_reliability_cases"]:
+        if not isinstance(case, dict):
+            checks.append(_check("worker_reliability_case_malformed", False, "case is not object"))
+            continue
+        represented.add(case.get("case"))
+        attempt_names = case.get("attempt_cases")
+        if not isinstance(attempt_names, list) or not all(isinstance(name, str) for name in attempt_names):
+            checks.append(_check(f"worker_reliability_case:{case.get('case', '<unnamed>')}", False, "bad attempt_cases"))
+            continue
+        attempts = [attempts_by_name[name] for name in attempt_names if name in attempts_by_name]
+        ledger = worker_reliability_ledger(attempts)
+        worker_id = case.get("worker_id")
+        row = next((entry for entry in ledger if entry.get("worker_id") == worker_id), None)
+        checks.append(
+            _check(
+                f"worker_reliability_present:{case.get('case', '<unnamed>')}",
+                row is not None,
+                str(worker_id),
+            )
+        )
+        if row is None:
+            continue
+        expected_class = case.get("expected_class")
+        expected_action = case.get("expected_next_action")
+        expected_reasons = set(case.get("expected_reasons", []))
+        checks.append(
+            _check(
+                f"worker_reliability_class:{case.get('case', '<unnamed>')}",
+                expected_class in WORKER_RELIABILITY_CLASSES and row.get("class") == expected_class,
+                str(row.get("class")),
+            )
+        )
+        checks.append(
+            _check(
+                f"worker_reliability_action:{case.get('case', '<unnamed>')}",
+                row.get("next_action") == expected_action,
+                str(row.get("next_action")),
+            )
+        )
+        checks.append(
+            _check(
+                f"worker_reliability_reasons:{case.get('case', '<unnamed>')}",
+                expected_reasons.issubset(set(row.get("reasons", []))),
+                ",".join(row.get("reasons", [])),
+            )
+        )
+
+    required_cases = {
+        "remote_success_healthy",
+        "repeated_stale_progress_drain",
+        "product_failures_excluded",
+        "fresh_heartbeat_ambiguity_degraded",
+        "filesystem_pressure_drain",
+        "missing_toolchain_degraded",
+        "local_fallback_blocked",
+    }
+    for required_case in sorted(required_cases):
+        checks.append(
+            _check(
+                f"worker_reliability_matrix:{required_case}",
+                required_case in represented,
+                ",".join(sorted(str(case) for case in represented)),
+            )
+        )
+    if fixtures.get("worker_reliability_cases"):
+        all_attempts = [
+            attempts_by_name[name]
+            for case in fixtures["worker_reliability_cases"]
+            if isinstance(case, dict)
+            for name in case.get("attempt_cases", [])
+            if isinstance(name, str) and name in attempts_by_name
+        ]
+        ledger = worker_reliability_ledger(all_attempts)
+        checks.append(
+            _check(
+                "worker_reliability_sorted",
+                [row["worker_id"] for row in ledger] == sorted(row["worker_id"] for row in ledger),
+                ",".join(row["worker_id"] for row in ledger),
+            )
+        )
+    return checks
+
+
 def run_all() -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     checks.extend(_check_files())
@@ -1021,6 +1260,7 @@ def run_all() -> dict[str, Any]:
     checks.extend(_check_fixture_catalog(fixtures))
     checks.extend(_check_valid_cases(fixtures))
     checks.extend(_check_invalid_cases(fixtures))
+    checks.extend(_check_worker_reliability_cases(fixtures))
     passed = sum(1 for check in checks if check["passed"])
     failed = len(checks) - passed
     return {

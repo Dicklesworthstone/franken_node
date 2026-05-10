@@ -299,6 +299,37 @@ The initial fixture suite must cover:
 | Source-only allowed because cargo/RCH is unavailable | `use_source_only_blocker` |
 | Proof cache hit or completed coalescer lease | `reuse_receipt` |
 
+## Worker Reliability Ledger
+
+A worker reliability ledger is a deterministic derived view over a bounded
+window of flight-recorder attempts and optional RCH status snapshots. It exists
+so doctor/readiness/control-tower consumers can choose healthy workers without
+parsing terminal scrollback or punishing a worker for product failures.
+
+Each ledger row must be sorted by `worker_id` and include:
+
+| Field | Meaning |
+|-------|---------|
+| `worker_id` | RCH worker or fallback identifier |
+| `score` | Bounded integer `0..=100` |
+| `class` | `healthy`, `degraded`, `drain`, `blocked`, or `unknown` |
+| `sample_count` | Number of attempts in the scoring window |
+| `success_count` | Fresh remote successes for this worker |
+| `infra_failure_count` | Retryable infrastructure failures for this worker |
+| `product_failure_count` | Product failures observed but excluded from worker penalty |
+| `confidence` | `high`, `medium`, or `low` |
+| `drain_hint` | Whether the worker should be drained before another proof |
+| `cooldown_hint` | Bounded retry/cooldown guidance |
+| `next_action` | `allow_worker`, `retry_different_worker`, `drain_worker`, or `reject_worker` |
+| `reasons` | Stable reason strings such as `fresh_heartbeat_no_output` or `worker_filesystem_error` |
+| `contributing_attempt_ids` | Sorted attempt IDs used for the row |
+
+Scoring must treat `compile_failed`, `test_failed`, and other product failures
+as product work, not worker degradation. Retryable infrastructure, stale
+progress, missing toolchains, filesystem pressure, and local fallback refusal
+can lower reliability. A worker with only retryable worker-infra evidence must
+not be marked `healthy`.
+
 ## Consumer Requirements
 
 ### Validation Broker
