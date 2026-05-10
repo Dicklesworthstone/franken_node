@@ -61,6 +61,18 @@ replay reproduces an identical transcript.
 | `ACT_CAPABILITY_FAILED` | Capability issuance failed. |
 | `ACT_HEALTH_FAILED` | Health-ready transition failed. |
 
+## Executor Boundary
+
+`DefaultExecutor` is fail-closed. It returns
+`ACTIVATION_EXECUTOR_REQUIRED` instead of creating a completed transcript so
+operator-facing activation cannot look successful without real sandbox,
+secret, capability, and health hooks.
+
+`FixtureActivationExecutor` is a deterministic test baseline only. It validates
+inputs and preserves transcript/order semantics, but it does not create a
+sandbox, mount real secrets, issue real capabilities, or perform a live health
+probe. It must not be cited as production activation evidence.
+
 ## Expected Artifacts
 
 | Artifact | Path |

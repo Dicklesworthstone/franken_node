@@ -369,6 +369,37 @@ RULES: tuple[RuleSpec, ...] = (
         remediation_bead="bd-oetof",
         related_checkers=("scripts/check_time_travel_replay.py",),
     ),
+    RuleSpec(
+        rule_id="activation_fixture_executor_boundary",
+        surface="connector activation fixture executor remains baseline-only evidence",
+        classification="allowlisted_simulation",
+        markers=("FixtureActivationExecutor", "ACTIVATION_EXECUTOR_REQUIRED"),
+        search_paths=("crates/**/*.rs", "tests/**/*.rs"),
+        allowed_paths=(
+            "crates/franken-node/src/connector/activation_pipeline.rs",
+            "tests/integration/activation_pipeline_determinism.rs",
+        ),
+        allowed_line_substrings=(
+            "`FixtureActivationExecutor`, which must not be cited as production",
+            "Fixture-only activation executor",
+            "pub struct FixtureActivationExecutor;",
+            "impl StageExecutor for FixtureActivationExecutor",
+            "const ACTIVATION_EXECUTOR_REQUIRED: &str =",
+            '"ACTIVATION_EXECUTOR_REQUIRED: no real activation executor configured"',
+            "Err(ACTIVATION_EXECUTOR_REQUIRED.to_string())",
+        ),
+        required_anchor_markers=(
+            "Fail-closed production default",
+            "Fixture-only activation executor",
+            "must not be cited as production activation evidence",
+            "Err(ACTIVATION_EXECUTOR_REQUIRED.to_string())",
+        ),
+        anchor_paths=("crates/franken-node/src/connector/activation_pipeline.rs",),
+        inventory_id="PSI-012",
+        allowed_simulation_label="FixtureActivationExecutor",
+        remediation_bead="bd-t1ko8",
+        related_checkers=("scripts/check_activation_pipeline.py",),
+    ),
 )
 
 

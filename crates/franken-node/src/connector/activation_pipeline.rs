@@ -285,12 +285,46 @@ pub trait StageExecutor {
     fn health_check(&self) -> Result<(), String>;
 }
 
-/// Default executor with input validation but no actual sandbox creation.
-/// Suitable for development and testing. For production, implement a custom
-/// StageExecutor with real sandbox, secret, and capability management.
+const ACTIVATION_EXECUTOR_REQUIRED: &str =
+    "ACTIVATION_EXECUTOR_REQUIRED: no real activation executor configured";
+
+/// Fail-closed production default.
+///
+/// `DefaultExecutor` exists so callers cannot accidentally get a completed
+/// activation transcript without providing real sandbox, secret, capability,
+/// and health hooks. Tests that need a deterministic success baseline must use
+/// `FixtureActivationExecutor`, which must not be cited as production
+/// activation evidence.
 pub struct DefaultExecutor;
 
 impl StageExecutor for DefaultExecutor {
+    fn create_sandbox(&self, _config: &str) -> Result<(), String> {
+        Err(ACTIVATION_EXECUTOR_REQUIRED.to_string())
+    }
+
+    fn mount_secrets(&self, _refs: &[String]) -> Result<Vec<String>, String> {
+        Err(ACTIVATION_EXECUTOR_REQUIRED.to_string())
+    }
+
+    fn issue_capabilities(&self, _caps: &[String]) -> Result<(), String> {
+        Err(ACTIVATION_EXECUTOR_REQUIRED.to_string())
+    }
+
+    fn health_check(&self) -> Result<(), String> {
+        Err(ACTIVATION_EXECUTOR_REQUIRED.to_string())
+    }
+}
+
+/// Fixture-only activation executor: validates inputs but does not create a
+/// sandbox, mount real secrets, issue real capabilities, or perform a live
+/// health probe.
+///
+/// This proves activation ordering, transcript determinism, and cleanup logic.
+/// It must not be cited as production activation evidence; operator-facing
+/// activation must pass a real `StageExecutor` implementation to `activate`.
+pub struct FixtureActivationExecutor;
+
+impl StageExecutor for FixtureActivationExecutor {
     fn create_sandbox(&self, config: &str) -> Result<(), String> {
         // Validate that config is non-empty and valid JSON.
         if config.is_empty() {
@@ -326,7 +360,7 @@ impl StageExecutor for DefaultExecutor {
         Ok(())
     }
     fn health_check(&self) -> Result<(), String> {
-        // Default executor always passes health check.
+        // Fixture executor always passes health check.
         Ok(())
     }
 }
@@ -543,27 +577,94 @@ pub fn activate(input: &ActivationInput, executor: &dyn StageExecutor) -> Activa
 pub fn verify_stage_order(transcript: &ActivationTranscript) -> bool {
     let sequence = ActivationStage::sequence();
     for (i, result) in transcript.stages.iter().enumerate() {
-        if i >= sequence.len() || result.stage != sequence[i] {
-            return false;
+        match sequence.get(i) {
+            Some(expected) if activation_stages_match(result.stage, *expected) => {}
+            _ => return false,
         }
     }
     true
 }
 
+fn activation_stages_match(left: ActivationStage, right: ActivationStage) -> bool {
+    matches!(
+        (left, right),
+        (
+            ActivationStage::SandboxCreate,
+            ActivationStage::SandboxCreate
+        ) | (ActivationStage::SecretMount, ActivationStage::SecretMount)
+            | (
+                ActivationStage::CapabilityIssue,
+                ActivationStage::CapabilityIssue
+            )
+            | (ActivationStage::HealthReady, ActivationStage::HealthReady)
+    )
+}
+
+fn strings_match(left: &str, right: &str) -> bool {
+    matches!(left.cmp(right), std::cmp::Ordering::Equal)
+}
+
+fn stage_errors_match(left: &Option<StageError>, right: &Option<StageError>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => stage_error_matches(left, right),
+        _ => false,
+    }
+}
+
+fn stage_error_matches(left: &StageError, right: &StageError) -> bool {
+    match (left, right) {
+        (
+            StageError::SandboxFailed {
+                reason: left_reason,
+            },
+            StageError::SandboxFailed {
+                reason: right_reason,
+            },
+        )
+        | (
+            StageError::SecretMountFailed {
+                reason: left_reason,
+            },
+            StageError::SecretMountFailed {
+                reason: right_reason,
+            },
+        )
+        | (
+            StageError::CapabilityFailed {
+                reason: left_reason,
+            },
+            StageError::CapabilityFailed {
+                reason: right_reason,
+            },
+        )
+        | (
+            StageError::HealthCheckFailed {
+                reason: left_reason,
+            },
+            StageError::HealthCheckFailed {
+                reason: right_reason,
+            },
+        ) => strings_match(left_reason, right_reason),
+        _ => false,
+    }
+}
+
 /// Verify that two transcripts from the same input are identical
 /// (INV-ACT-DETERMINISTIC).
 pub fn transcripts_match(a: &ActivationTranscript, b: &ActivationTranscript) -> bool {
-    if a.connector_id != b.connector_id || a.trace_id != b.trace_id {
+    if !strings_match(&a.connector_id, &b.connector_id) || !strings_match(&a.trace_id, &b.trace_id)
+    {
         return false;
     }
     if a.completed != b.completed || a.stages.len() != b.stages.len() {
         return false;
     }
     for (sa, sb) in a.stages.iter().zip(b.stages.iter()) {
-        if sa.stage != sb.stage
+        if !activation_stages_match(sa.stage, sb.stage)
             || sa.success != sb.success
-            || sa.error != sb.error
-            || sa.timestamp != sb.timestamp
+            || !stage_errors_match(&sa.error, &sb.error)
+            || !strings_match(&sa.timestamp, &sb.timestamp)
         {
             return false;
         }
@@ -588,7 +689,7 @@ mod tests {
 
     #[test]
     fn full_activation_succeeds() {
-        let t = activate(&test_input(), &DefaultExecutor);
+        let t = activate(&test_input(), &FixtureActivationExecutor);
         assert!(t.completed);
         assert_eq!(t.stages.len(), 4);
         assert!(t.stages.iter().all(|s| s.success));
@@ -596,7 +697,7 @@ mod tests {
 
     #[test]
     fn stage_order_is_correct() {
-        let t = activate(&test_input(), &DefaultExecutor);
+        let t = activate(&test_input(), &FixtureActivationExecutor);
         assert!(verify_stage_order(&t));
         assert_eq!(t.stages[0].stage, ActivationStage::SandboxCreate);
         assert_eq!(t.stages[1].stage, ActivationStage::SecretMount);
@@ -606,7 +707,7 @@ mod tests {
 
     #[test]
     fn health_ready_is_last() {
-        let t = activate(&test_input(), &DefaultExecutor);
+        let t = activate(&test_input(), &FixtureActivationExecutor);
         assert_eq!(t.stages.last().unwrap().stage, ActivationStage::HealthReady);
     }
 
@@ -731,8 +832,8 @@ mod tests {
     #[test]
     fn deterministic_replay() {
         let input = test_input();
-        let t1 = activate(&input, &DefaultExecutor);
-        let t2 = activate(&input, &DefaultExecutor);
+        let t1 = activate(&input, &FixtureActivationExecutor);
+        let t2 = activate(&input, &FixtureActivationExecutor);
         assert!(transcripts_match(&t1, &t2));
     }
 
@@ -746,13 +847,13 @@ mod tests {
 
     #[test]
     fn transcript_has_trace_id() {
-        let t = activate(&test_input(), &DefaultExecutor);
+        let t = activate(&test_input(), &FixtureActivationExecutor);
         assert_eq!(t.trace_id, "trace-1");
     }
 
     #[test]
     fn transcript_has_connector_id() {
-        let t = activate(&test_input(), &DefaultExecutor);
+        let t = activate(&test_input(), &FixtureActivationExecutor);
         assert_eq!(t.connector_id, "conn-1");
     }
 
@@ -883,7 +984,7 @@ mod tests {
             .collect();
 
         // This should fail at the boundary for fail-closed semantics
-        let t = activate(&input, &DefaultExecutor);
+        let t = activate(&input, &FixtureActivationExecutor);
         assert!(
             !t.completed,
             "activation with exactly MAX_MOUNTED_SECRETS should fail for fail-closed semantics"
@@ -907,7 +1008,7 @@ mod tests {
             .collect();
 
         // This should fail at the secret mount stage
-        let t = activate(&input, &DefaultExecutor);
+        let t = activate(&input, &FixtureActivationExecutor);
         assert!(!t.completed, "activation with too many secrets should fail");
         assert_eq!(t.stages.len(), 2); // SandboxCreate succeeds, SecretMount fails
         assert!(t.stages[0].success);
@@ -1026,19 +1127,19 @@ mod tests {
     #[test]
     fn transcripts_mismatch_on_different_connector() {
         let input = test_input();
-        let t1 = activate(&input, &DefaultExecutor);
-        let mut t2 = activate(&input, &DefaultExecutor);
+        let t1 = activate(&input, &FixtureActivationExecutor);
+        let mut t2 = activate(&input, &FixtureActivationExecutor);
         t2.connector_id = "other".into();
         assert!(!transcripts_match(&t1, &t2));
     }
 
-    // --- DefaultExecutor validation tests (bd-1phd2) ---
+    // --- FixtureActivationExecutor validation tests (bd-1phd2) ---
 
     #[test]
-    fn default_executor_rejects_empty_config() {
+    fn fixture_activation_executor_rejects_empty_config() {
         let mut input = test_input();
         input.sandbox_config = String::new();
-        let t = activate(&input, &DefaultExecutor);
+        let t = activate(&input, &FixtureActivationExecutor);
         assert!(!t.completed);
         assert_eq!(t.stages.len(), 1);
         assert_eq!(
@@ -1048,10 +1149,10 @@ mod tests {
     }
 
     #[test]
-    fn default_executor_rejects_invalid_json_config() {
+    fn fixture_activation_executor_rejects_invalid_json_config() {
         let mut input = test_input();
         input.sandbox_config = "not json".into();
-        let t = activate(&input, &DefaultExecutor);
+        let t = activate(&input, &FixtureActivationExecutor);
         assert!(!t.completed);
         assert_eq!(t.stages.len(), 1);
         assert_eq!(
@@ -1061,10 +1162,10 @@ mod tests {
     }
 
     #[test]
-    fn default_executor_rejects_empty_secret_ref() {
+    fn fixture_activation_executor_rejects_empty_secret_ref() {
         let mut input = test_input();
         input.secret_refs = vec!["valid".into(), String::new()];
-        let t = activate(&input, &DefaultExecutor);
+        let t = activate(&input, &FixtureActivationExecutor);
         assert!(!t.completed);
         assert_eq!(t.stages.len(), 2);
         assert_eq!(
@@ -1074,10 +1175,10 @@ mod tests {
     }
 
     #[test]
-    fn default_executor_rejects_path_traversal_secret() {
+    fn fixture_activation_executor_rejects_path_traversal_secret() {
         let mut input = test_input();
         input.secret_refs = vec!["../etc/passwd".into()];
-        let t = activate(&input, &DefaultExecutor);
+        let t = activate(&input, &FixtureActivationExecutor);
         assert!(!t.completed);
         assert_eq!(t.stages.len(), 2);
         assert_eq!(
@@ -1087,10 +1188,10 @@ mod tests {
     }
 
     #[test]
-    fn default_executor_rejects_absolute_path_secret() {
+    fn fixture_activation_executor_rejects_absolute_path_secret() {
         let mut input = test_input();
         input.secret_refs = vec!["/etc/shadow".into()];
-        let t = activate(&input, &DefaultExecutor);
+        let t = activate(&input, &FixtureActivationExecutor);
         assert!(!t.completed);
         assert_eq!(t.stages.len(), 2);
         assert_eq!(
@@ -1100,10 +1201,10 @@ mod tests {
     }
 
     #[test]
-    fn default_executor_rejects_backslash_secret() {
+    fn fixture_activation_executor_rejects_backslash_secret() {
         let mut input = test_input();
         input.secret_refs = vec!["foo\\bar".into()];
-        let t = activate(&input, &DefaultExecutor);
+        let t = activate(&input, &FixtureActivationExecutor);
         assert!(!t.completed);
         assert_eq!(t.stages.len(), 2);
         assert_eq!(
@@ -1113,10 +1214,10 @@ mod tests {
     }
 
     #[test]
-    fn default_executor_rejects_null_byte_secret() {
+    fn fixture_activation_executor_rejects_null_byte_secret() {
         let mut input = test_input();
         input.secret_refs = vec!["foo\0bar".into()];
-        let t = activate(&input, &DefaultExecutor);
+        let t = activate(&input, &FixtureActivationExecutor);
         assert!(!t.completed);
         assert_eq!(t.stages.len(), 2);
         assert_eq!(
@@ -1126,10 +1227,10 @@ mod tests {
     }
 
     #[test]
-    fn default_executor_rejects_empty_capability() {
+    fn fixture_activation_executor_rejects_empty_capability() {
         let mut input = test_input();
         input.capabilities = vec!["valid".into(), String::new()];
-        let t = activate(&input, &DefaultExecutor);
+        let t = activate(&input, &FixtureActivationExecutor);
         assert!(!t.completed);
         assert_eq!(t.stages.len(), 3);
         assert_eq!(
@@ -1139,12 +1240,26 @@ mod tests {
     }
 
     #[test]
-    fn default_executor_accepts_valid_inputs() {
+    fn fixture_activation_executor_accepts_valid_inputs() {
         let input = test_input();
-        let t = activate(&input, &DefaultExecutor);
+        let t = activate(&input, &FixtureActivationExecutor);
         assert!(t.completed);
         assert_eq!(t.stages.len(), 4);
         assert!(t.stages.iter().all(|s| s.success));
+    }
+
+    #[test]
+    fn default_executor_fails_closed_before_reporting_completed() {
+        let t = activate(&test_input(), &DefaultExecutor);
+        assert!(!t.completed);
+        assert_eq!(t.stages.len(), 1);
+        let error = t
+            .stages
+            .first()
+            .and_then(|stage| stage.error.as_ref())
+            .expect("default executor must fail");
+        assert_eq!(error.code(), "ACT_SANDBOX_FAILED");
+        assert!(error.to_string().contains("ACTIVATION_EXECUTOR_REQUIRED"));
     }
 
     // --- Edge case and security tests ---
@@ -1161,7 +1276,7 @@ mod tests {
             timestamp: "2026-01-01T00:00:00Z".into(),
         };
 
-        let transcript = activate(&input, &DefaultExecutor);
+        let transcript = activate(&input, &FixtureActivationExecutor);
         // With fail-closed >= semantics, this should fail at the exact boundary
         assert!(
             !transcript.completed,
@@ -1197,12 +1312,9 @@ mod tests {
         let requested = vec!["dup".to_string(); 1000];
         let mounted = vec!["dup".to_string(); 999]; // One short
 
-        match validate_mounted_secret_set(&requested, &mounted) {
-            Ok(_) => panic!("Should have detected missing secret"),
-            Err(e) => {
-                assert!(e.contains("mounted 999 secrets but expected 1000"));
-            }
-        }
+        let error = validate_mounted_secret_set(&requested, &mounted)
+            .expect_err("should detect missing secret");
+        assert!(error.contains("mounted 999 secrets but expected 1000"));
     }
 
     #[test]
@@ -1286,8 +1398,8 @@ mod tests {
             timestamp: "2026-01-01T00:00:00Z".into(),
         };
 
-        let t1 = activate(&input1, &DefaultExecutor);
-        let t2 = activate(&input2, &DefaultExecutor);
+        let t1 = activate(&input1, &FixtureActivationExecutor);
+        let t2 = activate(&input2, &FixtureActivationExecutor);
 
         // These should not match due to different trace IDs
         assert!(!transcripts_match(&t1, &t2));
@@ -1351,7 +1463,7 @@ mod tests {
 
     #[test]
     fn negative_verify_stage_order_rejects_extra_stage_after_canonical_sequence() {
-        let mut transcript = activate(&test_input(), &DefaultExecutor);
+        let mut transcript = activate(&test_input(), &FixtureActivationExecutor);
         transcript.stages.push(StageResult {
             stage: ActivationStage::HealthReady,
             success: true,
@@ -1365,8 +1477,8 @@ mod tests {
     #[test]
     fn negative_transcripts_mismatch_on_stage_success_delta() {
         let input = test_input();
-        let left = activate(&input, &DefaultExecutor);
-        let mut right = activate(&input, &DefaultExecutor);
+        let left = activate(&input, &FixtureActivationExecutor);
+        let mut right = activate(&input, &FixtureActivationExecutor);
         right.stages[1].success = false;
 
         assert!(!transcripts_match(&left, &right));
@@ -1419,7 +1531,7 @@ mod tests {
                 timestamp: "2026-01-01T00:00:00Z".into(),
             };
 
-            let transcript = activate(&input, &DefaultExecutor);
+            let transcript = activate(&input, &FixtureActivationExecutor);
 
             // Should either succeed or fail gracefully, not corrupt state
             if transcript.completed {
@@ -1452,7 +1564,7 @@ mod tests {
             timestamp: "2026-01-01T00:00:00Z".into(),
         };
 
-        let transcript = activate(&input, &DefaultExecutor);
+        let transcript = activate(&input, &FixtureActivationExecutor);
 
         // Should handle large secret lists without memory corruption
         assert!(
@@ -1490,7 +1602,7 @@ mod tests {
                 timestamp: format!("2026\0test"),
             };
 
-            let transcript = activate(&input, &DefaultExecutor);
+            let transcript = activate(&input, &FixtureActivationExecutor);
 
             // Should handle control characters without corruption
             assert!(!transcript.stages.is_empty());
@@ -1533,7 +1645,7 @@ mod tests {
                 timestamp: "2026-01-01T00:00:00Z".into(),
             };
 
-            let transcript = activate(&input, &DefaultExecutor);
+            let transcript = activate(&input, &FixtureActivationExecutor);
 
             // Should fail at sandbox creation stage for malformed JSON
             assert!(
@@ -1581,7 +1693,7 @@ mod tests {
                 timestamp: "2026-01-01T00:00:00Z".into(),
             };
 
-            let transcript = activate(&input, &DefaultExecutor);
+            let transcript = activate(&input, &FixtureActivationExecutor);
 
             // Should fail at SecretMount stage due to path validation
             assert!(
@@ -1669,7 +1781,7 @@ mod tests {
                 timestamp: "2026-01-01T00:00:00Z".into(),
             };
 
-            let transcript = activate(&input, &DefaultExecutor);
+            let transcript = activate(&input, &FixtureActivationExecutor);
 
             if malicious_cap.is_empty() {
                 // Empty capability should fail at CapabilityIssue stage
@@ -1682,7 +1794,7 @@ mod tests {
                 );
             } else {
                 // Non-empty malicious capabilities should be handled without injection
-                // The DefaultExecutor should accept them as-is for testing
+                // The FixtureActivationExecutor should accept them as-is for testing
                 assert!(transcript.completed || !transcript.completed); // Should complete without crash
             }
 
@@ -1765,7 +1877,7 @@ mod tests {
             match validation_result {
                 Ok(_) => {
                     // If validation passed, run activation and verify Unicode doesn't affect security
-                    let transcript = activate(&malicious_input, &DefaultExecutor);
+                    let transcript = activate(&malicious_input, &FixtureActivationExecutor);
 
                     // Unicode should not create privileged identifiers
                     assert!(
@@ -1797,7 +1909,7 @@ mod tests {
                     }
 
                     // Activation should still be deterministic
-                    let second_transcript = activate(&malicious_input, &DefaultExecutor);
+                    let second_transcript = activate(&malicious_input, &FixtureActivationExecutor);
                     assert_eq!(
                         transcript.stages.len(),
                         second_transcript.stages.len(),
@@ -1850,8 +1962,9 @@ mod tests {
             match validation_result {
                 Ok(_) => {
                     // If validation passed, test activation under memory pressure
-                    let activation_result =
-                        std::panic::catch_unwind(|| activate(&exhaustion_input, &DefaultExecutor));
+                    let activation_result = std::panic::catch_unwind(|| {
+                        activate(&exhaustion_input, &FixtureActivationExecutor)
+                    });
 
                     match activation_result {
                         Ok(transcript) => {
@@ -2002,7 +2115,7 @@ mod tests {
             match validation_result {
                 Ok(_) => {
                     // If validation unexpectedly passed, ensure activation is still safe
-                    let transcript = activate(&bypass_input, &DefaultExecutor);
+                    let transcript = activate(&bypass_input, &FixtureActivationExecutor);
 
                     // Empty inputs should not cause crashes
                     if bypass_input.connector_id.is_empty() {
@@ -2093,7 +2206,7 @@ mod tests {
                 match validation_result {
                     Ok(_) => {
                         // If validation passed, activation should handle limits gracefully
-                        let transcript = activate(&limit_input, &DefaultExecutor);
+                        let transcript = activate(&limit_input, &FixtureActivationExecutor);
 
                         // Should not exceed documented limits
                         assert!(limit_input.secret_refs.len() <= MAX_MOUNTED_SECRETS);
@@ -2232,7 +2345,7 @@ mod tests {
             match validation_result {
                 Ok(_) => {
                     // If validation passed, run activation and verify injection safety
-                    let transcript = activate(&injection_input, &DefaultExecutor);
+                    let transcript = activate(&injection_input, &FixtureActivationExecutor);
 
                     // Serialize transcript to JSON
                     let json_result = serde_json::to_string(&transcript);
@@ -2304,7 +2417,7 @@ mod tests {
                     *counter += 1;
                 }
 
-                activate(&test_input, &DefaultExecutor)
+                activate(&test_input, &FixtureActivationExecutor)
             });
             handles.push(handle);
         }
@@ -2377,7 +2490,7 @@ mod tests {
             match validation_result {
                 Ok(_) => {
                     // If validation passed, run activation
-                    let transcript = activate(&timestamp_input, &DefaultExecutor);
+                    let transcript = activate(&timestamp_input, &FixtureActivationExecutor);
 
                     // Verify timestamp doesn't affect activation logic
                     assert!(transcript.stages.len() > 0, "Should have stages");

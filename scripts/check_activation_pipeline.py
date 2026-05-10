@@ -40,10 +40,24 @@ def main():
         has_transcript = "struct ActivationTranscript" in content
         has_error = "enum StageError" in content
         has_activate = "fn activate" in content
-        all_types = has_stage and has_result and has_transcript and has_error and has_activate
+        has_default_fail_closed = (
+            "struct DefaultExecutor" in content
+            and "ACTIVATION_EXECUTOR_REQUIRED" in content
+            and "Err(ACTIVATION_EXECUTOR_REQUIRED.to_string())" in content
+        )
+        has_fixture_executor = "struct FixtureActivationExecutor" in content
+        all_types = (
+            has_stage
+            and has_result
+            and has_transcript
+            and has_error
+            and has_activate
+            and has_default_fail_closed
+            and has_fixture_executor
+        )
     else:
         all_types = False
-    all_pass &= check("AP-IMPL", "Implementation with all required types and activate fn",
+    all_pass &= check("AP-IMPL", "Implementation with required types, fail-closed default, fixture executor, and activate fn",
                        impl_exists and all_types)
 
     # Check stage ordering

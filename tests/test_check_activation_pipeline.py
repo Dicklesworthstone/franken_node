@@ -102,6 +102,15 @@ class TestPipelineImplementation(unittest.TestCase):
     def test_has_activate_fn(self):
         self.assertIn("fn activate", self.content)
 
+    def test_default_executor_fails_closed(self):
+        self.assertIn("struct DefaultExecutor", self.content)
+        self.assertIn("ACTIVATION_EXECUTOR_REQUIRED", self.content)
+        self.assertIn("Err(ACTIVATION_EXECUTOR_REQUIRED.to_string())", self.content)
+
+    def test_has_fixture_activation_executor(self):
+        self.assertIn("struct FixtureActivationExecutor", self.content)
+        self.assertIn("must not be cited as production activation evidence", self.content)
+
     def test_has_all_stages(self):
         for stage in ["SandboxCreate", "SecretMount", "CapabilityIssue", "HealthReady"]:
             self.assertIn(stage, self.content, f"Missing stage {stage}")
@@ -150,6 +159,10 @@ class TestPipelineIntegrationTests(unittest.TestCase):
 
     def test_covers_stage_order(self):
         self.assertIn("inv_act_stage_order", self.content)
+
+    def test_covers_fail_closed_default(self):
+        self.assertIn("default_executor_fails_closed_without_real_hooks", self.content)
+        self.assertIn("ACTIVATION_EXECUTOR_REQUIRED", self.content)
 
     def test_covers_health_last(self):
         self.assertIn("inv_act_health_last", self.content)
