@@ -511,6 +511,11 @@ pub const SWARM_SCHEDULER_POLICY_SCHEMA_VERSION: &str =
     "franken-node/validation-swarm-scheduler/policy/v1";
 pub const SWARM_SCHEDULER_DECISION_SCHEMA_VERSION: &str =
     "franken-node/validation-swarm-scheduler/decision/v1";
+const SWARM_SCHEDULER_MAX_ID_BYTES: usize = 160;
+const SWARM_SCHEDULER_MAX_FIELD_BYTES: usize = 512;
+const SWARM_SCHEDULER_MAX_PATH_BYTES: usize = 2048;
+const SWARM_SCHEDULER_MAX_FEATURE_FLAGS: usize = 128;
+const SWARM_SCHEDULER_MAX_INPUT_DIGESTS: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationSwarmSchedulerDigestRef {
@@ -581,6 +586,18 @@ pub enum ValidationSwarmSchedulerTargetDirClass {
     Unwritable,
     Missing,
     Unknown,
+}
+
+impl From<ValidationProofTargetDirClass> for ValidationSwarmSchedulerTargetDirClass {
+    fn from(value: ValidationProofTargetDirClass) -> Self {
+        match value {
+            ValidationProofTargetDirClass::OffRepo | ValidationProofTargetDirClass::Tmp => {
+                Self::OffRepo
+            }
+            ValidationProofTargetDirClass::RepoLocal => Self::RepoLocalWritable,
+            ValidationProofTargetDirClass::Unknown => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -823,6 +840,35 @@ pub struct ValidationSwarmSchedulerInput {
     pub artifact_valid: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationSwarmSchedulerBuildInput {
+    pub bead_id: String,
+    pub agent_name: String,
+    pub command_digest: CommandDigest,
+    pub input_digests: Vec<InputDigest>,
+    pub git_commit: String,
+    pub dirty_worktree: bool,
+    pub dirty_state_policy: DirtyStatePolicy,
+    pub feature_flags: Vec<String>,
+    pub cargo_toolchain: String,
+    pub package: String,
+    pub test_target: String,
+    pub environment_policy_id: String,
+    pub target_dir_policy_id: String,
+    pub target_dir_class: ValidationSwarmSchedulerTargetDirClass,
+    pub capacity_snapshot: ValidationSwarmSchedulerCapacitySnapshot,
+    pub coalescer_state: ValidationSwarmSchedulerCoalescerState,
+    pub flight_recorder_state: ValidationSwarmSchedulerFlightRecorderState,
+    pub proof_debt_class: ValidationSwarmSchedulerProofDebtClass,
+    pub queue_age_ms: u64,
+    pub priority: ValidationSwarmSchedulerPriority,
+    pub timeout_budget_ms: u64,
+    pub source_only_allowed: bool,
+    pub product_failure: bool,
+    pub worker_infra_retryable: bool,
+    pub artifact_valid: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationSwarmSchedulerDiagnostics {
     pub proof_work_key_hex: String,
@@ -936,6 +982,93 @@ pub fn decide_validation_swarm_schedule(
     ))
 }
 
+pub fn build_validation_swarm_scheduler_input(
+    parts: ValidationSwarmSchedulerBuildInput,
+) -> Result<ValidationSwarmSchedulerInput, ValidationProofCoalescerError> {
+    validate_swarm_scheduler_build_input(&parts)?;
+
+    let ValidationSwarmSchedulerBuildInput {
+        bead_id,
+        agent_name,
+        command_digest,
+        input_digests,
+        git_commit,
+        dirty_worktree,
+        dirty_state_policy,
+        feature_flags,
+        cargo_toolchain,
+        package,
+        test_target,
+        environment_policy_id,
+        target_dir_policy_id,
+        target_dir_class,
+        capacity_snapshot,
+        coalescer_state,
+        flight_recorder_state,
+        proof_debt_class,
+        queue_age_ms,
+        priority,
+        timeout_budget_ms,
+        source_only_allowed,
+        product_failure,
+        worker_infra_retryable,
+        artifact_valid,
+    } = parts;
+
+    let scheduler_command_digest = swarm_scheduler_digest_from_command(&command_digest)?;
+    let proof_work_key = ValidationProofWorkKey::from_parts(ValidationProofWorkKeyParts {
+        command_digest,
+        input_digests,
+        git_commit,
+        dirty_worktree,
+        dirty_state_policy,
+        feature_flags,
+        cargo_toolchain,
+        package,
+        test_target,
+        environment_policy_id,
+        target_dir_policy_id,
+    })?;
+    let scheduler_proof_work_key = swarm_scheduler_digest_from_work_key(&proof_work_key);
+    let input = ValidationSwarmSchedulerInput {
+        schema_version: SWARM_SCHEDULER_INPUT_SCHEMA_VERSION.to_string(),
+        input_id: swarm_scheduler_input_id(
+            &bead_id,
+            &agent_name,
+            &scheduler_proof_work_key.hex,
+            &scheduler_command_digest.hex,
+        ),
+        bead_id,
+        agent_name,
+        proof_work_key: scheduler_proof_work_key,
+        command_digest: scheduler_command_digest,
+        dirty_state_policy,
+        target_dir_class,
+        capacity_snapshot,
+        coalescer_state,
+        flight_recorder_state,
+        proof_debt_class,
+        queue_age_ms,
+        priority,
+        timeout_budget_ms,
+        source_only_allowed,
+        product_failure,
+        worker_infra_retryable,
+        artifact_valid,
+    };
+    validate_swarm_scheduler_input(&input)?;
+    Ok(input)
+}
+
+pub fn decide_validation_swarm_schedule_from_build_input(
+    policy: &ValidationSwarmSchedulerPolicy,
+    parts: ValidationSwarmSchedulerBuildInput,
+    decided_at: DateTime<Utc>,
+) -> Result<ValidationSwarmSchedulerDecision, ValidationProofCoalescerError> {
+    let input = build_validation_swarm_scheduler_input(parts)?;
+    decide_validation_swarm_schedule(policy, &input, decided_at)
+}
+
 pub fn order_validation_swarm_scheduler_inputs<'a>(
     policy: &ValidationSwarmSchedulerPolicy,
     inputs: &'a [ValidationSwarmSchedulerInput],
@@ -1018,10 +1151,13 @@ fn validate_swarm_scheduler_input(
             "validation swarm scheduler input schema version is invalid",
         ));
     }
-    if input.input_id.trim().is_empty()
-        || input.bead_id.trim().is_empty()
-        || input.agent_name.trim().is_empty()
-        || input.capacity_snapshot.snapshot_id.trim().is_empty()
+    if !swarm_scheduler_field_is_safe(&input.input_id, SWARM_SCHEDULER_MAX_ID_BYTES)
+        || !swarm_scheduler_field_is_safe(&input.bead_id, SWARM_SCHEDULER_MAX_ID_BYTES)
+        || !swarm_scheduler_field_is_safe(&input.agent_name, SWARM_SCHEDULER_MAX_ID_BYTES)
+        || !swarm_scheduler_field_is_safe(
+            &input.capacity_snapshot.snapshot_id,
+            SWARM_SCHEDULER_MAX_ID_BYTES,
+        )
         || input.capacity_snapshot.workers_total == 0
         || input.capacity_snapshot.workers_healthy > input.capacity_snapshot.workers_total
         || input.capacity_snapshot.slots_total == 0
@@ -1063,6 +1199,121 @@ fn validate_swarm_scheduler_input(
         ));
     }
     Ok(())
+}
+
+fn validate_swarm_scheduler_build_input(
+    parts: &ValidationSwarmSchedulerBuildInput,
+) -> Result<(), ValidationProofCoalescerError> {
+    if !swarm_scheduler_field_is_safe(&parts.bead_id, SWARM_SCHEDULER_MAX_ID_BYTES)
+        || !swarm_scheduler_field_is_safe(&parts.agent_name, SWARM_SCHEDULER_MAX_ID_BYTES)
+        || !swarm_scheduler_field_is_safe(&parts.git_commit, SWARM_SCHEDULER_MAX_FIELD_BYTES)
+        || !swarm_scheduler_field_is_safe(&parts.cargo_toolchain, SWARM_SCHEDULER_MAX_FIELD_BYTES)
+        || !swarm_scheduler_field_is_safe(&parts.package, SWARM_SCHEDULER_MAX_FIELD_BYTES)
+        || !swarm_scheduler_field_is_safe(&parts.test_target, SWARM_SCHEDULER_MAX_FIELD_BYTES)
+        || !swarm_scheduler_field_is_safe(
+            &parts.environment_policy_id,
+            SWARM_SCHEDULER_MAX_FIELD_BYTES,
+        )
+        || !swarm_scheduler_field_is_safe(
+            &parts.target_dir_policy_id,
+            SWARM_SCHEDULER_MAX_FIELD_BYTES,
+        )
+        || !swarm_scheduler_field_is_safe(
+            &parts.capacity_snapshot.snapshot_id,
+            SWARM_SCHEDULER_MAX_ID_BYTES,
+        )
+        || parts.input_digests.is_empty()
+        || parts.input_digests.len() > SWARM_SCHEDULER_MAX_INPUT_DIGESTS
+        || parts
+            .input_digests
+            .iter()
+            .any(|digest| !swarm_scheduler_input_digest_is_safe(digest))
+        || parts.feature_flags.len() > SWARM_SCHEDULER_MAX_FEATURE_FLAGS
+        || parts
+            .feature_flags
+            .iter()
+            .any(|feature| !swarm_scheduler_field_is_safe(feature, SWARM_SCHEDULER_MAX_FIELD_BYTES))
+    {
+        return Err(ValidationProofCoalescerError::contract(
+            swarm_scheduler_error_codes::ERR_VSS_MALFORMED_INPUT,
+            "validation swarm scheduler builder input is malformed",
+        ));
+    }
+    Ok(())
+}
+
+fn swarm_scheduler_digest_from_command(
+    command_digest: &CommandDigest,
+) -> Result<ValidationSwarmSchedulerDigestRef, ValidationProofCoalescerError> {
+    let digest = ValidationSwarmSchedulerDigestRef {
+        algorithm: command_digest.algorithm.clone(),
+        hex: command_digest.hex.clone(),
+        canonical_material: command_digest.canonical_material.clone(),
+    };
+    if !digest.verifies() {
+        return Err(ValidationProofCoalescerError::contract(
+            swarm_scheduler_error_codes::ERR_VSS_COMMAND_DIGEST_MISMATCH,
+            "validation swarm scheduler command digest does not verify",
+        ));
+    }
+    Ok(digest)
+}
+
+fn swarm_scheduler_digest_from_work_key(
+    work_key: &ValidationProofWorkKey,
+) -> ValidationSwarmSchedulerDigestRef {
+    ValidationSwarmSchedulerDigestRef {
+        algorithm: work_key.algorithm.clone(),
+        hex: work_key.hex.clone(),
+        canonical_material: work_key.canonical_material.clone(),
+    }
+}
+
+fn swarm_scheduler_input_id(
+    bead_id: &str,
+    agent_name: &str,
+    proof_work_key_hex: &str,
+    command_digest_hex: &str,
+) -> String {
+    format!(
+        "vss-input-{}-{}-{}-{}",
+        swarm_scheduler_id_component(bead_id),
+        swarm_scheduler_id_component(agent_name),
+        key_hex_prefix(proof_work_key_hex, 12),
+        key_hex_prefix(command_digest_hex, 12)
+    )
+}
+
+fn swarm_scheduler_id_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len().min(64));
+    for ch in value.trim().chars() {
+        if out.len() >= 64 {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if matches!(ch, '-' | '_') {
+            out.push(ch);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let component = out.trim_matches('-');
+    if component.is_empty() {
+        "unknown".to_string()
+    } else {
+        component.to_string()
+    }
+}
+
+fn swarm_scheduler_input_digest_is_safe(digest: &InputDigest) -> bool {
+    digest.is_valid()
+        && swarm_scheduler_field_is_safe(&digest.path, SWARM_SCHEDULER_MAX_PATH_BYTES)
+        && swarm_scheduler_field_is_safe(&digest.source, SWARM_SCHEDULER_MAX_FIELD_BYTES)
+}
+
+fn swarm_scheduler_field_is_safe(value: &str, max_bytes: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max_bytes && !value.contains('\0')
 }
 
 fn build_swarm_scheduler_decision(
