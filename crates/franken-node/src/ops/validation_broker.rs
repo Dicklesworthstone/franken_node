@@ -645,15 +645,22 @@ pub enum FlightRecorderRecoveryDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlightRecorderRequiredAction {
+    #[serde(alias = "use_receipt")]
     None,
+    #[serde(alias = "retry_rch", alias = "retry_rch_different_worker")]
     RetryRemote,
     WaitForCapacity,
     DrainWorker,
+    #[serde(alias = "wait_for_proof")]
     WaitForExistingProof,
+    #[serde(alias = "fence_stale_lease")]
     RefreshLeaseFence,
     ReuseReceipt,
+    #[serde(alias = "record_source_only")]
     RecordSourceOnlyBlocker,
+    #[serde(alias = "fix_product_failure")]
     SurfaceProductFailure,
+    #[serde(alias = "repair_artifact_or_contract")]
     RejectArtifact,
 }
 
@@ -2421,6 +2428,261 @@ pub fn write_validation_receipt_at(
     receipt.validate_at(now)?;
     let bytes = serde_json::to_vec_pretty(receipt).map_err(ValidationBrokerError::Json)?;
     write_bytes_atomically(path, &bytes)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationFlightRecorderWriteResult {
+    pub flight_recorder_ref: ValidationFlightRecorderRef,
+    pub recovery_ref: Option<FlightRecorderRecoveryRef>,
+    pub attempt: ValidationFlightRecorderAttempt,
+}
+
+struct PreparedFlightRecorderWrite {
+    result: ValidationFlightRecorderWriteResult,
+    attempt_bytes: Vec<u8>,
+    recovery_bytes: Option<Vec<u8>>,
+    stdout_bytes: Vec<u8>,
+    stderr_bytes: Vec<u8>,
+    summary_bytes: Vec<u8>,
+}
+
+pub fn write_validation_flight_recorder(
+    repo_root: &Path,
+    attempt: &ValidationFlightRecorderAttempt,
+    recovery: Option<&ValidationFlightRecorderRecovery>,
+) -> Result<ValidationFlightRecorderWriteResult, ValidationBrokerError> {
+    write_validation_flight_recorder_at(repo_root, attempt, recovery, Utc::now())
+}
+
+pub fn write_validation_flight_recorder_at(
+    repo_root: &Path,
+    attempt: &ValidationFlightRecorderAttempt,
+    recovery: Option<&ValidationFlightRecorderRecovery>,
+    now: DateTime<Utc>,
+) -> Result<ValidationFlightRecorderWriteResult, ValidationBrokerError> {
+    let prepared = prepare_validation_flight_recorder_write(attempt, recovery, now)?;
+    let artifacts = &prepared.result.attempt.artifacts;
+
+    if let Some(recovery_bytes) = &prepared.recovery_bytes {
+        let recovery_path = artifacts.recovery_path.as_deref().ok_or_else(|| {
+            ValidationBrokerError::ContractViolation {
+                code: error_codes::ERR_VFR_INVALID_RECOVERY_DECISION,
+                detail: "recovery artifact bytes require a recovery_path".to_string(),
+            }
+        })?;
+        write_flight_recorder_artifact(repo_root, recovery_path, recovery_bytes, "recovery_path")?;
+    }
+    write_flight_recorder_artifact(
+        repo_root,
+        &artifacts.stdout_path,
+        &prepared.stdout_bytes,
+        "stdout_path",
+    )?;
+    write_flight_recorder_artifact(
+        repo_root,
+        &artifacts.stderr_path,
+        &prepared.stderr_bytes,
+        "stderr_path",
+    )?;
+    write_flight_recorder_artifact(
+        repo_root,
+        &artifacts.summary_path,
+        &prepared.summary_bytes,
+        "summary_path",
+    )?;
+    write_flight_recorder_artifact(
+        repo_root,
+        &artifacts.attempt_path,
+        &prepared.attempt_bytes,
+        "attempt_path",
+    )?;
+
+    Ok(prepared.result)
+}
+
+fn prepare_validation_flight_recorder_write(
+    attempt: &ValidationFlightRecorderAttempt,
+    recovery: Option<&ValidationFlightRecorderRecovery>,
+    now: DateTime<Utc>,
+) -> Result<PreparedFlightRecorderWrite, ValidationBrokerError> {
+    let mut attempt = attempt.clone();
+    let recovery_bytes = match recovery {
+        Some(recovery) => {
+            let recovery_path = attempt.artifacts.recovery_path.clone().ok_or_else(|| {
+                ValidationBrokerError::ContractViolation {
+                    code: error_codes::ERR_VFR_INVALID_RECOVERY_DECISION,
+                    detail: "recovery artifact requires attempt.artifacts.recovery_path"
+                        .to_string(),
+                }
+            })?;
+            let mut attempt_without_ref = attempt.clone();
+            attempt_without_ref.recovery_ref = None;
+            recovery.validate_for_attempt(&attempt_without_ref, now)?;
+            let bytes = serde_json::to_vec_pretty(recovery).map_err(ValidationBrokerError::Json)?;
+            let recovery_ref = FlightRecorderRecoveryRef {
+                decision_id: recovery.decision_id.clone(),
+                path: recovery_path,
+                digest: DigestRef::sha256(&bytes),
+            };
+            if let Some(existing_ref) = &attempt.recovery_ref {
+                validate_recovery_ref_matches(existing_ref, &recovery_ref)?;
+            }
+            attempt.recovery_ref = Some(recovery_ref);
+            Some(bytes)
+        }
+        None => {
+            if attempt.recovery_ref.is_some() || attempt.artifacts.recovery_path.is_some() {
+                return flight_recorder_err(
+                    error_codes::ERR_VFR_INVALID_RECOVERY_DECISION,
+                    "attempt cannot advertise recovery artifact metadata without recovery bytes",
+                );
+            }
+            None
+        }
+    };
+
+    let stdout_bytes = attempt
+        .artifacts
+        .stdout_snippet
+        .as_deref()
+        .unwrap_or_default()
+        .as_bytes()
+        .to_vec();
+    attempt.artifacts.stdout_digest = DigestRef::sha256(&stdout_bytes);
+    let stderr_bytes = attempt
+        .artifacts
+        .stderr_snippet
+        .as_deref()
+        .unwrap_or_default()
+        .as_bytes()
+        .to_vec();
+    attempt.artifacts.stderr_digest = DigestRef::sha256(&stderr_bytes);
+
+    attempt.validate_at(now)?;
+    let attempt_bytes = serde_json::to_vec_pretty(&attempt).map_err(ValidationBrokerError::Json)?;
+    let adapter_outcome = attempt.adapter_outcome.as_ref().ok_or_else(|| {
+        ValidationBrokerError::ContractViolation {
+            code: error_codes::ERR_VFR_MALFORMED_ATTEMPT,
+            detail: "writer requires adapter_outcome to create a flight_recorder_ref".to_string(),
+        }
+    })?;
+    let flight_recorder_ref = ValidationFlightRecorderRef {
+        schema_version: FLIGHT_RECORDER_REF_SCHEMA_VERSION.to_string(),
+        attempt_path: attempt.artifacts.attempt_path.clone(),
+        attempt_digest: DigestRef::sha256(&attempt_bytes),
+        attempt_id: attempt.attempt_id.clone(),
+        generated_at: now,
+        freshness_expires_at: attempt.freshness_expires_at,
+        outcome_class: adapter_outcome.outcome,
+        execution_mode: adapter_outcome.execution_mode,
+        worker_id: adapter_outcome.worker_id.clone(),
+        reason_code: adapter_outcome.reason_code.clone(),
+    };
+    flight_recorder_ref.validate_at(now)?;
+
+    let summary = render_flight_recorder_summary(&attempt, recovery);
+    validate_bounded_snippet(&summary, "flight recorder summary")?;
+    let recovery_ref = attempt.recovery_ref.clone();
+
+    Ok(PreparedFlightRecorderWrite {
+        result: ValidationFlightRecorderWriteResult {
+            flight_recorder_ref,
+            recovery_ref,
+            attempt,
+        },
+        attempt_bytes,
+        recovery_bytes,
+        stdout_bytes,
+        stderr_bytes,
+        summary_bytes: summary.into_bytes(),
+    })
+}
+
+fn validate_recovery_ref_matches(
+    existing_ref: &FlightRecorderRecoveryRef,
+    computed_ref: &FlightRecorderRecoveryRef,
+) -> Result<(), ValidationBrokerError> {
+    if constant_time::ct_eq(&existing_ref.decision_id, &computed_ref.decision_id)
+        && constant_time::ct_eq(&existing_ref.path, &computed_ref.path)
+        && constant_time::ct_eq(
+            &existing_ref.digest.algorithm,
+            &computed_ref.digest.algorithm,
+        )
+        && constant_time::ct_eq(&existing_ref.digest.hex, &computed_ref.digest.hex)
+    {
+        return Ok(());
+    }
+    flight_recorder_err(
+        error_codes::ERR_VFR_INVALID_RECOVERY_DECISION,
+        "attempt recovery_ref does not match serialized recovery artifact",
+    )
+}
+
+fn render_flight_recorder_summary(
+    attempt: &ValidationFlightRecorderAttempt,
+    recovery: Option<&ValidationFlightRecorderRecovery>,
+) -> String {
+    let recovery_decision = recovery.map_or("none".to_string(), |recovery| {
+        format!("{:?}", recovery.decision)
+    });
+    let required_action = recovery.map_or("none".to_string(), |recovery| {
+        format!("{:?}", recovery.required_action)
+    });
+    let reason_code = recovery.map_or_else(
+        || {
+            attempt
+                .adapter_outcome
+                .as_ref()
+                .map_or("none".to_string(), |outcome| outcome.reason_code.clone())
+        },
+        |recovery| recovery.reason_code.clone(),
+    );
+    format!(
+        "# Validation Flight Recorder\n\nattempt_id: {}\nbead_id: {}\nthread_id: {}\noutcome: {:?}\nexit: {:?}\nreason_code: {}\nrecovery_decision: {}\nrequired_action: {}\n",
+        attempt.attempt_id,
+        attempt.bead_id,
+        attempt.thread_id,
+        attempt
+            .adapter_outcome
+            .as_ref()
+            .map(|outcome| outcome.outcome),
+        attempt.exit.kind,
+        reason_code,
+        recovery_decision,
+        required_action
+    )
+}
+
+fn write_flight_recorder_artifact(
+    repo_root: &Path,
+    artifact_path: &str,
+    bytes: &[u8],
+    field: &str,
+) -> Result<(), ValidationBrokerError> {
+    let path = resolve_flight_recorder_artifact_path(repo_root, artifact_path, field)?;
+    write_bytes_atomically(&path, bytes)
+}
+
+fn resolve_flight_recorder_artifact_path(
+    repo_root: &Path,
+    artifact_path: &str,
+    field: &str,
+) -> Result<PathBuf, ValidationBrokerError> {
+    validate_repo_relative_path(artifact_path, field)?;
+    let mut resolved = repo_root.to_path_buf();
+    for component in Path::new(artifact_path).components() {
+        match component {
+            Component::Normal(segment) => resolved.push(segment),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return contract_err(
+                    error_codes::ERR_VFR_INVALID_ARTIFACT_PATH,
+                    format!("{field} must be repo-relative without traversal"),
+                );
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 pub fn render_validation_proof_status_json(

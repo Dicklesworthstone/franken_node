@@ -4,17 +4,19 @@ use frankenengine_node::ops::rch_adapter::{
     RchProcessSnapshot, RchTimeoutClass, RchValidationAction, classify_rch_output,
 };
 use frankenengine_node::ops::validation_broker::{
-    CommandSpec, DigestRef, EnvironmentPolicy, FLIGHT_RECORDER_MAX_SNIPPET_BYTES, FallbackPolicy,
-    FlightRecorderExit, FlightRecorderExitKind, FlightRecorderRequiredAction, InputDigest,
-    InputSet, OutputPolicy, ProofEvidenceSource, ProofStatusKind, QueueState,
+    CommandSpec, DigestRef, EnvironmentPolicy, FLIGHT_RECORDER_MAX_SNIPPET_BYTES,
+    FLIGHT_RECORDER_RECOVERY_SCHEMA_VERSION, FallbackPolicy, FlightRecorderExit,
+    FlightRecorderExitKind, FlightRecorderRecoveryDecision, FlightRecorderRequiredAction,
+    InputDigest, InputSet, OutputPolicy, ProofEvidenceSource, ProofStatusKind, QueueState,
     READINESS_REF_SCHEMA_VERSION, RECEIPT_SCHEMA_VERSION, RchMode, RchReceipt, ReceiptArtifacts,
     ReceiptClassifications, ReceiptRequestRef, ReceiptTrust, SourceOnlyReason, TargetDirPolicy,
     TimeoutClass, ValidationBrokerError, ValidationBrokerQueue, ValidationBrokerRequest,
     ValidationErrorClass, ValidationExit, ValidationExitKind, ValidationFlightRecorderAttempt,
     ValidationFlightRecorderRecovery, ValidationPriority, ValidationProofCacheReuseEvidence,
     ValidationProofStatus, ValidationReadinessRef, ValidationReceipt, ValidationTiming,
-    WorkerRequirements, error_codes, readiness_ref_reason_codes,
-    render_validation_proof_status_human, render_validation_proof_status_json,
+    WorkerRequirements, error_codes, flight_recorder_event_codes, flight_recorder_reason_codes,
+    readiness_ref_reason_codes, render_validation_proof_status_human,
+    render_validation_proof_status_json, write_validation_flight_recorder_at,
     write_validation_receipt_at,
 };
 use frankenengine_node::ops::validation_closeout::{
@@ -1550,6 +1552,29 @@ fn base_flight_recorder_recovery()
     )?)
 }
 
+fn writer_flight_recorder_recovery(
+    attempt: &ValidationFlightRecorderAttempt,
+) -> ValidationFlightRecorderRecovery {
+    ValidationFlightRecorderRecovery {
+        schema_version: FLIGHT_RECORDER_RECOVERY_SCHEMA_VERSION.to_string(),
+        decision_id: "vfr-recovery-bd-2zn9k-writer".to_string(),
+        attempt_id: attempt.attempt_id.clone(),
+        bead_id: attempt.bead_id.clone(),
+        thread_id: attempt.thread_id.clone(),
+        decided_at: flight_recorder_now(),
+        input_digest: DigestRef::sha256(b"writer-attempt-plus-policy"),
+        decision: FlightRecorderRecoveryDecision::AcceptSuccess,
+        reason_code: flight_recorder_reason_codes::SUCCESS_REMOTE.to_string(),
+        event_code: flight_recorder_event_codes::SUCCESS_REMOTE.to_string(),
+        required_action: FlightRecorderRequiredAction::None,
+        fail_closed: false,
+        retryable: false,
+        freshness_expires_at: flight_recorder_now() + Duration::seconds(3_600),
+        operator_message: "fresh remote validation proof can be used".to_string(),
+        diagnostics: BTreeMap::from([("attempt_id".to_string(), attempt.attempt_id.clone())]),
+    }
+}
+
 fn assert_flight_recorder_contract_code(
     result: Result<(), ValidationBrokerError>,
     expected: &'static str,
@@ -1588,6 +1613,98 @@ fn flight_recorder_checked_fixture_round_trips_and_validates()
     let recovery = base_flight_recorder_recovery()?;
     recovery.validate_for_attempt(&parsed, flight_recorder_now())?;
 
+    Ok(())
+}
+
+#[test]
+fn flight_recorder_writer_persists_artifacts_and_links_status()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let mut attempt = base_flight_recorder_attempt()?;
+    attempt.recovery_ref = None;
+    let recovery = writer_flight_recorder_recovery(&attempt);
+
+    let result = write_validation_flight_recorder_at(
+        dir.path(),
+        &attempt,
+        Some(&recovery),
+        flight_recorder_now(),
+    )?;
+
+    let attempt_path = dir.path().join(&result.flight_recorder_ref.attempt_path);
+    let attempt_raw = fs::read_to_string(&attempt_path)?;
+    let persisted_attempt: ValidationFlightRecorderAttempt = serde_json::from_str(&attempt_raw)?;
+    persisted_attempt.validate_at(flight_recorder_now())?;
+    assert_eq!(persisted_attempt.attempt_id, attempt.attempt_id);
+    assert_eq!(
+        result.flight_recorder_ref.attempt_digest,
+        DigestRef::sha256(attempt_raw.as_bytes())
+    );
+
+    let recovery_ref = persisted_attempt
+        .recovery_ref
+        .clone()
+        .ok_or("writer should attach recovery_ref")?;
+    assert_eq!(result.recovery_ref, Some(recovery_ref.clone()));
+    let recovery_path = dir.path().join(&recovery_ref.path);
+    let recovery_raw = fs::read(&recovery_path)?;
+    assert_eq!(recovery_ref.digest, DigestRef::sha256(&recovery_raw));
+    let persisted_recovery: ValidationFlightRecorderRecovery =
+        serde_json::from_slice(&recovery_raw)?;
+    persisted_recovery.validate_for_attempt(&persisted_attempt, flight_recorder_now())?;
+
+    assert!(
+        dir.path()
+            .join(&persisted_attempt.artifacts.stdout_path)
+            .is_file()
+    );
+    assert!(
+        dir.path()
+            .join(&persisted_attempt.artifacts.stderr_path)
+            .is_file()
+    );
+    let summary = fs::read_to_string(dir.path().join(&persisted_attempt.artifacts.summary_path))?;
+    assert!(summary.contains(&persisted_attempt.attempt_id));
+
+    let mut receipt = receipt_for_bead(
+        &persisted_attempt.bead_id,
+        flight_recorder_now() - Duration::seconds(2),
+        flight_recorder_now() - Duration::seconds(1),
+        flight_recorder_now() + Duration::seconds(3_600),
+        ValidationExitKind::Success,
+        ValidationErrorClass::None,
+        TimeoutClass::None,
+        result.flight_recorder_ref.execution_mode,
+        result.flight_recorder_ref.worker_id.as_deref(),
+        None,
+    );
+    receipt.flight_recorder_ref = Some(result.flight_recorder_ref.clone());
+    receipt.validate_at(flight_recorder_now())?;
+    let status = ValidationProofStatus::from_receipt(&receipt, flight_recorder_now())?;
+    assert_eq!(
+        status.flight_recorder_ref,
+        Some(result.flight_recorder_ref.clone())
+    );
+    Ok(())
+}
+
+#[test]
+fn flight_recorder_writer_rejects_invalid_artifact_path_without_writes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let mut attempt = base_flight_recorder_attempt()?;
+    attempt.recovery_ref = None;
+    attempt.artifacts.recovery_path = None;
+    attempt.artifacts.attempt_path = "/tmp/escape.json".to_string();
+
+    let err =
+        write_validation_flight_recorder_at(dir.path(), &attempt, None, flight_recorder_now())
+            .expect_err("writer should reject absolute artifact paths");
+    assert_flight_recorder_contract_code(Err(err), error_codes::ERR_VFR_INVALID_ARTIFACT_PATH)?;
+    assert!(
+        !dir.path().join("artifacts").exists(),
+        "writer should not create sidecar artifacts after validation failure"
+    );
     Ok(())
 }
 

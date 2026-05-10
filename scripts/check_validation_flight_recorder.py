@@ -227,17 +227,17 @@ REASON_EVENT_PAIRS = {
 }
 
 DECISION_ACTIONS = {
-    "accept_success": "use_receipt",
-    "retry_remote_same_worker": "retry_rch",
-    "retry_remote_different_worker": "retry_rch_different_worker",
-    "queue_until_capacity": "wait_for_capacity",
-    "drain_worker_then_retry": "drain_worker",
-    "wait_for_existing_proof": "wait_for_proof",
-    "retry_with_new_fence": "fence_stale_lease",
-    "reuse_receipt": "reuse_receipt",
-    "use_source_only_blocker": "record_source_only",
-    "fail_closed_product": "fix_product_failure",
-    "fail_closed_invalid": "repair_artifact_or_contract",
+    "accept_success": {"use_receipt", "none"},
+    "retry_remote_same_worker": {"retry_rch", "retry_remote"},
+    "retry_remote_different_worker": {"retry_rch_different_worker", "retry_remote"},
+    "queue_until_capacity": {"wait_for_capacity"},
+    "drain_worker_then_retry": {"drain_worker"},
+    "wait_for_existing_proof": {"wait_for_proof", "wait_for_existing_proof"},
+    "retry_with_new_fence": {"fence_stale_lease", "refresh_lease_fence"},
+    "reuse_receipt": {"reuse_receipt"},
+    "use_source_only_blocker": {"record_source_only", "record_source_only_blocker"},
+    "fail_closed_product": {"fix_product_failure", "surface_product_failure"},
+    "fail_closed_invalid": {"repair_artifact_or_contract", "reject_artifact"},
 }
 
 RETRYABLE_DECISIONS = {
@@ -737,7 +737,8 @@ def validate_recovery(
         errors.append(ERR_INVALID_RECOVERY_DECISION)
     decision = recovery.get("decision")
     required_action = recovery.get("required_action")
-    if decision not in DECISION_ACTIONS or DECISION_ACTIONS.get(decision) != required_action:
+    allowed_actions = DECISION_ACTIONS.get(decision, set())
+    if required_action not in allowed_actions:
         errors.append(ERR_INVALID_RECOVERY_DECISION)
     if recovery.get("retryable") != (decision in RETRYABLE_DECISIONS):
         errors.append(ERR_INVALID_RECOVERY_DECISION)
