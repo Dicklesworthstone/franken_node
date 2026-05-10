@@ -26,6 +26,8 @@ pub const VALIDATION_READINESS_REPORT_SCHEMA_VERSION: &str =
     "franken-node/validation-readiness/report/v1";
 pub const VALIDATION_HANDOFF_SUMMARY_SCHEMA_VERSION: &str =
     "franken-node/validation-handoff-summary/report/v1";
+pub const VALIDATION_SWARM_PERFORMANCE_EVIDENCE_SCHEMA_VERSION: &str =
+    "franken-node/validation-swarm-performance/evidence/v1";
 pub const VALIDATION_READINESS_FIXTURE_SCHEMA_VERSION: &str =
     "franken-node/validation-readiness/fixtures/v1";
 pub const PROOF_LANE_READINESS_CAPSULE_SCHEMA_VERSION: &str =
@@ -41,6 +43,8 @@ pub const MAX_PROOF_LANE_STRING_BYTES: usize = 512;
 pub const MAX_PROOF_LANE_DETAIL_BYTES: usize = 1024;
 pub const MAX_VALIDATION_HANDOFF_ROWS: usize = 128;
 pub const MAX_VALIDATION_HANDOFF_FIELD_BYTES: usize = 512;
+pub const MAX_VALIDATION_SWARM_PERFORMANCE_OUTPUT_BYTES: usize = 512 * 1024;
+pub const MAX_VALIDATION_SWARM_PERFORMANCE_UNIQUE_WORK_KEYS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -773,6 +777,121 @@ pub struct ValidationHandoffEntry {
     pub markdown: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationSwarmPerformanceInputCase {
+    pub case_id: String,
+    pub equivalent_requests: usize,
+    pub configured_waiter_cap: usize,
+    pub linked_bead_ids: Vec<String>,
+    pub decisions: Vec<ValidationSwarmSchedulerDecision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ValidationSwarmPerformanceEvidence {
+    pub schema_version: String,
+    pub command: String,
+    pub trace_id: String,
+    pub generated_at_utc: DateTime<Utc>,
+    pub fixture_mode: String,
+    pub optional_heavy_benchmark: ValidationSwarmPerformanceBenchmarkInstructions,
+    pub linked_bead_ids: Vec<String>,
+    pub summary: ValidationSwarmPerformanceSummary,
+    pub cases: Vec<ValidationSwarmPerformanceCaseEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmPerformanceBenchmarkInstructions {
+    pub required_wrapper: String,
+    pub target_dir_policy_id: String,
+    pub example_command: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmPerformanceSummary {
+    pub cases: usize,
+    pub max_equivalent_requests: usize,
+    pub max_total_decisions: usize,
+    pub max_unique_work_keys: usize,
+    pub max_control_tower_rows: usize,
+    pub max_output_size_bytes: usize,
+    pub all_duplicate_producers_suppressed: bool,
+    pub all_waiter_caps_respected: bool,
+    pub all_stale_steals_recovered: bool,
+    pub all_output_within_bounds: bool,
+    pub all_growth_bounded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ValidationSwarmPerformanceCaseEvidence {
+    pub case_id: String,
+    pub equivalent_requests: usize,
+    pub total_decisions: usize,
+    pub decision_latency: ValidationSwarmPerformanceLatencyDistribution,
+    pub memory_growth: ValidationSwarmPerformanceMemoryGrowth,
+    pub duplicate_producer_suppression: ValidationSwarmPerformanceDuplicateSuppression,
+    pub waiter_cap: ValidationSwarmPerformanceWaiterCap,
+    pub stale_steal_recovery: ValidationSwarmPerformanceStaleStealRecovery,
+    pub output_size: ValidationSwarmPerformanceOutputSize,
+    pub decision_counts: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmPerformanceLatencyDistribution {
+    pub p50_queue_age_ms: u64,
+    pub p95_queue_age_ms: u64,
+    pub p99_queue_age_ms: u64,
+    pub max_queue_age_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmPerformanceMemoryGrowth {
+    pub class: ValidationSwarmPerformanceMemoryGrowthClass,
+    pub decision_vector_len: usize,
+    pub control_tower_rows: usize,
+    pub unique_work_keys: usize,
+    pub bounded_vector_growth: bool,
+    pub bounded_map_growth: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationSwarmPerformanceMemoryGrowthClass {
+    ConstantWorkKeysLinearRows,
+    LinearWorkKeysLinearRows,
+    Unbounded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmPerformanceDuplicateSuppression {
+    pub equivalent_work_key: String,
+    pub equivalent_requests: usize,
+    pub producer_count: usize,
+    pub joined_waiters: usize,
+    pub suppressed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmPerformanceWaiterCap {
+    pub configured_waiter_cap: usize,
+    pub max_waiters_observed_per_work_key: usize,
+    pub within_cap: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmPerformanceStaleStealRecovery {
+    pub stale_steal_count: usize,
+    pub recovered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationSwarmPerformanceOutputSize {
+    pub handoff_rows: usize,
+    pub handoff_truncated: bool,
+    pub markdown_bytes: usize,
+    pub json_bytes: usize,
+    pub bounded: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationReadinessError {
     #[error("failed reading validation readiness input {path}: {source}")]
@@ -893,6 +1012,283 @@ pub fn build_validation_handoff_report_from_readiness(
 #[must_use]
 pub fn render_validation_handoff_markdown(report: &ValidationHandoffReport) -> String {
     report.agent_mail_markdown.clone()
+}
+
+#[must_use]
+pub fn build_validation_swarm_performance_evidence(
+    cases: &[ValidationSwarmPerformanceInputCase],
+    trace_id: impl Into<String>,
+    now: DateTime<Utc>,
+) -> ValidationSwarmPerformanceEvidence {
+    let trace_id = trace_id.into();
+    let mut sorted_cases = cases.iter().collect::<Vec<_>>();
+    sorted_cases.sort_by(|left, right| {
+        left.equivalent_requests
+            .cmp(&right.equivalent_requests)
+            .then_with(|| left.case_id.cmp(&right.case_id))
+    });
+
+    let linked_bead_ids = sorted_cases
+        .iter()
+        .flat_map(|case| case.linked_bead_ids.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let cases = sorted_cases
+        .into_iter()
+        .map(|case| build_validation_swarm_performance_case(case, trace_id.as_str(), now))
+        .collect::<Vec<_>>();
+    let summary = summarize_validation_swarm_performance_cases(&cases);
+
+    ValidationSwarmPerformanceEvidence {
+        schema_version: VALIDATION_SWARM_PERFORMANCE_EVIDENCE_SCHEMA_VERSION.to_string(),
+        command: "ops validation-swarm-performance --source-only".to_string(),
+        trace_id,
+        generated_at_utc: now,
+        fixture_mode: "source_only_in_memory".to_string(),
+        optional_heavy_benchmark: ValidationSwarmPerformanceBenchmarkInstructions {
+            required_wrapper: "rch exec --".to_string(),
+            target_dir_policy_id: "validation-swarm-scheduler/target-dir/off-repo/v1".to_string(),
+            example_command: "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_swarm_perf cargo bench -p frankenengine-node validation_swarm_scheduler".to_string(),
+        },
+        linked_bead_ids,
+        summary,
+        cases,
+    }
+}
+
+fn build_validation_swarm_performance_case(
+    case: &ValidationSwarmPerformanceInputCase,
+    trace_id: &str,
+    now: DateTime<Utc>,
+) -> ValidationSwarmPerformanceCaseEvidence {
+    let readiness_input = ValidationReadinessInput {
+        swarm_scheduler_decisions: case.decisions.clone(),
+        ..ValidationReadinessInput::default()
+    };
+    let readiness = build_validation_readiness_report(
+        &readiness_input,
+        format!("{trace_id}/{}", case.case_id),
+        now,
+    );
+    let handoff = build_validation_handoff_report_from_readiness(&readiness_input, &readiness);
+    let markdown_bytes = handoff.agent_mail_markdown.len();
+    let json_bytes = serde_json::to_vec(&handoff)
+        .map(|encoded| encoded.len())
+        .unwrap_or(usize::MAX);
+    let output_bytes = markdown_bytes.saturating_add(json_bytes);
+
+    let latency = validation_swarm_latency_distribution(&case.decisions);
+    let work_key_counts = count_validation_swarm_work_keys(&case.decisions);
+    let unique_work_keys = work_key_counts.len();
+    let equivalent_work_key = largest_validation_swarm_work_key(&work_key_counts);
+    let equivalent = equivalent_work_key
+        .as_ref()
+        .and_then(|work_key| work_key_counts.get(work_key))
+        .copied()
+        .unwrap_or_default();
+    let max_waiters_observed_per_work_key = work_key_counts
+        .values()
+        .map(|counts| counts.joined_waiters)
+        .max()
+        .unwrap_or_default();
+    let decision_counts = count_validation_swarm_decision_kinds(&case.decisions);
+    let stale_steal_count = decision_counts
+        .get(ValidationSwarmSchedulerDecisionKind::StealStaleWork.as_str())
+        .copied()
+        .unwrap_or_default();
+
+    let total_decisions = case.decisions.len();
+    let bounded_vector_growth = readiness.summary.control_tower.rows
+        <= total_decisions.saturating_add(case.linked_bead_ids.len());
+    let bounded_map_growth = unique_work_keys <= MAX_VALIDATION_SWARM_PERFORMANCE_UNIQUE_WORK_KEYS;
+    let growth_class = if bounded_vector_growth && bounded_map_growth {
+        ValidationSwarmPerformanceMemoryGrowthClass::ConstantWorkKeysLinearRows
+    } else if bounded_vector_growth && unique_work_keys <= total_decisions {
+        ValidationSwarmPerformanceMemoryGrowthClass::LinearWorkKeysLinearRows
+    } else {
+        ValidationSwarmPerformanceMemoryGrowthClass::Unbounded
+    };
+
+    ValidationSwarmPerformanceCaseEvidence {
+        case_id: case.case_id.clone(),
+        equivalent_requests: case.equivalent_requests,
+        total_decisions,
+        decision_latency: latency,
+        memory_growth: ValidationSwarmPerformanceMemoryGrowth {
+            class: growth_class,
+            decision_vector_len: total_decisions,
+            control_tower_rows: readiness.summary.control_tower.rows,
+            unique_work_keys,
+            bounded_vector_growth,
+            bounded_map_growth,
+        },
+        duplicate_producer_suppression: ValidationSwarmPerformanceDuplicateSuppression {
+            equivalent_work_key: equivalent_work_key.unwrap_or_default(),
+            equivalent_requests: equivalent.requests,
+            producer_count: equivalent.producer_count,
+            joined_waiters: equivalent.joined_waiters,
+            suppressed: equivalent.requests == case.equivalent_requests
+                && equivalent.producer_count == 1
+                && equivalent
+                    .joined_waiters
+                    .saturating_add(equivalent.producer_count)
+                    == case.equivalent_requests,
+        },
+        waiter_cap: ValidationSwarmPerformanceWaiterCap {
+            configured_waiter_cap: case.configured_waiter_cap,
+            max_waiters_observed_per_work_key,
+            within_cap: max_waiters_observed_per_work_key <= case.configured_waiter_cap,
+        },
+        stale_steal_recovery: ValidationSwarmPerformanceStaleStealRecovery {
+            stale_steal_count,
+            recovered: stale_steal_count > 0,
+        },
+        output_size: ValidationSwarmPerformanceOutputSize {
+            handoff_rows: handoff.rows,
+            handoff_truncated: handoff.truncated,
+            markdown_bytes,
+            json_bytes,
+            bounded: output_bytes <= MAX_VALIDATION_SWARM_PERFORMANCE_OUTPUT_BYTES,
+        },
+        decision_counts,
+    }
+}
+
+fn summarize_validation_swarm_performance_cases(
+    cases: &[ValidationSwarmPerformanceCaseEvidence],
+) -> ValidationSwarmPerformanceSummary {
+    ValidationSwarmPerformanceSummary {
+        cases: cases.len(),
+        max_equivalent_requests: cases
+            .iter()
+            .map(|case| case.equivalent_requests)
+            .max()
+            .unwrap_or_default(),
+        max_total_decisions: cases
+            .iter()
+            .map(|case| case.total_decisions)
+            .max()
+            .unwrap_or_default(),
+        max_unique_work_keys: cases
+            .iter()
+            .map(|case| case.memory_growth.unique_work_keys)
+            .max()
+            .unwrap_or_default(),
+        max_control_tower_rows: cases
+            .iter()
+            .map(|case| case.memory_growth.control_tower_rows)
+            .max()
+            .unwrap_or_default(),
+        max_output_size_bytes: cases
+            .iter()
+            .map(|case| {
+                case.output_size
+                    .markdown_bytes
+                    .saturating_add(case.output_size.json_bytes)
+            })
+            .max()
+            .unwrap_or_default(),
+        all_duplicate_producers_suppressed: cases
+            .iter()
+            .all(|case| case.duplicate_producer_suppression.suppressed),
+        all_waiter_caps_respected: cases.iter().all(|case| case.waiter_cap.within_cap),
+        all_stale_steals_recovered: cases.iter().all(|case| case.stale_steal_recovery.recovered),
+        all_output_within_bounds: cases.iter().all(|case| case.output_size.bounded),
+        all_growth_bounded: cases.iter().all(|case| {
+            case.memory_growth.bounded_vector_growth && case.memory_growth.bounded_map_growth
+        }),
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ValidationSwarmWorkKeyCounts {
+    requests: usize,
+    producer_count: usize,
+    joined_waiters: usize,
+}
+
+fn count_validation_swarm_work_keys(
+    decisions: &[ValidationSwarmSchedulerDecision],
+) -> BTreeMap<String, ValidationSwarmWorkKeyCounts> {
+    let mut counts = BTreeMap::<String, ValidationSwarmWorkKeyCounts>::new();
+    for decision in decisions {
+        let entry = counts
+            .entry(decision.diagnostics.proof_work_key_hex.clone())
+            .or_default();
+        entry.requests = entry.requests.saturating_add(1);
+        match decision.decision {
+            ValidationSwarmSchedulerDecisionKind::RunNow => {
+                entry.producer_count = entry.producer_count.saturating_add(1);
+            }
+            ValidationSwarmSchedulerDecisionKind::JoinExisting => {
+                entry.joined_waiters = entry.joined_waiters.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    counts
+}
+
+fn largest_validation_swarm_work_key(
+    counts: &BTreeMap<String, ValidationSwarmWorkKeyCounts>,
+) -> Option<String> {
+    counts
+        .iter()
+        .max_by(|(left_key, left), (right_key, right)| {
+            left.requests
+                .cmp(&right.requests)
+                .then_with(|| right_key.cmp(left_key))
+        })
+        .map(|(work_key, _)| work_key.clone())
+}
+
+fn count_validation_swarm_decision_kinds(
+    decisions: &[ValidationSwarmSchedulerDecision],
+) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for decision in decisions {
+        *counts
+            .entry(decision.decision.as_str().to_string())
+            .or_insert(0) += 1;
+    }
+    counts
+}
+
+fn validation_swarm_latency_distribution(
+    decisions: &[ValidationSwarmSchedulerDecision],
+) -> ValidationSwarmPerformanceLatencyDistribution {
+    if decisions.is_empty() {
+        return ValidationSwarmPerformanceLatencyDistribution::default();
+    }
+    let mut queue_ages = decisions
+        .iter()
+        .map(|decision| decision.diagnostics.queue_age_ms)
+        .collect::<Vec<_>>();
+    queue_ages.sort_unstable();
+
+    ValidationSwarmPerformanceLatencyDistribution {
+        p50_queue_age_ms: percentile_sorted(&queue_ages, 50),
+        p95_queue_age_ms: percentile_sorted(&queue_ages, 95),
+        p99_queue_age_ms: percentile_sorted(&queue_ages, 99),
+        max_queue_age_ms: queue_ages.last().copied().unwrap_or_default(),
+    }
+}
+
+fn percentile_sorted(sorted_values: &[u64], percentile: usize) -> u64 {
+    if sorted_values.is_empty() {
+        return 0;
+    }
+    let index = sorted_values
+        .len()
+        .saturating_mul(percentile)
+        .saturating_add(99)
+        .checked_div(100)
+        .unwrap_or(1)
+        .saturating_sub(1)
+        .min(sorted_values.len().saturating_sub(1));
+    sorted_values[index]
 }
 
 #[must_use]

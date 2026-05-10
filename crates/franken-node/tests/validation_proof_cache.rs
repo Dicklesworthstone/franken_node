@@ -47,8 +47,12 @@ use frankenengine_node::ops::validation_proof_debt_ledger::{
     ValidationProofDebtClass, build_validation_proof_debt_ledger,
 };
 use frankenengine_node::ops::validation_readiness::{
-    TrackedValidationBead, ValidationBeadState, ValidationReadinessInput,
-    ValidationReadinessStatus, build_validation_handoff_report, build_validation_readiness_report,
+    MAX_VALIDATION_SWARM_PERFORMANCE_OUTPUT_BYTES,
+    MAX_VALIDATION_SWARM_PERFORMANCE_UNIQUE_WORK_KEYS, TrackedValidationBead,
+    VALIDATION_SWARM_PERFORMANCE_EVIDENCE_SCHEMA_VERSION, ValidationBeadState,
+    ValidationReadinessInput, ValidationReadinessStatus, ValidationSwarmPerformanceInputCase,
+    ValidationSwarmPerformanceMemoryGrowthClass, build_validation_handoff_report,
+    build_validation_readiness_report, build_validation_swarm_performance_evidence,
     render_validation_handoff_markdown, render_validation_readiness_human,
 };
 use std::collections::BTreeMap;
@@ -71,6 +75,9 @@ const COALESCER_STRESS_MATRIX_JSON: &str = include_str!(
 );
 const SWARM_SCHEDULER_STRESS_MATRIX_JSON: &str = include_str!(
     "../../../artifacts/validation_broker/swarm_scheduler/validation_swarm_scheduler_stress_matrix.v1.json"
+);
+const SWARM_SCHEDULER_PERF_EVIDENCE_JSON: &str = include_str!(
+    "../../../artifacts/validation_broker/swarm_scheduler/validation_swarm_scheduler_perf_evidence.v1.json"
 );
 const REQUIRED_LOG_FIELDS: [&str; 7] = [
     "trace_id",
@@ -1088,6 +1095,111 @@ fn proof_status_from_scheduler_decision(
     status
 }
 
+fn swarm_scheduler_performance_decisions(
+    equivalent_requests: usize,
+) -> Vec<ValidationSwarmSchedulerDecision> {
+    assert!(equivalent_requests > 0);
+    let mut decisions = Vec::with_capacity(equivalent_requests.saturating_add(8));
+    decisions.push(swarm_scheduler_decision(
+        "perf-equivalent",
+        "perf-agent-0000",
+        |_| {},
+    ));
+
+    for idx in 1..equivalent_requests {
+        let idx_u64 = u64::try_from(idx).expect("performance index fits in u64");
+        decisions.push(swarm_scheduler_decision(
+            "perf-equivalent",
+            &format!("perf-agent-{idx:04}"),
+            |input| {
+                input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Running;
+                input.queue_age_ms = 10_000 + idx_u64;
+            },
+        ));
+    }
+
+    decisions.push(swarm_scheduler_decision(
+        "perf-cache-hit",
+        "perf-cache-hit-agent",
+        |input| {
+            input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Completed;
+            input.queue_age_ms = 30_000;
+        },
+    ));
+    decisions.push(swarm_scheduler_decision(
+        "perf-p4-fresh",
+        "perf-low-priority-fresh",
+        |input| {
+            input.priority = ValidationSwarmSchedulerPriority::P4;
+            input.capacity_snapshot = swarm_scheduler_capacity(0, 96, 0, 0);
+            input.queue_age_ms = 120_000;
+        },
+    ));
+    decisions.push(swarm_scheduler_decision(
+        "perf-p4-aged",
+        "perf-low-priority-aged",
+        |input| {
+            input.priority = ValidationSwarmSchedulerPriority::P4;
+            input.capacity_snapshot = swarm_scheduler_capacity(0, 96, 0, 0);
+            input.queue_age_ms = 700_000;
+        },
+    ));
+    decisions.push(swarm_scheduler_decision(
+        "perf-stale-producer",
+        "perf-fresh-fence-agent",
+        |input| {
+            input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Stale;
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::StaleProducer;
+            input.queue_age_ms = 950_000;
+        },
+    ));
+    decisions.push(swarm_scheduler_decision(
+        "perf-worker-infra",
+        "perf-worker-infra-agent",
+        |input| {
+            input.worker_infra_retryable = true;
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::WorkerInfra;
+            input.flight_recorder_state =
+                ValidationSwarmSchedulerFlightRecorderState::WorkerTimeout;
+            input.capacity_snapshot = swarm_scheduler_capacity(8, 4, 0, 0);
+            input.queue_age_ms = 360_000;
+        },
+    ));
+    decisions.push(swarm_scheduler_decision(
+        "perf-source-only",
+        "perf-source-only-agent",
+        |input| {
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::SourceOnly;
+            input.flight_recorder_state =
+                ValidationSwarmSchedulerFlightRecorderState::SourceOnlyBlocker;
+            input.source_only_allowed = true;
+            input.queue_age_ms = 950_000;
+        },
+    ));
+    decisions.push(swarm_scheduler_decision(
+        "perf-product-failure",
+        "perf-product-agent",
+        |input| {
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::ProductFailure;
+            input.flight_recorder_state =
+                ValidationSwarmSchedulerFlightRecorderState::ProductFailure;
+            input.product_failure = true;
+        },
+    ));
+    decisions.push(swarm_scheduler_decision(
+        "perf-invalid-artifact",
+        "perf-artifact-agent",
+        |input| {
+            input.artifact_valid = false;
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::InvalidArtifact;
+            input.flight_recorder_state =
+                ValidationSwarmSchedulerFlightRecorderState::InvalidArtifact;
+        },
+    ));
+
+    decisions
+}
+
 #[derive(Debug)]
 struct CoalescerStressAttempt {
     agent: String,
@@ -2076,6 +2188,167 @@ fn fixture_replay_swarm_scheduler_fairness_stress_matches_economics()
             "missing swarm scheduler stress scenario {name}: decision={expected_decision}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn source_only_swarm_performance_evidence_bounds_1024_requests()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture: serde_json::Value = serde_json::from_str(SWARM_SCHEDULER_PERF_EVIDENCE_JSON)?;
+    assert_eq!(
+        fixture
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str),
+        Some(VALIDATION_SWARM_PERFORMANCE_EVIDENCE_SCHEMA_VERSION)
+    );
+    let linked_bead_ids = fixture
+        .get("linked_bead_ids")
+        .and_then(serde_json::Value::as_array)
+        .expect("performance evidence linked bead ids")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("linked bead id is string")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    for bead_id in ["bd-wc27p.1", "bd-wc27p.3", "bd-wc27p.5", "bd-wc27p.9"] {
+        assert!(
+            linked_bead_ids.iter().any(|linked| linked == bead_id),
+            "performance evidence must link back to {bead_id}"
+        );
+    }
+
+    let cases = fixture
+        .get("cases")
+        .and_then(serde_json::Value::as_array)
+        .expect("performance evidence cases")
+        .iter()
+        .map(|case| {
+            let equivalent_requests = case
+                .get("equivalent_requests")
+                .and_then(serde_json::Value::as_u64)
+                .expect("equivalent requests");
+            let equivalent_requests =
+                usize::try_from(equivalent_requests).expect("equivalent requests fit");
+            ValidationSwarmPerformanceInputCase {
+                case_id: case
+                    .get("case_id")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("case id")
+                    .to_string(),
+                equivalent_requests,
+                configured_waiter_cap: equivalent_requests.saturating_sub(1),
+                linked_bead_ids: linked_bead_ids.clone(),
+                decisions: swarm_scheduler_performance_decisions(equivalent_requests),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let evidence =
+        build_validation_swarm_performance_evidence(&cases, "bd-wc27p.9-source-only", ts(42));
+    let pretty_json = serde_json::to_string_pretty(&evidence)?;
+    assert_eq!(pretty_json, serde_json::to_string_pretty(&evidence)?);
+    let emitted: serde_json::Value = serde_json::from_str(&pretty_json)?;
+    assert_eq!(
+        emitted
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str),
+        Some(VALIDATION_SWARM_PERFORMANCE_EVIDENCE_SCHEMA_VERSION)
+    );
+    assert_eq!(evidence.summary.cases, 3);
+    assert_eq!(evidence.summary.max_equivalent_requests, 1024);
+    assert!(evidence.summary.all_duplicate_producers_suppressed);
+    assert!(evidence.summary.all_waiter_caps_respected);
+    assert!(evidence.summary.all_stale_steals_recovered);
+    assert!(evidence.summary.all_output_within_bounds);
+    assert!(evidence.summary.all_growth_bounded);
+    assert!(
+        evidence
+            .optional_heavy_benchmark
+            .example_command
+            .starts_with("rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_swarm_perf cargo bench"),
+        "optional heavy benchmark must be explicitly rch-only with an isolated target dir"
+    );
+    assert_eq!(
+        evidence.optional_heavy_benchmark.target_dir_policy_id,
+        "validation-swarm-scheduler/target-dir/off-repo/v1"
+    );
+
+    let fixture_cases = fixture
+        .get("cases")
+        .and_then(serde_json::Value::as_array)
+        .expect("performance evidence cases");
+    for expected in fixture_cases {
+        let case_id = expected
+            .get("case_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("case id");
+        let equivalent_requests = usize::try_from(
+            expected
+                .get("equivalent_requests")
+                .and_then(serde_json::Value::as_u64)
+                .expect("equivalent requests"),
+        )?;
+        let observed = evidence
+            .cases
+            .iter()
+            .find(|case| case.case_id == case_id)
+            .expect("observed performance case");
+        assert_eq!(observed.equivalent_requests, equivalent_requests);
+        assert_eq!(observed.total_decisions, equivalent_requests + 8);
+        assert_eq!(
+            observed.duplicate_producer_suppression.equivalent_requests,
+            equivalent_requests
+        );
+        assert_eq!(observed.duplicate_producer_suppression.producer_count, 1);
+        assert_eq!(
+            observed.duplicate_producer_suppression.joined_waiters,
+            equivalent_requests - 1
+        );
+        assert!(observed.duplicate_producer_suppression.suppressed);
+        assert_eq!(
+            observed.waiter_cap.max_waiters_observed_per_work_key,
+            equivalent_requests - 1
+        );
+        assert!(observed.waiter_cap.within_cap);
+        assert_eq!(
+            observed.memory_growth.class,
+            ValidationSwarmPerformanceMemoryGrowthClass::ConstantWorkKeysLinearRows
+        );
+        assert_eq!(
+            observed.memory_growth.decision_vector_len,
+            observed.total_decisions
+        );
+        assert_eq!(
+            observed.memory_growth.control_tower_rows,
+            observed.total_decisions
+        );
+        assert!(
+            observed.memory_growth.unique_work_keys
+                <= MAX_VALIDATION_SWARM_PERFORMANCE_UNIQUE_WORK_KEYS
+        );
+        assert!(observed.memory_growth.bounded_vector_growth);
+        assert!(observed.memory_growth.bounded_map_growth);
+        assert!(observed.stale_steal_recovery.recovered);
+        assert_eq!(observed.stale_steal_recovery.stale_steal_count, 1);
+        assert!(observed.output_size.handoff_rows <= 128);
+        assert!(observed.output_size.bounded);
+        assert!(
+            observed
+                .output_size
+                .markdown_bytes
+                .saturating_add(observed.output_size.json_bytes)
+                <= MAX_VALIDATION_SWARM_PERFORMANCE_OUTPUT_BYTES
+        );
+        assert_eq!(
+            observed.decision_counts.get("join_existing"),
+            Some(&equivalent_requests)
+        );
+        assert_eq!(observed.decision_counts.get("steal_stale_work"), Some(&1));
+    }
+
     Ok(())
 }
 

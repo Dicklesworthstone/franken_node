@@ -1,0 +1,42 @@
+{
+  "schema_version": "franken-node/validation-swarm-performance/evidence/v1",
+  "bead_id": "bd-wc27p.9",
+  "fixture_mode": "source_only_in_memory",
+  "purpose": "Deterministic performance evidence for validation scheduler, coalescer, and control-tower fan-in without live cargo execution.",
+  "linked_bead_ids": [
+    "bd-wc27p.1",
+    "bd-wc27p.3",
+    "bd-wc27p.5",
+    "bd-wc27p.9"
+  ],
+  "optional_heavy_benchmark": {
+    "required_wrapper": "rch exec --",
+    "target_dir_policy_id": "validation-swarm-scheduler/target-dir/off-repo/v1",
+    "example_command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_swarm_perf cargo bench -p frankenengine-node validation_swarm_scheduler"
+  },
+  "thresholds": {
+    "max_unique_work_keys": 16,
+    "max_output_size_bytes": 524288,
+    "expected_memory_growth_class": "constant_work_keys_linear_rows"
+  },
+  "cases": [
+    {
+      "case_id": "source-only-64",
+      "equivalent_requests": 64,
+      "expected_total_decisions": 72,
+      "expected_joined_waiters": 63
+    },
+    {
+      "case_id": "source-only-256",
+      "equivalent_requests": 256,
+      "expected_total_decisions": 264,
+      "expected_joined_waiters": 255
+    },
+    {
+      "case_id": "source-only-1024",
+      "equivalent_requests": 1024,
+      "expected_total_decisions": 1032,
+      "expected_joined_waiters": 1023
+    }
+  ]
+}
