@@ -275,14 +275,13 @@ mod tests {
             };
 
             let err = trace.validate().unwrap_err();
-            match err {
-                TimeTravelError::SequenceGap {
-                    expected, found, ..
-                } => {
-                    assert_eq!(expected, expected_seq);
-                    assert_eq!(found, found_seq);
-                }
-                other => panic!("Expected SequenceGap, got {:?}", other),
+            assert!(matches!(&err, TimeTravelError::SequenceGap { .. }));
+            if let TimeTravelError::SequenceGap {
+                expected, found, ..
+            } = err
+            {
+                assert_eq!(expected, expected_seq);
+                assert_eq!(found, found_seq);
             }
         }
     }
@@ -297,17 +296,16 @@ mod tests {
         trace.trace_digest = wrong_digest.clone();
 
         let err = trace.validate().unwrap_err();
-        match err {
-            TimeTravelError::DigestMismatch {
-                expected, found, ..
-            } => {
-                assert_eq!(expected, wrong_digest);
-                assert_eq!(found, correct_digest);
+        assert!(matches!(&err, TimeTravelError::DigestMismatch { .. }));
+        if let TimeTravelError::DigestMismatch {
+            expected, found, ..
+        } = err
+        {
+            assert_eq!(expected, wrong_digest);
+            assert_eq!(found, correct_digest);
 
-                // Verify constant-time comparison was used
-                assert!(!ct_eq(&wrong_digest, &correct_digest));
-            }
-            other => panic!("Expected DigestMismatch, got {:?}", other),
+            // Verify constant-time comparison was used
+            assert!(!ct_eq(&wrong_digest, &correct_digest));
         }
     }
 
@@ -354,7 +352,7 @@ mod tests {
         assert!(
             audit_log
                 .iter()
-                .any(|e| e.event_code == event_codes::TTR_002)
+                .any(|e| e.event_code.as_str().eq(event_codes::TTR_002))
         );
     }
 
@@ -557,12 +555,12 @@ mod tests {
         assert!(
             audit_log
                 .iter()
-                .any(|e| e.event_code == event_codes::TTR_004)
+                .any(|e| e.event_code.as_str().eq(event_codes::TTR_004))
         ); // Replay started
         assert!(
             audit_log
                 .iter()
-                .any(|e| e.event_code == event_codes::TTR_007)
+                .any(|e| e.event_code.as_str().eq(event_codes::TTR_007))
         ); // Replay completed
     }
 
@@ -797,11 +795,9 @@ mod tests {
         };
 
         let err = trace.validate().unwrap_err();
-        match err {
-            TimeTravelError::EmptyTrace { trace_id } => {
-                assert_eq!(trace_id, "empty-negative");
-            }
-            other => panic!("Expected EmptyTrace, got {:?}", other),
+        assert!(matches!(&err, TimeTravelError::EmptyTrace { .. }));
+        if let TimeTravelError::EmptyTrace { trace_id } = err {
+            assert_eq!(trace_id, "empty-negative");
         }
     }
 
@@ -825,14 +821,13 @@ mod tests {
         .with_canonical_digest();
 
         let err = trace.validate().unwrap_err();
-        match err {
-            TimeTravelError::SequenceGap {
-                expected, found, ..
-            } => {
-                assert_eq!(expected, 0);
-                assert_eq!(found, 1);
-            }
-            other => panic!("Expected SequenceGap, got {:?}", other),
+        assert!(matches!(&err, TimeTravelError::SequenceGap { .. }));
+        if let TimeTravelError::SequenceGap {
+            expected, found, ..
+        } = err
+        {
+            assert_eq!(expected, 0);
+            assert_eq!(found, 1);
         }
     }
 
@@ -853,14 +848,13 @@ mod tests {
         .with_canonical_digest();
 
         let err = trace.validate().unwrap_err();
-        match err {
-            TimeTravelError::SequenceGap {
-                expected, found, ..
-            } => {
-                assert_eq!(expected, 1);
-                assert_eq!(found, 0);
-            }
-            other => panic!("Expected SequenceGap, got {:?}", other),
+        assert!(matches!(&err, TimeTravelError::SequenceGap { .. }));
+        if let TimeTravelError::SequenceGap {
+            expected, found, ..
+        } = err
+        {
+            assert_eq!(expected, 1);
+            assert_eq!(found, 0);
         }
     }
 
@@ -899,11 +893,9 @@ mod tests {
 
         let mut engine = ReplayEngine::new();
         let err = engine.register_trace(trace).unwrap_err();
-        match err {
-            TimeTravelError::EnvironmentMissing { field, .. } => {
-                assert_eq!(field, "platform");
-            }
-            other => panic!("Expected EnvironmentMissing, got {:?}", other),
+        assert!(matches!(&err, TimeTravelError::EnvironmentMissing { .. }));
+        if let TimeTravelError::EnvironmentMissing { field, .. } = err {
+            assert_eq!(field, "platform");
         }
     }
 
@@ -930,11 +922,9 @@ mod tests {
 
         let mut engine = ReplayEngine::new();
         let err = engine.register_trace(trace).unwrap_err();
-        match err {
-            TimeTravelError::EnvironmentMissing { field, .. } => {
-                assert_eq!(field, "runtime_version");
-            }
-            other => panic!("Expected EnvironmentMissing, got {:?}", other),
+        assert!(matches!(&err, TimeTravelError::EnvironmentMissing { .. }));
+        if let TimeTravelError::EnvironmentMissing { field, .. } = err {
+            assert_eq!(field, "runtime_version");
         }
     }
 
@@ -949,11 +939,9 @@ mod tests {
             .register_trace(build_demo_trace("dupe-negative", "negative", 1))
             .unwrap_err();
 
-        match err {
-            TimeTravelError::DuplicateTrace { trace_id } => {
-                assert_eq!(trace_id, "dupe-negative");
-            }
-            other => panic!("Expected DuplicateTrace, got {:?}", other),
+        assert!(matches!(&err, TimeTravelError::DuplicateTrace { .. }));
+        if let TimeTravelError::DuplicateTrace { trace_id } = err {
+            assert_eq!(trace_id, "dupe-negative");
         }
         assert_eq!(engine.trace_count(), 1);
     }
@@ -966,11 +954,9 @@ mod tests {
             .replay_fixture_identity("missing-trace-negative")
             .unwrap_err();
 
-        match err {
-            TimeTravelError::TraceNotFound { trace_id } => {
-                assert_eq!(trace_id, "missing-trace-negative");
-            }
-            other => panic!("Expected TraceNotFound, got {:?}", other),
+        assert!(matches!(&err, TimeTravelError::TraceNotFound { .. }));
+        if let TimeTravelError::TraceNotFound { trace_id } = err {
+            assert_eq!(trace_id, "missing-trace-negative");
         }
         assert!(engine.audit_log().is_empty());
     }
@@ -981,11 +967,9 @@ mod tests {
 
         let err = builder.build().unwrap_err();
 
-        match err {
-            TimeTravelError::EmptyTrace { trace_id } => {
-                assert_eq!(trace_id, "empty-builder-negative");
-            }
-            other => panic!("Expected EmptyTrace, got {:?}", other),
+        assert!(matches!(&err, TimeTravelError::EmptyTrace { .. }));
+        if let TimeTravelError::EmptyTrace { trace_id } = err {
+            assert_eq!(trace_id, "empty-builder-negative");
         }
     }
 }

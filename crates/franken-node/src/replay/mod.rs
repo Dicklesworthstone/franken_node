@@ -80,10 +80,10 @@ mod negative_path_tests {
 
         let err = env.validate("trace-env-platform").unwrap_err();
 
-        assert!(matches!(
-            err,
-            TimeTravelError::EnvironmentMissing { field, .. } if field == "platform"
-        ));
+        assert!(matches!(&err, TimeTravelError::EnvironmentMissing { .. }));
+        if let TimeTravelError::EnvironmentMissing { field, .. } = err {
+            assert_eq!(field, "platform");
+        }
     }
 
     #[test]
@@ -93,10 +93,10 @@ mod negative_path_tests {
 
         let err = env.validate("trace-env-runtime").unwrap_err();
 
-        assert!(matches!(
-            err,
-            TimeTravelError::EnvironmentMissing { field, .. } if field == "runtime_version"
-        ));
+        assert!(matches!(&err, TimeTravelError::EnvironmentMissing { .. }));
+        if let TimeTravelError::EnvironmentMissing { field, .. } = err {
+            assert_eq!(field, "runtime_version");
+        }
     }
 
     #[test]
@@ -215,10 +215,10 @@ mod negative_path_tests {
 
         let err = trace.validate().unwrap_err();
 
-        assert!(matches!(
-            err,
-            TimeTravelError::EnvironmentMissing { field, .. } if field == "platform"
-        ));
+        assert!(matches!(&err, TimeTravelError::EnvironmentMissing { .. }));
+        if let TimeTravelError::EnvironmentMissing { field, .. } = err {
+            assert_eq!(field, "platform");
+        }
     }
 
     #[test]
@@ -250,10 +250,10 @@ mod negative_path_tests {
 
         let err = builder.build().unwrap_err();
 
-        assert!(matches!(
-            err,
-            TimeTravelError::EnvironmentMissing { field, .. } if field == "runtime_version"
-        ));
+        assert!(matches!(&err, TimeTravelError::EnvironmentMissing { .. }));
+        if let TimeTravelError::EnvironmentMissing { field, .. } = err {
+            assert_eq!(field, "runtime_version");
+        }
     }
 
     #[test]
@@ -329,11 +329,10 @@ mod negative_path_tests {
 
         let err = trace.validate().unwrap_err();
 
-        assert!(matches!(
-            err,
-            TimeTravelError::DigestMismatch { ref trace_id, .. }
-                if trace_id == "trace-input-tamper"
-        ));
+        assert!(matches!(&err, TimeTravelError::DigestMismatch { .. }));
+        if let TimeTravelError::DigestMismatch { trace_id, .. } = err {
+            assert_eq!(trace_id, "trace-input-tamper");
+        }
     }
 
     #[test]
@@ -358,11 +357,10 @@ mod negative_path_tests {
 
         let err = trace.validate().unwrap_err();
 
-        assert!(matches!(
-            err,
-            TimeTravelError::DigestMismatch { ref trace_id, .. }
-                if trace_id == "trace-effect-tamper"
-        ));
+        assert!(matches!(&err, TimeTravelError::DigestMismatch { .. }));
+        if let TimeTravelError::DigestMismatch { trace_id, .. } = err {
+            assert_eq!(trace_id, "trace-effect-tamper");
+        }
     }
 
     #[test]
@@ -444,19 +442,19 @@ mod negative_path_tests {
             engine
                 .audit_log()
                 .iter()
-                .any(|entry| entry.event_code == "TTR-004")
+                .any(|entry| entry.event_code.as_str().eq("TTR-004"))
         );
         assert!(
             engine
                 .audit_log()
                 .iter()
-                .any(|entry| entry.event_code == "TTR-006")
+                .any(|entry| entry.event_code.as_str().eq("TTR-006"))
         );
         assert!(
             engine
                 .audit_log()
                 .iter()
-                .any(|entry| entry.event_code == "TTR-007")
+                .any(|entry| entry.event_code.as_str().eq("TTR-007"))
         );
     }
 
