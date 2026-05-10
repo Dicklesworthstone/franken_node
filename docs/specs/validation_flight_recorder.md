@@ -148,6 +148,32 @@ Observation arrays must be sorted by `observed_at`, then `observation_id`.
 Implementations must cap observations at a documented maximum. Recommended cap:
 256 observations per attempt.
 
+### Fresh-Heartbeat/No-Output Ambiguity
+
+`progress_stale` with event `VFR-009` is the first-class state for ambiguous
+remote progress. It covers the RCH state where the worker heartbeat remains
+fresh, the last known phase is still `remote_exec_start`, and cargo output or
+progress has exceeded the idle budget. This state is not green proof, is not a
+product compile/test failure, and must remain retryable worker infrastructure
+until a later adapter outcome proves otherwise.
+
+The observation `details` for `VFR-009` must include:
+
+| Detail key | Meaning |
+|------------|---------|
+| `stale_progress_state` | One of `fresh_heartbeat_no_output`, `stale_heartbeat_no_output`, or `progress_stale_timeout` |
+| `heartbeat_fresh` | `true` only for fresh-heartbeat/no-output ambiguity; otherwise `false` |
+| `progress_age_seconds` | Bounded decimal string for output/progress staleness |
+| `last_phase` | Last observed RCH phase, for example `remote_exec_start` |
+| `stale_detector_progress_stale` | `true` when the stuck detector marked progress stale |
+| `recommended_action` | One of `wait_until_budget`, `reroute_after_budget`, or `record_blocker` |
+
+Fresh-heartbeat/no-output ambiguity must map to `worker_timeout`,
+`process_idle`, `product_failure=false`, `retryable=true`,
+`VFR_STALE_PROGRESS`, and `VFR-009`. A recorder, recovery, readiness, or
+closeout consumer must reject it if it is marked as `accept_success`,
+`use_receipt`, or any other green-proof path.
+
 ## Adapter Outcome Mapping
 
 The flight recorder consumes the RCH adapter outcome without changing its green
@@ -229,7 +255,7 @@ Agent Mail.
 | `VFR_REJECT_LOCAL_FALLBACK` | `VFR-006` | Remote proof required but local fallback occurred |
 | `VFR_SOURCE_ONLY_ALLOWED` | `VFR-007` | Explicit source-only fallback may be recorded |
 | `VFR_PRODUCT_FAILURE` | `VFR-008` | Product compile/test/format/clippy failure |
-| `VFR_STALE_PROGRESS` | `VFR-009` | Attempt made no progress for idle budget |
+| `VFR_STALE_PROGRESS` | `VFR-009` | Attempt made no progress for idle budget, including fresh-heartbeat/no-output ambiguity |
 | `VFR_STALE_LEASE_FENCE` | `VFR-010` | Proof coalescer lease must be fenced |
 | `VFR_REUSE_RECEIPT` | `VFR-011` | Existing receipt can be reused |
 | `VFR_INVALID_ARTIFACT` | `VFR-012` | Recorder or linked artifact is malformed |
@@ -265,6 +291,9 @@ The initial fixture suite must cover:
 | Remote proof required but local fallback occurred | `retry_remote_different_worker` or `fail_closed_invalid` |
 | Active cargo/rustc contention exceeded policy | `queue_until_capacity` |
 | Progress stale before wall timeout | `retry_remote_different_worker` or `drain_worker_then_retry` |
+| Fresh heartbeat but no output/progress before the ambiguity budget | `retry_remote_different_worker`, `drain_worker_then_retry`, or `queue_until_capacity` |
+| Stale heartbeat and stale progress | `retry_remote_different_worker` or `drain_worker_then_retry` |
+| Clean cancellation after fresh-heartbeat/no-output ambiguity | `retry_remote_different_worker` or `drain_worker_then_retry` |
 | Product compile error | `fail_closed_product` |
 | Product test failure | `fail_closed_product` |
 | Source-only allowed because cargo/RCH is unavailable | `use_source_only_blocker` |

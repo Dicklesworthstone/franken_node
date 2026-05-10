@@ -436,6 +436,15 @@
           "observations.0.rch_mode": "remote",
           "observations.0.queue_state": "running",
           "observations.0.message": "worker heartbeat continued but progress was stale",
+          "observations.0.details": {
+            "adapter_reason_code": "VFR_STALE_PROGRESS",
+            "stale_progress_state": "stale_heartbeat_no_output",
+            "heartbeat_fresh": "false",
+            "progress_age_seconds": "420",
+            "last_phase": "remote_exec_start",
+            "stale_detector_progress_stale": "true",
+            "recommended_action": "reroute_after_budget"
+          },
           "adapter_outcome": {
             "outcome": "worker_timeout",
             "execution_mode": "remote",
@@ -468,6 +477,239 @@
           "required_action": "drain_worker",
           "fail_closed": false,
           "retryable": true
+        }
+      }
+    },
+    {
+      "case": "fresh_heartbeat_progress_ambiguous",
+      "matrix_case": "fresh_heartbeat_progress_ambiguous",
+      "expected_decision": "retry_remote_different_worker",
+      "patch_attempt": {
+        "set": {
+          "attempt_id": "vfr-attempt-bd-2zn9k-fresh-heartbeat-ambiguous",
+          "observations": [
+            {
+              "schema_version": "franken-node/validation-flight-recorder/observation/v1",
+              "observation_id": "vfr-obs-0001",
+              "observed_at": "2026-05-06T08:00:02Z",
+              "phase": "progress_observed",
+              "event_code": "VFR-001",
+              "worker_id": "vmi-ambiguous",
+              "rch_mode": "remote",
+              "queue_state": "running",
+              "message": "worker heartbeat fresh while remote_exec_start continued",
+              "details": {
+                "last_phase": "remote_exec_start",
+                "heartbeat_fresh": "true"
+              }
+            },
+            {
+              "schema_version": "franken-node/validation-flight-recorder/observation/v1",
+              "observation_id": "vfr-obs-0002",
+              "observed_at": "2026-05-06T08:07:02Z",
+              "phase": "progress_stale",
+              "event_code": "VFR-009",
+              "worker_id": "vmi-ambiguous",
+              "rch_mode": "remote",
+              "queue_state": "running",
+              "message": "heartbeat remained fresh but cargo output/progress was stale",
+              "details": {
+                "adapter_reason_code": "VFR_STALE_PROGRESS",
+                "stale_progress_state": "fresh_heartbeat_no_output",
+                "heartbeat_fresh": "true",
+                "progress_age_seconds": "420",
+                "last_phase": "remote_exec_start",
+                "stale_detector_progress_stale": "true",
+                "recommended_action": "reroute_after_budget"
+              }
+            }
+          ],
+          "adapter_outcome": {
+            "outcome": "worker_timeout",
+            "execution_mode": "remote",
+            "worker_id": "vmi-ambiguous",
+            "timeout_class": "process_idle",
+            "exit_code": null,
+            "retryable": true,
+            "product_failure": false,
+            "reason_code": "VFR_STALE_PROGRESS",
+            "detail": "heartbeat remained fresh but cargo output/progress was stale"
+          },
+          "exit": {
+            "kind": "timeout",
+            "code": null,
+            "signal": null,
+            "timeout_class": "process_idle",
+            "error_class": "transport_timeout",
+            "retryable": true,
+            "product_failure": false
+          }
+        }
+      },
+      "patch_recovery": {
+        "set": {
+          "decision_id": "vfr-recovery-bd-2zn9k-fresh-heartbeat-ambiguous",
+          "attempt_id": "vfr-attempt-bd-2zn9k-fresh-heartbeat-ambiguous",
+          "decision": "retry_remote_different_worker",
+          "reason_code": "VFR_STALE_PROGRESS",
+          "event_code": "VFR-009",
+          "required_action": "retry_rch_different_worker",
+          "fail_closed": false,
+          "retryable": true,
+          "operator_message": "fresh heartbeat/no-output ambiguity reached budget; reroute remote proof after budget"
+        }
+      }
+    },
+    {
+      "case": "stale_heartbeat_progress_stale",
+      "matrix_case": "stale_heartbeat_progress_stale",
+      "expected_decision": "drain_worker_then_retry",
+      "patch_attempt": {
+        "set": {
+          "attempt_id": "vfr-attempt-bd-2zn9k-stale-heartbeat-progress",
+          "observations.0.event_code": "VFR-009",
+          "observations.0.phase": "progress_stale",
+          "observations.0.worker_id": "vmi-stale-heartbeat",
+          "observations.0.rch_mode": "remote",
+          "observations.0.queue_state": "running",
+          "observations.0.message": "heartbeat and cargo progress were both stale",
+          "observations.0.details": {
+            "adapter_reason_code": "VFR_STALE_PROGRESS",
+            "stale_progress_state": "stale_heartbeat_no_output",
+            "heartbeat_fresh": "false",
+            "progress_age_seconds": "900",
+            "last_phase": "remote_exec_start",
+            "stale_detector_progress_stale": "true",
+            "recommended_action": "reroute_after_budget"
+          },
+          "adapter_outcome": {
+            "outcome": "worker_timeout",
+            "execution_mode": "remote",
+            "worker_id": "vmi-stale-heartbeat",
+            "timeout_class": "process_idle",
+            "exit_code": null,
+            "retryable": true,
+            "product_failure": false,
+            "reason_code": "VFR_STALE_PROGRESS",
+            "detail": "heartbeat and cargo progress were both stale"
+          },
+          "exit": {
+            "kind": "timeout",
+            "code": null,
+            "signal": null,
+            "timeout_class": "process_idle",
+            "error_class": "transport_timeout",
+            "retryable": true,
+            "product_failure": false
+          }
+        }
+      },
+      "patch_recovery": {
+        "set": {
+          "decision_id": "vfr-recovery-bd-2zn9k-stale-heartbeat-progress",
+          "attempt_id": "vfr-attempt-bd-2zn9k-stale-heartbeat-progress",
+          "decision": "drain_worker_then_retry",
+          "reason_code": "VFR_STALE_PROGRESS",
+          "event_code": "VFR-009",
+          "required_action": "drain_worker",
+          "fail_closed": false,
+          "retryable": true,
+          "operator_message": "stale heartbeat and stale progress require draining or reroute"
+        }
+      }
+    },
+    {
+      "case": "clean_cancellation_after_ambiguity",
+      "matrix_case": "clean_cancellation_after_ambiguity",
+      "expected_decision": "retry_remote_different_worker",
+      "patch_attempt": {
+        "set": {
+          "attempt_id": "vfr-attempt-bd-2zn9k-ambiguous-cancelled",
+          "observations": [
+            {
+              "schema_version": "franken-node/validation-flight-recorder/observation/v1",
+              "observation_id": "vfr-obs-0001",
+              "observed_at": "2026-05-06T08:00:02Z",
+              "phase": "progress_observed",
+              "event_code": "VFR-001",
+              "worker_id": "vmi-cancelled",
+              "rch_mode": "remote",
+              "queue_state": "running",
+              "message": "worker heartbeat fresh while remote_exec_start continued",
+              "details": {
+                "last_phase": "remote_exec_start",
+                "heartbeat_fresh": "true"
+              }
+            },
+            {
+              "schema_version": "franken-node/validation-flight-recorder/observation/v1",
+              "observation_id": "vfr-obs-0002",
+              "observed_at": "2026-05-06T08:07:02Z",
+              "phase": "progress_stale",
+              "event_code": "VFR-009",
+              "worker_id": "vmi-cancelled",
+              "rch_mode": "remote",
+              "queue_state": "running",
+              "message": "fresh heartbeat/no-output ambiguity reached cancellation budget",
+              "details": {
+                "adapter_reason_code": "VFR_STALE_PROGRESS",
+                "stale_progress_state": "fresh_heartbeat_no_output",
+                "heartbeat_fresh": "true",
+                "progress_age_seconds": "420",
+                "last_phase": "remote_exec_start",
+                "stale_detector_progress_stale": "true",
+                "recommended_action": "reroute_after_budget"
+              }
+            },
+            {
+              "schema_version": "franken-node/validation-flight-recorder/observation/v1",
+              "observation_id": "vfr-obs-0003",
+              "observed_at": "2026-05-06T08:07:05Z",
+              "phase": "attempt_cancelled",
+              "event_code": "VFR-009",
+              "worker_id": "vmi-cancelled",
+              "rch_mode": "remote",
+              "queue_state": "cancelled",
+              "message": "attempt cancelled cleanly after ambiguity budget",
+              "details": {
+                "cancelled_by": "operator",
+                "adapter_reason_code": "VFR_STALE_PROGRESS"
+              }
+            }
+          ],
+          "adapter_outcome": {
+            "outcome": "worker_timeout",
+            "execution_mode": "remote",
+            "worker_id": "vmi-cancelled",
+            "timeout_class": "process_idle",
+            "exit_code": null,
+            "retryable": true,
+            "product_failure": false,
+            "reason_code": "VFR_STALE_PROGRESS",
+            "detail": "attempt cancelled cleanly after fresh heartbeat/no-output ambiguity"
+          },
+          "exit": {
+            "kind": "timeout",
+            "code": null,
+            "signal": null,
+            "timeout_class": "process_idle",
+            "error_class": "transport_timeout",
+            "retryable": true,
+            "product_failure": false
+          }
+        }
+      },
+      "patch_recovery": {
+        "set": {
+          "decision_id": "vfr-recovery-bd-2zn9k-ambiguous-cancelled",
+          "attempt_id": "vfr-attempt-bd-2zn9k-ambiguous-cancelled",
+          "decision": "retry_remote_different_worker",
+          "reason_code": "VFR_STALE_PROGRESS",
+          "event_code": "VFR-009",
+          "required_action": "retry_rch_different_worker",
+          "fail_closed": false,
+          "retryable": true,
+          "operator_message": "cancelled ambiguous remote attempt can reroute to a different worker"
         }
       }
     },
@@ -684,6 +926,51 @@
       "patch_recovery": {
         "set": {
           "thread_id": "bd-other"
+        }
+      }
+    },
+    {
+      "case": "fresh_heartbeat_ambiguity_marked_green",
+      "expected_error": "ERR_VFR_INVALID_RECOVERY_DECISION",
+      "patch_attempt": {
+        "set": {
+          "observations.0.event_code": "VFR-009",
+          "observations.0.phase": "progress_stale",
+          "observations.0.worker_id": "vmi-green-ambiguity",
+          "observations.0.rch_mode": "remote",
+          "observations.0.queue_state": "running",
+          "observations.0.message": "heartbeat was fresh but no output was observed",
+          "observations.0.details": {
+            "adapter_reason_code": "VFR_STALE_PROGRESS",
+            "stale_progress_state": "fresh_heartbeat_no_output",
+            "heartbeat_fresh": "true",
+            "progress_age_seconds": "420",
+            "last_phase": "remote_exec_start",
+            "stale_detector_progress_stale": "true",
+            "recommended_action": "reroute_after_budget"
+          }
+        }
+      }
+    },
+    {
+      "case": "fresh_heartbeat_ambiguity_missing_state",
+      "expected_error": "ERR_VFR_MALFORMED_ATTEMPT",
+      "patch_attempt": {
+        "set": {
+          "observations.0.event_code": "VFR-009",
+          "observations.0.phase": "progress_stale",
+          "observations.0.worker_id": "vmi-missing-state",
+          "observations.0.rch_mode": "remote",
+          "observations.0.queue_state": "running",
+          "observations.0.message": "heartbeat was fresh but no output was observed",
+          "observations.0.details": {
+            "adapter_reason_code": "VFR_STALE_PROGRESS",
+            "heartbeat_fresh": "true",
+            "progress_age_seconds": "420",
+            "last_phase": "remote_exec_start",
+            "stale_detector_progress_stale": "true",
+            "recommended_action": "reroute_after_budget"
+          }
         }
       }
     },

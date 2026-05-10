@@ -58,6 +58,7 @@ REQUIRED_SPEC_MARKERS = [
     OBSERVATION_SCHEMA_VERSION,
     RECOVERY_SCHEMA_VERSION,
     "artifacts/validation_broker/<bead-id>/flight-recorder/",
+    "fresh-heartbeat/no-output ambiguity",
     "ValidationFlightRecorderAttempt",
     "ValidationFlightRecorderRecovery",
     "command digest is missing",
@@ -253,6 +254,18 @@ FAIL_CLOSED_DECISIONS = {
     "use_source_only_blocker",
     "fail_closed_product",
     "fail_closed_invalid",
+}
+
+STALE_PROGRESS_STATES = {
+    "fresh_heartbeat_no_output",
+    "stale_heartbeat_no_output",
+    "progress_stale_timeout",
+}
+
+AMBIGUITY_NEXT_ACTIONS = {
+    "wait_until_budget",
+    "reroute_after_budget",
+    "record_blocker",
 }
 
 
@@ -619,6 +632,90 @@ def validate_exit(exit_info: Any) -> list[str]:
     return sorted(set(errors))
 
 
+def stale_progress_observations(attempt: Any) -> list[dict[str, Any]]:
+    if not isinstance(attempt, dict):
+        return []
+    observations = attempt.get("observations")
+    if not isinstance(observations, list):
+        return []
+    return [
+        observation
+        for observation in observations
+        if isinstance(observation, dict)
+        and observation.get("phase") == "progress_stale"
+        and observation.get("event_code") == "VFR-009"
+    ]
+
+
+def validate_stale_progress_evidence(
+    attempt: Any,
+    recovery: dict[str, Any] | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    observations = stale_progress_observations(attempt)
+    if not observations:
+        return errors
+
+    saw_fresh_heartbeat_ambiguity = False
+    for observation in observations:
+        details = observation.get("details")
+        if not isinstance(details, dict):
+            errors.append(ERR_MALFORMED_ATTEMPT)
+            continue
+        state = details.get("stale_progress_state")
+        if state not in STALE_PROGRESS_STATES:
+            errors.append(ERR_MALFORMED_ATTEMPT)
+            continue
+        for field in (
+            "heartbeat_fresh",
+            "progress_age_seconds",
+            "last_phase",
+            "stale_detector_progress_stale",
+            "recommended_action",
+        ):
+            if not _bounded(details.get(field)) or not details.get(field):
+                errors.append(ERR_MALFORMED_ATTEMPT)
+        if details.get("stale_detector_progress_stale") != "true":
+            errors.append(ERR_MALFORMED_ATTEMPT)
+        if details.get("recommended_action") not in AMBIGUITY_NEXT_ACTIONS:
+            errors.append(ERR_INVALID_RECOVERY_DECISION)
+        if state == "fresh_heartbeat_no_output":
+            saw_fresh_heartbeat_ambiguity = True
+            if details.get("heartbeat_fresh") != "true":
+                errors.append(ERR_MALFORMED_ATTEMPT)
+        elif details.get("heartbeat_fresh") != "false":
+            errors.append(ERR_MALFORMED_ATTEMPT)
+
+    if not saw_fresh_heartbeat_ambiguity:
+        return sorted(set(errors))
+
+    adapter_outcome = attempt.get("adapter_outcome") if isinstance(attempt, dict) else None
+    exit_info = attempt.get("exit") if isinstance(attempt, dict) else None
+    if not isinstance(adapter_outcome, dict) or (
+        adapter_outcome.get("outcome") != "worker_timeout"
+        or adapter_outcome.get("timeout_class") != "process_idle"
+        or adapter_outcome.get("product_failure")
+        or not adapter_outcome.get("retryable")
+    ):
+        errors.append(ERR_INVALID_RECOVERY_DECISION)
+    if not isinstance(exit_info, dict) or (
+        exit_info.get("kind") != "timeout"
+        or exit_info.get("timeout_class") != "process_idle"
+        or exit_info.get("error_class") != "transport_timeout"
+        or exit_info.get("product_failure")
+        or not exit_info.get("retryable")
+    ):
+        errors.append(ERR_INVALID_RECOVERY_DECISION)
+    if recovery is not None and (
+        recovery.get("decision") == "accept_success"
+        or recovery.get("required_action") in {"none", "use_receipt"}
+        or recovery.get("reason_code") != "VFR_STALE_PROGRESS"
+        or recovery.get("event_code") != "VFR-009"
+    ):
+        errors.append(ERR_INVALID_RECOVERY_DECISION)
+    return sorted(set(errors))
+
+
 def validate_artifacts(artifacts: Any) -> list[str]:
     errors: list[str] = []
     if not isinstance(artifacts, dict):
@@ -685,6 +782,7 @@ def validate_attempt(
     errors.extend(validate_observations(attempt.get("observations")))
     errors.extend(validate_adapter_outcome(attempt.get("adapter_outcome")))
     errors.extend(validate_exit(attempt.get("exit")))
+    errors.extend(validate_stale_progress_evidence(attempt))
     errors.extend(validate_artifacts(attempt.get("artifacts")))
 
     input_digests = attempt.get("input_digests")
@@ -765,6 +863,7 @@ def validate_recovery(
         for field in ("attempt_id", "bead_id", "thread_id"):
             if recovery.get(field) != attempt.get(field):
                 errors.append(ERR_BEAD_MISMATCH)
+        errors.extend(validate_stale_progress_evidence(attempt, recovery))
     return sorted(set(errors))
 
 
@@ -850,6 +949,9 @@ def _check_valid_cases(fixtures: dict[str, Any] | None) -> list[dict[str, Any]]:
         "local_fallback_refused",
         "contention_deferred",
         "stale_progress",
+        "fresh_heartbeat_progress_ambiguous",
+        "stale_heartbeat_progress_stale",
+        "clean_cancellation_after_ambiguity",
         "compile_error",
         "test_failure",
         "source_only_allowed",
@@ -897,6 +999,8 @@ def _check_invalid_cases(fixtures: dict[str, Any] | None) -> list[dict[str, Any]
         "absolute_artifact_path",
         "missing_next_action",
         "mismatched_bead_thread",
+        "fresh_heartbeat_ambiguity_marked_green",
+        "fresh_heartbeat_ambiguity_missing_state",
     }
     for failure_case in sorted(required_failure_cases):
         checks.append(
