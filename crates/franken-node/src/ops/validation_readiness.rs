@@ -11,6 +11,7 @@ use crate::ops::validation_broker::{
 };
 use crate::ops::validation_proof_coalescer::{
     ValidationSwarmSchedulerDecision, ValidationSwarmSchedulerDecisionKind,
+    ValidationSwarmSchedulerProofDebtClass,
 };
 use crate::ops::validation_recovery_planner::{RecoveryAction, reason_codes};
 use chrono::{DateTime, Utc};
@@ -634,6 +635,48 @@ pub struct SwarmSchedulerDecisionSummary {
     pub fail_closed: bool,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationControlTowerSummary {
+    pub rows: usize,
+    pub green_proofs: usize,
+    pub wait_or_join: usize,
+    pub source_only_blockers: usize,
+    pub worker_infrastructure: usize,
+    pub product_failures: usize,
+    pub invalid_artifacts: usize,
+    pub stale_leases: usize,
+    pub no_known_proofs: usize,
+    pub capacity_waits: usize,
+    #[serde(default)]
+    pub entries: Vec<ValidationControlTowerRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationControlTowerRow {
+    pub bead_id: String,
+    pub agent_name: String,
+    pub decision: String,
+    pub scheduler_decision: Option<String>,
+    pub reason_code: String,
+    pub event_code: String,
+    pub required_action: String,
+    pub next_action: String,
+    pub proof_source: String,
+    pub proof_debt_class: String,
+    pub fairness_bucket: String,
+    pub stale_risk: String,
+    pub proof_work_key: Option<String>,
+    pub command_digest: Option<String>,
+    pub coalescer_state: String,
+    pub green_proof_eligible: bool,
+    pub recorder_path: Option<String>,
+    pub recovery_artifact_path: Option<String>,
+    pub latest_artifact_path: Option<String>,
+    pub rch_slots_total: Option<u16>,
+    pub rch_slots_available: Option<u16>,
+    pub rch_queue_depth: Option<u16>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidationReadinessSummary {
     pub tracked_beads: usize,
@@ -656,6 +699,8 @@ pub struct ValidationReadinessSummary {
     pub proof_lane_readiness: Vec<ProofLaneReadinessSummary>,
     #[serde(default)]
     pub swarm_scheduler: SwarmSchedulerReadinessSummary,
+    #[serde(default)]
+    pub control_tower: ValidationControlTowerSummary,
     #[serde(default)]
     pub flight_recorder_refs: usize,
     #[serde(default)]
@@ -867,7 +912,48 @@ pub fn render_validation_readiness_human(report: &ValidationReadinessReport) -> 
         ),
         format!("  last_successful_cargo_proof_at={last_success}"),
         format!("  contention_state={}", report.summary.contention_state),
+        format!(
+            "  control_tower=rows:{} green:{} wait_or_join:{} capacity_waits:{} source_only:{} worker_infra:{} product_failures:{} invalid_artifacts:{} stale_leases:{} no_known_proofs:{}",
+            report.summary.control_tower.rows,
+            report.summary.control_tower.green_proofs,
+            report.summary.control_tower.wait_or_join,
+            report.summary.control_tower.capacity_waits,
+            report.summary.control_tower.source_only_blockers,
+            report.summary.control_tower.worker_infrastructure,
+            report.summary.control_tower.product_failures,
+            report.summary.control_tower.invalid_artifacts,
+            report.summary.control_tower.stale_leases,
+            report.summary.control_tower.no_known_proofs
+        ),
     ];
+
+    for entry in &report.summary.control_tower.entries {
+        lines.push(format!(
+            "    control_tower bead={} agent={} decision={} reason_code={} event_code={} required_action={} proof_source={} proof_debt_class={} fairness_bucket={} stale_risk={} recorder_path={} latest_artifact={} rch_slots={}/{} queue_depth={} green_proof_eligible={}",
+            entry.bead_id,
+            entry.agent_name,
+            entry.decision,
+            entry.reason_code,
+            entry.event_code,
+            entry.required_action,
+            entry.proof_source,
+            entry.proof_debt_class,
+            entry.fairness_bucket,
+            entry.stale_risk,
+            entry.recorder_path.as_deref().unwrap_or("none"),
+            entry.latest_artifact_path.as_deref().unwrap_or("none"),
+            entry
+                .rch_slots_available
+                .map_or_else(|| "n/a".to_string(), |slots| slots.to_string()),
+            entry
+                .rch_slots_total
+                .map_or_else(|| "n/a".to_string(), |slots| slots.to_string()),
+            entry
+                .rch_queue_depth
+                .map_or_else(|| "n/a".to_string(), |depth| depth.to_string()),
+            entry.green_proof_eligible
+        ));
+    }
 
     if report.summary.proof_lane_readiness.is_empty() {
         lines.push("  proof_lane_readiness=none".to_string());
@@ -962,6 +1048,7 @@ fn summarize_validation_readiness(
     let mut proof_cache_hits = 0usize;
     let mut proof_coalescer = ProofCoalescerCounts::default();
     let swarm_scheduler = summarize_swarm_scheduler_decisions(&input.swarm_scheduler_decisions);
+    let control_tower = build_validation_control_tower(input, now);
 
     for status in &input.proof_statuses {
         increment_proof_count(&mut proof_counts, status.status);
@@ -1173,6 +1260,7 @@ fn summarize_validation_readiness(
             .map(summarize_proof_lane_capsule)
             .collect(),
         swarm_scheduler,
+        control_tower,
         flight_recorder_refs: flight_recorder_refs_count,
         failed_attempt_details,
         pending_recoveries,
@@ -1203,6 +1291,440 @@ fn summarize_proof_lane_capsule(capsule: &ProofLaneReadinessCapsule) -> ProofLan
         freshness_expires_at: capsule.freshness_expires_at,
         required_action: capsule.decision.required_action.clone(),
         operator_summary: capsule.decision.operator_summary.clone(),
+    }
+}
+
+fn build_validation_control_tower(
+    input: &ValidationReadinessInput,
+    now: DateTime<Utc>,
+) -> ValidationControlTowerSummary {
+    let mut entries = Vec::new();
+    let mut seen_beads = BTreeSet::new();
+
+    for decision in &input.swarm_scheduler_decisions {
+        seen_beads.insert(decision.bead_id.clone());
+        entries.push(control_tower_row_from_scheduler(decision));
+    }
+
+    for receipt in &input.receipts {
+        seen_beads.insert(receipt.bead_id.clone());
+        entries.push(control_tower_row_from_receipt(receipt, now));
+    }
+
+    for status in &input.proof_statuses {
+        seen_beads.insert(status.bead_id.clone());
+        entries.push(control_tower_row_from_status(status));
+    }
+
+    for bead in &input.tracked_beads {
+        if !seen_beads.contains(&bead.bead_id) {
+            entries.push(control_tower_row_for_missing_bead(bead));
+        }
+    }
+
+    entries.sort_by(|left, right| {
+        (
+            left.bead_id.as_str(),
+            left.agent_name.as_str(),
+            left.decision.as_str(),
+            left.reason_code.as_str(),
+        )
+            .cmp(&(
+                right.bead_id.as_str(),
+                right.agent_name.as_str(),
+                right.decision.as_str(),
+                right.reason_code.as_str(),
+            ))
+    });
+
+    summarize_control_tower_entries(entries)
+}
+
+fn summarize_control_tower_entries(
+    entries: Vec<ValidationControlTowerRow>,
+) -> ValidationControlTowerSummary {
+    let mut summary = ValidationControlTowerSummary {
+        rows: entries.len(),
+        entries,
+        ..ValidationControlTowerSummary::default()
+    };
+
+    for entry in &summary.entries {
+        match entry.decision.as_str() {
+            "green_proof" => summary.green_proofs = summary.green_proofs.saturating_add(1),
+            "join_existing" | "wait_for_capacity" | "running" | "queued" | "leased" => {
+                summary.wait_or_join = summary.wait_or_join.saturating_add(1);
+            }
+            "record_source_only_blocker" | "source_only" => {
+                summary.source_only_blockers = summary.source_only_blockers.saturating_add(1);
+            }
+            "worker_infrastructure" => {
+                summary.worker_infrastructure = summary.worker_infrastructure.saturating_add(1);
+            }
+            "fail_closed_product" | "product_failure" => {
+                summary.product_failures = summary.product_failures.saturating_add(1);
+            }
+            "fail_closed_invalid_artifact" | "invalid_artifact" => {
+                summary.invalid_artifacts = summary.invalid_artifacts.saturating_add(1);
+            }
+            "stale_lease" | "steal_stale_work" => {
+                summary.stale_leases = summary.stale_leases.saturating_add(1);
+            }
+            "no_known_proof" => {
+                summary.no_known_proofs = summary.no_known_proofs.saturating_add(1);
+            }
+            _ => {}
+        }
+        if matches!(entry.decision.as_str(), "wait_for_capacity") {
+            summary.capacity_waits = summary.capacity_waits.saturating_add(1);
+        }
+    }
+
+    summary
+}
+
+fn control_tower_row_from_scheduler(
+    decision: &ValidationSwarmSchedulerDecision,
+) -> ValidationControlTowerRow {
+    let scheduler_decision = decision.decision.as_str().to_string();
+    ValidationControlTowerRow {
+        bead_id: decision.bead_id.clone(),
+        agent_name: decision.agent_name.clone(),
+        decision: scheduler_decision.clone(),
+        scheduler_decision: Some(scheduler_decision),
+        reason_code: decision.reason_code.clone(),
+        event_code: decision.event_code.clone(),
+        required_action: decision.required_action.as_str().to_string(),
+        next_action: decision.required_action.as_str().to_string(),
+        proof_source: proof_source_for_scheduler_decision(decision.decision).to_string(),
+        proof_debt_class: scheduler_proof_debt_class_as_str(decision.diagnostics.proof_debt_class)
+            .to_string(),
+        fairness_bucket: decision.fairness_bucket.as_str().to_string(),
+        stale_risk: decision.starvation_risk.as_str().to_string(),
+        proof_work_key: Some(decision.diagnostics.proof_work_key_hex.clone()),
+        command_digest: Some(decision.diagnostics.command_digest_hex.clone()),
+        coalescer_state: decision.diagnostics.coalescer_state.as_str().to_string(),
+        green_proof_eligible: decision.green_proof_eligible,
+        recorder_path: decision.diagnostics.recorder_path.clone(),
+        recovery_artifact_path: None,
+        latest_artifact_path: decision.diagnostics.recorder_path.clone(),
+        rch_slots_total: Some(decision.diagnostics.slots_total),
+        rch_slots_available: Some(decision.diagnostics.slots_available),
+        rch_queue_depth: Some(decision.diagnostics.queue_depth),
+    }
+}
+
+fn control_tower_row_from_receipt(
+    receipt: &ValidationReceipt,
+    now: DateTime<Utc>,
+) -> ValidationControlTowerRow {
+    let valid = receipt.validate_at(now).is_ok();
+    let (decision, reason_code, event_code, required_action) =
+        control_tower_receipt_decision(receipt, valid);
+    let readiness_ref = receipt.readiness_ref.as_ref();
+    let flight_ref = receipt.flight_recorder_ref.as_ref();
+    ValidationControlTowerRow {
+        bead_id: receipt.bead_id.clone(),
+        agent_name: receipt.trust.agent_name.clone(),
+        decision: decision.to_string(),
+        scheduler_decision: None,
+        reason_code: readiness_ref
+            .map(|ref_| ref_.reason_code.clone())
+            .unwrap_or_else(|| reason_code.to_string()),
+        event_code: readiness_ref
+            .map(|ref_| ref_.event_code.clone())
+            .unwrap_or_else(|| event_code.to_string()),
+        required_action: readiness_ref
+            .map(|ref_| ref_.required_action.clone())
+            .unwrap_or_else(|| required_action.to_string()),
+        next_action: readiness_ref
+            .map(|ref_| ref_.required_action.clone())
+            .unwrap_or_else(|| required_action.to_string()),
+        proof_source: proof_source_for_receipt(receipt).to_string(),
+        proof_debt_class: proof_debt_class_for_receipt(receipt, valid).to_string(),
+        fairness_bucket: "n/a".to_string(),
+        stale_risk: if valid { "none" } else { "stale_or_invalid" }.to_string(),
+        proof_work_key: None,
+        command_digest: Some(receipt.command_digest.hex.clone()),
+        coalescer_state: "n/a".to_string(),
+        green_proof_eligible: valid && matches!(receipt.exit.kind, ValidationExitKind::Success),
+        recorder_path: flight_ref.map(|ref_| ref_.attempt_path.clone()),
+        recovery_artifact_path: None,
+        latest_artifact_path: Some(receipt.artifacts.receipt_path.clone()),
+        rch_slots_total: None,
+        rch_slots_available: None,
+        rch_queue_depth: None,
+    }
+}
+
+fn control_tower_row_from_status(status: &ValidationProofStatus) -> ValidationControlTowerRow {
+    let proof_coalescer = status.proof_coalescer.as_ref();
+    let proof_cache = status.proof_cache.as_ref();
+    let flight_ref = status.flight_recorder_ref.as_ref();
+    let readiness_ref = status.readiness_ref.as_ref();
+    let decision = control_tower_status_decision(status);
+    ValidationControlTowerRow {
+        bead_id: status.bead_id.clone(),
+        agent_name: proof_coalescer
+            .and_then(|coalescer| coalescer.waiter_agent.clone())
+            .or_else(|| proof_coalescer.map(|coalescer| coalescer.producer_agent.clone()))
+            .unwrap_or_else(|| "unknown".to_string()),
+        decision: decision.to_string(),
+        scheduler_decision: None,
+        reason_code: readiness_ref
+            .map(|ref_| ref_.reason_code.clone())
+            .or_else(|| proof_coalescer.map(|coalescer| coalescer.reason_code.clone()))
+            .or_else(|| proof_cache.map(|cache| cache.reason_code.clone()))
+            .unwrap_or_else(|| "VCT_STATUS_OBSERVED".to_string()),
+        event_code: readiness_ref
+            .map(|ref_| ref_.event_code.clone())
+            .or_else(|| proof_coalescer.map(|coalescer| coalescer.event_code.clone()))
+            .or_else(|| proof_cache.map(|cache| cache.event_code.clone()))
+            .unwrap_or_else(|| "VCT-010".to_string()),
+        required_action: readiness_ref
+            .map(|ref_| ref_.required_action.clone())
+            .or_else(|| proof_coalescer.map(|coalescer| coalescer.required_action.clone()))
+            .or_else(|| proof_cache.map(|cache| cache.required_action.clone()))
+            .unwrap_or_else(|| required_action_for_status(status).to_string()),
+        next_action: readiness_ref
+            .map(|ref_| ref_.required_action.clone())
+            .or_else(|| proof_coalescer.map(|coalescer| coalescer.required_action.clone()))
+            .or_else(|| proof_cache.map(|cache| cache.required_action.clone()))
+            .unwrap_or_else(|| required_action_for_status(status).to_string()),
+        proof_source: status.proof_source.as_str().to_string(),
+        proof_debt_class: proof_debt_class_for_status(status).to_string(),
+        fairness_bucket: "n/a".to_string(),
+        stale_risk: if matches!(decision, "stale_lease") {
+            "stale"
+        } else {
+            "none"
+        }
+        .to_string(),
+        proof_work_key: proof_coalescer.map(|coalescer| coalescer.proof_work_key_hex.clone()),
+        command_digest: status
+            .command_digest
+            .as_ref()
+            .map(|digest| digest.hex.clone()),
+        coalescer_state: proof_coalescer
+            .map(|coalescer| coalescer.lease_state.clone())
+            .or_else(|| status.queue_state.map(|state| state.as_str().to_string()))
+            .unwrap_or_else(|| "n/a".to_string()),
+        green_proof_eligible: matches!(
+            status.status,
+            ProofStatusKind::Passed | ProofStatusKind::Reused
+        ),
+        recorder_path: flight_ref.map(|ref_| ref_.attempt_path.clone()),
+        recovery_artifact_path: None,
+        latest_artifact_path: proof_cache
+            .map(|cache| cache.receipt_path.clone())
+            .or_else(|| {
+                status
+                    .artifact_paths
+                    .as_ref()
+                    .map(|paths| paths.receipt_path.clone())
+            }),
+        rch_slots_total: None,
+        rch_slots_available: None,
+        rch_queue_depth: u16::try_from(status.queue_depth).ok(),
+    }
+}
+
+fn control_tower_row_for_missing_bead(bead: &TrackedValidationBead) -> ValidationControlTowerRow {
+    ValidationControlTowerRow {
+        bead_id: bead.bead_id.clone(),
+        agent_name: "unknown".to_string(),
+        decision: "no_known_proof".to_string(),
+        scheduler_decision: None,
+        reason_code: "VCT_NO_KNOWN_PROOF".to_string(),
+        event_code: "VCT-000".to_string(),
+        required_action: "record_validation_proof_or_blocker".to_string(),
+        next_action: format!(
+            "record validation proof or source-only blocker for {}",
+            bead.normalized_thread_id()
+        ),
+        proof_source: "unknown".to_string(),
+        proof_debt_class: "unknown".to_string(),
+        fairness_bucket: "n/a".to_string(),
+        stale_risk: "unknown".to_string(),
+        proof_work_key: None,
+        command_digest: None,
+        coalescer_state: "none".to_string(),
+        green_proof_eligible: false,
+        recorder_path: None,
+        recovery_artifact_path: None,
+        latest_artifact_path: None,
+        rch_slots_total: None,
+        rch_slots_available: None,
+        rch_queue_depth: None,
+    }
+}
+
+fn proof_source_for_scheduler_decision(
+    decision: ValidationSwarmSchedulerDecisionKind,
+) -> &'static str {
+    match decision {
+        ValidationSwarmSchedulerDecisionKind::RunNow => "scheduler_run_now",
+        ValidationSwarmSchedulerDecisionKind::JoinExisting => {
+            ProofEvidenceSource::CoalescedWaiter.as_str()
+        }
+        ValidationSwarmSchedulerDecisionKind::WaitForCapacity
+        | ValidationSwarmSchedulerDecisionKind::RejectLowPriority => {
+            ProofEvidenceSource::BrokerQueue.as_str()
+        }
+        ValidationSwarmSchedulerDecisionKind::StealStaleWork => {
+            ProofEvidenceSource::CoalescedInflight.as_str()
+        }
+        ValidationSwarmSchedulerDecisionKind::RecordSourceOnlyBlocker => {
+            ProofEvidenceSource::SourceOnlyFallback.as_str()
+        }
+        ValidationSwarmSchedulerDecisionKind::FailClosedProduct
+        | ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact => {
+            ProofEvidenceSource::Unknown.as_str()
+        }
+    }
+}
+
+fn scheduler_proof_debt_class_as_str(
+    class: ValidationSwarmSchedulerProofDebtClass,
+) -> &'static str {
+    match class {
+        ValidationSwarmSchedulerProofDebtClass::None => "none",
+        ValidationSwarmSchedulerProofDebtClass::WorkerInfra => "worker_infra",
+        ValidationSwarmSchedulerProofDebtClass::Capacity => "capacity",
+        ValidationSwarmSchedulerProofDebtClass::StaleProducer => "stale_producer",
+        ValidationSwarmSchedulerProofDebtClass::SourceOnly => "source_only",
+        ValidationSwarmSchedulerProofDebtClass::ProductFailure => "product_failure",
+        ValidationSwarmSchedulerProofDebtClass::InvalidArtifact => "invalid_artifact",
+    }
+}
+
+fn proof_source_for_receipt(receipt: &ValidationReceipt) -> &'static str {
+    if matches!(receipt.exit.kind, ValidationExitKind::SourceOnly)
+        || receipt.classifications.source_only_fallback
+    {
+        ProofEvidenceSource::SourceOnlyFallback.as_str()
+    } else {
+        ProofEvidenceSource::FreshExecution.as_str()
+    }
+}
+
+fn control_tower_receipt_decision(
+    receipt: &ValidationReceipt,
+    valid: bool,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    if !valid {
+        return (
+            "invalid_artifact",
+            "VCT_RECEIPT_INVALID",
+            "VCT-004",
+            "refresh_or_reject_receipt",
+        );
+    }
+    match receipt.exit.kind {
+        ValidationExitKind::Success => (
+            "green_proof",
+            "VCT_RECEIPT_GREEN",
+            "VCT-001",
+            "reuse_green_receipt",
+        ),
+        ValidationExitKind::SourceOnly => (
+            "source_only",
+            "VCT_RECEIPT_SOURCE_ONLY",
+            "VCT-002",
+            "record_source_only_blocker",
+        ),
+        _ if failure_domain_for_receipt(receipt) == ValidationFailureDomain::Product => (
+            "product_failure",
+            "VCT_RECEIPT_PRODUCT_FAILURE",
+            "VCT-003",
+            "surface_product_failure",
+        ),
+        _ => (
+            "worker_infrastructure",
+            "VCT_RECEIPT_WORKER_INFRA",
+            "VCT-005",
+            "retry_remote_or_record_blocker",
+        ),
+    }
+}
+
+fn proof_debt_class_for_receipt(receipt: &ValidationReceipt, valid: bool) -> &'static str {
+    if !valid {
+        "invalid_artifact"
+    } else if matches!(receipt.exit.kind, ValidationExitKind::SourceOnly)
+        || receipt.classifications.source_only_fallback
+    {
+        "source_only"
+    } else {
+        match failure_domain_for_receipt(receipt) {
+            ValidationFailureDomain::None => "none",
+            ValidationFailureDomain::Product => "product_failure",
+            ValidationFailureDomain::Worker => "worker_infra",
+            ValidationFailureDomain::Resource => "capacity",
+            ValidationFailureDomain::Unknown => "unknown",
+        }
+    }
+}
+
+fn control_tower_status_decision(status: &ValidationProofStatus) -> &'static str {
+    match status.status {
+        ProofStatusKind::Passed | ProofStatusKind::Reused => "green_proof",
+        ProofStatusKind::Queued => "queued",
+        ProofStatusKind::Leased => {
+            if status
+                .proof_coalescer
+                .as_ref()
+                .is_some_and(|coalescer| coalescer.lease_state == "stale")
+            {
+                "stale_lease"
+            } else {
+                "leased"
+            }
+        }
+        ProofStatusKind::Running => "running",
+        ProofStatusKind::SourceOnly => "source_only",
+        ProofStatusKind::Failed => {
+            if status.exit.as_ref().is_some_and(|exit| {
+                failure_domain_for_exit(exit) == ValidationFailureDomain::Product
+            }) {
+                "product_failure"
+            } else {
+                "worker_infrastructure"
+            }
+        }
+        ProofStatusKind::Cancelled => "worker_infrastructure",
+        ProofStatusKind::Unknown => "no_known_proof",
+    }
+}
+
+fn required_action_for_status(status: &ValidationProofStatus) -> &'static str {
+    match status.status {
+        ProofStatusKind::Passed | ProofStatusKind::Reused => "reuse_green_receipt",
+        ProofStatusKind::Queued | ProofStatusKind::Leased | ProofStatusKind::Running => {
+            "wait_for_validation_result"
+        }
+        ProofStatusKind::SourceOnly => "record_source_only_blocker",
+        ProofStatusKind::Failed | ProofStatusKind::Cancelled => "record_blocker_and_retry",
+        ProofStatusKind::Unknown => "record_validation_proof_or_blocker",
+    }
+}
+
+fn proof_debt_class_for_status(status: &ValidationProofStatus) -> &'static str {
+    match control_tower_status_decision(status) {
+        "green_proof" => {
+            if status.proof_source == ProofEvidenceSource::ProofCacheHit {
+                "proof_cache_reuse"
+            } else {
+                "none"
+            }
+        }
+        "queued" => "waiting_for_capacity",
+        "leased" | "running" => "worker_infra",
+        "stale_lease" => "stale_lease",
+        "source_only" => "source_only",
+        "product_failure" => "product_failure",
+        "worker_infrastructure" => "worker_infra",
+        _ => "unknown",
     }
 }
 

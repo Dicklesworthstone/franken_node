@@ -853,6 +853,143 @@ fn swarm_scheduler_slos_are_reported_in_readiness_json_and_human_output() {
     assert!(human.contains("slo_breached=true"));
 }
 
+#[test]
+fn validation_control_tower_unifies_scheduler_receipt_and_missing_proof_rows() {
+    let decisions = vec![
+        scheduler_decision("producer", |_| {}),
+        scheduler_decision("waiter-a", |input| {
+            input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Running;
+            input.queue_age_ms = 50_000;
+        }),
+        scheduler_decision("waiter-b", |input| {
+            input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Running;
+            input.queue_age_ms = 60_000;
+        }),
+        scheduler_decision("capacity", |input| {
+            input.capacity_snapshot = scheduler_capacity("capacity", 8, 1, 80, 0, 0);
+            input.queue_age_ms = 320_000;
+        }),
+        scheduler_decision("source-only", |input| {
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::SourceOnly;
+            input.flight_recorder_state =
+                ValidationSwarmSchedulerFlightRecorderState::SourceOnlyBlocker;
+        }),
+        scheduler_decision("product", |input| {
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::ProductFailure;
+            input.flight_recorder_state =
+                ValidationSwarmSchedulerFlightRecorderState::ProductFailure;
+            input.product_failure = true;
+        }),
+        scheduler_decision("invalid", |input| {
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::InvalidArtifact;
+            input.flight_recorder_state =
+                ValidationSwarmSchedulerFlightRecorderState::InvalidArtifact;
+            input.artifact_valid = false;
+        }),
+    ];
+    let input = ValidationReadinessInput {
+        tracked_beads: vec![TrackedValidationBead::new(
+            "bd-no-proof",
+            ValidationBeadState::Open,
+        )],
+        receipts: vec![receipt(
+            "bd-green",
+            ValidationExitKind::Success,
+            ValidationErrorClass::None,
+            TimeoutClass::None,
+            ts(60),
+        )],
+        swarm_scheduler_decisions: decisions,
+        rch_workers: vec![remote_worker()],
+        resource_governor: Some(allow_resource_snapshot()),
+        ..ValidationReadinessInput::default()
+    };
+
+    let report = build_validation_readiness_report(&input, "vr-control-tower", ts(40));
+    let tower = &report.summary.control_tower;
+
+    assert_eq!(tower.rows, 9);
+    assert_eq!(tower.green_proofs, 1);
+    assert_eq!(tower.wait_or_join, 3);
+    assert_eq!(tower.capacity_waits, 1);
+    assert_eq!(tower.source_only_blockers, 1);
+    assert_eq!(tower.product_failures, 1);
+    assert_eq!(tower.invalid_artifacts, 1);
+    assert_eq!(tower.no_known_proofs, 1);
+
+    let json: Value =
+        serde_json::from_str(&render_validation_readiness_json(&report).expect("json report"))
+            .expect("parse report json");
+    let rows = json["summary"]["control_tower"]["entries"]
+        .as_array()
+        .expect("control tower rows");
+    let row_for = |bead_id: &str| {
+        rows.iter()
+            .find(|row| row["bead_id"].as_str() == Some(bead_id))
+            .expect("control tower row")
+    };
+    let green = row_for("bd-green");
+    assert_eq!(green["decision"], "green_proof");
+    assert_eq!(green["proof_source"], "fresh_execution");
+    assert_eq!(green["proof_debt_class"], "none");
+    assert_eq!(green["green_proof_eligible"], true);
+    assert_eq!(
+        green["latest_artifact_path"],
+        "artifacts/validation_broker/receipt.json"
+    );
+
+    let producer = row_for("bd-producer");
+    assert_eq!(producer["decision"], "run_now");
+    assert_eq!(producer["agent_name"], "agent-producer");
+    assert_eq!(producer["required_action"], "start_rch_validation");
+    assert_eq!(producer["proof_source"], "scheduler_run_now");
+    assert_eq!(producer["rch_slots_available"], 6);
+
+    let waiter = row_for("bd-waiter-a");
+    assert_eq!(waiter["decision"], "join_existing");
+    assert_eq!(waiter["proof_source"], "coalesced_waiter");
+    assert_eq!(waiter["coalescer_state"], "running");
+
+    let capacity = row_for("bd-capacity");
+    assert_eq!(capacity["decision"], "wait_for_capacity");
+    assert_eq!(capacity["required_action"], "wait_for_capacity");
+    assert_eq!(capacity["rch_queue_depth"], 80);
+
+    let source_only = row_for("bd-source-only");
+    assert_eq!(source_only["decision"], "record_source_only_blocker");
+    assert_eq!(source_only["proof_debt_class"], "source_only");
+
+    let product = row_for("bd-product");
+    assert_eq!(product["decision"], "fail_closed_product");
+    assert_eq!(product["required_action"], "surface_product_failure");
+    assert_eq!(product["green_proof_eligible"], false);
+
+    let invalid = row_for("bd-invalid");
+    assert_eq!(invalid["decision"], "fail_closed_invalid_artifact");
+    assert_eq!(invalid["proof_debt_class"], "invalid_artifact");
+
+    let missing = row_for("bd-no-proof");
+    assert_eq!(missing["decision"], "no_known_proof");
+    assert_eq!(
+        missing["required_action"],
+        "record_validation_proof_or_blocker"
+    );
+
+    let empty = build_validation_readiness_report(
+        &ValidationReadinessInput::default(),
+        "vr-control-tower-empty",
+        ts(40),
+    );
+    assert_eq!(empty.summary.control_tower.rows, 0);
+
+    let human = render_validation_readiness_human(&report);
+    assert!(human.contains("control_tower=rows:9"));
+    assert!(human.contains("control_tower bead=bd-capacity"));
+    assert!(human.contains("decision=fail_closed_invalid_artifact"));
+    assert!(human.contains("control_tower bead=bd-green"));
+    assert!(human.contains("green_proof_eligible=true"));
+}
+
 fn known_proof_lane_reason_event_pair(reason_code: &str, event_code: &str) -> bool {
     matches!(
         (reason_code, event_code),
