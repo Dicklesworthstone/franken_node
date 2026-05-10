@@ -152,7 +152,7 @@ fn lock_validation_proof_coalescer_file(
 ) -> Result<(), ValidationProofCoalescerError> {
     match file.try_lock_exclusive() {
         Ok(()) => return Ok(()),
-        Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+        Err(err) if matches!(err.kind(), ErrorKind::WouldBlock) => {}
         Err(err) => {
             return Err(ValidationProofCoalescerError::contract(
                 error_codes::ERR_VPCO_MALFORMED_LEASE,
@@ -167,7 +167,7 @@ fn lock_validation_proof_coalescer_file(
         thread::sleep(Duration::from_millis(delay_millis));
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(()),
-            Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+            Err(err) if matches!(err.kind(), ErrorKind::WouldBlock) => {}
             Err(err) => {
                 return Err(ValidationProofCoalescerError::contract(
                     error_codes::ERR_VPCO_MALFORMED_LEASE,
@@ -2509,7 +2509,7 @@ impl ValidationProofCoalescerStore {
         }
 
         match self.read_lease(&request.proof_work_key)? {
-            Some(current) if current != lease => {
+            Some(current) if validation_proof_leases_differ(&current, &lease) => {
                 return self.join_or_wait(request, current, path, relative_path);
             }
             Some(_) => {}
@@ -3383,6 +3383,13 @@ fn canonical_work_key_material(parts: CanonicalWorkKeyMaterialParts<'_>) -> Stri
 fn same_work_key(left: &ValidationProofWorkKey, right: &ValidationProofWorkKey) -> bool {
     constant_time::ct_eq(&left.hex, &right.hex)
         && constant_time::ct_eq(&left.canonical_material, &right.canonical_material)
+}
+
+fn validation_proof_leases_differ(
+    left: &ValidationProofLease,
+    right: &ValidationProofLease,
+) -> bool {
+    PartialEq::ne(left, right)
 }
 
 fn is_sha256_hex(value: &str) -> bool {
