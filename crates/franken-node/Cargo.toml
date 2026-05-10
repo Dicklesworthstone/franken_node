@@ -615,6 +615,7 @@ path = "tests/adversarial_trust_card_forgery.rs"
 [[test]]
 name = "adversarial_supply_chain_poisoning"
 path = "tests/adversarial_supply_chain_poisoning.rs"
+required-features = ["engine"]
 
 [[test]]
 name = "sync_durability_regression"
@@ -733,6 +734,7 @@ path = "tests/security_perfect_e2e_enforcement.rs"
 [[test]]
 name = "cross_substrate_vector_consumer_conformance"
 path = "tests/cross_substrate_vector_consumer_conformance.rs"
+required-features = ["engine"]
 
 [[test]]
 name = "remote_api_conformance_harness"
