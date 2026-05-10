@@ -51,6 +51,7 @@ use frankenengine_node::ops::validation_readiness::{
     ValidationReadinessStatus, build_validation_readiness_report,
     render_validation_readiness_human,
 };
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -83,7 +84,7 @@ const REQUIRED_LOG_FIELDS: [&str; 7] = [
 const COALESCER_STRESS_ATTEMPTS: usize = 32;
 const COALESCER_STRESS_BEAD: &str = "bd-co196";
 const COALESCER_STRESS_RECEIPT_PATH: &str = "receipts/bd-co196-producer.json";
-const SWARM_SCHEDULER_STRESS_ATTEMPTS: usize = 32;
+const SWARM_SCHEDULER_STRESS_ATTEMPTS: usize = 64;
 const SWARM_SCHEDULER_STRESS_BEAD: &str = "bd-qtnmv";
 const REQUIRED_COALESCER_LOG_FIELDS: [&str; 15] = [
     "trace_id",
@@ -766,7 +767,12 @@ fn swarm_scheduler_digest(material: &str) -> ValidationSwarmSchedulerDigestRef {
 }
 
 fn swarm_scheduler_policy() -> ValidationSwarmSchedulerPolicy {
-    ValidationSwarmSchedulerPolicy::default_policy("validation-swarm-scheduler/stress-policy/v1")
+    let mut policy = ValidationSwarmSchedulerPolicy::default_policy(
+        "validation-swarm-scheduler/stress-policy/v1",
+    );
+    policy.max_waiters_per_work_key =
+        u16::try_from(SWARM_SCHEDULER_STRESS_ATTEMPTS).expect("stress attempts fit in u16");
+    policy
 }
 
 fn swarm_scheduler_capacity(
@@ -935,6 +941,16 @@ fn assert_swarm_scheduler_log_event_fields(event: &serde_json::Value) {
             "missing swarm scheduler structured log field {field}: {event}"
         );
     }
+}
+
+fn count_swarm_scheduler_decisions(
+    decisions: &[ValidationSwarmSchedulerDecision],
+) -> BTreeMap<&'static str, usize> {
+    let mut counts = BTreeMap::new();
+    for decision in decisions {
+        *counts.entry(decision.decision.as_str()).or_insert(0) += 1;
+    }
+    counts
 }
 
 fn proof_status_from_scheduler_decision(
@@ -1640,6 +1656,7 @@ fn fixture_replay_swarm_scheduler_fairness_stress_matches_economics()
     let dir = TempDir::new()?;
     let log_path = dir.path().join("swarm-scheduler-stress.ndjson");
     let policy = swarm_scheduler_policy();
+    let stress_attempts_u64 = u64::try_from(SWARM_SCHEDULER_STRESS_ATTEMPTS)?;
 
     let mut decisions = Vec::new();
     let producer = swarm_scheduler_decision("equivalent", "stress-agent-00", |_| {});
@@ -1662,6 +1679,49 @@ fn fixture_replay_swarm_scheduler_fairness_stress_matches_economics()
         );
         decisions.push(waiter);
     }
+
+    let equivalent_decisions = decisions
+        .iter()
+        .filter(|decision| decision.input_ref.contains("equivalent"))
+        .collect::<Vec<_>>();
+    let equivalent_producer_count = equivalent_decisions
+        .iter()
+        .filter(|decision| decision.decision == ValidationSwarmSchedulerDecisionKind::RunNow)
+        .count();
+    let equivalent_waiter_count = equivalent_decisions
+        .iter()
+        .filter(|decision| decision.decision == ValidationSwarmSchedulerDecisionKind::JoinExisting)
+        .count();
+    assert_eq!(equivalent_decisions.len(), SWARM_SCHEDULER_STRESS_ATTEMPTS);
+    assert_eq!(equivalent_producer_count, 1);
+    assert_eq!(equivalent_waiter_count, SWARM_SCHEDULER_STRESS_ATTEMPTS - 1);
+    assert!(
+        equivalent_waiter_count <= usize::from(policy.max_waiters_per_work_key),
+        "equivalent waiters must remain inside the explicit waiter cap"
+    );
+    let equivalent_agents = equivalent_decisions
+        .iter()
+        .map(|decision| decision.agent_name.as_str())
+        .collect::<Vec<_>>();
+    let mut sorted_equivalent_agents = equivalent_agents.clone();
+    sorted_equivalent_agents.sort_unstable();
+    assert_eq!(
+        equivalent_agents, sorted_equivalent_agents,
+        "stress harness must emit equivalent-agent rows deterministically"
+    );
+
+    let cache_hit = swarm_scheduler_decision("proof-cache-hit", "cache-hit-agent", |input| {
+        input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Completed;
+        input.queue_age_ms = 30_000;
+    });
+    assert_eq!(
+        cache_hit.decision,
+        ValidationSwarmSchedulerDecisionKind::JoinExisting
+    );
+    assert_eq!(
+        cache_hit.diagnostics.coalescer_state,
+        ValidationSwarmSchedulerCoalescerState::Completed
+    );
 
     let fresh_low_priority = swarm_scheduler_decision("p4-fresh", "low-priority-fresh", |input| {
         input.priority = ValidationSwarmSchedulerPriority::P4;
@@ -1695,6 +1755,22 @@ fn fixture_replay_swarm_scheduler_fairness_stress_matches_economics()
     );
     assert!(stale_steal.diagnostics.fencing_token_digest.is_some());
 
+    let worker_infra = swarm_scheduler_decision("worker-infra", "worker-infra-agent", |input| {
+        input.worker_infra_retryable = true;
+        input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::WorkerInfra;
+        input.flight_recorder_state = ValidationSwarmSchedulerFlightRecorderState::WorkerTimeout;
+        input.capacity_snapshot = swarm_scheduler_capacity(8, 4, 0, 0);
+        input.queue_age_ms = 360_000;
+    });
+    assert_eq!(
+        worker_infra.decision,
+        ValidationSwarmSchedulerDecisionKind::WaitForCapacity
+    );
+    assert_eq!(
+        worker_infra.diagnostics.proof_debt_class,
+        ValidationSwarmSchedulerProofDebtClass::WorkerInfra
+    );
+
     let source_only = swarm_scheduler_decision("source-only", "source-only-agent", |input| {
         input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::SourceOnly;
         input.flight_recorder_state =
@@ -1719,13 +1795,30 @@ fn fixture_replay_swarm_scheduler_fairness_stress_matches_economics()
     );
     assert!(product_failure.fail_closed);
 
+    let invalid_artifact =
+        swarm_scheduler_decision("invalid-artifact", "artifact-agent", |input| {
+            input.artifact_valid = false;
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::InvalidArtifact;
+            input.flight_recorder_state =
+                ValidationSwarmSchedulerFlightRecorderState::InvalidArtifact;
+        });
+    assert_eq!(
+        invalid_artifact.decision,
+        ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact
+    );
+    assert!(invalid_artifact.fail_closed);
+
     decisions.extend([
+        cache_hit.clone(),
         fresh_low_priority.clone(),
         aged_low_priority.clone(),
         stale_steal.clone(),
+        worker_infra.clone(),
         source_only.clone(),
         product_failure.clone(),
+        invalid_artifact.clone(),
     ]);
+    let decision_counts = count_swarm_scheduler_decisions(&decisions);
 
     let ordered_inputs = [
         swarm_scheduler_input("tie-right", "agent-b"),
@@ -1829,16 +1922,16 @@ fn fixture_replay_swarm_scheduler_fairness_stress_matches_economics()
     );
     assert_eq!(
         economics.summary.duplicate_proofs_avoided,
-        SWARM_SCHEDULER_STRESS_ATTEMPTS - 1
+        SWARM_SCHEDULER_STRESS_ATTEMPTS
     );
     assert_eq!(
         economics.summary.worker_time_saved_seconds,
-        ((SWARM_SCHEDULER_STRESS_ATTEMPTS - 1) as u64).saturating_mul(60)
+        stress_attempts_u64.saturating_mul(60)
     );
-    assert_eq!(economics.summary.queue_debt_count, 5);
+    assert_eq!(economics.summary.queue_debt_count, 7);
     assert_eq!(economics.summary.stale_producer_count, 1);
     assert_eq!(economics.summary.source_only_blocker_count, 1);
-    assert_eq!(economics.summary.product_failure_count, 1);
+    assert_eq!(economics.summary.product_failure_count, 2);
     assert_eq!(economics.summary.slo_breach_count, 1);
     assert_eq!(economics.slo_compliance.overall_status, SloStatus::Breach);
 
@@ -1850,10 +1943,11 @@ fn fixture_replay_swarm_scheduler_fairness_stress_matches_economics()
     let readiness =
         build_validation_readiness_report(&readiness_input, "bd-qtnmv-readiness", ts(41));
     assert_eq!(readiness.summary.swarm_scheduler.decisions, decisions.len());
-    assert_eq!(readiness.summary.swarm_scheduler.capacity_waits, 1);
+    assert_eq!(readiness.summary.swarm_scheduler.capacity_waits, 2);
     assert_eq!(readiness.summary.swarm_scheduler.work_steals, 1);
     assert_eq!(readiness.summary.swarm_scheduler.source_only_blockers, 1);
     assert_eq!(readiness.summary.swarm_scheduler.product_failures, 1);
+    assert_eq!(readiness.summary.control_tower.invalid_artifacts, 1);
     assert!(
         readiness
             .summary
@@ -1866,8 +1960,99 @@ fn fixture_replay_swarm_scheduler_fairness_stress_matches_economics()
     let matrix: serde_json::Value = serde_json::from_str(SWARM_SCHEDULER_STRESS_MATRIX_JSON)?;
     assert_eq!(
         matrix.get("attempts").and_then(serde_json::Value::as_u64),
-        Some(SWARM_SCHEDULER_STRESS_ATTEMPTS as u64)
+        Some(stress_attempts_u64)
     );
+    assert_eq!(
+        matrix
+            .get("expected_summary")
+            .and_then(|summary| summary.get("total_decisions"))
+            .and_then(serde_json::Value::as_u64),
+        Some(u64::try_from(decisions.len())?)
+    );
+    assert_eq!(
+        matrix
+            .get("expected_summary")
+            .and_then(|summary| summary.get("equivalent_requests"))
+            .and_then(serde_json::Value::as_u64),
+        Some(stress_attempts_u64)
+    );
+    assert_eq!(
+        matrix
+            .get("expected_summary")
+            .and_then(|summary| summary.get("producer_count"))
+            .and_then(serde_json::Value::as_u64),
+        Some(u64::try_from(equivalent_producer_count)?)
+    );
+    assert_eq!(
+        matrix
+            .get("expected_summary")
+            .and_then(|summary| summary.get("joined_waiters"))
+            .and_then(serde_json::Value::as_u64),
+        Some(u64::try_from(equivalent_waiter_count)?)
+    );
+    assert_eq!(
+        matrix
+            .get("expected_summary")
+            .and_then(|summary| summary.get("max_waiters_per_work_key"))
+            .and_then(serde_json::Value::as_u64),
+        Some(u64::from(policy.max_waiters_per_work_key))
+    );
+    let bounded_event_count_max = matrix
+        .get("expected_summary")
+        .and_then(|summary| summary.get("bounded_event_count_max"))
+        .and_then(serde_json::Value::as_u64)
+        .expect("matrix bounded event count");
+    assert!(
+        u64::try_from(events.len()).expect("event count fits") <= bounded_event_count_max,
+        "stress harness event count must stay bounded"
+    );
+    let matrix_expected_economics = matrix
+        .get("expected_economics")
+        .and_then(serde_json::Value::as_object)
+        .expect("swarm scheduler matrix expected economics");
+    assert_eq!(
+        matrix_expected_economics
+            .get("duplicate_proofs_avoided")
+            .and_then(serde_json::Value::as_u64),
+        Some(u64::try_from(economics.summary.duplicate_proofs_avoided)?)
+    );
+    assert_eq!(
+        matrix_expected_economics
+            .get("worker_time_saved_seconds")
+            .and_then(serde_json::Value::as_u64),
+        Some(economics.summary.worker_time_saved_seconds)
+    );
+    assert_eq!(
+        matrix_expected_economics
+            .get("queue_debt_count")
+            .and_then(serde_json::Value::as_u64),
+        Some(u64::try_from(economics.summary.queue_debt_count)?)
+    );
+    assert_eq!(
+        matrix_expected_economics
+            .get("slo_breach_count")
+            .and_then(serde_json::Value::as_u64),
+        Some(u64::try_from(economics.summary.slo_breach_count)?)
+    );
+    let matrix_decision_counts = matrix
+        .get("expected_decision_counts")
+        .and_then(serde_json::Value::as_object)
+        .expect("swarm scheduler matrix decision counts");
+    for (decision, expected_count) in matrix_decision_counts {
+        let expected_count = usize::try_from(
+            expected_count
+                .as_u64()
+                .expect("matrix decision count is an integer"),
+        )?;
+        assert_eq!(
+            decision_counts
+                .get(decision.as_str())
+                .copied()
+                .unwrap_or_default(),
+            expected_count,
+            "swarm scheduler decision count mismatch for {decision}"
+        );
+    }
     let matrix_scenarios = matrix
         .get("scenarios")
         .and_then(serde_json::Value::as_array)

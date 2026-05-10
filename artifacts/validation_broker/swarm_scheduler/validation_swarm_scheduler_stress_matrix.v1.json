@@ -1,7 +1,7 @@
 {
   "schema_version": "franken-node/validation-swarm-scheduler/stress-matrix/v1",
   "bead_id": "bd-qtnmv",
-  "attempts": 32,
+  "attempts": 64,
   "proof_command": {
     "program": "rch",
     "argv": [
@@ -39,10 +39,28 @@
     "recorder_path"
   ],
   "expected_economics": {
-    "duplicate_proofs_avoided": 31,
-    "worker_time_saved_seconds": 1860,
-    "queue_debt_count": 5,
+    "duplicate_proofs_avoided": 64,
+    "worker_time_saved_seconds": 3840,
+    "queue_debt_count": 7,
     "slo_breach_count": 1
+  },
+  "expected_summary": {
+    "total_decisions": 72,
+    "equivalent_requests": 64,
+    "producer_count": 1,
+    "joined_waiters": 63,
+    "max_waiters_per_work_key": 64,
+    "bounded_event_count_max": 80
+  },
+  "expected_decision_counts": {
+    "fail_closed_invalid_artifact": 1,
+    "fail_closed_product": 1,
+    "join_existing": 64,
+    "record_source_only_blocker": 1,
+    "reject_low_priority": 1,
+    "run_now": 1,
+    "steal_stale_work": 1,
+    "wait_for_capacity": 2
   },
   "scenarios": [
     {
@@ -52,6 +70,14 @@
     {
       "name": "equivalent_attempts_join_existing",
       "expected_decision": "join_existing"
+    },
+    {
+      "name": "proof_cache_hit_join_existing",
+      "expected_decision": "join_existing"
+    },
+    {
+      "name": "worker_infra_waits_for_capacity",
+      "expected_decision": "wait_for_capacity"
     },
     {
       "name": "fresh_low_priority_rejected_under_high_watermark",
@@ -72,6 +98,10 @@
     {
       "name": "product_failure_fails_closed",
       "expected_decision": "fail_closed_product"
+    },
+    {
+      "name": "invalid_artifact_fails_closed",
+      "expected_decision": "fail_closed_invalid_artifact"
     }
   ]
 }
