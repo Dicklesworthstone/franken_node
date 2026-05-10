@@ -6,12 +6,12 @@
 
 #[cfg(test)]
 mod tests {
+    use chrono::{DateTime, TimeZone, Utc};
     use frankenengine_node::replay::time_travel_engine::{
         DivergenceKind, EnvironmentSnapshot, ReplayEngine, ReplayVerdict, SideEffect, TraceBuilder,
         TraceStep, WorkflowTrace, build_demo_trace,
     };
     use frankenengine_node::runtime::clock::{Clock, TestClock};
-    use chrono::{DateTime, Utc, TimeZone};
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -25,14 +25,18 @@ mod tests {
     }
 
     fn create_trace_with_timestamps(trace_id: &str, timestamps: &[u64]) -> WorkflowTrace {
-        let mut builder = TraceBuilder::new(trace_id.to_string(), "clock-test-workflow".to_string());
+        let mut builder =
+            TraceBuilder::new(trace_id.to_string(), "clock-test-workflow".to_string());
 
         for (i, &timestamp_ns) in timestamps.iter().enumerate() {
             let step = TraceStep::new(
                 i as u64,
                 format!("input-{}", i).into_bytes(),
                 format!("output-{}", i).into_bytes(),
-                vec![SideEffect::new("clock_read", timestamp_ns.to_le_bytes().to_vec())],
+                vec![SideEffect::new(
+                    "clock_read",
+                    timestamp_ns.to_le_bytes().to_vec(),
+                )],
                 timestamp_ns,
             );
             builder.add_step(step);
@@ -41,22 +45,26 @@ mod tests {
         builder.build(create_test_environment())
     }
 
-    fn clock_aware_replay_fn(step: &TraceStep, _env: &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
+    fn clock_aware_replay_fn(
+        step: &TraceStep,
+        _env: &EnvironmentSnapshot,
+    ) -> (Vec<u8>, Vec<SideEffect>) {
         // This replay function simulates a clock-aware system that could drift
         // For now, we just return the original outputs to focus on timestamp validation
         (step.output.clone(), step.side_effects.clone())
     }
 
-    fn drifting_replay_fn(drift_ns: u64) -> impl Fn(&TraceStep, &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
+    fn drifting_replay_fn(
+        drift_ns: u64,
+    ) -> impl Fn(&TraceStep, &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
         move |step: &TraceStep, _env: &EnvironmentSnapshot| {
             // Simulate a replay function that experiences clock drift
             // by modifying the side effects to include drifted timestamps
             let mut effects = step.side_effects.clone();
             if let Some(effect) = effects.get_mut(0) {
                 if effect.kind == "clock_read" && effect.payload.len() >= 8 {
-                    let original_time = u64::from_le_bytes(
-                        effect.payload[0..8].try_into().unwrap_or([0; 8])
-                    );
+                    let original_time =
+                        u64::from_le_bytes(effect.payload[0..8].try_into().unwrap_or([0; 8]));
                     let drifted_time = original_time.saturating_add(drift_ns);
                     effect.payload = drifted_time.to_le_bytes().to_vec();
                 }
@@ -82,8 +90,8 @@ mod tests {
         let trace = create_trace_with_timestamps("no-drift-test", &timestamps);
         engine.register_trace(trace).unwrap();
 
-        // Replay using identity function (no modifications)
-        let result = engine.replay_identity("no-drift-test").unwrap();
+        // Replay using the fixture identity baseline (no modifications)
+        let result = engine.replay_fixture_identity("no-drift-test").unwrap();
 
         // Should be identical since no drift occurred
         assert_eq!(result.verdict, ReplayVerdict::Identical);
@@ -104,27 +112,40 @@ mod tests {
 
         // Replay with 10 second drift
         let drift_ns = 10_000_000_000; // 10 seconds
-        let result = engine.replay("drift-test", drifting_replay_fn(drift_ns)).unwrap();
+        let result = engine
+            .replay("drift-test", drifting_replay_fn(drift_ns))
+            .unwrap();
 
         // Should detect clock drift divergence
         match result.verdict {
             ReplayVerdict::Diverged(_) => {
                 // Check if any divergence is specifically clock drift
-                let has_clock_drift = result.divergences.iter().any(|d|
-                    matches!(d.kind, DivergenceKind::ClockDrift { .. })
-                );
+                let has_clock_drift = result
+                    .divergences
+                    .iter()
+                    .any(|d| matches!(d.kind, DivergenceKind::ClockDrift { .. }));
                 if has_clock_drift {
                     eprintln!("SUCCESS: Clock drift detected as expected");
                     // Verify the drift details
                     for divergence in &result.divergences {
-                        if let DivergenceKind::ClockDrift { expected_ns, actual_ns, drift_ns, tolerance_ns } = &divergence.kind {
+                        if let DivergenceKind::ClockDrift {
+                            expected_ns,
+                            actual_ns,
+                            drift_ns,
+                            tolerance_ns,
+                        } = &divergence.kind
+                        {
                             assert!(*drift_ns > *tolerance_ns, "Drift should exceed tolerance");
-                            eprintln!("Clock drift details: expected={}ns, actual={}ns, drift={}ns, tolerance={}ns",
-                                     expected_ns, actual_ns, drift_ns, tolerance_ns);
+                            eprintln!(
+                                "Clock drift details: expected={}ns, actual={}ns, drift={}ns, tolerance={}ns",
+                                expected_ns, actual_ns, drift_ns, tolerance_ns
+                            );
                         }
                     }
                 } else {
-                    eprintln!("WARNING: Divergence detected but not specifically clock drift - may be side effect mismatch");
+                    eprintln!(
+                        "WARNING: Divergence detected but not specifically clock drift - may be side effect mismatch"
+                    );
                 }
             }
             ReplayVerdict::Identical => {
@@ -152,13 +173,16 @@ mod tests {
         match engine.register_trace(trace) {
             Ok(_) => {
                 // If registration succeeds, replay should detect the issue
-                let result = engine.replay_identity("non-monotonic");
+                let result = engine.replay_fixture_identity("non-monotonic");
                 // The system should handle this gracefully, either as error or divergence
                 eprintln!("Non-monotonic timestamp handling: {:?}", result);
             }
             Err(e) => {
                 // If registration fails, that's also valid behavior for timestamp validation
-                eprintln!("Registration correctly rejected non-monotonic timestamps: {}", e);
+                eprintln!(
+                    "Registration correctly rejected non-monotonic timestamps: {}",
+                    e
+                );
             }
         }
     }
@@ -197,10 +221,10 @@ mod tests {
 
         // Test various precision levels
         let test_cases = [
-            ("nanosecond-precision", 1u64),                    // 1 nanosecond
-            ("microsecond-precision", 1_000u64),               // 1 microsecond
-            ("millisecond-precision", 1_000_000u64),           // 1 millisecond
-            ("second-precision", 1_000_000_000u64),            // 1 second
+            ("nanosecond-precision", 1u64),          // 1 nanosecond
+            ("microsecond-precision", 1_000u64),     // 1 microsecond
+            ("millisecond-precision", 1_000_000u64), // 1 millisecond
+            ("second-precision", 1_000_000_000u64),  // 1 second
         ];
 
         for (case_name, precision_ns) in test_cases {
@@ -209,7 +233,7 @@ mod tests {
 
             match engine.register_trace(trace) {
                 Ok(_) => {
-                    let result = engine.replay_identity(case_name).unwrap();
+                    let result = engine.replay_fixture_identity(case_name).unwrap();
                     // All precision levels should be handled correctly
                     eprintln!("{}: {:?}", case_name, result.verdict);
                 }
@@ -239,7 +263,7 @@ mod tests {
         engine.register_trace(trace).unwrap();
 
         // Baseline replay should be identical
-        let result = engine.replay_identity("invariant-doc").unwrap();
+        let result = engine.replay_fixture_identity("invariant-doc").unwrap();
         assert_eq!(result.verdict, ReplayVerdict::Identical);
 
         // This test documents the expected behavior once ERR_REPLAY_CLOCK_DRIFT

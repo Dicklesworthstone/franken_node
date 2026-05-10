@@ -340,6 +340,35 @@ RULES: tuple[RuleSpec, ...] = (
         inventory_id="PSI-010",
         remediation_bead="bd-2fqyv.10",
     ),
+    RuleSpec(
+        rule_id="time_travel_fixture_identity_replay_boundary",
+        surface="time-travel identity replay remains fixture-only baseline evidence",
+        classification="allowlisted_simulation",
+        markers=("fixture_identity_replay(", "replay_fixture_identity("),
+        search_paths=("crates/**/*.rs", "tests/**/*.rs"),
+        allowed_paths=(
+            "crates/franken-node/src/replay/time_travel_engine.rs",
+            "crates/franken-node/src/replay/replay_conformance_tests.rs",
+            "crates/franken-node/src/replay/mod.rs",
+            "tests/lab/time_travel_replay_equivalence.rs",
+            "tests/conformance/replay_clock_drift_detection.rs",
+        ),
+        allowed_line_substrings=(
+            "pub fn fixture_identity_replay(",
+            "pub fn replay_fixture_identity(",
+        ),
+        required_anchor_markers=(
+            "Fixture-only replay function",
+            "must not be cited as production replay evidence",
+            "Production/operator flows",
+            "self.replay(trace_id, fixture_identity_replay)",
+        ),
+        anchor_paths=("crates/franken-node/src/replay/time_travel_engine.rs",),
+        inventory_id="PSI-011",
+        allowed_simulation_label="fixture_identity_replay(...)",
+        remediation_bead="bd-oetof",
+        related_checkers=("scripts/check_time_travel_replay.py",),
+    ),
 )
 
 

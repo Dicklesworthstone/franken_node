@@ -1031,22 +1031,23 @@ pub struct ReplayResult {
 }
 
 // ---------------------------------------------------------------------------
-// Replay executor (simulated deterministic re-execution)
+// Replay executor
 // ---------------------------------------------------------------------------
 
-/// A replay executor that deterministically re-executes workflow steps.
-///
-/// In a full production system, this would invoke the actual extension-host
-/// runtime. For the capture/replay contract, it takes a "replay function"
-/// that maps (step_input, environment) -> (output, side_effects).
-///
-/// The default replay function is the identity replay: it returns the
-/// original outputs exactly, which should always produce Identical verdict.
-/// This is the baseline for INV-TTR-DETERMINISM.
+/// A replay executor hook that maps captured step input and environment into
+/// replayed output and side effects. Operator-facing replay evidence must pass
+/// a real adapter here; fixture identity replay is reserved for deterministic
+/// baseline tests.
 pub type ReplayFn = fn(&TraceStep, &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>);
 
-/// Default replay function: identity replay returns original outputs.
-pub fn identity_replay(step: &TraceStep, _env: &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
+/// Fixture-only replay function: returns original outputs and side effects.
+///
+/// This proves storage, hashing, and comparison determinism. It is not real
+/// workload re-execution and must not be cited as production replay evidence.
+pub fn fixture_identity_replay(
+    step: &TraceStep,
+    _env: &EnvironmentSnapshot,
+) -> (Vec<u8>, Vec<SideEffect>) {
     (step.output.clone(), step.side_effects.clone())
 }
 
@@ -1337,9 +1338,15 @@ impl ReplayEngine {
         })
     }
 
-    /// Convenience: replay with the identity function (should always produce Identical).
-    pub fn replay_identity(&mut self, trace_id: &str) -> Result<ReplayResult, TimeTravelError> {
-        self.replay(trace_id, identity_replay)
+    /// Fixture-only convenience replay (should always produce Identical).
+    ///
+    /// This is a deterministic baseline for tests. Production/operator flows
+    /// must call `replay` with a real replay adapter instead.
+    pub fn replay_fixture_identity(
+        &mut self,
+        trace_id: &str,
+    ) -> Result<ReplayResult, TimeTravelError> {
+        self.replay(trace_id, fixture_identity_replay)
     }
 
     /// Access the engine's accumulated audit log.
@@ -2054,16 +2061,16 @@ mod tests {
         assert!(msg.contains("capacity"));
     }
 
-    // --- Identity replay (INV-TTR-DETERMINISM) ---
+    // --- Fixture identity replay (INV-TTR-DETERMINISM baseline) ---
 
     #[test]
-    fn identity_replay_produces_identical_verdict() {
+    fn fixture_identity_replay_produces_identical_verdict() {
         let mut engine = ReplayEngine::new();
         engine
             .register_trace(multi_step_trace("id1", 5))
             .expect("register should succeed");
         let result = engine
-            .replay_identity("id1")
+            .replay_fixture_identity("id1")
             .expect("replay should succeed");
         assert_eq!(result.verdict, ReplayVerdict::Identical);
         assert!(result.divergences.is_empty());
@@ -2071,13 +2078,13 @@ mod tests {
     }
 
     #[test]
-    fn identity_replay_emits_ttr_004_005_007() {
+    fn fixture_identity_replay_emits_ttr_004_005_007() {
         let mut engine = ReplayEngine::new();
         engine
             .register_trace(one_step_trace("audit1"))
             .expect("register should succeed");
         engine
-            .replay_identity("audit1")
+            .replay_fixture_identity("audit1")
             .expect("replay should succeed");
         let log = engine.audit_log();
         assert!(log.iter().any(|e| e.event_code == event_codes::TTR_004));
@@ -2093,7 +2100,7 @@ mod tests {
             .expect("register should succeed");
 
         let result = engine
-            .replay_identity("clock-duration")
+            .replay_fixture_identity("clock-duration")
             .expect("replay should succeed");
 
         assert_eq!(result.replay_duration_ns, 1_200);
@@ -2101,7 +2108,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_replay_step_audit_keeps_sequence_order_when_timestamps_are_unsorted() {
+    fn fixture_identity_replay_step_audit_keeps_sequence_order_when_timestamps_are_unsorted() {
         let mut engine = ReplayEngine::new();
         engine
             .register_trace(trace_with_timestamps(
@@ -2111,7 +2118,7 @@ mod tests {
             .expect("register should succeed");
 
         engine
-            .replay_identity("order-stable")
+            .replay_fixture_identity("order-stable")
             .expect("replay should succeed");
 
         let identical_steps: Vec<(&str, u64)> = engine
@@ -2256,7 +2263,7 @@ mod tests {
     }
 
     #[test]
-    fn counterfactual_replay_does_not_poison_future_identity_replay() {
+    fn counterfactual_replay_does_not_poison_future_fixture_identity_replay() {
         let original = trace_with_timestamps("cf-identity", &[25, 50]);
         let original_digest = original.trace_digest.clone();
         let mut engine = ReplayEngine::new();
@@ -2268,7 +2275,7 @@ mod tests {
             .replay("cf-identity", counterfactual_output_and_effects)
             .expect("counterfactual replay should succeed");
         let identity = engine
-            .replay_identity("cf-identity")
+            .replay_fixture_identity("cf-identity")
             .expect("identity replay should still succeed");
         let stored_trace = engine
             .get_trace("cf-identity")
@@ -2371,7 +2378,7 @@ mod tests {
     #[test]
     fn replay_trace_not_found() {
         let mut engine = ReplayEngine::new();
-        let err = engine.replay_identity("nonexistent").unwrap_err();
+        let err = engine.replay_fixture_identity("nonexistent").unwrap_err();
         assert!(matches!(err, TimeTravelError::TraceNotFound { .. }));
     }
 
@@ -2384,7 +2391,7 @@ mod tests {
             .register_trace(one_step_trace("drain"))
             .expect("register should succeed");
         engine
-            .replay_identity("drain")
+            .replay_fixture_identity("drain")
             .expect("replay should succeed");
         let drained = engine.drain_audit_log();
         assert!(!drained.is_empty());
@@ -2612,16 +2619,16 @@ mod tests {
         assert_eq!(entry.timestamp_ns, 999);
     }
 
-    // --- Multi-step identity replay with varied data ---
+    // --- Multi-step fixture identity replay with varied data ---
 
     #[test]
-    fn multi_step_identity_replay_all_identical() {
+    fn multi_step_fixture_identity_replay_all_identical() {
         let mut engine = ReplayEngine::new();
         let trace = multi_step_trace("multi-id", 20);
         engine
             .register_trace(trace)
             .expect("register should succeed");
-        let result = engine.replay_identity("multi-id").unwrap();
+        let result = engine.replay_fixture_identity("multi-id").unwrap();
         assert_eq!(result.verdict, ReplayVerdict::Identical);
         assert_eq!(result.steps_replayed, 20);
     }
@@ -4549,7 +4556,7 @@ mod tests {
     // --- METAMORPHIC TEST: Replay Idempotency (bd-342pj) ---
 
     #[test]
-    fn replay_identity_idempotency_metamorphic_invariant() {
+    fn replay_fixture_identity_idempotency_metamorphic_invariant() {
         // METAMORPHIC PROPERTY: replay(trace) twice produces identical engine state
         // This catches non-determinism bugs: random seeds, HashMap iteration order, time leaks
 
@@ -4563,7 +4570,7 @@ mod tests {
             .expect("register trace in engine_a");
 
         let result_a = engine_a
-            .replay_identity("idempotency-test")
+            .replay_fixture_identity("idempotency-test")
             .expect("replay in engine_a should succeed");
 
         // ENGINE B: Second replay (independent engine)
@@ -4573,7 +4580,7 @@ mod tests {
             .expect("register trace in engine_b");
 
         let result_b = engine_b
-            .replay_identity("idempotency-test")
+            .replay_fixture_identity("idempotency-test")
             .expect("replay in engine_b should succeed");
 
         // METAMORPHIC ASSERTION 1: Replay results must be identical
@@ -4651,17 +4658,17 @@ mod tests {
 
         // First replay
         let result_1 = engine
-            .replay_identity("same-engine-multi")
+            .replay_fixture_identity("same-engine-multi")
             .expect("first replay should succeed");
 
         // Second replay on same engine (tests for stateful contamination)
         let result_2 = engine
-            .replay_identity("same-engine-multi")
+            .replay_fixture_identity("same-engine-multi")
             .expect("second replay should succeed");
 
         // Third replay (stress test)
         let result_3 = engine
-            .replay_identity("same-engine-multi")
+            .replay_fixture_identity("same-engine-multi")
             .expect("third replay should succeed");
 
         // METAMORPHIC ASSERTIONS: All replay results must be identical

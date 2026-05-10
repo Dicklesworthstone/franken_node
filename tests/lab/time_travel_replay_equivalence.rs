@@ -7,7 +7,7 @@
 
 use frankenengine_node::replay::time_travel_engine::{
     DivergenceKind, EnvironmentSnapshot, ReplayEngine, ReplayVerdict, SideEffect, TraceBuilder,
-    TraceStep, WorkflowTrace, build_demo_trace, identity_replay,
+    TraceStep, WorkflowTrace, build_demo_trace,
 };
 use std::collections::BTreeMap;
 
@@ -25,11 +25,11 @@ fn demo_env() -> EnvironmentSnapshot {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn identity_replay_produces_identical_verdict() {
+fn fixture_identity_replay_produces_identical_verdict() {
     let mut engine = ReplayEngine::new();
     let trace = build_demo_trace("equiv-1", "workflow-alpha", 10);
     engine.register_trace(trace).unwrap();
-    let result = engine.replay_identity("equiv-1").unwrap();
+    let result = engine.replay_fixture_identity("equiv-1").unwrap();
     assert_eq!(result.verdict, ReplayVerdict::Identical);
     assert!(result.divergences.is_empty());
     assert_eq!(result.steps_replayed, 10);
@@ -49,7 +49,7 @@ fn replay_single_step_trace() {
     engine
         .register_trace(build_demo_trace("single", "wf", 1))
         .unwrap();
-    let result = engine.replay_identity("single").unwrap();
+    let result = engine.replay_fixture_identity("single").unwrap();
     assert_eq!(result.verdict, ReplayVerdict::Identical);
     assert_eq!(result.steps_replayed, 1);
 }

@@ -177,7 +177,7 @@ mod negative_path_tests {
     fn replay_missing_trace_is_rejected_without_audit_growth() {
         let mut engine = ReplayEngine::new();
 
-        let err = engine.replay_identity("trace-missing").unwrap_err();
+        let err = engine.replay_fixture_identity("trace-missing").unwrap_err();
 
         assert!(matches!(err, TimeTravelError::TraceNotFound { .. }));
         assert!(engine.audit_log().is_empty());
@@ -290,7 +290,7 @@ mod negative_path_tests {
         let removed = engine.remove_trace("trace-remove-then-replay");
 
         let err = engine
-            .replay_identity("trace-remove-then-replay")
+            .replay_fixture_identity("trace-remove-then-replay")
             .unwrap_err();
 
         assert!(removed.is_some());

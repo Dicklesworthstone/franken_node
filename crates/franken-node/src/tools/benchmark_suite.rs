@@ -1728,7 +1728,7 @@ fn execute_measured_workload(
         "lockstep_harness_throughput" => measured_lockstep_throughput(iteration, 48),
         "quarantine_propagation_latency" => timed_digest_ms(&scenario.name, iteration, 128),
         "trust_card_materialization" => timed_digest_ms(&scenario.name, iteration, 80),
-        "replay_bit_identity_rate" => measured_replay_identity_rate(iteration),
+        "replay_bit_identity_rate" => measured_fixture_identity_replay_rate(iteration),
         "adversarial_pass_rate" => measured_adversarial_pass_rate(),
         "migration_success_rate" => measured_migration_success_rate(),
         other => {
@@ -1823,9 +1823,9 @@ fn measured_lockstep_throughput(iteration: u32, cases: u32) -> f64 {
     f64::from(cases) / started.elapsed().as_secs_f64().max(0.000_001)
 }
 
-fn measured_replay_identity_rate(iteration: u32) -> f64 {
-    let first = digest_rounds("replay_identity", iteration, 64);
-    let second = digest_rounds("replay_identity", iteration, 64);
+fn measured_fixture_identity_replay_rate(iteration: u32) -> f64 {
+    let first = digest_rounds("fixture_identity_replay", iteration, 64);
+    let second = digest_rounds("fixture_identity_replay", iteration, 64);
     if first.as_slice().eq(second.as_slice()) {
         100.0
     } else {

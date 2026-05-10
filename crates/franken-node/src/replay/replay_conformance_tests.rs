@@ -546,7 +546,7 @@ mod tests {
 
         // Perform many replays to stress audit log
         for i in 0..100 {
-            let result = engine.replay_identity("large-audit").unwrap();
+            let result = engine.replay_fixture_identity("large-audit").unwrap();
             assert_eq!(result.verdict, ReplayVerdict::Identical);
         }
 
@@ -659,8 +659,8 @@ mod tests {
         let (trace, _) = builder.build().unwrap();
         engine.register_trace(trace).unwrap();
 
-        // Identity replay should succeed even with large data
-        let result = engine.replay_identity("memory-stress").unwrap();
+        // Fixture identity replay should succeed even with large data
+        let result = engine.replay_fixture_identity("memory-stress").unwrap();
         assert_eq!(result.verdict, ReplayVerdict::Identical);
         assert_eq!(result.steps_replayed, 100);
 
@@ -696,7 +696,7 @@ mod tests {
         let mut engine = ReplayEngine::new();
         engine.register_trace(trace).unwrap();
 
-        let result = engine.replay_identity("schema-test").unwrap();
+        let result = engine.replay_fixture_identity("schema-test").unwrap();
         assert_eq!(result.schema_version, SCHEMA_VERSION);
     }
 
@@ -779,7 +779,7 @@ mod tests {
         let (trace, _) = builder.build().unwrap();
         engine.register_trace(trace).unwrap();
 
-        let result = engine.replay_identity("duration-test").unwrap();
+        let result = engine.replay_fixture_identity("duration-test").unwrap();
 
         // Duration should be max timestamp
         assert_eq!(result.replay_duration_ns, u64::MAX);
@@ -963,7 +963,7 @@ mod tests {
         let mut engine = ReplayEngine::new();
 
         let err = engine
-            .replay_identity("missing-trace-negative")
+            .replay_fixture_identity("missing-trace-negative")
             .unwrap_err();
 
         match err {
