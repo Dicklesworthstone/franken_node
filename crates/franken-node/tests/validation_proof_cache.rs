@@ -865,6 +865,25 @@ fn swarm_scheduler_build_input(seed: &str, agent: &str) -> ValidationSwarmSchedu
     }
 }
 
+fn expected_scheduler_work_key(
+    input: &ValidationSwarmSchedulerBuildInput,
+) -> ValidationProofWorkKey {
+    ValidationProofWorkKey::from_parts(ValidationProofWorkKeyParts {
+        command_digest: input.command_digest.clone(),
+        input_digests: input.input_digests.clone(),
+        git_commit: input.git_commit.clone(),
+        dirty_worktree: input.dirty_worktree,
+        dirty_state_policy: input.dirty_state_policy,
+        feature_flags: input.feature_flags.clone(),
+        cargo_toolchain: input.cargo_toolchain.clone(),
+        package: input.package.clone(),
+        test_target: input.test_target.clone(),
+        environment_policy_id: input.environment_policy_id.clone(),
+        target_dir_policy_id: input.target_dir_policy_id.clone(),
+    })
+    .expect("valid expected scheduler work key")
+}
+
 fn swarm_scheduler_decision(
     seed: &str,
     agent: &str,
@@ -1504,6 +1523,115 @@ fn mock_free_e2e_concurrent_proof_attempts_coalesce_and_handoff_receipt()
         );
     }
     Ok(())
+}
+
+#[test]
+fn scheduler_builder_derives_live_work_key_and_command_digest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let build = swarm_scheduler_build_input("derive", "agent-builder");
+    let expected = expected_scheduler_work_key(&build);
+
+    let input = build_validation_swarm_scheduler_input(build.clone())?;
+
+    assert!(input.proof_work_key.verifies());
+    assert!(input.command_digest.verifies());
+    assert_eq!(input.proof_work_key.hex, expected.hex);
+    assert_eq!(
+        input.proof_work_key.canonical_material,
+        expected.canonical_material
+    );
+    assert_eq!(input.command_digest.hex, build.command_digest.hex);
+    assert_eq!(input.bead_id, "bd-wc27p.1");
+    assert!(
+        input
+            .input_id
+            .starts_with("vss-input-bd-wc27p-1-agent-builder-")
+    );
+
+    let mut reordered = build.clone();
+    reordered.input_digests.reverse();
+    reordered.feature_flags = vec![
+        "external-commands".to_string(),
+        "http-client".to_string(),
+        "external-commands".to_string(),
+    ];
+    let reordered_input = build_validation_swarm_scheduler_input(reordered)?;
+    assert_eq!(input.proof_work_key.hex, reordered_input.proof_work_key.hex);
+    Ok(())
+}
+
+#[test]
+fn scheduler_builder_feeds_join_and_invalid_artifact_decisions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let policy = swarm_scheduler_policy();
+    let mut join_build = swarm_scheduler_build_input("join", "waiter-agent");
+    join_build.coalescer_state = ValidationSwarmSchedulerCoalescerState::Running;
+
+    let join_decision =
+        decide_validation_swarm_schedule_from_build_input(&policy, join_build, ts(40))?;
+
+    assert_eq!(
+        join_decision.decision,
+        ValidationSwarmSchedulerDecisionKind::JoinExisting
+    );
+    assert_eq!(
+        join_decision.required_action.as_str(),
+        "join_existing_proof"
+    );
+    assert!(
+        join_decision
+            .input_ref
+            .starts_with("vss-input-bd-wc27p-1-waiter-agent-")
+    );
+
+    let mut invalid_build = swarm_scheduler_build_input("invalid-artifact", "artifact-agent");
+    invalid_build.artifact_valid = false;
+    invalid_build.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::InvalidArtifact;
+
+    let invalid_decision =
+        decide_validation_swarm_schedule_from_build_input(&policy, invalid_build, ts(41))?;
+
+    assert_eq!(
+        invalid_decision.decision,
+        ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact
+    );
+    assert!(invalid_decision.fail_closed);
+    assert!(!invalid_decision.green_proof_eligible);
+    Ok(())
+}
+
+#[test]
+fn scheduler_builder_rejects_dirty_clean_required_work() {
+    let mut build = swarm_scheduler_build_input("dirty", "dirty-agent");
+    build.dirty_worktree = true;
+
+    let err = build_validation_swarm_scheduler_input(build).expect_err("dirty work rejected");
+
+    assert_eq!(err.code(), coalescer_error_codes::ERR_VPCO_DIRTY_POLICY);
+}
+
+#[test]
+fn scheduler_builder_rejects_malformed_and_bad_digest_inputs() {
+    let mut nul_build = swarm_scheduler_build_input("nul", "nul-agent");
+    nul_build.bead_id = "bd-wc27p.1\0truncated".to_string();
+
+    let err = build_validation_swarm_scheduler_input(nul_build).expect_err("nul bead id rejected");
+
+    assert_eq!(
+        err.code(),
+        swarm_scheduler_error_codes::ERR_VSS_MALFORMED_INPUT
+    );
+
+    let mut bad_digest_build = swarm_scheduler_build_input("bad-digest", "digest-agent");
+    bad_digest_build.command_digest.hex = "0".repeat(64);
+
+    let err = build_validation_swarm_scheduler_input(bad_digest_build)
+        .expect_err("bad command digest rejected");
+
+    assert_eq!(
+        err.code(),
+        swarm_scheduler_error_codes::ERR_VSS_COMMAND_DIGEST_MISMATCH
+    );
 }
 
 #[test]
