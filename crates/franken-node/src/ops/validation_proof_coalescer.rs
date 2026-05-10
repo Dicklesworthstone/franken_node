@@ -3386,8 +3386,8 @@ fn same_work_key(left: &ValidationProofWorkKey, right: &ValidationProofWorkKey) 
 }
 
 fn validation_proof_leases_differ(
-    left: &ValidationProofLease,
-    right: &ValidationProofLease,
+    left: &ValidationProofCoalescerLease,
+    right: &ValidationProofCoalescerLease,
 ) -> bool {
     PartialEq::ne(left, right)
 }

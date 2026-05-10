@@ -18,7 +18,7 @@ use fsqlite::compat::TransactionExt;
 use fsqlite::{Connection, SqliteValue};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1026,11 +1026,11 @@ fn policy_decision_golden_path() -> PathBuf {
 fn build_policy_decision_golden() -> Value {
     let policy = WorkspacePressurePolicy::with_balanced_defaults();
     let work_types = policy_decision_work_types();
-    let mut scenario_values = serde_json::Map::new();
+    let mut scenario_values = BTreeMap::new();
     let mut decision_matrix = Vec::new();
 
     for (scenario_name, inputs) in policy_decision_scenarios() {
-        let mut work_decisions = serde_json::Map::new();
+        let mut work_decisions = BTreeMap::new();
 
         for (work_class, work_class_name, priority) in &work_types {
             let decision = policy.decide_admission(*work_class, *priority, &inputs);
@@ -1039,7 +1039,7 @@ fn build_policy_decision_golden() -> Value {
             let decision_value = json!({
                 "admission": admission_name(&decision.admission),
                 "cleanup_candidates": cleanup_candidates,
-                "confidence": decision.confidence,
+                "confidence": stable_f32_value(decision.confidence),
                 "reason_code": decision.reason_code.as_str(),
             });
 
@@ -1057,7 +1057,7 @@ fn build_policy_decision_golden() -> Value {
         scenario_values.insert(
             scenario_name.to_string(),
             json!({
-                "inputs": inputs,
+                "inputs": stable_policy_inputs(&inputs),
                 "work_decisions": work_decisions,
             }),
         );
@@ -1069,6 +1069,40 @@ fn build_policy_decision_golden() -> Value {
         "scenarios": scenario_values,
         "schema_version": POLICY_DECISION_GOLDEN_SCHEMA_VERSION,
     })
+}
+
+fn stable_policy_inputs(inputs: &WorkspacePressureInputs) -> BTreeMap<String, Value> {
+    let mut value = BTreeMap::new();
+    value.insert(
+        "active_build_count".to_string(),
+        json!(inputs.active_build_count),
+    );
+    value.insert(
+        "active_reservations".to_string(),
+        json!(inputs.active_reservations),
+    );
+    value.insert(
+        "coordination_healthy".to_string(),
+        json!(inputs.coordination_healthy),
+    );
+    value.insert("free_disk_bytes".to_string(), json!(inputs.free_disk_bytes));
+    value.insert(
+        "memory_pressure".to_string(),
+        stable_f32_value(inputs.memory_pressure),
+    );
+    value.insert(
+        "rch_available_slots".to_string(),
+        json!(inputs.rch_available_slots),
+    );
+    value.insert(
+        "target_dir_bytes".to_string(),
+        json!(inputs.target_dir_bytes),
+    );
+    value
+}
+
+fn stable_f32_value(value: f32) -> Value {
+    json!(((value as f64) * 100.0).round() / 100.0)
 }
 
 fn policy_decision_work_types() -> Vec<(WorkCostClass, &'static str, u32)> {

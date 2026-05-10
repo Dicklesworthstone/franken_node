@@ -1740,7 +1740,7 @@ fn hardware_bridge_profile_risk(input: &WorkspaceHardwarePlacementInput) -> u32 
     } else {
         1.0
     };
-    let memory_risk = if memory_pressure >= 0.95 {
+    let memory_risk: u32 = if memory_pressure >= 0.95 {
         95
     } else if memory_pressure >= 0.9 {
         90

@@ -11,7 +11,6 @@ pub mod clock;
 pub mod crash_loop_detector;
 pub mod epoch_guard;
 pub mod epoch_transition;
-#[cfg(any(test, feature = "admin-tools"))]
 pub mod hardware_planner;
 #[cfg(any(test, feature = "admin-tools"))]
 pub mod incident_lab;
@@ -48,6 +47,10 @@ mod tests {
             evidence_ledger_intact: true,
             operator_confirmed: true,
         }
+    }
+
+    fn test_clock_start() -> std::time::Instant {
+        std::time::Instant::now()
     }
 
     #[test]
@@ -948,11 +951,11 @@ mod tests {
                                 release_duration
                             );
 
-                            thread_results.push((thread_id, operation, "success"));
+                            thread_results.push((thread_id, operation, true));
                         }
                         Err(_) => {
                             // Some failures under memory pressure are acceptable
-                            thread_results.push((thread_id, operation, "acquire_failed"));
+                            thread_results.push((thread_id, operation, false));
                         }
                     }
                 }
@@ -978,7 +981,7 @@ mod tests {
         // Count successes
         let success_count = final_results
             .iter()
-            .filter(|(_, _, status)| *status == "success")
+            .filter(|(_, _, acquired)| *acquired)
             .count();
 
         let success_rate = if final_results.is_empty() {
@@ -1050,10 +1053,10 @@ mod tests {
             );
 
             // Test trust verification processing with extreme inputs
-            let verification_start = std::time::Instant::now();
+            let started_at = test_clock_start();
             let verification_result =
                 std::panic::catch_unwind(|| controller.verify_trust_state(trust_input));
-            let verification_duration = verification_start.elapsed();
+            let verification_duration = started_at.elapsed();
 
             // Should complete without panic and in reasonable time
             assert!(
