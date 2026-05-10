@@ -18,12 +18,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 
 pub const VALIDATION_READINESS_INPUT_SCHEMA_VERSION: &str =
     "franken-node/validation-readiness/input/v1";
 pub const VALIDATION_READINESS_REPORT_SCHEMA_VERSION: &str =
     "franken-node/validation-readiness/report/v1";
+pub const VALIDATION_HANDOFF_SUMMARY_SCHEMA_VERSION: &str =
+    "franken-node/validation-handoff-summary/report/v1";
 pub const VALIDATION_READINESS_FIXTURE_SCHEMA_VERSION: &str =
     "franken-node/validation-readiness/fixtures/v1";
 pub const PROOF_LANE_READINESS_CAPSULE_SCHEMA_VERSION: &str =
@@ -37,6 +39,8 @@ pub const MAX_PROOF_LANE_WORKERS: usize = 32;
 pub const MAX_PROOF_LANE_ARGS: usize = 64;
 pub const MAX_PROOF_LANE_STRING_BYTES: usize = 512;
 pub const MAX_PROOF_LANE_DETAIL_BYTES: usize = 1024;
+pub const MAX_VALIDATION_HANDOFF_ROWS: usize = 128;
+pub const MAX_VALIDATION_HANDOFF_FIELD_BYTES: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -721,6 +725,54 @@ pub struct ValidationReadinessReport {
     pub summary: ValidationReadinessSummary,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ValidationHandoffReport {
+    pub schema_version: String,
+    pub command: String,
+    pub trace_id: String,
+    pub generated_at_utc: DateTime<Utc>,
+    pub readiness_status: ValidationReadinessStatus,
+    pub rows: usize,
+    pub truncated: bool,
+    pub entries: Vec<ValidationHandoffEntry>,
+    pub br_comment_markdown: String,
+    pub agent_mail_markdown: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ValidationHandoffEntry {
+    pub bead_id: String,
+    pub thread_id: String,
+    pub agent_name: String,
+    pub decision: String,
+    pub scheduler_decision: Option<String>,
+    pub reason_code: String,
+    pub event_code: String,
+    pub required_action: String,
+    pub next_action: String,
+    pub proof_source: String,
+    pub proof_debt_class: String,
+    pub proof_work_key: Option<String>,
+    pub command_digest: Option<String>,
+    pub recorder_path: Option<String>,
+    pub recovery_artifact_path: Option<String>,
+    pub latest_artifact_path: Option<String>,
+    pub rch_slots_total: Option<u16>,
+    pub rch_slots_available: Option<u16>,
+    pub rch_queue_depth: Option<u16>,
+    pub green_closeout_allowed: bool,
+    pub cargo_launch_allowed: bool,
+    pub cargo_action: String,
+    pub fail_closed: bool,
+    pub field_errors: Vec<String>,
+    pub recovery_action: Option<String>,
+    pub recovery_required_action: Option<String>,
+    pub retry_after_ms: Option<u64>,
+    pub worker_preference: Option<String>,
+    pub flight_recorder_path: Option<String>,
+    pub markdown: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationReadinessError {
     #[error("failed reading validation readiness input {path}: {source}")]
@@ -779,6 +831,68 @@ pub fn build_validation_readiness_report(
         checks,
         summary,
     }
+}
+
+#[must_use]
+pub fn build_validation_handoff_report(
+    input: &ValidationReadinessInput,
+    trace_id: impl Into<String>,
+    now: DateTime<Utc>,
+) -> ValidationHandoffReport {
+    let report = build_validation_readiness_report(input, trace_id, now);
+    build_validation_handoff_report_from_readiness(input, &report)
+}
+
+#[must_use]
+pub fn build_validation_handoff_report_from_readiness(
+    input: &ValidationReadinessInput,
+    report: &ValidationReadinessReport,
+) -> ValidationHandoffReport {
+    let thread_ids = tracked_thread_ids(input);
+    let recoveries = recovery_plans_by_bead(&report.summary.pending_recoveries);
+    let failed_attempts = failed_attempts_by_bead(&report.summary.failed_attempt_details);
+    let entries = report
+        .summary
+        .control_tower
+        .entries
+        .iter()
+        .take(MAX_VALIDATION_HANDOFF_ROWS)
+        .map(|row| {
+            let thread_id = thread_ids
+                .get(&row.bead_id)
+                .cloned()
+                .unwrap_or_else(|| row.bead_id.clone());
+            let recovery = recoveries.get(&row.bead_id).copied();
+            let failed_attempt = failed_attempts.get(&row.bead_id).copied();
+            validation_handoff_entry_from_row(row, thread_id, recovery, failed_attempt)
+        })
+        .collect::<Vec<_>>();
+    let truncated = report.summary.control_tower.entries.len() > entries.len();
+    let markdown = render_validation_handoff_entries_markdown(
+        report.trace_id.as_str(),
+        report.overall_status,
+        report.generated_at_utc,
+        truncated,
+        &entries,
+    );
+
+    ValidationHandoffReport {
+        schema_version: VALIDATION_HANDOFF_SUMMARY_SCHEMA_VERSION.to_string(),
+        command: "ops validation-handoff-summary".to_string(),
+        trace_id: report.trace_id.clone(),
+        generated_at_utc: report.generated_at_utc,
+        readiness_status: report.overall_status,
+        rows: entries.len(),
+        truncated,
+        entries,
+        br_comment_markdown: markdown.clone(),
+        agent_mail_markdown: markdown,
+    }
+}
+
+#[must_use]
+pub fn render_validation_handoff_markdown(report: &ValidationHandoffReport) -> String {
+    report.agent_mail_markdown.clone()
 }
 
 #[must_use]
@@ -1030,6 +1144,379 @@ pub fn render_validation_readiness_human(report: &ValidationReadinessReport) -> 
     }
 
     lines.join("\n")
+}
+
+fn tracked_thread_ids(input: &ValidationReadinessInput) -> BTreeMap<String, String> {
+    input
+        .tracked_beads
+        .iter()
+        .map(|bead| {
+            (
+                bead.bead_id.clone(),
+                bead.normalized_thread_id().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn recovery_plans_by_bead(
+    recoveries: &[RecoveryPlanSummary],
+) -> BTreeMap<String, &RecoveryPlanSummary> {
+    recoveries
+        .iter()
+        .map(|recovery| (recovery.bead_id.clone(), recovery))
+        .collect()
+}
+
+fn failed_attempts_by_bead(
+    attempts: &[FailedAttemptSummary],
+) -> BTreeMap<String, &FailedAttemptSummary> {
+    attempts
+        .iter()
+        .map(|attempt| (attempt.bead_id.clone(), attempt))
+        .collect()
+}
+
+fn validation_handoff_entry_from_row(
+    row: &ValidationControlTowerRow,
+    thread_id: String,
+    recovery: Option<&RecoveryPlanSummary>,
+    failed_attempt: Option<&FailedAttemptSummary>,
+) -> ValidationHandoffEntry {
+    let mut field_errors = validation_handoff_field_errors(row, thread_id.as_str());
+    let fail_closed = !field_errors.is_empty()
+        || matches!(
+            row.decision.as_str(),
+            "fail_closed_invalid_artifact"
+                | "invalid_artifact"
+                | "fail_closed_product"
+                | "product_failure"
+                | "record_source_only_blocker"
+                | "source_only"
+                | "no_known_proof"
+        );
+    if !field_errors.is_empty() {
+        field_errors.sort();
+        field_errors.dedup();
+    }
+    let (cargo_launch_allowed, cargo_action) = if field_errors.is_empty() {
+        validation_handoff_cargo_action(row, recovery)
+    } else {
+        (false, "repair_handoff_input")
+    };
+    let green_closeout_allowed = field_errors.is_empty() && row.green_proof_eligible;
+    let markdown = render_validation_handoff_entry_markdown(
+        row,
+        thread_id.as_str(),
+        cargo_launch_allowed,
+        cargo_action,
+        fail_closed,
+        &field_errors,
+        recovery,
+        failed_attempt,
+    );
+
+    ValidationHandoffEntry {
+        bead_id: bounded_handoff_value(row.bead_id.as_str()),
+        thread_id: bounded_handoff_value(thread_id.as_str()),
+        agent_name: bounded_handoff_value(row.agent_name.as_str()),
+        decision: bounded_handoff_value(row.decision.as_str()),
+        scheduler_decision: row.scheduler_decision.as_deref().map(bounded_handoff_value),
+        reason_code: bounded_handoff_value(row.reason_code.as_str()),
+        event_code: bounded_handoff_value(row.event_code.as_str()),
+        required_action: bounded_handoff_value(row.required_action.as_str()),
+        next_action: bounded_handoff_value(row.next_action.as_str()),
+        proof_source: bounded_handoff_value(row.proof_source.as_str()),
+        proof_debt_class: bounded_handoff_value(row.proof_debt_class.as_str()),
+        proof_work_key: row.proof_work_key.as_deref().map(bounded_handoff_value),
+        command_digest: row.command_digest.as_deref().map(bounded_handoff_value),
+        recorder_path: row.recorder_path.as_deref().map(bounded_handoff_value),
+        recovery_artifact_path: row
+            .recovery_artifact_path
+            .as_deref()
+            .map(bounded_handoff_value),
+        latest_artifact_path: row
+            .latest_artifact_path
+            .as_deref()
+            .map(bounded_handoff_value),
+        rch_slots_total: row.rch_slots_total,
+        rch_slots_available: row.rch_slots_available,
+        rch_queue_depth: row.rch_queue_depth,
+        green_closeout_allowed,
+        cargo_launch_allowed,
+        cargo_action: cargo_action.to_string(),
+        fail_closed,
+        field_errors,
+        recovery_action: recovery.map(|item| bounded_handoff_value(item.action.as_str())),
+        recovery_required_action: recovery
+            .map(|item| bounded_handoff_value(item.required_action.as_str())),
+        retry_after_ms: recovery.and_then(|item| item.retry_after_ms),
+        worker_preference: recovery
+            .and_then(|item| item.worker_preference.as_deref())
+            .map(bounded_handoff_value),
+        flight_recorder_path: failed_attempt
+            .and_then(|item| item.flight_recorder_path.as_deref())
+            .map(bounded_handoff_value),
+        markdown,
+    }
+}
+
+fn validation_handoff_field_errors(
+    row: &ValidationControlTowerRow,
+    thread_id: &str,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if row.bead_id.trim().is_empty() {
+        errors.push("missing_bead_id".to_string());
+    }
+    if thread_id.trim().is_empty() {
+        errors.push("missing_thread_id".to_string());
+    }
+    if row.command_digest.as_ref().is_none_or(|value| {
+        value.trim().is_empty()
+            || value.contains('\0')
+            || value.len() > MAX_VALIDATION_HANDOFF_FIELD_BYTES
+    }) && !matches!(row.decision.as_str(), "no_known_proof")
+    {
+        errors.push("missing_or_malformed_command_digest".to_string());
+    }
+    for (field, path) in [
+        ("recorder_path", row.recorder_path.as_deref()),
+        (
+            "recovery_artifact_path",
+            row.recovery_artifact_path.as_deref(),
+        ),
+        ("latest_artifact_path", row.latest_artifact_path.as_deref()),
+    ] {
+        if let Some(path) = path
+            && !validation_handoff_path_is_safe(path)
+        {
+            errors.push(format!("malformed_{field}"));
+        }
+    }
+    errors
+}
+
+fn validation_handoff_path_is_safe(path: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty()
+        || trimmed.contains('\0')
+        || trimmed.len() > MAX_VALIDATION_HANDOFF_FIELD_BYTES
+    {
+        return false;
+    }
+    !Path::new(trimmed).is_absolute()
+        && !Path::new(trimmed).components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+}
+
+fn validation_handoff_cargo_action(
+    row: &ValidationControlTowerRow,
+    recovery: Option<&RecoveryPlanSummary>,
+) -> (bool, &'static str) {
+    if !row.green_proof_eligible
+        && matches!(
+            row.decision.as_str(),
+            "green_proof" | "join_existing" | "running" | "queued" | "leased"
+        )
+        && row.command_digest.is_none()
+    {
+        return (false, "repair_handoff_input");
+    }
+
+    match row.decision.as_str() {
+        "run_now" => (true, "launch_remote_proof"),
+        "green_proof" => (false, "do_not_launch_green_proof"),
+        "join_existing" | "running" | "queued" | "leased" => (false, "join_existing_or_wait"),
+        "wait_for_capacity" => (false, "wait_for_capacity"),
+        "steal_stale_work" | "stale_lease" => (true, "retry_remote_with_fresh_fence"),
+        "worker_infrastructure" => (
+            recovery.is_some_and(|item| !item.fail_closed),
+            "retry_remote_after_worker_infra",
+        ),
+        "record_source_only_blocker" | "source_only" => (false, "record_source_only_blocker"),
+        "fail_closed_product" | "product_failure" => (false, "surface_product_failure"),
+        "fail_closed_invalid_artifact" | "invalid_artifact" => (false, "reject_invalid_artifact"),
+        "no_known_proof" => (true, "launch_remote_proof_or_record_blocker"),
+        _ => (false, "inspect_validation_state"),
+    }
+}
+
+fn render_validation_handoff_entries_markdown(
+    trace_id: &str,
+    status: ValidationReadinessStatus,
+    generated_at: DateTime<Utc>,
+    truncated: bool,
+    entries: &[ValidationHandoffEntry],
+) -> String {
+    let mut lines = vec![
+        format!(
+            "`{}` validation handoff summary: `{}`",
+            trace_id,
+            status.as_str()
+        ),
+        format!("- generated_at: `{}`", generated_at.to_rfc3339()),
+        format!("- rows: {} truncated={}", entries.len(), truncated),
+    ];
+    for entry in entries {
+        lines.push(String::new());
+        lines.push(entry.markdown.clone());
+    }
+    lines.join("\n")
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "handoff rendering intentionally keeps each evidence facet explicit"
+)]
+fn render_validation_handoff_entry_markdown(
+    row: &ValidationControlTowerRow,
+    thread_id: &str,
+    cargo_launch_allowed: bool,
+    cargo_action: &str,
+    fail_closed: bool,
+    field_errors: &[String],
+    recovery: Option<&RecoveryPlanSummary>,
+    failed_attempt: Option<&FailedAttemptSummary>,
+) -> String {
+    let mut lines = vec![
+        format!("### `{}`", bounded_handoff_value(row.bead_id.as_str())),
+        format!("- thread: `{}`", bounded_handoff_value(thread_id)),
+        format!(
+            "- owner: `{}`",
+            bounded_handoff_value(row.agent_name.as_str())
+        ),
+        format!(
+            "- decision: `{}` reason=`{}` event=`{}`",
+            bounded_handoff_value(row.decision.as_str()),
+            bounded_handoff_value(row.reason_code.as_str()),
+            bounded_handoff_value(row.event_code.as_str())
+        ),
+        format!(
+            "- required_action: `{}`",
+            bounded_handoff_value(row.required_action.as_str())
+        ),
+        format!(
+            "- next_action: `{}`",
+            bounded_handoff_value(row.next_action.as_str())
+        ),
+        format!(
+            "- cargo: launch_allowed={} action=`{}`",
+            cargo_launch_allowed, cargo_action
+        ),
+        format!(
+            "- proof: source=`{}` debt=`{}` green_closeout_allowed={} fail_closed={}",
+            bounded_handoff_value(row.proof_source.as_str()),
+            bounded_handoff_value(row.proof_debt_class.as_str()),
+            row.green_proof_eligible && field_errors.is_empty(),
+            fail_closed
+        ),
+        format!(
+            "- command_digest: `{}`",
+            row.command_digest
+                .as_deref()
+                .map(bounded_handoff_value)
+                .unwrap_or_else(|| "none".to_string())
+        ),
+        format!(
+            "- proof_work_key: `{}`",
+            row.proof_work_key
+                .as_deref()
+                .map(bounded_handoff_value)
+                .unwrap_or_else(|| "none".to_string())
+        ),
+        format!(
+            "- artifacts: recorder=`{}` recovery=`{}` latest=`{}`",
+            row.recorder_path
+                .as_deref()
+                .map(bounded_handoff_value)
+                .unwrap_or_else(|| "none".to_string()),
+            row.recovery_artifact_path
+                .as_deref()
+                .map(bounded_handoff_value)
+                .unwrap_or_else(|| "none".to_string()),
+            row.latest_artifact_path
+                .as_deref()
+                .map(bounded_handoff_value)
+                .unwrap_or_else(|| "none".to_string())
+        ),
+        format!(
+            "- rch_capacity: slots={}/{} queue_depth={}",
+            row.rch_slots_available
+                .map_or_else(|| "n/a".to_string(), |slots| slots.to_string()),
+            row.rch_slots_total
+                .map_or_else(|| "n/a".to_string(), |slots| slots.to_string()),
+            row.rch_queue_depth
+                .map_or_else(|| "n/a".to_string(), |depth| depth.to_string())
+        ),
+    ];
+
+    if let Some(recovery) = recovery {
+        lines.push(format!(
+            "- recovery: action=`{}` required_action=`{}` retry_after_ms={} worker=`{}`",
+            bounded_handoff_value(recovery.action.as_str()),
+            bounded_handoff_value(recovery.required_action.as_str()),
+            recovery
+                .retry_after_ms
+                .map_or_else(|| "none".to_string(), |value| value.to_string()),
+            recovery
+                .worker_preference
+                .as_deref()
+                .map(bounded_handoff_value)
+                .unwrap_or_else(|| "none".to_string())
+        ));
+    }
+
+    if let Some(failed_attempt) = failed_attempt {
+        lines.push(format!(
+            "- flight_recorder: path=`{}` outcome=`{}` worker=`{}` retryable={} product_failure={}",
+            failed_attempt
+                .flight_recorder_path
+                .as_deref()
+                .map(bounded_handoff_value)
+                .unwrap_or_else(|| "none".to_string()),
+            bounded_handoff_value(failed_attempt.outcome_class.as_str()),
+            failed_attempt
+                .worker_id
+                .as_deref()
+                .map(bounded_handoff_value)
+                .unwrap_or_else(|| "none".to_string()),
+            failed_attempt.retryable,
+            failed_attempt.product_failure
+        ));
+    }
+
+    if field_errors.is_empty() {
+        lines.push("- field_errors: none".to_string());
+    } else {
+        lines.push(format!("- field_errors: `{}`", field_errors.join(",")));
+    }
+
+    lines.join("\n")
+}
+
+fn bounded_handoff_value(value: &str) -> String {
+    if value.len() <= MAX_VALIDATION_HANDOFF_FIELD_BYTES {
+        return value.to_string();
+    }
+    const TRUNCATED_SUFFIX: &str = "[truncated]";
+    let max_value_bytes = MAX_VALIDATION_HANDOFF_FIELD_BYTES.saturating_sub(TRUNCATED_SUFFIX.len());
+    let mut bounded = String::new();
+    let mut bytes = 0usize;
+    for ch in value.chars() {
+        let next = bytes.saturating_add(ch.len_utf8());
+        if next > max_value_bytes {
+            break;
+        }
+        bounded.push(ch);
+        bytes = next;
+    }
+    bounded.push_str(TRUNCATED_SUFFIX);
+    bounded
 }
 
 fn summarize_validation_readiness(

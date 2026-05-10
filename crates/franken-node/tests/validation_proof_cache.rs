@@ -48,8 +48,8 @@ use frankenengine_node::ops::validation_proof_debt_ledger::{
 };
 use frankenengine_node::ops::validation_readiness::{
     TrackedValidationBead, ValidationBeadState, ValidationReadinessInput,
-    ValidationReadinessStatus, build_validation_readiness_report,
-    render_validation_readiness_human,
+    ValidationReadinessStatus, build_validation_handoff_report, build_validation_readiness_report,
+    render_validation_handoff_markdown, render_validation_readiness_human,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -2076,6 +2076,186 @@ fn fixture_replay_swarm_scheduler_fairness_stress_matches_economics()
             "missing swarm scheduler stress scenario {name}: decision={expected_decision}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn validation_handoff_summary_covers_blocked_swarm_decisions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let run_now = swarm_scheduler_decision("handoff-run-now", "run-agent", |_| {});
+    let mut malformed_run_now =
+        swarm_scheduler_decision("handoff-malformed", "malformed-agent", |_| {});
+    malformed_run_now.diagnostics.command_digest_hex.clear();
+    malformed_run_now.diagnostics.recorder_path = Some("../bad-recorder.json".to_string());
+    let join_existing = swarm_scheduler_decision("handoff-join", "join-agent", |input| {
+        input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Running;
+        input.queue_age_ms = 10_000;
+    });
+    let wait_for_capacity =
+        swarm_scheduler_decision("handoff-capacity", "capacity-agent", |input| {
+            input.capacity_snapshot = swarm_scheduler_capacity(0, 96, 0, 0);
+            input.queue_age_ms = 700_000;
+        });
+    let stale_steal = swarm_scheduler_decision("handoff-stale", "stale-agent", |input| {
+        input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Stale;
+        input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::StaleProducer;
+        input.queue_age_ms = 950_000;
+    });
+    let source_only = swarm_scheduler_decision("handoff-source-only", "source-agent", |input| {
+        input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::SourceOnly;
+        input.flight_recorder_state =
+            ValidationSwarmSchedulerFlightRecorderState::SourceOnlyBlocker;
+        input.source_only_allowed = true;
+    });
+    let product_failure = swarm_scheduler_decision("handoff-product", "product-agent", |input| {
+        input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::ProductFailure;
+        input.flight_recorder_state = ValidationSwarmSchedulerFlightRecorderState::ProductFailure;
+        input.product_failure = true;
+    });
+    let invalid_artifact = swarm_scheduler_decision("handoff-invalid", "invalid-agent", |input| {
+        input.artifact_valid = false;
+        input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::InvalidArtifact;
+        input.flight_recorder_state = ValidationSwarmSchedulerFlightRecorderState::InvalidArtifact;
+    });
+
+    let mut green_reuse_status = proof_status_from_scheduler_decision(&join_existing);
+    green_reuse_status.status = ProofStatusKind::Reused;
+    green_reuse_status.proof_source = ProofEvidenceSource::ProofCacheHit;
+    green_reuse_status.deduplicated = true;
+    green_reuse_status.artifact_paths = Some(ProofArtifactPaths {
+        stdout_path: "artifacts/validation_broker/bd-qtnmv/stdout.txt".to_string(),
+        stderr_path: "artifacts/validation_broker/bd-qtnmv/stderr.txt".to_string(),
+        summary_path: "artifacts/validation_broker/bd-qtnmv/summary.json".to_string(),
+        receipt_path: "receipts/bd-qtnmv-cache-hit.json".to_string(),
+    });
+
+    let mut worker_retry_status = proof_status_from_scheduler_decision(&product_failure);
+    worker_retry_status.status = ProofStatusKind::Failed;
+    worker_retry_status.proof_source = ProofEvidenceSource::BrokerQueue;
+    worker_retry_status.exit = Some(ValidationExit {
+        kind: ValidationExitKind::Timeout,
+        code: None,
+        signal: None,
+        timeout_class: TimeoutClass::SshCommand,
+        error_class: ValidationErrorClass::WorkerInfra,
+        retryable: true,
+    });
+    if let Some(flight_ref) = worker_retry_status.flight_recorder_ref.as_mut() {
+        flight_ref.outcome_class = FlightRecorderAdapterOutcomeClass::WorkerTimeout;
+        flight_ref.reason_code = coalescer_reason_codes::QUEUE_CAPACITY.to_string();
+    }
+
+    let input = ValidationReadinessInput {
+        tracked_beads: vec![TrackedValidationBead {
+            bead_id: SWARM_SCHEDULER_STRESS_BEAD.to_string(),
+            thread_id: "mail-thread-bd-qtnmv".to_string(),
+            state: ValidationBeadState::InProgress,
+            requires_receipt: true,
+            source_only_waiver: None,
+        }],
+        proof_statuses: vec![green_reuse_status, worker_retry_status],
+        swarm_scheduler_decisions: vec![
+            run_now,
+            malformed_run_now,
+            join_existing,
+            wait_for_capacity,
+            stale_steal,
+            source_only,
+            product_failure,
+            invalid_artifact,
+        ],
+        ..ValidationReadinessInput::default()
+    };
+
+    let handoff = build_validation_handoff_report(&input, "bd-wc27p-7-handoff", ts(42));
+    let markdown = render_validation_handoff_markdown(&handoff);
+    let has_action = |decision: &str, action: &str| {
+        handoff
+            .entries
+            .iter()
+            .any(|entry| entry.decision == decision && entry.cargo_action == action)
+    };
+    let entry = |decision: &str| {
+        handoff
+            .entries
+            .iter()
+            .find(|entry| entry.decision == decision)
+            .expect("handoff entry")
+    };
+    let entry_for_agent = |agent_name: &str| {
+        handoff
+            .entries
+            .iter()
+            .find(|entry| entry.agent_name == agent_name)
+            .expect("handoff entry for agent")
+    };
+
+    assert_eq!(handoff.command, "ops validation-handoff-summary");
+    assert_eq!(handoff.rows, handoff.entries.len());
+    assert!(handoff.entries.iter().all(|entry| {
+        entry.thread_id == "mail-thread-bd-qtnmv"
+            && (entry.agent_name == "malformed-agent" || entry.field_errors.is_empty())
+    }));
+    assert!(has_action("run_now", "launch_remote_proof"));
+    assert!(has_action("green_proof", "do_not_launch_green_proof"));
+    assert!(has_action("join_existing", "join_existing_or_wait"));
+    assert!(has_action("wait_for_capacity", "wait_for_capacity"));
+    assert!(has_action(
+        "worker_infrastructure",
+        "retry_remote_after_worker_infra"
+    ));
+    assert!(has_action("fail_closed_product", "surface_product_failure"));
+    assert!(has_action(
+        "record_source_only_blocker",
+        "record_source_only_blocker"
+    ));
+    assert!(has_action(
+        "steal_stale_work",
+        "retry_remote_with_fresh_fence"
+    ));
+    assert!(has_action(
+        "fail_closed_invalid_artifact",
+        "reject_invalid_artifact"
+    ));
+
+    assert!(entry("green_proof").green_closeout_allowed);
+    assert!(!entry("join_existing").green_closeout_allowed);
+    assert!(!entry("wait_for_capacity").cargo_launch_allowed);
+    assert!(entry("worker_infrastructure").cargo_launch_allowed);
+    assert!(entry("worker_infrastructure").recovery_action.is_some());
+    assert!(entry("fail_closed_product").fail_closed);
+    assert!(entry("record_source_only_blocker").fail_closed);
+    assert!(entry("fail_closed_invalid_artifact").fail_closed);
+    assert!(entry("steal_stale_work").cargo_launch_allowed);
+    let malformed = entry_for_agent("malformed-agent");
+    assert!(malformed.fail_closed);
+    assert!(!malformed.cargo_launch_allowed);
+    assert_eq!(malformed.cargo_action, "repair_handoff_input");
+    assert!(
+        malformed
+            .field_errors
+            .iter()
+            .any(|field| field == "missing_or_malformed_command_digest")
+    );
+    assert!(
+        malformed
+            .field_errors
+            .iter()
+            .any(|field| field == "malformed_recorder_path")
+    );
+    assert!(
+        malformed
+            .field_errors
+            .iter()
+            .any(|field| field == "malformed_latest_artifact_path")
+    );
+
+    assert!(markdown.contains("validation handoff summary"));
+    assert!(markdown.contains("thread: `mail-thread-bd-qtnmv`"));
+    assert!(markdown.contains("command_digest: `"));
+    assert!(markdown.contains("cargo: launch_allowed=false action=`join_existing_or_wait`"));
+    assert!(markdown.contains("field_errors: none"));
+    assert!(!markdown.contains("terminal scrollback"));
     Ok(())
 }
 
