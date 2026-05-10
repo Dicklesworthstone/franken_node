@@ -5,11 +5,15 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 // External dependencies for disk space detection
 extern crate fs2;
 
+use crate::runtime::hardware_planner::{
+    HardwarePlanner, HardwareProfile, PlacementDecision, PlacementPolicy, WorkloadRequest,
+};
 use crate::{bounded_read_to_string, push_bounded};
 
 /// Maximum diagnostic reasons to track per decision.
@@ -32,6 +36,10 @@ const MAX_AGENT_MAIL_RESERVATION_FILE_BYTES: u64 = 64 * 1024;
 
 /// Schema version for operator what-if simulation reports.
 pub const OPERATOR_WHAT_IF_SCHEMA_VERSION: &str = "franken-node/operator-what-if/v1";
+
+/// Schema version for workspace-pressure to hardware-planner bridge decisions.
+pub const WORKSPACE_HARDWARE_ADMISSION_SCHEMA_VERSION: &str =
+    "franken-node/workspace-hardware-admission/v1";
 
 /// Maximum structured log entries emitted by one what-if simulation.
 const MAX_OPERATOR_WHAT_IF_LOGS: usize = 32;
@@ -142,6 +150,45 @@ pub struct WorkspacePressureInputs {
     pub active_reservations: u32,
     /// Whether Agent Mail coordination is healthy.
     pub coordination_healthy: bool,
+}
+
+/// Optional deterministic topology snapshot used by hardware placement bridging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceHardwareTopologySnapshot {
+    pub snapshot_id: String,
+    pub cpu_cores: u32,
+    pub memory_bytes: u64,
+    pub numa_nodes: Option<u32>,
+    pub stale: bool,
+}
+
+/// Input for projecting workspace pressure into hardware-planner placement evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceHardwarePlacementInput {
+    pub bridge_id: String,
+    pub workload_id: String,
+    pub work_class: WorkCostClass,
+    pub bead_priority: u32,
+    pub requested_command: Option<String>,
+    pub workspace: WorkspacePressureInputs,
+    pub topology: Option<WorkspaceHardwareTopologySnapshot>,
+    pub timestamp_ms: u64,
+}
+
+/// Read-only placement bridge output. The bridge never launches work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceHardwarePlacementDecision {
+    pub schema_version: String,
+    pub bridge_id: String,
+    pub workload_id: String,
+    pub action: OperatorWhatIfAction,
+    pub reason_code: String,
+    pub policy_decision: PolicyDecision,
+    pub placement_decision: Option<PlacementDecision>,
+    pub target_profile_id: Option<String>,
+    pub approved_dispatch_notes: Vec<String>,
+    pub diagnostics: Vec<String>,
+    pub fail_closed: bool,
 }
 
 /// RCH queue state visible to an operator simulation.
@@ -750,6 +797,82 @@ impl WorkspacePressurePolicy {
             summary,
             diagnostic_reasons: limit_diagnostics(diagnostic_reasons),
             confidence,
+        }
+    }
+
+    /// Build read-only hardware placement evidence from workspace pressure.
+    pub fn plan_hardware_placement(
+        &self,
+        input: WorkspaceHardwarePlacementInput,
+    ) -> WorkspaceHardwarePlacementDecision {
+        let policy_decision =
+            self.decide_admission(input.work_class, input.bead_priority, &input.workspace);
+        let mut diagnostics = policy_decision.diagnostic_reasons.clone();
+        if input
+            .topology
+            .as_ref()
+            .and_then(|topology| topology.numa_nodes)
+            .unwrap_or(0)
+            == 0
+        {
+            push_bounded(
+                &mut diagnostics,
+                "NUMA topology unavailable; placement evidence downgraded".to_string(),
+                MAX_DIAGNOSTIC_REASONS,
+            );
+        }
+
+        let (action, reason_code, fail_closed) =
+            hardware_bridge_action(&input, &policy_decision.admission);
+        let mut approved_dispatch_notes = Vec::new();
+        let mut placement_decision = None;
+        let mut target_profile_id = None;
+
+        if matches!(
+            action,
+            OperatorWhatIfAction::Allow | OperatorWhatIfAction::RequireRch
+        ) {
+            match build_hardware_bridge_placement(&input, action) {
+                Ok(decision) => {
+                    target_profile_id = decision.target_profile_id.clone();
+                    push_bounded(
+                        &mut approved_dispatch_notes,
+                        hardware_bridge_dispatch_note(&input, action),
+                        MAX_DIAGNOSTIC_REASONS,
+                    );
+                    placement_decision = Some(decision);
+                }
+                Err(message) => {
+                    push_bounded(&mut diagnostics, message, MAX_DIAGNOSTIC_REASONS);
+                    return WorkspaceHardwarePlacementDecision {
+                        schema_version: WORKSPACE_HARDWARE_ADMISSION_SCHEMA_VERSION.to_string(),
+                        bridge_id: input.bridge_id,
+                        workload_id: input.workload_id,
+                        action: OperatorWhatIfAction::RefuseLocalFallback,
+                        reason_code: "HWP_BRIDGE_PLACEMENT_FAILED".to_string(),
+                        policy_decision,
+                        placement_decision: None,
+                        target_profile_id: None,
+                        approved_dispatch_notes,
+                        diagnostics: limit_diagnostics(diagnostics),
+                        fail_closed: true,
+                    };
+                }
+            }
+        }
+
+        WorkspaceHardwarePlacementDecision {
+            schema_version: WORKSPACE_HARDWARE_ADMISSION_SCHEMA_VERSION.to_string(),
+            bridge_id: input.bridge_id,
+            workload_id: input.workload_id,
+            action,
+            reason_code,
+            policy_decision,
+            placement_decision,
+            target_profile_id,
+            approved_dispatch_notes,
+            diagnostics: limit_diagnostics(diagnostics),
+            fail_closed,
         }
     }
 
@@ -1367,6 +1490,306 @@ fn render_operator_what_if_human_summary(
         input.rch_queue.available_slots,
         input.rch_queue.queued_jobs,
     )
+}
+
+fn hardware_bridge_action(
+    input: &WorkspaceHardwarePlacementInput,
+    admission: &AdmissionDecision,
+) -> (OperatorWhatIfAction, String, bool) {
+    if !input.workspace.memory_pressure.is_finite() {
+        return (
+            OperatorWhatIfAction::RefuseLocalFallback,
+            "HWP_BRIDGE_INVALID_PRESSURE_INPUT".to_string(),
+            true,
+        );
+    }
+
+    if input
+        .topology
+        .as_ref()
+        .is_some_and(|topology| topology.stale)
+    {
+        return (
+            OperatorWhatIfAction::RefuseLocalFallback,
+            "HWP_BRIDGE_STALE_TOPOLOGY".to_string(),
+            true,
+        );
+    }
+
+    match admission {
+        AdmissionDecision::RefuseLocalFallback => (
+            OperatorWhatIfAction::RefuseLocalFallback,
+            "HWP_BRIDGE_REFUSE_POLICY".to_string(),
+            true,
+        ),
+        AdmissionDecision::Queue { .. } => (
+            OperatorWhatIfAction::Queue,
+            "HWP_BRIDGE_QUEUE_POLICY".to_string(),
+            false,
+        ),
+        AdmissionDecision::Wait { .. } => (
+            OperatorWhatIfAction::Wait,
+            "HWP_BRIDGE_WAIT_POLICY".to_string(),
+            false,
+        ),
+        AdmissionDecision::RequireRch => (
+            OperatorWhatIfAction::RequireRch,
+            "HWP_BRIDGE_REQUIRE_RCH_POLICY".to_string(),
+            false,
+        ),
+        AdmissionDecision::AllowLocal => hardware_bridge_local_action(input),
+    }
+}
+
+fn hardware_bridge_local_action(
+    input: &WorkspaceHardwarePlacementInput,
+) -> (OperatorWhatIfAction, String, bool) {
+    if !input.work_class.prefers_rch() {
+        return (
+            OperatorWhatIfAction::Allow,
+            "HWP_BRIDGE_ALLOW_LOCAL_SOURCE".to_string(),
+            false,
+        );
+    }
+
+    match input.workspace.rch_available_slots {
+        Some(slots) if slots > 0 => (
+            OperatorWhatIfAction::RequireRch,
+            "HWP_BRIDGE_REQUIRE_RCH_FOR_COSTLY_WORK".to_string(),
+            false,
+        ),
+        Some(_) => (
+            OperatorWhatIfAction::Queue,
+            "HWP_BRIDGE_QUEUE_RCH_SATURATED".to_string(),
+            false,
+        ),
+        None => (
+            OperatorWhatIfAction::RefuseLocalFallback,
+            "HWP_BRIDGE_REFUSE_MISSING_RCH".to_string(),
+            true,
+        ),
+    }
+}
+
+fn build_hardware_bridge_placement(
+    input: &WorkspaceHardwarePlacementInput,
+    action: OperatorWhatIfAction,
+) -> Result<PlacementDecision, String> {
+    let mut planner = HardwarePlanner::default();
+    let profile = match action {
+        OperatorWhatIfAction::RequireRch => hardware_bridge_rch_profile(input)?,
+        OperatorWhatIfAction::Allow => hardware_bridge_local_profile(input)?,
+        OperatorWhatIfAction::Wait
+        | OperatorWhatIfAction::Queue
+        | OperatorWhatIfAction::RefuseLocalFallback => {
+            return Err("hardware bridge action does not permit placement".to_string());
+        }
+    };
+    let policy = PlacementPolicy::new(
+        hardware_bridge_policy_id(action),
+        "workspace pressure hardware admission bridge",
+        hardware_bridge_max_risk(input),
+    );
+    let policy_id = policy.policy_id.clone();
+    planner
+        .register_profile(profile, input.timestamp_ms, &input.bridge_id)
+        .map_err(|err| err.to_string())?;
+    planner
+        .register_policy(policy, input.timestamp_ms, &input.bridge_id)
+        .map_err(|err| err.to_string())?;
+
+    let request = WorkloadRequest {
+        workload_id: input.workload_id.clone(),
+        required_capabilities: hardware_bridge_required_capabilities(input.work_class, action),
+        max_risk: hardware_bridge_max_risk(input),
+        policy_id,
+        trace_id: input.bridge_id.clone(),
+    };
+    planner
+        .request_placement(&request, input.timestamp_ms)
+        .map_err(|err| err.to_string())
+}
+
+fn hardware_bridge_rch_profile(
+    input: &WorkspaceHardwarePlacementInput,
+) -> Result<HardwareProfile, String> {
+    let available_slots = input
+        .workspace
+        .rch_available_slots
+        .ok_or_else(|| "RCH slot count unavailable".to_string())?;
+    if available_slots == 0 {
+        return Err("RCH slots saturated".to_string());
+    }
+    let total_slots = available_slots.max(1);
+    let mut profile = HardwareProfile::new(
+        "rch-high-capacity",
+        "RCH high-capacity worker pool",
+        hardware_bridge_profile_capabilities(input.work_class, OperatorWhatIfAction::RequireRch),
+        hardware_bridge_profile_risk(input),
+        total_slots,
+    )
+    .map_err(|err| err.to_string())?;
+    profile.metadata.insert(
+        "rch_available_slots".to_string(),
+        available_slots.to_string(),
+    );
+    if let Some(topology) = &input.topology {
+        profile.metadata.insert(
+            "topology_snapshot".to_string(),
+            topology.snapshot_id.clone(),
+        );
+    }
+    Ok(profile)
+}
+
+fn hardware_bridge_local_profile(
+    input: &WorkspaceHardwarePlacementInput,
+) -> Result<HardwareProfile, String> {
+    let topology = input
+        .topology
+        .as_ref()
+        .ok_or_else(|| "local topology snapshot unavailable".to_string())?;
+    if topology.cpu_cores == 0 || topology.memory_bytes == 0 {
+        return Err("local topology snapshot is incomplete".to_string());
+    }
+    let total_slots = topology.cpu_cores.saturating_div(16).clamp(1, 64);
+    let mut profile = HardwareProfile::new(
+        "local-high-capacity",
+        "Local high-capacity workspace host",
+        hardware_bridge_profile_capabilities(input.work_class, OperatorWhatIfAction::Allow),
+        hardware_bridge_profile_risk(input),
+        total_slots,
+    )
+    .map_err(|err| err.to_string())?;
+    profile.used_slots = input.workspace.active_build_count.min(total_slots);
+    profile
+        .metadata
+        .insert("cpu_cores".to_string(), topology.cpu_cores.to_string());
+    profile.metadata.insert(
+        "memory_bytes".to_string(),
+        topology.memory_bytes.to_string(),
+    );
+    profile.metadata.insert(
+        "numa_nodes".to_string(),
+        topology.numa_nodes.unwrap_or_default().to_string(),
+    );
+    Ok(profile)
+}
+
+fn hardware_bridge_profile_capabilities(
+    work_class: WorkCostClass,
+    action: OperatorWhatIfAction,
+) -> BTreeSet<String> {
+    let mut capabilities = BTreeSet::new();
+    capabilities.insert(hardware_bridge_work_capability(work_class).to_string());
+    match action {
+        OperatorWhatIfAction::RequireRch => {
+            capabilities.insert("rch".to_string());
+            capabilities.insert("remote_worker".to_string());
+        }
+        OperatorWhatIfAction::Allow => {
+            capabilities.insert("local".to_string());
+            capabilities.insert("high_capacity".to_string());
+        }
+        OperatorWhatIfAction::Wait
+        | OperatorWhatIfAction::Queue
+        | OperatorWhatIfAction::RefuseLocalFallback => {}
+    }
+    capabilities
+}
+
+fn hardware_bridge_required_capabilities(
+    work_class: WorkCostClass,
+    action: OperatorWhatIfAction,
+) -> BTreeSet<String> {
+    hardware_bridge_profile_capabilities(work_class, action)
+}
+
+fn hardware_bridge_work_capability(work_class: WorkCostClass) -> &'static str {
+    match work_class {
+        WorkCostClass::Validation => "validation",
+        WorkCostClass::Fuzzing => "fuzzing",
+        WorkCostClass::Benchmark => "benchmark",
+        WorkCostClass::DocsGate => "docs_gate",
+        WorkCostClass::SourceOnly => "source_only",
+        WorkCostClass::Cleanup => "cleanup",
+    }
+}
+
+fn hardware_bridge_policy_id(action: OperatorWhatIfAction) -> &'static str {
+    match action {
+        OperatorWhatIfAction::Allow => "workspace-hardware-admission/local/v1",
+        OperatorWhatIfAction::RequireRch => "workspace-hardware-admission/rch/v1",
+        OperatorWhatIfAction::Wait
+        | OperatorWhatIfAction::Queue
+        | OperatorWhatIfAction::RefuseLocalFallback => "workspace-hardware-admission/none/v1",
+    }
+}
+
+fn hardware_bridge_max_risk(input: &WorkspaceHardwarePlacementInput) -> u32 {
+    if input.work_class.prefers_rch() {
+        50
+    } else {
+        80
+    }
+}
+
+fn hardware_bridge_profile_risk(input: &WorkspaceHardwarePlacementInput) -> u32 {
+    let memory_pressure = if input.workspace.memory_pressure.is_finite() {
+        input.workspace.memory_pressure.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let memory_risk = if memory_pressure >= 0.95 {
+        95
+    } else if memory_pressure >= 0.9 {
+        90
+    } else if memory_pressure >= 0.8 {
+        80
+    } else if memory_pressure >= 0.7 {
+        70
+    } else if memory_pressure >= 0.5 {
+        50
+    } else if memory_pressure >= 0.3 {
+        30
+    } else if memory_pressure >= 0.1 {
+        10
+    } else {
+        0
+    };
+    let build_risk = input
+        .workspace
+        .active_build_count
+        .saturating_mul(10)
+        .min(40);
+    memory_risk.saturating_add(build_risk).min(100)
+}
+
+fn hardware_bridge_dispatch_note(
+    input: &WorkspaceHardwarePlacementInput,
+    action: OperatorWhatIfAction,
+) -> String {
+    let command = input
+        .requested_command
+        .as_deref()
+        .unwrap_or("source-only proof");
+    match action {
+        OperatorWhatIfAction::RequireRch => {
+            format!(
+                "dispatch via {}",
+                render_simulated_command(input.work_class, action, command)
+            )
+        }
+        OperatorWhatIfAction::Allow => {
+            format!(
+                "local dispatch approved for {}",
+                hardware_bridge_work_capability(input.work_class)
+            )
+        }
+        OperatorWhatIfAction::Wait
+        | OperatorWhatIfAction::Queue
+        | OperatorWhatIfAction::RefuseLocalFallback => "no dispatch approved".to_string(),
+    }
 }
 
 /// Estimate size of temporary artifacts for cleanup analysis.
@@ -2093,6 +2516,182 @@ mod tests {
 
         let decision = policy.decide_admission(WorkCostClass::Benchmark, 1, &inputs);
         assert!(matches!(decision.admission, AdmissionDecision::RequireRch));
+    }
+
+    fn bridge_pressure_inputs(
+        active_build_count: u32,
+        rch_available_slots: Option<u32>,
+        memory_pressure: f32,
+    ) -> WorkspacePressureInputs {
+        WorkspacePressureInputs {
+            free_disk_bytes: 2_000_000_000,
+            target_dir_bytes: 1_000_000_000,
+            active_build_count,
+            rch_available_slots,
+            memory_pressure,
+            active_reservations: 3,
+            coordination_healthy: true,
+        }
+    }
+
+    fn bridge_topology(
+        cpu_cores: u32,
+        memory_bytes: u64,
+        numa_nodes: Option<u32>,
+    ) -> WorkspaceHardwareTopologySnapshot {
+        WorkspaceHardwareTopologySnapshot {
+            snapshot_id: format!("topology-{cpu_cores}-{memory_bytes}"),
+            cpu_cores,
+            memory_bytes,
+            numa_nodes,
+            stale: false,
+        }
+    }
+
+    fn bridge_input(
+        work_class: WorkCostClass,
+        workspace: WorkspacePressureInputs,
+        topology: Option<WorkspaceHardwareTopologySnapshot>,
+    ) -> WorkspaceHardwarePlacementInput {
+        WorkspaceHardwarePlacementInput {
+            bridge_id: format!("bridge-{work_class:?}"),
+            workload_id: format!("workload-{work_class:?}"),
+            work_class,
+            bead_priority: 1,
+            requested_command: Some("cargo test -p frankenengine-node validation".to_string()),
+            workspace,
+            topology,
+            timestamp_ms: 1_776_000_000_000,
+        }
+    }
+
+    #[test]
+    fn hardware_bridge_places_source_only_on_high_capacity_host() {
+        let policy = WorkspacePressurePolicy::with_balanced_defaults();
+        let decision = policy.plan_hardware_placement(bridge_input(
+            WorkCostClass::SourceOnly,
+            bridge_pressure_inputs(0, Some(8), 0.2),
+            Some(bridge_topology(96, 256 * 1024 * 1024 * 1024, Some(4))),
+        ));
+
+        assert_eq!(decision.action, OperatorWhatIfAction::Allow);
+        assert_eq!(decision.reason_code, "HWP_BRIDGE_ALLOW_LOCAL_SOURCE");
+        assert_eq!(
+            decision.target_profile_id.as_deref(),
+            Some("local-high-capacity")
+        );
+        assert!(!decision.fail_closed);
+        assert!(
+            decision
+                .placement_decision
+                .as_ref()
+                .is_some_and(|placement| placement
+                    .evidence
+                    .reasoning_chain
+                    .iter()
+                    .any(|step| step.contains("selected local-high-capacity")))
+        );
+    }
+
+    #[test]
+    fn hardware_bridge_requires_rch_for_validation_when_slots_exist() {
+        let policy = WorkspacePressurePolicy::with_balanced_defaults();
+        let decision = policy.plan_hardware_placement(bridge_input(
+            WorkCostClass::Validation,
+            bridge_pressure_inputs(1, Some(6), 0.35),
+            Some(bridge_topology(96, 256 * 1024 * 1024 * 1024, Some(4))),
+        ));
+
+        assert_eq!(decision.action, OperatorWhatIfAction::RequireRch);
+        assert_eq!(
+            decision.target_profile_id.as_deref(),
+            Some("rch-high-capacity")
+        );
+        assert!(
+            decision
+                .approved_dispatch_notes
+                .iter()
+                .any(|note| note.contains("rch exec -- cargo test"))
+        );
+        assert!(!decision.fail_closed);
+    }
+
+    #[test]
+    fn hardware_bridge_queues_when_rch_saturated_and_cpu_busy() {
+        let policy = WorkspacePressurePolicy::with_balanced_defaults();
+        let decision = policy.plan_hardware_placement(bridge_input(
+            WorkCostClass::Validation,
+            bridge_pressure_inputs(12, Some(0), 0.65),
+            Some(bridge_topology(96, 256 * 1024 * 1024 * 1024, Some(4))),
+        ));
+
+        assert_eq!(decision.action, OperatorWhatIfAction::Queue);
+        assert_eq!(decision.reason_code, "HWP_BRIDGE_QUEUE_POLICY");
+        assert!(decision.placement_decision.is_none());
+    }
+
+    #[test]
+    fn hardware_bridge_refuses_missing_rch_for_benchmark_work() {
+        let policy = WorkspacePressurePolicy::with_balanced_defaults();
+        let decision = policy.plan_hardware_placement(bridge_input(
+            WorkCostClass::Benchmark,
+            bridge_pressure_inputs(0, None, 0.3),
+            Some(bridge_topology(96, 256 * 1024 * 1024 * 1024, Some(4))),
+        ));
+
+        assert_eq!(decision.action, OperatorWhatIfAction::RefuseLocalFallback);
+        assert!(decision.fail_closed);
+        assert!(decision.placement_decision.is_none());
+    }
+
+    #[test]
+    fn hardware_bridge_reports_missing_numa_without_blocking_source_only() {
+        let policy = WorkspacePressurePolicy::with_balanced_defaults();
+        let decision = policy.plan_hardware_placement(bridge_input(
+            WorkCostClass::SourceOnly,
+            bridge_pressure_inputs(0, Some(8), 0.2),
+            Some(bridge_topology(96, 256 * 1024 * 1024 * 1024, None)),
+        ));
+
+        assert_eq!(decision.action, OperatorWhatIfAction::Allow);
+        assert!(
+            decision
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("NUMA topology unavailable"))
+        );
+    }
+
+    #[test]
+    fn hardware_bridge_fail_closes_stale_topology() {
+        let policy = WorkspacePressurePolicy::with_balanced_defaults();
+        let mut topology = bridge_topology(96, 256 * 1024 * 1024 * 1024, Some(4));
+        topology.stale = true;
+
+        let decision = policy.plan_hardware_placement(bridge_input(
+            WorkCostClass::SourceOnly,
+            bridge_pressure_inputs(0, Some(8), 0.2),
+            Some(topology),
+        ));
+
+        assert_eq!(decision.action, OperatorWhatIfAction::RefuseLocalFallback);
+        assert_eq!(decision.reason_code, "HWP_BRIDGE_STALE_TOPOLOGY");
+        assert!(decision.fail_closed);
+        assert!(decision.placement_decision.is_none());
+    }
+
+    #[test]
+    fn hardware_bridge_fail_closes_invalid_pressure_input() {
+        let policy = WorkspacePressurePolicy::with_balanced_defaults();
+        let decision = policy.plan_hardware_placement(bridge_input(
+            WorkCostClass::SourceOnly,
+            bridge_pressure_inputs(0, Some(8), f32::NAN),
+            Some(bridge_topology(96, 256 * 1024 * 1024 * 1024, Some(4))),
+        ));
+
+        assert_eq!(decision.action, OperatorWhatIfAction::RefuseLocalFallback);
+        assert_eq!(decision.reason_code, "HWP_BRIDGE_INVALID_PRESSURE_INPUT");
+        assert!(decision.fail_closed);
     }
 
     #[test]
