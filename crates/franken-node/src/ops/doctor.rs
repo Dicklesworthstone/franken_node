@@ -342,7 +342,7 @@ impl WorkspacePressureDoctor {
         // Policy decisions
         if !output.policy_decisions.is_empty() {
             report.push_str("🎯 Policy Decisions:\n");
-            for (_, decision) in &output.policy_decisions {
+            for decision in output.policy_decisions.values() {
                 let confidence_emoji = if decision.confidence >= 0.9 {
                     "🟢"
                 } else if decision.confidence >= 0.7 {

@@ -156,7 +156,7 @@ fn lock_validation_proof_coalescer_file(
         Err(err) => {
             return Err(ValidationProofCoalescerError::contract(
                 error_codes::ERR_VPCO_MALFORMED_LEASE,
-                &format!("failed acquiring flock for {}: {err}", lock_path.display()),
+                format!("failed acquiring flock for {}: {err}", lock_path.display()),
             ));
         }
     }
@@ -171,7 +171,7 @@ fn lock_validation_proof_coalescer_file(
             Err(err) => {
                 return Err(ValidationProofCoalescerError::contract(
                     error_codes::ERR_VPCO_MALFORMED_LEASE,
-                    &format!("failed acquiring flock for {}: {err}", lock_path.display()),
+                    format!("failed acquiring flock for {}: {err}", lock_path.display()),
                 ));
             }
         }
@@ -179,7 +179,7 @@ fn lock_validation_proof_coalescer_file(
 
     Err(ValidationProofCoalescerError::contract(
         error_codes::ERR_VPCO_MALFORMED_LEASE,
-        &format!(
+        format!(
             "validation proof coalescer file lock timeout for {}",
             lease_path.display()
         ),
@@ -194,7 +194,7 @@ fn unlock_validation_proof_coalescer_file(
     file.unlock().map_err(|err| {
         ValidationProofCoalescerError::contract(
             error_codes::ERR_VPCO_MALFORMED_LEASE,
-            &format!("failed releasing flock for {}: {err}", lock_path.display()),
+            format!("failed releasing flock for {}: {err}", lock_path.display()),
         )
     })
 }
@@ -208,7 +208,7 @@ fn with_validation_proof_coalescer_persist_lock<T>(
     fs::create_dir_all(parent).map_err(|err| {
         ValidationProofCoalescerError::contract(
             error_codes::ERR_VPCO_MALFORMED_LEASE,
-            &format!(
+            format!(
                 "failed creating lease parent directory {}: {err}",
                 parent.display()
             ),
@@ -225,7 +225,7 @@ fn with_validation_proof_coalescer_persist_lock<T>(
         .map_err(|err| {
             ValidationProofCoalescerError::contract(
                 error_codes::ERR_VPCO_MALFORMED_LEASE,
-                &format!("failed opening flock file {}: {err}", lock_path.display()),
+                format!("failed opening flock file {}: {err}", lock_path.display()),
             )
         })?;
 

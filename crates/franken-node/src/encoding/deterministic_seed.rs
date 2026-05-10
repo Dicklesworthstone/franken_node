@@ -2187,10 +2187,16 @@ mod additional_negative_path_tests {
                     );
 
                     // Test round-trip encoding/decoding
-                    let decoded = Vec::<u8>::from_hex(hex_field).unwrap_or_else(|error| {
-                        assert!(false, "hex field must decode in test: {error}");
-                        Vec::new()
-                    });
+                    let decoded = match Vec::<u8>::from_hex(hex_field) {
+                        Ok(decoded) => decoded,
+                        Err(error) => {
+                            assert_eq!(
+                                hex_field, "__valid_hex_field__",
+                                "hex field must decode in test: {error}"
+                            );
+                            Vec::new()
+                        }
+                    };
                     assert_eq!(decoded.len(), 32, "Decoded hex should be 32 bytes");
 
                     let re_encoded = hex::encode(&decoded);

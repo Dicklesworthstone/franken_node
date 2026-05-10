@@ -8,7 +8,7 @@ use crate::push_bounded;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -17,9 +17,6 @@ const MAX_CLEANUP_OPERATIONS: usize = 1000;
 
 /// Maximum diagnostic messages per cleanup receipt.
 const MAX_CLEANUP_DIAGNOSTICS: usize = 100;
-
-/// Maximum protected path patterns to track.
-const MAX_PROTECTED_PATTERNS: usize = 500;
 
 /// Minimum age threshold for cleanup eligibility (24 hours).
 const MIN_CLEANUP_AGE_SECONDS: u64 = 24 * 60 * 60;
@@ -552,17 +549,16 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
 
     fn check_protections(&self, path: &Path, age_seconds: u64) -> Option<(CleanupOutcome, String)> {
         // Check protected extensions
-        if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
-            if self
+        if let Some(extension) = path.extension().and_then(|ext| ext.to_str())
+            && self
                 .protection_rules
                 .protected_extensions
                 .contains(&format!(".{}", extension))
-            {
-                return Some((
-                    CleanupOutcome::SkippedProtected,
-                    format!("Extension .{} is protected", extension),
-                ));
-            }
+        {
+            return Some((
+                CleanupOutcome::SkippedProtected,
+                format!("Extension .{} is protected", extension),
+            ));
         }
 
         // Check protected directories

@@ -476,15 +476,14 @@ impl ValidationProofEconomicsGenerator {
         // Calculate average ages
         for entry in &debt_ledger.entries {
             let class_key = entry.debt_class.as_str().to_string();
-            if let Some(metrics) = debt_by_blocker_class.get_mut(&class_key) {
-                if metrics.total_debt > 0 {
-                    let age_seconds =
-                        (generated_at - entry.observed_at).num_seconds().max(0) as f64;
-                    metrics.average_age_seconds = (metrics.average_age_seconds
-                        * (metrics.total_debt.saturating_sub(1)) as f64
-                        + age_seconds)
-                        / metrics.total_debt as f64;
-                }
+            if let Some(metrics) = debt_by_blocker_class.get_mut(&class_key)
+                && metrics.total_debt > 0
+            {
+                let age_seconds = (generated_at - entry.observed_at).num_seconds().max(0) as f64;
+                metrics.average_age_seconds = (metrics.average_age_seconds
+                    * (metrics.total_debt.saturating_sub(1)) as f64
+                    + age_seconds)
+                    / metrics.total_debt as f64;
             }
         }
 

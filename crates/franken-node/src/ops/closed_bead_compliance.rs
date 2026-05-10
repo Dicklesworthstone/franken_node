@@ -309,7 +309,7 @@ pub fn audit_closed_bead_compliance(
     let evidence = input
         .evidence
         .get(..bounded_evidence_len)
-        .unwrap_or_else(|| input.evidence.as_slice());
+        .unwrap_or(input.evidence.as_slice());
     let evidence_summary = summarize_evidence(&bead_id, evidence);
     if input.evidence.len() > MAX_COMPLIANCE_EVIDENCE {
         warnings.push(format!(

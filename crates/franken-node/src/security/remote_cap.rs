@@ -2248,25 +2248,25 @@ impl CapabilityGate {
         if cap.single_use {
             if consume_single_use {
                 // Consume path: atomic check-and-consume to prevent replay races
-                if self.replay_store.is_memory_only() {
-                    if !self.consumed_tokens.insert_if_new(cap.token_id.clone()) {
-                        let err = RemoteCapError::ReplayDetected {
-                            token_id: cap.token_id.clone(),
-                        };
-                        self.push_audit(build_audit_event(
-                            "REMOTECAP_DENIED",
-                            "RC_CHECK_DENIED",
-                            Some(cap.token_id.clone()),
-                            Some(cap.issuer_identity.clone()),
-                            Some(operation),
-                            Some(endpoint.to_string()),
-                            trace_id.to_string(),
-                            now_epoch_secs,
-                            false,
-                            Some(err.code().to_string()),
-                        ));
-                        return Err(err);
-                    }
+                if self.replay_store.is_memory_only()
+                    && !self.consumed_tokens.insert_if_new(cap.token_id.clone())
+                {
+                    let err = RemoteCapError::ReplayDetected {
+                        token_id: cap.token_id.clone(),
+                    };
+                    self.push_audit(build_audit_event(
+                        "REMOTECAP_DENIED",
+                        "RC_CHECK_DENIED",
+                        Some(cap.token_id.clone()),
+                        Some(cap.issuer_identity.clone()),
+                        Some(operation),
+                        Some(endpoint.to_string()),
+                        trace_id.to_string(),
+                        now_epoch_secs,
+                        false,
+                        Some(err.code().to_string()),
+                    ));
+                    return Err(err);
                 }
 
                 if let Some(replay_key) = replay_key.as_deref() {

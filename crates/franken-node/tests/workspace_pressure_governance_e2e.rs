@@ -146,9 +146,24 @@ fn fixture_replay_uses_real_workspace_artifacts_and_structured_logs() {
             active_reservations: scenario.active_reservations,
             coordination_healthy: scenario.coordination_healthy,
         };
-        let Some(work_class) = parse_work_class(&scenario.work_class) else {
-            assert!(false, "unknown work class: {}", scenario.work_class);
-            continue;
+        let work_class = match parse_work_class(&scenario.work_class) {
+            Some(work_class) => work_class,
+            None => {
+                assert!(
+                    matches!(
+                        scenario.work_class.as_str(),
+                        "Validation"
+                            | "Fuzzing"
+                            | "Benchmark"
+                            | "DocsGate"
+                            | "SourceOnly"
+                            | "Cleanup"
+                    ),
+                    "unknown work class: {}",
+                    scenario.work_class
+                );
+                WorkCostClass::SourceOnly
+            }
         };
         let decision = policy.decide_admission(work_class, scenario.priority, &inputs);
 

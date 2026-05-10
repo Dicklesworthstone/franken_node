@@ -1913,11 +1913,7 @@ pub fn execute_cleanup<A: CleanupAdapter>(
     }
 
     let completed_at = now;
-    let event_code = if request.mode.is_destructive() {
-        event_codes::CLEANUP_COMPLETED
-    } else {
-        event_codes::CLEANUP_COMPLETED
-    };
+    let event_code = event_codes::CLEANUP_COMPLETED;
 
     Ok(CleanupReceipt {
         schema_version: CLEANUP_RECEIPT_SCHEMA_VERSION.to_string(),

@@ -30,6 +30,7 @@ fn hash_pair_bytes(left: &[u8], right: &[u8]) -> [u8; 32] {
 /// Compute a deterministic hash of two hex strings combined.
 /// Uses full-width SHA-256 output (64 hex chars) to avoid weakened collision
 /// resistance from truncation.
+#[cfg(test)]
 fn hash_pair(left: &str, right: &str) -> String {
     let mut h = Sha256::new();
     h.update(b"transparency_interior_v1:");

@@ -8,7 +8,7 @@ use frankenengine_node::ops::cleanup_executor::{
     FilesystemDeletionAdapter, MockDeletionAdapter,
 };
 use frankenengine_node::ops::workspace_pressure_policy::{
-    CleanupCandidate, PolicyThresholds, WorkspacePressureInputs, WorkspacePressurePolicy,
+    CleanupCandidate, WorkspacePressureInputs, WorkspacePressurePolicy,
 };
 use frankenengine_node::storage::cleanup_receipts::{CleanupReceiptsStorage, ReceiptSearchFilter};
 use std::collections::BTreeSet;
@@ -33,9 +33,10 @@ fn create_candidate(
 }
 
 fn test_cleanup_rules() -> CleanupProtectionRules {
-    let mut rules = CleanupProtectionRules::default();
-    rules.min_age_seconds = 0;
-    rules
+    CleanupProtectionRules {
+        min_age_seconds: 0,
+        ..CleanupProtectionRules::default()
+    }
 }
 
 /// Create temporary test files for cleanup testing.

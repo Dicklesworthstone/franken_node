@@ -511,20 +511,15 @@ pub enum FlightRecorderTargetDirClass {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlightRecorderTargetDirHygieneStatus {
     Clean,
     Stale,
     Dirty,
     Mixed,
+    #[default]
     Unknown,
-}
-
-impl Default for FlightRecorderTargetDirHygieneStatus {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -552,20 +547,15 @@ impl Default for FlightRecorderTargetDirHygiene {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlightRecorderSyncRootHygieneStatus {
     Clean,
     Modified,
     Untracked,
     Conflicted,
+    #[default]
     Unknown,
-}
-
-impl Default for FlightRecorderSyncRootHygieneStatus {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3485,23 +3475,23 @@ pub mod hygiene_detector {
         result.total_entries = result.total_entries.saturating_add(1);
         result.total_size = result.total_size.saturating_add(metadata.len());
 
-        if let Ok(modified) = metadata.modified() {
-            if let Ok(age) = now.duration_since(modified) {
-                let age_seconds = age.as_secs().min(u32::MAX as u64) as u32;
+        if let Ok(modified) = metadata.modified()
+            && let Ok(age) = now.duration_since(modified)
+        {
+            let age_seconds = age.as_secs().min(u32::MAX as u64) as u32;
 
-                if age > stale_threshold {
-                    result.stale_entries = result.stale_entries.saturating_add(1);
-                }
+            if age > stale_threshold {
+                result.stale_entries = result.stale_entries.saturating_add(1);
+            }
 
-                match result.oldest_age_seconds {
-                    None => result.oldest_age_seconds = Some(age_seconds),
-                    Some(current) => result.oldest_age_seconds = Some(age_seconds.max(current)),
-                }
+            match result.oldest_age_seconds {
+                None => result.oldest_age_seconds = Some(age_seconds),
+                Some(current) => result.oldest_age_seconds = Some(age_seconds.max(current)),
+            }
 
-                match result.newest_age_seconds {
-                    None => result.newest_age_seconds = Some(age_seconds),
-                    Some(current) => result.newest_age_seconds = Some(age_seconds.min(current)),
-                }
+            match result.newest_age_seconds {
+                None => result.newest_age_seconds = Some(age_seconds),
+                Some(current) => result.newest_age_seconds = Some(age_seconds.min(current)),
             }
         }
 
@@ -3561,7 +3551,7 @@ pub mod hygiene_detector {
                 continue;
             }
 
-            let index_status = line.chars().nth(0);
+            let index_status = line.chars().next();
             let worktree_status = line.chars().nth(1);
 
             match (index_status, worktree_status) {

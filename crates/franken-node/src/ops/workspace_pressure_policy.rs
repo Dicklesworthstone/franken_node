@@ -12,9 +12,6 @@ extern crate fs2;
 
 use crate::{bounded_read_to_string, push_bounded};
 
-/// Maximum cleanup candidates to suggest in one decision.
-const MAX_CLEANUP_CANDIDATES: usize = 100;
-
 /// Maximum diagnostic reasons to track per decision.
 const MAX_DIAGNOSTIC_REASONS: usize = 32;
 
@@ -774,19 +771,17 @@ impl WorkspacePressurePolicy {
         }
 
         // Add temp file cleanup candidates if disk pressure high
-        if inputs.free_disk_bytes < self.thresholds.min_free_disk_bytes.saturating_mul(2) {
-            if let Ok(temp_size) = estimate_temp_artifacts_size() {
-                if temp_size > 100_000_000 {
-                    // 100MB
-                    candidates.push(CleanupCandidate {
-                        path: "/tmp/cargo-*".into(),
-                        size_bytes: temp_size,
-                        reason: "Temporary cargo artifacts consuming space".to_string(),
-                        requires_approval: false,
-                        mtime: None,
-                    });
-                }
-            }
+        if inputs.free_disk_bytes < self.thresholds.min_free_disk_bytes.saturating_mul(2)
+            && let Ok(temp_size) = estimate_temp_artifacts_size()
+            && temp_size > 100_000_000
+        {
+            candidates.push(CleanupCandidate {
+                path: "/tmp/cargo-*".into(),
+                size_bytes: temp_size,
+                reason: "Temporary cargo artifacts consuming space".to_string(),
+                requires_approval: false,
+                mtime: None,
+            });
         }
 
         candidates
@@ -1053,6 +1048,10 @@ impl WorkspacePressurePolicy {
         false
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "admission scoring intentionally keeps the normalized pressure inputs visible"
+    )]
     fn compute_admission_decision(
         &self,
         work_class: WorkCostClass,
@@ -1338,6 +1337,10 @@ fn command_is_cargo_heavy(command: &str) -> bool {
         || command.contains(" cargo ")
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "operator what-if summaries render independent contract fields explicitly"
+)]
 fn render_operator_what_if_human_summary(
     input: &OperatorWhatIfInput,
     action: OperatorWhatIfAction,
@@ -1380,12 +1383,12 @@ fn estimate_temp_artifacts_size() -> std::io::Result<u64> {
             };
             if let Ok(entries) = std::fs::read_dir("/tmp") {
                 for entry in entries.flatten() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        if name.starts_with(name_prefix) {
-                            // Remove "/tmp/" prefix
-                            if let Ok(size) = calculate_directory_size_safe(&entry.path()) {
-                                total = total.saturating_add(size);
-                            }
+                    if let Some(name) = entry.file_name().to_str()
+                        && name.starts_with(name_prefix)
+                    {
+                        // Remove "/tmp/" prefix
+                        if let Ok(size) = calculate_directory_size_safe(entry.path()) {
+                            total = total.saturating_add(size);
                         }
                     }
                 }
@@ -1457,14 +1460,14 @@ fn validate_optional_ledger_text(
     field: &'static str,
     value: Option<&str>,
 ) -> Result<(), AgentCommandLedgerError> {
-    if let Some(value) = value {
-        if value.len() > MAX_AGENT_COMMAND_FIELD_BYTES {
-            return Err(AgentCommandLedgerError::StringTooLong {
-                field,
-                len: value.len(),
-                max: MAX_AGENT_COMMAND_FIELD_BYTES,
-            });
-        }
+    if let Some(value) = value
+        && value.len() > MAX_AGENT_COMMAND_FIELD_BYTES
+    {
+        return Err(AgentCommandLedgerError::StringTooLong {
+            field,
+            len: value.len(),
+            max: MAX_AGENT_COMMAND_FIELD_BYTES,
+        });
     }
     Ok(())
 }
@@ -1551,11 +1554,11 @@ fn redact_protected_command_text(command_summary: &str) -> String {
             continue;
         }
 
-        if let Some((key, _value)) = token.split_once('=') {
-            if contains_secret_marker(key) {
-                redacted.push(format!("{key}=<redacted>"));
-                continue;
-            }
+        if let Some((key, _value)) = token.split_once('=')
+            && contains_secret_marker(key)
+        {
+            redacted.push(format!("{key}=<redacted>"));
+            continue;
         }
 
         redacted.push(token.to_string());

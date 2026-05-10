@@ -6359,7 +6359,7 @@ fn get_target_directory_size() -> Result<u64> {
 fn get_active_build_count() -> Result<u32> {
     use std::process::Command;
 
-    let output = Command::new("pgrep").args(&["-f", "cargo|rustc"]).output();
+    let output = Command::new("pgrep").args(["-f", "cargo|rustc"]).output();
 
     match output {
         Ok(result) => {
@@ -6373,7 +6373,7 @@ fn get_active_build_count() -> Result<u32> {
 fn get_rch_available_slots() -> Option<u32> {
     use std::process::Command;
 
-    let output = Command::new("rch").args(&["status", "--json"]).output();
+    let output = Command::new("rch").args(["status", "--json"]).output();
 
     match output {
         Ok(result) if result.status.success() => {
@@ -10256,10 +10256,10 @@ fn estimate_workspace_artifacts() -> usize {
 
     if let Ok(entries) = std::fs::read_dir("/tmp") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.contains("cargo") || name.contains("rust") || name.contains("rch") {
-                    count = count.saturating_add(1);
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && (name.contains("cargo") || name.contains("rust") || name.contains("rch"))
+            {
+                count = count.saturating_add(1);
             }
         }
     }
@@ -10292,12 +10292,11 @@ fn estimate_disposable_bytes() -> u64 {
     // Temp directories
     if let Ok(entries) = std::fs::read_dir("/tmp") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.contains("cargo") || name.contains("rust") || name.contains("rch") {
-                    if let Ok(size) = calculate_directory_size(&entry.path()) {
-                        total = total.saturating_add(size);
-                    }
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && (name.contains("cargo") || name.contains("rust") || name.contains("rch"))
+                && let Ok(size) = calculate_directory_size(entry.path())
+            {
+                total = total.saturating_add(size);
             }
         }
     }
@@ -10315,10 +10314,10 @@ fn count_target_directories() -> usize {
     // Count temp target directories
     if let Ok(entries) = std::fs::read_dir("/tmp") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.contains("target") || name.contains("cargo") {
-                    count = count.saturating_add(1);
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && (name.contains("target") || name.contains("cargo"))
+            {
+                count = count.saturating_add(1);
             }
         }
     }
@@ -11065,35 +11064,35 @@ fn build_doctor_report_with_cwd_and_policy_input(
         "DR-WORKSPACE-001",
         "DOC-WSP-001",
         "workspace.inventory",
-        || evaluate_workspace_inventory_pressure(),
+        evaluate_workspace_inventory_pressure,
     ));
 
     checks.push(evaluate_doctor_check(
         "DR-WORKSPACE-002",
         "DOC-WSP-002",
         "workspace.build_pressure",
-        || evaluate_build_pressure(),
+        evaluate_build_pressure,
     ));
 
     checks.push(evaluate_doctor_check(
         "DR-WORKSPACE-003",
         "DOC-WSP-003",
         "workspace.rch_availability",
-        || evaluate_rch_availability(),
+        evaluate_rch_availability,
     ));
 
     checks.push(evaluate_doctor_check(
         "DR-WORKSPACE-004",
         "DOC-WSP-004",
         "workspace.coordination",
-        || evaluate_coordination_health(),
+        evaluate_coordination_health,
     ));
 
     checks.push(evaluate_doctor_check(
         "DR-WORKSPACE-005",
         "DOC-WSP-005",
         "workspace.reservations",
-        || evaluate_active_reservations(),
+        evaluate_active_reservations,
     ));
 
     // DR-RESOURCE-GOVERNOR-014: Check workspace resource pressure monitoring

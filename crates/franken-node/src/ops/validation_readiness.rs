@@ -1038,52 +1038,51 @@ fn summarize_validation_readiness(
             flight_recorder_refs_count = flight_recorder_refs_count.saturating_add(1);
         }
 
-        if status.status == ProofStatusKind::Failed {
-            if let Some(ref flight_ref) = status.flight_recorder_ref {
-                // Extract failure domain information
-                let domain = status
-                    .exit
-                    .as_ref()
-                    .map_or(ValidationFailureDomain::Unknown, failure_domain_for_exit);
+        if status.status == ProofStatusKind::Failed
+            && let Some(ref flight_ref) = status.flight_recorder_ref
+        {
+            // Extract failure domain information
+            let domain = status
+                .exit
+                .as_ref()
+                .map_or(ValidationFailureDomain::Unknown, failure_domain_for_exit);
 
-                // Determine if this failure is retryable based on recovery planner
-                let (retryable, recovery_plan) = if let Some(ref exit) = status.exit {
-                    let decision = recovery_decision_for_exit(exit, status.thread_id.as_str());
-                    let is_retryable = recovery_action_is_retryable(decision.action);
-                    (is_retryable, Some(decision))
-                } else {
-                    (false, None)
-                };
+            // Determine if this failure is retryable based on recovery planner
+            let (retryable, recovery_plan) = if let Some(ref exit) = status.exit {
+                let decision = recovery_decision_for_exit(exit, status.thread_id.as_str());
+                let is_retryable = recovery_action_is_retryable(decision.action);
+                (is_retryable, Some(decision))
+            } else {
+                (false, None)
+            };
 
-                failed_attempt_details.push(FailedAttemptSummary {
+            failed_attempt_details.push(FailedAttemptSummary {
+                bead_id: status.bead_id.clone(),
+                thread_id: status.thread_id.clone(),
+                flight_recorder_path: Some(flight_ref.attempt_path.clone()),
+                outcome_class: flight_outcome_class_as_str(flight_ref.outcome_class).to_string(),
+                execution_mode: rch_mode_as_str(flight_ref.execution_mode).to_string(),
+                worker_id: flight_ref.worker_id.clone(),
+                reason_code: flight_ref.reason_code.clone(),
+                retryable,
+                product_failure: domain == ValidationFailureDomain::Product,
+                last_attempt_at: status.observed_at,
+            });
+
+            // Add recovery plan if retryable
+            if let Some(recovery) = recovery_plan
+                && retryable
+            {
+                pending_recoveries.push(RecoveryPlanSummary {
                     bead_id: status.bead_id.clone(),
                     thread_id: status.thread_id.clone(),
-                    flight_recorder_path: Some(flight_ref.attempt_path.clone()),
-                    outcome_class: flight_outcome_class_as_str(flight_ref.outcome_class)
-                        .to_string(),
-                    execution_mode: rch_mode_as_str(flight_ref.execution_mode).to_string(),
-                    worker_id: flight_ref.worker_id.clone(),
-                    reason_code: flight_ref.reason_code.clone(),
-                    retryable,
-                    product_failure: domain == ValidationFailureDomain::Product,
-                    last_attempt_at: status.observed_at,
+                    action: format!("{:?}", recovery.action),
+                    reason_code: recovery.reason_code,
+                    required_action: recovery.required_action,
+                    retry_after_ms: recovery.retry_after_ms,
+                    worker_preference: recovery.worker_preference,
+                    fail_closed: matches!(recovery.action, RecoveryAction::FailClosed),
                 });
-
-                // Add recovery plan if retryable
-                if let Some(recovery) = recovery_plan {
-                    if retryable {
-                        pending_recoveries.push(RecoveryPlanSummary {
-                            bead_id: status.bead_id.clone(),
-                            thread_id: status.thread_id.clone(),
-                            action: format!("{:?}", recovery.action),
-                            reason_code: recovery.reason_code,
-                            required_action: recovery.required_action,
-                            retry_after_ms: recovery.retry_after_ms,
-                            worker_preference: recovery.worker_preference,
-                            fail_closed: matches!(recovery.action, RecoveryAction::FailClosed),
-                        });
-                    }
-                }
             }
         }
     }
@@ -1119,19 +1118,19 @@ fn summarize_validation_readiness(
                 });
 
                 // Add recovery plan if retryable
-                if let Some(recovery) = recovery_plan {
-                    if retryable {
-                        pending_recoveries.push(RecoveryPlanSummary {
-                            bead_id: receipt.bead_id.clone(),
-                            thread_id: receipt.thread_id.clone(),
-                            action: format!("{:?}", recovery.action),
-                            reason_code: recovery.reason_code,
-                            required_action: recovery.required_action,
-                            retry_after_ms: recovery.retry_after_ms,
-                            worker_preference: recovery.worker_preference,
-                            fail_closed: matches!(recovery.action, RecoveryAction::FailClosed),
-                        });
-                    }
+                if let Some(recovery) = recovery_plan
+                    && retryable
+                {
+                    pending_recoveries.push(RecoveryPlanSummary {
+                        bead_id: receipt.bead_id.clone(),
+                        thread_id: receipt.thread_id.clone(),
+                        action: format!("{:?}", recovery.action),
+                        reason_code: recovery.reason_code,
+                        required_action: recovery.required_action,
+                        retry_after_ms: recovery.retry_after_ms,
+                        worker_preference: recovery.worker_preference,
+                        fail_closed: matches!(recovery.action, RecoveryAction::FailClosed),
+                    });
                 }
             }
         }

@@ -3,13 +3,12 @@
 //! Provides durable audit trail for cleanup operations with retrieval and
 //! search capabilities for compliance and forensics.
 
-use crate::ops::cleanup_executor::{CleanupMode, CleanupOutcome, CleanupReceipt};
-use crate::push_bounded;
+use crate::ops::cleanup_executor::{CleanupMode, CleanupReceipt};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Maximum receipts to return in search results.
 const MAX_RECEIPT_SEARCH_RESULTS: usize = 1000;
@@ -117,10 +116,10 @@ impl CleanupReceiptsStorage {
     /// Create storage manager with custom directory.
     pub fn with_directory(storage_dir: PathBuf) -> Result<Self, CleanupReceiptsError> {
         // Ensure storage directory exists (TOCTOU-safe)
-        if let Err(e) = fs::create_dir_all(&storage_dir) {
-            if e.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(e.into());
-            }
+        if let Err(e) = fs::create_dir_all(&storage_dir)
+            && e.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(e.into());
         }
 
         let mut storage = Self {
@@ -214,7 +213,7 @@ impl CleanupReceiptsStorage {
         // Collect matching references first to avoid per-result clones
         let mut matching_refs = Vec::new();
 
-        for (_, metadata) in &self.index.receipts {
+        for metadata in self.index.receipts.values() {
             if self.matches_filter(metadata, filter) {
                 if matching_refs.len() < MAX_RECEIPT_SEARCH_RESULTS {
                     matching_refs.push(metadata);
@@ -225,7 +224,7 @@ impl CleanupReceiptsStorage {
         }
 
         // Sort references by timestamp (newest first)
-        matching_refs.sort_by(|a, b| b.initiated_at.cmp(&a.initiated_at));
+        matching_refs.sort_by_key(|metadata| std::cmp::Reverse(metadata.initiated_at));
 
         // Clone only the final sorted results
         matching_refs.into_iter().cloned().collect()
@@ -252,7 +251,7 @@ impl CleanupReceiptsStorage {
     /// Get recent receipts (last N).
     pub fn get_recent_receipts(&self, limit: usize) -> Vec<ReceiptMetadata> {
         let mut all_receipts: Vec<_> = self.index.receipts.values().cloned().collect();
-        all_receipts.sort_by(|a, b| b.initiated_at.cmp(&a.initiated_at));
+        all_receipts.sort_by_key(|metadata| std::cmp::Reverse(metadata.initiated_at));
         all_receipts.truncate(limit);
         all_receipts
     }
@@ -266,10 +265,10 @@ impl CleanupReceiptsStorage {
             .ok_or_else(|| CleanupReceiptsError::ReceiptNotFound(receipt_id.to_string()))?;
 
         // Remove file atomically (TOCTOU-safe)
-        if let Err(e) = fs::remove_file(&metadata.file_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(e.into());
-            }
+        if let Err(e) = fs::remove_file(&metadata.file_path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(e.into());
         }
 
         self.index.last_updated = Utc::now();
@@ -315,46 +314,46 @@ impl CleanupReceiptsStorage {
     }
 
     fn matches_filter(&self, metadata: &ReceiptMetadata, filter: &ReceiptSearchFilter) -> bool {
-        if let Some(ref actor) = filter.actor {
-            if metadata.actor != *actor {
-                return false;
-            }
+        if let Some(ref actor) = filter.actor
+            && metadata.actor != *actor
+        {
+            return false;
         }
 
-        if let Some(ref bead_id) = filter.bead_id {
-            if metadata.bead_id.as_ref() != Some(bead_id) {
-                return false;
-            }
+        if let Some(ref bead_id) = filter.bead_id
+            && metadata.bead_id.as_ref() != Some(bead_id)
+        {
+            return false;
         }
 
-        if let Some(mode) = filter.mode {
-            if metadata.mode != mode {
-                return false;
-            }
+        if let Some(mode) = filter.mode
+            && metadata.mode != mode
+        {
+            return false;
         }
 
-        if let Some(since) = filter.since {
-            if metadata.initiated_at < since {
-                return false;
-            }
+        if let Some(since) = filter.since
+            && metadata.initiated_at < since
+        {
+            return false;
         }
 
-        if let Some(until) = filter.until {
-            if metadata.initiated_at > until {
-                return false;
-            }
+        if let Some(until) = filter.until
+            && metadata.initiated_at > until
+        {
+            return false;
         }
 
-        if let Some(min_bytes) = filter.min_bytes_freed {
-            if metadata.bytes_freed < min_bytes {
-                return false;
-            }
+        if let Some(min_bytes) = filter.min_bytes_freed
+            && metadata.bytes_freed < min_bytes
+        {
+            return false;
         }
 
-        if let Some(min_success) = filter.min_success_rate {
-            if metadata.success_rate < min_success {
-                return false;
-            }
+        if let Some(min_success) = filter.min_success_rate
+            && metadata.success_rate < min_success
+        {
+            return false;
         }
 
         true
@@ -415,7 +414,7 @@ impl CleanupReceiptsStorage {
 
         // Collect and sort by timestamp
         let mut entries: Vec<_> = self.index.receipts.iter().collect();
-        entries.sort_by(|a, b| a.1.initiated_at.cmp(&b.1.initiated_at));
+        entries.sort_by_key(|entry| entry.1.initiated_at);
 
         // Collect keys to remove first, then remove them
         let to_remove = entries.len() - target_size;
@@ -501,7 +500,7 @@ pub fn generate_cleanup_audit_report(storage: &CleanupReceiptsStorage) -> String
             report.push_str(&format!(
                 "- {}: {} by {} ({} ops, {:.1}% success, {} freed)\n",
                 receipt.initiated_at.format("%Y-%m-%d %H:%M"),
-                receipt.mode.to_string(),
+                receipt.mode,
                 receipt.actor,
                 receipt.operation_count,
                 receipt.success_rate * 100.0,

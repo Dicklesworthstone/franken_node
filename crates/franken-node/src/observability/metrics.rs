@@ -328,13 +328,14 @@ fn render_metric_value_to_buffer(value: f64, output: &mut String) {
     write!(output, "{}", value).expect("write metric value to String never fails");
 }
 
-// Keep original functions for backward compatibility (if needed elsewhere)
+#[cfg(test)]
 fn render_labels(labels: &[(String, String)]) -> String {
     let mut rendered = String::new();
     render_labels_to_buffer(labels, &mut rendered);
     rendered
 }
 
+#[cfg(test)]
 fn render_metric_value(value: f64) -> String {
     let mut rendered = String::new();
     render_metric_value_to_buffer(value, &mut rendered);

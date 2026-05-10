@@ -76,10 +76,6 @@ impl TaskId {
         Self(counter)
     }
 
-    fn as_u64(&self) -> u64 {
-        self.0
-    }
-
     /// Parse a task ID string in "task-{:08}" format back to TaskId.
     fn from_str(s: &str) -> Option<Self> {
         s.strip_prefix("task-")

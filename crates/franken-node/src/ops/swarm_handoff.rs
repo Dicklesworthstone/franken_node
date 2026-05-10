@@ -1323,7 +1323,7 @@ pub fn score_cross_agent_overlap_risk(
             && !holder_is_candidate
             && issue
                 .and_then(|issue| issue.assignee.as_deref())
-                .map_or(true, |assignee| assignee != reservation.holder_agent);
+                .is_none_or(|assignee| assignee != reservation.holder_agent);
 
         if br_mail_disagrees {
             conflicts.push(overlap_conflict(
@@ -2646,6 +2646,10 @@ fn overlap_suggested_action(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "small conflict constructor keeps call sites readable at the scoring point"
+)]
 fn overlap_conflict(
     kind: SwarmOverlapConflictKind,
     risk_level: SwarmOverlapRiskLevel,

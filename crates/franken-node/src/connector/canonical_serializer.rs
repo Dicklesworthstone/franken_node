@@ -214,9 +214,9 @@ impl SignaturePreimage {
     /// eliminating the need for a temporary Vec allocation in hash computation paths.
     /// Layout: \[version\]\[domain_tag_0\]\[domain_tag_1\]\[payload...\]
     pub fn feed_into_hasher<D: Digest>(&self, hasher: &mut D) {
-        hasher.update(&[self.version]);
-        hasher.update(&self.domain_tag);
-        hasher.update(&self.canonical_payload);
+        hasher.update([self.version]);
+        hasher.update(self.domain_tag);
+        hasher.update(self.canonical_payload.as_slice());
     }
 
     /// Byte length of the preimage.

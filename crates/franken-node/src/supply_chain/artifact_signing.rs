@@ -199,9 +199,9 @@ impl ChecksumManifest {
         let mut buf = String::with_capacity(estimated_size);
         for entry in self.entries.values() {
             use std::fmt::Write;
-            write!(
+            writeln!(
                 buf,
-                "{}  {}  {}\n",
+                "{}  {}  {}",
                 entry.sha256, entry.name, entry.size_bytes
             )
             .expect("writing to String never fails");

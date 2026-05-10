@@ -1145,6 +1145,10 @@ const fn closeout_log_severity(status: ValidationCloseoutStatus) -> &'static str
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "closeout rendering intentionally spells out independent evidence facets"
+)]
 fn render_close_reason(
     receipt: &ValidationReceipt,
     status: ValidationCloseoutStatus,
@@ -1244,6 +1248,10 @@ fn render_close_reason(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "agent-mail rendering intentionally spells out independent evidence facets"
+)]
 fn render_agent_mail_markdown(
     receipt: &ValidationReceipt,
     status: ValidationCloseoutStatus,
