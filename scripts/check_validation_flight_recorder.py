@@ -42,6 +42,7 @@ FIXTURES_FILE = (
     / "artifacts/validation_broker/bd-2zn9k/validation_flight_recorder_fixtures.v1.json"
 )
 SCRIPT_FILE = ROOT / "scripts/check_validation_flight_recorder.py"
+TEST_FILE = ROOT / "tests/test_check_validation_flight_recorder.py"
 
 ERR_INVALID_SCHEMA_VERSION = "ERR_VFR_INVALID_SCHEMA_VERSION"
 ERR_MALFORMED_ATTEMPT = "ERR_VFR_MALFORMED_ATTEMPT"
@@ -66,6 +67,8 @@ REQUIRED_SPEC_MARKERS = [
     "Proof Lane Reroute Policy",
     "Validation Proof Explanation Bundle",
     EXPLANATION_BUNDLE_SCHEMA_VERSION,
+    "python3 scripts/check_validation_flight_recorder.py --json",
+    "tests/test_check_validation_flight_recorder.py",
     "ValidationFlightRecorderAttempt",
     "ValidationFlightRecorderRecovery",
     "command digest is missing",
@@ -1621,6 +1624,7 @@ def _check_files() -> list[dict[str, Any]]:
         _check("spec_exists", SPEC_FILE.is_file(), str(SPEC_FILE)),
         _check("fixtures_exist", FIXTURES_FILE.is_file(), str(FIXTURES_FILE)),
         _check("script_exists", SCRIPT_FILE.is_file(), str(SCRIPT_FILE)),
+        _check("test_exists", TEST_FILE.is_file(), str(TEST_FILE)),
     ]
 
 

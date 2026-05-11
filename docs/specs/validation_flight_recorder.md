@@ -49,6 +49,31 @@ Recommended files:
 All paths embedded in recorder JSON must be repo-relative, non-empty, and free
 of NUL bytes. Absolute paths and `..` path traversal segments are invalid.
 
+## Cargo-Free Source-Only Gate
+
+This contract is intentionally cargo-free. The fixture catalog under
+`artifacts/validation_broker/bd-2zn9k/` plus
+`scripts/check_validation_flight_recorder.py` must be enough to validate
+scheduler, control-tower, proof-cache, coalescer, handoff, worker reliability,
+reroute, proof-debt, and explanation-bundle evidence when the AGENTS.md cargo
+contention threshold blocks live RCH proof.
+
+Acceptable source-only evidence commands:
+
+| Evidence | Command |
+|----------|---------|
+| Gate JSON | `python3 scripts/check_validation_flight_recorder.py --json` |
+| Gate self-test | `python3 scripts/check_validation_flight_recorder.py --self-test --json` |
+| Gate tests | `python3 -m unittest tests/test_check_validation_flight_recorder.py` |
+| Fixture parse | `jq empty artifacts/validation_broker/bd-2zn9k/validation_flight_recorder_fixtures.v1.json` |
+
+Gate tests live in `tests/test_check_validation_flight_recorder.py`. They must
+exercise valid fixtures, stale freshness, worker-infrastructure marked green,
+product failures retried as infrastructure, invalid artifacts, missing
+bead/thread matches, malformed command digests, unsafe artifact paths, bounded
+Markdown output, and JSON CLI output. The gate must not run cargo, mutate
+artifacts, clean files, or send Agent Mail.
+
 ## Attempt Capsule
 
 `ValidationFlightRecorderAttempt` is the top-level attempt artifact.
