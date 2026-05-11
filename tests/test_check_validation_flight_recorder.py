@@ -111,6 +111,92 @@ class ValidationFlightRecorderContractTests(unittest.TestCase):
         errors = mod.validate_attempt(attempt, expected_bead_id="bd-2zn9k", now=self.validation_time)
         self.assertIn("ERR_VFR_MALFORMED_ATTEMPT", errors)
 
+    def test_worker_reliability_cases_cover_valid_and_fail_closed_paths(self) -> None:
+        required_cases = {
+            "remote_success_healthy",
+            "repeated_stale_progress_drain",
+            "product_failures_excluded",
+            "fresh_heartbeat_ambiguity_degraded",
+            "filesystem_pressure_drain",
+            "missing_toolchain_degraded",
+            "local_fallback_blocked",
+        }
+        seen = {case["case"] for case in self.fixtures["worker_reliability_cases"]}
+        self.assertTrue(required_cases.issubset(seen))
+
+        attempts_by_case = self._valid_attempts_by_case()
+        for case in self.fixtures["worker_reliability_cases"]:
+            with self.subTest(case=case["case"]):
+                attempts = [attempts_by_case[name] for name in case["attempt_cases"]]
+                ledger = mod.worker_reliability_ledger(attempts)
+                worker_row = next(row for row in ledger if row["worker_id"] == case["worker_id"])
+                self.assertEqual(worker_row["class"], case["expected_class"])
+                self.assertEqual(worker_row["next_action"], case["expected_next_action"])
+                self.assertTrue(set(case["expected_reasons"]).issubset(worker_row["reasons"]))
+                if case["case"] == "product_failures_excluded":
+                    self.assertEqual(worker_row["class"], "healthy")
+                    self.assertGreater(worker_row["product_failure_count"], 0)
+
+    def test_proof_debt_slo_cases_cover_green_stop_and_blocker_paths(self) -> None:
+        required_cases = {
+            "fresh_green_proof",
+            "repeated_worker_infra_budget_exhausted",
+            "product_failure_fail_closed",
+            "saturated_rch_queue",
+            "no_healthy_workers",
+            "stale_coalescer_lease",
+            "source_only_not_green",
+        }
+        seen = {case["case"] for case in self.fixtures["proof_debt_slo_cases"]}
+        self.assertTrue(required_cases.issubset(seen))
+
+        for case in self.fixtures["proof_debt_slo_cases"]:
+            with self.subTest(case=case["case"]):
+                decision = mod.proof_debt_slo_decision(case["input"])
+                self.assertEqual(decision["next_action"], case["expected_next_action"])
+                self.assertEqual(decision["complete"], case["expected_complete"])
+                self.assertEqual(decision["escalation_reason"], case["expected_escalation_reason"])
+                if "expected_budget_remaining" in case:
+                    self.assertEqual(decision["budget_remaining"], case["expected_budget_remaining"])
+                self.assertIn(decision["next_action"], decision["operator_summary"])
+                if case["input"]["debt_class"] in {"source_only", "worker_infra", "waiting_for_capacity"}:
+                    self.assertFalse(decision["complete"])
+
+    def test_proof_lane_reroute_cases_reject_unsafe_validation_shortcuts(self) -> None:
+        required_cases = {
+            "alternate_worker_reroute",
+            "drain_before_retry",
+            "wait_for_capacity",
+            "join_existing_proof",
+            "fence_stale_lease",
+            "source_only_blocker",
+            "product_failure_fail_closed",
+            "remote_required_local_fallback_refusal",
+            "active_cargo_contention_above_threshold",
+        }
+        seen = {case["case"] for case in self.fixtures["proof_lane_reroute_cases"]}
+        self.assertTrue(required_cases.issubset(seen))
+
+        for case in self.fixtures["proof_lane_reroute_cases"]:
+            with self.subTest(case=case["case"]):
+                decision = mod.proof_lane_reroute_decision(case["input"])
+                self.assertEqual(decision["selected_action"], case["expected_selected_action"])
+                self.assertEqual(
+                    decision["green_proof_eligible"],
+                    case["expected_green_proof_eligible"],
+                )
+                self.assertIn(case["expected_reason"], decision["reason_codes"])
+                self.assertTrue(
+                    set(case["expected_rejected_actions"]).issubset(decision["rejected_actions"])
+                )
+                self.assertIn(decision["selected_action"], decision["operator_summary"])
+                if case["input"]["worker_class"] in {"degraded", "drain", "blocked"}:
+                    self.assertNotEqual(decision["selected_action"], "retry_same_worker")
+                if case["input"]["product_failure"]:
+                    self.assertEqual(decision["selected_action"], "fail_closed_product")
+                if case["input"]["source_only"]:
+                    self.assertEqual(decision["selected_action"], "record_source_only_blocker")
+
     def test_explanation_bundle_cases_cover_green_and_negative_paths(self) -> None:
         expected_cases = {
             "green_proof_reuse",
@@ -179,6 +265,14 @@ class ValidationFlightRecorderContractTests(unittest.TestCase):
         checks = result.get("checks", [])
         failures = [check for check in checks if isinstance(check, dict) and not check.get("passed")]
         return "\n".join(f"{check['check']}: {check['detail']}" for check in failures[:20])
+
+    def _valid_attempts_by_case(self) -> dict[str, dict[str, object]]:
+        attempts: dict[str, dict[str, object]] = {}
+        for case in self.fixtures["valid_cases"]:
+            attempt, _ = mod._fixture_attempt_and_recovery(self.fixtures, case)
+            attempts[case["case"]] = attempt
+        return attempts
+
 
 if __name__ == "__main__":
     unittest.main()

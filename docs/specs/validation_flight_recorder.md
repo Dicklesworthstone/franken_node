@@ -71,8 +71,10 @@ Gate tests live in `tests/test_check_validation_flight_recorder.py`. They must
 exercise valid fixtures, stale freshness, worker-infrastructure marked green,
 product failures retried as infrastructure, invalid artifacts, missing
 bead/thread matches, malformed command digests, unsafe artifact paths, bounded
-Markdown output, and JSON CLI output. The gate must not run cargo, mutate
-artifacts, clean files, or send Agent Mail.
+Markdown output, worker reliability derivation, proof-debt budget exhaustion,
+degraded-worker reroutes away from new proof, ambiguous fresh-heartbeat evidence
+marked complete, source-only blockers, and JSON CLI output. The gate must not
+run cargo, mutate artifacts, clean files, or send Agent Mail.
 
 ## Attempt Capsule
 
