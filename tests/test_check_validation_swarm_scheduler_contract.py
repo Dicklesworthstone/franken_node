@@ -33,6 +33,7 @@ mod = ScriptNamespace(script_globals["run_all"].__globals__)
 class ValidationSwarmSchedulerContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixtures = json.JSONDecoder().decode(mod.FIXTURES_FILE.read_text(encoding="utf-8"))
+        self.stress = json.JSONDecoder().decode(mod.STRESS_MATRIX_FILE.read_text(encoding="utf-8"))
         self.base_input = self.fixtures["base_input"]
         self.base_policy = self.fixtures["base_policy"]
         self.base_decision = self.fixtures["decision_examples"][0]
@@ -96,6 +97,39 @@ class ValidationSwarmSchedulerContractTests(unittest.TestCase):
         decision["diagnostics"]["proof_debt_class"] = "worker_infra"
         errors = mod.validate_decision(decision, now=self.validation_time)
         self.assertIn("ERR_VSS_WORKER_INFRA_GREEN", errors)
+
+    def test_degraded_reroute_stress_goldens_are_byte_stable(self) -> None:
+        cases = {case["case_id"]: case for case in self.stress["degraded_reroute_cases"]}
+        self.assertEqual(set(cases), {"degraded-reroute-256", "degraded-reroute-1024"})
+        for case_id, case in cases.items():
+            with self.subTest(case=case_id):
+                errors = mod.validate_degraded_reroute_stress_case(case)
+                self.assertEqual(errors, [])
+                summary = mod.degraded_reroute_stress_summary(case)
+                self.assertEqual(summary, case["expected_summary"])
+                self.assertEqual(
+                    json.dumps(summary, sort_keys=True),
+                    json.dumps(mod.degraded_reroute_stress_summary(copy.deepcopy(case)), sort_keys=True),
+                )
+
+    def test_degraded_reroute_stress_safety_invariants(self) -> None:
+        for case in self.stress["degraded_reroute_cases"]:
+            with self.subTest(case=case["case_id"]):
+                summary = mod.degraded_reroute_stress_summary(case)
+                self.assertEqual(summary["duplicate_producer_count"], 0)
+                self.assertEqual(summary["producer_count"], summary["unique_work_keys"])
+                self.assertEqual(summary["degraded_worker_new_proofs"], 0)
+                self.assertEqual(summary["worker_infra_green_count"], 0)
+                self.assertEqual(summary["product_failure_retry_count"], 0)
+                self.assertEqual(summary["retry_after_exhausted_count"], 0)
+                self.assertLessEqual(summary["event_count"], case["bounded_event_count_max"])
+
+    def test_invalid_degraded_reroute_stress_cases_emit_expected_errors(self) -> None:
+        for case in self.stress["invalid_degraded_reroute_cases"]:
+            with self.subTest(case=case["case_id"]):
+                errors = mod.validate_degraded_reroute_stress_case(case)
+                for expected in case["expected_errors"]:
+                    self.assertIn(expected, errors)
 
     def test_scenarios_cover_acceptance(self) -> None:
         names = {scenario["name"] for scenario in self.fixtures["scenarios"]}

@@ -103,5 +103,226 @@
       "name": "invalid_artifact_fails_closed",
       "expected_decision": "fail_closed_invalid_artifact"
     }
+  ],
+  "degraded_reroute_cases": [
+    {
+      "case_id": "degraded-reroute-256",
+      "attempts": 256,
+      "unique_work_keys": 4,
+      "healthy_workers": 8,
+      "degraded_workers": 3,
+      "alternate_worker_reroutes": 42,
+      "product_failure_lanes": 8,
+      "stale_lease_lanes": 6,
+      "proof_cache_reuses": 32,
+      "exhausted_budget_lanes": 12,
+      "aged_low_priority_lanes": 16,
+      "max_waiters_per_work_key": 64,
+      "bounded_event_count_max": 384,
+      "growth_class": "constant_work_keys_linear_rows",
+      "optional_live_cargo": {
+        "required_wrapper": "rch exec --",
+        "example_command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_swarm_256 cargo test -p frankenengine-node validation_swarm_scheduler"
+      },
+      "expected_summary": {
+        "attempts": 256,
+        "unique_work_keys": 4,
+        "producer_count": 4,
+        "duplicate_producer_count": 0,
+        "joined_waiters": 178,
+        "max_waiters_per_work_key": 64,
+        "alternate_worker_reroutes": 42,
+        "degraded_worker_new_proofs": 0,
+        "proof_debt_backoffs": 12,
+        "stale_lease_fences": 6,
+        "proof_cache_reuses": 32,
+        "aged_low_priority_lanes": 16,
+        "stopped_after_budget_exhausted": 12,
+        "retry_after_exhausted_count": 0,
+        "worker_infra_green_count": 0,
+        "product_failure_retry_count": 0,
+        "event_count": 330,
+        "decision_counts": {
+          "run_now": 4,
+          "join_existing": 210,
+          "wait_for_capacity": 28,
+          "steal_stale_work": 6,
+          "fail_closed_product": 8
+        }
+      }
+    },
+    {
+      "case_id": "degraded-reroute-1024",
+      "attempts": 1024,
+      "unique_work_keys": 16,
+      "healthy_workers": 16,
+      "degraded_workers": 7,
+      "alternate_worker_reroutes": 168,
+      "product_failure_lanes": 32,
+      "stale_lease_lanes": 24,
+      "proof_cache_reuses": 128,
+      "exhausted_budget_lanes": 48,
+      "aged_low_priority_lanes": 64,
+      "max_waiters_per_work_key": 64,
+      "bounded_event_count_max": 1536,
+      "growth_class": "constant_work_keys_linear_rows",
+      "optional_live_cargo": {
+        "required_wrapper": "rch exec --",
+        "example_command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_swarm_1024 cargo test -p frankenengine-node validation_swarm_scheduler"
+      },
+      "expected_summary": {
+        "attempts": 1024,
+        "unique_work_keys": 16,
+        "producer_count": 16,
+        "duplicate_producer_count": 0,
+        "joined_waiters": 712,
+        "max_waiters_per_work_key": 64,
+        "alternate_worker_reroutes": 168,
+        "degraded_worker_new_proofs": 0,
+        "proof_debt_backoffs": 48,
+        "stale_lease_fences": 24,
+        "proof_cache_reuses": 128,
+        "aged_low_priority_lanes": 64,
+        "stopped_after_budget_exhausted": 48,
+        "retry_after_exhausted_count": 0,
+        "worker_infra_green_count": 0,
+        "product_failure_retry_count": 0,
+        "event_count": 1320,
+        "decision_counts": {
+          "run_now": 16,
+          "join_existing": 840,
+          "wait_for_capacity": 112,
+          "steal_stale_work": 24,
+          "fail_closed_product": 32
+        }
+      }
+    }
+  ],
+  "invalid_degraded_reroute_cases": [
+    {
+      "case_id": "degraded_worker_selected",
+      "attempts": 256,
+      "unique_work_keys": 4,
+      "healthy_workers": 8,
+      "degraded_workers": 3,
+      "alternate_worker_reroutes": 42,
+      "product_failure_lanes": 8,
+      "stale_lease_lanes": 6,
+      "proof_cache_reuses": 32,
+      "exhausted_budget_lanes": 12,
+      "aged_low_priority_lanes": 16,
+      "max_waiters_per_work_key": 64,
+      "bounded_event_count_max": 384,
+      "growth_class": "constant_work_keys_linear_rows",
+      "degraded_worker_new_proofs": 1,
+      "expected_summary": {},
+      "expected_errors": [
+        "ERR_VSS_DEGRADED_WORKER_SELECTED"
+      ]
+    },
+    {
+      "case_id": "duplicate_producer",
+      "attempts": 256,
+      "unique_work_keys": 4,
+      "healthy_workers": 8,
+      "degraded_workers": 3,
+      "alternate_worker_reroutes": 42,
+      "product_failure_lanes": 8,
+      "stale_lease_lanes": 6,
+      "proof_cache_reuses": 32,
+      "exhausted_budget_lanes": 12,
+      "aged_low_priority_lanes": 16,
+      "max_waiters_per_work_key": 64,
+      "bounded_event_count_max": 384,
+      "growth_class": "constant_work_keys_linear_rows",
+      "duplicate_producer_count": 1,
+      "expected_summary": {},
+      "expected_errors": [
+        "ERR_VSS_DUPLICATE_PRODUCER"
+      ]
+    },
+    {
+      "case_id": "worker_infra_marked_green",
+      "attempts": 256,
+      "unique_work_keys": 4,
+      "healthy_workers": 8,
+      "degraded_workers": 3,
+      "alternate_worker_reroutes": 42,
+      "product_failure_lanes": 8,
+      "stale_lease_lanes": 6,
+      "proof_cache_reuses": 32,
+      "exhausted_budget_lanes": 12,
+      "aged_low_priority_lanes": 16,
+      "max_waiters_per_work_key": 64,
+      "bounded_event_count_max": 384,
+      "growth_class": "constant_work_keys_linear_rows",
+      "worker_infra_green_count": 1,
+      "expected_summary": {},
+      "expected_errors": [
+        "ERR_VSS_WORKER_INFRA_GREEN"
+      ]
+    },
+    {
+      "case_id": "product_failure_retry_candidate",
+      "attempts": 256,
+      "unique_work_keys": 4,
+      "healthy_workers": 8,
+      "degraded_workers": 3,
+      "alternate_worker_reroutes": 42,
+      "product_failure_lanes": 8,
+      "stale_lease_lanes": 6,
+      "proof_cache_reuses": 32,
+      "exhausted_budget_lanes": 12,
+      "aged_low_priority_lanes": 16,
+      "max_waiters_per_work_key": 64,
+      "bounded_event_count_max": 384,
+      "growth_class": "constant_work_keys_linear_rows",
+      "product_failure_retry_count": 1,
+      "expected_summary": {},
+      "expected_errors": [
+        "ERR_VSS_PRODUCT_RETRIED_AS_INFRA"
+      ]
+    },
+    {
+      "case_id": "retry_after_budget_exhausted",
+      "attempts": 256,
+      "unique_work_keys": 4,
+      "healthy_workers": 8,
+      "degraded_workers": 3,
+      "alternate_worker_reroutes": 42,
+      "product_failure_lanes": 8,
+      "stale_lease_lanes": 6,
+      "proof_cache_reuses": 32,
+      "exhausted_budget_lanes": 12,
+      "aged_low_priority_lanes": 16,
+      "max_waiters_per_work_key": 64,
+      "bounded_event_count_max": 384,
+      "growth_class": "constant_work_keys_linear_rows",
+      "retry_after_exhausted_count": 1,
+      "expected_summary": {},
+      "expected_errors": [
+        "ERR_VSS_RETRY_BUDGET_EXHAUSTED"
+      ]
+    },
+    {
+      "case_id": "unbounded_event_growth",
+      "attempts": 256,
+      "unique_work_keys": 4,
+      "healthy_workers": 8,
+      "degraded_workers": 3,
+      "alternate_worker_reroutes": 42,
+      "product_failure_lanes": 8,
+      "stale_lease_lanes": 6,
+      "proof_cache_reuses": 32,
+      "exhausted_budget_lanes": 12,
+      "aged_low_priority_lanes": 16,
+      "max_waiters_per_work_key": 64,
+      "bounded_event_count_max": 128,
+      "growth_class": "quadratic_rows",
+      "expected_summary": {},
+      "expected_errors": [
+        "ERR_VSS_UNBOUNDED_OUTPUT"
+      ]
+    }
   ]
 }

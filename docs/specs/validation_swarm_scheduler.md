@@ -191,6 +191,30 @@ The fixture matrix must include both valid decisions and invalid mutations for
 bad work-key digest, reason/action mismatch, stale freshness, worker-infra green
 proof, product failure retried as infra, and invalid artifact accepted.
 
+## Degraded-worker stress matrix
+
+The source-only stress matrix under
+`artifacts/validation_broker/swarm_scheduler/validation_swarm_scheduler_stress_matrix.v1.json`
+must include byte-stable golden summaries for `degraded-reroute-256` and
+`degraded-reroute-1024`. These cases cover degraded worker reliability scores,
+alternate-worker reroutes, proof-debt backoff, stale lease fencing, proof-cache
+reuse, product-failure fail-closed lanes, exhausted retry budgets, and mixed
+priority aging.
+
+The checker must reject stress cases when:
+
+- more than one producer exists for a proof work key;
+- a degraded worker is selected for a new remote proof while a healthy worker is
+  eligible;
+- worker infrastructure is counted as green proof;
+- product failures are retried as worker infrastructure;
+- exhausted proof-debt budgets keep retrying; or
+- event/output growth exceeds the linear bound.
+
+The default stress matrix is source-only and must not launch cargo. Any
+optional live cargo or benchmark path is rch-only and must be documented with an
+`rch exec --` command and an off-repo target-dir policy.
+
 ## Doctor and Closeout
 
 Follow-on implementation beads should make doctor/readiness/closeout able to
