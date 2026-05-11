@@ -410,6 +410,46 @@ evidence is a blocker rather than green validation, and cargo contention above
 the configured threshold selects `wait_for_capacity`. Every decision must
 record rejected alternatives so operators can see why the lane was chosen.
 
+## Validation Proof Explanation Bundle
+
+`franken-node/validation-proof-explanation-bundle/v1` is a bounded operator
+handoff artifact. It joins read-only Beads metadata, scheduler state, broker
+receipts, coalescer state, proof cache state, flight-recorder artifacts, worker
+reliability, proof-lane reroute output, proof-debt SLO output, and the final
+recommendation into one JSON object plus one compact Markdown rendering.
+
+The formatter must not send Agent Mail, mutate Beads, run cargo, query live RCH,
+or clean files. It is an offline explanation over existing artifacts so another
+agent can resume when Agent Mail is red or corrupt by relying on Beads plus
+Git-backed validation artifacts.
+
+Each explanation bundle must include:
+
+| Field | Meaning |
+|-------|---------|
+| `schema_version` | `franken-node/validation-proof-explanation-bundle/v1` |
+| `bead_id` / `thread_id` | Beads issue and Agent Mail thread identifiers |
+| `command_digest` / `receipt_command_digest` | Exact command proof linkage |
+| `final_status` | `complete`, `blocked`, `deferred`, `failed`, or `invalid` |
+| `complete` | True only when fresh green proof covers the exact command and bead |
+| `next_action` | Deterministic operator/agent action |
+| `field_errors` | Fail-closed validation errors |
+| `timeline` | Ordered bead, scheduler, coalescer, cache, worker, reroute, SLO, and final entries |
+| `evidence_refs` | Artifact paths and stdout/stderr digests or paths, not raw output |
+| `mail_fallback` | `agent_mail_thread` or `beads_and_git_artifacts` |
+| `operator_summary` / `operator_markdown` | Bounded human handoff text |
+
+The bundle must fail closed on mismatched bead IDs, stale receipts, unsafe
+artifact paths, malformed command digests, product failures hidden as worker
+infrastructure, or worker-infrastructure evidence marked as green. Missing or
+corrupt Agent Mail is not itself a product failure; when the proof artifacts are
+fresh and complete, the bundle can still close with `mail_fallback` set to
+`beads_and_git_artifacts`.
+
+Markdown output must be deterministic and bounded for Beads comments and Agent
+Mail. Large stdout/stderr snippets must never be embedded; the explanation must
+refer to their digest and artifact path instead.
+
 ## Consumer Requirements
 
 ### Validation Broker

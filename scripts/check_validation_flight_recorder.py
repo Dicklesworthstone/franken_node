@@ -30,8 +30,10 @@ ATTEMPT_SCHEMA_VERSION = "franken-node/validation-flight-recorder/attempt/v1"
 OBSERVATION_SCHEMA_VERSION = "franken-node/validation-flight-recorder/observation/v1"
 RECOVERY_SCHEMA_VERSION = "franken-node/validation-flight-recorder/recovery/v1"
 FIXTURE_SCHEMA_VERSION = "franken-node/validation-flight-recorder/fixtures/v1"
+EXPLANATION_BUNDLE_SCHEMA_VERSION = "franken-node/validation-proof-explanation-bundle/v1"
 MAX_OBSERVATIONS = 256
 MAX_SNIPPET_BYTES = 4096
+MAX_EXPLANATION_MARKDOWN_BYTES = 2048
 REDACTED_ENV_VALUE = "<redacted>"
 
 SPEC_FILE = ROOT / "docs/specs/validation_flight_recorder.md"
@@ -62,6 +64,8 @@ REQUIRED_SPEC_MARKERS = [
     "Worker Reliability Ledger",
     "Proof Debt SLO",
     "Proof Lane Reroute Policy",
+    "Validation Proof Explanation Bundle",
+    EXPLANATION_BUNDLE_SCHEMA_VERSION,
     "ValidationFlightRecorderAttempt",
     "ValidationFlightRecorderRecovery",
     "command digest is missing",
@@ -334,6 +338,31 @@ PROOF_LANE_REROUTE_REASONS = {
 
 PROOF_LANE_REROUTE_COALESCER_STATES = {"none", "open", "fresh_joinable", "stale_lease"}
 PROOF_LANE_REROUTE_CACHE_STATES = {"miss", "fresh_hit", "stale_hit"}
+EXPLANATION_BUNDLE_STATUSES = {"complete", "blocked", "deferred", "failed", "invalid"}
+EXPLANATION_BUNDLE_MAIL_HEALTH = {"green", "yellow", "red", "unavailable"}
+EXPLANATION_BUNDLE_FAILURE_CLASSES = {"none", "worker_infra", "product_failure", "source_only", "unknown"}
+EXPLANATION_BUNDLE_FIELD_ERRORS = {
+    "invalid_input",
+    "missing_artifact",
+    "unsafe_artifact_path",
+    "bead_mismatch",
+    "command_digest_mismatch",
+    "malformed_command_digest",
+    "stale_receipt",
+    "product_failure_hidden_as_infra",
+    "worker_infra_marked_green",
+    "raw_output_snippet_present",
+}
+EXPLANATION_BUNDLE_TIMELINE_PHASES = {
+    "bead",
+    "scheduler",
+    "coalescer",
+    "proof_cache",
+    "worker_selection",
+    "reroute_policy",
+    "proof_debt_slo",
+    "final_recommendation",
+}
 
 
 def _read_text(path: Path) -> str:
@@ -1246,6 +1275,170 @@ def proof_lane_reroute_decision(input_data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _short_digest(value: Any) -> str:
+    return str(value)[:12] if _is_sha256_hex(value) else "<invalid>"
+
+
+def _explanation_field_errors(input_data: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    bead_id = input_data.get("bead_id")
+    receipt_bead_id = input_data.get("receipt_bead_id")
+    command_digest = input_data.get("command_digest")
+    receipt_command_digest = input_data.get("receipt_command_digest")
+    artifact_paths = input_data.get("artifact_paths")
+    failure_class = input_data.get("failure_class")
+
+    if not _bounded(bead_id) or not _bounded(input_data.get("thread_id")):
+        errors.append("invalid_input")
+    if not _is_sha256_hex(command_digest) or not _is_sha256_hex(receipt_command_digest):
+        errors.append("malformed_command_digest")
+    elif command_digest != receipt_command_digest:
+        errors.append("command_digest_mismatch")
+    if not _bounded(receipt_bead_id) or receipt_bead_id != bead_id:
+        errors.append("bead_mismatch")
+    if not isinstance(artifact_paths, list) or not artifact_paths:
+        errors.append("missing_artifact")
+    elif not all(_repo_relative_path_valid(path) for path in artifact_paths):
+        errors.append("unsafe_artifact_path")
+    if input_data.get("receipt_state") == "stale" or input_data.get("proof_freshness") == "stale":
+        errors.append("stale_receipt")
+    if input_data.get("product_failure") is True and failure_class == "worker_infra":
+        errors.append("product_failure_hidden_as_infra")
+    if failure_class == "worker_infra" and input_data.get("green_proof_eligible") is True:
+        errors.append("worker_infra_marked_green")
+    if _bounded(input_data.get("stdout_snippet")) or _bounded(input_data.get("stderr_snippet")):
+        errors.append("raw_output_snippet_present")
+    return sorted(set(errors))
+
+
+def _render_explanation_markdown(bundle: dict[str, Any]) -> str:
+    refs = bundle.get("evidence_refs") if isinstance(bundle.get("evidence_refs"), dict) else {}
+    timeline = bundle.get("timeline") if isinstance(bundle.get("timeline"), list) else []
+    phases = ", ".join(str(entry.get("phase")) for entry in timeline if isinstance(entry, dict))
+    lines = [
+        "### Validation Proof Explanation",
+        f"- bead: {bundle.get('bead_id')}",
+        f"- status: {bundle.get('final_status')}",
+        f"- next_action: {bundle.get('next_action')}",
+        f"- command: sha256:{_short_digest(bundle.get('command_digest'))}",
+        f"- receipt: sha256:{_short_digest(bundle.get('receipt_command_digest'))}",
+        f"- mail_fallback: {bundle.get('mail_fallback')}",
+        f"- evidence: {', '.join(str(path) for path in refs.get('artifact_paths', []))}",
+        f"- timeline: {phases}",
+    ]
+    if bundle.get("field_errors"):
+        lines.append(f"- field_errors: {', '.join(str(error) for error in bundle['field_errors'])}")
+    rendered = "\n".join(lines)
+    encoded = rendered.encode("utf-8")
+    if len(encoded) <= MAX_EXPLANATION_MARKDOWN_BYTES:
+        return rendered
+    return encoded[:MAX_EXPLANATION_MARKDOWN_BYTES].decode("utf-8", errors="ignore")
+
+
+def validation_explanation_bundle(input_data: dict[str, Any]) -> dict[str, Any]:
+    bead_id = input_data.get("bead_id")
+    thread_id = input_data.get("thread_id")
+    command_digest = input_data.get("command_digest")
+    receipt_command_digest = input_data.get("receipt_command_digest")
+    worker_class = input_data.get("worker_class")
+    failure_class = input_data.get("failure_class")
+    reroute_selected_action = input_data.get("reroute_selected_action")
+    proof_debt_next_action = input_data.get("proof_debt_next_action")
+    mail_health = input_data.get("mail_health")
+    mail_thread_present = input_data.get("mail_thread_present")
+    artifact_paths = input_data.get("artifact_paths")
+
+    field_errors = _explanation_field_errors(input_data)
+    invalid_input = (
+        worker_class not in WORKER_RELIABILITY_CLASSES
+        or failure_class not in EXPLANATION_BUNDLE_FAILURE_CLASSES
+        or reroute_selected_action not in PROOF_LANE_REROUTE_ACTIONS
+        or proof_debt_next_action not in PROOF_DEBT_SLO_ACTIONS
+        or mail_health not in EXPLANATION_BUNDLE_MAIL_HEALTH
+        or not isinstance(mail_thread_present, bool)
+        or not isinstance(input_data.get("proof_debt_complete"), bool)
+        or not isinstance(input_data.get("green_proof_eligible"), bool)
+        or not isinstance(input_data.get("product_failure"), bool)
+        or not isinstance(input_data.get("source_only"), bool)
+    )
+    if invalid_input:
+        field_errors = sorted(set(field_errors + ["invalid_input"]))
+
+    complete = (
+        not field_errors
+        and input_data.get("proof_debt_complete") is True
+        and input_data.get("green_proof_eligible") is True
+        and input_data.get("proof_freshness") == "fresh"
+        and input_data.get("receipt_state") == "fresh"
+        and reroute_selected_action == "reuse_fresh_proof"
+        and failure_class == "none"
+        and input_data.get("product_failure") is False
+        and input_data.get("source_only") is False
+        and command_digest == receipt_command_digest
+        and bead_id == input_data.get("receipt_bead_id")
+    )
+
+    if field_errors:
+        final_status = "invalid"
+        next_action = "repair_explanation_bundle"
+    elif complete:
+        final_status = "complete"
+        next_action = "use_green_proof"
+    elif input_data.get("product_failure") is True or failure_class == "product_failure":
+        final_status = "failed"
+        next_action = "fail_closed_product"
+    elif reroute_selected_action in {"wait_for_capacity", "join_existing_proof"}:
+        final_status = "deferred"
+        next_action = reroute_selected_action
+    else:
+        final_status = "blocked"
+        next_action = reroute_selected_action
+
+    artifact_list = artifact_paths if isinstance(artifact_paths, list) else []
+    mail_fallback = (
+        "agent_mail_thread"
+        if mail_health in {"green", "yellow"} and mail_thread_present
+        else "beads_and_git_artifacts"
+    )
+    timeline = [
+        {"phase": "bead", "status": str(final_status), "detail": str(bead_id)},
+        {"phase": "scheduler", "status": str(input_data.get("scheduler_decision")), "detail": str(thread_id)},
+        {"phase": "coalescer", "status": str(input_data.get("coalescer_state")), "detail": "bounded snapshot"},
+        {"phase": "proof_cache", "status": str(input_data.get("proof_cache_state")), "detail": str(input_data.get("receipt_state"))},
+        {"phase": "worker_selection", "status": str(worker_class), "detail": str(input_data.get("worker_id"))},
+        {"phase": "reroute_policy", "status": str(reroute_selected_action), "detail": str(input_data.get("reroute_reason"))},
+        {"phase": "proof_debt_slo", "status": str(proof_debt_next_action), "detail": str(input_data.get("proof_debt_complete"))},
+        {"phase": "final_recommendation", "status": str(final_status), "detail": str(next_action)},
+    ]
+    bundle = {
+        "schema_version": EXPLANATION_BUNDLE_SCHEMA_VERSION,
+        "bead_id": bead_id,
+        "thread_id": thread_id,
+        "command_digest": command_digest,
+        "receipt_command_digest": receipt_command_digest,
+        "final_status": final_status,
+        "complete": complete,
+        "next_action": next_action,
+        "field_errors": field_errors,
+        "timeline": timeline,
+        "evidence_refs": {
+            "artifact_paths": artifact_list,
+            "stdout_digest": input_data.get("stdout_digest"),
+            "stderr_digest": input_data.get("stderr_digest"),
+            "stdout_path": input_data.get("stdout_path"),
+            "stderr_path": input_data.get("stderr_path"),
+        },
+        "mail_fallback": mail_fallback,
+        "green_proof_eligible": bool(input_data.get("green_proof_eligible")),
+        "operator_summary": (
+            f"{final_status}: bead={bead_id}; next={next_action}; "
+            f"fallback={mail_fallback}; errors={','.join(field_errors) or 'none'}"
+        ),
+    }
+    bundle["operator_markdown"] = _render_explanation_markdown(bundle)
+    return bundle
+
+
 def validate_artifacts(artifacts: Any) -> list[str]:
     errors: list[str] = []
     if not isinstance(artifacts, dict):
@@ -1898,6 +2091,189 @@ def _check_proof_lane_reroute_cases(fixtures: dict[str, Any] | None) -> list[dic
     return checks
 
 
+def _check_explanation_bundle_cases(fixtures: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if fixtures is None or not isinstance(fixtures.get("explanation_bundle_cases"), list):
+        return [_check("explanation_bundle_cases_present", False, "missing explanation_bundle_cases")]
+    checks: list[dict[str, Any]] = []
+    represented = set()
+    for case in fixtures["explanation_bundle_cases"]:
+        if not isinstance(case, dict):
+            checks.append(_check("explanation_bundle_case_malformed", False, "case is not object"))
+            continue
+        name = case.get("case", "<unnamed>")
+        represented.add(name)
+        input_data = case.get("input")
+        if not isinstance(input_data, dict):
+            checks.append(_check(f"explanation_bundle_case:{name}", False, "missing input"))
+            continue
+        bundle = validation_explanation_bundle(input_data)
+        expected_status = case.get("expected_final_status")
+        expected_next_action = case.get("expected_next_action")
+        expected_complete = case.get("expected_complete")
+        expected_error = case.get("expected_field_error")
+        expected_mail_fallback = case.get("expected_mail_fallback")
+        markdown = str(bundle.get("operator_markdown", ""))
+        repeated = validation_explanation_bundle(copy.deepcopy(input_data))
+        raw_fragments = [
+            value
+            for value in (input_data.get("stdout_snippet"), input_data.get("stderr_snippet"))
+            if isinstance(value, str) and value
+        ]
+
+        checks.append(
+            _check(
+                f"explanation_bundle_schema:{name}",
+                bundle.get("schema_version") == EXPLANATION_BUNDLE_SCHEMA_VERSION,
+                str(bundle.get("schema_version")),
+            )
+        )
+        checks.append(
+            _check(
+                f"explanation_bundle_status:{name}",
+                expected_status in EXPLANATION_BUNDLE_STATUSES and bundle.get("final_status") == expected_status,
+                str(bundle.get("final_status")),
+            )
+        )
+        checks.append(
+            _check(
+                f"explanation_bundle_next:{name}",
+                bundle.get("next_action") == expected_next_action,
+                str(bundle.get("next_action")),
+            )
+        )
+        checks.append(
+            _check(
+                f"explanation_bundle_complete:{name}",
+                isinstance(expected_complete, bool) and bundle.get("complete") == expected_complete,
+                str(bundle.get("complete")),
+            )
+        )
+        checks.append(
+            _check(
+                f"explanation_bundle_markdown_bounded:{name}",
+                len(markdown.encode("utf-8")) <= MAX_EXPLANATION_MARKDOWN_BYTES
+                and all(fragment not in markdown for fragment in raw_fragments),
+                str(len(markdown.encode("utf-8"))),
+            )
+        )
+        checks.append(
+            _check(
+                f"explanation_bundle_deterministic:{name}",
+                bundle == repeated,
+                "stable",
+            )
+        )
+        checks.append(
+            _check(
+                f"explanation_bundle_timeline:{name}",
+                {entry.get("phase") for entry in bundle.get("timeline", []) if isinstance(entry, dict)}
+                == EXPLANATION_BUNDLE_TIMELINE_PHASES,
+                ",".join(
+                    str(entry.get("phase")) for entry in bundle.get("timeline", []) if isinstance(entry, dict)
+                ),
+            )
+        )
+        if expected_error is not None:
+            checks.append(
+                _check(
+                    f"explanation_bundle_error:{name}",
+                    expected_error in EXPLANATION_BUNDLE_FIELD_ERRORS
+                    and expected_error in set(bundle.get("field_errors", [])),
+                    ",".join(bundle.get("field_errors", [])),
+                )
+            )
+        else:
+            checks.append(
+                _check(
+                    f"explanation_bundle_no_error:{name}",
+                    not bundle.get("field_errors"),
+                    ",".join(bundle.get("field_errors", [])),
+                )
+            )
+        if expected_mail_fallback is not None:
+            checks.append(
+                _check(
+                    f"explanation_bundle_mail_fallback:{name}",
+                    bundle.get("mail_fallback") == expected_mail_fallback,
+                    str(bundle.get("mail_fallback")),
+                )
+            )
+
+    required_cases = {
+        "green_proof_reuse",
+        "worker_degraded_reroute",
+        "exhausted_proof_debt_budget",
+        "stale_lease_fence",
+        "source_only_blocker",
+        "product_failure",
+        "missing_agent_mail_thread",
+        "corrupt_missing_artifact",
+        "mismatched_bead_id",
+        "malformed_command_digest",
+        "stale_receipt",
+        "worker_infra_marked_green",
+        "product_failure_hidden_as_infra",
+    }
+    for required_case in sorted(required_cases):
+        checks.append(
+            _check(
+                f"explanation_bundle_matrix:{required_case}",
+                required_case in represented,
+                ",".join(sorted(str(case) for case in represented)),
+            )
+        )
+
+    stress_inputs = [
+        {
+            "bead_id": f"bd-wc27p.{13 + (index % 3)}",
+            "thread_id": f"bd-wc27p.{13 + (index % 3)}",
+            "scheduler_decision": "validation_lane",
+            "command_digest": "a" * 64,
+            "receipt_bead_id": f"bd-wc27p.{13 + (index % 3)}",
+            "receipt_command_digest": "a" * 64,
+            "receipt_state": "fresh" if index % 5 == 0 else "missing",
+            "proof_freshness": "fresh" if index % 5 == 0 else "missing",
+            "proof_debt_complete": index % 5 == 0,
+            "proof_debt_next_action": "use_reusable_proof" if index % 5 == 0 else "retry_different_worker",
+            "green_proof_eligible": index % 5 == 0,
+            "coalescer_state": "fresh_joinable" if index % 7 == 0 else "none",
+            "proof_cache_state": "fresh_hit" if index % 5 == 0 else "miss",
+            "reroute_selected_action": "reuse_fresh_proof" if index % 5 == 0 else "select_alternate_worker",
+            "reroute_reason": "fresh_proof_reuse" if index % 5 == 0 else "degraded_worker_reroute",
+            "worker_id": f"worker-{index % 11}",
+            "worker_class": "healthy" if index % 5 == 0 else "degraded",
+            "failure_class": "none",
+            "product_failure": False,
+            "source_only": False,
+            "mail_health": "red" if index % 13 == 0 else "green",
+            "mail_thread_present": index % 13 != 0,
+            "artifact_paths": [f"artifacts/validation_broker/bd-wc27p.13/explanation-{index}.json"],
+            "stdout_digest": "b" * 64,
+            "stderr_digest": "c" * 64,
+            "stdout_path": f"artifacts/validation_broker/bd-wc27p.13/stdout-{index}.txt",
+            "stderr_path": f"artifacts/validation_broker/bd-wc27p.13/stderr-{index}.txt",
+        }
+        for index in range(512)
+    ]
+    stress_bundles = [validation_explanation_bundle(input_data) for input_data in stress_inputs]
+    stress_bytes = len(json.dumps(stress_bundles, sort_keys=True).encode("utf-8"))
+    checks.append(
+        _check(
+            "explanation_bundle_stress_512",
+            len(stress_bundles) == 512 and stress_bytes <= 1024 * 1024,
+            f"bundles={len(stress_bundles)} bytes={stress_bytes}",
+        )
+    )
+    checks.append(
+        _check(
+            "explanation_bundle_stress_deterministic",
+            stress_bundles == [validation_explanation_bundle(input_data) for input_data in stress_inputs],
+            "stable",
+        )
+    )
+    return checks
+
+
 def run_all() -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     checks.extend(_check_files())
@@ -1909,6 +2285,7 @@ def run_all() -> dict[str, Any]:
     checks.extend(_check_worker_reliability_cases(fixtures))
     checks.extend(_check_proof_debt_slo_cases(fixtures))
     checks.extend(_check_proof_lane_reroute_cases(fixtures))
+    checks.extend(_check_explanation_bundle_cases(fixtures))
     passed = sum(1 for check in checks if check["passed"])
     failed = len(checks) - passed
     return {
