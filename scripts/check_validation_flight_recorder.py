@@ -1489,11 +1489,12 @@ def _check_proof_debt_slo_cases(fixtures: dict[str, Any] | None) -> list[dict[st
             )
         )
         if input_data.get("debt_class") in {"source_only", "worker_infra"}:
+            complete_value = decision.get("complete")
             checks.append(
                 _check(
                     f"proof_debt_slo_not_green:{name}",
-                    decision.get("complete") is False,
-                    str(decision.get("complete")),
+                    isinstance(complete_value, bool) and not complete_value,
+                    str(complete_value),
                 )
             )
 
