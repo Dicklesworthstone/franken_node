@@ -176,3 +176,6 @@ target_*/
 # the load-bearing schema/format docs and shell scripts; one-off restoration
 # narratives live under docs/reports/.
 /transplant/RESTORATION_REPORT.md
+
+# Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
+/beads_compliance_audit/
