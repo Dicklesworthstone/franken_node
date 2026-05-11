@@ -369,6 +369,47 @@ emit `record_blocker`. Priority `0`/`1` work may get shorter retry backoff when
 capacity evidence permits; priority `4` work must age into a bounded retry or
 queue path instead of disappearing forever.
 
+## Proof Lane Reroute Policy
+
+Proof lane reroute decisions are deterministic, offline decisions that join
+worker reliability rows, proof-debt SLO output, proof cache state, coalescer
+lease state, recovery decisions, and cargo contention. They do not launch
+cargo, mutate Beads, or query live RCH. They exist so every agent chooses the
+same next validation lane from the same evidence.
+
+Each reroute input must include:
+
+| Field | Meaning |
+|-------|---------|
+| `worker_class` | Candidate worker class: `healthy`, `degraded`, `drain`, `blocked`, or `unknown` |
+| `worker_next_action` | Reliability-ledger action: `allow_worker`, `retry_different_worker`, `drain_worker`, or `reject_worker` |
+| `proof_debt_next_action` / `proof_debt_complete` | Bounded SLO action and whether it represents complete green proof |
+| `proof_freshness` | `fresh`, `stale`, or `missing` |
+| `coalescer_state` | `none`, `open`, `fresh_joinable`, or `stale_lease` |
+| `proof_cache_state` | `miss`, `fresh_hit`, or `stale_hit` |
+| `remote_required` / `execution_mode` | Whether policy requires remote proof and the observed execution mode |
+| `candidate_worker_id` | Bounded worker identifier considered for the lane |
+| `alternate_worker_count` / `healthy_workers` | Available alternate and healthy-worker capacity |
+| `active_cargo_processes` / `max_cargo_processes` | Local cargo/rustc contention evidence |
+| `product_failure` / `source_only` | Fail-closed product and source-only classifications |
+
+Each reroute output must include `selected_action`, `rejected_actions`,
+`reason_codes`, `constraints`, `cooldown_hint`, `drain_recommendation`,
+`freshness_window_seconds`, `green_proof_eligible`, and a bounded
+`operator_summary`. Valid selected actions are `retry_same_worker`,
+`select_alternate_worker`, `drain_worker_then_retry`, `wait_for_capacity`,
+`join_existing_proof`, `refresh_lease_fence`, `record_source_only_blocker`,
+`fail_closed_product`, `reject_local_fallback`, `reuse_fresh_proof`, and
+`record_blocker`.
+
+The policy must never select a fresh degraded, draining, or blocked worker for
+new proof. It may reuse fresh green proof or join an existing fresh proof
+without selecting a worker. Product failures fail closed, remote-required local
+fallback is rejected, stale coalescer leases require a new fence, source-only
+evidence is a blocker rather than green validation, and cargo contention above
+the configured threshold selects `wait_for_capacity`. Every decision must
+record rejected alternatives so operators can see why the lane was chosen.
+
 ## Consumer Requirements
 
 ### Validation Broker

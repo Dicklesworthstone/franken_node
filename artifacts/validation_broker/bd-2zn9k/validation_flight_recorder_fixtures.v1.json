@@ -1357,5 +1357,287 @@
       "expected_escalation_reason": "source_only_not_green",
       "expected_budget_remaining": 3
     }
+  ],
+  "proof_lane_reroute_cases": [
+    {
+      "case": "healthy_same_worker_retry",
+      "input": {
+        "worker_class": "healthy",
+        "worker_next_action": "allow_worker",
+        "proof_debt_next_action": "refresh_stale_proof",
+        "proof_debt_complete": false,
+        "proof_freshness": "stale",
+        "coalescer_state": "none",
+        "proof_cache_state": "miss",
+        "remote_required": true,
+        "execution_mode": "remote",
+        "candidate_worker_id": "ts2",
+        "alternate_worker_count": 1,
+        "healthy_workers": 3,
+        "active_cargo_processes": 1,
+        "max_cargo_processes": 3,
+        "product_failure": false,
+        "source_only": false
+      },
+      "expected_selected_action": "retry_same_worker",
+      "expected_green_proof_eligible": false,
+      "expected_reason": "healthy_worker_retry",
+      "expected_rejected_actions": [
+        "reject_local_fallback",
+        "select_alternate_worker"
+      ]
+    },
+    {
+      "case": "alternate_worker_reroute",
+      "input": {
+        "worker_class": "degraded",
+        "worker_next_action": "retry_different_worker",
+        "proof_debt_next_action": "retry_different_worker",
+        "proof_debt_complete": false,
+        "proof_freshness": "missing",
+        "coalescer_state": "none",
+        "proof_cache_state": "miss",
+        "remote_required": true,
+        "execution_mode": "remote",
+        "candidate_worker_id": "vmi-ambiguous",
+        "alternate_worker_count": 2,
+        "healthy_workers": 2,
+        "active_cargo_processes": 1,
+        "max_cargo_processes": 3,
+        "product_failure": false,
+        "source_only": false
+      },
+      "expected_selected_action": "select_alternate_worker",
+      "expected_green_proof_eligible": false,
+      "expected_reason": "degraded_worker_reroute",
+      "expected_rejected_actions": [
+        "retry_same_worker",
+        "reuse_fresh_proof"
+      ]
+    },
+    {
+      "case": "drain_before_retry",
+      "input": {
+        "worker_class": "drain",
+        "worker_next_action": "drain_worker",
+        "proof_debt_next_action": "retry_different_worker",
+        "proof_debt_complete": false,
+        "proof_freshness": "missing",
+        "coalescer_state": "none",
+        "proof_cache_state": "miss",
+        "remote_required": true,
+        "execution_mode": "remote",
+        "candidate_worker_id": "vmi-disk",
+        "alternate_worker_count": 2,
+        "healthy_workers": 2,
+        "active_cargo_processes": 1,
+        "max_cargo_processes": 3,
+        "product_failure": false,
+        "source_only": false
+      },
+      "expected_selected_action": "drain_worker_then_retry",
+      "expected_green_proof_eligible": false,
+      "expected_reason": "drain_worker",
+      "expected_rejected_actions": [
+        "retry_same_worker",
+        "reuse_fresh_proof"
+      ]
+    },
+    {
+      "case": "wait_for_capacity",
+      "input": {
+        "worker_class": "healthy",
+        "worker_next_action": "allow_worker",
+        "proof_debt_next_action": "wait_for_capacity",
+        "proof_debt_complete": false,
+        "proof_freshness": "missing",
+        "coalescer_state": "none",
+        "proof_cache_state": "miss",
+        "remote_required": true,
+        "execution_mode": "remote",
+        "candidate_worker_id": "ts2",
+        "alternate_worker_count": 2,
+        "healthy_workers": 2,
+        "active_cargo_processes": 1,
+        "max_cargo_processes": 3,
+        "product_failure": false,
+        "source_only": false
+      },
+      "expected_selected_action": "wait_for_capacity",
+      "expected_green_proof_eligible": false,
+      "expected_reason": "waiting_for_capacity",
+      "expected_rejected_actions": [
+        "retry_same_worker",
+        "select_alternate_worker"
+      ]
+    },
+    {
+      "case": "join_existing_proof",
+      "input": {
+        "worker_class": "healthy",
+        "worker_next_action": "allow_worker",
+        "proof_debt_next_action": "retry_different_worker",
+        "proof_debt_complete": false,
+        "proof_freshness": "missing",
+        "coalescer_state": "fresh_joinable",
+        "proof_cache_state": "miss",
+        "remote_required": true,
+        "execution_mode": "remote",
+        "candidate_worker_id": "ts2",
+        "alternate_worker_count": 2,
+        "healthy_workers": 2,
+        "active_cargo_processes": 1,
+        "max_cargo_processes": 3,
+        "product_failure": false,
+        "source_only": false
+      },
+      "expected_selected_action": "join_existing_proof",
+      "expected_green_proof_eligible": false,
+      "expected_reason": "join_existing_proof",
+      "expected_rejected_actions": [
+        "retry_same_worker",
+        "select_alternate_worker"
+      ]
+    },
+    {
+      "case": "fence_stale_lease",
+      "input": {
+        "worker_class": "healthy",
+        "worker_next_action": "allow_worker",
+        "proof_debt_next_action": "refresh_lease_fence",
+        "proof_debt_complete": false,
+        "proof_freshness": "missing",
+        "coalescer_state": "stale_lease",
+        "proof_cache_state": "miss",
+        "remote_required": true,
+        "execution_mode": "remote",
+        "candidate_worker_id": "ts2",
+        "alternate_worker_count": 2,
+        "healthy_workers": 2,
+        "active_cargo_processes": 1,
+        "max_cargo_processes": 3,
+        "product_failure": false,
+        "source_only": false
+      },
+      "expected_selected_action": "refresh_lease_fence",
+      "expected_green_proof_eligible": false,
+      "expected_reason": "stale_lease_fence",
+      "expected_rejected_actions": [
+        "join_existing_proof",
+        "retry_same_worker"
+      ]
+    },
+    {
+      "case": "source_only_blocker",
+      "input": {
+        "worker_class": "healthy",
+        "worker_next_action": "allow_worker",
+        "proof_debt_next_action": "record_source_only_blocker",
+        "proof_debt_complete": false,
+        "proof_freshness": "missing",
+        "coalescer_state": "none",
+        "proof_cache_state": "miss",
+        "remote_required": true,
+        "execution_mode": "unavailable",
+        "candidate_worker_id": "ts2",
+        "alternate_worker_count": 0,
+        "healthy_workers": 1,
+        "active_cargo_processes": 3,
+        "max_cargo_processes": 3,
+        "product_failure": false,
+        "source_only": true
+      },
+      "expected_selected_action": "record_source_only_blocker",
+      "expected_green_proof_eligible": false,
+      "expected_reason": "source_only_blocker",
+      "expected_rejected_actions": [
+        "retry_same_worker",
+        "reuse_fresh_proof"
+      ]
+    },
+    {
+      "case": "product_failure_fail_closed",
+      "input": {
+        "worker_class": "healthy",
+        "worker_next_action": "allow_worker",
+        "proof_debt_next_action": "fail_closed_product",
+        "proof_debt_complete": false,
+        "proof_freshness": "missing",
+        "coalescer_state": "none",
+        "proof_cache_state": "miss",
+        "remote_required": true,
+        "execution_mode": "remote",
+        "candidate_worker_id": "ts2",
+        "alternate_worker_count": 2,
+        "healthy_workers": 2,
+        "active_cargo_processes": 1,
+        "max_cargo_processes": 3,
+        "product_failure": true,
+        "source_only": false
+      },
+      "expected_selected_action": "fail_closed_product",
+      "expected_green_proof_eligible": false,
+      "expected_reason": "product_failure",
+      "expected_rejected_actions": [
+        "retry_same_worker",
+        "select_alternate_worker"
+      ]
+    },
+    {
+      "case": "remote_required_local_fallback_refusal",
+      "input": {
+        "worker_class": "blocked",
+        "worker_next_action": "reject_worker",
+        "proof_debt_next_action": "retry_different_worker",
+        "proof_debt_complete": false,
+        "proof_freshness": "missing",
+        "coalescer_state": "none",
+        "proof_cache_state": "miss",
+        "remote_required": true,
+        "execution_mode": "local_fallback",
+        "candidate_worker_id": "local",
+        "alternate_worker_count": 2,
+        "healthy_workers": 2,
+        "active_cargo_processes": 1,
+        "max_cargo_processes": 3,
+        "product_failure": false,
+        "source_only": false
+      },
+      "expected_selected_action": "reject_local_fallback",
+      "expected_green_proof_eligible": false,
+      "expected_reason": "remote_required_local_fallback",
+      "expected_rejected_actions": [
+        "reuse_fresh_proof",
+        "retry_same_worker"
+      ]
+    },
+    {
+      "case": "active_cargo_contention_above_threshold",
+      "input": {
+        "worker_class": "healthy",
+        "worker_next_action": "allow_worker",
+        "proof_debt_next_action": "retry_different_worker",
+        "proof_debt_complete": false,
+        "proof_freshness": "missing",
+        "coalescer_state": "none",
+        "proof_cache_state": "miss",
+        "remote_required": true,
+        "execution_mode": "remote",
+        "candidate_worker_id": "ts2",
+        "alternate_worker_count": 2,
+        "healthy_workers": 2,
+        "active_cargo_processes": 4,
+        "max_cargo_processes": 3,
+        "product_failure": false,
+        "source_only": false
+      },
+      "expected_selected_action": "wait_for_capacity",
+      "expected_green_proof_eligible": false,
+      "expected_reason": "cargo_contention",
+      "expected_rejected_actions": [
+        "retry_same_worker",
+        "select_alternate_worker"
+      ]
+    }
   ]
 }

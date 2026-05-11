@@ -61,6 +61,7 @@ REQUIRED_SPEC_MARKERS = [
     "fresh-heartbeat/no-output ambiguity",
     "Worker Reliability Ledger",
     "Proof Debt SLO",
+    "Proof Lane Reroute Policy",
     "ValidationFlightRecorderAttempt",
     "ValidationFlightRecorderRecovery",
     "command digest is missing",
@@ -271,6 +272,12 @@ AMBIGUITY_NEXT_ACTIONS = {
 }
 
 WORKER_RELIABILITY_CLASSES = {"healthy", "degraded", "drain", "blocked", "unknown"}
+WORKER_RELIABILITY_ACTIONS = {
+    "allow_worker",
+    "retry_different_worker",
+    "drain_worker",
+    "reject_worker",
+}
 
 PROOF_DEBT_SLO_CLASSES = {
     "fresh_green",
@@ -294,6 +301,39 @@ PROOF_DEBT_SLO_ACTIONS = {
     "fail_closed_product",
     "refresh_lease_fence",
 }
+
+PROOF_LANE_REROUTE_ACTIONS = {
+    "retry_same_worker",
+    "select_alternate_worker",
+    "drain_worker_then_retry",
+    "wait_for_capacity",
+    "join_existing_proof",
+    "refresh_lease_fence",
+    "record_source_only_blocker",
+    "fail_closed_product",
+    "reject_local_fallback",
+    "reuse_fresh_proof",
+    "record_blocker",
+}
+
+PROOF_LANE_REROUTE_REASONS = {
+    "healthy_worker_retry",
+    "degraded_worker_reroute",
+    "drain_worker",
+    "waiting_for_capacity",
+    "cargo_contention",
+    "join_existing_proof",
+    "stale_lease_fence",
+    "source_only_blocker",
+    "product_failure",
+    "remote_required_local_fallback",
+    "fresh_proof_reuse",
+    "no_eligible_worker",
+    "invalid_reroute_input",
+}
+
+PROOF_LANE_REROUTE_COALESCER_STATES = {"none", "open", "fresh_joinable", "stale_lease"}
+PROOF_LANE_REROUTE_CACHE_STATES = {"miss", "fresh_hit", "stale_hit"}
 
 
 def _read_text(path: Path) -> str:
@@ -1040,6 +1080,172 @@ def proof_debt_slo_decision(input_data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def proof_lane_reroute_decision(input_data: dict[str, Any]) -> dict[str, Any]:
+    worker_class = input_data.get("worker_class")
+    worker_next_action = input_data.get("worker_next_action")
+    proof_debt_next_action = input_data.get("proof_debt_next_action")
+    proof_debt_complete = input_data.get("proof_debt_complete")
+    proof_freshness = input_data.get("proof_freshness")
+    coalescer_state = input_data.get("coalescer_state")
+    proof_cache_state = input_data.get("proof_cache_state")
+    remote_required = input_data.get("remote_required")
+    execution_mode = input_data.get("execution_mode")
+    product_failure = input_data.get("product_failure")
+    source_only = input_data.get("source_only")
+    candidate_worker_id = input_data.get("candidate_worker_id")
+    alternate_worker_count = _bounded_int(input_data.get("alternate_worker_count"))
+    healthy_workers = _bounded_int(input_data.get("healthy_workers"))
+    active_cargo_processes = _bounded_int(input_data.get("active_cargo_processes"))
+    max_cargo_processes = _bounded_int(input_data.get("max_cargo_processes"), minimum=1)
+
+    invalid = (
+        worker_class not in WORKER_RELIABILITY_CLASSES
+        or worker_next_action not in WORKER_RELIABILITY_ACTIONS
+        or proof_debt_next_action not in PROOF_DEBT_SLO_ACTIONS
+        or not isinstance(proof_debt_complete, bool)
+        or proof_freshness not in {"fresh", "stale", "missing"}
+        or coalescer_state not in PROOF_LANE_REROUTE_COALESCER_STATES
+        or proof_cache_state not in PROOF_LANE_REROUTE_CACHE_STATES
+        or not isinstance(remote_required, bool)
+        or execution_mode not in RCH_MODES
+        or not isinstance(product_failure, bool)
+        or not isinstance(source_only, bool)
+        or not _bounded(candidate_worker_id)
+        or alternate_worker_count is None
+        or healthy_workers is None
+        or active_cargo_processes is None
+        or max_cargo_processes is None
+    )
+    if invalid:
+        return {
+            "selected_action": "record_blocker",
+            "rejected_actions": sorted(PROOF_LANE_REROUTE_ACTIONS - {"record_blocker"}),
+            "reason_codes": ["invalid_reroute_input"],
+            "constraints": {"valid": False},
+            "cooldown_hint": "none",
+            "drain_recommendation": False,
+            "freshness_window_seconds": 0,
+            "green_proof_eligible": False,
+            "operator_summary": "record_blocker: invalid proof-lane reroute input",
+        }
+
+    cargo_saturated = active_cargo_processes >= max_cargo_processes
+    selected_action = "retry_same_worker"
+    rejected_actions: list[str] = []
+    reason_codes: list[str] = []
+    cooldown_hint = "none"
+    drain_recommendation = False
+    green_proof_eligible = False
+    freshness_window_seconds = 900 if proof_freshness == "fresh" else 0
+
+    def reject(*actions: str) -> None:
+        rejected_actions.extend(action for action in actions if action in PROOF_LANE_REROUTE_ACTIONS)
+
+    if product_failure:
+        selected_action = "fail_closed_product"
+        reason_codes.append("product_failure")
+        reject("retry_same_worker", "select_alternate_worker", "join_existing_proof", "reuse_fresh_proof")
+    elif remote_required and execution_mode == "local_fallback":
+        selected_action = "reject_local_fallback"
+        reason_codes.append("remote_required_local_fallback")
+        reject("retry_same_worker", "select_alternate_worker", "reuse_fresh_proof")
+    elif source_only or proof_debt_next_action == "record_source_only_blocker":
+        selected_action = "record_source_only_blocker"
+        reason_codes.append("source_only_blocker")
+        reject("retry_same_worker", "select_alternate_worker", "reuse_fresh_proof")
+    elif coalescer_state == "stale_lease" or proof_debt_next_action == "refresh_lease_fence":
+        selected_action = "refresh_lease_fence"
+        reason_codes.append("stale_lease_fence")
+        cooldown_hint = "refresh_lease_fence"
+        reject("retry_same_worker", "join_existing_proof", "reuse_fresh_proof")
+    elif proof_cache_state == "fresh_hit" or (proof_debt_complete and proof_freshness == "fresh"):
+        selected_action = "reuse_fresh_proof"
+        reason_codes.append("fresh_proof_reuse")
+        green_proof_eligible = True
+        reject("retry_same_worker", "select_alternate_worker")
+    elif coalescer_state == "fresh_joinable":
+        selected_action = "join_existing_proof"
+        reason_codes.append("join_existing_proof")
+        cooldown_hint = "wait_for_existing_proof"
+        reject("retry_same_worker", "select_alternate_worker", "reuse_fresh_proof")
+    elif cargo_saturated:
+        selected_action = "wait_for_capacity"
+        reason_codes.append("cargo_contention")
+        cooldown_hint = "wait_for_capacity"
+        reject("retry_same_worker", "select_alternate_worker", "reuse_fresh_proof")
+    elif proof_debt_next_action == "wait_for_capacity":
+        selected_action = "wait_for_capacity"
+        reason_codes.append("waiting_for_capacity")
+        cooldown_hint = "wait_for_capacity"
+        reject("retry_same_worker", "select_alternate_worker", "reuse_fresh_proof")
+    elif worker_class == "drain" or worker_next_action == "drain_worker":
+        selected_action = "drain_worker_then_retry"
+        reason_codes.append("drain_worker")
+        cooldown_hint = "drain_before_retry"
+        drain_recommendation = True
+        reject("retry_same_worker", "reuse_fresh_proof")
+    elif worker_class == "blocked" or worker_next_action == "reject_worker":
+        if alternate_worker_count > 0 and healthy_workers > 0:
+            selected_action = "select_alternate_worker"
+            reason_codes.append("degraded_worker_reroute")
+            reject("retry_same_worker", "reuse_fresh_proof")
+        else:
+            selected_action = "record_blocker"
+            reason_codes.append("no_eligible_worker")
+            reject("retry_same_worker", "select_alternate_worker", "reuse_fresh_proof")
+    elif worker_class in {"degraded", "unknown"} or worker_next_action == "retry_different_worker":
+        if alternate_worker_count > 0 and healthy_workers > 0:
+            selected_action = "select_alternate_worker"
+            reason_codes.append("degraded_worker_reroute")
+            reject("retry_same_worker", "reuse_fresh_proof")
+        else:
+            selected_action = "wait_for_capacity"
+            reason_codes.append("waiting_for_capacity")
+            cooldown_hint = "wait_for_capacity"
+            reject("retry_same_worker", "select_alternate_worker", "reuse_fresh_proof")
+    else:
+        selected_action = "retry_same_worker"
+        reason_codes.append("healthy_worker_retry")
+        reject("select_alternate_worker", "record_source_only_blocker", "reject_local_fallback")
+
+    if selected_action not in PROOF_LANE_REROUTE_ACTIONS:
+        selected_action = "record_blocker"
+        reason_codes = ["invalid_reroute_input"]
+        cooldown_hint = "none"
+        green_proof_eligible = False
+        drain_recommendation = False
+
+    if selected_action not in {"reuse_fresh_proof"}:
+        green_proof_eligible = False
+
+    rejected_actions = sorted(set(rejected_actions) - {selected_action})
+    reason_codes = sorted(set(reason_codes))
+    constraints = {
+        "candidate_worker_id": candidate_worker_id,
+        "worker_class": worker_class,
+        "remote_required": remote_required,
+        "cargo_saturated": cargo_saturated,
+        "proof_freshness": proof_freshness,
+        "coalescer_state": coalescer_state,
+        "proof_cache_state": proof_cache_state,
+    }
+    operator_summary = (
+        f"{selected_action}: worker={candidate_worker_id}; class={worker_class}; "
+        f"reasons={'+'.join(reason_codes)}"
+    )
+    return {
+        "selected_action": selected_action,
+        "rejected_actions": rejected_actions,
+        "reason_codes": reason_codes,
+        "constraints": constraints,
+        "cooldown_hint": cooldown_hint,
+        "drain_recommendation": drain_recommendation,
+        "freshness_window_seconds": freshness_window_seconds,
+        "green_proof_eligible": green_proof_eligible,
+        "operator_summary": operator_summary,
+    }
+
+
 def validate_artifacts(artifacts: Any) -> list[str]:
     errors: list[str] = []
     if not isinstance(artifacts, dict):
@@ -1559,6 +1765,139 @@ def _check_proof_debt_slo_cases(fixtures: dict[str, Any] | None) -> list[dict[st
     return checks
 
 
+def _check_proof_lane_reroute_cases(fixtures: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if fixtures is None or not isinstance(fixtures.get("proof_lane_reroute_cases"), list):
+        return [_check("proof_lane_reroute_cases_present", False, "missing proof_lane_reroute_cases")]
+    checks: list[dict[str, Any]] = []
+    represented = set()
+    for case in fixtures["proof_lane_reroute_cases"]:
+        if not isinstance(case, dict):
+            checks.append(_check("proof_lane_reroute_case_malformed", False, "case is not object"))
+            continue
+        name = case.get("case", "<unnamed>")
+        represented.add(name)
+        input_data = case.get("input")
+        if not isinstance(input_data, dict):
+            checks.append(_check(f"proof_lane_reroute_case:{name}", False, "missing input"))
+            continue
+        decision = proof_lane_reroute_decision(input_data)
+        checks.append(
+            _check(
+                f"proof_lane_reroute_action:{name}",
+                decision.get("selected_action") == case.get("expected_selected_action"),
+                str(decision.get("selected_action")),
+            )
+        )
+        checks.append(
+            _check(
+                f"proof_lane_reroute_green:{name}",
+                decision.get("green_proof_eligible") == case.get("expected_green_proof_eligible"),
+                str(decision.get("green_proof_eligible")),
+            )
+        )
+        expected_reason = case.get("expected_reason")
+        checks.append(
+            _check(
+                f"proof_lane_reroute_reason:{name}",
+                expected_reason in PROOF_LANE_REROUTE_REASONS
+                and expected_reason in set(decision.get("reason_codes", [])),
+                ",".join(decision.get("reason_codes", [])),
+            )
+        )
+        expected_rejected = set(case.get("expected_rejected_actions", []))
+        checks.append(
+            _check(
+                f"proof_lane_reroute_rejected:{name}",
+                expected_rejected.issubset(set(decision.get("rejected_actions", [])))
+                and len(decision.get("rejected_actions", [])) > 0,
+                ",".join(decision.get("rejected_actions", [])),
+            )
+        )
+        checks.append(
+            _check(
+                f"proof_lane_reroute_summary:{name}",
+                _bounded(decision.get("operator_summary"))
+                and str(decision.get("selected_action")) in str(decision.get("operator_summary")),
+                str(decision.get("operator_summary")),
+            )
+        )
+        checks.append(
+            _check(
+                f"proof_lane_reroute_degraded_not_selected:{name}",
+                not (
+                    input_data.get("worker_class") in {"degraded", "drain", "blocked"}
+                    and decision.get("selected_action") == "retry_same_worker"
+                ),
+                str(decision.get("selected_action")),
+            )
+        )
+
+    required_cases = {
+        "healthy_same_worker_retry",
+        "alternate_worker_reroute",
+        "drain_before_retry",
+        "wait_for_capacity",
+        "join_existing_proof",
+        "fence_stale_lease",
+        "source_only_blocker",
+        "product_failure_fail_closed",
+        "remote_required_local_fallback_refusal",
+        "active_cargo_contention_above_threshold",
+    }
+    for required_case in sorted(required_cases):
+        checks.append(
+            _check(
+                f"proof_lane_reroute_matrix:{required_case}",
+                required_case in represented,
+                ",".join(sorted(str(case) for case in represented)),
+            )
+        )
+
+    stress_inputs = [
+        {
+            "worker_class": ("healthy", "degraded", "drain", "blocked")[index % 4],
+            "worker_next_action": (
+                "allow_worker",
+                "retry_different_worker",
+                "drain_worker",
+                "reject_worker",
+            )[index % 4],
+            "proof_debt_next_action": "wait_for_capacity" if index % 11 == 0 else "retry_different_worker",
+            "proof_debt_complete": index % 17 == 0,
+            "proof_freshness": "fresh" if index % 17 == 0 else "missing",
+            "coalescer_state": "fresh_joinable" if index % 13 == 0 else "none",
+            "proof_cache_state": "fresh_hit" if index % 17 == 0 else "miss",
+            "remote_required": True,
+            "execution_mode": "remote",
+            "product_failure": index % 19 == 0,
+            "source_only": index % 23 == 0,
+            "candidate_worker_id": f"worker-{index % 7}",
+            "alternate_worker_count": index % 3,
+            "healthy_workers": 1 + (index % 5),
+            "active_cargo_processes": index % 5,
+            "max_cargo_processes": 4,
+        }
+        for index in range(1024)
+    ]
+    stress_decisions = [proof_lane_reroute_decision(input_data) for input_data in stress_inputs]
+    stress_bytes = len(json.dumps(stress_decisions, sort_keys=True).encode("utf-8"))
+    checks.append(
+        _check(
+            "proof_lane_reroute_stress_1024",
+            len(stress_decisions) == 1024 and stress_bytes <= 768 * 1024,
+            f"decisions={len(stress_decisions)} bytes={stress_bytes}",
+        )
+    )
+    checks.append(
+        _check(
+            "proof_lane_reroute_stress_deterministic",
+            stress_decisions == [proof_lane_reroute_decision(input_data) for input_data in stress_inputs],
+            "stable",
+        )
+    )
+    return checks
+
+
 def run_all() -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     checks.extend(_check_files())
@@ -1569,6 +1908,7 @@ def run_all() -> dict[str, Any]:
     checks.extend(_check_invalid_cases(fixtures))
     checks.extend(_check_worker_reliability_cases(fixtures))
     checks.extend(_check_proof_debt_slo_cases(fixtures))
+    checks.extend(_check_proof_lane_reroute_cases(fixtures))
     passed = sum(1 for check in checks if check["passed"])
     failed = len(checks) - passed
     return {
