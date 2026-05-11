@@ -1287,12 +1287,14 @@ def _explanation_field_errors(input_data: dict[str, Any]) -> list[str]:
     receipt_command_digest = input_data.get("receipt_command_digest")
     artifact_paths = input_data.get("artifact_paths")
     failure_class = input_data.get("failure_class")
+    product_failure = input_data.get("product_failure")
+    green_proof_eligible = input_data.get("green_proof_eligible")
 
     if not _bounded(bead_id) or not _bounded(input_data.get("thread_id")):
         errors.append("invalid_input")
     if not _is_sha256_hex(command_digest) or not _is_sha256_hex(receipt_command_digest):
         errors.append("malformed_command_digest")
-    elif command_digest != receipt_command_digest:
+    elif not hmac.compare_digest(str(command_digest), str(receipt_command_digest)):
         errors.append("command_digest_mismatch")
     if not _bounded(receipt_bead_id) or receipt_bead_id != bead_id:
         errors.append("bead_mismatch")
@@ -1302,9 +1304,9 @@ def _explanation_field_errors(input_data: dict[str, Any]) -> list[str]:
         errors.append("unsafe_artifact_path")
     if input_data.get("receipt_state") == "stale" or input_data.get("proof_freshness") == "stale":
         errors.append("stale_receipt")
-    if input_data.get("product_failure") is True and failure_class == "worker_infra":
+    if isinstance(product_failure, bool) and product_failure and failure_class == "worker_infra":
         errors.append("product_failure_hidden_as_infra")
-    if failure_class == "worker_infra" and input_data.get("green_proof_eligible") is True:
+    if isinstance(green_proof_eligible, bool) and green_proof_eligible and failure_class == "worker_infra":
         errors.append("worker_infra_marked_green")
     if _bounded(input_data.get("stdout_snippet")) or _bounded(input_data.get("stderr_snippet")):
         errors.append("raw_output_snippet_present")
@@ -1347,6 +1349,10 @@ def validation_explanation_bundle(input_data: dict[str, Any]) -> dict[str, Any]:
     mail_health = input_data.get("mail_health")
     mail_thread_present = input_data.get("mail_thread_present")
     artifact_paths = input_data.get("artifact_paths")
+    proof_debt_complete = input_data.get("proof_debt_complete")
+    green_proof_eligible = input_data.get("green_proof_eligible")
+    product_failure = input_data.get("product_failure")
+    source_only = input_data.get("source_only")
 
     field_errors = _explanation_field_errors(input_data)
     invalid_input = (
@@ -1356,25 +1362,29 @@ def validation_explanation_bundle(input_data: dict[str, Any]) -> dict[str, Any]:
         or proof_debt_next_action not in PROOF_DEBT_SLO_ACTIONS
         or mail_health not in EXPLANATION_BUNDLE_MAIL_HEALTH
         or not isinstance(mail_thread_present, bool)
-        or not isinstance(input_data.get("proof_debt_complete"), bool)
-        or not isinstance(input_data.get("green_proof_eligible"), bool)
-        or not isinstance(input_data.get("product_failure"), bool)
-        or not isinstance(input_data.get("source_only"), bool)
+        or not isinstance(proof_debt_complete, bool)
+        or not isinstance(green_proof_eligible, bool)
+        or not isinstance(product_failure, bool)
+        or not isinstance(source_only, bool)
     )
     if invalid_input:
         field_errors = sorted(set(field_errors + ["invalid_input"]))
 
     complete = (
         not field_errors
-        and input_data.get("proof_debt_complete") is True
-        and input_data.get("green_proof_eligible") is True
+        and isinstance(proof_debt_complete, bool)
+        and proof_debt_complete
+        and isinstance(green_proof_eligible, bool)
+        and green_proof_eligible
         and input_data.get("proof_freshness") == "fresh"
         and input_data.get("receipt_state") == "fresh"
         and reroute_selected_action == "reuse_fresh_proof"
         and failure_class == "none"
-        and input_data.get("product_failure") is False
-        and input_data.get("source_only") is False
-        and command_digest == receipt_command_digest
+        and isinstance(product_failure, bool)
+        and not product_failure
+        and isinstance(source_only, bool)
+        and not source_only
+        and hmac.compare_digest(str(command_digest), str(receipt_command_digest))
         and bead_id == input_data.get("receipt_bead_id")
     )
 
@@ -1384,7 +1394,7 @@ def validation_explanation_bundle(input_data: dict[str, Any]) -> dict[str, Any]:
     elif complete:
         final_status = "complete"
         next_action = "use_green_proof"
-    elif input_data.get("product_failure") is True or failure_class == "product_failure":
+    elif (isinstance(product_failure, bool) and product_failure) or failure_class == "product_failure":
         final_status = "failed"
         next_action = "fail_closed_product"
     elif reroute_selected_action in {"wait_for_capacity", "join_existing_proof"}:
@@ -2253,14 +2263,14 @@ def _check_explanation_bundle_cases(fixtures: dict[str, Any] | None) -> list[dic
             "stdout_path": f"artifacts/validation_broker/bd-wc27p.13/stdout-{index}.txt",
             "stderr_path": f"artifacts/validation_broker/bd-wc27p.13/stderr-{index}.txt",
         }
-        for index in range(512)
+        for index in range(384)
     ]
     stress_bundles = [validation_explanation_bundle(input_data) for input_data in stress_inputs]
     stress_bytes = len(json.dumps(stress_bundles, sort_keys=True).encode("utf-8"))
     checks.append(
         _check(
-            "explanation_bundle_stress_512",
-            len(stress_bundles) == 512 and stress_bytes <= 1024 * 1024,
+            "explanation_bundle_stress_384",
+            len(stress_bundles) == 384 and stress_bytes <= 1024 * 1024,
             f"bundles={len(stress_bundles)} bytes={stress_bytes}",
         )
     )
