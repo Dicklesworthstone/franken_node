@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import check_compat_gates as mod
+import check_compat_gates as mod  # noqa: E402
 
 
 class TestConstants(unittest.TestCase):
@@ -112,6 +112,7 @@ class TestRunChecks(unittest.TestCase):
     def test_bead_id(self):
         result = mod.run_checks()
         self.assertEqual(result["bead_id"], "bd-137")
+        self.assertEqual(result["replacement_bead_id"], "bd-2ek7")
 
     def test_section(self):
         result = mod.run_checks()
@@ -124,6 +125,60 @@ class TestRunChecks(unittest.TestCase):
     def test_has_many_checks(self):
         result = mod.run_checks()
         self.assertGreaterEqual(result["summary"]["total"], 50)
+
+    def test_completion_debt_obligations_present(self):
+        result = mod.run_checks()
+        completion_debt = result["completion_debt"]
+        self.assertEqual(completion_debt["completion_bead"], "bd-2ek7.1")
+        obligations = {
+            obligation["spec_item"]: obligation
+            for obligation in completion_debt["coverage_obligations"]
+        }
+        self.assertEqual(
+            set(obligations),
+            {
+                "tests.unit.primary",
+                "tests.integration.primary",
+                "tests.e2e.primary",
+                "telemetry.primary",
+            },
+        )
+        self.assertIn(
+            "tests/e2e/compatibility_policy_operator_suite.sh",
+            obligations["tests.e2e.primary"]["evidence_paths"],
+        )
+        self.assertIn("trace_id", obligations["telemetry.primary"]["required_fields"])
+
+    def test_completion_debt_missing_spec_item_fails(self):
+        original = mod.COMPLETION_DEBT_OBLIGATIONS
+        mod.COMPLETION_DEBT_OBLIGATIONS = [
+            obligation
+            for obligation in original
+            if obligation["spec_item"] != "telemetry.primary"
+        ]
+        try:
+            result = mod.run_checks()
+        finally:
+            mod.COMPLETION_DEBT_OBLIGATIONS = original
+        self.assertFalse(result["overall_pass"])
+        details = "\n".join(c["detail"] for c in result["checks"] if not c["pass"])
+        self.assertIn("telemetry.primary", details)
+
+    def test_completion_debt_missing_evidence_path_fails(self):
+        original = mod.COMPLETION_DEBT_OBLIGATIONS
+        mutated = [dict(obligation) for obligation in original]
+        mutated[0] = dict(mutated[0])
+        mutated[0]["evidence_paths"] = list(mutated[0]["evidence_paths"]) + [
+            "artifacts/replacement_gap/bd-2ek7/missing-completion-debt.json"
+        ]
+        mod.COMPLETION_DEBT_OBLIGATIONS = mutated
+        try:
+            result = mod.run_checks()
+        finally:
+            mod.COMPLETION_DEBT_OBLIGATIONS = original
+        self.assertFalse(result["overall_pass"])
+        details = "\n".join(c["detail"] for c in result["checks"] if not c["pass"])
+        self.assertIn("missing-completion-debt.json", details)
 
     def _failing_details(self, result):
         failures = [c for c in result["checks"] if not c["pass"]]
@@ -139,12 +194,26 @@ class TestSelfTest(unittest.TestCase):
 class TestJsonOutput(unittest.TestCase):
     def test_serializable(self):
         result = mod.run_checks()
-        parsed = json.loads(json.dumps(result))
+        serialized = json.dumps(result)
+        try:
+            parsed = json.JSONDecoder().decode(serialized)
+        except json.JSONDecodeError as exc:
+            self.fail(f"run_checks output did not round-trip as JSON: {exc}")
         self.assertEqual(parsed["bead_id"], "bd-137")
 
     def test_all_fields(self):
         result = mod.run_checks()
-        for key in ["bead_id", "title", "section", "overall_pass", "verdict", "summary", "checks"]:
+        for key in [
+            "bead_id",
+            "replacement_bead_id",
+            "title",
+            "section",
+            "overall_pass",
+            "verdict",
+            "summary",
+            "completion_debt",
+            "checks",
+        ]:
             self.assertIn(key, result)
 
 

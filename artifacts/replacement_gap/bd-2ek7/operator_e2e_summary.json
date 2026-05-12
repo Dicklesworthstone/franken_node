@@ -1,0 +1,21 @@
+{
+  "check_failing": 0,
+  "check_passing": 129,
+  "check_total": 129,
+  "event_count": 2,
+  "log_path": "artifacts/replacement_gap/bd-2ek7/operator_e2e_log.jsonl",
+  "missing_fields": [],
+  "required_fields": [
+    "decision",
+    "derived_scope",
+    "explanation_digest",
+    "freshness_state",
+    "parent_receipt_id",
+    "predicate_id",
+    "reason_code",
+    "trace_id"
+  ],
+  "schema_version": "bd-2ek7-operator-e2e-v1",
+  "trace_id": "trace-bd-2ek7-operator-e2e",
+  "verdict": "PASS"
+}

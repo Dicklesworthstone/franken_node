@@ -1,19 +1,128 @@
 {
   "artifact_type": "verification_evidence",
   "bead_id": "bd-2ek7",
+  "completion_debt_bead_id": "bd-2ek7.1",
   "title": "Replace placeholder compatibility signatures and demo signing paths with canonical policy verifier",
   "section": "10.5",
   "verdict": "PASS",
-  "timestamp": "2026-03-09T03:36:54Z",
+  "timestamp": "2026-05-12T00:34:40Z",
   "artifacts": {
     "compat_gates": "crates/franken-node/src/policy/compat_gates.rs",
     "compatibility_gate": "crates/franken-node/src/policy/compatibility_gate.rs",
     "integration_test": "tests/integration/compatibility_policy_pipeline.rs",
     "cargo_integration_wrapper": "crates/franken-node/tests/compatibility_policy_pipeline.rs",
+    "operator_e2e": "tests/e2e/compatibility_policy_operator_suite.sh",
+    "operator_e2e_log": "artifacts/replacement_gap/bd-2ek7/operator_e2e_log.jsonl",
+    "operator_e2e_summary_json": "artifacts/replacement_gap/bd-2ek7/operator_e2e_summary.json",
+    "operator_e2e_summary_md": "artifacts/replacement_gap/bd-2ek7/operator_e2e_summary.md",
     "verification_summary": "artifacts/replacement_gap/bd-2ek7/verification_summary.md",
     "verification_evidence": "artifacts/replacement_gap/bd-2ek7/verification_evidence.json"
   },
+  "completion_debt": {
+    "required_spec_items": [
+      "telemetry.primary",
+      "tests.e2e.primary",
+      "tests.integration.primary",
+      "tests.unit.primary"
+    ],
+    "coverage_obligations": [
+      {
+        "spec_item": "tests.unit.primary",
+        "status": "covered",
+        "evidence_paths": [
+          "scripts/check_compat_gates.py",
+          "tests/test_check_compat_gates.py",
+          "crates/franken-node/src/policy/compat_gates.rs",
+          "crates/franken-node/src/policy/compatibility_gate.rs"
+        ],
+        "commands": [
+          "python3 scripts/check_compat_gates.py --json",
+          "python3 -m unittest tests/test_check_compat_gates.py",
+          "python3 -m compileall -q scripts/check_compat_gates.py tests/test_check_compat_gates.py"
+        ]
+      },
+      {
+        "spec_item": "tests.integration.primary",
+        "status": "covered",
+        "evidence_paths": [
+          "tests/integration/compatibility_policy_pipeline.rs",
+          "crates/franken-node/tests/compatibility_policy_pipeline.rs",
+          "artifacts/replacement_gap/bd-2ek7/verification_evidence.json"
+        ],
+        "commands": [
+          "rch exec -- env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 RUSTFLAGS='-Cdebuginfo=0' CARGO_TARGET_DIR=/data/projects/rch_target_crimsonglacier_extcompat_lowmem cargo test -p frankenengine-node --features extended-surfaces --test compatibility_policy_pipeline -- --nocapture"
+        ]
+      },
+      {
+        "spec_item": "tests.e2e.primary",
+        "status": "covered",
+        "evidence_paths": [
+          "tests/e2e/compatibility_policy_operator_suite.sh",
+          "artifacts/replacement_gap/bd-2ek7/operator_e2e_log.jsonl",
+          "artifacts/replacement_gap/bd-2ek7/operator_e2e_summary.json",
+          "artifacts/replacement_gap/bd-2ek7/operator_e2e_summary.md"
+        ],
+        "commands": [
+          "tests/e2e/compatibility_policy_operator_suite.sh"
+        ]
+      },
+      {
+        "spec_item": "telemetry.primary",
+        "status": "covered",
+        "required_fields": [
+          "trace_id",
+          "predicate_id",
+          "parent_receipt_id",
+          "derived_scope",
+          "decision",
+          "reason_code",
+          "freshness_state",
+          "explanation_digest"
+        ],
+        "evidence_paths": [
+          "crates/franken-node/src/policy/compat_gates.rs",
+          "crates/franken-node/src/policy/compatibility_gate.rs",
+          "artifacts/replacement_gap/bd-2ek7/operator_e2e_log.jsonl",
+          "scripts/check_compat_gates.py"
+        ],
+        "commands": [
+          "python3 scripts/check_compat_gates.py --json",
+          "tests/e2e/compatibility_policy_operator_suite.sh"
+        ]
+      }
+    ]
+  },
   "verification_steps": [
+    {
+      "name": "python_check_compat_gates_json",
+      "command": "python3 scripts/check_compat_gates.py --json",
+      "status": "PASS",
+      "detail": "129 passed, 0 failed. The checker now exposes bd-2ek7 replacement evidence and bd-2ek7.1 completion-debt obligations for unit, integration, E2E, and telemetry coverage."
+    },
+    {
+      "name": "python_unittest_check_compat_gates",
+      "command": "python3 -m unittest tests/test_check_compat_gates.py",
+      "status": "PASS",
+      "detail": "39 tests passed, including mutation coverage for missing completion-debt spec items and missing evidence paths."
+    },
+    {
+      "name": "operator_e2e_compatibility_policy",
+      "command": "tests/e2e/compatibility_policy_operator_suite.sh",
+      "status": "PASS",
+      "detail": "Operator E2E emitted 2 structured POLICY_COMPAT events with all required telemetry fields and summarized 129/129 checker assertions."
+    },
+    {
+      "name": "python_compileall_check_compat_gates",
+      "command": "python3 -m compileall -q scripts/check_compat_gates.py tests/test_check_compat_gates.py",
+      "status": "PASS",
+      "detail": "Python checker and regression test module compiled successfully."
+    },
+    {
+      "name": "jq_operator_and_verification_json",
+      "command": "jq empty artifacts/replacement_gap/bd-2ek7/operator_e2e_summary.json artifacts/replacement_gap/bd-2ek7/verification_evidence.json",
+      "status": "PASS",
+      "detail": "Updated operator E2E and verification evidence JSON artifacts parse cleanly."
+    },
     {
       "name": "rch_cargo_check_extended_surfaces_default",
       "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/data/projects/rch_target_crimsonglacier_extcompat cargo check -p frankenengine-node --features extended-surfaces --tests --message-format short",
@@ -74,7 +183,8 @@
   ],
   "notes": [
     "The relevant policy modules are only compiled when feature extended-surfaces is enabled.",
-    "Package-level fmt and all-targets clippy remain noisy because the repository currently has unrelated active-worktree edits outside bd-2ek7 surfaces.",
-    "Bead-local implementation, unit coverage, integration coverage, and library-surface linting are complete."
+    "bd-2ek7.1 closes the completion-debt audit items for tests.unit.primary, tests.integration.primary, tests.e2e.primary, and telemetry.primary.",
+    "Fresh completion-debt proof in this turn is Python/checker/E2E/artifact based; previously recorded rch evidence remains the Rust unit, integration, and library clippy proof for the compiled compatibility policy modules.",
+    "Cargo-heavy reproof was deferred when the shared machine already had more than two cargo/rustc processes in flight."
   ]
 }

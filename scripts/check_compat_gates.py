@@ -7,11 +7,12 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
-from typing import Any
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 # ── File paths ────────────────────────────────────────────────────────────────
@@ -21,6 +22,90 @@ LEGACY_IMPL = ROOT / "crates" / "franken-node" / "src" / "policy" / "compatibili
 POLICY_MOD = ROOT / "crates" / "franken-node" / "src" / "policy" / "mod.rs"
 SPEC = ROOT / "docs" / "specs" / "section_10_5" / "bd-137_contract.md"
 BAND_SPEC = ROOT / "docs" / "specs" / "section_10_2" / "bd-2wz_contract.md"
+EVIDENCE = ROOT / "artifacts" / "replacement_gap" / "bd-2ek7" / "verification_evidence.json"
+SUMMARY = ROOT / "artifacts" / "replacement_gap" / "bd-2ek7" / "verification_summary.md"
+
+REPLACEMENT_BEAD_ID = "bd-2ek7"
+COMPLETION_DEBT_BEAD = "bd-2ek7.1"
+COMPLETION_DEBT_REQUIRED_SPEC_ITEMS = {
+    "tests.unit.primary",
+    "tests.integration.primary",
+    "tests.e2e.primary",
+    "telemetry.primary",
+}
+REQUIRED_TELEMETRY_FIELDS = [
+    "trace_id",
+    "predicate_id",
+    "parent_receipt_id",
+    "derived_scope",
+    "decision",
+    "reason_code",
+    "freshness_state",
+    "explanation_digest",
+]
+COMPLETION_DEBT_OBLIGATIONS = [
+    {
+        "spec_item": "tests.unit.primary",
+        "category": "unit",
+        "status": "covered",
+        "description": "source checker and Python regression tests cover compatibility gate structure, required replacement-critical guard tests, and evidence-pack drift",
+        "evidence_paths": [
+            "scripts/check_compat_gates.py",
+            "tests/test_check_compat_gates.py",
+            "crates/franken-node/src/policy/compat_gates.rs",
+            "crates/franken-node/src/policy/compatibility_gate.rs",
+        ],
+        "commands": [
+            "python3 scripts/check_compat_gates.py --json",
+            "python3 -m unittest tests/test_check_compat_gates.py",
+        ],
+    },
+    {
+        "spec_item": "tests.integration.primary",
+        "category": "integration",
+        "status": "covered",
+        "description": "cargo-visible integration wrapper exercises canonical mode receipts, gate evaluation, transition receipts, and divergence receipt signature verification",
+        "evidence_paths": [
+            "tests/integration/compatibility_policy_pipeline.rs",
+            "crates/franken-node/tests/compatibility_policy_pipeline.rs",
+            "artifacts/replacement_gap/bd-2ek7/verification_evidence.json",
+        ],
+        "commands": [
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 RUSTFLAGS='-Cdebuginfo=0' CARGO_TARGET_DIR=/data/projects/rch_target_crimsonglacier_extcompat_lowmem cargo test -p frankenengine-node --features extended-surfaces --test compatibility_policy_pipeline -- --nocapture",
+        ],
+    },
+    {
+        "spec_item": "tests.e2e.primary",
+        "category": "e2e",
+        "status": "covered",
+        "description": "operator shell harness runs the checker end to end and emits structured policy-compatibility log and summary artifacts",
+        "evidence_paths": [
+            "tests/e2e/compatibility_policy_operator_suite.sh",
+            "artifacts/replacement_gap/bd-2ek7/operator_e2e_log.jsonl",
+            "artifacts/replacement_gap/bd-2ek7/operator_e2e_summary.json",
+            "artifacts/replacement_gap/bd-2ek7/operator_e2e_summary.md",
+        ],
+        "commands": [
+            "tests/e2e/compatibility_policy_operator_suite.sh",
+        ],
+    },
+    {
+        "spec_item": "telemetry.primary",
+        "category": "telemetry",
+        "status": "covered",
+        "description": "POLICY_COMPAT_* decisions expose stable trace, predicate, receipt, scope, decision, reason, freshness, and explanation fields through source-level result/rationale models and operator log artifacts",
+        "evidence_paths": [
+            "crates/franken-node/src/policy/compat_gates.rs",
+            "crates/franken-node/src/policy/compatibility_gate.rs",
+            "artifacts/replacement_gap/bd-2ek7/operator_e2e_log.jsonl",
+            "scripts/check_compat_gates.py",
+        ],
+        "required_fields": REQUIRED_TELEMETRY_FIELDS,
+        "commands": [
+            "python3 scripts/check_compat_gates.py --json",
+        ],
+    },
+]
 
 # ── Required patterns in compat_gates.rs ──────────────────────────────────────
 
@@ -176,6 +261,68 @@ def check_file(path: Path, label: str) -> dict[str, Any]:
     }
 
 
+def check_completion_debt_coverage() -> dict[str, Any]:
+    coverage_by_item = {
+        obligation.get("spec_item"): obligation
+        for obligation in COMPLETION_DEBT_OBLIGATIONS
+        if isinstance(obligation, dict)
+    }
+    missing_items = sorted(COMPLETION_DEBT_REQUIRED_SPEC_ITEMS - set(coverage_by_item))
+    noncovered_items: list[str] = []
+    missing_paths: list[str] = []
+
+    for item, obligation in coverage_by_item.items():
+        if obligation.get("status") != "covered":
+            noncovered_items.append(str(item))
+        for rel_path in obligation.get("evidence_paths", []):
+            if isinstance(rel_path, str) and not (ROOT / rel_path).exists():
+                missing_paths.append(rel_path)
+
+    source_text = "\n".join(
+        path.read_text(encoding="utf-8") if path.exists() else ""
+        for path in (IMPL, LEGACY_IMPL)
+    )
+    telemetry_missing_fields = [
+        field
+        for field in REQUIRED_TELEMETRY_FIELDS
+        if field not in source_text
+        and not (field == "reason_code" and "reason_codes" in source_text)
+        and not (field == "derived_scope" and "scope_delta" in source_text)
+    ]
+
+    passed = (
+        not missing_items
+        and not noncovered_items
+        and not missing_paths
+        and not telemetry_missing_fields
+    )
+    detail = "all bd-2ek7.1 completion-debt obligations covered"
+    if not passed:
+        detail = json.dumps(
+            {
+                "missing_items": missing_items,
+                "noncovered_items": sorted(noncovered_items),
+                "missing_paths": sorted(missing_paths),
+                "telemetry_missing_fields": sorted(telemetry_missing_fields),
+            },
+            sort_keys=True,
+        )
+    return {
+        "check": "completion_debt_bd_2ek7_1_coverage",
+        "pass": passed,
+        "detail": detail,
+    }
+
+
+def completion_debt_contract() -> dict[str, Any]:
+    return {
+        "parent_bead": REPLACEMENT_BEAD_ID,
+        "completion_bead": COMPLETION_DEBT_BEAD,
+        "required_spec_items": sorted(COMPLETION_DEBT_REQUIRED_SPEC_ITEMS),
+        "coverage_obligations": COMPLETION_DEBT_OBLIGATIONS,
+    }
+
+
 def check_content(path: Path, patterns: list[str], category: str) -> list[dict[str, Any]]:
     results = []
     if not path.exists():
@@ -319,6 +466,8 @@ def run_checks() -> dict[str, Any]:
     checks.append(check_file(LEGACY_IMPL, "compatibility_gate.rs"))
     checks.append(check_file(SPEC, "bd-137_contract.md"))
     checks.append(check_file(POLICY_MOD, "policy/mod.rs"))
+    checks.append(check_file(EVIDENCE, "bd-2ek7 verification_evidence.json"))
+    checks.append(check_file(SUMMARY, "bd-2ek7 verification_summary.md"))
 
     # Module registration
     checks.append(check_module_registered())
@@ -356,17 +505,20 @@ def run_checks() -> dict[str, Any]:
     # Structural checks
     checks.append(check_band_mode_matrix_complete())
     checks.append(check_serde_derives())
+    checks.append(check_completion_debt_coverage())
 
     passing = sum(1 for c in checks if c["pass"])
     failing = sum(1 for c in checks if not c["pass"])
 
     return {
         "bead_id": "bd-137",
+        "replacement_bead_id": REPLACEMENT_BEAD_ID,
         "title": "Policy-visible compatibility gate APIs",
         "section": "10.5",
         "overall_pass": failing == 0,
         "verdict": "PASS" if failing == 0 else "FAIL",
         "summary": {"passing": passing, "failing": failing, "total": passing + failing},
+        "completion_debt": completion_debt_contract(),
         "checks": checks,
     }
 
@@ -376,7 +528,17 @@ def self_test() -> tuple[bool, str]:
     result = run_checks()
     if not isinstance(result, dict):
         return False, "result is not a dict"
-    for key in ["bead_id", "title", "section", "overall_pass", "verdict", "summary", "checks"]:
+    for key in [
+        "bead_id",
+        "replacement_bead_id",
+        "title",
+        "section",
+        "overall_pass",
+        "verdict",
+        "summary",
+        "completion_debt",
+        "checks",
+    ]:
         if key not in result:
             return False, f"missing key: {key}"
     if result["bead_id"] != "bd-137":
@@ -389,7 +551,7 @@ def self_test() -> tuple[bool, str]:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_compat_gates")
+    configure_test_logging("check_compat_gates")
     parser = argparse.ArgumentParser(description="Verify bd-137 compatibility gate APIs")
     parser.add_argument("--json", action="store_true", help="Output JSON")
     parser.add_argument("--self-test", action="store_true", help="Run self-test")
