@@ -1,6 +1,13 @@
 import glob
+import os
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
+
+logger = configure_test_logging("run_all_checks")
+logger.info("starting run_all_checks", extra={"argv": sys.argv[1:]})
 
 failed = []
 for script in sorted(glob.glob("scripts/*.py")):

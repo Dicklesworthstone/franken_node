@@ -25,6 +25,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schemas"
 TEMPLATE_DIR = ROOT / "docs" / "templates" / "reproducibility"
@@ -189,6 +192,8 @@ def generate_example_lock() -> dict:
 
 
 def main():
+    logger = configure_test_logging("validate_repro_pack")
+    logger.info("starting validate_repro_pack", extra={"argv": sys.argv[1:]})
     json_output = "--json" in sys.argv
     timestamp = datetime.now(timezone.utc).isoformat()
 

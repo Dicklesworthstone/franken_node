@@ -11,9 +11,13 @@ Usage:
 """
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -165,6 +169,8 @@ def self_test() -> dict:
 
 
 def main():
+    logger = configure_test_logging("rollout_planner")
+    logger.info("starting rollout_planner", extra={"argv": sys.argv[1:]})
     json_output = "--json" in sys.argv
     is_self_test = "--self-test" in sys.argv
 

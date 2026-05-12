@@ -15,10 +15,14 @@ Exit codes:
 """
 
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = ROOT / "schemas" / "compatibility_fixture.schema.json"
@@ -198,6 +202,8 @@ def check_fixture_ids_unique() -> dict:
 
 
 def main():
+    logger = configure_test_logging("fixture_runner")
+    logger.info("starting fixture_runner verification")
     json_output = "--json" in sys.argv
     timestamp = datetime.now(timezone.utc).isoformat()
 

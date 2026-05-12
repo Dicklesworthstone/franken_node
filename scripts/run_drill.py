@@ -5,9 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNBOOK_DIR = ROOT / "fixtures" / "runbooks"
@@ -78,6 +82,8 @@ def self_test() -> tuple[bool, list[dict]]:
 
 
 def main() -> int:
+    logger = configure_test_logging("run_drill")
+    logger.info("starting run_drill", extra={"argv": sys.argv[1:]})
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runbook-id", help="Runbook ID to execute (e.g., RB-001)")
     parser.add_argument("--output", help="Optional output JSON path")

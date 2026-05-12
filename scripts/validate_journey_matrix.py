@@ -19,9 +19,13 @@ Exit codes:
 """
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 MATRIX_PATH = ROOT / "docs" / "verification" / "journey_matrix.json"
@@ -118,6 +122,8 @@ def validate_failure_taxonomy(matrix: dict) -> list[str]:
 
 
 def main():
+    logger = configure_test_logging("validate_journey_matrix")
+    logger.info("starting validate_journey_matrix", extra={"argv": sys.argv[1:]})
     json_output = "--json" in sys.argv
 
     matrix = load_json(MATRIX_PATH)

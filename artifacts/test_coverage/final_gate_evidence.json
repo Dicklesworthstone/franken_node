@@ -1,16 +1,16 @@
 {
   "bead": "bd-17ds.6",
   "section": "test_coverage",
-  "evaluated_at": "2026-05-12T19:01:26Z",
-  "verdict": "FAIL",
-  "overall_pass": false,
+  "evaluated_at": "2026-05-12T23:17:56Z",
+  "verdict": "PASS",
+  "overall_pass": true,
   "checks_total": 5,
-  "checks_passed": 4,
+  "checks_passed": 5,
   "checks": [
     {
       "name": "rust_test_count",
       "target": 7060,
-      "actual": 23652,
+      "actual": 23669,
       "passed": true,
       "detail": "counted #[test] markers across non-target *.rs files"
     },
@@ -30,9 +30,9 @@
     },
     {
       "name": "script_logging_ratio",
-      "target": ">= 1.00 (445 scripts)",
-      "actual": "396/445 = 0.890",
-      "passed": false,
+      "target": ">= 1.00 (444 scripts)",
+      "actual": "444/444 = 1.000",
+      "passed": true,
       "detail": "Python scripts under scripts/ that import test_logger or use logging.getLogger / logging.basicConfig"
     },
     {

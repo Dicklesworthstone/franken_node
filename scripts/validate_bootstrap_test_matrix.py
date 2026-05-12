@@ -15,10 +15,14 @@ Exit codes:
 """
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 MATRIX_PATH = ROOT / "docs" / "verification" / "bootstrap_test_matrix.json"
@@ -108,6 +112,8 @@ def validate(matrix: dict, bead_ids: set[str]) -> tuple[list[str], list[str]]:
 
 
 def main():
+    logger = configure_test_logging("validate_bootstrap_test_matrix")
+    logger.info("starting validate_bootstrap_test_matrix", extra={"argv": sys.argv[1:]})
     json_output = "--json" in sys.argv
 
     matrix = load_matrix()

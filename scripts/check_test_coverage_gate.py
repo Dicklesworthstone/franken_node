@@ -116,12 +116,27 @@ def count_cross_module_integration(repo_root: Path) -> int:
 
 
 def script_logging_ratio(repo_root: Path) -> tuple[int, int, float]:
-    """Ratio of Python verification scripts that import the project's test_logger."""
+    """Ratio of Python verification scripts that import the project's test_logger.
+
+    Excludes:
+      - ``__init__.py`` files (package markers, not verification scripts)
+      - ``scripts/lib/`` modules (helpers — the logger itself lives here; including
+        them would create a circular-import requirement)
+      - ``__pycache__`` artefacts and dot-directories
+    """
     scripts = list((repo_root / "scripts").glob("**/*.py"))
     total = 0
     logged = 0
     for s in scripts:
-        if "/.git/" in str(s) or "/__pycache__/" in str(s):
+        sp = str(s)
+        name = s.name
+        if "/.git/" in sp or "/__pycache__/" in sp:
+            continue
+        # Skip __init__.py — these are package markers, not verification scripts
+        if name == "__init__.py":
+            continue
+        # Skip scripts/lib/ — these are the logging helpers themselves
+        if "/scripts/lib/" in sp:
             continue
         total += 1
         try:
