@@ -4,11 +4,14 @@
 //! sequence number and this order is preserved through all builder operations.
 
 use proptest::prelude::*;
-use proptest::test_runner::TestRunner;
+use proptest::test_runner::{Config, TestRunner};
 use std::collections::BTreeMap;
 
 use frankenengine_node::capacity_defaults::aliases::MAX_TRACE_STEPS;
-use frankenengine_node::replay::time_travel_engine::{EnvironmentSnapshot, TraceBuilder};
+use frankenengine_node::replay::time_travel_engine::{
+    AuditEntry, EnvironmentSnapshot, ReplayEngine, ReplayVerdict, SideEffect, TraceBuilder,
+    TraceStep, WorkflowTrace, event_codes,
+};
 
 /// Create a demo environment for testing.
 fn demo_env() -> EnvironmentSnapshot {
@@ -25,6 +28,7 @@ fn demo_env() -> EnvironmentSnapshot {
 struct StepData {
     input: Vec<u8>,
     output: Vec<u8>,
+    side_effects: Vec<SideEffectData>,
     timestamp_ns: u64,
 }
 
@@ -36,15 +40,121 @@ impl Arbitrary for StepData {
         (
             prop::collection::vec(any::<u8>(), 0..=100),
             prop::collection::vec(any::<u8>(), 0..=100),
+            prop::collection::vec(any::<SideEffectData>(), 0..=4),
             1_000_000_u64..=u64::MAX,
         )
-            .prop_map(|(input, output, timestamp_ns)| StepData {
+            .prop_map(|(input, output, side_effects, timestamp_ns)| StepData {
                 input,
                 output,
+                side_effects,
                 timestamp_ns,
             })
             .boxed()
     }
+}
+
+#[derive(Debug, Clone)]
+struct SideEffectData {
+    kind: String,
+    payload: Vec<u8>,
+}
+
+impl Arbitrary for SideEffectData {
+    type Parameters = ();
+    type Strategy = BoxedStrategy<Self>;
+
+    fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+        (
+            prop::collection::vec(any::<u8>(), 0..=8),
+            prop::collection::vec(any::<u8>(), 0..=64),
+        )
+            .prop_map(|(kind_bytes, payload)| SideEffectData {
+                kind: format!("effect_{}", hex::encode(kind_bytes)),
+                payload,
+            })
+            .boxed()
+    }
+}
+
+fn side_effect_from_data(data: &SideEffectData) -> SideEffect {
+    SideEffect::new(&data.kind, data.payload.clone())
+}
+
+fn generated_environment_strategy() -> impl Strategy<Value = EnvironmentSnapshot> {
+    (
+        any::<u64>(),
+        prop::collection::vec(
+            (
+                prop::collection::vec(any::<u8>(), 0..=6),
+                prop::collection::vec(any::<u8>(), 0..=24),
+            ),
+            0..=8,
+        ),
+        prop::collection::vec(any::<u8>(), 1..=6),
+        (0_u8..=9, 0_u8..=9, 0_u8..=9),
+    )
+        .prop_map(
+            |(clock_seed_ns, env_pairs, platform_bytes, version_parts)| {
+                let env_vars = env_pairs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (key_bytes, value_bytes))| {
+                        (
+                            format!("KEY_{index}_{}", hex::encode(key_bytes)),
+                            hex::encode(value_bytes),
+                        )
+                    })
+                    .collect();
+
+                EnvironmentSnapshot::new(
+                    clock_seed_ns,
+                    env_vars,
+                    &format!("linux-{}", hex::encode(platform_bytes)),
+                    &format!(
+                        "{}.{}.{}",
+                        version_parts.0, version_parts.1, version_parts.2
+                    ),
+                )
+            },
+        )
+}
+
+fn build_trace_from_steps(
+    trace_id: &str,
+    workflow_name: &str,
+    environment: EnvironmentSnapshot,
+    steps_data: &[StepData],
+) -> (WorkflowTrace, Vec<AuditEntry>) {
+    let mut builder = TraceBuilder::new(trace_id, workflow_name, environment);
+    for step_data in steps_data {
+        let side_effects = step_data
+            .side_effects
+            .iter()
+            .map(side_effect_from_data)
+            .collect();
+        builder.record_step(
+            step_data.input.clone(),
+            step_data.output.clone(),
+            side_effects,
+            step_data.timestamp_ns,
+        );
+    }
+    builder.build().expect("generated trace should build")
+}
+
+fn audit_event_codes(entries: &[AuditEntry]) -> Vec<&str> {
+    entries
+        .iter()
+        .map(|entry| entry.event_code.as_str())
+        .collect()
+}
+
+fn assert_event_count(codes: &[&str], event_code: &str, expected: usize) {
+    assert_eq!(
+        codes.iter().filter(|code| **code == event_code).count(),
+        expected,
+        "expected {expected} {event_code} events in {codes:?}"
+    );
 }
 
 #[test]
@@ -126,6 +236,167 @@ fn trace_builder_preserves_step_order() {
             Ok(())
         })
         .expect("step order property should hold");
+}
+
+#[test]
+fn workflow_trace_json_round_trip_identity_for_generated_inputs() {
+    let mut runner = TestRunner::new(Config::with_cases(32));
+    let strategy = (
+        generated_environment_strategy(),
+        prop::collection::vec(any::<StepData>(), 1..=12),
+    );
+
+    runner
+        .run(&strategy, |(environment, steps_data)| {
+            let (trace, capture_audit) = build_trace_from_steps(
+                "bd-10xmk-roundtrip",
+                "serde-round-trip-identity",
+                environment,
+                &steps_data,
+            );
+
+            let encoded =
+                serde_json::to_string(&trace).expect("workflow trace should serialize to JSON");
+            let decoded: WorkflowTrace =
+                serde_json::from_str(&encoded).expect("workflow trace JSON should decode");
+            let recoded = serde_json::to_string(&decoded)
+                .expect("decoded workflow trace should serialize to JSON");
+
+            prop_assert_eq!(&decoded, &trace);
+            prop_assert_eq!(recoded, encoded);
+            prop_assert!(decoded.validate().is_ok());
+            prop_assert_eq!(decoded.canonical_digest(), trace.trace_digest);
+
+            let capture_codes = audit_event_codes(&capture_audit);
+            prop_assert!(capture_codes.contains(&event_codes::TTR_001));
+            prop_assert!(capture_codes.contains(&event_codes::TTR_003));
+            prop_assert!(capture_codes.contains(&event_codes::TTR_009));
+            prop_assert_eq!(
+                capture_codes
+                    .iter()
+                    .filter(|code| **code == event_codes::TTR_002)
+                    .count(),
+                steps_data.len()
+            );
+
+            Ok(())
+        })
+        .expect("workflow trace JSON round-trip identity should hold");
+}
+
+#[test]
+fn trace_step_and_environment_json_round_trip_identity_for_generated_inputs() {
+    let mut runner = TestRunner::new(Config::with_cases(32));
+    let strategy = (any::<StepData>(), generated_environment_strategy());
+
+    runner
+        .run(&strategy, |(step_data, environment)| {
+            let side_effects = step_data
+                .side_effects
+                .iter()
+                .map(side_effect_from_data)
+                .collect();
+            let step = TraceStep::new(
+                u64::MAX.saturating_sub(7),
+                step_data.input,
+                step_data.output,
+                side_effects,
+                step_data.timestamp_ns,
+            );
+
+            let step_json =
+                serde_json::to_string(&step).expect("trace step should serialize to JSON");
+            let decoded_step: TraceStep =
+                serde_json::from_str(&step_json).expect("trace step JSON should decode");
+            prop_assert_eq!(&decoded_step, &step);
+            prop_assert_eq!(
+                serde_json::to_string(&decoded_step)
+                    .expect("decoded trace step should serialize to JSON"),
+                step_json
+            );
+
+            let env_json = serde_json::to_string(&environment)
+                .expect("environment snapshot should serialize to JSON");
+            let decoded_env: EnvironmentSnapshot =
+                serde_json::from_str(&env_json).expect("environment JSON should decode");
+            prop_assert_eq!(&decoded_env, &environment);
+            prop_assert_eq!(
+                serde_json::to_string(&decoded_env)
+                    .expect("decoded environment should serialize to JSON"),
+                env_json
+            );
+
+            Ok(())
+        })
+        .expect("trace step and environment JSON round-trip identity should hold");
+}
+
+#[test]
+fn replay_round_trip_identity_emits_capture_and_replay_telemetry() {
+    let mut builder = TraceBuilder::new(
+        "bd-10xmk-telemetry",
+        "serde-round-trip-telemetry",
+        demo_env(),
+    );
+    builder.record_step(
+        b"first-input".to_vec(),
+        b"first-output".to_vec(),
+        vec![SideEffect::new("file_write", b"/tmp/trace".to_vec())],
+        1_000_010,
+    );
+    builder.record_step(
+        b"second-input".to_vec(),
+        b"second-output".to_vec(),
+        vec![SideEffect::new("network_call", b"POST /audit".to_vec())],
+        1_000_020,
+    );
+
+    let (trace, capture_audit) = builder.build().expect("trace should build");
+    let trace_json = serde_json::to_string(&trace).expect("trace should serialize");
+    let decoded_trace: WorkflowTrace =
+        serde_json::from_str(&trace_json).expect("trace should deserialize");
+
+    let capture_codes = audit_event_codes(&capture_audit);
+    assert!(capture_codes.contains(&event_codes::TTR_001));
+    assert!(capture_codes.contains(&event_codes::TTR_008));
+    assert_event_count(&capture_codes, event_codes::TTR_002, 2);
+    assert!(capture_codes.contains(&event_codes::TTR_003));
+    assert!(capture_codes.contains(&event_codes::TTR_009));
+
+    let mut engine = ReplayEngine::new();
+    engine
+        .register_trace(decoded_trace)
+        .expect("deserialized trace should register");
+    let result = engine
+        .replay_fixture_identity("bd-10xmk-telemetry")
+        .expect("fixture replay should succeed");
+
+    assert_eq!(result.verdict, ReplayVerdict::Identical);
+    assert_eq!(result.steps_replayed, 2);
+    assert!(result.divergences.is_empty());
+
+    let replay_codes = audit_event_codes(engine.audit_log());
+    assert!(replay_codes.contains(&event_codes::TTR_004));
+    assert_event_count(&replay_codes, event_codes::TTR_005, 2);
+    assert!(replay_codes.contains(&event_codes::TTR_007));
+
+    let result_json = serde_json::to_string(&result).expect("replay result should serialize");
+    let decoded_result: serde_json::Value =
+        serde_json::from_str(&result_json).expect("replay result JSON should decode");
+    assert_eq!(decoded_result["trace_id"], "bd-10xmk-telemetry");
+    assert_eq!(decoded_result["verdict"], "identical");
+
+    let audit_json =
+        serde_json::to_string(engine.audit_log()).expect("audit telemetry should serialize");
+    let decoded_audit: serde_json::Value =
+        serde_json::from_str(&audit_json).expect("audit telemetry JSON should decode");
+    assert_eq!(
+        decoded_audit
+            .as_array()
+            .expect("audit telemetry should be an array")
+            .len(),
+        engine.audit_log().len()
+    );
 }
 
 #[test]
