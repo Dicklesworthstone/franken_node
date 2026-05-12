@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts/check_frame_parser.py"
 RESULTS_PATH = ROOT / "artifacts/section_10_13/bd-3tzl/frame_decode_guardrail_results.json"
 EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-3tzl/verification_evidence.json"
+PLAN_SPEC_PATH = ROOT / "docs/specs/control_channel_parser_limits.md"
+PLAN_PATH = ROOT / "docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md"
 JSON_DECODER = json.JSONDecoder()
 
 
@@ -67,6 +69,22 @@ class TestFrameParserSpec(unittest.TestCase):
         for inv in ["INV-BPG-SIZE-BOUNDED", "INV-BPG-DEPTH-BOUNDED",
                     "INV-BPG-CPU-BOUNDED", "INV-BPG-AUDITABLE"]:
             self.assertIn(inv, self.content, f"Missing invariant {inv}")
+
+    def test_plan_level_spec_bridge_exists(self):
+        self.assertTrue(PLAN_SPEC_PATH.is_file())
+        bridge = PLAN_SPEC_PATH.read_text(encoding="utf-8")
+        self.assertIn("docs/specs/section_10_13/bd-3tzl_contract.md", bridge)
+        self.assertIn("tests/integration/frame_decode_guardrails.rs", bridge)
+        self.assertNotIn("tests/security/parser_budget_guardrails.rs", bridge)
+
+    def test_project_plan_paths_are_current(self):
+        plan = PLAN_PATH.read_text(encoding="utf-8")
+        self.assertIn("docs/specs/control_channel_parser_limits.md", plan)
+        self.assertIn("docs/specs/section_10_13/bd-3tzl_contract.md", plan)
+        self.assertIn("tests/integration/frame_decode_guardrails.rs", plan)
+        self.assertIn("artifacts/section_10_13/bd-3tzl/frame_decode_guardrail_results.json", plan)
+        self.assertNotIn("tests/security/parser_budget_guardrails.rs", plan)
+        self.assertNotIn("artifacts/10.13/parser_guardrail_metrics.csv", plan)
 
 
 class TestFrameParserIntegration(unittest.TestCase):

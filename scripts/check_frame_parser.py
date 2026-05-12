@@ -19,6 +19,8 @@ IMPL_PATH = ROOT / "crates/franken-node/src/connector/frame_parser.rs"
 RESULTS_PATH = ROOT / "artifacts/section_10_13/bd-3tzl/frame_decode_guardrail_results.json"
 INTEGRATION_PATH = ROOT / "tests/integration/frame_decode_guardrails.rs"
 SPEC_PATH = ROOT / "docs/specs/section_10_13/bd-3tzl_contract.md"
+PLAN_SPEC_PATH = ROOT / "docs/specs/control_channel_parser_limits.md"
+PLAN_PATH = ROOT / "docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md"
 EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-3tzl/verification_evidence.json"
 JSON_DECODER = json.JSONDecoder()
 
@@ -266,6 +268,41 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
         "BPG-SPEC",
         "Specification with invariants and types",
         spec_exists and has_invariants and has_types,
+        emit_human=emit_human,
+    )
+
+    plan_spec_content = read_utf8(PLAN_SPEC_PATH)
+    plan_spec_valid = (
+        plan_spec_content is not None
+        and "docs/specs/section_10_13/bd-3tzl_contract.md" in plan_spec_content
+        and "tests/integration/frame_decode_guardrails.rs" in plan_spec_content
+        and "tests/security/parser_budget_guardrails.rs" not in plan_spec_content
+        and "INV-BPG-SIZE-BOUNDED" in plan_spec_content
+        and "INV-BPG-AUDITABLE" in plan_spec_content
+    )
+    check(
+        checks,
+        "BPG-PLAN-SPEC",
+        "Plan-level spec path bridges to canonical contract and integration test",
+        plan_spec_valid,
+        emit_human=emit_human,
+    )
+
+    plan_content = read_utf8(PLAN_PATH)
+    plan_paths_valid = (
+        plan_content is not None
+        and "docs/specs/control_channel_parser_limits.md" in plan_content
+        and "docs/specs/section_10_13/bd-3tzl_contract.md" in plan_content
+        and "tests/integration/frame_decode_guardrails.rs" in plan_content
+        and "artifacts/section_10_13/bd-3tzl/frame_decode_guardrail_results.json" in plan_content
+        and "tests/security/parser_budget_guardrails.rs" not in plan_content
+        and "artifacts/10.13/parser_guardrail_metrics.csv" not in plan_content
+    )
+    check(
+        checks,
+        "BPG-PLAN-PATHS",
+        "Project plan cites current frame parser artifact paths",
+        plan_paths_valid,
         emit_human=emit_human,
     )
 

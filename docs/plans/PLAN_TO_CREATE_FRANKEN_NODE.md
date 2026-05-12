@@ -1246,7 +1246,7 @@ Canonical ownership map (non-reductive, full-feature):
   `Artifacts:` `src/protocol/control_channel.rs`, `tests/security/control_channel_replay_window.rs`, `artifacts/10.13/control_channel_security_trace.jsonl`.
 - [ ] Add bounded parser/resource-accounting guardrails on control-channel frame decode.
   `Acceptance Criteria:` Decode path enforces byte/CPU/allocation ceilings; oversized/malformed frames fail fast; parse budgets are reflected in telemetry.
-  `Artifacts:` `docs/specs/control_channel_parser_limits.md`, `tests/security/parser_budget_guardrails.rs`, `artifacts/10.13/parser_guardrail_metrics.csv`.
+  `Artifacts:` `docs/specs/control_channel_parser_limits.md`, canonical contract `docs/specs/section_10_13/bd-3tzl_contract.md`, `tests/integration/frame_decode_guardrails.rs`, `artifacts/section_10_13/bd-3tzl/frame_decode_guardrail_results.json`.
 - [ ] Define stable telemetry namespace for protocol/capability/egress/security planes.
   `Acceptance Criteria:` Metric names and labels are versioned and frozen by contract; deprecations follow compatibility policy; schema validator enforces namespace rules.
   `Artifacts:` `docs/observability/telemetry_namespace.md`, `tests/conformance/metric_schema_stability.rs`, `artifacts/10.13/telemetry_schema_catalog.json`.
