@@ -46,7 +46,7 @@
     {
       "check": "test_count",
       "pass": true,
-      "detail": "43 unit tests"
+      "detail": "91 unit tests"
     },
     {
       "check": "spec_exists",
@@ -57,9 +57,40 @@
       "check": "telemetry_csv",
       "pass": true,
       "detail": "telemetry CSV valid with 12 rows"
+    },
+    {
+      "check": "git_xref",
+      "pass": true,
+      "detail": "10f532f3bcb7d988f9d8e868cbdd384ba8828bad"
     }
   ],
-  "test_count": 43,
+  "test_count": 91,
+  "git_xref": [
+    {
+      "bead_id": "bd-3a3q",
+      "commit": "10f532f3bcb7d988f9d8e868cbdd384ba8828bad",
+      "subject": "feat: implement sections 10.4, 10.5, and 10.14 across connector, security, supply chain, and 5 new subsystems",
+      "paths": [
+        "crates/franken-node/src/policy/guardrail_monitor.rs"
+      ],
+      "evidence": [
+        "GuardrailMonitor trait and GuardrailMonitorSet added",
+        "memory, durability, hardening, and evidence-emission guardrails added",
+        "anytime-valid optional-stopping tests added inline"
+      ]
+    },
+    {
+      "bead_id": "bd-3a3q",
+      "commit": "911db31bb1aa1cefdebbdae2f1e663fdb9f83fa7",
+      "subject": "fix(policy): use push_bounded for findings vector in guardrail_monitor",
+      "paths": [
+        "crates/franken-node/src/policy/guardrail_monitor.rs"
+      ],
+      "evidence": [
+        "bounded finding growth hardening for the monitor set"
+      ]
+    }
+  ],
   "artifacts": {
     "implementation": "crates/franken-node/src/policy/guardrail_monitor.rs",
     "spec": "docs/specs/section_10_14/bd-3a3q_contract.md",

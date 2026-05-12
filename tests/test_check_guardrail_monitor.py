@@ -12,6 +12,13 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_guardrail_monitor.py"
 
 
+def _load_cli_json(stdout: str) -> dict:
+    try:
+        return json.JSONDecoder().decode(stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(f"invalid JSON output: {stdout[:500]}") from exc
+
+
 class TestCheckGuardrailMonitor(unittest.TestCase):
     """Tests for the guardrail monitor verification script."""
 
@@ -97,6 +104,20 @@ class TestCheckGuardrailMonitor(unittest.TestCase):
         ok, detail = mod.check_telemetry_csv()
         self.assertTrue(ok, detail)
 
+    def test_git_xref(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import check_guardrail_monitor as mod
+        ok, detail = mod.check_git_xref()
+        self.assertTrue(ok, detail)
+        self.assertEqual(len(detail), 40)
+
+    def test_git_xref_json_names_bd_3a3q(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import check_guardrail_monitor as mod
+        refs = [entry for entry in mod.GUARDRAIL_MONITOR_GIT_XREF if entry["bead_id"] == "bd-3a3q"]
+        self.assertGreaterEqual(len(refs), 1)
+        self.assertEqual(len(refs[0]["commit"]), 40)
+
     def test_cli_human_readable(self):
         result = subprocess.run(
             [sys.executable, str(SCRIPT)],
@@ -111,7 +132,7 @@ class TestCheckGuardrailMonitor(unittest.TestCase):
             capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(result.returncode, 0)
-        data = json.loads(result.stdout)
+        data = _load_cli_json(result.stdout)
         self.assertEqual(data["bead_id"], "bd-3a3q")
         self.assertTrue(data["overall_pass"])
 
@@ -120,13 +141,13 @@ class TestCheckGuardrailMonitor(unittest.TestCase):
             [sys.executable, str(SCRIPT), "--json"],
             capture_output=True, text=True, timeout=30,
         )
-        data = json.loads(result.stdout)
+        data = _load_cli_json(result.stdout)
         check_names = {c["check"] for c in data["checks"]}
         required = {
             "impl_exists", "verdict_enum", "system_state",
             "concrete_monitors", "monitor_set", "event_codes",
             "anytime_valid", "threshold_enforcement", "test_count",
-            "spec_exists", "telemetry_csv",
+            "spec_exists", "telemetry_csv", "git_xref",
         }
         self.assertTrue(required.issubset(check_names), f"missing: {required - check_names}")
 

@@ -3,16 +3,17 @@
 ## Anytime-Valid Guardrail Monitor Set
 
 **Section:** 10.14 (FrankenSQLite Deep-Mined Expansion)
-**Status:** PASS (11/11 checks)
+**Status:** PASS (12/12 checks)
 **Agent:** CrimsonCrane (claude-code, claude-opus-4-6)
-**Date:** 2026-02-20
+**Date:** 2026-05-12
 
 ## Implementation
 
 - **Module:** `crates/franken-node/src/policy/guardrail_monitor.rs`
 - **Spec:** `docs/specs/section_10_14/bd-3a3q_contract.md`
 - **Verification:** `scripts/check_guardrail_monitor.py`
-- **Test Suite:** `tests/test_check_guardrail_monitor.py` (16 tests)
+- **Test Suite:** `tests/test_check_guardrail_monitor.py` (18 tests)
+- **Git xref:** `10f532f3bcb7d988f9d8e868cbdd384ba8828bad` (initial guardrail monitor implementation)
 
 ## Architecture
 
@@ -70,17 +71,25 @@
 | EVD-GUARD event codes (001-004) | PASS |
 | Anytime-valid property tested | PASS |
 | Threshold enforcement with envelope minimums | PASS |
-| 43 Rust unit tests | PASS |
+| 91 Rust unit tests | PASS |
 | Spec document exists | PASS |
 | Telemetry CSV with 12 rows | PASS |
+| Direct git_xref evidence | PASS |
 
 ### Test Summary
 
 | Category | Count | Status |
 |----------|-------|--------|
-| Rust unit tests | 43 | All pass |
-| Python verification checks | 11 | All pass |
-| Python unit tests | 16 | All pass |
+| Rust unit tests | 91 | All pass |
+| Python verification checks | 12 | All pass |
+| Python unit tests | 18 | All pass |
+
+## Completion-Debt Closure
+
+`bd-3a3q.1` is resolved by recording direct git xref evidence for the shipped implementation:
+
+- `10f532f3bcb7d988f9d8e868cbdd384ba8828bad` added `crates/franken-node/src/policy/guardrail_monitor.rs`.
+- `911db31bb1aa1cefdebbdae2f1e663fdb9f83fa7` hardened bounded finding growth in the same module.
 
 ## Downstream Unblocked
 

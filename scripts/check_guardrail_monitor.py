@@ -27,14 +27,35 @@ import json
 import re
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 IMPL_PATH = ROOT / "crates" / "franken-node" / "src" / "policy" / "guardrail_monitor.rs"
 SPEC_PATH = ROOT / "docs" / "specs" / "section_10_14" / "bd-3a3q_contract.md"
 TELEMETRY_PATH = ROOT / "artifacts" / "10.14" / "guardrail_monitor_telemetry.csv"
+
+GUARDRAIL_MONITOR_GIT_XREF = [
+    {
+        "bead_id": "bd-3a3q",
+        "commit": "10f532f3bcb7d988f9d8e868cbdd384ba8828bad",
+        "subject": "feat: implement sections 10.4, 10.5, and 10.14 across connector, security, supply chain, and 5 new subsystems",
+        "paths": ["crates/franken-node/src/policy/guardrail_monitor.rs"],
+        "evidence": [
+            "GuardrailMonitor trait and GuardrailMonitorSet added",
+            "memory, durability, hardening, and evidence-emission guardrails added",
+            "anytime-valid optional-stopping tests added inline",
+        ],
+    },
+    {
+        "bead_id": "bd-3a3q",
+        "commit": "911db31bb1aa1cefdebbdae2f1e663fdb9f83fa7",
+        "subject": "fix(policy): use push_bounded for findings vector in guardrail_monitor",
+        "paths": ["crates/franken-node/src/policy/guardrail_monitor.rs"],
+        "evidence": ["bounded finding growth hardening for the monitor set"],
+    },
+]
 
 
 def _read_impl() -> str:
@@ -169,6 +190,23 @@ def check_telemetry_csv() -> tuple[bool, str]:
         return False, f"telemetry CSV parse error: {e}"
 
 
+def check_git_xref() -> tuple[bool, str]:
+    content = _read_impl()
+    xref = next((entry for entry in GUARDRAIL_MONITOR_GIT_XREF if entry["bead_id"] == "bd-3a3q"), None)
+    has_xref = xref is not None and len(xref["commit"]) == 40
+    has_impl_markers = (
+        "bd-3a3q" in content
+        and "pub trait GuardrailMonitor" in content
+        and "pub struct GuardrailMonitorSet" in content
+        and "is_valid_at_any_stopping_point" in content
+    )
+    if not has_xref:
+        return False, "missing bd-3a3q git_xref"
+    if not has_impl_markers:
+        return False, "guardrail monitor implementation markers missing"
+    return True, xref["commit"]
+
+
 def self_test() -> tuple[bool, list]:
     checks = [
         ("impl_exists", check_impl_exists),
@@ -182,6 +220,7 @@ def self_test() -> tuple[bool, list]:
         ("test_count", lambda: count_tests()[:2]),
         ("spec_exists", check_spec_exists),
         ("telemetry_csv", check_telemetry_csv),
+        ("git_xref", check_git_xref),
     ]
     results = []
     all_pass = True
@@ -194,7 +233,7 @@ def self_test() -> tuple[bool, list]:
 
 
 def main():
-    logger = configure_test_logging("check_guardrail_monitor")
+    configure_test_logging("check_guardrail_monitor")
     parser = argparse.ArgumentParser(description="Verify guardrail monitors (bd-3a3q)")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -209,6 +248,7 @@ def main():
             "overall_pass": all_pass,
             "checks": results,
             "test_count": test_count,
+            "git_xref": GUARDRAIL_MONITOR_GIT_XREF,
             "artifacts": {
                 "implementation": str(IMPL_PATH.relative_to(ROOT)),
                 "spec": str(SPEC_PATH.relative_to(ROOT)),
