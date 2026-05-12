@@ -25,12 +25,16 @@ fn signed_input(capabilities: Vec<CapabilityRequirement>) -> ExtensionArtifactIn
     )
 }
 
-#[test]
-fn builds_artifact_from_signed_caller_supplied_metadata() {
-    let input = signed_input(vec![
+fn fixture_capabilities() -> Vec<CapabilityRequirement> {
+    vec![
         CapabilityRequirement::new("cap:fs:read", "read project manifest", true),
         CapabilityRequirement::new("cap:trust:read", "read trust policy", true),
-    ]);
+    ]
+}
+
+#[test]
+fn builds_artifact_from_signed_caller_supplied_metadata() {
+    let input = signed_input(fixture_capabilities());
 
     let artifact = build_extension_artifact(input).expect("signed input should build");
 
@@ -39,6 +43,44 @@ fn builds_artifact_from_signed_caller_supplied_metadata() {
     let envelope = artifact.envelope.expect("capability envelope");
     assert_eq!(envelope.capability_count(), 2);
     assert!(envelope.verify_digest(&artifact.identity));
+}
+
+#[test]
+fn capability_artifact_length_prefixed_hashes_match_golden_vectors() {
+    let identity = ArtifactIdentity::new(
+        "ext-real-builder",
+        "publisher-alpha",
+        "2026-02-21T00:00:00Z",
+    );
+    let capabilities = fixture_capabilities();
+    let source_digest = format!("sha256:{}", "a".repeat(64));
+
+    let signature = compute_artifact_provenance_signature(
+        &identity,
+        &capabilities,
+        "publisher-alpha",
+        &source_digest,
+    )
+    .expect("golden provenance signature");
+
+    assert_eq!(
+        signature,
+        "sha256:7a94dae6ac3bb141e8be85ea0a656ed12957d7b03baafa55d6d32ecdfdb263c9"
+    );
+
+    let artifact = build_extension_artifact(ExtensionArtifactInput::new(
+        identity.clone(),
+        capabilities,
+        ArtifactProvenance::new("publisher-alpha", source_digest, signature),
+    ))
+    .expect("golden capability artifact should build");
+    let envelope = artifact.envelope.expect("golden capability envelope");
+
+    assert_eq!(
+        envelope.digest,
+        "sha256:4b78c363e6712ccd7da094837fde6aab12ba15b047e39e42e17326fd17ffeb8f"
+    );
+    assert!(envelope.verify_digest(&identity));
 }
 
 #[test]
