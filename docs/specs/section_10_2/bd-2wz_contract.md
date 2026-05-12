@@ -21,6 +21,11 @@ The canonical plan (Section 10.2) requires defining four compatibility bands tha
 | `balanced` | Error on divergence | Warn + receipt | Log + receipt | Blocked |
 | `legacy-risky` | Error on divergence | Warn + receipt | Log + receipt | Warn + policy gate |
 
+## Primary Implementation Surface
+
+- `crates/franken-node/src/policy/compat_gates.rs` encodes the `CompatibilityBand`, `CompatibilityMode`, and `DivergenceAction` types, the bd-2wz mode-band matrix, and runtime shim activation by band.
+- `crates/franken-node/src/config.rs` parses and resolves compatibility modes for strict, balanced, and legacy-risky runtime profiles before policy evaluation.
+
 ## Invariants
 
 1. `docs/COMPATIBILITY_BANDS.md` exists with all 4 bands defined.

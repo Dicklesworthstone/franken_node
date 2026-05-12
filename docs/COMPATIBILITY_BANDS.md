@@ -5,12 +5,18 @@
 
 **Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
 **Related**: [ADR-001: Hybrid Baseline Strategy](adr/ADR-001-hybrid-baseline-strategy.md)
+**Primary implementation**: `crates/franken-node/src/policy/compat_gates.rs`
 
 ---
 
 ## 1. Overview
 
 Every Node/Bun API surface that franken_node implements is classified into one of four **compatibility bands**. Bands determine how divergences are handled, what testing coverage is required, and whether divergences can block releases.
+
+## Implementation Map
+
+- `crates/franken-node/src/policy/compat_gates.rs` owns `CompatibilityBand`, `CompatibilityMode`, `DivergenceAction`, the bd-2wz mode-band matrix, and shim activation filtering by band.
+- `crates/franken-node/src/config.rs` owns runtime compatibility mode parsing and the strict, balanced, and legacy-risky profile defaults that feed policy evaluation.
 
 ## 2. Band Definitions
 

@@ -16,14 +16,55 @@ Exit codes:
 import json
 import re
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
+
 BANDS_PATH = ROOT / "docs" / "COMPATIBILITY_BANDS.md"
+CONTRACT_PATH = ROOT / "docs" / "specs" / "section_10_2" / "bd-2wz_contract.md"
+
+PRIMARY_IMPLEMENTATION_PATHS = {
+    "compatibility_policy_gate": "crates/franken-node/src/policy/compat_gates.rs",
+    "compatibility_mode_config": "crates/franken-node/src/config.rs",
+}
+
+EVIDENCE_PATHS = {
+    "primary_policy_gate": PRIMARY_IMPLEMENTATION_PATHS["compatibility_policy_gate"],
+    "compatibility_mode_config": PRIMARY_IMPLEMENTATION_PATHS["compatibility_mode_config"],
+    "band_contract": "docs/COMPATIBILITY_BANDS.md",
+    "contract": "docs/specs/section_10_2/bd-2wz_contract.md",
+    "verifier": "scripts/check_compat_bands.py",
+    "regression_tests": "tests/test_check_compat_bands.py",
+    "machine_evidence": "artifacts/section_10_2/bd-2wz/verification_evidence.json",
+    "human_summary": "artifacts/section_10_2/bd-2wz/verification_summary.md",
+}
+
+VERIFICATION_COMMANDS = [
+    {
+        "command": "python3 scripts/check_compat_bands.py --json",
+        "covers": [
+            "compatibility band contract",
+            "primary Rust policy implementation citations",
+            "compatibility mode config citations",
+            "band definitions",
+            "band content requirements",
+            "compatibility modes",
+            "mode-band matrix",
+            "plan reference",
+        ],
+    },
+    {
+        "command": "python3 -m pytest tests/test_check_compat_bands.py",
+        "covers": [
+            "compatibility bands verifier checks",
+            "report evidence path citations",
+            "checked-in machine evidence citations",
+        ],
+    },
+]
 
 REQUIRED_BANDS = ["core", "high-value", "edge", "unsafe"]
 REQUIRED_MODES = ["strict", "balanced", "legacy-risky"]
@@ -167,13 +208,54 @@ def check_plan_reference() -> dict:
     return check
 
 
-def main():
-    logger = configure_test_logging("check_compat_bands")
-    json_output = "--json" in sys.argv
-    timestamp = datetime.now(timezone.utc).isoformat()
+def check_primary_implementation_cited() -> dict:
+    """BAND-IMPL: Check primary Rust implementation paths are cited."""
+    check = {
+        "id": "BAND-IMPL",
+        "status": "PASS",
+        "details": {
+            "paths": PRIMARY_IMPLEMENTATION_PATHS,
+            "existing_paths": {},
+            "band_doc_citations": {},
+            "contract_citations": {},
+        },
+    }
 
+    band_doc_text = BANDS_PATH.read_text(encoding="utf-8") if BANDS_PATH.exists() else ""
+    contract_text = CONTRACT_PATH.read_text(encoding="utf-8") if CONTRACT_PATH.exists() else ""
+
+    missing_paths = []
+    missing_band_doc_citations = []
+    missing_contract_citations = []
+
+    for name, path in PRIMARY_IMPLEMENTATION_PATHS.items():
+        exists = (ROOT / path).exists()
+        band_doc_cited = path in band_doc_text
+        contract_cited = path in contract_text
+        check["details"]["existing_paths"][name] = exists
+        check["details"]["band_doc_citations"][name] = band_doc_cited
+        check["details"]["contract_citations"][name] = contract_cited
+
+        if not exists:
+            missing_paths.append(path)
+        if not band_doc_cited:
+            missing_band_doc_citations.append(path)
+        if not contract_cited:
+            missing_contract_citations.append(path)
+
+    if missing_paths or missing_band_doc_citations or missing_contract_citations:
+        check["status"] = "FAIL"
+        check["details"]["missing_paths"] = missing_paths
+        check["details"]["missing_band_doc_citations"] = missing_band_doc_citations
+        check["details"]["missing_contract_citations"] = missing_contract_citations
+
+    return check
+
+
+def build_report(timestamp: str) -> dict:
     checks = [
         check_bands_doc_exists(),
+        check_primary_implementation_cited(),
         check_all_bands_defined(),
         check_band_content(),
         check_modes_defined(),
@@ -189,6 +271,8 @@ def main():
         "section": "10.2",
         "verdict": verdict,
         "timestamp": timestamp,
+        "evidence_paths": EVIDENCE_PATHS,
+        "verification_commands": VERIFICATION_COMMANDS,
         "checks": checks,
         "summary": {
             "total_checks": len(checks),
@@ -196,6 +280,14 @@ def main():
             "failing_checks": len(failing),
         },
     }
+    return report
+
+
+def main():
+    configure_test_logging("check_compat_bands")
+    json_output = "--json" in sys.argv
+    timestamp = datetime.now(timezone.utc).isoformat()
+    report = build_report(timestamp)
 
     if json_output:
         print(json.dumps(report, indent=2))
@@ -203,7 +295,7 @@ def main():
         print("=== Compatibility Bands Verifier ===")
         print(f"Timestamp: {timestamp}")
         print()
-        for c in checks:
+        for c in report["checks"]:
             icon = "OK" if c["status"] == "PASS" else "FAIL"
             print(f"  [{icon}] {c['id']}")
             if c["status"] == "FAIL":
@@ -216,9 +308,9 @@ def main():
                     print(f"       Missing: {', '.join(details['missing_modes'])}")
         print()
         print(f"Checks: {report['summary']['passing_checks']}/{report['summary']['total_checks']} pass")
-        print(f"Verdict: {verdict}")
+        print(f"Verdict: {report['verdict']}")
 
-    sys.exit(0 if verdict == "PASS" else 1)
+    sys.exit(0 if report["verdict"] == "PASS" else 1)
 
 
 if __name__ == "__main__":

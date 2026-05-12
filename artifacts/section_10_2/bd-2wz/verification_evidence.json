@@ -5,9 +5,46 @@
   "timestamp": "2026-02-20T09:31:39.088203+00:00",
   "git_commit": "32b56e4c639fd2a39f3f0b77ee55a656ae65109e",
   "verdict": "PASS",
+  "evidence_paths": {
+    "primary_policy_gate": "crates/franken-node/src/policy/compat_gates.rs",
+    "compatibility_mode_config": "crates/franken-node/src/config.rs",
+    "band_contract": "docs/COMPATIBILITY_BANDS.md",
+    "contract": "docs/specs/section_10_2/bd-2wz_contract.md",
+    "verifier": "scripts/check_compat_bands.py",
+    "regression_tests": "tests/test_check_compat_bands.py",
+    "machine_evidence": "artifacts/section_10_2/bd-2wz/verification_evidence.json",
+    "human_summary": "artifacts/section_10_2/bd-2wz/verification_summary.md"
+  },
+  "verification_commands": [
+    {
+      "command": "python3 scripts/check_compat_bands.py --json",
+      "covers": [
+        "compatibility band contract",
+        "primary Rust policy implementation citations",
+        "compatibility mode config citations",
+        "band definitions",
+        "band content requirements",
+        "compatibility modes",
+        "mode-band matrix",
+        "plan reference"
+      ]
+    },
+    {
+      "command": "python3 -m pytest tests/test_check_compat_bands.py",
+      "covers": [
+        "compatibility bands verifier checks",
+        "report evidence path citations",
+        "checked-in machine evidence citations"
+      ]
+    }
+  ],
   "checks": [
     {
       "id": "BAND-EXISTS",
+      "status": "PASS"
+    },
+    {
+      "id": "BAND-IMPL",
       "status": "PASS"
     },
     {
@@ -32,30 +69,30 @@
     }
   ],
   "unit_tests": {
-    "total": 10,
-    "passed": 10,
+    "total": 13,
+    "passed": 13,
     "failed": 0
   },
   "outputs": [
     {
       "path": "docs/COMPATIBILITY_BANDS.md",
-      "sha256": "eec2e442c3acd96bc33f5531aa652c92f405fa575e27edf56c069675c932a5fb",
-      "size_bytes": 5715
+      "sha256": "711c6dcbc863d6f67f4ec15fe944aa1cc55b5524485259da4ee10b4606562416",
+      "size_bytes": 6175
     },
     {
       "path": "docs/specs/section_10_2/bd-2wz_contract.md",
-      "sha256": "491125122a82d9e99863337a10caaa3ea81722bb81b7ded302f2c1989d81bb0c",
-      "size_bytes": 2133
+      "sha256": "0109c824147a7054581f0cd97c75366f0e720e49eba58233b29a1f4801f19957",
+      "size_bytes": 2530
     },
     {
       "path": "scripts/check_compat_bands.py",
-      "sha256": "4897d0be1a46a0f705757ca65a69f4880cfcb0e846a7246545ed78ebae3102d4",
-      "size_bytes": 7834
+      "sha256": "811bafa070f7c1adf76ad60f7991f8b67a5b7aeeb86b87b38df1c1b5ecaf4dbc",
+      "size_bytes": 11499
     },
     {
       "path": "tests/test_check_compat_bands.py",
-      "sha256": "026c7c284907b0b84695eae73a510caa5b43c290b3873e34756001f4b2ce512f",
-      "size_bytes": 2416
+      "sha256": "137ef97c41bd5818a19feb9d7b330aee03d8c2df63533faaa498e3776c4892d1",
+      "size_bytes": 5769
     }
   ]
 }
