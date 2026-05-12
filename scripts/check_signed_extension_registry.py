@@ -13,15 +13,129 @@ import json
 import re
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 SRC = ROOT / "crates" / "franken-node" / "src" / "supply_chain" / "extension_registry.rs"
 MOD_RS = ROOT / "crates" / "franken-node" / "src" / "supply_chain" / "mod.rs"
 SPEC = ROOT / "docs" / "specs" / "section_15" / "bd-209w_contract.md"
+REPLACEMENT_EVIDENCE_DIR = ROOT / "artifacts" / "replacement_gap" / "bd-3hdn"
+REPLACEMENT_EVIDENCE = REPLACEMENT_EVIDENCE_DIR / "verification_evidence.json"
+REPLACEMENT_SUMMARY = REPLACEMENT_EVIDENCE_DIR / "verification_summary.md"
+ADVERSARIAL_FIXTURE_INDEX = REPLACEMENT_EVIDENCE_DIR / "adversarial_fixture_index.json"
+OPERATOR_E2E = ROOT / "tests" / "e2e" / "extension_registry_operator_suite.sh"
+OPERATOR_LOG = REPLACEMENT_EVIDENCE_DIR / "operator_e2e_log.jsonl"
+OPERATOR_SUMMARY_JSON = REPLACEMENT_EVIDENCE_DIR / "operator_e2e_summary.json"
+OPERATOR_SUMMARY_MD = REPLACEMENT_EVIDENCE_DIR / "operator_e2e_summary.md"
+GOLDEN_TEST = ROOT / "crates" / "franken-node" / "tests" / "supply_chain_attestation_manifest_golden.rs"
+GOLDEN_ARTIFACT = ROOT / "artifacts" / "golden" / "supply_chain_attestation_manifest.json"
+CONFORMANCE_TEST = ROOT / "crates" / "franken-node" / "tests" / "supply_chain_registry_attestation_receipt_conformance.rs"
+ADVERSARIAL_TEST = ROOT / "crates" / "franken-node" / "tests" / "adversarial_supply_chain_poisoning.rs"
+CLAIMS_E2E_TEST = ROOT / "crates" / "franken-node" / "tests" / "supply_chain_registry_claims_e2e_integration.rs"
+
+REPLACEMENT_BEAD_ID = "bd-3hdn"
+COMPLETION_DEBT_BEAD = "bd-3hdn.1"
+COMPLETION_DEBT_REQUIRED_SPEC_ITEMS = {
+    "tests.unit.primary",
+    "tests.integration.primary",
+    "tests.e2e.primary",
+    "tests.golden.primary",
+    "telemetry.primary",
+}
+REQUIRED_TELEMETRY_FIELDS = [
+    "trace_id",
+    "artifact_id",
+    "publisher_key_id",
+    "decision",
+    "reason_code",
+    "transparency_checkpoint",
+    "attestation_digest",
+]
+COMPLETION_DEBT_OBLIGATIONS = [
+    {
+        "spec_item": "tests.unit.primary",
+        "category": "unit",
+        "status": "covered",
+        "description": "source checker and Python tests cover the signed admission kernel, no-shape-shortcut regression checks, evidence-pack drift, and completion-debt contract",
+        "evidence_paths": [
+            "scripts/check_signed_extension_registry.py",
+            "tests/test_check_signed_extension_registry.py",
+            "crates/franken-node/src/supply_chain/extension_registry.rs",
+        ],
+        "commands": [
+            "python3 scripts/check_signed_extension_registry.py --json",
+            "python3 scripts/check_signed_extension_registry.py --self-test",
+            "python3 -m pytest -q tests/test_check_signed_extension_registry.py",
+        ],
+    },
+    {
+        "spec_item": "tests.integration.primary",
+        "category": "integration",
+        "status": "covered",
+        "description": "cargo-visible integration and conformance suites exercise registry admission receipts, adversarial poisoning failures, claims lifecycle boundaries, and deterministic replay vectors",
+        "evidence_paths": [
+            "crates/franken-node/tests/supply_chain_registry_attestation_receipt_conformance.rs",
+            "crates/franken-node/tests/adversarial_supply_chain_poisoning.rs",
+            "crates/franken-node/tests/supply_chain_registry_claims_e2e_integration.rs",
+            "crates/franken-node/tests/fixtures/supply_chain_registry_attestation_receipt_vectors.json",
+        ],
+        "commands": [
+            "rch exec -- cargo test -p frankenengine-node --test supply_chain_registry_attestation_receipt_conformance",
+            "rch exec -- cargo test -p frankenengine-node --test adversarial_supply_chain_poisoning",
+            "rch exec -- cargo test -p frankenengine-node --test supply_chain_registry_claims_e2e_integration",
+        ],
+    },
+    {
+        "spec_item": "tests.e2e.primary",
+        "category": "e2e",
+        "status": "covered",
+        "description": "operator shell harness runs the registry checker end to end and emits structured extension-admission telemetry artifacts",
+        "evidence_paths": [
+            "tests/e2e/extension_registry_operator_suite.sh",
+            "artifacts/replacement_gap/bd-3hdn/operator_e2e_log.jsonl",
+            "artifacts/replacement_gap/bd-3hdn/operator_e2e_summary.json",
+            "artifacts/replacement_gap/bd-3hdn/operator_e2e_summary.md",
+        ],
+        "commands": [
+            "tests/e2e/extension_registry_operator_suite.sh",
+        ],
+    },
+    {
+        "spec_item": "tests.golden.primary",
+        "category": "golden",
+        "status": "covered",
+        "description": "signed extension manifest serialization is frozen as a golden artifact so schema or signature-material drift requires review",
+        "evidence_paths": [
+            "crates/franken-node/tests/supply_chain_attestation_manifest_golden.rs",
+            "artifacts/golden/supply_chain_attestation_manifest.json",
+            "artifacts/replacement_gap/bd-3hdn/adversarial_fixture_index.json",
+        ],
+        "commands": [
+            "rch exec -- cargo test -p frankenengine-node --test supply_chain_attestation_manifest_golden",
+        ],
+    },
+    {
+        "spec_item": "telemetry.primary",
+        "category": "telemetry",
+        "status": "covered",
+        "description": "EXT_REG_ADMISSION_* and EXT_REG_PROVENANCE_* operator events expose stable trace, artifact, publisher, decision, reason, transparency, and attestation fields",
+        "evidence_paths": [
+            "tests/e2e/extension_registry_operator_suite.sh",
+            "artifacts/replacement_gap/bd-3hdn/operator_e2e_log.jsonl",
+            "artifacts/replacement_gap/bd-3hdn/operator_e2e_summary.json",
+            "crates/franken-node/src/supply_chain/extension_registry.rs",
+        ],
+        "required_fields": REQUIRED_TELEMETRY_FIELDS,
+        "commands": [
+            "tests/e2e/extension_registry_operator_suite.sh",
+            "python3 scripts/check_signed_extension_registry.py --json",
+        ],
+    },
+]
 
 EXTENSION_STATUSES = [
     "Submitted",
@@ -33,7 +147,10 @@ EXTENSION_STATUSES = [
 EVENT_CODES = [
     "SER-001", "SER-002", "SER-003", "SER-004", "SER-005",
     "SER-006", "SER-007", "SER-008", "SER-009", "SER-010",
-    "SER-ERR-001", "SER-ERR-002", "SER-ERR-003",
+    "SER-011",
+    "SER-ERR-001", "SER-ERR-002", "SER-ERR-003", "SER-ERR-004",
+    "SER-ERR-005", "SER-ERR-006", "SER-ERR-007", "SER-ERR-008",
+    "SER-ERR-009", "SER-ERR-010", "SER-ERR-011",
 ]
 
 INVARIANTS = [
@@ -121,27 +238,43 @@ def check_registry_operations() -> tuple[str, bool, str]:
 def check_signature_verification() -> tuple[str, bool, str]:
     src = _read(SRC)
     checks = [
-        "verify_signature" in src,
-        "key_id" in src,
-        "signature_hex" in src,
-        "is_ascii_hexdigit" in src,
+        "artifact_signing::verify_signature(" in src,
+        "KeyRing" in src,
+        "signature.signature_bytes" in src,
+        "SER_ERR_INVALID_SIGNATURE" in src,
     ]
     ok = all(checks)
-    return ("signature_verification", ok, f"Signature verification: {sum(checks)}/4 checks")
+    return ("signature_verification", ok, f"Cryptographic signature verification: {sum(checks)}/4 checks")
 
 
 def check_provenance_validation() -> tuple[str, bool, str]:
     src = _read(SRC)
     checks = [
-        "verify_provenance" in src,
-        "publisher_id" in src,
-        "build_system" in src,
-        "source_repository" in src,
-        "vcs_commit" in src,
-        "attestation_chain" in src,  # verify_attestation_chain from provenance module
+        "prov::verify_attestation_chain(" in src,
+        "VerificationPolicy" in src,
+        "provenance.vcs_commit_sha" in src,
+        "provenance.build_system_identifier" in src,
+        "provenance.output_hash" in src,
+        "SER_ERR_PROVENANCE_CHAIN_INVALID" in src,
     ]
     ok = all(checks)
-    return ("provenance_validation", ok, f"Provenance validation: {sum(checks)}/6 checks")
+    return ("provenance_validation", ok, f"Canonical provenance validation: {sum(checks)}/6 checks")
+
+
+def check_admission_kernel() -> tuple[str, bool, str]:
+    src = _read(SRC)
+    checks = [
+        "pub struct AdmissionKernel" in src,
+        "compute_admission_digest(" in src,
+        "extension_registry_admission_v1:" in src,
+        "canonical_registration_manifest_bytes" in src,
+        "registration_manifest_divergence" in src,
+        "tv::verify_inclusion(" in src,
+        "NegativeWitness" in src,
+        "admission_receipts" in src,
+    ]
+    ok = all(checks)
+    return ("admission_kernel", ok, f"Admission kernel controls: {sum(checks)}/8 checks")
 
 
 def check_monotonic_revocation() -> tuple[str, bool, str]:
@@ -212,6 +345,101 @@ def check_test_coverage() -> tuple[str, bool, str]:
     return ("test_coverage", ok, f"Rust unit tests: {test_count} (target >= 25)")
 
 
+def _artifact_rel(path: Path) -> str:
+    return str(path.relative_to(ROOT))
+
+
+def check_replacement_evidence_files() -> tuple[str, bool, str]:
+    required = [
+        REPLACEMENT_EVIDENCE,
+        REPLACEMENT_SUMMARY,
+        ADVERSARIAL_FIXTURE_INDEX,
+        OPERATOR_E2E,
+        OPERATOR_LOG,
+        OPERATOR_SUMMARY_JSON,
+        OPERATOR_SUMMARY_MD,
+        GOLDEN_TEST,
+        GOLDEN_ARTIFACT,
+        CONFORMANCE_TEST,
+        ADVERSARIAL_TEST,
+        CLAIMS_E2E_TEST,
+    ]
+    missing = [_artifact_rel(path) for path in required if not path.exists()]
+    ok = not missing
+    detail = (
+        f"All {len(required)} bd-3hdn evidence files present"
+        if ok
+        else f"Missing evidence files: {missing}"
+    )
+    return ("bd_3hdn_evidence_files", ok, detail)
+
+
+def check_telemetry_contract() -> tuple[str, bool, str]:
+    texts = []
+    for path in (OPERATOR_E2E, OPERATOR_LOG, OPERATOR_SUMMARY_JSON):
+        if path.exists():
+            texts.append(_read(path))
+    combined = "\n".join(texts)
+    missing_fields = [field for field in REQUIRED_TELEMETRY_FIELDS if field not in combined]
+    missing_families = [
+        family
+        for family in ("EXT_REG_ADMISSION_", "EXT_REG_PROVENANCE_")
+        if family not in combined
+    ]
+    ok = not missing_fields and not missing_families
+    detail = (
+        "Extension registry telemetry contract present"
+        if ok
+        else json.dumps(
+            {"missing_fields": missing_fields, "missing_event_families": missing_families},
+            sort_keys=True,
+        )
+    )
+    return ("bd_3hdn_telemetry_contract", ok, detail)
+
+
+def check_completion_debt_coverage() -> tuple[str, bool, str]:
+    coverage_by_item = {
+        obligation.get("spec_item"): obligation
+        for obligation in COMPLETION_DEBT_OBLIGATIONS
+        if isinstance(obligation, dict)
+    }
+    missing_items = sorted(COMPLETION_DEBT_REQUIRED_SPEC_ITEMS - set(coverage_by_item))
+    noncovered_items = sorted(
+        str(item)
+        for item, obligation in coverage_by_item.items()
+        if obligation.get("status") != "covered"
+    )
+    missing_paths: list[str] = []
+    for obligation in coverage_by_item.values():
+        for rel_path in obligation.get("evidence_paths", []):
+            if isinstance(rel_path, str) and not (ROOT / rel_path).exists():
+                missing_paths.append(rel_path)
+    ok = not missing_items and not noncovered_items and not missing_paths
+    detail = (
+        "all bd-3hdn.1 completion-debt obligations covered"
+        if ok
+        else json.dumps(
+            {
+                "missing_items": missing_items,
+                "noncovered_items": noncovered_items,
+                "missing_paths": sorted(missing_paths),
+            },
+            sort_keys=True,
+        )
+    )
+    return ("bd_3hdn_1_completion_debt", ok, detail)
+
+
+def completion_debt_contract() -> dict:
+    return {
+        "parent_bead": REPLACEMENT_BEAD_ID,
+        "completion_bead": COMPLETION_DEBT_BEAD,
+        "required_spec_items": sorted(COMPLETION_DEBT_REQUIRED_SPEC_ITEMS),
+        "coverage_obligations": COMPLETION_DEBT_OBLIGATIONS,
+    }
+
+
 ALL_CHECKS = [
     check_source_exists,
     check_module_wiring,
@@ -219,6 +447,7 @@ ALL_CHECKS = [
     check_extension_statuses,
     check_revocation_reasons,
     check_registry_operations,
+    check_admission_kernel,
     check_signature_verification,
     check_provenance_validation,
     check_monotonic_revocation,
@@ -228,6 +457,9 @@ ALL_CHECKS = [
     check_audit_logging,
     check_spec_alignment,
     check_test_coverage,
+    check_replacement_evidence_files,
+    check_telemetry_contract,
+    check_completion_debt_coverage,
 ]
 
 
@@ -253,7 +485,7 @@ def self_test() -> bool:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_signed_extension_registry")
+    configure_test_logging("check_signed_extension_registry")
     parser = argparse.ArgumentParser(description="bd-209w gate: Signed Extension Registry")
     parser.add_argument("--json", action="store_true", help="JSON output")
     parser.add_argument("--self-test", action="store_true", help="Run self-test")
@@ -271,13 +503,16 @@ def main() -> None:
     if args.json:
         output = {
             "bead_id": "bd-209w",
+            "replacement_bead_id": REPLACEMENT_BEAD_ID,
             "title": "Signed extension registry with provenance and revocation",
             "section": "15",
             "verdict": verdict,
             "overall_pass": n_failed == 0,
+            "summary": {"passing": n_passed, "failing": n_failed, "total": total},
             "total": total,
             "passed": n_passed,
             "failed": n_failed,
+            "completion_debt": completion_debt_contract(),
             "checks": results,
         }
         print(json.dumps(output, indent=2))

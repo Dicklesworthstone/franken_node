@@ -1,167 +1,215 @@
-"""Unit tests for scripts/check_signed_extension_registry.py (bd-209w gate)."""
+"""Unit tests for scripts/check_signed_extension_registry.py."""
 
 from __future__ import annotations
 
-import importlib.util
+import contextlib
+import io
 import json
-import subprocess
 import sys
+import unittest
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "scripts" / "check_signed_extension_registry.py"
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import check_signed_extension_registry as checker  # noqa: E402
 
 
-def _load_module():
-    spec = importlib.util.spec_from_file_location("check_signed_extension_registry", SCRIPT)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+def run_main(args: list[str]) -> tuple[int, str]:
+    old_argv = sys.argv
+    stdout = io.StringIO()
+    try:
+        sys.argv = ["check_signed_extension_registry.py", *args]
+        with contextlib.redirect_stdout(stdout):
+            try:
+                checker.main()
+            except SystemExit as exc:
+                return int(exc.code), stdout.getvalue()
+    finally:
+        sys.argv = old_argv
+    return 0, stdout.getvalue()
 
 
-@pytest.fixture(scope="module")
-def mod():
-    return _load_module()
+class TestSignedExtensionRegistryChecker(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = checker
+        cls.results = cls.mod.run_all()
+
+    def test_self_test(self):
+        self.assertTrue(self.mod.self_test())
+
+    def test_json_output(self):
+        returncode, stdout = run_main(["--json"])
+        self.assertEqual(returncode, 0)
+        data = json.JSONDecoder().decode(stdout)
+        self.assertEqual(data["bead_id"], "bd-209w")
+        self.assertEqual(data["replacement_bead_id"], "bd-3hdn")
+        self.assertEqual(data["verdict"], "PASS")
+        self.assertEqual(data["summary"]["failing"], 0)
+        self.assertIsInstance(data["checks"], list)
+        self.assertEqual(data["completion_debt"]["completion_bead"], "bd-3hdn.1")
+
+    def test_source_exists(self):
+        name, ok, _ = self.mod.check_source_exists()
+        self.assertEqual(name, "source_exists")
+        self.assertTrue(ok)
+
+    def test_module_wiring(self):
+        name, ok, _ = self.mod.check_module_wiring()
+        self.assertEqual(name, "module_wiring")
+        self.assertTrue(ok)
+
+    def test_structs(self):
+        name, ok, _ = self.mod.check_structs()
+        self.assertEqual(name, "structs")
+        self.assertTrue(ok)
+
+    def test_extension_statuses(self):
+        name, ok, _ = self.mod.check_extension_statuses()
+        self.assertEqual(name, "extension_statuses")
+        self.assertTrue(ok)
+
+    def test_revocation_reasons(self):
+        name, ok, _ = self.mod.check_revocation_reasons()
+        self.assertEqual(name, "revocation_reasons")
+        self.assertTrue(ok)
+
+    def test_registry_operations(self):
+        name, ok, _ = self.mod.check_registry_operations()
+        self.assertEqual(name, "registry_operations")
+        self.assertTrue(ok)
+
+    def test_signature_verification(self):
+        name, ok, _ = self.mod.check_signature_verification()
+        self.assertEqual(name, "signature_verification")
+        self.assertTrue(ok)
+
+    def test_provenance_validation(self):
+        name, ok, _ = self.mod.check_provenance_validation()
+        self.assertEqual(name, "provenance_validation")
+        self.assertTrue(ok)
+
+    def test_admission_kernel(self):
+        name, ok, _ = self.mod.check_admission_kernel()
+        self.assertEqual(name, "admission_kernel")
+        self.assertTrue(ok)
+
+    def test_monotonic_revocation(self):
+        name, ok, _ = self.mod.check_monotonic_revocation()
+        self.assertEqual(name, "monotonic_revocation")
+        self.assertTrue(ok)
+
+    def test_event_codes(self):
+        name, ok, _ = self.mod.check_event_codes()
+        self.assertEqual(name, "event_codes")
+        self.assertTrue(ok)
+
+    def test_invariants(self):
+        name, ok, _ = self.mod.check_invariants()
+        self.assertEqual(name, "invariants")
+        self.assertTrue(ok)
+
+    def test_content_hash(self):
+        name, ok, _ = self.mod.check_content_hash()
+        self.assertEqual(name, "content_hash")
+        self.assertTrue(ok)
+
+    def test_audit_logging(self):
+        name, ok, _ = self.mod.check_audit_logging()
+        self.assertEqual(name, "audit_logging")
+        self.assertTrue(ok)
+
+    def test_spec_alignment(self):
+        name, ok, _ = self.mod.check_spec_alignment()
+        self.assertEqual(name, "spec_alignment")
+        self.assertTrue(ok)
+
+    def test_test_coverage(self):
+        name, ok, _ = self.mod.check_test_coverage()
+        self.assertEqual(name, "test_coverage")
+        self.assertTrue(ok)
+
+    def test_replacement_evidence_files(self):
+        name, ok, _ = self.mod.check_replacement_evidence_files()
+        self.assertEqual(name, "bd_3hdn_evidence_files")
+        self.assertTrue(ok)
+
+    def test_telemetry_contract(self):
+        name, ok, _ = self.mod.check_telemetry_contract()
+        self.assertEqual(name, "bd_3hdn_telemetry_contract")
+        self.assertTrue(ok)
+
+    def test_completion_debt_obligations_present(self):
+        contract = self.mod.completion_debt_contract()
+        self.assertEqual(contract["completion_bead"], "bd-3hdn.1")
+        obligations = {
+            obligation["spec_item"]: obligation
+            for obligation in contract["coverage_obligations"]
+        }
+        self.assertEqual(
+            set(obligations),
+            {
+                "tests.unit.primary",
+                "tests.integration.primary",
+                "tests.e2e.primary",
+                "tests.golden.primary",
+                "telemetry.primary",
+            },
+        )
+        self.assertIn(
+            "tests/e2e/extension_registry_operator_suite.sh",
+            obligations["tests.e2e.primary"]["evidence_paths"],
+        )
+        self.assertIn(
+            "artifacts/golden/supply_chain_attestation_manifest.json",
+            obligations["tests.golden.primary"]["evidence_paths"],
+        )
+        self.assertIn("trace_id", obligations["telemetry.primary"]["required_fields"])
+
+    def test_completion_debt_missing_spec_item_fails(self):
+        original = self.mod.COMPLETION_DEBT_OBLIGATIONS
+        self.mod.COMPLETION_DEBT_OBLIGATIONS = [
+            obligation
+            for obligation in original
+            if obligation["spec_item"] != "telemetry.primary"
+        ]
+        try:
+            name, ok, detail = self.mod.check_completion_debt_coverage()
+        finally:
+            self.mod.COMPLETION_DEBT_OBLIGATIONS = original
+        self.assertEqual(name, "bd_3hdn_1_completion_debt")
+        self.assertFalse(ok)
+        self.assertIn("telemetry.primary", detail)
+
+    def test_completion_debt_missing_evidence_path_fails(self):
+        original = self.mod.COMPLETION_DEBT_OBLIGATIONS
+        mutated = [dict(obligation) for obligation in original]
+        mutated[0] = dict(mutated[0])
+        mutated[0]["evidence_paths"] = list(mutated[0]["evidence_paths"]) + [
+            "artifacts/replacement_gap/bd-3hdn/missing-completion-debt.json"
+        ]
+        self.mod.COMPLETION_DEBT_OBLIGATIONS = mutated
+        try:
+            name, ok, detail = self.mod.check_completion_debt_coverage()
+        finally:
+            self.mod.COMPLETION_DEBT_OBLIGATIONS = original
+        self.assertEqual(name, "bd_3hdn_1_completion_debt")
+        self.assertFalse(ok)
+        self.assertIn("missing-completion-debt.json", detail)
+
+    def test_all_checks_pass(self):
+        failures = [r for r in self.results if not r["passed"]]
+        self.assertEqual(failures, [])
+
+    def test_verdict_is_pass(self):
+        self.assertTrue(all(r["passed"] for r in self.results))
+
+    def test_human_output(self):
+        returncode, stdout = run_main([])
+        self.assertEqual(returncode, 0)
+        self.assertIn("PASS", stdout)
 
 
-@pytest.fixture(scope="module")
-def results(mod):
-    return mod.run_all()
-
-
-# --- Self-test ---
-
-def test_self_test(mod):
-    assert mod.self_test() is True
-
-
-# --- JSON output ---
-
-def test_json_output():
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--json"],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0
-    data = json.loads(result.stdout)
-    assert data["bead_id"] == "bd-209w"
-    assert data["verdict"] == "PASS"
-    assert isinstance(data["checks"], list)
-
-
-# --- Individual checks ---
-
-def test_source_exists(mod):
-    name, ok, _ = mod.check_source_exists()
-    assert name == "source_exists"
-    assert ok is True
-
-
-def test_module_wiring(mod):
-    name, ok, _ = mod.check_module_wiring()
-    assert name == "module_wiring"
-    assert ok is True
-
-
-def test_structs(mod):
-    name, ok, _ = mod.check_structs()
-    assert name == "structs"
-    assert ok is True
-
-
-def test_extension_statuses(mod):
-    name, ok, _ = mod.check_extension_statuses()
-    assert name == "extension_statuses"
-    assert ok is True
-
-
-def test_revocation_reasons(mod):
-    name, ok, _ = mod.check_revocation_reasons()
-    assert name == "revocation_reasons"
-    assert ok is True
-
-
-def test_registry_operations(mod):
-    name, ok, _ = mod.check_registry_operations()
-    assert name == "registry_operations"
-    assert ok is True
-
-
-def test_signature_verification(mod):
-    name, ok, _ = mod.check_signature_verification()
-    assert name == "signature_verification"
-    assert ok is True
-
-
-def test_provenance_validation(mod):
-    name, ok, _ = mod.check_provenance_validation()
-    assert name == "provenance_validation"
-    assert ok is True
-
-
-def test_monotonic_revocation(mod):
-    name, ok, _ = mod.check_monotonic_revocation()
-    assert name == "monotonic_revocation"
-    assert ok is True
-
-
-def test_event_codes(mod):
-    name, ok, _ = mod.check_event_codes()
-    assert name == "event_codes"
-    assert ok is True
-
-
-def test_invariants(mod):
-    name, ok, _ = mod.check_invariants()
-    assert name == "invariants"
-    assert ok is True
-
-
-def test_content_hash(mod):
-    name, ok, _ = mod.check_content_hash()
-    assert name == "content_hash"
-    assert ok is True
-
-
-def test_audit_logging(mod):
-    name, ok, _ = mod.check_audit_logging()
-    assert name == "audit_logging"
-    assert ok is True
-
-
-def test_spec_alignment(mod):
-    name, ok, _ = mod.check_spec_alignment()
-    assert name == "spec_alignment"
-    assert ok is True
-
-
-def test_test_coverage(mod):
-    name, ok, _ = mod.check_test_coverage()
-    assert name == "test_coverage"
-    assert ok is True
-
-
-# --- Overall ---
-
-def test_all_checks_pass(results):
-    for r in results:
-        assert r["passed"] is True, f"{r['check']}: {r['detail']}"
-
-
-def test_verdict_is_pass(results):
-    assert all(r["passed"] for r in results)
-
-
-# --- Human output ---
-
-def test_human_output():
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT)],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0
-    assert "PASS" in result.stdout
+if __name__ == "__main__":
+    unittest.main()

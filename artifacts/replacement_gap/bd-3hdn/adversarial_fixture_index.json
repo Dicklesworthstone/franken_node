@@ -1,0 +1,62 @@
+{
+  "artifact_type": "adversarial_fixture_index",
+  "bead_id": "bd-3hdn",
+  "completion_debt_bead_id": "bd-3hdn.1",
+  "schema_version": "bd-3hdn-adversarial-fixture-index-v1",
+  "generated_at": "2026-05-12T00:47:06Z",
+  "fixtures": [
+    {
+      "case_id": "tampered_signature",
+      "attack_vector": "same-length forged signature bytes",
+      "expected_control": "SER_ERR_INVALID_SIGNATURE with a negative witness",
+      "evidence_paths": [
+        "crates/franken-node/src/supply_chain/extension_registry.rs",
+        "crates/franken-node/tests/supply_chain_registry_attestation_receipt_conformance.rs",
+        "crates/franken-node/tests/fixtures/supply_chain_registry_attestation_receipt_vectors.json"
+      ]
+    },
+    {
+      "case_id": "revoked_publisher_link",
+      "attack_vector": "revoked attestation link reuse",
+      "expected_control": "SER_ERR_PROVENANCE_CHAIN_INVALID and no registry admission",
+      "evidence_paths": [
+        "crates/franken-node/tests/supply_chain_registry_attestation_receipt_conformance.rs",
+        "crates/franken-node/tests/adversarial_supply_chain_poisoning.rs"
+      ]
+    },
+    {
+      "case_id": "missing_transparency_proof",
+      "attack_vector": "transparency checkpoint required but absent",
+      "expected_control": "SER_ERR_TRANSPARENCY_FAILED with a remediation witness",
+      "evidence_paths": [
+        "crates/franken-node/src/supply_chain/extension_registry.rs",
+        "crates/franken-node/tests/supply_chain_registry_attestation_receipt_conformance.rs"
+      ]
+    },
+    {
+      "case_id": "stale_attestation_replay",
+      "attack_vector": "stale attestation replay beyond freshness window",
+      "expected_control": "SER_ERR_PROVENANCE_CHAIN_INVALID",
+      "evidence_paths": [
+        "crates/franken-node/tests/adversarial_supply_chain_poisoning.rs"
+      ]
+    },
+    {
+      "case_id": "attacker_resigned_manifest",
+      "attack_vector": "reused manifest bytes signed by an untrusted attacker key",
+      "expected_control": "SER_ERR_KEY_NOT_FOUND or invalid signature rejection",
+      "evidence_paths": [
+        "crates/franken-node/tests/adversarial_supply_chain_poisoning.rs"
+      ]
+    },
+    {
+      "case_id": "threshold_manifest_golden",
+      "attack_vector": "signed extension manifest schema or threshold-signature drift",
+      "expected_control": "golden byte comparison fails until reviewed",
+      "evidence_paths": [
+        "crates/franken-node/tests/supply_chain_attestation_manifest_golden.rs",
+        "artifacts/golden/supply_chain_attestation_manifest.json"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "check_failing": 0,
+  "check_passing": 19,
+  "check_total": 19,
+  "event_count": 4,
+  "event_families": {
+    "EXT_REG_ADMISSION": true,
+    "EXT_REG_PROVENANCE": true
+  },
+  "log_path": "artifacts/replacement_gap/bd-3hdn/operator_e2e_log.jsonl",
+  "missing_fields": [],
+  "required_fields": [
+    "artifact_id",
+    "attestation_digest",
+    "decision",
+    "publisher_key_id",
+    "reason_code",
+    "trace_id",
+    "transparency_checkpoint"
+  ],
+  "schema_version": "bd-3hdn-operator-e2e-v1",
+  "trace_id": "trace-bd-3hdn-operator-e2e",
+  "verdict": "PASS"
+}

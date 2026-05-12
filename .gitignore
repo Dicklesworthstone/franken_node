@@ -37,6 +37,7 @@ __pycache__/
 
 # Beads issue tracker history backups
 .beads/.br_history/
+.beads/.br_recovery/
 .beads/*.bad_*
 .beads/*.rebuild_*
 .beads/recovery_*/

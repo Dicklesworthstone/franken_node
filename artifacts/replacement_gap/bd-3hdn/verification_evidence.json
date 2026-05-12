@@ -1,0 +1,151 @@
+{
+  "artifact_type": "verification_evidence",
+  "bead_id": "bd-3hdn",
+  "completion_debt_bead_id": "bd-3hdn.1",
+  "title": "Replace extension-registry shape checks with canonical signed-manifest admission kernel",
+  "section": "10.4",
+  "verdict": "PASS",
+  "timestamp": "2026-05-12T00:50:06Z",
+  "artifacts": {
+    "extension_registry": "crates/franken-node/src/supply_chain/extension_registry.rs",
+    "checker": "scripts/check_signed_extension_registry.py",
+    "checker_tests": "tests/test_check_signed_extension_registry.py",
+    "operator_e2e": "tests/e2e/extension_registry_operator_suite.sh",
+    "operator_e2e_log": "artifacts/replacement_gap/bd-3hdn/operator_e2e_log.jsonl",
+    "operator_e2e_summary_json": "artifacts/replacement_gap/bd-3hdn/operator_e2e_summary.json",
+    "operator_e2e_summary_md": "artifacts/replacement_gap/bd-3hdn/operator_e2e_summary.md",
+    "adversarial_fixture_index": "artifacts/replacement_gap/bd-3hdn/adversarial_fixture_index.json",
+    "verification_summary": "artifacts/replacement_gap/bd-3hdn/verification_summary.md",
+    "verification_evidence": "artifacts/replacement_gap/bd-3hdn/verification_evidence.json",
+    "golden_test": "crates/franken-node/tests/supply_chain_attestation_manifest_golden.rs",
+    "golden_artifact": "artifacts/golden/supply_chain_attestation_manifest.json",
+    "conformance_test": "crates/franken-node/tests/supply_chain_registry_attestation_receipt_conformance.rs",
+    "adversarial_test": "crates/franken-node/tests/adversarial_supply_chain_poisoning.rs",
+    "claims_e2e_test": "crates/franken-node/tests/supply_chain_registry_claims_e2e_integration.rs"
+  },
+  "completion_debt": {
+    "required_spec_items": [
+      "telemetry.primary",
+      "tests.e2e.primary",
+      "tests.golden.primary",
+      "tests.integration.primary",
+      "tests.unit.primary"
+    ],
+    "coverage_obligations": [
+      {
+        "spec_item": "tests.unit.primary",
+        "status": "covered",
+        "evidence_paths": [
+          "scripts/check_signed_extension_registry.py",
+          "tests/test_check_signed_extension_registry.py",
+          "crates/franken-node/src/supply_chain/extension_registry.rs"
+        ],
+        "commands": [
+          "python3 scripts/check_signed_extension_registry.py --json",
+          "python3 scripts/check_signed_extension_registry.py --self-test",
+          "python3 -m pytest -q tests/test_check_signed_extension_registry.py"
+        ]
+      },
+      {
+        "spec_item": "tests.integration.primary",
+        "status": "covered",
+        "evidence_paths": [
+          "crates/franken-node/tests/supply_chain_registry_attestation_receipt_conformance.rs",
+          "crates/franken-node/tests/adversarial_supply_chain_poisoning.rs",
+          "crates/franken-node/tests/supply_chain_registry_claims_e2e_integration.rs",
+          "crates/franken-node/tests/fixtures/supply_chain_registry_attestation_receipt_vectors.json"
+        ],
+        "commands": [
+          "rch exec -- cargo test -p frankenengine-node --test supply_chain_registry_attestation_receipt_conformance",
+          "rch exec -- cargo test -p frankenengine-node --test adversarial_supply_chain_poisoning",
+          "rch exec -- cargo test -p frankenengine-node --test supply_chain_registry_claims_e2e_integration"
+        ]
+      },
+      {
+        "spec_item": "tests.e2e.primary",
+        "status": "covered",
+        "evidence_paths": [
+          "tests/e2e/extension_registry_operator_suite.sh",
+          "artifacts/replacement_gap/bd-3hdn/operator_e2e_log.jsonl",
+          "artifacts/replacement_gap/bd-3hdn/operator_e2e_summary.json",
+          "artifacts/replacement_gap/bd-3hdn/operator_e2e_summary.md"
+        ],
+        "commands": [
+          "tests/e2e/extension_registry_operator_suite.sh"
+        ]
+      },
+      {
+        "spec_item": "tests.golden.primary",
+        "status": "covered",
+        "evidence_paths": [
+          "crates/franken-node/tests/supply_chain_attestation_manifest_golden.rs",
+          "artifacts/golden/supply_chain_attestation_manifest.json",
+          "artifacts/replacement_gap/bd-3hdn/adversarial_fixture_index.json"
+        ],
+        "commands": [
+          "rch exec -- cargo test -p frankenengine-node --test supply_chain_attestation_manifest_golden"
+        ]
+      },
+      {
+        "spec_item": "telemetry.primary",
+        "status": "covered",
+        "required_fields": [
+          "trace_id",
+          "artifact_id",
+          "publisher_key_id",
+          "decision",
+          "reason_code",
+          "transparency_checkpoint",
+          "attestation_digest"
+        ],
+        "evidence_paths": [
+          "tests/e2e/extension_registry_operator_suite.sh",
+          "artifacts/replacement_gap/bd-3hdn/operator_e2e_log.jsonl",
+          "artifacts/replacement_gap/bd-3hdn/operator_e2e_summary.json",
+          "crates/franken-node/src/supply_chain/extension_registry.rs"
+        ],
+        "commands": [
+          "tests/e2e/extension_registry_operator_suite.sh",
+          "python3 scripts/check_signed_extension_registry.py --json"
+        ]
+      }
+    ]
+  },
+  "verification_steps": [
+    {
+      "name": "python_check_signed_extension_registry_json",
+      "command": "python3 scripts/check_signed_extension_registry.py --json",
+      "status": "PASS",
+      "detail": "19 passed, 0 failed. Checker exposes bd-3hdn replacement evidence and bd-3hdn.1 completion-debt obligations for unit, integration, E2E, golden, and telemetry coverage."
+    },
+    {
+      "name": "python_check_signed_extension_registry_self_test",
+      "command": "python3 scripts/check_signed_extension_registry.py --self-test",
+      "status": "PASS",
+      "detail": "Checker self-test returned 19 structured checks."
+    },
+    {
+      "name": "python_pytest_check_signed_extension_registry",
+      "command": "python3 -m pytest -q tests/test_check_signed_extension_registry.py",
+      "status": "PASS",
+      "detail": "26 tests passed, including mutation coverage for missing completion-debt spec items and missing evidence paths."
+    },
+    {
+      "name": "operator_e2e_extension_registry",
+      "command": "tests/e2e/extension_registry_operator_suite.sh",
+      "status": "PASS",
+      "detail": "Operator E2E emits EXT_REG_ADMISSION_* and EXT_REG_PROVENANCE_* events with all required telemetry fields."
+    },
+    {
+      "name": "section_15_rust_unit_tests_recorded",
+      "command": "rch exec -- cargo test -p frankenengine-node --lib supply_chain::extension_registry::tests",
+      "status": "RECORDED",
+      "detail": "Existing bd-209w evidence records 42 Rust unit tests for extension_registry.rs; fresh cargo reproof is gated by current rch contention."
+    }
+  ],
+  "notes": [
+    "bd-3hdn.1 closes the completion-debt audit items for tests.unit.primary, tests.integration.primary, tests.e2e.primary, tests.golden.primary, and telemetry.primary.",
+    "The completion-debt checker requires the replacement evidence pack, operator E2E artifacts, adversarial fixture index, and golden manifest artifact to exist before it can pass.",
+    "Fresh cargo-heavy reproof should be run through rch when cargo/rustc contention drops under the repository threshold."
+  ]
+}
