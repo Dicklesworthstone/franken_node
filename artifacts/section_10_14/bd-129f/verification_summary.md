@@ -4,8 +4,8 @@
 
 **Section:** 10.14 (FrankenSQLite Deep-Mined Expansion)
 **Status:** PASS (37/37 checks)
-**Agent:** CrimsonCrane (claude-code, claude-opus-4-6)
-**Date:** 2026-02-20
+**Agent:** SnowyBeaver (codex-cli, GPT-5)
+**Date:** 2026-05-12
 
 ## Implementation
 
@@ -18,7 +18,7 @@
 
 | Operation | Complexity | Mechanism |
 |-----------|-----------|-----------|
-| `marker_by_sequence(seq)` | O(1) | Direct Vec index (`markers.get(seq as usize)`) |
+| `marker_by_sequence(seq)` | O(1) | Base-adjusted Vec index (`markers.get(sequence_offset(base, seq)?)`) |
 | `sequence_by_timestamp(ts)` | O(log N) | Binary search over monotonic timestamp order |
 | `first()` | O(1) | `markers.first()` |
 
@@ -33,7 +33,7 @@
 
 ### marker_by_sequence (O(1))
 
-Since `MarkerStream` enforces the dense sequence invariant (INV-MKS-DENSE-SEQUENCE), sequence number N always lives at Vec index N. The lookup is a single `.get(seq as usize)` call, which is O(1).
+Since `MarkerStream` enforces the dense sequence invariant (INV-MKS-DENSE-SEQUENCE), every retained marker lives at a stable offset from the first retained sequence. The lookup computes that offset and performs a single `.get(sequence_offset(base, seq)?)` call, which is O(1) and returns `None` for evicted or out-of-range sequences.
 
 ### sequence_by_timestamp (O(log N))
 
@@ -47,7 +47,7 @@ Since `MarkerStream` enforces monotonically non-decreasing timestamps (INV-MKS-M
 | Case | Result |
 |------|--------|
 | Empty stream | `None` |
-| Out-of-range sequence | `None` (no panic) |
+| Out-of-range or evicted sequence | `None` (no panic) |
 | Timestamp before first marker | `None` |
 | Timestamp after last marker | Last sequence |
 | Duplicate timestamps | Rightmost marker at that timestamp |
@@ -78,7 +78,7 @@ Since `MarkerStream` enforces monotonically non-decreasing timestamps (INV-MKS-M
 
 - **Python verification script:** 37/37 checks pass
 - **Python unit tests:** 26/26 tests pass
-- **Rust unit tests:** 50 passed, 0 failed (`cargo test marker_stream`, includes 14 bd-129f-specific tests plus bd-126h base tests and divergence detection tests)
+- **Rust marker-stream filter:** `rch exec -- cargo test -p frankenengine-node marker_stream -- --nocapture` passed; the filter exercised `e2e_marker_stream_lifecycle` (4/4 tests) and compiled the marker stream surface successfully.
 
 ## Downstream Unblocks
 

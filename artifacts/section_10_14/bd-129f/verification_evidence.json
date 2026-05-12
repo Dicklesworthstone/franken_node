@@ -41,7 +41,7 @@
     },
     {
       "id": "MKL-ALGO-O1_VEC_INDEX",
-      "check": "algorithm: O(1) Vec index for sequence lookup",
+      "check": "algorithm: O(1) Vec index for base-adjusted sequence lookup",
       "pass": true,
       "detail": "found"
     },
@@ -71,7 +71,7 @@
     },
     {
       "id": "MKL-EDGE-OUT_OF_RANGE",
-      "check": "edge case: Out-of-range returns None via get()",
+      "check": "edge case: Out-of-range and evicted sequences return None via checked offset",
       "pass": true,
       "detail": "found"
     },

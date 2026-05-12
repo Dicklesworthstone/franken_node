@@ -19,10 +19,10 @@ import json
 import re
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 IMPL = ROOT / "crates" / "franken-node" / "src" / "control_plane" / "marker_stream.rs"
 SPEC = ROOT / "docs" / "specs" / "section_10_14" / "bd-129f_contract.md"
@@ -63,7 +63,11 @@ REQUIRED_TESTS = [
 
 # Algorithm evidence patterns in code
 ALGORITHM_PATTERNS = [
-    ("o1_vec_index", r"\.get\(seq\s+as\s+usize\)", "O(1) Vec index for sequence lookup"),
+    (
+        "o1_vec_index",
+        r"\.get\(sequence_offset\(base,\s*seq\)\?\)",
+        "O(1) Vec index for base-adjusted sequence lookup",
+    ),
     ("binary_search_loop", r"while\s+lo\s*<\s*hi", "Binary search loop for timestamp lookup"),
     ("binary_search_mid", r"let\s+mid\s*=\s*lo\s*\+\s*\(hi\s*-\s*lo\)\s*/\s*2", "Midpoint calculation"),
     ("monotonic_precondition", r"INV-MKS-MONOTONIC-TIME", "Monotonic time precondition documented"),
@@ -118,7 +122,6 @@ def check_algorithms(content):
 
 def check_tests(content):
     results = []
-    test_count = len(re.findall(r"#\[test\]", content))
 
     # Count only bd-129f specific tests
     bd129f_tests = [t for t in REQUIRED_TESTS if t in content]
@@ -168,7 +171,11 @@ def check_edge_cases(content):
     results = []
     edge_cases = [
         ("empty_none", "is_empty()", "Empty stream returns None"),
-        ("out_of_range", "markers.get(seq as usize)", "Out-of-range returns None via get()"),
+        (
+            "out_of_range",
+            "sequence_offset(base, seq)?",
+            "Out-of-range and evicted sequences return None via checked offset",
+        ),
         ("before_first", "ts < self.markers[0].timestamp", "Before-first timestamp check"),
         ("rightmost", "lo - 1", "Rightmost marker at-or-before timestamp"),
     ]
@@ -252,7 +259,7 @@ def self_test():
 
 
 def main():
-    logger = configure_test_logging("check_marker_lookup")
+    configure_test_logging("check_marker_lookup")
     if "--self-test" in sys.argv:
         self_test()
         return

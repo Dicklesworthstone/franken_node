@@ -15,8 +15,9 @@ active at time T") using binary search over the monotonically-ordered stream.
 
 ### `marker_by_sequence(seq: u64) -> Option<&Marker>`
 
-O(1) lookup. Since the stream is dense (sequence N = array index N), this is
-a direct index operation. Returns `None` for out-of-range sequences.
+O(1) lookup. Since the retained stream window is dense, the sequence is
+converted to an offset from the first retained sequence and used as a direct
+index operation. Returns `None` for out-of-range or already-evicted sequences.
 
 ### `sequence_by_timestamp(ts: u64) -> Option<u64>`
 
@@ -37,7 +38,7 @@ Returns the first marker (sequence 0), or `None` if empty.
 
 | Operation | Complexity | Mechanism |
 |-----------|-----------|-----------|
-| `marker_by_sequence` | O(1) | Vec index |
+| `marker_by_sequence` | O(1) | Base-adjusted Vec index |
 | `sequence_by_timestamp` | O(log N) | Binary search |
 | `first` / `head` | O(1) | First/last element |
 
@@ -51,7 +52,7 @@ Returns the first marker (sequence 0), or `None` if empty.
 - Empty stream: all lookups return `None`
 - Single marker: exact, before, and after timestamp cases
 - Duplicate timestamps: returns rightmost marker at that timestamp
-- Out-of-range sequence: returns `None` (no panic)
+- Out-of-range or evicted sequence: returns `None` (no panic)
 - Maximum u64 sequence/timestamp: no overflow
 
 ## Artifacts

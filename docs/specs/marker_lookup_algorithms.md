@@ -14,12 +14,14 @@ that make the stream operationally viable at scale.
 
 **Complexity:** O(1)
 
-Because the marker stream enforces a dense sequence invariant (marker N lives
-at index N with no gaps), sequence-to-marker lookup is a direct array index
-operation:
+Because the marker stream enforces a dense retained-window sequence invariant,
+sequence-to-marker lookup is a direct array index after subtracting the first
+retained sequence:
 
 ```
-if seq < markers.len() then markers[seq] else None
+base = markers.first().map_or(0, |m| m.sequence)
+offset = seq - base
+if offset < markers.len() then markers[offset] else None
 ```
 
 No search is required. The cost is one bounds check and one pointer
@@ -27,7 +29,7 @@ dereference, independent of stream size.
 
 **Proof sketch:**
 - The dense sequence invariant (INV-MKS-DENSE-SEQUENCE) guarantees
-  `marker[i].sequence == i` for all `i` in `0..len`.
+  `marker[i].sequence == base + i` for all retained markers.
 - Vec indexing in Rust is O(1) (pointer arithmetic).
 - Therefore `marker_by_sequence(seq)` is O(1).
 
@@ -86,9 +88,10 @@ These targets are enforced by benchmark tests in
 ## Data Structures
 
 The lookup functions operate on `MarkerStream` from bd-126h, which stores
-markers in a `Vec<Marker>`. The dense sequence invariant means no auxiliary
-index is needed for O(1) sequence lookup. The monotonic time invariant means
-no auxiliary index is needed for O(log N) timestamp lookup.
+markers in a `Vec<Marker>`. The dense retained-window invariant means no
+auxiliary index is needed for O(1) sequence lookup even after capacity-bound
+oldest-first eviction. The monotonic time invariant means no auxiliary index is
+needed for O(log N) timestamp lookup.
 
 ## Implementation Location
 

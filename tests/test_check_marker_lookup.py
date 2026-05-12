@@ -12,7 +12,7 @@ IMPL = ROOT / "crates" / "franken-node" / "src" / "control_plane" / "marker_stre
 SPEC = ROOT / "docs" / "specs" / "section_10_14" / "bd-129f_contract.md"
 
 sys.path.insert(0, str(ROOT / "scripts"))
-import check_marker_lookup as cml
+import check_marker_lookup as cml  # noqa: E402
 
 
 class TestFileExistence(unittest.TestCase):
@@ -51,7 +51,8 @@ class TestAlgorithmEvidence(unittest.TestCase):
         self.content = IMPL.read_text()
 
     def test_o1_vec_index(self):
-        self.assertIn(".get(seq as usize)", self.content)
+        self.assertIn("self.markers.get(sequence_offset(base, seq)?)", self.content)
+        self.assertIn("fn sequence_offset(", self.content)
 
     def test_binary_search_loop(self):
         self.assertIn("while lo < hi", self.content)
@@ -138,7 +139,10 @@ class TestSelfTestAndCli(unittest.TestCase):
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        payload = json.loads(completed.stdout)
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            self.fail(f"Invalid JSON output: {exc}: {completed.stdout}")
         self.assertEqual(payload["verdict"], "PASS")
         self.assertEqual(payload["bead"], "bd-129f")
 
