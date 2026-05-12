@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for migration_validation_runner.py."""
 
+import json
 import sys
 import tempfile
 import unittest
@@ -95,6 +96,36 @@ class TestSelfTest(unittest.TestCase):
     def test_passes(self):
         result = runner.self_test()
         self.assertEqual(result["verdict"], "PASS")
+
+    def test_cites_primary_implementations(self):
+        result = runner.self_test()
+        self.assertEqual(
+            result["evidence_paths"]["migration_validation_runner"],
+            "scripts/migration_validation_runner.py",
+        )
+        self.assertEqual(
+            result["evidence_paths"]["lockstep_harness"],
+            "crates/franken-node/src/runtime/lockstep_harness.rs",
+        )
+        self.assertIn("VALIDATE-IMPL", {check["id"] for check in result["checks"]})
+
+    def test_checked_in_evidence_cites_primary_implementations(self):
+        evidence_path = (
+            Path(__file__).resolve().parent.parent
+            / "artifacts"
+            / "section_10_3"
+            / "bd-2st"
+            / "verification_evidence.json"
+        )
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            evidence["evidence_paths"]["migration_validation_runner"],
+            "scripts/migration_validation_runner.py",
+        )
+        self.assertEqual(
+            evidence["evidence_paths"]["lockstep_harness"],
+            "crates/franken-node/src/runtime/lockstep_harness.rs",
+        )
 
 
 if __name__ == "__main__":

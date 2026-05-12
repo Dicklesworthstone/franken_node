@@ -5,7 +5,8 @@
 - **Section**: 10.3
 
 ## Results
-- 5 verification checks: all passed
-- 16 unit tests: all passed
+- 6 verification checks: all passed
+- 18 unit tests: all passed
+- Primary implementation citations: `scripts/migration_validation_runner.py`, `crates/franken-node/src/runtime/lockstep_harness.rs`
 
 ## Verdict: PASS

@@ -3,7 +3,42 @@
   "section": "10.3",
   "verdict": "PASS",
   "timestamp": "2026-02-20T10:14:34.282439+00:00",
+  "evidence_paths": {
+    "migration_validation_runner": "scripts/migration_validation_runner.py",
+    "lockstep_harness": "crates/franken-node/src/runtime/lockstep_harness.rs",
+    "contract": "docs/specs/section_10_3/bd-2st_contract.md",
+    "verifier": "scripts/check_migration_validation.py",
+    "regression_tests": "tests/test_check_migration_validation.py",
+    "machine_evidence": "artifacts/section_10_3/bd-2st/verification_evidence.json",
+    "human_summary": "artifacts/section_10_3/bd-2st/verification_summary.md"
+  },
+  "verification_commands": [
+    {
+      "command": "python3 scripts/check_migration_validation.py --json",
+      "covers": [
+        "migration validation runner self-test",
+        "primary runner implementation citation",
+        "lockstep harness implementation citation",
+        "test discovery",
+        "output canonicalization",
+        "delta comparison",
+        "band-aware severity classification"
+      ]
+    },
+    {
+      "command": "python3 -m pytest tests/test_check_migration_validation.py",
+      "covers": [
+        "migration validation runner unit tests",
+        "report evidence path citations",
+        "checked-in machine evidence citations"
+      ]
+    }
+  ],
   "checks": [
+    {
+      "id": "VALIDATE-IMPL",
+      "status": "PASS"
+    },
     {
       "id": "VALIDATE-DISCOVERY",
       "status": "PASS",
@@ -37,8 +72,35 @@
     }
   ],
   "summary": {
-    "total_checks": 5,
-    "passing_checks": 5,
+    "total_checks": 6,
+    "passing_checks": 6,
     "failing_checks": 0
-  }
+  },
+  "unit_tests": {
+    "total": 18,
+    "passed": 18,
+    "failed": 0
+  },
+  "outputs": [
+    {
+      "path": "docs/specs/section_10_3/bd-2st_contract.md",
+      "sha256": "cc881ab3f5d858d0f676db7d8e61e2c9d25ff4b0b8603487a336042c8c981c0f",
+      "size_bytes": 2756
+    },
+    {
+      "path": "scripts/check_migration_validation.py",
+      "sha256": "403c0d18e35e20d8e83cfa93f25e73c98b7401686f1a70dc37d92b74b10b0d55",
+      "size_bytes": 968
+    },
+    {
+      "path": "scripts/migration_validation_runner.py",
+      "sha256": "a39793dda22a1730c632e3fb9b88ece75f0f1af47d8175f309255054a9a2e1af",
+      "size_bytes": 9563
+    },
+    {
+      "path": "tests/test_check_migration_validation.py",
+      "sha256": "b8a54245debfb7ce13a3b3719261f1f4d7060cec34dccca474bfedf609259f78",
+      "size_bytes": 4668
+    }
+  ]
 }

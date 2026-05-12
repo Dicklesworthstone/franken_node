@@ -17,6 +17,45 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+CONTRACT_PATH = ROOT / "docs" / "specs" / "section_10_3" / "bd-2st_contract.md"
+
+PRIMARY_IMPLEMENTATION_PATHS = {
+    "migration_validation_runner": "scripts/migration_validation_runner.py",
+    "lockstep_harness": "crates/franken-node/src/runtime/lockstep_harness.rs",
+}
+
+EVIDENCE_PATHS = {
+    "migration_validation_runner": PRIMARY_IMPLEMENTATION_PATHS["migration_validation_runner"],
+    "lockstep_harness": PRIMARY_IMPLEMENTATION_PATHS["lockstep_harness"],
+    "contract": "docs/specs/section_10_3/bd-2st_contract.md",
+    "verifier": "scripts/check_migration_validation.py",
+    "regression_tests": "tests/test_check_migration_validation.py",
+    "machine_evidence": "artifacts/section_10_3/bd-2st/verification_evidence.json",
+    "human_summary": "artifacts/section_10_3/bd-2st/verification_summary.md",
+}
+
+VERIFICATION_COMMANDS = [
+    {
+        "command": "python3 scripts/check_migration_validation.py --json",
+        "covers": [
+            "migration validation runner self-test",
+            "primary runner implementation citation",
+            "lockstep harness implementation citation",
+            "test discovery",
+            "output canonicalization",
+            "delta comparison",
+            "band-aware severity classification",
+        ],
+    },
+    {
+        "command": "python3 -m pytest tests/test_check_migration_validation.py",
+        "covers": [
+            "migration validation runner unit tests",
+            "report evidence path citations",
+            "checked-in machine evidence citations",
+        ],
+    },
+]
 
 # Test file patterns
 TEST_PATTERNS = [
@@ -86,6 +125,39 @@ def classify_divergence_severity(divergences: list[dict], band: str = "core") ->
     return "medium"
 
 
+def check_primary_implementation_cited() -> dict:
+    """Verify that the contract cites the primary implementation paths."""
+    check = {
+        "id": "VALIDATE-IMPL",
+        "status": "PASS",
+        "details": {
+            "paths": PRIMARY_IMPLEMENTATION_PATHS,
+            "existing_paths": {},
+            "contract_citations": {},
+        },
+    }
+    contract_text = CONTRACT_PATH.read_text(encoding="utf-8") if CONTRACT_PATH.exists() else ""
+    missing_paths = []
+    missing_contract_citations = []
+
+    for name, path in PRIMARY_IMPLEMENTATION_PATHS.items():
+        exists = (ROOT / path).exists()
+        contract_cited = path in contract_text
+        check["details"]["existing_paths"][name] = exists
+        check["details"]["contract_citations"][name] = contract_cited
+        if not exists:
+            missing_paths.append(path)
+        if not contract_cited:
+            missing_contract_citations.append(path)
+
+    if missing_paths or missing_contract_citations:
+        check["status"] = "FAIL"
+        check["details"]["missing_paths"] = missing_paths
+        check["details"]["missing_contract_citations"] = missing_contract_citations
+
+    return check
+
+
 def validate_project(project_dir: Path) -> dict:
     """Run migration validation on a project (design-phase: structure only)."""
     tests = discover_tests(project_dir)
@@ -112,7 +184,7 @@ def validate_project(project_dir: Path) -> dict:
 def self_test() -> dict:
     """Run self-test."""
     import tempfile
-    checks = []
+    checks = [check_primary_implementation_cited()]
 
     # Test 1: Test discovery
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -153,6 +225,8 @@ def self_test() -> dict:
         "section": "10.3",
         "verdict": "PASS" if not failing else "FAIL",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "evidence_paths": EVIDENCE_PATHS,
+        "verification_commands": VERIFICATION_COMMANDS,
         "checks": checks,
         "summary": {"total_checks": len(checks), "passing_checks": len(checks) - len(failing), "failing_checks": len(failing)},
     }

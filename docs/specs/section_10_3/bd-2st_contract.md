@@ -38,6 +38,11 @@ Build a migration validation runner that:
 4. **Compare**: Canonicalize and diff outputs
 5. **Report**: Classify divergences by band, produce verdict
 
+## Primary Implementation Surface
+
+- `scripts/migration_validation_runner.py` implements the migration validation runner, including test discovery, canonicalization, output comparison, band-aware severity classification, report emission, and the verifier self-test.
+- `crates/franken-node/src/runtime/lockstep_harness.rs` is the product lockstep harness that executes Node/Bun/franken_node comparisons and emits divergence fixtures for the runtime validation path.
+
 ## Invariants
 
 1. Validation is deterministic for identical test inputs.
