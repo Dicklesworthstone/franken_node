@@ -1,0 +1,65 @@
+{
+  "bead": "bd-17ds.6",
+  "section": "test_coverage",
+  "evaluated_at": "2026-05-12T19:01:26Z",
+  "verdict": "FAIL",
+  "overall_pass": false,
+  "checks_total": 5,
+  "checks_passed": 4,
+  "checks": [
+    {
+      "name": "rust_test_count",
+      "target": 7060,
+      "actual": 23652,
+      "passed": true,
+      "detail": "counted #[test] markers across non-target *.rs files"
+    },
+    {
+      "name": "e2e_scenario_count",
+      "target": 6,
+      "actual": 44,
+      "passed": true,
+      "detail": "files matching *_e2e*.rs / e2e_*.rs / tests/e2e/*.rs with at least one test function"
+    },
+    {
+      "name": "cross_module_integration_count",
+      "target": 50,
+      "actual": 61,
+      "passed": true,
+      "detail": "integration test files importing >= 2 distinct frankenengine_node submodules"
+    },
+    {
+      "name": "script_logging_ratio",
+      "target": ">= 1.00 (445 scripts)",
+      "actual": "396/445 = 0.890",
+      "passed": false,
+      "detail": "Python scripts under scripts/ that import test_logger or use logging.getLogger / logging.basicConfig"
+    },
+    {
+      "name": "mock_patterns_in_prod_files",
+      "target": 0,
+      "actual": 0,
+      "passed": true,
+      "detail": "files containing mockall::mock! / mockito / unittest.mock outside /tests/ or *_test.rs paths"
+    }
+  ],
+  "section_beads": {
+    "available": true,
+    "total": 6,
+    "closed": 0,
+    "open": 6
+  },
+  "targets": {
+    "rust_tests": 7060,
+    "e2e_scenarios": 6,
+    "cross_module_integration": 50,
+    "script_logging_ratio": 1.0,
+    "mock_pattern_files": 0
+  },
+  "notes": [
+    "This gate is a living scorecard. It can run at any pass through the tree.",
+    "Heuristics intentionally lean conservative: actual coverage may exceed counted #[test] markers",
+    "(e.g. parameterised tests, helper functions invoked by tests).",
+    "When verdict=FAIL, expand on the failing check via the `detail` field rather than guessing."
+  ]
+}
