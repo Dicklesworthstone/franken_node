@@ -91,12 +91,34 @@ class TestFailureInjection(unittest.TestCase):
     def test_missing_summary_fails(self) -> None:
         original = mod.SUMMARY
         with tempfile.TemporaryDirectory() as temp_dir:
-            mod.SUMMARY = Path(temp_dir) / "missing-summary.md"
-            result = mod.run_all()
-            self.assertEqual(result["verdict"], "FAIL")
-            failed_checks = [c["check"] for c in result["checks"] if not c["pass"]]
-            self.assertIn("summary_exists", failed_checks)
-        mod.SUMMARY = original
+            try:
+                mod.SUMMARY = Path(temp_dir) / "missing-summary.md"
+                result = mod.run_all()
+                self.assertEqual(result["verdict"], "FAIL")
+                failed_checks = [c["check"] for c in result["checks"] if not c["pass"]]
+                self.assertIn("summary_exists", failed_checks)
+            finally:
+                mod.SUMMARY = original
+
+    def test_vector_hash_mismatch_fails(self) -> None:
+        original = mod.VECTORS
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                vector_copy = json.loads(original.read_text(encoding="utf-8"))
+                vector_copy["vectors"][0]["expected_hash"] = (
+                    "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                )
+                mutated_vectors = Path(temp_dir) / "vef_receipt_schema_vectors.json"
+                mutated_vectors.write_text(json.dumps(vector_copy), encoding="utf-8")
+                mod.VECTORS = mutated_vectors
+
+                result = mod.run_all()
+
+                self.assertEqual(result["verdict"], "FAIL")
+                failed_checks = [c["check"] for c in result["checks"] if not c["pass"]]
+                self.assertIn("vector_0_expected_hash_matches_canonical_bytes", failed_checks)
+            finally:
+                mod.VECTORS = original
 
 
 if __name__ == "__main__":

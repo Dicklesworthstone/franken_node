@@ -82,7 +82,7 @@ fn execution_receipt_from_raw(raw: RawExecutionReceipt) -> Result<ExecutionRecei
     })
 }
 
-/// Compute canonical hash for ExecutionReceipt using domain-separated SHA256.
+/// Compute canonical hash for ExecutionReceipt using canonical JSON bytes only.
 fn compute_canonical_hash(receipt: &ExecutionReceipt) -> Result<String, String> {
     receipt_hash_sha256(receipt).map_err(|err| format!("receipt should hash canonically: {err:?}"))
 }
@@ -374,7 +374,8 @@ fn vef_execution_receipt_binary_format_golden() {
     let binary_output = serialize_canonical(&receipt)
         .expect("VEF execution receipt should serialize to canonical binary");
 
-    let golden_path = Path::new("artifacts/golden/vef_execution_receipt.bin");
+    let golden_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../artifacts/golden/vef_execution_receipt.bin");
 
     // Check if we're in update mode
     if std::env::var("UPDATE_GOLDENS").is_ok() {
@@ -396,7 +397,7 @@ fn vef_execution_receipt_binary_format_golden() {
 
     // Compare byte-for-byte
     if binary_output != expected_binary {
-        let actual_path = Path::new("artifacts/golden/vef_execution_receipt.actual.bin");
+        let actual_path = golden_path.with_file_name("vef_execution_receipt.actual.bin");
         fs::write(actual_path, &binary_output).unwrap();
 
         panic!(

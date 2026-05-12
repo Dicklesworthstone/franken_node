@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -86,6 +87,19 @@ REQUIRED_RECEIPT_FIELDS = [
     "trace_id",
 ]
 
+RECEIPT_FIELD_ORDER = [
+    "schema_version",
+    "action_type",
+    "capability_context",
+    "actor_identity",
+    "artifact_identity",
+    "policy_snapshot_hash",
+    "timestamp_millis",
+    "sequence_number",
+    "witness_references",
+    "trace_id",
+]
+
 RESULTS: list[dict[str, Any]] = []
 
 
@@ -114,6 +128,22 @@ def _load_json(path: Path) -> Any | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return None
+
+
+def _canonical_receipt_bytes(receipt: dict[str, Any]) -> bytes:
+    canonical: dict[str, Any] = {}
+    for field in RECEIPT_FIELD_ORDER:
+        value = receipt[field]
+        if field == "capability_context" and isinstance(value, dict):
+            value = dict(sorted(value.items()))
+        elif field == "witness_references" and isinstance(value, list):
+            value = sorted(set(value))
+        canonical[field] = value
+    return json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _canonical_receipt_hash(receipt: dict[str, Any]) -> str:
+    return f"sha256:{hashlib.sha256(_canonical_receipt_bytes(receipt)).hexdigest()}"
 
 
 def check_file_presence() -> None:
@@ -290,6 +320,13 @@ def check_vectors() -> None:
                     f"{check_prefix}_canonical_witnesses_match",
                     normalized == canonical_witnesses,
                     f"normalized={normalized}",
+                )
+            if not missing:
+                computed_hash = _canonical_receipt_hash(receipt)
+                _check(
+                    f"{check_prefix}_expected_hash_matches_canonical_bytes",
+                    expected_hash == computed_hash,
+                    f"computed={computed_hash}",
                 )
 
     _check(

@@ -15,7 +15,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 pub const RECEIPT_SCHEMA_VERSION: &str = "vef-execution-receipt-v1";
-const VEF_EXECUTION_RECEIPT_HASH_DOMAIN: &[u8] = b"vef_execution_receipt_v1:";
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
 pub mod event_codes {
@@ -298,15 +297,7 @@ pub fn serialize_canonical(receipt: &ExecutionReceipt) -> Result<Vec<u8>, Execut
 
 pub fn receipt_hash_sha256(receipt: &ExecutionReceipt) -> Result<String, ExecutionReceiptError> {
     let bytes = serialize_canonical(receipt)?;
-    let byte_len = u64::try_from(bytes.len()).map_err(|_| {
-        ExecutionReceiptError::new(
-            error_codes::ERR_VEF_RECEIPT_INTERNAL,
-            "canonical receipt bytes exceed u64 length prefix",
-        )
-    })?;
     let mut hasher = Sha256::new();
-    hasher.update(VEF_EXECUTION_RECEIPT_HASH_DOMAIN);
-    hasher.update(byte_len.to_le_bytes());
     hasher.update(bytes.as_slice());
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
@@ -614,35 +605,40 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_uses_domain_separator_and_canonical_bytes() {
+    fn test_hash_uses_canonical_bytes_only() {
         let receipt = make_receipt();
         let bytes = serialize_canonical(&receipt).unwrap();
         let mut expected_hasher = Sha256::new();
-        expected_hasher.update(VEF_EXECUTION_RECEIPT_HASH_DOMAIN);
-        expected_hasher.update(
+        expected_hasher.update(bytes.as_slice());
+
+        let mut legacy_domain_hasher = Sha256::new();
+        legacy_domain_hasher.update(b"vef_execution_receipt_v1:");
+        legacy_domain_hasher.update(
             u64::try_from(bytes.len())
                 .expect("canonical receipt length fits u64")
                 .to_le_bytes(),
         );
-        expected_hasher.update(bytes.as_slice());
-
-        let mut raw_hasher = Sha256::new();
-        raw_hasher.update(bytes.as_slice());
+        legacy_domain_hasher.update(bytes.as_slice());
 
         let actual = receipt_hash_sha256(&receipt).unwrap();
         let expected = format!("sha256:{}", hex::encode(expected_hasher.finalize()));
-        let raw = format!("sha256:{}", hex::encode(raw_hasher.finalize()));
+        let legacy_domain_hash = format!("sha256:{}", hex::encode(legacy_domain_hasher.finalize()));
 
         assert_eq!(actual, expected);
-        assert_ne!(actual, raw);
+        assert_ne!(actual, legacy_domain_hash);
     }
 
     #[test]
-    fn test_verify_hash_rejects_legacy_domain_raw_bytes_hash() {
+    fn test_verify_hash_rejects_legacy_domain_prefixed_hash() {
         let receipt = make_receipt();
         let bytes = serialize_canonical(&receipt).unwrap();
         let mut legacy_hasher = Sha256::new();
-        legacy_hasher.update(VEF_EXECUTION_RECEIPT_HASH_DOMAIN);
+        legacy_hasher.update(b"vef_execution_receipt_v1:");
+        legacy_hasher.update(
+            u64::try_from(bytes.len())
+                .expect("canonical receipt length fits u64")
+                .to_le_bytes(),
+        );
         legacy_hasher.update(bytes.as_slice());
         let legacy_hash = format!("sha256:{}", hex::encode(legacy_hasher.finalize()));
 
