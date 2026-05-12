@@ -44,6 +44,14 @@ VALID_ENGINE_PATH_PREFIXES = [
     "/dp/franken_engine/",
 ]
 
+EVIDENCE_PATHS = {
+    "spec_contract": "docs/specs/section_10_1/bd-2zz_contract.md",
+    "guard_script": "scripts/guard_dependency_direction.py",
+    "unit_tests": "tests/test_guard_dependency_direction.py",
+    "machine_evidence": "artifacts/section_10_1/bd-2zz/verification_evidence.json",
+    "human_summary": "artifacts/section_10_1/bd-2zz/verification_summary.md",
+}
+
 
 def check_workspace_members() -> dict:
     """Verify workspace members don't include engine crate directories."""
@@ -54,7 +62,7 @@ def check_workspace_members() -> dict:
         result["details"]["note"] = "No workspace Cargo.toml found"
         return result
 
-    content = workspace_toml.read_text()
+    content = workspace_toml.read_text(encoding="utf-8")
 
     # Extract members list
     members_match = re.search(r'members\s*=\s*\[(.*?)\]', content, re.DOTALL)
@@ -101,8 +109,8 @@ def check_local_package_names() -> dict:
     violations = []
     for cargo_file in cargo_files:
         try:
-            content = cargo_file.read_text()
-        except Exception:
+            content = cargo_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
             continue
 
         # Find [package] name declarations
@@ -141,8 +149,8 @@ def check_dependency_direction() -> dict:
 
     for cargo_file in cargo_files:
         try:
-            content = cargo_file.read_text()
-        except Exception:
+            content = cargo_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
             continue
 
         # Find all path dependencies
@@ -255,6 +263,26 @@ def main():
         "section": "10.1",
         "verdict": verdict,
         "timestamp": timestamp,
+        "evidence_paths": EVIDENCE_PATHS,
+        "verification_commands": [
+            {
+                "command": "python3 scripts/guard_dependency_direction.py --json",
+                "covers": [
+                    "workspace members",
+                    "local package names",
+                    "dependency path direction",
+                    "crates directory cleanliness",
+                ],
+            },
+            {
+                "command": "python3 -m unittest tests.test_guard_dependency_direction",
+                "covers": [
+                    "guard script JSON output",
+                    "guard script human output",
+                    "guard evidence path citations",
+                ],
+            },
+        ],
         "checks": checks,
         "summary": {
             "total_checks": len(checks),

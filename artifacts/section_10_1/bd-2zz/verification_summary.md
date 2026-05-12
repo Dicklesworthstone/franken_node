@@ -11,8 +11,17 @@
 |----------|------|--------|
 | Spec/contract | `docs/specs/section_10_1/bd-2zz_contract.md` | Created |
 | Guard script | `scripts/guard_dependency_direction.py` | Created |
-| Unit tests (9 tests) | `tests/test_guard_dependency_direction.py` | All pass |
+| Unit tests (11 tests) | `tests/test_guard_dependency_direction.py` | All pass |
 | Verification evidence | `artifacts/section_10_1/bd-2zz/verification_evidence.json` | Generated |
+
+## Evidence Traceability
+
+The machine-readable evidence now explicitly cites the implementation and
+regression-test artifacts that produce and validate this guard:
+
+- Guard implementation: `scripts/guard_dependency_direction.py`
+- Regression tests: `tests/test_guard_dependency_direction.py`
+- Spec contract: `docs/specs/section_10_1/bd-2zz_contract.md`
 
 ## Guard Checks
 
@@ -25,6 +34,6 @@
 
 ## Unit Test Results
 
-9/9 tests passing. Tests verify JSON output, verdict, all check IDs, individual checks, human-readable output, and summary counts.
+11/11 tests passing. Tests verify JSON output, verdict, all check IDs, individual checks, human-readable output, summary counts, and checked-in evidence citations.
 
-**Overall Verdict: PASS (4/4 checks, 9/9 tests)**
+**Overall Verdict: PASS (4/4 checks, 11/11 tests)**

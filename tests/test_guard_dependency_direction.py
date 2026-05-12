@@ -87,6 +87,30 @@ class TestDependencyDirectionGuard(unittest.TestCase):
         self.assertEqual(output["summary"]["passing_checks"], 4)
         self.assertEqual(output["summary"]["failing_checks"], 0)
 
+    def test_report_cites_guard_artifacts(self):
+        """Machine output should cite the guard script and its evidence files."""
+        result = self._run()
+        output = json.loads(result.stdout)
+        paths = output["evidence_paths"]
+        self.assertEqual(paths["guard_script"], "scripts/guard_dependency_direction.py")
+        self.assertEqual(paths["unit_tests"], "tests/test_guard_dependency_direction.py")
+        self.assertEqual(paths["spec_contract"], "docs/specs/section_10_1/bd-2zz_contract.md")
+        self.assertEqual(
+            paths["machine_evidence"],
+            "artifacts/section_10_1/bd-2zz/verification_evidence.json",
+        )
+        commands = {entry["command"] for entry in output["verification_commands"]}
+        self.assertIn("python3 scripts/guard_dependency_direction.py --json", commands)
+        self.assertIn("python3 -m unittest tests.test_guard_dependency_direction", commands)
+
+    def test_checked_in_evidence_cites_guard_script(self):
+        """Checked-in bd-2zz evidence should preserve the implementation citation."""
+        evidence_path = ROOT / "artifacts" / "section_10_1" / "bd-2zz" / "verification_evidence.json"
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        paths = evidence["evidence_paths"]
+        self.assertEqual(paths["guard_script"], "scripts/guard_dependency_direction.py")
+        self.assertEqual(paths["unit_tests"], "tests/test_guard_dependency_direction.py")
+
 
 if __name__ == "__main__":
     unittest.main()
