@@ -15,11 +15,15 @@
 
 3. **Spec document** `docs/specs/section_10_2/bd-38l_contract.md`
 
-4. **Verification script** `scripts/check_divergence_ledger.py` with 6 checks:
-   - DIV-EXISTS, DIV-SCHEMA, DIV-STRUCTURE, DIV-FIELDS, DIV-RATIONALE, DIV-UNIQUE
+4. **Verification script** `scripts/check_divergence_ledger.py` with 7 checks:
+   - DIV-EXISTS, DIV-SCHEMA, DIV-TRACEABILITY, DIV-STRUCTURE, DIV-FIELDS, DIV-RATIONALE, DIV-UNIQUE
 
-5. **Unit tests** `tests/test_check_divergence_ledger.py`: 9 tests
+5. **Unit tests** `tests/test_check_divergence_ledger.py`: 11 tests
+
+6. **Traceability closure** for `bd-38l.1`:
+   - Canonical source module: `scripts/check_divergence_ledger.py`
+   - Git xref is recorded in `verification_evidence.json` for the ledger, schema, verifier, tests, and evidence artifacts.
 
 ## Unit tests
 
-- 9/9 passed, 0 failed
+- 11/11 passed, 0 failed

@@ -16,20 +16,69 @@ Exit codes:
 import json
 import re
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
+
 LEDGER_PATH = ROOT / "docs" / "DIVERGENCE_LEDGER.json"
 SCHEMA_PATH = ROOT / "schemas" / "divergence_ledger.schema.json"
+SPEC_PATH = ROOT / "docs" / "specs" / "section_10_2" / "bd-38l_contract.md"
+SCRIPT_PATH = ROOT / "scripts" / "check_divergence_ledger.py"
+TEST_PATH = ROOT / "tests" / "test_check_divergence_ledger.py"
+EVIDENCE_PATH = ROOT / "artifacts" / "section_10_2" / "bd-38l" / "verification_evidence.json"
+SUMMARY_PATH = ROOT / "artifacts" / "section_10_2" / "bd-38l" / "verification_summary.md"
+
+GIT_XREF = [
+    {
+        "commit": "d8a6e25c",
+        "subject": "chore(scripts): consolidate ROOT definitions and reorganize imports across 400+ check scripts",
+        "paths": ["scripts/check_divergence_ledger.py"],
+    },
+    {
+        "commit": "495e5c1b",
+        "subject": "Harden test infrastructure: add structured logging, replace panic with unreachable, migrate to Uuid v7, and modernize Rust/Python idioms",
+        "paths": ["scripts/check_divergence_ledger.py", "tests/test_check_divergence_ledger.py"],
+    },
+    {
+        "commit": "1d9fe387",
+        "subject": "Add CI workflow, test harness, verification artifacts, and build scripts",
+        "paths": [
+            "docs/DIVERGENCE_LEDGER.json",
+            "schemas/divergence_ledger.schema.json",
+            "scripts/check_divergence_ledger.py",
+            "tests/test_check_divergence_ledger.py",
+            "artifacts/section_10_2/bd-38l/verification_evidence.json",
+            "artifacts/section_10_2/bd-38l/verification_summary.md",
+        ],
+    },
+]
 
 VALID_BANDS = {"core", "high-value", "edge", "unsafe"}
 VALID_RISK_TIERS = {"critical", "high", "medium", "low"}
 VALID_STATUSES = {"accepted", "under-review", "deprecated"}
 ID_PATTERN = re.compile(r'^DIV-\d{3,}$')
+
+
+def _rel(path: Path) -> str:
+    return str(path.relative_to(ROOT))
+
+
+def implementation_artifacts() -> dict:
+    """Return canonical implementation and traceability paths for bd-38l."""
+    return {
+        "bead_id": "bd-38l",
+        "source_module": _rel(SCRIPT_PATH),
+        "ledger_path": _rel(LEDGER_PATH),
+        "schema_path": _rel(SCHEMA_PATH),
+        "spec_path": _rel(SPEC_PATH),
+        "test_path": _rel(TEST_PATH),
+        "evidence_path": _rel(EVIDENCE_PATH),
+        "summary_path": _rel(SUMMARY_PATH),
+        "git_xref": GIT_XREF,
+    }
 
 
 def check_ledger_exists() -> dict:
@@ -54,11 +103,33 @@ def check_schema_exists() -> dict:
     return check
 
 
+def check_traceability() -> dict:
+    """DIV-TRACEABILITY: Check canonical source and git traceability are exposed."""
+    check = {"id": "DIV-TRACEABILITY", "status": "PASS", "details": implementation_artifacts()}
+    required_paths = [
+        SCRIPT_PATH,
+        LEDGER_PATH,
+        SCHEMA_PATH,
+        SPEC_PATH,
+        TEST_PATH,
+        EVIDENCE_PATH,
+        SUMMARY_PATH,
+    ]
+    missing = [_rel(path) for path in required_paths if not path.exists()]
+    if missing:
+        check["status"] = "FAIL"
+        check["details"]["missing_paths"] = missing
+    if not GIT_XREF:
+        check["status"] = "FAIL"
+        check["details"]["error"] = "git_xref is empty"
+    return check
+
+
 def load_ledger() -> tuple[dict | None, str | None]:
     if not LEDGER_PATH.exists():
         return None, "File not found"
     try:
-        return json.loads(LEDGER_PATH.read_text()), None
+        return json.loads(LEDGER_PATH.read_text(encoding="utf-8")), None
     except json.JSONDecodeError as e:
         return None, f"Invalid JSON: {e}"
 
@@ -167,13 +238,14 @@ def check_unique_ids() -> dict:
 
 
 def main():
-    logger = configure_test_logging("check_divergence_ledger")
+    configure_test_logging("check_divergence_ledger")
     json_output = "--json" in sys.argv
     timestamp = datetime.now(timezone.utc).isoformat()
 
     checks = [
         check_ledger_exists(),
         check_schema_exists(),
+        check_traceability(),
         check_ledger_structure(),
         check_entry_fields(),
         check_rationale_present(),
@@ -189,6 +261,7 @@ def main():
         "verdict": verdict,
         "timestamp": timestamp,
         "checks": checks,
+        "implementation_artifacts": implementation_artifacts(),
         "summary": {
             "total_checks": len(checks),
             "passing_checks": sum(1 for c in checks if c["status"] == "PASS"),

@@ -35,6 +35,14 @@ Each divergence entry includes:
 - **Input**: `schemas/divergence_ledger.schema.json`
 - **Output**: PASS/FAIL verdict on ledger validity
 
+## Implementation Traceability
+
+- **Canonical verifier source module**: `scripts/check_divergence_ledger.py`
+- **Regression tests**: `tests/test_check_divergence_ledger.py`
+- **Machine evidence**: `artifacts/section_10_2/bd-38l/verification_evidence.json`
+- **Human evidence**: `artifacts/section_10_2/bd-38l/verification_summary.md`
+- **Git xref**: evidence records the commits that created and later hardened the ledger, schema, verifier, tests, and artifacts.
+
 ## Failure Semantics
 
 - Missing ledger or schema: FAIL

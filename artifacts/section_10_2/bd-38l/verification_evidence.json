@@ -2,9 +2,14 @@
   "schema_version": "1.0",
   "bead_id": "bd-38l",
   "artifact_type": "verification_evidence",
-  "timestamp": "2026-02-20T09:35:54.974041+00:00",
+  "timestamp": "2026-05-12T21:42:27.319776+00:00",
   "git_commit": "32b56e4c639fd2a39f3f0b77ee55a656ae65109e",
   "verdict": "PASS",
+  "completion_debt_resolution": {
+    "bead_id": "bd-38l.1",
+    "finding": "spec and evidence were artifact-only, without an explicit source module or git_xref",
+    "resolution": "canonical verifier source module and git_xref are now exposed in the checker, spec, and evidence"
+  },
   "checks": [
     {
       "id": "DIV-EXISTS",
@@ -13,6 +18,14 @@
     {
       "id": "DIV-SCHEMA",
       "status": "PASS"
+    },
+    {
+      "id": "DIV-TRACEABILITY",
+      "status": "PASS",
+      "details": {
+        "source_module": "scripts/check_divergence_ledger.py",
+        "git_xref_count": 3
+      }
     },
     {
       "id": "DIV-STRUCTURE",
@@ -32,9 +45,48 @@
     }
   ],
   "unit_tests": {
-    "total": 9,
-    "passed": 9,
+    "total": 11,
+    "passed": 11,
     "failed": 0
+  },
+  "implementation_artifacts": {
+    "bead_id": "bd-38l",
+    "source_module": "scripts/check_divergence_ledger.py",
+    "ledger_path": "docs/DIVERGENCE_LEDGER.json",
+    "schema_path": "schemas/divergence_ledger.schema.json",
+    "spec_path": "docs/specs/section_10_2/bd-38l_contract.md",
+    "test_path": "tests/test_check_divergence_ledger.py",
+    "evidence_path": "artifacts/section_10_2/bd-38l/verification_evidence.json",
+    "summary_path": "artifacts/section_10_2/bd-38l/verification_summary.md",
+    "git_xref": [
+      {
+        "commit": "d8a6e25c",
+        "subject": "chore(scripts): consolidate ROOT definitions and reorganize imports across 400+ check scripts",
+        "paths": [
+          "scripts/check_divergence_ledger.py"
+        ]
+      },
+      {
+        "commit": "495e5c1b",
+        "subject": "Harden test infrastructure: add structured logging, replace panic with unreachable, migrate to Uuid v7, and modernize Rust/Python idioms",
+        "paths": [
+          "scripts/check_divergence_ledger.py",
+          "tests/test_check_divergence_ledger.py"
+        ]
+      },
+      {
+        "commit": "1d9fe387",
+        "subject": "Add CI workflow, test harness, verification artifacts, and build scripts",
+        "paths": [
+          "docs/DIVERGENCE_LEDGER.json",
+          "schemas/divergence_ledger.schema.json",
+          "scripts/check_divergence_ledger.py",
+          "tests/test_check_divergence_ledger.py",
+          "artifacts/section_10_2/bd-38l/verification_evidence.json",
+          "artifacts/section_10_2/bd-38l/verification_summary.md"
+        ]
+      }
+    ]
   },
   "outputs": [
     {
@@ -49,18 +101,18 @@
     },
     {
       "path": "docs/specs/section_10_2/bd-38l_contract.md",
-      "sha256": "23b959200f54ad41b511eec83dc6b400087f2e60672dfd8c3bb100bb60913989",
-      "size_bytes": 1727
+      "sha256": "7dc1390a5d943f90db1047ecc0c6fa94c3eea29ef639ffb3290ed1344be085b6",
+      "size_bytes": 2191
     },
     {
       "path": "scripts/check_divergence_ledger.py",
-      "sha256": "176bb5071864687ce9ecba6285081ad7421b5120d21f27d630fe20c594e3507c",
-      "size_bytes": 7244
+      "sha256": "cd53a3e6e18be17aac20d70a25f691e597d9588634250cc180bc5162831f9bd5",
+      "size_bytes": 10192
     },
     {
       "path": "tests/test_check_divergence_ledger.py",
-      "sha256": "7898ebe1e518b42b573f9ddd00a1ccdf9cb474ed201ae2bf26bf8922a34c7e4b",
-      "size_bytes": 2043
+      "sha256": "bd31be1b7e58855296416123ac6ab2e2a2ecf6ddd0dfd0884b4ddd0c0705fbbb",
+      "size_bytes": 2808
     }
   ]
 }
