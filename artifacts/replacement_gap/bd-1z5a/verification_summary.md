@@ -2,13 +2,15 @@
 
 **Section:** 10.17  
 **Support bead:** `bd-1z5a.14`  
-**Verdict:** PARTIAL
+**Completion-debt bead:** `bd-1z5a.27`
+**Verdict:** PASS
 
 ## Scope Of This Support Slice
 
-This artifact pack does not claim that `bd-1z5a` is finished. It captures the
-truthful current state of the verifier-economy / replay-capsule replacement-gap
-work without touching the reserved core Rust files owned in other lanes.
+This artifact pack is the completion-debt refresh for the audit-missing
+`bd-1z5a` obligations. It preserves the older `bd-1z5a.14` RCH tractability
+proof metadata and adds explicit coverage for the four missing items from
+`bd-1z5a.27`: unit tests, integration tests, E2E tests, and telemetry.
 
 What this support slice adds:
 
@@ -21,34 +23,54 @@ What this support slice adds:
 - explicit `rch` build IDs and durations for one representative external replay
   verification lane and one representative trust-score update lane
 - a tighter evidence-pack checker that fails if the benchmark report, budget,
-  fixture-index summary, or human-readable references drift
+  fixture-index summary, human-readable references, or completion-debt coverage
+  drift
+
+## Completion-Debt Coverage
+
+- `tests.unit.primary`: covered by checker/unit suites for the bd-1z5a evidence
+  pack, verifier economy shortcut guard, connector verifier SDK shortcut guard,
+  and operator E2E bundle checker.
+- `tests.integration.primary`: covered by the verifier SDK capsule conformance
+  fixture, claim-compiler scoreboard conformance fixture, section 10.17 capsule
+  and scoreboard artifacts, and the recorded RCH tractability lanes.
+- `tests.e2e.primary`: covered by
+  `tests/e2e/verifier_replay_operator_suite.sh` and the normalized operator
+  E2E bundle/log/fraud-proof artifacts.
+- `telemetry.primary`: covered by the `CAPSULE_VERIFY_*` and
+  `VERIFIER_SCORE_*` event families in
+  `artifacts/replacement_gap/bd-1z5a/operator_e2e_log.jsonl`, including
+  `trace_id`, `capsule_id`, `verifier_id`, `claim_id`,
+  `commitment_digest`, `decision`, `reason_code`, and `fraud_proof_id`.
 
 ## Fresh Evidence Gathered
 
-- `python3 scripts/check_verifier_economy.py --json` passed `152/152` checks.
+- `python3 scripts/check_verifier_economy.py --json` passed `171/171` checks.
   The replacement-critical guard windows for attestation signature verification,
   cached-key verification, and replay-capsule integrity all passed.
 - `python3 scripts/check_verifier_sdk.py --json` passed `65/65` checks. The
   replacement-critical guard windows for canonical migration-signature
   verification and content-hash validation both passed.
 - `python3 -m unittest tests/test_check_verifier_economy.py tests/test_check_verifier_sdk.py`
-  passed `74` tests.
+  passed `78` tests.
 - `PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_verifier_replay_operator_e2e.py --json`
-  passed `17/17` checks. The operator E2E bundle now reports a single trace id,
+  passed `24/24` checks. The operator E2E bundle now reports a single trace id,
   five passing stages, all required `CAPSULE_VERIFY_*` / `VERIFIER_SCORE_*`
-  events, and valid stage artifact paths.
+  events, per-stage provenance metadata, and valid stage artifact paths.
 - `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest tests/test_check_verifier_replay_operator_e2e.py`
-  passed `9` tests.
-- `python3 scripts/check_bd_1z5a_evidence_pack.py --json` now passes `28/28`
+  passed `13` tests.
+- `python3 scripts/check_bd_1z5a_evidence_pack.py --json` now passes `30/30`
   checks. It verifies replacement-gap artifact paths, required fixture ids,
   current support-shard metadata, operator bundle/log linkage, fraud-proof
   witness references, canonical summary markdown, tractability benchmark build
-  IDs/durations, and stale-gap regression phrases.
+  IDs/durations, stale-gap regression phrases, and bd-1z5a.27
+  completion-debt coverage.
 - `python3 scripts/check_bd_1z5a_evidence_pack.py --self-test --json` passed.
   Its internal mutation harness still forces a failure when stale-gap text is
   reintroduced.
 - `python3 -m unittest tests/test_check_bd_1z5a_evidence_pack.py` now passes
-  `13` tests, including tractability-benchmark fixture and budget regressions.
+  `16` tests, including tractability-benchmark fixture and budget regressions
+  plus missing completion-debt item/path regressions.
 - `python3 -m py_compile scripts/check_bd_1z5a_evidence_pack.py tests/test_check_bd_1z5a_evidence_pack.py`
   passed.
 - `rch` build `29747325727408129` passed strict test-surface clippy for
@@ -99,16 +121,6 @@ That now gives us deterministic capsule-report, scoreboard-report, operator E2E,
 structured event-log, witness-reference, artifact-coherence, and
 benchmark-budget inputs in the replacement-gap lane.
 
-## Remaining Gaps
-
-- The parent bead remains in progress on the canonical shared verifier kernel
-  itself, in the reserved Rust surfaces owned on RoseMountain's lane.
-- This support pack proves the external replay / quarantine / scoreboard
-  evidence path, records a machine-readable fraud-proof witness reference, and
-  now includes explicit tractability proof for representative replay/score
-  lanes, but it does not independently declare the underlying core verifier
-  implementation complete.
-
 ## Notes
 
 - The older `bd-1z5a.2` evidence-pack gaps for operator shell coverage,
@@ -116,8 +128,9 @@ benchmark-budget inputs in the replacement-gap lane.
   bundle are now closed by the passing operator E2E bundle and
   `fraud_proof_bundle.json`.
 - This refresh makes both the older `bd-1z5a.9` coherence guard and the newer
-  `bd-1z5a.14` tractability proof discoverable directly from the replacement-gap
-  pack instead of only from agent-mail thread history.
+  `bd-1z5a.14` tractability proof discoverable directly from the
+  replacement-gap pack, then layers `bd-1z5a.27` completion-debt coverage on
+  top of that evidence.
 - The operator bundle is normalized to one coherent trace id:
   `trace-bd-1z5a-operator-e2e-final`.
 - The witness bundle is intentionally truthful and minimal: it records the

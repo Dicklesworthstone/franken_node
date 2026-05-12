@@ -43,6 +43,7 @@ class TestRunChecks(unittest.TestCase):
             "failed",
             "checks",
             "coherence_contract",
+            "completion_debt",
         ):
             self.assertIn(key, result)
 
@@ -55,6 +56,30 @@ class TestRunChecks(unittest.TestCase):
         self.assertTrue(contract["summary_markdown_matches_bundle"])
         self.assertTrue(contract["stale_gap_language_absent"])
         self.assertTrue(contract["tractability_benchmarks_resolve"])
+        self.assertTrue(contract["completion_debt_coverage"])
+
+    def test_completion_debt_obligations_present(self):
+        result = mod.run_checks()
+        completion_debt = result["completion_debt"]
+        self.assertEqual(completion_debt["completion_bead"], "bd-1z5a.27")
+        obligations = {
+            obligation["spec_item"]: obligation
+            for obligation in completion_debt["coverage_obligations"]
+        }
+        self.assertEqual(
+            set(obligations),
+            {
+                "tests.unit.primary",
+                "tests.integration.primary",
+                "tests.e2e.primary",
+                "telemetry.primary",
+            },
+        )
+        self.assertIn(
+            "tests/e2e/verifier_replay_operator_suite.sh",
+            obligations["tests.e2e.primary"]["evidence_paths"],
+        )
+        self.assertIn("trace_id", obligations["telemetry.primary"]["required_fields"])
 
     def _failing(self, result):
         failures = [check for check in result["checks"] if not check["passed"]]
@@ -180,6 +205,41 @@ class TestMutations(unittest.TestCase):
         self.assertEqual(result["verdict"], "FAIL")
         details = "\n".join(check["check"] for check in result["checks"] if not check["passed"])
         self.assertIn("tractability benchmark lanes pass within declared budget", details)
+
+    def test_completion_debt_missing_spec_item_fails(self):
+        root, tmpdir = fixture_root()
+        self.addCleanup(tmpdir.cleanup)
+        original = mod.COMPLETION_DEBT_OBLIGATIONS
+        mod.COMPLETION_DEBT_OBLIGATIONS = [
+            obligation
+            for obligation in original
+            if obligation["spec_item"] != "telemetry.primary"
+        ]
+        try:
+            result = mod.run_checks(root)
+        finally:
+            mod.COMPLETION_DEBT_OBLIGATIONS = original
+        self.assertEqual(result["verdict"], "FAIL")
+        details = "\n".join(check["detail"] for check in result["checks"] if not check["passed"])
+        self.assertIn("telemetry.primary", details)
+
+    def test_completion_debt_missing_evidence_path_fails(self):
+        root, tmpdir = fixture_root()
+        self.addCleanup(tmpdir.cleanup)
+        original = mod.COMPLETION_DEBT_OBLIGATIONS
+        mutated = [dict(obligation) for obligation in original]
+        mutated[0] = dict(mutated[0])
+        mutated[0]["evidence_paths"] = list(mutated[0]["evidence_paths"]) + [
+            "artifacts/replacement_gap/bd-1z5a/missing-completion-debt.json"
+        ]
+        mod.COMPLETION_DEBT_OBLIGATIONS = mutated
+        try:
+            result = mod.run_checks(root)
+        finally:
+            mod.COMPLETION_DEBT_OBLIGATIONS = original
+        self.assertEqual(result["verdict"], "FAIL")
+        details = "\n".join(check["detail"] for check in result["checks"] if not check["passed"])
+        self.assertIn("missing-completion-debt.json", details)
 
 
 class TestSelfTest(unittest.TestCase):

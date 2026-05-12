@@ -93,7 +93,7 @@ REPLACEMENT_CRITICAL_GUARDS = [
             "let sig_ok = !sig.is_empty()",
             "let sig_ok = !signature.is_empty()",
         ],
-        "span": 1600,
+        "span": 3200,
     },
     {
         "name": "content_hash_path",

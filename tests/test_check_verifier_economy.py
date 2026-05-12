@@ -247,7 +247,7 @@ class TestReplacementCriticalGuardRegression(unittest.TestCase):
     def test_detects_signature_presence_shortcut(self):
         source = mod.RUST_IMPL.read_text(encoding="utf-8")
         mutated = source.replace(
-            "verify_ed25519_signature_hex(expected_key, payload, &sig.value).is_ok()",
+            "verify_ed25519_signature_hex(&canonical_expected, payload, &sig.value).is_ok()",
             "!sig.value.is_empty()",
             1,
         )

@@ -64,6 +64,93 @@ STALE_GAP_PHRASES = [
     "missing fraud-proof bundle",
 ]
 
+REQUIRED_OPERATOR_FIELDS = [
+    "trace_id",
+    "capsule_id",
+    "verifier_id",
+    "claim_id",
+    "commitment_digest",
+    "decision",
+    "reason_code",
+    "fraud_proof_id",
+]
+
+COMPLETION_DEBT_BEAD = "bd-1z5a.27"
+COMPLETION_DEBT_REQUIRED_SPEC_ITEMS = {
+    "tests.unit.primary",
+    "tests.integration.primary",
+    "tests.e2e.primary",
+    "telemetry.primary",
+}
+
+COMPLETION_DEBT_OBLIGATIONS = [
+    {
+        "spec_item": "tests.unit.primary",
+        "category": "unit",
+        "status": "covered",
+        "description": "checker and shortcut-regression unit tests cover the replacement-gap evidence pack, verifier economy, verifier SDK, and operator E2E bundle contracts",
+        "evidence_paths": [
+            "tests/test_check_bd_1z5a_evidence_pack.py",
+            "tests/test_check_verifier_economy.py",
+            "tests/test_check_verifier_sdk.py",
+            "tests/test_check_verifier_replay_operator_e2e.py",
+        ],
+        "commands": [
+            "python3 -m unittest tests/test_check_bd_1z5a_evidence_pack.py tests/test_check_verifier_economy.py tests/test_check_verifier_sdk.py tests/test_check_verifier_replay_operator_e2e.py"
+        ],
+    },
+    {
+        "spec_item": "tests.integration.primary",
+        "category": "integration",
+        "status": "covered",
+        "description": "conformance fixtures and rch tractability evidence exercise canonical capsule replay, scoreboard updates, and verifier SDK report artifacts",
+        "evidence_paths": [
+            "tests/conformance/verifier_sdk_capsule_replay.rs",
+            "tests/conformance/claim_compiler_gate.rs",
+            "artifacts/10.17/verifier_sdk_certification_report.json",
+            "artifacts/10.17/public_trust_scoreboard_snapshot.json",
+            "artifacts/replacement_gap/bd-1z5a/rch_tractability_benchmarks.json",
+        ],
+        "commands": [
+            "rch exec -- env TMPDIR=/data/tmp CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/data/tmp/rch_target_navyriver_bd1z5a14_match_u2 cargo test -p frankenengine-node --features extended-surfaces test_replay_capsule_match --lib -- --nocapture",
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_navyriver_bd1z5a14_score cargo test -p frankenengine-node test_events_contain_scoreboard_updated --lib -- --nocapture",
+        ],
+    },
+    {
+        "spec_item": "tests.e2e.primary",
+        "category": "e2e",
+        "status": "covered",
+        "description": "operator E2E bundle reproduces successful replay verification, forged capsule rejection, fraud-proof extraction, quarantine replay, and scoreboard update logging",
+        "evidence_paths": [
+            "tests/e2e/verifier_replay_operator_suite.sh",
+            "scripts/check_verifier_replay_operator_e2e.py",
+            "artifacts/replacement_gap/bd-1z5a/operator_e2e_summary.json",
+            "artifacts/replacement_gap/bd-1z5a/operator_e2e_bundle.json",
+            "artifacts/replacement_gap/bd-1z5a/operator_e2e_log.jsonl",
+            "artifacts/replacement_gap/bd-1z5a/fraud_proof_bundle.json",
+        ],
+        "commands": [
+            "python3 scripts/check_verifier_replay_operator_e2e.py --json",
+            "tests/e2e/verifier_replay_operator_suite.sh",
+        ],
+    },
+    {
+        "spec_item": "telemetry.primary",
+        "category": "telemetry",
+        "status": "covered",
+        "description": "operator structured logs expose stable CAPSULE_VERIFY_* and VERIFIER_SCORE_* event families with required trace, capsule, verifier, claim, commitment, decision, reason, and fraud-proof fields",
+        "evidence_paths": [
+            "artifacts/replacement_gap/bd-1z5a/operator_e2e_log.jsonl",
+            "artifacts/replacement_gap/bd-1z5a/stage_outputs/stage_results.jsonl",
+            "scripts/check_verifier_replay_operator_e2e.py",
+        ],
+        "required_fields": REQUIRED_OPERATOR_FIELDS,
+        "commands": [
+            "python3 scripts/check_verifier_replay_operator_e2e.py --json"
+        ],
+    },
+]
+
 
 def _check(check: str, passed: bool, detail: str) -> dict[str, Any]:
     return {"check": check, "passed": passed, "detail": detail}
@@ -149,17 +236,22 @@ def _expected_summary_markdown(summary_json: dict[str, Any], bundle: dict[str, A
         f"- Trace ID: `{summary_json['trace_id']}`",
         f"- Verdict: **{summary_json['verdict']}**",
         f"- Build IDs: {_markdown_build_ids(summary_json)}",
+        "- Build ID Kind: `daemon_build_id` when retained by `rch status --jobs`; otherwise persisted `telemetry_test_run_id` from `~/.local/share/rch/telemetry/telemetry.db`",
         "",
-        "| Stage | Event | Decision | Reason | Status | Exit | Build ID |",
-        "|---|---|---|---|---|---:|---|",
+        "| Stage | Event | Decision | Reason | Status | Exit | Build ID | Kind | Worker | Completed | Duration ms |",
+        "|---|---|---|---|---|---:|---|---|---|---|---:|",
     ]
     for stage in bundle.get("stage_results", []):
         if not isinstance(stage, dict):
             continue
         build_id = "" if stage.get("build_id") is None else str(stage.get("build_id"))
         exit_code = "" if stage.get("exit_code") is None else str(stage.get("exit_code"))
+        build_id_kind = "" if stage.get("build_id_kind") is None else str(stage.get("build_id_kind"))
+        worker_id = "" if stage.get("worker_id") is None else str(stage.get("worker_id"))
+        completed_at = "" if stage.get("completed_at") is None else str(stage.get("completed_at"))
+        duration_ms = "" if stage.get("duration_ms") is None else str(stage.get("duration_ms"))
         lines.append(
-            "| {stage_id} | `{event_code}` | `{decision}` | `{reason_code}` | {status} | {exit_code} | `{build_id}` |".format(
+            "| {stage_id} | `{event_code}` | `{decision}` | `{reason_code}` | {status} | {exit_code} | `{build_id}` | `{build_id_kind}` | `{worker_id}` | `{completed_at}` | {duration_ms} |".format(
                 stage_id=stage.get("stage_id", ""),
                 event_code=stage.get("event_code", ""),
                 decision=stage.get("decision", ""),
@@ -167,9 +259,77 @@ def _expected_summary_markdown(summary_json: dict[str, Any], bundle: dict[str, A
                 status=stage.get("status", ""),
                 exit_code=exit_code,
                 build_id=build_id,
+                build_id_kind=build_id_kind,
+                worker_id=worker_id,
+                completed_at=completed_at,
+                duration_ms=duration_ms,
             )
         )
     return "\n".join(lines) + "\n"
+
+
+def _completion_debt_contract() -> dict[str, Any]:
+    return {
+        "parent_bead": PARENT_BEAD,
+        "completion_bead": COMPLETION_DEBT_BEAD,
+        "required_spec_items": sorted(COMPLETION_DEBT_REQUIRED_SPEC_ITEMS),
+        "coverage_obligations": COMPLETION_DEBT_OBLIGATIONS,
+    }
+
+
+def _completion_debt_coverage(root: Path, log_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    coverage_by_item = {
+        obligation.get("spec_item"): obligation
+        for obligation in COMPLETION_DEBT_OBLIGATIONS
+        if isinstance(obligation, dict)
+    }
+    missing_items = sorted(COMPLETION_DEBT_REQUIRED_SPEC_ITEMS - set(coverage_by_item))
+    missing_paths: list[str] = []
+    noncovered_items: list[str] = []
+    for item, obligation in coverage_by_item.items():
+        if obligation.get("status") != "covered":
+            noncovered_items.append(str(item))
+        for rel_path in obligation.get("evidence_paths", []):
+            if isinstance(rel_path, str) and not (root / rel_path).exists():
+                missing_paths.append(rel_path)
+
+    telemetry_missing_fields: list[str] = []
+    telemetry_obligation = coverage_by_item.get("telemetry.primary")
+    if isinstance(telemetry_obligation, dict):
+        required_fields = [
+            field
+            for field in telemetry_obligation.get("required_fields", [])
+            if isinstance(field, str)
+        ]
+        operator_rows = _operator_log_rows(log_rows)
+        if not operator_rows:
+            telemetry_missing_fields.append("operator_log_rows")
+        else:
+            for row in operator_rows:
+                for field in required_fields:
+                    if field not in row:
+                        telemetry_missing_fields.append(
+                            f"{row.get('event_code', '?')}:{field}"
+                        )
+
+    passed = (
+        not missing_items
+        and not missing_paths
+        and not noncovered_items
+        and not telemetry_missing_fields
+    )
+    detail = "all bd-1z5a.27 completion-debt obligations covered"
+    if not passed:
+        detail = json.dumps(
+            {
+                "missing_items": missing_items,
+                "missing_paths": sorted(missing_paths),
+                "noncovered_items": sorted(noncovered_items),
+                "telemetry_missing_fields": sorted(set(telemetry_missing_fields)),
+            },
+            sort_keys=True,
+        )
+    return _check("completion_debt_bd_1z5a_27_coverage", passed, detail)
 
 
 def _operator_log_rows(log_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -227,6 +387,7 @@ def _evaluate(root: Path) -> dict[str, Any]:
             "failed": failed,
             "checks": checks,
             "coherence_contract": {},
+            "completion_debt": _completion_debt_contract(),
         }
 
     evidence = _read_json(root / VERIFICATION_EVIDENCE.relative_to(ROOT))
@@ -267,6 +428,7 @@ def _evaluate(root: Path) -> dict[str, Any]:
             ),
         )
     )
+    checks.append(_completion_debt_coverage(root, log_rows))
 
     fixtures = fixture_index.get("fixtures", [])
     fixture_ids = {
@@ -606,6 +768,7 @@ def _evaluate(root: Path) -> dict[str, Any]:
 
     coherence_contract = {
         "artifact_paths_resolve": not missing_artifact_refs,
+        "completion_debt_coverage": checks[-1]["passed"],
         "fixture_index_resolves": not missing_fixture_paths and not missing_fixture_ids,
         "fraud_witness_links_consistent": fraud_links_ok and not missing_fraud_source_paths,
         "summary_markdown_matches_bundle": summary_md_text == expected_summary_md and summary_rows_ok,
@@ -634,6 +797,7 @@ def _evaluate(root: Path) -> dict[str, Any]:
         "failed": failed,
         "checks": checks,
         "coherence_contract": coherence_contract,
+        "completion_debt": _completion_debt_contract(),
     }
 
 
@@ -679,6 +843,13 @@ def _materialize_self_test_fixture(root: Path) -> None:
         value
         for value in fraud_bundle.get("source_artifacts", {}).values()
         if isinstance(value, str)
+    )
+    synthetic_fixture_paths.update(
+        rel
+        for obligation in COMPLETION_DEBT_OBLIGATIONS
+        if isinstance(obligation, dict)
+        for rel in obligation.get("evidence_paths", [])
+        if isinstance(rel, str)
     )
     synthetic_fixture_paths.add(bundle.get("summary_path", ""))
     synthetic_fixture_paths.add(bundle.get("structured_log_path", ""))

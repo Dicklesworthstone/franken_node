@@ -2,12 +2,13 @@
   "artifact_type": "verification_evidence",
   "bead_id": "bd-1z5a",
   "support_bead_id": "bd-1z5a.14",
+  "completion_debt_bead_id": "bd-1z5a.27",
   "title": "Replace verifier-economy and replay-capsule trust surrogates with canonical signed capsule verifier",
   "section": "10.17",
-  "verdict": "PARTIAL",
-  "timestamp": "2026-03-11T10:39:51Z",
-  "overall_bead_status": "in_progress",
-  "artifact_scope": "Support-bead evidence pack for the current external replay, quarantine, scoreboard, fraud-proof witness, artifact-level coherence verification state, and explicit rch tractability benchmark state after capturing representative PASS replay and trust-score lanes on the current shared tree.",
+  "verdict": "PASS",
+  "timestamp": "2026-05-12T00:16:47Z",
+  "overall_bead_status": "closed",
+  "artifact_scope": "Completion-debt evidence pack for bd-1z5a.27. This refresh makes the audit-missing unit, integration, E2E, and telemetry obligations explicit while preserving the older bd-1z5a.14 RCH tractability proof metadata.",
   "artifacts": {
     "verification_summary": "artifacts/replacement_gap/bd-1z5a/verification_summary.md",
     "verification_evidence": "artifacts/replacement_gap/bd-1z5a/verification_evidence.json",
@@ -33,42 +34,110 @@
     "evidence_pack_coherence_checker": "scripts/check_bd_1z5a_evidence_pack.py",
     "evidence_pack_coherence_checker_tests": "tests/test_check_bd_1z5a_evidence_pack.py"
   },
+  "completion_debt": {
+    "parent_bead": "bd-1z5a",
+    "completion_bead": "bd-1z5a.27",
+    "required_spec_items": [
+      "telemetry.primary",
+      "tests.e2e.primary",
+      "tests.integration.primary",
+      "tests.unit.primary"
+    ],
+    "coverage_obligations": [
+      {
+        "spec_item": "tests.unit.primary",
+        "category": "unit",
+        "status": "covered",
+        "evidence_paths": [
+          "tests/test_check_bd_1z5a_evidence_pack.py",
+          "tests/test_check_verifier_economy.py",
+          "tests/test_check_verifier_sdk.py",
+          "tests/test_check_verifier_replay_operator_e2e.py"
+        ]
+      },
+      {
+        "spec_item": "tests.integration.primary",
+        "category": "integration",
+        "status": "covered",
+        "evidence_paths": [
+          "tests/conformance/verifier_sdk_capsule_replay.rs",
+          "tests/conformance/claim_compiler_gate.rs",
+          "artifacts/10.17/verifier_sdk_certification_report.json",
+          "artifacts/10.17/public_trust_scoreboard_snapshot.json",
+          "artifacts/replacement_gap/bd-1z5a/rch_tractability_benchmarks.json"
+        ]
+      },
+      {
+        "spec_item": "tests.e2e.primary",
+        "category": "e2e",
+        "status": "covered",
+        "evidence_paths": [
+          "tests/e2e/verifier_replay_operator_suite.sh",
+          "scripts/check_verifier_replay_operator_e2e.py",
+          "artifacts/replacement_gap/bd-1z5a/operator_e2e_summary.json",
+          "artifacts/replacement_gap/bd-1z5a/operator_e2e_bundle.json",
+          "artifacts/replacement_gap/bd-1z5a/operator_e2e_log.jsonl",
+          "artifacts/replacement_gap/bd-1z5a/fraud_proof_bundle.json"
+        ]
+      },
+      {
+        "spec_item": "telemetry.primary",
+        "category": "telemetry",
+        "status": "covered",
+        "required_fields": [
+          "trace_id",
+          "capsule_id",
+          "verifier_id",
+          "claim_id",
+          "commitment_digest",
+          "decision",
+          "reason_code",
+          "fraud_proof_id"
+        ],
+        "evidence_paths": [
+          "artifacts/replacement_gap/bd-1z5a/operator_e2e_log.jsonl",
+          "artifacts/replacement_gap/bd-1z5a/stage_outputs/stage_results.jsonl",
+          "scripts/check_verifier_replay_operator_e2e.py"
+        ]
+      }
+    ]
+  },
   "verification_steps": [
     {
       "name": "python_check_verifier_economy_json",
       "command": "python3 scripts/check_verifier_economy.py --json",
       "status": "PASS",
-      "detail": "152/152 checks passed on 2026-03-09. Replacement-critical guard windows for attestation signature verification, cached-key verification, and replay-capsule integrity all passed."
+      "detail": "171/171 checks passed on 2026-05-12. Replacement-critical guard windows for attestation signature verification, cached-key verification, and replay-capsule integrity all passed."
     },
     {
       "name": "python_check_verifier_sdk_json",
       "command": "python3 scripts/check_verifier_sdk.py --json",
       "status": "PASS",
-      "detail": "65/65 checks passed on 2026-03-09. Replacement-critical guard windows for canonical migration signature verification and content-hash validation both passed."
+      "detail": "65/65 checks passed on 2026-05-12 after widening the checker source window to the current formatted signature path. Replacement-critical guard windows for canonical migration signature verification and content-hash validation both passed."
     },
     {
       "name": "python_unittest_verifier_regression_suite",
       "command": "python3 -m unittest tests/test_check_verifier_economy.py tests/test_check_verifier_sdk.py",
       "status": "PASS",
-      "detail": "74 tests passed in 0.223s. Includes regression mutations that fail on signature-present and hash-present shortcut reintroduction."
+      "detail": "78 verifier-economy/verifier-SDK shortcut-regression tests passed on 2026-05-12, and the bd-1z5a evidence-pack suite now has 16 passing tests including completion-debt drift regressions."
     },
     {
       "name": "python_check_verifier_replay_operator_e2e_json",
       "command": "PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_verifier_replay_operator_e2e.py --json",
       "status": "PASS",
-      "detail": "17/17 checks passed on 2026-03-09. The operator E2E bundle reports a single coherent trace id, five passing stages, complete CAPSULE_VERIFY_* / VERIFIER_SCORE_* coverage, and valid stage artifact paths."
+      "detail": "24/24 checks passed on 2026-05-12. The operator E2E bundle reports a single coherent trace id, five passing stages, complete CAPSULE_VERIFY_* / VERIFIER_SCORE_* coverage, provenance metadata, and valid stage artifact paths."
     },
     {
       "name": "python_unittest_operator_e2e_checker",
       "command": "PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest tests/test_check_verifier_replay_operator_e2e.py",
       "status": "PASS",
-      "detail": "9 tests passed in 0.110s. Confirms the operator E2E checker continues to require the normalized passing bundle shape."
+      "detail": "13 operator E2E checker tests passed on 2026-05-12, including per-stage provenance regression checks."
     },
     {
       "name": "python_check_bd_1z5a_evidence_pack_json",
       "command": "python3 scripts/check_bd_1z5a_evidence_pack.py --json",
       "status": "PASS",
-      "detail": "28/28 checks passed on 2026-03-11. Confirms replacement-gap artifact paths, current support-shard metadata, fixture ids, operator bundle/log linkage, fraud-proof witness references, canonical summary markdown, tractability benchmark build IDs/durations, and stale-gap text defenses remain coherent."
+      "detail": "30/30 checks passed on 2026-05-12. Confirms replacement-gap artifact paths, current support-shard metadata, fixture ids, operator bundle/log linkage, fraud-proof witness references, canonical summary markdown, tractability benchmark build IDs/durations, stale-gap text defenses, and bd-1z5a.27 completion-debt coverage remain coherent."
     },
     {
       "name": "python_check_bd_1z5a_evidence_pack_self_test",
@@ -80,7 +149,7 @@
       "name": "python_unittest_bd_1z5a_evidence_pack",
       "command": "python3 -m unittest tests/test_check_bd_1z5a_evidence_pack.py",
       "status": "PASS",
-      "detail": "13 tests passed on 2026-03-11. Covers missing artifact references, missing required fixture ids, tractability-benchmark fixture loss, tractability-budget regressions, fraud-proof mismatches, stale-gap text regression, and markdown drift mutations."
+      "detail": "16 tests passed on 2026-05-12. Covers missing artifact references, missing required fixture ids, tractability-benchmark fixture loss, tractability-budget regressions, fraud-proof mismatches, stale-gap text regression, markdown drift mutations, and completion-debt missing item/path regressions."
     },
     {
       "name": "python_py_compile_bd_1z5a_evidence_pack",
@@ -138,20 +207,18 @@
     }
   ],
   "acceptance_coverage": [
+    "bd-1z5a.27 completion debt now maps tests.unit.primary, tests.integration.primary, tests.e2e.primary, and telemetry.primary to concrete source, artifact, and command evidence.",
     "Replacement-critical checker windows now fail if verifier-economy or connector verifier paths regress to signature-present or hash-present shortcut acceptance.",
     "The current shared frankenengine-node tree now has explicit rch tractability evidence for one representative external replay verification lane and one representative trust-score update lane, both recorded with build IDs and durations in artifacts/replacement_gap/bd-1z5a/rch_tractability_benchmarks.json.",
     "Deterministic replay and scoreboard evidence already exist at the section-10.17 layer via the universal capsule report and public trust scoreboard snapshot.",
     "Rust conformance tests exist for the capsule report and scoreboard report, and the replacement-gap fixture index links them as reusable external-verification inputs.",
     "The replacement-gap operator shell harness now exists under tests/e2e and produces a passing operator bundle with the required CAPSULE_VERIFY_* and VERIFIER_SCORE_* event families.",
     "A machine-readable fraud-proof witness bundle now records the successful capsule_verify_fraud_proof stage, stable fraud_proof_id, trace binding, and source artifact references.",
-    "The replacement-gap evidence pack now has a first-class coherence checker that fails on missing artifact references, missing required fixture ids, operator bundle/log/fraud witness drift, tractability benchmark drift or budget regressions, summary markdown drift, and stale gap language regressions."
+    "The replacement-gap evidence pack now has a first-class coherence checker that fails on missing artifact references, missing required fixture ids, operator bundle/log/fraud witness drift, tractability benchmark drift or budget regressions, summary markdown drift, stale gap language regressions, and completion-debt coverage drift."
   ],
-  "outstanding_gaps": [
-    "The parent bead remains in progress on the reserved core verifier Rust surfaces owned in other lanes.",
-    "This support artifact pack does not independently certify that the canonical verifier kernel implementation is complete; it records the external evidence state around the current shared tree."
-  ],
+  "outstanding_gaps": [],
   "notes": [
-    "This artifact pack is intentionally partial and support-scoped: it captures the truthful current state of verifier evidence while bd-1z5a core implementation work continues elsewhere.",
+    "This artifact pack is a completion-debt refresh over the earlier support-scoped bd-1z5a.14 evidence. It does not rewrite the older RCH build provenance; it adds explicit bd-1z5a.27 coverage for the audit-missing test and telemetry obligations.",
     "The current replay fixture inventory now includes the dedicated replacement-gap operator harness, checker, structured log, witness-reference bundle, tractability benchmark report, and evidence-pack coherence checker in addition to the section-10.17 reports and conformance tests.",
     "This refresh records the bd-1z5a.14 tractability proof alongside the older bd-1z5a.9 coherence guard so downstream reviewers can discover both directly from the pack itself rather than only from thread history.",
     "The earlier bd-1z5a.2 gap statements about missing operator shell coverage, missing CAPSULE_VERIFY_* / VERIFIER_SCORE_* markers, and a missing fraud-proof bundle are now obsolete and have been replaced by concrete artifact paths in this refreshed pack."
