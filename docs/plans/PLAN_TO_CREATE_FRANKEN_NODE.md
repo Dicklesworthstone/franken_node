@@ -1231,7 +1231,7 @@ Canonical ownership map (non-reductive, full-feature):
   `Artifacts:` `tests/security/anti_amplification_harness.rs`, `docs/specs/anti_amplification_rules.md`, `artifacts/10.13/anti_amplification_test_results.json`.
 - [ ] Implement quarantine-by-default store for unreferenced objects with quota + TTL enforcement.
   `Acceptance Criteria:` Unknown objects enter quarantine class by default; quota and TTL eviction enforce hard caps; quarantined objects are excluded from primary gossip state.
-  `Artifacts:` `src/admission/quarantine_store.rs`, `tests/integration/quarantine_retention.rs`, `artifacts/10.13/quarantine_usage_metrics.csv`.
+  `Artifacts:` `crates/franken-node/src/connector/quarantine_store.rs`, `tests/integration/quarantine_retention.rs`, `artifacts/section_10_13/bd-2eun/quarantine_usage_metrics.csv`.
 - [ ] Implement schema-gated quarantine promotion rules and promotion provenance receipts.
   `Acceptance Criteria:` Promotion requires reachability/authenticated request/pin plus schema validation; promotion emits provenance receipt with promotion reason; invalid promotions fail closed.
   `Artifacts:` `docs/specs/quarantine_promotion_rules.md`, `tests/security/quarantine_promotion_gate.rs`, `artifacts/10.13/quarantine_promotion_receipts.json`.

@@ -13,6 +13,10 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts/check_quarantine_store.py"
 CSV_PATH = ROOT / "artifacts/section_10_13/bd-2eun/quarantine_usage_metrics.csv"
 EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-2eun/verification_evidence.json"
+SUMMARY_PATH = ROOT / "artifacts/section_10_13/bd-2eun/verification_summary.md"
+PLAN_PATH = ROOT / "docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md"
+CANONICAL_IMPL_PATH = "crates/franken-node/src/connector/quarantine_store.rs"
+STALE_IMPL_PATH = "src/admission/" + "quarantine_store.rs"
 JSON_DECODER = json.JSONDecoder()
 
 
@@ -76,6 +80,9 @@ class TestQuarantineStoreImpl(unittest.TestCase):
                      "QDS_NOT_FOUND", "QDS_INVALID_CONFIG"]:
             self.assertIn(code, self.content, f"Missing error code {code}")
 
+    def test_checker_uses_canonical_connector_path(self):
+        self.assertEqual(check_quarantine_store.IMPL_PATH, ROOT / CANONICAL_IMPL_PATH)
+
 
 class TestQuarantineStoreSpec(unittest.TestCase):
 
@@ -93,6 +100,31 @@ class TestQuarantineStoreSpec(unittest.TestCase):
         for code in ["QDS_QUOTA_EXCEEDED", "QDS_TTL_EXPIRED", "QDS_DUPLICATE",
                      "QDS_NOT_FOUND", "QDS_INVALID_CONFIG"]:
             self.assertIn(code, self.content, f"Missing error code {code}")
+
+    def test_spec_cites_canonical_connector_path(self):
+        self.assertIn(CANONICAL_IMPL_PATH, self.content)
+        self.assertNotIn(STALE_IMPL_PATH, self.content)
+
+
+class TestQuarantinePathTruth(unittest.TestCase):
+
+    def test_plan_cites_live_connector_artifact_path(self):
+        content = PLAN_PATH.read_text(encoding="utf-8")
+
+        self.assertIn(CANONICAL_IMPL_PATH, content)
+        self.assertNotIn(STALE_IMPL_PATH, content)
+
+    def test_summary_cites_live_connector_artifact_path(self):
+        content = SUMMARY_PATH.read_text(encoding="utf-8")
+
+        self.assertIn(CANONICAL_IMPL_PATH, content)
+        self.assertNotIn(STALE_IMPL_PATH, content)
+
+    def test_evidence_cites_live_connector_artifact_path(self):
+        content = EVIDENCE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn(CANONICAL_IMPL_PATH, content)
+        self.assertNotIn(STALE_IMPL_PATH, content)
 
 
 class TestQuarantineIntegration(unittest.TestCase):
@@ -138,6 +170,8 @@ class TestQuarantineStoreCli(unittest.TestCase):
         self.assertEqual(evidence["mode"], "structural")
         self.assertEqual(evidence["verdict"], "PARTIAL")
         self.assertEqual(statuses["QDS-TESTS"], "SKIP")
+        self.assertEqual(statuses["QDS-PATH-TRUTH"], "PASS")
+        self.assertEqual(evidence["summary"]["total_checks"], 7)
         self.assertEqual(evidence["summary"]["skipped_checks"], 1)
         self.assertEqual(result.returncode, 1)
         self.assertNotIn("bd-2eun:", result.stdout)

@@ -1,12 +1,12 @@
 # bd-2eun: Quarantine-by-Default Store — Verification Summary
 
-## Verdict: PASS (6/6 checks)
+## Verdict: PASS (7/7 checks)
 
 ## Implementation
 
 `crates/franken-node/src/connector/quarantine_store.rs`
 
-- `QuarantineStore`: HashMap-backed store with quota (objects + bytes) and TTL enforcement
+- `QuarantineStore`: BTreeMap-backed store with quota (objects + bytes) and TTL enforcement
 - `ingest()`: TTL eviction first, then quota eviction (oldest-first, deterministic tiebreak), then admit
 - `evict_expired()`: removes all entries past TTL
 - `promote()`: removes from quarantine after validation
@@ -29,5 +29,10 @@ All 5 error codes present: QDS_QUOTA_EXCEEDED, QDS_TTL_EXPIRED, QDS_DUPLICATE, Q
 
 - 19 Rust unit tests passed
 - 4 integration tests (1 per invariant)
-- 16 Python verification tests passed
+- 25 Python verification tests passed
 - Usage metrics CSV with 5 time-series snapshots
+
+## Path Truth Ratchet
+
+- Canonical implementation path: `crates/franken-node/src/connector/quarantine_store.rs`
+- Historical admission-module artifact paths are not live module paths and are excluded from verification evidence.

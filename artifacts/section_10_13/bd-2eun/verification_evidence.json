@@ -7,7 +7,8 @@
     {
       "id": "QDS-IMPL",
       "description": "Implementation with all required types",
-      "status": "PASS"
+      "status": "PASS",
+      "details": "crates/franken-node/src/connector/quarantine_store.rs"
     },
     {
       "id": "QDS-ERRORS",
@@ -35,11 +36,17 @@
       "id": "QDS-SPEC",
       "description": "Specification with invariants and types",
       "status": "PASS"
+    },
+    {
+      "id": "QDS-PATH-TRUTH",
+      "description": "Plan, contract, summary, and evidence cite the canonical connector implementation path",
+      "status": "PASS",
+      "details": "canonical path crates/franken-node/src/connector/quarantine_store.rs present; stale admission-module artifact path absent"
     }
   ],
   "summary": {
-    "total_checks": 6,
-    "passing_checks": 6,
+    "total_checks": 7,
+    "passing_checks": 7,
     "failing_checks": 0
   }
 }

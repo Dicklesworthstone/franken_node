@@ -20,6 +20,13 @@ CSV_PATH = ROOT / "artifacts/section_10_13/bd-2eun/quarantine_usage_metrics.csv"
 INTEG_PATH = ROOT / "tests/integration/quarantine_retention.rs"
 SPEC_PATH = ROOT / "docs/specs/section_10_13/bd-2eun_contract.md"
 EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-2eun/verification_evidence.json"
+SUMMARY_PATH = ROOT / "artifacts/section_10_13/bd-2eun/verification_summary.md"
+PLAN_PATH = ROOT / "docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md"
+CANONICAL_IMPL_PATH = "crates/franken-node/src/connector/quarantine_store.rs"
+STALE_IMPL_PATHS = (
+    "src/admission/" + "quarantine_store.rs",
+    "crates/franken-node/src/admission/" + "quarantine_store.rs",
+)
 
 
 def read_utf8(path: Path) -> str | None:
@@ -121,6 +128,41 @@ def build_evidence(checks: list[dict[str, str]], mode: str) -> dict[str, object]
     }
 
 
+def check_path_truth(checks: list[dict[str, str]], *, emit_human: bool) -> bool:
+    checked_docs = {
+        "plan": PLAN_PATH,
+        "contract": SPEC_PATH,
+        "summary": SUMMARY_PATH,
+        "evidence": EVIDENCE_PATH,
+    }
+    missing: list[str] = []
+    stale_refs: list[str] = []
+
+    if not IMPL_PATH.is_file():
+        missing.append(CANONICAL_IMPL_PATH)
+
+    for label, path in checked_docs.items():
+        content = read_utf8(path)
+        if content is None:
+            missing.append(str(path.relative_to(ROOT)))
+            continue
+        if CANONICAL_IMPL_PATH not in content:
+            missing.append(f"{label}:{CANONICAL_IMPL_PATH}")
+        for stale_path in STALE_IMPL_PATHS:
+            if stale_path in content:
+                stale_refs.append(f"{label}:{stale_path}")
+
+    details = f"missing={missing or 'none'} stale_refs={stale_refs or 'none'}"
+    return check(
+        checks,
+        "QDS-PATH-TRUTH",
+        "Plan, contract, summary, and evidence cite the canonical connector implementation path",
+        not missing and not stale_refs,
+        details,
+        emit_human=emit_human,
+    )
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit evidence JSON to stdout")
@@ -167,6 +209,7 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
         "QDS-IMPL",
         "Implementation with all required types",
         impl_exists and all_types,
+        CANONICAL_IMPL_PATH,
         emit_human=emit_human,
     )
 
@@ -243,6 +286,7 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
         spec_exists and has_invariants and has_types,
         emit_human=emit_human,
     )
+    check_path_truth(checks, emit_human=emit_human)
 
     evidence = build_evidence(checks, "full" if run_tests else "structural")
     if emit_human:
