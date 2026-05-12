@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from scripts import check_threshold_sig
@@ -160,6 +161,28 @@ class TestThresholdSigCli(unittest.TestCase):
         args = check_threshold_sig.parse_args(["--json"])
 
         self.assertTrue(check_threshold_sig.should_run_rust_tests(args))
+
+    def test_rust_proof_uses_lib_target_filter(self):
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="test result: ok. 73 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            stderr="",
+        )
+
+        with mock.patch("scripts.check_threshold_sig.subprocess.run", return_value=completed) as run:
+            passed, details = check_threshold_sig.run_rust_tests()
+
+        self.assertTrue(passed)
+        self.assertEqual(details, "73 tests passed")
+        run.assert_called_once()
+        kwargs = run.call_args.kwargs
+        command = run.call_args.args[0]
+        self.assertEqual(kwargs["cwd"], ROOT)
+        self.assertIn("--lib", command)
+        self.assertEqual(command[:4], ["rch", "exec", "--", "cargo"])
+        self.assertNotIn("--", command[4:])
+        self.assertEqual(command[-1], "security::threshold_sig")
 
     def test_structural_json_mode_is_partial_and_machine_readable(self):
         result = subprocess.run(

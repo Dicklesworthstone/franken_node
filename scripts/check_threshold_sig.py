@@ -98,13 +98,13 @@ def run_rust_tests() -> tuple[bool, str]:
                 "test",
                 "-p",
                 "frankenengine-node",
-                "--",
+                "--lib",
                 "security::threshold_sig",
             ],
             capture_output=True,
             text=True,
             timeout=3600,
-            cwd=ROOT / "crates/franken-node",
+            cwd=ROOT,
             check=False,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as exc:

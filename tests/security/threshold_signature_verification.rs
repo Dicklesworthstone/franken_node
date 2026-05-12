@@ -115,8 +115,13 @@ fn invalid_sig_ignored() {
 fn duplicate_counted_once() {
     let (sks, cfg) = config(2, 3);
     let mut art = artifact_with_sigs(&sks, &cfg, "h6", 1);
-    art.signatures
-        .push(sign(&sks[0], &cfg.signer_keys[0].key_id, "h6"));
+    art.signatures.push(sign(
+        &sks[0],
+        &cfg.signer_keys[0].key_id,
+        "art-test",
+        "conn-test",
+        "h6",
+    ));
     let result = verify_threshold(&cfg, &art, "t6", "ts");
     assert!(!result.verified);
     assert_eq!(result.valid_signatures, 1);
