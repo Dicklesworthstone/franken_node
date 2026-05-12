@@ -342,7 +342,7 @@ fn vef_receipt_chain_checkpoint_capacity_fails_closed_without_eviction() -> Test
 /// across versions. Execution receipts are cryptographically signed audit records
 /// and any format change would break signature validation and compliance tooling.
 #[test]
-fn vef_execution_receipt_binary_format_golden() {
+fn vef_execution_receipt_binary_format_golden() -> TestResult {
     use frankenengine_node::connector::vef_execution_receipt::serialize_canonical;
     use std::{fs, path::Path};
 
@@ -372,35 +372,49 @@ fn vef_execution_receipt_binary_format_golden() {
 
     // Serialize to canonical binary format
     let binary_output = serialize_canonical(&receipt)
-        .expect("VEF execution receipt should serialize to canonical binary");
+        .map_err(|err| format!("VEF execution receipt failed to serialize: {err}"))?;
 
     let golden_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../artifacts/golden/vef_execution_receipt.bin");
 
     // Check if we're in update mode
     if std::env::var("UPDATE_GOLDENS").is_ok() {
-        fs::create_dir_all(golden_path.parent().unwrap()).unwrap();
-        fs::write(golden_path, &binary_output).unwrap();
-        eprintln!("[GOLDEN] Updated: {}", golden_path.display());
-        return;
+        let parent = golden_path
+            .parent()
+            .ok_or_else(|| format!("golden path has no parent: {}", golden_path.display()))?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create golden dir {}: {err}", parent.display()))?;
+        fs::write(&golden_path, &binary_output)
+            .map_err(|err| format!("failed to update golden {}: {err}", golden_path.display()))?;
+        return Ok(());
     }
 
     // Read expected golden output
-    let expected_binary = fs::read(golden_path).unwrap_or_else(|_| {
-        panic!(
+    let expected_binary = fs::read(&golden_path).map_err(|err| {
+        format!(
             "Golden file missing: {}\n\
              Run with UPDATE_GOLDENS=1 to create it\n\
-             Then review and commit: git diff artifacts/golden/",
+             Then review and commit: git diff artifacts/golden/\n\
+             Read error: {err}",
             golden_path.display()
         )
-    });
+    })?;
 
     // Compare byte-for-byte
-    if binary_output != expected_binary {
+    if !binary_output
+        .as_slice()
+        .cmp(expected_binary.as_slice())
+        .is_eq()
+    {
         let actual_path = golden_path.with_file_name("vef_execution_receipt.actual.bin");
-        fs::write(actual_path, &binary_output).unwrap();
+        fs::write(&actual_path, &binary_output).map_err(|err| {
+            format!(
+                "failed to write actual golden {}: {err}",
+                actual_path.display()
+            )
+        })?;
 
-        panic!(
+        return Err(format!(
             "GOLDEN MISMATCH: VEF execution receipt binary format changed\n\n\
              This indicates a breaking change to canonical binary serialization\n\
              that could invalidate existing signatures and break audit compliance.\n\n\
@@ -408,6 +422,7 @@ fn vef_execution_receipt_binary_format_golden() {
              To review: xxd {} | head -20 && echo '---' && xxd {} | head -20",
             golden_path.display(),
             actual_path.display(),
-        );
+        ));
     }
+    Ok(())
 }
