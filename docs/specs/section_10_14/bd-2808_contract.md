@@ -10,6 +10,15 @@ so that feeding the bundle into `replay_bundle` re-executes the incident step
 by step with identical outcomes. This is the cornerstone of deterministic
 verification: every failure can be reproduced mechanically.
 
+## Implementation Surface
+
+The authoritative repro-bundle export and replay implementation lives in
+`crates/franken-node/src/testing/lab_runtime.rs`.
+
+`crates/franken-node/src/tools/repro_bundle_export.rs` is only the portable
+`EvidenceRef` helper surface. It must not be cited as the full deterministic
+bundle export/replay implementation.
+
 ## Key Types
 
 | Type | Role |

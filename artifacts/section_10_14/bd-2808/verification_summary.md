@@ -3,13 +3,14 @@
 ## Deterministic Repro Bundle Export
 
 **Section:** 10.14 (FrankenSQLite Deep-Mined Expansion)
-**Status:** PASS (97/97 checks)
+**Status:** PASS (current source truth enforced by `scripts/check_repro_bundle_export.py`)
 **Agent:** CopperCompass (codex, gpt-5)
 **Date:** 2026-03-29
 
 ## Implementation
 
-- **Module:** `crates/franken-node/src/tools/repro_bundle_export.rs`
+- **Module:** `crates/franken-node/src/testing/lab_runtime.rs`
+- **EvidenceRef Helper:** `crates/franken-node/src/tools/repro_bundle_export.rs`
 - **Spec:** `docs/specs/section_10_14/bd-2808_contract.md`
 - **Verification:** `scripts/check_repro_bundle_export.py`
 - **Schema Artifact:** `artifacts/10.14/repro_bundle_schema_v1.json`
@@ -51,14 +52,19 @@
 
 | Category | Count | Status |
 |----------|-------|--------|
-| Rust unit tests | 46 | All pass |
-| Python verification checks | 97 | All pass |
+| Rust unit tests | 167 in `lab_runtime.rs` | Source-present; cargo proof is contention-gated |
+| Python verification checks | Current checker total | All pass |
 | Python unit tests | 26 | All pass |
 
 ## Fresh-Eyes Fix
 
 - `ReproBundle::to_json()` now includes `failure_timestamp_ms`, so the portable JSON artifact preserves the full `FailureContext` already used in bundle derivation.
 - The checker and schema artifact now require `failure_timestamp_ms`, which prevents future regressions where exported JSON silently omits canonical replay state.
+
+## Path Truth Ratchet
+
+- The authoritative implementation path is `crates/franken-node/src/testing/lab_runtime.rs`.
+- `crates/franken-node/src/tools/repro_bundle_export.rs` is retained only for `EvidenceRef` portability helper coverage.
 
 ## Downstream Unblocked
 

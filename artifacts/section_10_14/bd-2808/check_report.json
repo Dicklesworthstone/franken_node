@@ -14,7 +14,7 @@
     {
       "check": "file: implementation",
       "pass": true,
-      "detail": "exists: crates/franken-node/src/tools/repro_bundle_export.rs"
+      "detail": "exists: crates/franken-node/src/testing/lab_runtime.rs"
     },
     {
       "check": "file: spec contract",

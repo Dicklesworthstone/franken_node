@@ -24,6 +24,10 @@ class TestCheckFileHelper(TestCase):
         result = mod.check_file(mod.IMPL, "self")
         self.assertTrue(result["pass"])
 
+    def test_evidence_ref_helper_exists(self):
+        result = mod.check_file(mod.EVIDENCE_REF_HELPER, "helper")
+        self.assertTrue(result["pass"])
+
     def test_schema_file_exists(self):
         result = mod.check_file(mod.SCHEMA, "schema")
         self.assertTrue(result["pass"])
@@ -74,9 +78,16 @@ class TestCheckSchemaVersion(TestCase):
 
 
 class TestCheckDefaultHasher(TestCase):
-    def test_hasher(self):
-        result = mod.check_default_hasher()
+    def test_event_bound(self):
+        result = mod.check_event_bound()
         self.assertTrue(result["pass"])
+
+
+class TestPathTruth(TestCase):
+    def test_real_path_truth_passes(self):
+        results = mod.check_path_truth()
+        for result in results:
+            self.assertTrue(result["pass"], f"Failed: {result['check']}: {result['detail']}")
 
 
 class TestRunChecks(TestCase):
@@ -96,11 +107,11 @@ class TestRunChecks(TestCase):
 
     def test_check_count_reasonable(self):
         result = mod.run_checks()
-        self.assertGreaterEqual(result["summary"]["total"], 80)
+        self.assertGreaterEqual(result["summary"]["total"], 50)
 
     def test_test_count_field(self):
         result = mod.run_checks()
-        self.assertGreaterEqual(result["test_count"], 25)
+        self.assertGreaterEqual(result["test_count"], 15)
 
 
 class TestSelfTest(TestCase):
@@ -111,10 +122,10 @@ class TestSelfTest(TestCase):
 
 class TestRequiredConstants(TestCase):
     def test_types_count(self):
-        self.assertEqual(len(mod.REQUIRED_TYPES), 11)
+        self.assertEqual(len(mod.REQUIRED_TYPES), 8)
 
     def test_methods_count(self):
-        self.assertEqual(len(mod.REQUIRED_METHODS), 14)
+        self.assertEqual(len(mod.REQUIRED_METHODS), 7)
 
     def test_event_codes_count(self):
         self.assertEqual(len(mod.EVENT_CODES), 4)
@@ -123,13 +134,13 @@ class TestRequiredConstants(TestCase):
         self.assertEqual(len(mod.INVARIANTS), 3)
 
     def test_required_tests_count(self):
-        self.assertEqual(len(mod.REQUIRED_TESTS), 40)
+        self.assertEqual(len(mod.REQUIRED_TESTS), 15)
 
-    def test_trace_event_types_count(self):
-        self.assertEqual(len(mod.TRACE_EVENT_TYPES), 6)
+    def test_bundle_fields_count(self):
+        self.assertEqual(len(mod.REQUIRED_BUNDLE_FIELDS), 6)
 
-    def test_failure_types_count(self):
-        self.assertEqual(len(mod.FAILURE_TYPES), 4)
+    def test_helper_patterns_count(self):
+        self.assertEqual(len(mod.HELPER_PATTERNS), 4)
 
 
 class TestJsonOutput(TestCase):

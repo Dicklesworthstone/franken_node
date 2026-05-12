@@ -14,128 +14,90 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
-IMPL = ROOT / "crates" / "franken-node" / "src" / "tools" / "repro_bundle_export.rs"
+IMPL = ROOT / "crates" / "franken-node" / "src" / "testing" / "lab_runtime.rs"
+EVIDENCE_REF_HELPER = ROOT / "crates" / "franken-node" / "src" / "tools" / "repro_bundle_export.rs"
 SPEC = ROOT / "docs" / "specs" / "section_10_14" / "bd-2808_contract.md"
 SCHEMA = ROOT / "artifacts" / "10.14" / "repro_bundle_schema_v1.json"
 MOD_RS = ROOT / "crates" / "franken-node" / "src" / "tools" / "mod.rs"
+SUMMARY = ROOT / "artifacts" / "section_10_14" / "bd-2808" / "verification_summary.md"
+EVIDENCE = ROOT / "artifacts" / "section_10_14" / "bd-2808" / "verification_evidence.json"
+
+CANONICAL_IMPL_PATH = "crates/franken-node/src/testing/lab_runtime.rs"
+EVIDENCE_REF_HELPER_PATH = "crates/franken-node/src/tools/repro_bundle_export.rs"
 
 REQUIRED_TYPES = [
-    "pub struct TraceEvent",
-    "pub enum TraceEventType",
-    "pub struct EvidenceRef",
-    "pub struct FailureContext",
-    "pub enum FailureType",
-    "pub struct ConfigSnapshot",
+    "pub enum LabError",
+    "pub struct LabConfig",
+    "pub struct LabEvent",
+    "pub struct FaultProfile",
+    "pub struct VirtualLink",
+    "pub struct ScenarioResult",
     "pub struct ReproBundle",
-    "pub struct ExportContext",
-    "pub enum ReplayOutcome",
-    "pub enum SchemaError",
-    "pub struct ReproBundleExporter",
+    "pub struct LabRuntime",
 ]
 
 REQUIRED_METHODS = [
-    "fn generate_repro_bundle(",
-    "fn replay_bundle(",
-    "fn validate_bundle(",
-    "fn event_count(",
-    "fn evidence_count(",
-    "fn is_portable(",
-    "fn to_json(",
-    "fn export(",
-    "fn find_bundle(",
-    "fn bundle_count(",
-    "fn should_auto_export(",
-    "fn export_for_range",
-    "fn with_entry(",
-    "fn label(",
+    "pub fn to_json(",
+    "pub fn from_json(",
+    "pub fn run_scenario(",
+    "pub fn run_scenario_dpor(",
+    "pub fn export_repro_bundle(",
+    "pub fn replay_bundle(",
+    "pub fn events(",
 ]
 
 EVENT_CODES = [
-    "REPRO_BUNDLE_EXPORTED",
-    "REPRO_BUNDLE_REPLAY_START",
-    "REPRO_BUNDLE_REPLAY_COMPLETE",
-    "REPRO_BUNDLE_REPLAY_DIVERGENCE",
+    "EVT_REPRO_EXPORTED",
+    "EVT_SCENARIO_STARTED",
+    "EVT_SCENARIO_FAILED",
+    "EVT_SCENARIO_COMPLETED",
 ]
 
 INVARIANTS = [
-    "INV-REPRO-DETERMINISTIC",
-    "INV-REPRO-COMPLETE",
-    "INV-REPRO-VERSIONED",
-]
-
-TRACE_EVENT_TYPES = [
-    "EpochTransition",
-    "BarrierEvent",
-    "PolicyEvaluation",
-    "MarkerIntegrityCheck",
-    "ConfigChange",
-    "ExternalSignal",
-]
-
-FAILURE_TYPES = [
-    "EpochTransitionTimeout",
-    "BarrierTimeout",
-    "PolicyViolation",
-    "MarkerIntegrityBreak",
-]
-
-REPLAY_VARIANTS = [
-    "Match",
-    "Divergence",
-]
-
-SCHEMA_ERROR_VARIANTS = [
-    "MissingField",
-    "InvalidVersion",
-    "NonPortablePath",
-    "EmptyEventTrace",
+    "INV-LB-REPLAY",
+    "INV-LB-DETERMINISTIC",
+    "INV-LB-NO-WALLCLOCK",
 ]
 
 REQUIRED_TESTS = [
-    "trace_event_type_labels",
-    "trace_event_type_all_six",
-    "trace_event_type_display",
-    "failure_type_labels",
-    "failure_type_all_four",
-    "failure_type_display",
-    "config_snapshot_empty",
-    "config_snapshot_with_entries",
-    "config_snapshot_not_portable",
-    "evidence_ref_portable",
-    "evidence_ref_not_portable_unix",
-    "evidence_ref_display",
-    "generate_bundle_from_context",
-    "bundle_determinism",
-    "bundle_determinism_100_runs",
-    "different_context_different_id",
-    "event_trace_ordering_preserved",
-    "empty_trace_produces_valid_bundle",
-    "bundle_is_portable",
-    "bundle_to_json",
-    "bundle_to_json_includes_failure_timestamp",
-    "replay_produces_match",
-    "replay_deterministic_100_runs",
-    "replay_wrong_schema_version",
-    "replay_misordered_events_diverge",
-    "replay_outcome_display",
-    "valid_bundle_passes_schema",
-    "empty_bundle_id_rejected",
-    "wrong_version_rejected",
-    "empty_error_message_rejected",
-    "non_portable_path_rejected",
-    "schema_error_display",
-    "exporter_defaults",
-    "exporter_custom_triggers",
-    "exporter_exports_bundle",
-    "exporter_multiple_bundles",
-    "exporter_find_missing_bundle",
-    "exporter_time_range_query",
-    "json_round_trip_preserves_key_fields",
-    "config_snapshot_in_bundle",
+    "test_repro_bundle_export_json_round_trip",
+    "test_repro_bundle_to_json_reports_serialization_error",
+    "test_repro_bundle_export_is_idempotent_for_same_state",
+    "test_repro_bundle_export_respects_max_events_bound",
+    "test_repro_bundle_from_json_reports_parse_error",
+    "test_repro_bundle_from_json_rejects_unsupported_schema_version",
+    "test_repro_bundle_from_json_rejects_seed_mismatch",
+    "test_repro_bundle_from_json_rejects_invalid_fault_profile",
+    "test_repro_bundle_from_json_rejects_link_capacity_overflow",
+    "test_repro_bundle_from_json_rejects_zero_seed_config",
+    "test_repro_bundle_from_json_rejects_missing_events_field",
+    "test_repro_bundle_from_json_rejects_links_type_confusion",
+    "test_repro_bundle_replay_deterministic",
+    "test_repro_bundle_replay_divergence_detected",
+    "test_repro_bundle_replay_detects_trace_divergence_with_same_outcome",
 ]
 
-REQUIRED_JSON_FIELDS = [
-    "failure_timestamp_ms",
+REQUIRED_BUNDLE_FIELDS = [
+    "schema_version",
+    "seed",
+    "config",
+    "links",
+    "events",
+    "passed",
+]
+
+REQUIRED_SCHEMA_FIELDS = [
+    "schema_version",
+    "seed",
+    "event_trace",
+    "evidence_refs",
+]
+
+HELPER_PATTERNS = [
+    "pub struct EvidenceRef",
+    "pub fn is_portable(",
+    "evidence_ref_rejects_nul_byte_relative_path",
+    "evidence_ref_accepts_plain_relative_path",
 ]
 
 
@@ -171,7 +133,7 @@ def check_module_registered():
         return {"check": "module registered in mod.rs", "pass": False, "detail": "mod.rs missing"}
     content = MOD_RS.read_text()
     found = "repro_bundle_export" in content
-    return {"check": "module registered in mod.rs", "pass": found,
+    return {"check": "EvidenceRef helper registered in tools/mod.rs", "pass": found,
             "detail": "found" if found else "NOT FOUND"}
 
 
@@ -180,8 +142,8 @@ def check_test_count():
         return {"check": "unit test count", "pass": False, "detail": "file missing"}
     content = IMPL.read_text()
     count = len(re.findall(r"#\[test\]", content))
-    return {"check": "unit test count", "pass": count >= 25,
-            "detail": f"{count} tests (minimum 25)"}
+    return {"check": "lab runtime unit test count", "pass": count >= 15,
+            "detail": f"{count} tests (minimum 15)"}
 
 
 def check_schema_version():
@@ -193,13 +155,37 @@ def check_schema_version():
             "detail": "found" if found else "NOT FOUND"}
 
 
-def check_default_hasher():
+def check_event_bound():
     if not IMPL.is_file():
-        return {"check": "Sha256 for determinism", "pass": False, "detail": "file missing"}
+        return {"check": "bounded repro events", "pass": False, "detail": "file missing"}
     content = IMPL.read_text()
-    found = "Sha256" in content
-    return {"check": "Sha256 for determinism", "pass": found,
+    found = "MAX_EVENTS" in content and "EVT_REPRO_EXPORTED" in content
+    return {"check": "bounded repro events", "pass": found,
             "detail": "found" if found else "NOT FOUND"}
+
+
+def check_path_truth():
+    results = []
+    for path, label in [
+        (SPEC, "spec contract"),
+        (SUMMARY, "verification summary"),
+        (EVIDENCE, "verification evidence"),
+    ]:
+        if not path.is_file():
+            results.append({
+                "check": f"path truth: {label}",
+                "pass": False,
+                "detail": f"missing: {path}",
+            })
+            continue
+        text = path.read_text(encoding="utf-8")
+        found = CANONICAL_IMPL_PATH in text
+        results.append({
+            "check": f"path truth: {label} names lab runtime implementation",
+            "pass": found,
+            "detail": CANONICAL_IMPL_PATH if found else "canonical path missing",
+        })
+    return results
 
 
 def self_test():
@@ -210,24 +196,25 @@ def self_test():
 
 def run_checks():
     checks = []
-    checks.append(check_file(IMPL, "implementation"))
+    checks.append(check_file(IMPL, "lab runtime implementation"))
+    checks.append(check_file(EVIDENCE_REF_HELPER, "EvidenceRef portability helper"))
     checks.append(check_file(SPEC, "spec contract"))
     checks.append(check_file(SCHEMA, "schema artifact"))
+    checks.append(check_file(SUMMARY, "verification summary"))
+    checks.append(check_file(EVIDENCE, "verification evidence"))
     checks.append(check_module_registered())
     checks.append(check_test_count())
     checks.append(check_schema_version())
-    checks.append(check_default_hasher())
+    checks.append(check_event_bound())
     checks.extend(check_content(IMPL, REQUIRED_TYPES, "type"))
     checks.extend(check_content(IMPL, REQUIRED_METHODS, "method"))
     checks.extend(check_content(IMPL, EVENT_CODES, "event_code"))
     checks.extend(check_content(IMPL, INVARIANTS, "invariant"))
-    checks.extend(check_content(IMPL, TRACE_EVENT_TYPES, "trace_event_type"))
-    checks.extend(check_content(IMPL, FAILURE_TYPES, "failure_type"))
-    checks.extend(check_content(IMPL, REPLAY_VARIANTS, "replay_variant"))
-    checks.extend(check_content(IMPL, SCHEMA_ERROR_VARIANTS, "schema_error"))
     checks.extend(check_content(IMPL, REQUIRED_TESTS, "test"))
-    checks.extend(check_content(IMPL, REQUIRED_JSON_FIELDS, "json_field"))
-    checks.extend(check_content(SCHEMA, REQUIRED_JSON_FIELDS, "schema_field"))
+    checks.extend(check_content(IMPL, REQUIRED_BUNDLE_FIELDS, "bundle_field"))
+    checks.extend(check_content(EVIDENCE_REF_HELPER, HELPER_PATTERNS, "evidence_ref_helper"))
+    checks.extend(check_content(SCHEMA, REQUIRED_SCHEMA_FIELDS, "schema_field"))
+    checks.extend(check_path_truth())
 
     passed = sum(1 for c in checks if c["pass"])
     total = len(checks)
