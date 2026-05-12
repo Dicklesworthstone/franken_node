@@ -422,8 +422,20 @@ fn e2e_divergence_gate_audits_distinct_fork_while_already_diverged() {
         event_codes::DG_001_DIVERGENCE_DETECTED
     );
     assert_eq!(audit_entry.trace_id, "trace-fork-2");
+    assert_eq!(audit_entry.epoch_id, 7);
     assert!(audit_entry.detail.contains("subsequent divergence"));
-    h.log_phase("second_fork_audited_without_overwrite", true, json!({}));
+    h.log_phase(
+        "second_fork_audited_without_overwrite",
+        true,
+        json!({
+            "audit_delta": 1,
+            "event_code": audit_entry.event_code.as_str(),
+            "event_delta": 1,
+            "epoch_id": audit_entry.epoch_id,
+            "preserved_remote_hash": active_after.remote_hash.as_str(),
+            "trace_id": audit_entry.trace_id.as_str(),
+        }),
+    );
 }
 
 #[test]
