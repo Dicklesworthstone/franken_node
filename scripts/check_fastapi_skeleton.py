@@ -2,12 +2,15 @@
 """Verification script for bd-2f5l: control-plane catalog boundary."""
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 IMPL = ROOT / "crates" / "franken-node" / "src" / "api" / "service.rs"
 ROUTE_FILES = [
@@ -713,6 +716,8 @@ def self_test() -> tuple[bool, str]:
 
 
 if __name__ == "__main__":
+    logger = configure_test_logging("check_fastapi_skeleton")
+    logger.info("starting %s verification", "check_fastapi_skeleton")
     result = run_checks()
     if "--json" in sys.argv:
         print(json.dumps(result, indent=2))

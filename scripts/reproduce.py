@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
 import shlex
@@ -27,6 +28,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 ROOT = Path(__file__).resolve().parent.parent
 CLAIMS_PATH = ROOT / "docs" / "headline_claims.toml"
@@ -594,6 +598,8 @@ def run_reproduction(
 
 
 def main() -> None:
+    logger = configure_test_logging("reproduce")
+    logger.info("starting reproduce", extra={"argv": sys.argv[1:]})
     parser = argparse.ArgumentParser(
         description="franken_node external reproduction automation"
     )

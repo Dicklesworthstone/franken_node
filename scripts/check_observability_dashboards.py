@@ -7,11 +7,14 @@ Usage:
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 DOC = ROOT / "docs" / "observability" / "asupersync_control_dashboards.md"
 SNAPSHOT = ROOT / "artifacts" / "10.15" / "dashboard_snapshot.json"
@@ -275,6 +278,8 @@ def self_test():
 
 
 if __name__ == "__main__":
+    logger = configure_test_logging("check_observability_dashboards")
+    logger.info("starting %s verification", "check_observability_dashboards")
     result = run_checks()
     if "--json" in sys.argv:
         print(json.dumps(result, indent=2))

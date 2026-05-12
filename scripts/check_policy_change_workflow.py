@@ -7,12 +7,15 @@ Usage:
 """
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 IMPL = ROOT / "crates" / "franken-node" / "src" / "policy" / "approval_workflow.rs"
 SPEC = ROOT / "docs" / "specs" / "section_10_5" / "bd-sh3_contract.md"
@@ -364,6 +367,8 @@ def self_test():
 
 
 if __name__ == "__main__":
+    logger = configure_test_logging("check_policy_change_workflow")
+    logger.info("starting %s verification", "check_policy_change_workflow")
     result = run_checks()
     if "--json" in sys.argv:
         print(json.dumps(result, indent=2))

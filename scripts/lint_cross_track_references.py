@@ -18,11 +18,15 @@ Exit codes:
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = ROOT / "docs" / "capability_ownership_registry.json"
@@ -187,6 +191,8 @@ def lint_bead(bead: dict, registry: dict) -> list[dict]:
 
 
 def main():
+    logger = configure_test_logging("lint_cross_track_references")
+    logger.info("starting cross-track canonical-reference lint")
     json_output = "--json" in sys.argv
 
     registry = load_registry()

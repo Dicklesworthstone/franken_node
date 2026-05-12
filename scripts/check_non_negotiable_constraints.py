@@ -249,6 +249,8 @@ def self_test():
 
 
 if __name__ == "__main__":
+    logger = configure_test_logging("check_non_negotiable_constraints")
+    logger.info("starting %s verification", "check_non_negotiable_constraints")
     result = run_checks()
     if "--json" in sys.argv:
         print(json.dumps(result, indent=2))

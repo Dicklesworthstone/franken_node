@@ -11,10 +11,14 @@ Usage:
 """
 
 import json
+import os
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -202,6 +206,8 @@ def self_test() -> dict:
 
 
 def main():
+    logger = configure_test_logging("migrate_report")
+    logger.info("starting migrate-report pipeline")
     json_output = "--json" in sys.argv
     is_self_test = "--self-test" in sys.argv
 

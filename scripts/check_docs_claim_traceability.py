@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -13,6 +14,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 SCHEMA_VERSION = "franken-node/docs-claim-traceability/v1"
 BEAD_ID = "bd-38hez.8"
@@ -453,6 +456,8 @@ def self_test() -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    logger = configure_test_logging("check_docs_claim_traceability")
+    logger.info("starting %s verification", "check_docs_claim_traceability")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)

@@ -249,6 +249,8 @@ def check_crates_dir_clean() -> dict:
 
 
 def main():
+    logger = configure_test_logging("guard_dependency_direction")
+    logger.info("starting dependency-direction guard")
     json_output = "--json" in sys.argv
     timestamp = datetime.now(timezone.utc).isoformat()
 
