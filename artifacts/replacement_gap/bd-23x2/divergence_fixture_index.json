@@ -1,0 +1,71 @@
+{
+  "artifact_type": "divergence_fixture_index",
+  "bead_id": "bd-23x2",
+  "completion_debt_bead_id": "bd-23x2.1",
+  "schema_version": "bd-23x2-divergence-fixture-index-v1",
+  "generated_at": "2026-05-12T01:08:00Z",
+  "fixtures": [
+    {
+      "case_id": "zero_filled_proof",
+      "attack_vector": "proof path material filled with zero hashes",
+      "expected_control": "ERR_AE_PROOF_INVALID with no local state mutation",
+      "evidence_paths": [
+        "crates/franken-node/src/runtime/anti_entropy.rs",
+        "crates/franken-node/tests/e2e_mmr_proofs_lifecycle.rs"
+      ]
+    },
+    {
+      "case_id": "same_length_forged_proof",
+      "attack_vector": "same-shape audit path with a forged marker digest",
+      "expected_control": "canonical mmr_proofs::verify_inclusion rejection",
+      "evidence_paths": [
+        "crates/franken-node/src/runtime/anti_entropy.rs",
+        "tests/conformance/mmr_proof_verification.rs"
+      ]
+    },
+    {
+      "case_id": "mismatched_root",
+      "attack_vector": "valid-looking proof replayed against a different MMR root",
+      "expected_control": "ERR_AE_PROOF_INVALID before record acceptance",
+      "evidence_paths": [
+        "crates/franken-node/src/runtime/anti_entropy.rs",
+        "crates/franken-node/tests/e2e_mmr_proofs_lifecycle.rs"
+      ]
+    },
+    {
+      "case_id": "cross_epoch_replay",
+      "attack_vector": "future-epoch record replayed into an older trust state",
+      "expected_control": "ERR_AE_EPOCH_VIOLATION style rejection with stable record-rejected event",
+      "evidence_paths": [
+        "crates/franken-node/src/runtime/anti_entropy.rs"
+      ]
+    },
+    {
+      "case_id": "network_partition",
+      "attack_vector": "remote state contains a sparse divergent suffix after a shared prefix",
+      "expected_control": "O(delta) compute_delta plus exact marker divergence boundary evidence",
+      "evidence_paths": [
+        "tests/integration/marker_divergence_detection.rs",
+        "crates/franken-node/tests/e2e_marker_stream_lifecycle.rs"
+      ]
+    },
+    {
+      "case_id": "forked_history",
+      "attack_vector": "same record ID and precedence tuple with different payload bytes",
+      "expected_control": "ERR_AE_FORK_DETECTED and minimal divergent record certificate",
+      "evidence_paths": [
+        "crates/franken-node/src/runtime/anti_entropy.rs",
+        "tests/e2e/anti_entropy_operator_suite.sh"
+      ]
+    },
+    {
+      "case_id": "fallback_to_canonical_tree_proof",
+      "attack_vector": "sparse delta confidence insufficient for operator acceptance",
+      "expected_control": "operator evidence records canonical_mmr proof mode and certificate inspection",
+      "evidence_paths": [
+        "tests/e2e/anti_entropy_operator_suite.sh",
+        "artifacts/replacement_gap/bd-23x2/operator_e2e_log.jsonl"
+      ]
+    }
+  ]
+}

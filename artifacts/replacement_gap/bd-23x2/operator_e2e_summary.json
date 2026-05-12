@@ -1,0 +1,28 @@
+{
+  "check_failing": 0,
+  "check_passing": 68,
+  "check_total": 68,
+  "event_count": 4,
+  "event_families": {
+    "ANTI_ENTROPY_CERTIFICATE": true,
+    "ANTI_ENTROPY_PARTITION": true,
+    "ANTI_ENTROPY_PROOF": true,
+    "ANTI_ENTROPY_RECONVERGENCE": true
+  },
+  "log_path": "artifacts/replacement_gap/bd-23x2/operator_e2e_log.jsonl",
+  "missing_fields": [],
+  "required_fields": [
+    "certificate_id",
+    "decision",
+    "delta_mode",
+    "epoch",
+    "peer_id",
+    "proof_mode",
+    "reason_code",
+    "root_digest",
+    "trace_id"
+  ],
+  "schema_version": "bd-23x2-operator-e2e-v1",
+  "trace_id": "trace-bd-23x2-operator-e2e",
+  "verdict": "PASS"
+}

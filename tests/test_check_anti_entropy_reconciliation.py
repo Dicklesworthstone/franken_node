@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
-import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -11,7 +12,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import check_anti_entropy_reconciliation as checker
+import check_anti_entropy_reconciliation as checker  # noqa: E402
+
+
+def run_main(args: list[str]) -> tuple[int, str]:
+    old_argv = sys.argv
+    stdout = io.StringIO()
+    try:
+        sys.argv = ["check_anti_entropy_reconciliation.py", *args]
+        with contextlib.redirect_stdout(stdout):
+            try:
+                checker.main()
+            except SystemExit as exc:
+                return int(exc.code), stdout.getvalue()
+    finally:
+        sys.argv = old_argv
+    return 0, stdout.getvalue()
 
 
 class TestSelfTest(unittest.TestCase):
@@ -30,6 +46,7 @@ class TestRunAllStructure(unittest.TestCase):
     def test_bead_id(self):
         result = checker.run_all()
         self.assertEqual(result["bead_id"], "bd-390")
+        self.assertEqual(result["replacement_bead_id"], "bd-23x2")
 
     def test_section(self):
         result = checker.run_all()
@@ -167,6 +184,80 @@ class TestRustModuleChecks(unittest.TestCase):
                      if c["name"] == "rust_epoch_enforcement")
         self.assertTrue(check["passed"], check["detail"])
 
+    def test_canonical_mmr_verifier(self):
+        result = checker.run_all()
+        check = next(c for c in result["checks"]
+                     if c["name"] == "bd_23x2_canonical_mmr_verifier")
+        self.assertTrue(check["passed"], check["detail"])
+
+    def test_replacement_evidence_files(self):
+        result = checker.run_all()
+        check = next(c for c in result["checks"]
+                     if c["name"] == "bd_23x2_evidence_files")
+        self.assertTrue(check["passed"], check["detail"])
+
+    def test_operator_e2e_telemetry(self):
+        result = checker.run_all()
+        check = next(c for c in result["checks"]
+                     if c["name"] == "bd_23x2_operator_e2e_telemetry")
+        self.assertTrue(check["passed"], check["detail"])
+
+    def test_completion_debt_obligations_present(self):
+        contract = checker.completion_debt_contract()
+        self.assertEqual(contract["completion_bead"], "bd-23x2.1")
+        obligations = {
+            obligation["spec_item"]: obligation
+            for obligation in contract["coverage_obligations"]
+        }
+        self.assertEqual(
+            set(obligations),
+            {
+                "tests.unit.primary",
+                "tests.integration.primary",
+                "tests.e2e.primary",
+            },
+        )
+        self.assertIn(
+            "tests/e2e/anti_entropy_operator_suite.sh",
+            obligations["tests.e2e.primary"]["evidence_paths"],
+        )
+        self.assertIn(
+            "tests/conformance/mmr_proof_verification.rs",
+            obligations["tests.integration.primary"]["evidence_paths"],
+        )
+        self.assertIn("root_digest", obligations["tests.e2e.primary"]["required_fields"])
+
+    def test_completion_debt_missing_spec_item_fails(self):
+        original = checker.COMPLETION_DEBT_OBLIGATIONS
+        checker.COMPLETION_DEBT_OBLIGATIONS = [
+            obligation
+            for obligation in original
+            if obligation["spec_item"] != "tests.e2e.primary"
+        ]
+        try:
+            result = checker.check_completion_debt_coverage()
+        finally:
+            checker.COMPLETION_DEBT_OBLIGATIONS = original
+        self.assertEqual(result["name"], "bd_23x2_1_completion_debt")
+        self.assertFalse(result["passed"])
+        self.assertIn("tests.e2e.primary", result["detail"])
+
+    def test_completion_debt_missing_evidence_path_fails(self):
+        original = checker.COMPLETION_DEBT_OBLIGATIONS
+        mutated = [dict(obligation) for obligation in original]
+        mutated[0] = dict(mutated[0])
+        mutated[0]["evidence_paths"] = list(mutated[0]["evidence_paths"]) + [
+            "artifacts/replacement_gap/bd-23x2/missing-completion-debt.json"
+        ]
+        checker.COMPLETION_DEBT_OBLIGATIONS = mutated
+        try:
+            result = checker.check_completion_debt_coverage()
+        finally:
+            checker.COMPLETION_DEBT_OBLIGATIONS = original
+        self.assertEqual(result["name"], "bd_23x2_1_completion_debt")
+        self.assertFalse(result["passed"])
+        self.assertIn("missing-completion-debt.json", result["detail"])
+
 
 class TestConstants(unittest.TestCase):
     def test_event_code_count(self):
@@ -192,24 +283,18 @@ class TestJsonOutput(unittest.TestCase):
         self.assertIsInstance(json_str, str)
 
     def test_cli_json(self):
-        proc = subprocess.run(
-            [sys.executable,
-             str(ROOT / "scripts" / "check_anti_entropy_reconciliation.py"), "--json"],
-            capture_output=True, text=True,
-        )
-        data = json.loads(proc.stdout)
+        returncode, stdout = run_main(["--json"])
+        self.assertEqual(returncode, 0)
+        data = json.JSONDecoder().decode(stdout)
         self.assertEqual(data["bead_id"], "bd-390")
+        self.assertEqual(data["replacement_bead_id"], "bd-23x2")
         self.assertIn("checks", data)
+        self.assertEqual(data["completion_debt"]["completion_bead"], "bd-23x2.1")
 
     def test_cli_self_test(self):
-        proc = subprocess.run(
-            [sys.executable,
-             str(ROOT / "scripts" / "check_anti_entropy_reconciliation.py"),
-             "--self-test"],
-            capture_output=True, text=True,
-        )
-        self.assertEqual(proc.returncode, 0)
-        self.assertIn("self_test passed", proc.stdout)
+        returncode, stdout = run_main(["--self-test"])
+        self.assertEqual(returncode, 0)
+        self.assertIn("self_test passed", stdout)
 
 
 class TestOverallVerdict(unittest.TestCase):
