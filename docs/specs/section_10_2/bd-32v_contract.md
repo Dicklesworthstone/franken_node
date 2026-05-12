@@ -24,6 +24,15 @@ Minimized fixtures follow the same schema as standard fixtures (`compatibility_f
 Minimized fixtures are written to `docs/fixtures/minimized/` with naming convention:
 `<original_fixture_id>_min.json`
 
+### Implementation and Verification Paths
+
+- Fixture-generation design: `docs/MINIMIZED_FIXTURE_SPEC.md`
+- Minimized fixture output root: `docs/fixtures/minimized/`
+- Verification implementation: `scripts/check_minimized_fixtures.py`
+- Regression tests: `tests/test_check_minimized_fixtures.py`
+- Machine evidence: `artifacts/section_10_2/bd-32v/verification_evidence.json`
+- Human summary: `artifacts/section_10_2/bd-32v/verification_summary.md`
+
 ## Invariants
 
 1. `docs/MINIMIZED_FIXTURE_SPEC.md` design document exists.
