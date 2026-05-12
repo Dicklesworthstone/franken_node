@@ -35,6 +35,8 @@ REPORT_PATH = ROOT / "reproduction_report.json"
 SCHEMA_VERSION = "erp-report.v2"
 DEFAULT_TIMEOUT_SECONDS = 300
 SUPPORTED_HARNESS_KINDS = {"python"}
+EMPTY_CLAIMS: list[dict[str, Any]] = []
+BOOLEAN_THRESHOLD_VALUES = {"true": True, "false": False}
 
 
 def _utc_now_iso() -> str:
@@ -71,7 +73,7 @@ def _append_execution_log(
 def _parse_claims_toml(path: Path) -> list[dict[str, Any]]:
     """Load [[claim]] entries from TOML with a minimal fallback parser."""
     if not path.is_file():
-        return []
+        return list(EMPTY_CLAIMS)
     try:
         import tomllib
     except ImportError:
@@ -210,10 +212,8 @@ def _extract_measurement(payload: dict[str, Any], measurement_key: str) -> Any:
 def _coerce_threshold_value(raw: str) -> Any:
     token = raw.strip()
     lowered = token.lower()
-    if lowered == "true":
-        return True
-    if lowered == "false":
-        return False
+    if lowered in BOOLEAN_THRESHOLD_VALUES:
+        return BOOLEAN_THRESHOLD_VALUES[lowered]
     if re.fullmatch(r"-?\d+(?:\.\d+)?", token):
         return float(token) if "." in token else int(token)
     return token

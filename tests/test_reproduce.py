@@ -90,6 +90,17 @@ def _load_cli_json(result: subprocess.CompletedProcess[str]) -> dict[str, object
     return payload
 
 
+class TestReproductionHelpers(unittest.TestCase):
+    def test_missing_claims_file_returns_empty_claim_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing = Path(tmpdir) / "missing-claims.toml"
+            self.assertEqual(reproduce._parse_claims_toml(missing), [])
+
+    def test_boolean_threshold_literals_are_coerced(self) -> None:
+        self.assertIs(reproduce._coerce_threshold_value("true"), True)
+        self.assertIs(reproduce._coerce_threshold_value("false"), False)
+
+
 class TestReproductionRunner(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
