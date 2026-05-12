@@ -37,6 +37,14 @@ Current command-local reporting surfaces are `franken-node init --json`,
 `franken-node init --structured-logs-jsonl`, `franken-node run --json`, and
 `franken-node run --structured-logs-jsonl`.
 
+The named completion-debt artifacts for the original target now exist as
+current-reality boundary evidence:
+
+- `tests/e2e/install_to_production_pathway.sh` checks the section-13 verifier
+  and timing report boundary. It must not be cited as full end-to-end success.
+- `artifacts/13/onboarding_timing_report.json` records the five setup cohorts
+  with `target_pathway_shipped=false` and no claimed target timings.
+
 ## Planned Target Pathway
 
 1. **Install** -- `curl -fsSL https://get.frankennode.dev | sh`
@@ -100,6 +108,11 @@ the narrower bootstrap surface documented above.
    records pass/fail for each check.
 6. Summary artifact at `artifacts/section_13/bd-34d5/verification_summary.md`
    provides a human-readable roll-up.
+7. Completion-debt artifacts at `tests/e2e/install_to_production_pathway.sh`
+   and `artifacts/13/onboarding_timing_report.json` cite the original expected
+   shell/report paths while preserving the reality boundary:
+   `target_pathway_shipped=false` and these artifacts must not be cited as full
+   end-to-end success.
 
 ## Dependencies
 - bd-1ta (Section 10.13 Epic -- connector infrastructure)

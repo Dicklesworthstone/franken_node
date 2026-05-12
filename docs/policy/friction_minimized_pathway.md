@@ -215,6 +215,11 @@ is documentation- and contract-oriented: it verifies the docs distinguish the
 current shipped surface from the future target pathway instead of pretending
 the target flow is already live.
 
+The current-reality sentinel is checked by
+`tests/e2e/install_to_production_pathway.sh`. It runs the section verifier and
+confirms `artifacts/13/onboarding_timing_report.json` has
+`target_pathway_shipped=false`; it must not be cited as full end-to-end success.
+
 ---
 
 ## 9. Verification
@@ -236,3 +241,6 @@ The verification script `scripts/check_friction_pathway.py` checks:
    no-silent-failure rule for the future pathway contract.
 
 Evidence is recorded at `artifacts/section_13/bd-34d5/verification_evidence.json`.
+The named onboarding timing artifact is recorded at
+`artifacts/13/onboarding_timing_report.json`; until the target pathway ships,
+it is boundary evidence rather than a passing timing claim.

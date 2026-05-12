@@ -23,6 +23,8 @@ SPEC_PATH = ROOT / "docs" / "specs" / "section_13" / "bd-34d5_contract.md"
 POLICY_PATH = ROOT / "docs" / "policy" / "friction_minimized_pathway.md"
 EVIDENCE_PATH = ROOT / "artifacts" / "section_13" / "bd-34d5" / "verification_evidence.json"
 SUMMARY_PATH = ROOT / "artifacts" / "section_13" / "bd-34d5" / "verification_summary.md"
+PATHWAY_SENTINEL_PATH = ROOT / "tests" / "e2e" / "install_to_production_pathway.sh"
+ONBOARDING_TIMING_REPORT_PATH = ROOT / "artifacts" / "13" / "onboarding_timing_report.json"
 
 ARCHETYPES = [
     "Express API",
@@ -39,6 +41,14 @@ INVARIANTS = [
     "INV-FMP-ZERO-EDIT",
     "INV-FMP-TELEMETRY",
     "INV-FMP-ARCHETYPES",
+]
+
+SETUP_IDS = [
+    "macos_npm",
+    "linux_npm",
+    "windows_npm",
+    "docker_container",
+    "github_actions_ci",
 ]
 
 
@@ -392,6 +402,135 @@ def check_archetype_scores() -> dict:
     }
 
 
+def check_named_pathway_artifacts() -> dict:
+    """Check that bd-34d5's named completion-debt artifacts exist."""
+    required = {
+        "tests/e2e/install_to_production_pathway.sh": PATHWAY_SENTINEL_PATH,
+        "artifacts/13/onboarding_timing_report.json": ONBOARDING_TIMING_REPORT_PATH,
+    }
+    missing = [path for path, absolute in required.items() if not absolute.is_file()]
+    if missing:
+        return {
+            "check": "named_pathway_artifacts",
+            "passed": False,
+            "detail": f"Missing named bd-34d5 artifacts: {missing}",
+        }
+    shell_text = PATHWAY_SENTINEL_PATH.read_text(encoding="utf-8")
+    report_text = ONBOARDING_TIMING_REPORT_PATH.read_text(encoding="utf-8")
+    shell_markers = [
+        "bd-34d5",
+        "current-reality boundary",
+        "does not prove the future full target pathway",
+    ]
+    report_markers = ["target_pathway_shipped", "setup_results", "not_measured_target_unshipped"]
+    missing_markers = [
+        marker for marker in shell_markers if marker not in shell_text
+    ] + [
+        marker for marker in report_markers if marker not in report_text
+    ]
+    ok = not missing_markers
+    return {
+        "check": "named_pathway_artifacts",
+        "passed": ok,
+        "detail": (
+            "Named shell sentinel and onboarding timing report are present with reality-boundary markers"
+            if ok
+            else f"Named artifacts missing markers: {missing_markers}"
+        ),
+    }
+
+
+def check_onboarding_timing_report() -> dict:
+    """Check that the timing report covers all required setups without overclaiming."""
+    if not ONBOARDING_TIMING_REPORT_PATH.is_file():
+        return {
+            "check": "onboarding_timing_report",
+            "passed": False,
+            "detail": "artifacts/13/onboarding_timing_report.json missing",
+        }
+    try:
+        report = json.JSONDecoder().decode(
+            ONBOARDING_TIMING_REPORT_PATH.read_text(encoding="utf-8")
+        )
+    except json.JSONDecodeError as exc:
+        return {
+            "check": "onboarding_timing_report",
+            "passed": False,
+            "detail": f"Invalid onboarding timing JSON: {exc}",
+        }
+    setup_results = report.get("setup_results")
+    if not isinstance(setup_results, list):
+        return {
+            "check": "onboarding_timing_report",
+            "passed": False,
+            "detail": "onboarding timing report lacks setup_results list",
+        }
+    setup_by_id = {
+        item.get("setup_id"): item
+        for item in setup_results
+        if isinstance(item, dict)
+    }
+    missing_setups = [setup for setup in SETUP_IDS if setup not in setup_by_id]
+    overclaimed = [
+        setup_id
+        for setup_id, item in setup_by_id.items()
+        if item.get("status") != "not_measured_target_unshipped"
+        or item.get("target_total_elapsed_seconds") is not None
+    ]
+    target_pathway_shipped = report.get("target_pathway_shipped")
+    claimed_full_e2e_success = report.get("claimed_full_e2e_success")
+    ok = (
+        report.get("bead_id") == BEAD_ID
+        and isinstance(target_pathway_shipped, bool)
+        and not target_pathway_shipped
+        and isinstance(claimed_full_e2e_success, bool)
+        and not claimed_full_e2e_success
+        and not missing_setups
+        and not overclaimed
+    )
+    if ok:
+        detail = "Onboarding timing report covers all 5 setups as current-reality, non-overclaiming evidence"
+    elif missing_setups:
+        detail = f"Onboarding timing report missing setups: {missing_setups}"
+    elif overclaimed:
+        detail = f"Onboarding timing report overclaims measured target success for: {overclaimed}"
+    else:
+        detail = "Onboarding timing report bead id or reality flags are incorrect"
+    return {
+        "check": "onboarding_timing_report",
+        "passed": ok,
+        "detail": detail,
+    }
+
+
+def check_completion_debt_citations() -> dict:
+    """Check that docs cite the named artifacts and their non-overclaiming role."""
+    if not SPEC_PATH.is_file() or not POLICY_PATH.is_file():
+        return {
+            "check": "completion_debt_citations",
+            "passed": False,
+            "detail": "Spec or policy file missing; cannot check completion-debt citations",
+        }
+    combined = f"{SPEC_PATH.read_text(encoding='utf-8')}\n{POLICY_PATH.read_text(encoding='utf-8')}"
+    required = [
+        "tests/e2e/install_to_production_pathway.sh",
+        "artifacts/13/onboarding_timing_report.json",
+        "target_pathway_shipped=false",
+        "must not be cited as full end-to-end success",
+    ]
+    missing = [fragment for fragment in required if fragment not in combined]
+    ok = not missing
+    return {
+        "check": "completion_debt_citations",
+        "passed": ok,
+        "detail": (
+            "Spec and policy cite the named shell/report artifacts with non-overclaiming boundaries"
+            if ok
+            else f"Missing completion-debt citation fragments: {missing}"
+        ),
+    }
+
+
 ALL_CHECKS = [
     check_spec_exists,
     check_policy_exists,
@@ -408,6 +547,9 @@ ALL_CHECKS = [
     check_current_surface_reality,
     check_current_reporting_surface,
     check_archetype_scores,
+    check_named_pathway_artifacts,
+    check_onboarding_timing_report,
+    check_completion_debt_citations,
 ]
 
 
@@ -547,6 +689,9 @@ def self_test() -> None:
         "current_surface_reality",
         "current_reporting_surface",
         "archetype_scores",
+        "named_pathway_artifacts",
+        "onboarding_timing_report",
+        "completion_debt_citations",
     }
     if check_names != expected_names:
         raise AssertionError(f"check names mismatch: {check_names ^ expected_names}")

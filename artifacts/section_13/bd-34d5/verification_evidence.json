@@ -1,9 +1,9 @@
 {
   "bead_id": "bd-34d5",
   "section": "section_13",
-  "timestamp_utc": "2026-04-27T04:48:56.173121+00:00",
-  "total_checks": 15,
-  "passed": 15,
+  "timestamp_utc": "2026-05-12T22:28:20.147358+00:00",
+  "total_checks": 18,
+  "passed": 18,
   "failed": 0,
   "all_passed": true,
   "checks": [
@@ -81,6 +81,21 @@
       "check": "archetype_scores",
       "passed": true,
       "detail": "Found 5/5 archetype compatibility scores"
+    },
+    {
+      "check": "named_pathway_artifacts",
+      "passed": true,
+      "detail": "Named shell sentinel and onboarding timing report are present with reality-boundary markers"
+    },
+    {
+      "check": "onboarding_timing_report",
+      "passed": true,
+      "detail": "Onboarding timing report covers all 5 setups as current-reality, non-overclaiming evidence"
+    },
+    {
+      "check": "completion_debt_citations",
+      "passed": true,
+      "detail": "Spec and policy cite the named shell/report artifacts with non-overclaiming boundaries"
     }
   ]
 }

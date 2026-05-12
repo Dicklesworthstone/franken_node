@@ -26,10 +26,10 @@
 
 | Bead | Target | Measured | Required | Pass |
 |------|--------|----------|----------|------|
-| bd-28sz | overall_pass_rate >= 95% | 98.7 | 95.0 | PASS |
+| bd-28sz | overall_pass_rate >= 95% | 98.75 | 95.0 | PASS |
 | bd-3agp | overall_velocity_ratio >= 3.0 | 3.1507 | 3.0 | PASS |
 | bd-3cpa | compromise_reduction_ratio >= 10.0 | 10.0 | 10.0 | PASS |
-| bd-34d5 | all friction pathway checks pass | 13/13 checks | 13/13 checks | PASS |
+| bd-34d5 | all friction pathway checks pass | 18/18 checks | 18/18 checks | PASS |
 | bd-2l1k | coverage_ratio >= 1.0 | 1.0 | 1.0 | PASS |
 | bd-whxp | independent_replications_passing >= 2 | 2 | 2 | PASS |
 

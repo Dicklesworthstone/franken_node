@@ -1,0 +1,62 @@
+{
+  "bead_id": "bd-34d5",
+  "report_type": "current_reality_boundary",
+  "target_pathway_shipped": false,
+  "claimed_full_e2e_success": false,
+  "purpose": "Records the five required setup cohorts and the explicit reason target end-to-end timings are not claimed by the current repository.",
+  "current_shipped_surface": [
+    "curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main/install.sh | bash",
+    "franken-node init --profile balanced",
+    "franken-node run ./my-app --policy balanced"
+  ],
+  "target_gap_summary": [
+    "No get.frankennode.dev installer alias is shipped in this repository.",
+    "franken-node init does not auto-detect archetypes during onboarding.",
+    "FMP-001 through FMP-004 pathway telemetry is reserved target semantics, not live CLI output.",
+    "The full install-to-first-safe-production pathway is not yet measurable as a passing target E2E."
+  ],
+  "setup_results": [
+    {
+      "setup_id": "macos_npm",
+      "setup": "macOS + npm",
+      "status": "not_measured_target_unshipped",
+      "target_total_elapsed_seconds": null,
+      "current_boundary_evidence": "docs/specs/section_13/bd-34d5_contract.md documents this as a future target, not current shipped behavior."
+    },
+    {
+      "setup_id": "linux_npm",
+      "setup": "Linux + npm",
+      "status": "not_measured_target_unshipped",
+      "target_total_elapsed_seconds": null,
+      "current_boundary_evidence": "docs/policy/friction_minimized_pathway.md documents the current raw install/init/run surface."
+    },
+    {
+      "setup_id": "windows_npm",
+      "setup": "Windows + npm",
+      "status": "not_measured_target_unshipped",
+      "target_total_elapsed_seconds": null,
+      "current_boundary_evidence": "No Windows install-to-production target harness is shipped."
+    },
+    {
+      "setup_id": "docker_container",
+      "setup": "Docker container",
+      "status": "not_measured_target_unshipped",
+      "target_total_elapsed_seconds": null,
+      "current_boundary_evidence": "No Docker install-to-production target harness is shipped."
+    },
+    {
+      "setup_id": "github_actions_ci",
+      "setup": "CI environment (GitHub Actions)",
+      "status": "not_measured_target_unshipped",
+      "target_total_elapsed_seconds": null,
+      "current_boundary_evidence": "The section-13 gate validates the documentation boundary rather than a live target pathway."
+    }
+  ],
+  "verification": {
+    "sentinel_script": "tests/e2e/install_to_production_pathway.sh",
+    "checker": "scripts/check_friction_pathway.py",
+    "unit_tests": "tests/test_check_friction_pathway.py",
+    "machine_evidence": "artifacts/section_13/bd-34d5/verification_evidence.json",
+    "human_summary": "artifacts/section_13/bd-34d5/verification_summary.md"
+  }
+}

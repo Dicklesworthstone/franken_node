@@ -2,11 +2,11 @@
 """Unit tests for scripts/check_friction_pathway.py (bd-34d5)."""
 
 import contextlib
-import importlib.util
 import io
 import json
 import sys
 import unittest
+from importlib import util as importlib_util
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,13 +14,13 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def load_check_friction_pathway():
-    spec = importlib.util.spec_from_file_location(
+    spec = importlib_util.spec_from_file_location(
         "check_friction_pathway",
         ROOT / "scripts" / "check_friction_pathway.py",
     )
     if spec is None or spec.loader is None:
         raise RuntimeError("failed to load check_friction_pathway.py")
-    module = importlib.util.module_from_spec(spec)
+    module = importlib_util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
@@ -152,6 +152,21 @@ class TestCheckFrictionPathway(unittest.TestCase):
     def test_current_reporting_surface(self):
         result = cfp.check_current_reporting_surface()
         self.assertEqual(result["check"], "current_reporting_surface")
+        self.assertTrue(result["passed"], result["detail"])
+
+    def test_named_pathway_artifacts(self):
+        result = cfp.check_named_pathway_artifacts()
+        self.assertEqual(result["check"], "named_pathway_artifacts")
+        self.assertTrue(result["passed"], result["detail"])
+
+    def test_onboarding_timing_report(self):
+        result = cfp.check_onboarding_timing_report()
+        self.assertEqual(result["check"], "onboarding_timing_report")
+        self.assertTrue(result["passed"], result["detail"])
+
+    def test_completion_debt_citations(self):
+        result = cfp.check_completion_debt_citations()
+        self.assertEqual(result["check"], "completion_debt_citations")
         self.assertTrue(result["passed"], result["detail"])
 
     # ------------------------------------------------------------------

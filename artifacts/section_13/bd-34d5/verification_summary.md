@@ -2,9 +2,9 @@
 
 **Bead:** bd-34d5
 **Section:** 13 -- Friction-Minimized Install-to-Production Pathway
-**Date:** 2026-04-27 04:48:56 UTC
+**Date:** 2026-05-12 22:28:20 UTC
 
-## Results: 15/15 checks passed
+## Results: 18/18 checks passed
 
 | # | Check | Result | Detail |
 |---|-------|--------|--------|
@@ -23,5 +23,8 @@
 | 13 | current_surface_reality | PASS | Docs distinguish current shipped surface from future pathway targets |
 | 14 | current_reporting_surface | PASS | Current docs enumerate the shipped init/run JSON and JSONL surfaces |
 | 15 | archetype_scores | PASS | Found 5/5 archetype compatibility scores |
+| 16 | named_pathway_artifacts | PASS | Named shell sentinel and onboarding timing report are present with reality-boundary markers |
+| 17 | onboarding_timing_report | PASS | Onboarding timing report covers all 5 setups as current-reality, non-overclaiming evidence |
+| 18 | completion_debt_citations | PASS | Spec and policy cite the named shell/report artifacts with non-overclaiming boundaries |
 
 All checks passed. Bead bd-34d5 is ready for closure.
