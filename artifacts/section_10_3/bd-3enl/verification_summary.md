@@ -1,7 +1,7 @@
 # bd-3enl Verification Summary
 
 ## Result
-PASS (32/32 gate checks pass)
+PASS (33/33 gate checks pass)
 
 ## Delivered
 - `scripts/check_section_10_3_gate.py`
@@ -18,6 +18,7 @@ PASS (32/32 gate checks pass)
 - `python3 scripts/check_section_10_3_gate.py --json`
 
 ## Key Outcomes
-- Gate checker self-test passes (8/8).
-- Gate checker unit tests pass (20/20).
+- Gate checker self-test passes with completion-debt contract coverage (10/10).
+- Gate checker unit tests pass (27/27).
 - Gate verdict is PASS: all 8 Section 10.3 beads have verification evidence with PASS verdicts.
+- `bd-2avo.1` completion debt is explicit in the gate output: unit, E2E, migrations, and telemetry obligations are mapped to concrete source-only evidence paths.

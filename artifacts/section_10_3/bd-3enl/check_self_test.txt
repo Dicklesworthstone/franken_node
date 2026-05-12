@@ -2,8 +2,8 @@
   "bead_id": "bd-3enl",
   "mode": "self-test",
   "verdict": "PASS",
-  "total": 8,
-  "passed": 8,
+  "total": 10,
+  "passed": 10,
   "failed": 0,
   "checks": [
     {
@@ -27,6 +27,11 @@
       "detail": "10.3"
     },
     {
+      "check": "completion_debt_items_set",
+      "pass": true,
+      "detail": "migrations.primary,telemetry.primary,tests.e2e.primary,tests.unit.primary"
+    },
+    {
       "check": "run_all_is_dict",
       "pass": true,
       "detail": "dict"
@@ -45,7 +50,12 @@
       "check": "run_all_has_section_beads",
       "pass": true,
       "detail": "8 beads"
+    },
+    {
+      "check": "run_all_has_completion_debt",
+      "pass": true,
+      "detail": "ok"
     }
   ],
-  "timestamp": "2026-02-22T08:10:52.736679+00:00"
+  "timestamp": "2026-05-12T00:05:22.224119+00:00"
 }

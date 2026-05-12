@@ -2,15 +2,85 @@
   "bead_id": "bd-3enl",
   "section": "10.3",
   "title": "Section 10.3 verification gate",
-  "generated_at": "2026-02-22T08:11:14Z",
+  "generated_at": "2026-05-12T00:05:22Z",
   "verdict": "PASS",
   "overall_pass": true,
   "status": "all_bead_evidence_present",
   "summary": {
-    "passed": 32,
+    "passed": 33,
     "failed": 0,
-    "total": 32,
+    "total": 33,
     "missing_evidence_beads": []
+  },
+  "completion_debt": {
+    "parent_bead": "bd-2avo",
+    "completion_bead": "bd-2avo.1",
+    "required_spec_items": [
+      "migrations.primary",
+      "telemetry.primary",
+      "tests.e2e.primary",
+      "tests.unit.primary"
+    ],
+    "coverage_obligations": [
+      {
+        "spec_item": "tests.unit.primary",
+        "category": "unit",
+        "status": "covered",
+        "evidence_paths": [
+          "tests/test_check_section_10_3_gate.py",
+          "tests/test_check_project_scanner.py",
+          "tests/test_check_risk_scorer.py",
+          "tests/test_check_rewrite_engine.py",
+          "tests/test_check_migration_validation.py",
+          "tests/test_check_rollout_planner.py",
+          "tests/test_check_confidence_report.py",
+          "tests/test_check_migrate_report.py",
+          "tests/test_check_failure_replay.py"
+        ]
+      },
+      {
+        "spec_item": "tests.e2e.primary",
+        "category": "e2e",
+        "status": "covered",
+        "evidence_paths": [
+          "tests/e2e/migration_cohort_validation.sh",
+          "artifacts/15/migration_cohort_results.json",
+          "artifacts/15/migration_cohort_validation_log.jsonl",
+          "artifacts/15/migration_cohort_validation_summary.json"
+        ]
+      },
+      {
+        "spec_item": "migrations.primary",
+        "category": "migrations",
+        "status": "covered",
+        "evidence_paths": [
+          "scripts/check_project_scanner.py",
+          "scripts/check_risk_scorer.py",
+          "scripts/check_rewrite_engine.py",
+          "scripts/check_migration_validation.py",
+          "scripts/check_rollout_planner.py",
+          "scripts/check_confidence_report.py",
+          "scripts/check_migrate_report.py",
+          "scripts/check_failure_replay.py"
+        ]
+      },
+      {
+        "spec_item": "telemetry.primary",
+        "category": "telemetry",
+        "status": "covered",
+        "required_fields": [
+          "trace_id",
+          "event_code",
+          "status",
+          "detail"
+        ],
+        "evidence_paths": [
+          "scripts/check_section_10_3_gate.py",
+          "tests/e2e/migration_cohort_validation.sh",
+          "artifacts/15/migration_cohort_validation_log.jsonl"
+        ]
+      }
+    ]
   },
   "checks": [
     {
@@ -26,7 +96,7 @@
       "exit_code": 0,
       "status": "PASS",
       "output_path": "artifacts/section_10_3/bd-3enl/unit_tests.txt",
-      "summary": "Ran 20 tests: OK"
+      "summary": "Ran 27 tests: OK"
     },
     {
       "name": "gate_report",
@@ -36,7 +106,7 @@
       "output_path": "artifacts/section_10_3/bd-3enl/check_report.json",
       "summary": {
         "verdict": "PASS",
-        "passed": 32,
+        "passed": 33,
         "failed": 0,
         "missing_evidence_beads": []
       }

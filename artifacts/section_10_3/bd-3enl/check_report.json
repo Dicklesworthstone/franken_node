@@ -5,8 +5,8 @@
   "gate": true,
   "verdict": "PASS",
   "overall_pass": true,
-  "total": 32,
-  "passed": 32,
+  "total": 33,
+  "passed": 33,
   "failed": 0,
   "section_beads": [
     "bd-2a0",
@@ -18,6 +18,102 @@
     "bd-hg1",
     "bd-3f9"
   ],
+  "completion_debt": {
+    "parent_bead": "bd-2avo",
+    "completion_bead": "bd-2avo.1",
+    "required_spec_items": [
+      "migrations.primary",
+      "telemetry.primary",
+      "tests.e2e.primary",
+      "tests.unit.primary"
+    ],
+    "coverage_obligations": [
+      {
+        "spec_item": "tests.unit.primary",
+        "category": "unit",
+        "status": "covered",
+        "description": "section 10.3 checker unit tests exercise gate shape, evidence pass/fail behavior, and completion-debt contract drift",
+        "evidence_paths": [
+          "tests/test_check_section_10_3_gate.py",
+          "tests/test_check_project_scanner.py",
+          "tests/test_check_risk_scorer.py",
+          "tests/test_check_rewrite_engine.py",
+          "tests/test_check_migration_validation.py",
+          "tests/test_check_rollout_planner.py",
+          "tests/test_check_confidence_report.py",
+          "tests/test_check_migrate_report.py",
+          "tests/test_check_failure_replay.py"
+        ],
+        "commands": [
+          "python3 -m unittest tests/test_check_section_10_3_gate.py"
+        ]
+      },
+      {
+        "spec_item": "tests.e2e.primary",
+        "category": "e2e",
+        "status": "covered",
+        "description": "migration cohort validation shell suite exercises deterministic cohort artifacts and structured event logs without cargo",
+        "evidence_paths": [
+          "tests/e2e/migration_cohort_validation.sh",
+          "artifacts/15/migration_cohort_results.json",
+          "artifacts/15/migration_cohort_validation_log.jsonl",
+          "artifacts/15/migration_cohort_validation_summary.json"
+        ],
+        "commands": [
+          "tests/e2e/migration_cohort_validation.sh"
+        ]
+      },
+      {
+        "spec_item": "migrations.primary",
+        "category": "migrations",
+        "status": "covered",
+        "description": "all section 10.3 migration autopilot domains have passing evidence and summaries",
+        "evidence_paths": [
+          "scripts/check_project_scanner.py",
+          "scripts/check_risk_scorer.py",
+          "scripts/check_rewrite_engine.py",
+          "scripts/check_migration_validation.py",
+          "scripts/check_rollout_planner.py",
+          "scripts/check_confidence_report.py",
+          "scripts/check_migrate_report.py",
+          "scripts/check_failure_replay.py"
+        ],
+        "domain_groups": [
+          "confidence_report",
+          "failure_replay",
+          "migrate_report",
+          "migration_validation",
+          "project_scanner",
+          "rewrite_engine",
+          "risk_scorer",
+          "rollout_planner"
+        ],
+        "commands": [
+          "python3 scripts/check_section_10_3_gate.py --json"
+        ]
+      },
+      {
+        "spec_item": "telemetry.primary",
+        "category": "telemetry",
+        "status": "covered",
+        "description": "checker logs and E2E cohort logs preserve trace-correlated event fields",
+        "evidence_paths": [
+          "scripts/check_section_10_3_gate.py",
+          "tests/e2e/migration_cohort_validation.sh",
+          "artifacts/15/migration_cohort_validation_log.jsonl"
+        ],
+        "required_fields": [
+          "trace_id",
+          "event_code",
+          "status",
+          "detail"
+        ],
+        "commands": [
+          "python3 scripts/check_section_10_3_gate.py --json"
+        ]
+      }
+    ]
+  },
   "checks": [
     {
       "check": "evidence_bd-2a0",
@@ -178,7 +274,12 @@
       "check": "pipeline_rollout_to_report",
       "pass": true,
       "detail": "both have evidence"
+    },
+    {
+      "check": "completion_debt_bd_2avo_1_coverage",
+      "pass": true,
+      "detail": "all completion-debt obligations covered"
     }
   ],
-  "timestamp": "2026-02-22T08:10:52.694218+00:00"
+  "timestamp": "2026-05-12T00:05:22.168403+00:00"
 }

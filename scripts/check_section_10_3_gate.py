@@ -26,6 +26,8 @@ from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 GATE_BEAD = "bd-3enl"
 SECTION = "10.3"
+PARENT_COMPLETION_BEAD = "bd-2avo"
+COMPLETION_DEBT_BEAD = "bd-2avo.1"
 
 # All 8 section 10.3 implementation beads
 SECTION_BEADS = [
@@ -50,6 +52,78 @@ DOMAIN_GROUPS = {
     "migrate_report": ["bd-hg1"],
     "failure_replay": ["bd-3f9"],
 }
+
+COMPLETION_DEBT_REQUIRED_SPEC_ITEMS = {
+    "tests.unit.primary",
+    "tests.e2e.primary",
+    "migrations.primary",
+    "telemetry.primary",
+}
+
+COMPLETION_DEBT_OBLIGATIONS = [
+    {
+        "spec_item": "tests.unit.primary",
+        "category": "unit",
+        "status": "covered",
+        "description": "section 10.3 checker unit tests exercise gate shape, evidence pass/fail behavior, and completion-debt contract drift",
+        "evidence_paths": [
+            "tests/test_check_section_10_3_gate.py",
+            "tests/test_check_project_scanner.py",
+            "tests/test_check_risk_scorer.py",
+            "tests/test_check_rewrite_engine.py",
+            "tests/test_check_migration_validation.py",
+            "tests/test_check_rollout_planner.py",
+            "tests/test_check_confidence_report.py",
+            "tests/test_check_migrate_report.py",
+            "tests/test_check_failure_replay.py",
+        ],
+        "commands": ["python3 -m unittest tests/test_check_section_10_3_gate.py"],
+    },
+    {
+        "spec_item": "tests.e2e.primary",
+        "category": "e2e",
+        "status": "covered",
+        "description": "migration cohort validation shell suite exercises deterministic cohort artifacts and structured event logs without cargo",
+        "evidence_paths": [
+            "tests/e2e/migration_cohort_validation.sh",
+            "artifacts/15/migration_cohort_results.json",
+            "artifacts/15/migration_cohort_validation_log.jsonl",
+            "artifacts/15/migration_cohort_validation_summary.json",
+        ],
+        "commands": ["tests/e2e/migration_cohort_validation.sh"],
+    },
+    {
+        "spec_item": "migrations.primary",
+        "category": "migrations",
+        "status": "covered",
+        "description": "all section 10.3 migration autopilot domains have passing evidence and summaries",
+        "evidence_paths": [
+            "scripts/check_project_scanner.py",
+            "scripts/check_risk_scorer.py",
+            "scripts/check_rewrite_engine.py",
+            "scripts/check_migration_validation.py",
+            "scripts/check_rollout_planner.py",
+            "scripts/check_confidence_report.py",
+            "scripts/check_migrate_report.py",
+            "scripts/check_failure_replay.py",
+        ],
+        "domain_groups": sorted(DOMAIN_GROUPS),
+        "commands": ["python3 scripts/check_section_10_3_gate.py --json"],
+    },
+    {
+        "spec_item": "telemetry.primary",
+        "category": "telemetry",
+        "status": "covered",
+        "description": "checker logs and E2E cohort logs preserve trace-correlated event fields",
+        "evidence_paths": [
+            "scripts/check_section_10_3_gate.py",
+            "tests/e2e/migration_cohort_validation.sh",
+            "artifacts/15/migration_cohort_validation_log.jsonl",
+        ],
+        "required_fields": ["trace_id", "event_code", "status", "detail"],
+        "commands": ["python3 scripts/check_section_10_3_gate.py --json"],
+    },
+]
 
 # Key section-level artifacts
 KEY_ARTIFACTS: list[tuple[str, str]] = []
@@ -240,6 +314,45 @@ def check_pipeline_completeness() -> list[dict[str, Any]]:
     return checks
 
 
+def _completion_debt_contract() -> dict[str, Any]:
+    return {
+        "parent_bead": PARENT_COMPLETION_BEAD,
+        "completion_bead": COMPLETION_DEBT_BEAD,
+        "required_spec_items": sorted(COMPLETION_DEBT_REQUIRED_SPEC_ITEMS),
+        "coverage_obligations": COMPLETION_DEBT_OBLIGATIONS,
+    }
+
+
+def check_completion_debt_coverage() -> dict[str, Any]:
+    coverage_by_item = {
+        obligation.get("spec_item"): obligation
+        for obligation in COMPLETION_DEBT_OBLIGATIONS
+        if isinstance(obligation, dict)
+    }
+    missing_items = sorted(COMPLETION_DEBT_REQUIRED_SPEC_ITEMS - set(coverage_by_item))
+    missing_paths: list[str] = []
+    noncovered_items: list[str] = []
+    for item, obligation in coverage_by_item.items():
+        if obligation.get("status") != "covered":
+            noncovered_items.append(str(item))
+        for rel_path in obligation.get("evidence_paths", []):
+            if isinstance(rel_path, str) and not (ROOT / rel_path).exists():
+                missing_paths.append(rel_path)
+
+    passed = not missing_items and not missing_paths and not noncovered_items
+    detail = "all completion-debt obligations covered"
+    if not passed:
+        detail = json.dumps(
+            {
+                "missing_items": missing_items,
+                "missing_paths": sorted(missing_paths),
+                "noncovered_items": sorted(noncovered_items),
+            },
+            sort_keys=True,
+        )
+    return _check("completion_debt_bd_2avo_1_coverage", passed, detail)
+
+
 def run_all_checks() -> list[dict[str, Any]]:
     RESULTS.clear()
 
@@ -255,6 +368,7 @@ def run_all_checks() -> list[dict[str, Any]]:
     check_gate_deliverables()
     check_domain_coverage()
     check_pipeline_completeness()
+    check_completion_debt_coverage()
 
     return RESULTS
 
@@ -276,6 +390,7 @@ def run_all() -> dict[str, Any]:
         "passed": passed,
         "failed": failed,
         "section_beads": [b[0] for b in SECTION_BEADS],
+        "completion_debt": _completion_debt_contract(),
         "checks": results,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -291,12 +406,18 @@ def self_test() -> dict[str, Any]:
     push("domain_group_count", len(DOMAIN_GROUPS) == 8, str(len(DOMAIN_GROUPS)))
     push("gate_bead_set", GATE_BEAD == "bd-3enl", GATE_BEAD)
     push("section_set", SECTION == "10.3", SECTION)
+    push(
+        "completion_debt_items_set",
+        set(_completion_debt_contract()["required_spec_items"]) == COMPLETION_DEBT_REQUIRED_SPEC_ITEMS,
+        ",".join(_completion_debt_contract()["required_spec_items"]),
+    )
 
     report = run_all()
     push("run_all_is_dict", isinstance(report, dict), "dict")
     push("run_all_has_checks", isinstance(report.get("checks"), list), "checks list")
     push("run_all_total_matches", report.get("total") == len(report.get("checks", [])), "total vs checks")
     push("run_all_has_section_beads", len(report.get("section_beads", [])) == 8, "8 beads")
+    push("run_all_has_completion_debt", report.get("completion_debt", {}).get("completion_bead") == COMPLETION_DEBT_BEAD)
 
     passed = sum(1 for entry in checks if entry["pass"])
     failed = len(checks) - passed

@@ -32,6 +32,7 @@ class TestRunAllShape(unittest.TestCase):
         self.assertEqual(result["failed"], result["total"] - result["passed"])
         self.assertEqual(result["total"], len(result["checks"]))
         self.assertTrue(result["gate"])
+        self.assertEqual(result["completion_debt"]["completion_bead"], "bd-2avo.1")
 
     def test_check_entries_shape(self) -> None:
         result = mod.run_all()
@@ -50,6 +51,50 @@ class TestRunAllShape(unittest.TestCase):
     def test_has_timestamp(self) -> None:
         result = mod.run_all()
         self.assertIn("timestamp", result)
+
+    def test_completion_debt_obligations_present(self) -> None:
+        result = mod.run_all()
+        obligations = {
+            item["spec_item"]: item
+            for item in result["completion_debt"]["coverage_obligations"]
+        }
+        self.assertEqual(
+            set(obligations),
+            {"tests.unit.primary", "tests.e2e.primary", "migrations.primary", "telemetry.primary"},
+        )
+        self.assertEqual(obligations["migrations.primary"]["status"], "covered")
+        self.assertIn("tests/e2e/migration_cohort_validation.sh", obligations["tests.e2e.primary"]["evidence_paths"])
+
+    def test_completion_debt_check_fails_when_spec_item_missing(self) -> None:
+        globals_dict = mod.check_completion_debt_coverage.__globals__
+        original = globals_dict["COMPLETION_DEBT_OBLIGATIONS"]
+        globals_dict["COMPLETION_DEBT_OBLIGATIONS"] = [
+            item
+            for item in original
+            if item["spec_item"] != "telemetry.primary"
+        ]
+        try:
+            mod.RESULTS.clear()
+            check = mod.check_completion_debt_coverage()
+            self.assertFalse(check["pass"])
+            self.assertIn("telemetry.primary", check["detail"])
+        finally:
+            globals_dict["COMPLETION_DEBT_OBLIGATIONS"] = original
+
+    def test_completion_debt_check_fails_when_evidence_path_missing(self) -> None:
+        globals_dict = mod.check_completion_debt_coverage.__globals__
+        original = globals_dict["COMPLETION_DEBT_OBLIGATIONS"]
+        mutated = [dict(item) for item in original]
+        mutated[0] = dict(mutated[0])
+        mutated[0]["evidence_paths"] = list(mutated[0]["evidence_paths"]) + ["tests/no_such_completion_debt_test.py"]
+        globals_dict["COMPLETION_DEBT_OBLIGATIONS"] = mutated
+        try:
+            mod.RESULTS.clear()
+            check = mod.check_completion_debt_coverage()
+            self.assertFalse(check["pass"])
+            self.assertIn("tests/no_such_completion_debt_test.py", check["detail"])
+        finally:
+            globals_dict["COMPLETION_DEBT_OBLIGATIONS"] = original
 
 
 class TestSelfTest(unittest.TestCase):
@@ -147,6 +192,12 @@ class TestConstants(unittest.TestCase):
 
     def test_gate_bead_id(self) -> None:
         self.assertEqual(mod.GATE_BEAD, "bd-3enl")
+
+    def test_completion_debt_required_items(self) -> None:
+        self.assertEqual(
+            mod.COMPLETION_DEBT_REQUIRED_SPEC_ITEMS,
+            {"tests.unit.primary", "tests.e2e.primary", "migrations.primary", "telemetry.primary"},
+        )
 
 
 class TestEvidencePass(unittest.TestCase):
