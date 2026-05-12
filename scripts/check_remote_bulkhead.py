@@ -9,6 +9,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 SRC = os.path.join(ROOT, "crates", "franken-node", "src", "remote", "remote_bulkhead.rs")
+CARGO_TOML = os.path.join(ROOT, "crates", "franken-node", "Cargo.toml")
+PERF_TEST = os.path.join(ROOT, "tests", "perf", "remote_bulkhead_under_load.rs")
 
 
 def _read(path):
@@ -61,7 +63,7 @@ def _checks():
         "event_codes module present" if has_event_mod else "event_codes module missing",
     )
 
-    # 4. Error codes (11 stable error codes on BulkheadError)
+    # 4. Error codes (13 stable error codes on BulkheadError)
     error_codes = [
         "RB_ERR_NO_REMOTECAP",
         "RB_ERR_AT_CAPACITY",
@@ -71,6 +73,8 @@ def _checks():
         "RB_ERR_UNKNOWN_REQUEST",
         "RB_ERR_DUPLICATE_REQUEST",
         "RB_ERR_UNKNOWN_PERMIT",
+        "RB_ERR_INVALID_PERMIT",
+        "RB_ERR_PERMIT_ID_EXHAUSTED",
         "RB_ERR_INVALID_REQUEST_ID",
         "RB_ERR_DRAINING",
         "RB_ERR_INVALID_CONFIG",
@@ -224,7 +228,41 @@ def _checks():
     test_count = len(re.findall(r"#\[test\]", src))
     check("TEST_COVERAGE", test_count >= 10, f"{test_count} tests found (minimum 10)")
 
-    # 15. Spec contract exists
+    # 15. Cargo integration/load test wiring
+    cargo = _read(CARGO_TOML)
+    has_cargo_wiring = (
+        cargo is not None
+        and 'name = "remote_bulkhead_under_load"' in cargo
+        and 'path = "../../tests/perf/remote_bulkhead_under_load.rs"' in cargo
+        and 'required-features = ["remote-ops"]' in cargo
+    )
+    check(
+        "CARGO_TEST_WIRING",
+        has_cargo_wiring,
+        "remote_bulkhead_under_load is wired as a remote-ops Cargo test"
+        if has_cargo_wiring
+        else "missing remote_bulkhead_under_load Cargo test with remote-ops feature gate",
+    )
+
+    # 16. Integration/e2e-style load coverage
+    perf = _read(PERF_TEST)
+    has_load_coverage = (
+        perf is not None
+        and "RemoteCapLookup::Denied" in perf
+        and "e2e_saturation_flow_preserves_telemetry_and_latency_budget" in perf
+        and "p99_stays_within_target_for_cap_profiles" in perf
+        and "event_codes::RB_LATENCY_REPORT" in perf
+        and "BulkheadError::QueueSaturated" in perf
+    )
+    check(
+        "INTEGRATION_E2E_COVERAGE",
+        has_load_coverage,
+        "load contract covers saturation, denied RemoteCap, telemetry, and p99 budget"
+        if has_load_coverage
+        else "missing load/e2e coverage for saturation, denied RemoteCap, telemetry, or p99 budget",
+    )
+
+    # 17. Spec contract exists
     spec = os.path.join(ROOT, "docs", "specs", "section_10_14", "bd-v4l0_contract.md")
     check(
         "SPEC_CONTRACT",

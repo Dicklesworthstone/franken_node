@@ -3,8 +3,8 @@
   "title": "Remote Bulkhead",
   "section": "10.14",
   "verdict": "PASS",
-  "passed": 16,
-  "total": 16,
+  "passed": 18,
+  "total": 18,
   "checks": [
     {
       "check": "SOURCE_EXISTS",
@@ -24,7 +24,7 @@
     {
       "check": "ERROR_CODES",
       "passed": true,
-      "detail": "11/11 error codes"
+      "detail": "13/13 error codes"
     },
     {
       "check": "CORE_TYPES",
@@ -34,7 +34,7 @@
     {
       "check": "REMOTECAP_GATING",
       "passed": true,
-      "detail": "RemoteCap gating on acquire"
+      "detail": "RemoteCapLookup fail-closed acquire gate with queue admission regression"
     },
     {
       "check": "DRAIN_MODE",
@@ -79,7 +79,17 @@
     {
       "check": "TEST_COVERAGE",
       "passed": true,
-      "detail": "20 tests found (minimum 10)"
+      "detail": "49 tests found (minimum 10)"
+    },
+    {
+      "check": "CARGO_TEST_WIRING",
+      "passed": true,
+      "detail": "remote_bulkhead_under_load is wired as a remote-ops Cargo test"
+    },
+    {
+      "check": "INTEGRATION_E2E_COVERAGE",
+      "passed": true,
+      "detail": "load contract covers saturation, denied RemoteCap, telemetry, and p99 budget"
     },
     {
       "check": "SPEC_CONTRACT",

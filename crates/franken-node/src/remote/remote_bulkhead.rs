@@ -978,7 +978,7 @@ mod tests {
     fn empty_request_id_is_rejected_fail_closed() {
         let mut b = bulkhead_reject(2);
         let err = b
-            .acquire(true, "   ", 1)
+            .acquire(RemoteCapLookup::Granted, "   ", 1)
             .expect_err("empty request id must fail closed");
         assert!(matches!(err, BulkheadError::InvalidRequestId { .. }));
         assert_eq!(b.current_in_flight(), 0);
@@ -991,7 +991,7 @@ mod tests {
             .acquire(RemoteCapLookup::Granted, "dup", 1)
             .expect("first permit");
         let err = b
-            .acquire(true, "dup", 2)
+            .acquire(RemoteCapLookup::Granted, "dup", 2)
             .expect_err("duplicate active request id must fail closed");
         assert!(matches!(
             err,
@@ -1009,11 +1009,11 @@ mod tests {
             .acquire(RemoteCapLookup::Granted, "active", 1)
             .expect("active permit");
         let queued = b
-            .acquire(true, "queued", 2)
+            .acquire(RemoteCapLookup::Granted, "queued", 2)
             .expect_err("first queued request");
         assert!(matches!(queued, BulkheadError::Queued { .. }));
         let duplicate = b
-            .acquire(true, "queued", 3)
+            .acquire(RemoteCapLookup::Granted, "queued", 3)
             .expect_err("duplicate queued request must fail closed");
         assert!(matches!(
             duplicate,
@@ -1034,13 +1034,13 @@ mod tests {
         b.next_permit_id = u64::MAX;
 
         let terminal = b
-            .acquire(true, "terminal", 1)
+            .acquire(RemoteCapLookup::Granted, "terminal", 1)
             .expect("terminal permit id should still be issued once");
         assert_eq!(terminal.permit_id(), u64::MAX);
         b.release(terminal, 2).expect("release terminal permit");
 
         let err = b
-            .acquire(true, "after-terminal", 3)
+            .acquire(RemoteCapLookup::Granted, "after-terminal", 3)
             .expect_err("permit id exhaustion must fail closed");
         assert!(matches!(
             err,
@@ -1062,10 +1062,10 @@ mod tests {
             .acquire(RemoteCapLookup::Granted, "active", 1)
             .expect("active permit");
         let _queued = b
-            .acquire(true, "queued-1", 2)
+            .acquire(RemoteCapLookup::Granted, "queued-1", 2)
             .expect_err("queue first waiter");
         let _queued = b
-            .acquire(true, "queued-2", 3)
+            .acquire(RemoteCapLookup::Granted, "queued-2", 3)
             .expect_err("queue second waiter");
 
         b.next_permit_id = u64::MAX;
@@ -1093,7 +1093,7 @@ mod tests {
         b.next_permit_id = u64::MAX;
 
         let terminal = b
-            .acquire(true, "terminal", 1)
+            .acquire(RemoteCapLookup::Granted, "terminal", 1)
             .expect("terminal permit id should still be issued once");
         b.release(terminal, 2).expect("release terminal permit");
         assert!(b.permit_ids_exhausted);
@@ -1104,7 +1104,7 @@ mod tests {
 
         assert!(restored.permit_ids_exhausted);
         let err = restored
-            .acquire(true, "after-round-trip", 3)
+            .acquire(RemoteCapLookup::Granted, "after-round-trip", 3)
             .expect_err("exhaustion must survive serde round-trip");
         assert!(matches!(
             err,
@@ -1119,14 +1119,14 @@ mod tests {
             .acquire(RemoteCapLookup::Granted, "active", 1)
             .expect("active permit");
         let queued = b
-            .acquire(true, "queued-1", 2)
+            .acquire(RemoteCapLookup::Granted, "queued-1", 2)
             .expect_err("first queued request");
         assert!(matches!(queued, BulkheadError::Queued { position: 1, .. }));
 
         b.release(active, 3).expect("release active permit");
 
         let newer = b
-            .acquire(true, "queued-2", 4)
+            .acquire(RemoteCapLookup::Granted, "queued-2", 4)
             .expect_err("new request must queue behind existing waiter");
         assert!(matches!(
             newer,
@@ -1390,7 +1390,7 @@ mod tests {
         let mut b = bulkhead_reject(2);
 
         let err = b
-            .acquire(true, "\t\n", 10)
+            .acquire(RemoteCapLookup::Granted, "\t\n", 10)
             .expect_err("blank request id must fail before admission");
 
         assert!(matches!(err, BulkheadError::InvalidRequestId { .. }));
@@ -1406,7 +1406,7 @@ mod tests {
             .acquire(RemoteCapLookup::Granted, "active", 1)
             .expect("active permit");
         let queued = b
-            .acquire(true, "queued", 2)
+            .acquire(RemoteCapLookup::Granted, "queued", 2)
             .expect_err("request should queue");
         assert!(matches!(queued, BulkheadError::Queued { .. }));
 
@@ -1426,7 +1426,7 @@ mod tests {
             .acquire(RemoteCapLookup::Granted, "active", 1)
             .expect("active permit");
         let queued = b
-            .acquire(true, "queued", 2)
+            .acquire(RemoteCapLookup::Granted, "queued", 2)
             .expect_err("request should queue");
         assert!(matches!(queued, BulkheadError::Queued { .. }));
 
@@ -1496,7 +1496,7 @@ mod tests {
         let mut b = bulkhead_reject(1);
 
         let err = b
-            .acquire(true, " req ", 1)
+            .acquire(RemoteCapLookup::Granted, " req ", 1)
             .expect_err("outer whitespace should fail closed");
 
         assert!(matches!(
@@ -1513,7 +1513,7 @@ mod tests {
         let mut b = bulkhead_reject(1);
 
         let err = b
-            .acquire(true, "req\0hidden", 1)
+            .acquire(RemoteCapLookup::Granted, "req\0hidden", 1)
             .expect_err("control byte should fail closed");
 
         assert!(matches!(
@@ -1578,7 +1578,7 @@ mod tests {
         b.release(active, 3).expect("release active permit");
 
         let fresh = b
-            .acquire(true, "fresh", 7)
+            .acquire(RemoteCapLookup::Granted, "fresh", 7)
             .expect("expired waiter should be evicted before fresh acquire");
 
         assert_eq!(b.queue_depth(), 0);
@@ -1649,7 +1649,7 @@ mod tests {
         b.set_max_in_flight(1, 3).expect("reduce cap");
 
         let err = b
-            .acquire(true, "drained-waiter", 4)
+            .acquire(RemoteCapLookup::Granted, "drained-waiter", 4)
             .expect_err("draining should reject before queue admission");
 
         assert!(matches!(err, BulkheadError::Draining { .. }));
@@ -1728,7 +1728,7 @@ mod tests {
         ));
 
         let err = b
-            .acquire(true, "overflow", 3)
+            .acquire(RemoteCapLookup::Granted, "overflow", 3)
             .expect_err("full queue must reject overflow");
 
         assert!(matches!(
@@ -1770,7 +1770,7 @@ mod tests {
         let mut b = bulkhead_reject(1);
 
         let err = b
-            .acquire(true, "req\u{7f}", 1)
+            .acquire(RemoteCapLookup::Granted, "req\u{7f}", 1)
             .expect_err("delete control byte must fail closed");
 
         assert!(matches!(
@@ -1785,7 +1785,7 @@ mod tests {
     fn saturating_queue_deadline_does_not_timeout_before_u64_max() {
         let mut b = bulkhead_queue(1, 2, 10);
         let active = b
-            .acquire(true, "active", u64::MAX - 5)
+            .acquire(RemoteCapLookup::Granted, "active", u64::MAX - 5)
             .expect("active permit");
         assert!(matches!(
             b.acquire(RemoteCapLookup::Granted, "waiter", u64::MAX - 5),

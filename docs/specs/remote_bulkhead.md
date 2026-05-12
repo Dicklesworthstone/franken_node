@@ -6,7 +6,7 @@ foreground latency collapse.
 
 ## Core API
 - `RemoteBulkhead::new(max_in_flight, policy, p99_target_ms) -> Result<RemoteBulkhead>`
-- `acquire(has_remote_cap, request_id, now_ms) -> Result<BulkheadPermit, BulkheadError>`
+- `acquire(remote_cap, request_id, now_ms) -> Result<BulkheadPermit, BulkheadError>`
 - `poll_queued(request_id, now_ms) -> Result<BulkheadPermit, BulkheadError>`
 - `release(permit, now_ms) -> Result<(), BulkheadError>`
 - `set_max_in_flight(new_cap, now_ms) -> Result<(), BulkheadError>`
@@ -29,8 +29,9 @@ Queue mode is deterministic and explicit:
 - Existing in-flight operations are never force-cancelled.
 
 ## Remote Capability Requirement
-All acquires require an explicit `RemoteCap` signal (`has_remote_cap=true`).
-Missing capability fails closed (`RB_ERR_NO_REMOTECAP`).
+All acquires require an explicit `RemoteCapLookup::Granted` signal.
+Denied or missing capability fails closed (`RB_ERR_NO_REMOTECAP`) before queue
+admission.
 
 ## Latency Budget Contract
 - Foreground latency samples are recorded and p99 is computed deterministically.

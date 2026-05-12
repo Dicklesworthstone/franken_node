@@ -13,7 +13,7 @@ telemetry.
 - **INV-RB-CAPPED**: The number of outstanding permits never exceeds `max_in_flight`.
 - **INV-RB-BACKPRESSURE**: When at capacity, the configured `BackpressurePolicy` (Reject or Queue) is applied deterministically; no request is silently dropped.
 - **INV-RB-SAFE-DRAIN**: When `set_max_in_flight()` reduces the cap below the current in-flight count, the bulkhead enters draining mode and rejects new acquires until in-flight drops below the target.
-- **INV-RB-GATED**: Every `acquire()` call requires `has_remote_cap == true`; missing capability yields `RemoteCapRequired` immediately.
+- **INV-RB-GATED**: Every `acquire()` call requires `RemoteCapLookup::Granted`; denied or missing capability yields `RemoteCapRequired` immediately.
 - **INV-RB-AUDITABLE**: All significant state transitions emit a `BulkheadEvent` with a stable event code, enabling external audit.
 - **INV-RB-DETERMINISTIC**: Latency percentile computation (p99) is deterministic: given the same sample set, the result is always identical.
 
@@ -58,6 +58,8 @@ Error type with stable error codes:
 - `UnknownRequest { request_id }` -- `RB_ERR_UNKNOWN_REQUEST`
 - `DuplicateRequest { request_id }` -- `RB_ERR_DUPLICATE_REQUEST`
 - `UnknownPermit { permit_id }` -- `RB_ERR_UNKNOWN_PERMIT`
+- `InvalidPermit { permit_id }` -- `RB_ERR_INVALID_PERMIT`
+- `PermitIdExhausted { request_id }` -- `RB_ERR_PERMIT_ID_EXHAUSTED`
 - `InvalidRequestId { detail }` -- `RB_ERR_INVALID_REQUEST_ID`
 - `Draining { in_flight, target_cap }` -- `RB_ERR_DRAINING`
 - `InvalidConfig { reason }` -- `RB_ERR_INVALID_CONFIG`
@@ -82,10 +84,11 @@ Global concurrency limiter:
 Construct a new bulkhead. Validates that `max_in_flight > 0`,
 `p99_target_ms > 0`, and the backpressure policy configuration.
 
-### `acquire(has_remote_cap, request_id, now_ms) -> Result<BulkheadPermit, BulkheadError>`
+### `acquire(remote_cap, request_id, now_ms) -> Result<BulkheadPermit, BulkheadError>`
 
-Acquire a permit for a remote operation. Rejects if `has_remote_cap` is
-false. Applies backpressure policy when at capacity. Blocks during drain.
+Acquire a permit for a remote operation. Rejects unless `remote_cap` is
+`RemoteCapLookup::Granted`. Applies backpressure policy when at capacity.
+Blocks during drain.
 
 ### `release(permit, now_ms) -> Result<(), BulkheadError>`
 
@@ -138,7 +141,11 @@ Returns true if measured p99 is at or below `p99_target_ms`.
 | `RB_ERR_QUEUED` | Queued |
 | `RB_ERR_QUEUE_TIMEOUT` | QueueTimeout |
 | `RB_ERR_UNKNOWN_REQUEST` | UnknownRequest |
+| `RB_ERR_DUPLICATE_REQUEST` | DuplicateRequest |
 | `RB_ERR_UNKNOWN_PERMIT` | UnknownPermit |
+| `RB_ERR_INVALID_PERMIT` | InvalidPermit |
+| `RB_ERR_PERMIT_ID_EXHAUSTED` | PermitIdExhausted |
+| `RB_ERR_INVALID_REQUEST_ID` | InvalidRequestId |
 | `RB_ERR_DRAINING` | Draining |
 | `RB_ERR_INVALID_CONFIG` | InvalidConfig |
 
@@ -148,7 +155,7 @@ Returns true if measured p99 is at or below `p99_target_ms`.
 2. Under `BackpressurePolicy::Reject`, at-capacity requests receive `AtCapacity` error immediately.
 3. Under `BackpressurePolicy::Queue`, at-capacity requests are enqueued up to `max_depth`; deeper requests get `QueueSaturated`.
 4. Queue entries expire after `timeout_ms`; expired entries are evicted on the next `acquire()` or `poll_queued()` call.
-5. `acquire()` with `has_remote_cap == false` returns `RemoteCapRequired` without modifying state (INV-RB-GATED).
+5. `acquire()` with `RemoteCapLookup::Denied` or `RemoteCapLookup::NotPresent` returns `RemoteCapRequired` without modifying state or queueing work (INV-RB-GATED).
 6. `set_max_in_flight()` below current in-flight activates drain mode (INV-RB-SAFE-DRAIN).
 7. Drain mode blocks new acquires until in-flight drops below target.
 8. `release()` of an unknown permit returns `UnknownPermit` (fail-closed).
@@ -161,5 +168,6 @@ Returns true if measured p99 is at or below `p99_target_ms`.
 - Implementation: `crates/franken-node/src/remote/remote_bulkhead.rs`
 - Verification script: `scripts/check_remote_bulkhead.py`
 - Unit tests: `tests/test_check_remote_bulkhead.py`
+- Cargo load/integration test: `tests/perf/remote_bulkhead_under_load.rs`
 - Evidence: `artifacts/section_10_14/bd-v4l0/verification_evidence.json`
 - Summary: `artifacts/section_10_14/bd-v4l0/verification_summary.md`

@@ -2,139 +2,99 @@
   "bead_id": "bd-v4l0",
   "section": "10.14",
   "gate_script": "check_remote_bulkhead.py",
-  "checks_passed": 26,
-  "checks_total": 26,
+  "checks_passed": 18,
+  "checks_total": 18,
   "verdict": "PASS",
   "checks": [
     {
-      "check": "impl_exists",
+      "check": "SOURCE_EXISTS",
       "passed": true,
       "detail": "/data/projects/franken_node/crates/franken-node/src/remote/remote_bulkhead.rs"
     },
     {
-      "check": "remote_mod_exists",
+      "check": "EVENT_CODES",
       "passed": true,
-      "detail": "/data/projects/franken_node/crates/franken-node/src/remote/mod.rs"
+      "detail": "8/8 event codes"
     },
     {
-      "check": "perf_test_exists",
+      "check": "EVENT_CODES_MODULE",
       "passed": true,
-      "detail": "/data/projects/franken_node/tests/perf/remote_bulkhead_under_load.rs"
+      "detail": "event_codes module present"
     },
     {
-      "check": "spec_exists",
+      "check": "ERROR_CODES",
       "passed": true,
-      "detail": "/data/projects/franken_node/docs/specs/remote_bulkhead.md"
+      "detail": "13/13 error codes"
     },
     {
-      "check": "latency_csv_exists",
+      "check": "CORE_TYPES",
       "passed": true,
-      "detail": "/data/projects/franken_node/artifacts/10.14/remote_bulkhead_latency_report.csv"
+      "detail": "6/6 types"
     },
     {
-      "check": "module_wiring",
+      "check": "REMOTECAP_GATING",
       "passed": true,
-      "detail": "remote/mod.rs exports remote_bulkhead"
+      "detail": "RemoteCapLookup fail-closed acquire gate with queue admission regression"
     },
     {
-      "check": "marker_pub enum BackpressurePolicy",
+      "check": "DRAIN_MODE",
       "passed": true,
-      "detail": "pub enum BackpressurePolicy"
+      "detail": "drain mode on cap reduction"
     },
     {
-      "check": "marker_pub struct BulkheadPermit",
+      "check": "LATENCY_TRACKING",
       "passed": true,
-      "detail": "pub struct BulkheadPermit"
+      "detail": "p99 latency tracking with target gate"
     },
     {
-      "check": "marker_pub struct RemoteBulkhead",
+      "check": "LATENCY_EVENT_TIMESTAMP",
       "passed": true,
-      "detail": "pub struct RemoteBulkhead"
+      "detail": "latency events use caller-supplied now_ms"
     },
     {
-      "check": "marker_pub fn new(",
+      "check": "BACKPRESSURE_POLICY",
       "passed": true,
-      "detail": "pub fn new("
+      "detail": "Reject and Queue policies implemented"
     },
     {
-      "check": "marker_pub fn acquire(",
+      "check": "CORE_OPERATIONS",
       "passed": true,
-      "detail": "pub fn acquire("
+      "detail": "3/3 operations"
     },
     {
-      "check": "marker_pub fn poll_queued(",
+      "check": "PERMIT_LIFECYCLE",
       "passed": true,
-      "detail": "pub fn poll_queued("
+      "detail": "permit issuance and tracking"
     },
     {
-      "check": "marker_pub fn release(",
+      "check": "QUEUE_TIMEOUT",
       "passed": true,
-      "detail": "pub fn release("
+      "detail": "queue timeout eviction implemented"
     },
     {
-      "check": "marker_pub fn set_max_in_flight(",
+      "check": "SERDE_DERIVES",
       "passed": true,
-      "detail": "pub fn set_max_in_flight("
+      "detail": "Serialize/Deserialize on public types"
     },
     {
-      "check": "marker_pub fn current_in_flight(",
+      "check": "TEST_COVERAGE",
       "passed": true,
-      "detail": "pub fn current_in_flight("
+      "detail": "49 tests found (minimum 10)"
     },
     {
-      "check": "marker_pub fn p99_foreground_latency_ms(",
+      "check": "CARGO_TEST_WIRING",
       "passed": true,
-      "detail": "pub fn p99_foreground_latency_ms("
+      "detail": "remote_bulkhead_under_load is wired as a remote-ops Cargo test"
     },
     {
-      "check": "event_codes_present",
+      "check": "INTEGRATION_E2E_COVERAGE",
       "passed": true,
-      "detail": "8/8 found"
+      "detail": "load contract covers saturation, denied RemoteCap, telemetry, and p99 budget"
     },
     {
-      "check": "impl_test_count",
+      "check": "SPEC_CONTRACT",
       "passed": true,
-      "detail": "20 tests (>=12)"
-    },
-    {
-      "check": "perf_test_imports_impl",
-      "passed": true,
-      "detail": "path import + simulation harness"
-    },
-    {
-      "check": "csv_columns",
-      "passed": true,
-      "detail": "columns=['test_scenario', 'in_flight_count', 'p50_latency_ms', 'p99_latency_ms', 'rejected_count', 'queue_depth']"
-    },
-    {
-      "check": "csv_row_count",
-      "passed": true,
-      "detail": "rows=4"
-    },
-    {
-      "check": "csv_required_scenarios",
-      "passed": true,
-      "detail": "all present"
-    },
-    {
-      "check": "csv_numeric_parse",
-      "passed": true,
-      "detail": "parse_failures=0"
-    },
-    {
-      "check": "csv_p99_budget",
-      "passed": true,
-      "detail": "rows_over_budget=0"
-    },
-    {
-      "check": "csv_overload_rejections",
-      "passed": true,
-      "detail": "at least one row rejected overload"
-    },
-    {
-      "check": "csv_queue_depth_observed",
-      "passed": true,
-      "detail": "at least one row observed queue depth"
+      "detail": "exists"
     }
   ]
 }

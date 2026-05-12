@@ -231,6 +231,11 @@ name = "remote_virtual_transport_faults_regressions"
 path = "tests/remote_virtual_transport_faults_regressions.rs"
 
 [[test]]
+name = "remote_bulkhead_under_load"
+path = "../../tests/perf/remote_bulkhead_under_load.rs"
+required-features = ["remote-ops"]
+
+[[test]]
 name = "connector_interop_suite_revocation"
 path = "tests/connector_interop_suite_revocation.rs"
 required-features = ["control-plane"]

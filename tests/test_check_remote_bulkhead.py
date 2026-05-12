@@ -113,6 +113,14 @@ class TestIndividualChecks(unittest.TestCase):
         r = self.by_name["TEST_COVERAGE"]
         self.assertTrue(r["passed"], r["detail"])
 
+    def test_cargo_test_wiring(self):
+        r = self.by_name["CARGO_TEST_WIRING"]
+        self.assertTrue(r["passed"], r["detail"])
+
+    def test_integration_e2e_coverage(self):
+        r = self.by_name["INTEGRATION_E2E_COVERAGE"]
+        self.assertTrue(r["passed"], r["detail"])
+
     def test_spec_contract(self):
         r = self.by_name["SPEC_CONTRACT"]
         self.assertTrue(r["passed"], r["detail"])
