@@ -1,5 +1,7 @@
 """Tests for scripts/check_claim_language.py."""
 
+import json
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -117,7 +119,7 @@ def test_check_registry_format():
     from check_claim_language import check_registry_format
     result = check_registry_format()
     assert result["status"] == "PASS"
-    assert result["details"]["well_formed"] is True
+    assert result["details"]["well_formed"]
 
 
 def test_check_policy_doc_exists():
@@ -132,3 +134,20 @@ def test_check_claims_have_artifacts_empty_registry():
     # With no active claims, there's nothing to fail
     assert result["status"] == "PASS"
     assert result["details"]["claim_count"] == 0
+
+
+def test_claim_language_checker_e2e_json_passes():
+    result = subprocess.run(  # nosec B603 - fixed checker command under repo root.
+        [sys.executable, "scripts/check_claim_language.py", "--json"],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["gate"] == "claim_language_policy"
+    assert payload["verdict"] == "PASS"
+    assert payload["summary"]["total_checks"] == 5
+    assert payload["summary"]["failing_checks"] == 0
