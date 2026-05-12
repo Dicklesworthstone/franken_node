@@ -134,6 +134,42 @@ class EvaluateWitnessTests(unittest.TestCase):
             "crates/franken-node/src/sdk/replay_capsule.rs",
         )
 
+    def test_migration_prefix_surrogate_detection_stays_production_specific(self) -> None:
+        spec = _witness_spec("migration_placeholder_prefix_shortcuts")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _materialize_spec_sources(spec, root)
+            baseline = mod.evaluate_witness(spec, root)
+            self.assertTrue(baseline["pass"], baseline)
+
+            target = root / "crates/franken-node/src/connector/migration_pipeline.rs"
+            target.write_text(
+                target.read_text(encoding="utf-8")
+                + '\nfn regression_placeholder_prefix(name: &str) -> bool { name.starts_with("blocked_") }\n',
+                encoding="utf-8",
+            )
+            result = mod.evaluate_witness(spec, root)
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason_code"], mod.SURROGATE_REINTRODUCED)
+
+    def test_workspace_sdk_witness_fails_on_missing_crypto_posture(self) -> None:
+        spec = _witness_spec("workspace_verifier_sdk_cryptographic_bundle_posture")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _materialize_spec_sources(spec, root)
+            for rel in ("sdk/verifier/src/lib.rs", "sdk/verifier/src/capsule.rs"):
+                target = root / rel
+                target.write_text(
+                    target.read_text(encoding="utf-8").replace(
+                        'pub const CRYPTOGRAPHIC_SECURITY_POSTURE: &str = "cryptographic_ed25519_authenticated";',
+                        'pub const CRYPTOGRAPHIC_SECURITY_POSTURE: &str = "unknown";',
+                    ),
+                    encoding="utf-8",
+                )
+            result = mod.evaluate_witness(spec, root)
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["reason_code"], mod.MISSING_ANCHOR)
+
 
 class RealRepoTests(unittest.TestCase):
     def test_run_all_passes_on_shared_tree(self) -> None:
@@ -149,7 +185,7 @@ class RealRepoTests(unittest.TestCase):
         self.assertIn("migration_placeholder_prefix_shortcuts", witness_ids)
         self.assertIn("session_auth_opaque_signature_regression", witness_ids)
         self.assertIn("certification_evidence_binding", witness_ids)
-        self.assertIn("workspace_verifier_sdk_structural_only_posture", witness_ids)
+        self.assertIn("workspace_verifier_sdk_cryptographic_bundle_posture", witness_ids)
         self.assertIn("incrate_sdk_verifier_structural_only_posture", witness_ids)
         self.assertIn("incrate_sdk_replay_capsule_structural_only_posture", witness_ids)
 
@@ -157,7 +193,7 @@ class RealRepoTests(unittest.TestCase):
         payload = mod.run_all()
         self.assertEqual(
             payload["support_bead_ids"],
-            ["bd-3tw7.1", "bd-3tw7.2", "bd-3tw7.4", "bd-3tw7.5", "bd-3tw7.6", "bd-3tw7.8"],
+            ["bd-3tw7.1", "bd-3tw7.2", "bd-3tw7.4", "bd-3tw7.5", "bd-3tw7.6", "bd-3tw7.8", "bd-3tw7.9"],
         )
 
     def test_artifact_checker_refs_include_evidence_pack_guard(self) -> None:
@@ -200,9 +236,10 @@ class RealRepoTests(unittest.TestCase):
         sdk_witness = next(
             item
             for item in payload["witness_matrix"]
-            if item["witness_id"] == "workspace_verifier_sdk_structural_only_posture"
+            if item["witness_id"] == "workspace_verifier_sdk_cryptographic_bundle_posture"
         )
         self.assertEqual(sdk_witness["support_bead"], "bd-3tw7.2")
+        self.assertIn("sdk/verifier/src/bundle.rs", sdk_witness["source_paths"])
 
     def test_workspace_sdk_metadata_witness_owned_by_metadata_follow_on(self) -> None:
         payload = mod.run_all()
@@ -244,6 +281,32 @@ class RealRepoTests(unittest.TestCase):
         self.assertIn("crates/franken-node/src/connector/verifier_sdk.rs", excluded)
         self.assertNotIn("crates/franken-node/src/sdk/verifier_sdk.rs", excluded)
         self.assertNotIn("crates/franken-node/src/sdk/replay_capsule.rs", excluded)
+
+    def test_completion_debt_coverage_obligations_present(self) -> None:
+        payload = mod.run_all()
+        coverage = {item["spec_item"]: item for item in payload["coverage_obligations"]}
+        self.assertEqual(
+            set(coverage),
+            {"tests.e2e.primary", "migrations.primary", "telemetry.primary"},
+        )
+        self.assertEqual(coverage["migrations.primary"]["status"], "covered")
+        self.assertIn(
+            "migration_artifact_real_signature_verification",
+            coverage["migrations.primary"]["witness_ids"],
+        )
+
+    def test_witness_telemetry_fields_present(self) -> None:
+        payload = mod.run_all()
+        required_fields = set(mod.TELEMETRY_REQUIRED_FIELDS)
+        self.assertEqual(
+            set(payload["structured_log_contract"]["required_fields"]),
+            required_fields,
+        )
+        for witness in payload["witness_matrix"]:
+            self.assertTrue(required_fields.issubset(witness), witness["witness_id"])
+            self.assertEqual(witness["trace_id"], mod.STATIC_GATE_TRACE_ID)
+            self.assertEqual(witness["evidence_bundle_id"], mod.EVIDENCE_BUNDLE_ID)
+            self.assertEqual(witness["decision"], "PASS")
 
 
 class ArtifactWriteTests(unittest.TestCase):

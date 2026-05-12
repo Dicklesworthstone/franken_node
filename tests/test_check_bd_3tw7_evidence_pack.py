@@ -71,6 +71,8 @@ class TestRunChecks(unittest.TestCase):
         self.assertTrue(contract["bead_references_resolve"])
         self.assertTrue(contract["summary_markdown_matches_source"])
         self.assertTrue(contract["static_seed_notes_present"])
+        self.assertTrue(contract["completion_debt_coverage_present"])
+        self.assertTrue(contract["telemetry_contract_present"])
 
     def _failing(self, result):
         failures = [check for check in result["checks"] if not check["passed"]]
@@ -203,6 +205,40 @@ class TestMutations(unittest.TestCase):
         self.assertEqual(result["verdict"], "FAIL")
         details = "\n".join(check["check"] for check in result["checks"] if not check["passed"])
         self.assertIn("verification evidence preserves required static-seed notes", details)
+
+    def test_missing_completion_debt_coverage_item_fails(self):
+        root, tmpdir = fixture_root()
+        self.addCleanup(tmpdir.cleanup)
+        evidence_path = root / "artifacts/replacement_gap/bd-3tw7/verification_evidence.json"
+        payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+        payload["coverage_obligations"] = [
+            item
+            for item in payload["coverage_obligations"]
+            if item["spec_item"] != "telemetry.primary"
+        ]
+        evidence_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        result = mod.run_checks(root)
+        self.assertEqual(result["verdict"], "FAIL")
+        details = "\n".join(check["check"] for check in result["checks"] if not check["passed"])
+        self.assertIn("completion-debt coverage obligations cover e2e, migrations, and telemetry", details)
+
+    def test_missing_witness_telemetry_field_fails(self):
+        root, tmpdir = fixture_root()
+        self.addCleanup(tmpdir.cleanup)
+        evidence_path = root / "artifacts/replacement_gap/bd-3tw7/verification_evidence.json"
+        witness_path = root / "artifacts/replacement_gap/bd-3tw7/witness_matrix.json"
+        payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+        witness_matrix = json.loads(witness_path.read_text(encoding="utf-8"))
+        payload["witness_matrix"][0].pop("trace_id", None)
+        witness_matrix[0].pop("trace_id", None)
+        evidence_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        witness_path.write_text(json.dumps(witness_matrix, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        result = mod.run_checks(root)
+        self.assertEqual(result["verdict"], "FAIL")
+        details = "\n".join(check["check"] for check in result["checks"] if not check["passed"])
+        self.assertIn("telemetry contract covers every witness result", details)
 
 
 class TestSelfTest(unittest.TestCase):

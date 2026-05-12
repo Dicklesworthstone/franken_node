@@ -43,7 +43,14 @@ EXPECTED_ARTIFACT_KEYS = {
 REQUIRED_NOTE_PHRASES = [
     "The witness matrix is a static seed for bd-3tw7, not a claim that the full parent dynamic/e2e truthfulness gate is complete.",
     "bd-3tw7.5 adds deterministic evidence-pack coherence coverage so artifact drift fails closed.",
+    "bd-3tw7.9 makes the audit-missing E2E, migration, and telemetry obligations explicit in the source-only evidence pack.",
 ]
+
+REQUIRED_COVERAGE_SPEC_ITEMS = {
+    "tests.e2e.primary",
+    "migrations.primary",
+    "telemetry.primary",
+}
 
 
 def _check(check: str, passed: bool, detail: str) -> dict[str, Any]:
@@ -90,6 +97,20 @@ def _artifact_paths_from_evidence(evidence: dict[str, Any]) -> list[str]:
     if not isinstance(artifacts, dict):
         return []
     return [value for value in artifacts.values() if isinstance(value, str)]
+
+
+def _coverage_evidence_paths(evidence: dict[str, Any]) -> list[str]:
+    paths: list[str] = []
+    coverage_obligations = evidence.get("coverage_obligations", [])
+    if not isinstance(coverage_obligations, list):
+        return paths
+    for obligation in coverage_obligations:
+        if not isinstance(obligation, dict):
+            continue
+        evidence_paths = obligation.get("evidence_paths", [])
+        if isinstance(evidence_paths, list):
+            paths.extend(path for path in evidence_paths if isinstance(path, str))
+    return paths
 
 
 def _source_paths_from_witnesses(witness_matrix: list[dict[str, Any]]) -> list[str]:
@@ -146,6 +167,26 @@ def _expected_summary_markdown(
             f"- `{entry['witness_id']}` ({entry['surface']}): "
             f"`{'PASS' if entry['pass'] else 'FAIL'}` via `{entry['reason_code']}`"
         )
+
+    lines.extend(["", "## Completion-Debt Coverage", ""])
+    for obligation in evidence["coverage_obligations"]:
+        lines.append(
+            f"- `{obligation['spec_item']}` ({obligation['category']}): "
+            f"`{obligation['status']}` via {obligation['description']}"
+        )
+
+    telemetry = evidence["structured_log_contract"]
+    lines.extend(
+        [
+            "",
+            "## Telemetry Contract",
+            "",
+            f"- Event family: `{telemetry['event_family']}`",
+            f"- Trace ID: `{telemetry['trace_id']}`",
+            f"- Evidence bundle: `{telemetry['evidence_bundle_id']}`",
+            f"- Required fields: `{', '.join(telemetry['required_fields'])}`",
+        ]
+    )
 
     lines.extend(
         [
@@ -272,6 +313,101 @@ def _evaluate(root: Path) -> dict[str, Any]:
             "witness matrix file matches verification evidence payload",
             witness_matrix_ok,
             "ok" if witness_matrix_ok else "verification_evidence.json and witness_matrix.json diverged",
+        )
+    )
+
+    witness_ids_for_contract = {
+        witness.get("witness_id")
+        for witness in witness_matrix
+        if isinstance(witness, dict) and isinstance(witness.get("witness_id"), str)
+    } if isinstance(witness_matrix, list) else set()
+
+    coverage_obligations = evidence.get("coverage_obligations", [])
+    coverage_by_spec = {
+        obligation.get("spec_item"): obligation
+        for obligation in coverage_obligations
+        if isinstance(obligation, dict) and isinstance(obligation.get("spec_item"), str)
+    } if isinstance(coverage_obligations, list) else {}
+    missing_coverage_items = sorted(REQUIRED_COVERAGE_SPEC_ITEMS - set(coverage_by_spec))
+    coverage_paths_missing = sorted(
+        rel for rel in _coverage_evidence_paths(evidence) if not (root / rel).exists()
+    )
+    coverage_witness_missing: dict[str, list[str]] = {}
+    for spec_item, obligation in coverage_by_spec.items():
+        witness_ids = obligation.get("witness_ids", [])
+        if not isinstance(witness_ids, list):
+            coverage_witness_missing[str(spec_item)] = ["<invalid witness_ids>"]
+            continue
+        missing = sorted(
+            witness_id
+            for witness_id in witness_ids
+            if isinstance(witness_id, str) and witness_id not in witness_ids_for_contract
+        )
+        if missing:
+            coverage_witness_missing[str(spec_item)] = missing
+    coverage_statuses_ok = all(
+        coverage_by_spec[item].get("status") == "covered"
+        for item in REQUIRED_COVERAGE_SPEC_ITEMS
+        if item in coverage_by_spec
+    )
+    coverage_ok = (
+        isinstance(coverage_obligations, list)
+        and not missing_coverage_items
+        and not coverage_paths_missing
+        and not coverage_witness_missing
+        and coverage_statuses_ok
+    )
+    checks.append(
+        _check(
+            "completion-debt coverage obligations cover e2e, migrations, and telemetry",
+            coverage_ok,
+            "ok"
+            if coverage_ok
+            else json.dumps(
+                {
+                    "coverage_paths_missing": coverage_paths_missing,
+                    "coverage_witness_missing": coverage_witness_missing,
+                    "missing_items": missing_coverage_items,
+                    "statuses_ok": coverage_statuses_ok,
+                },
+                sort_keys=True,
+            ),
+        )
+    )
+
+    telemetry_contract = evidence.get("structured_log_contract", {})
+    required_telemetry_fields = set(truthfulness_gate.TELEMETRY_REQUIRED_FIELDS)
+    observed_required_fields = set(telemetry_contract.get("required_fields", [])) if isinstance(telemetry_contract, dict) else set()
+    witness_telemetry_ok = isinstance(witness_matrix, list) and all(
+        required_telemetry_fields.issubset(witness)
+        and witness.get("trace_id") == truthfulness_gate.STATIC_GATE_TRACE_ID
+        and witness.get("evidence_bundle_id") == truthfulness_gate.EVIDENCE_BUNDLE_ID
+        and witness.get("decision") == ("PASS" if witness.get("pass") else "FAIL")
+        for witness in witness_matrix
+        if isinstance(witness, dict)
+    )
+    telemetry_ok = (
+        isinstance(telemetry_contract, dict)
+        and telemetry_contract.get("event_family") == truthfulness_gate.TRUTHFULNESS_EVENT_FAMILY
+        and telemetry_contract.get("trace_id") == truthfulness_gate.STATIC_GATE_TRACE_ID
+        and telemetry_contract.get("evidence_bundle_id") == truthfulness_gate.EVIDENCE_BUNDLE_ID
+        and observed_required_fields == required_telemetry_fields
+        and witness_telemetry_ok
+    )
+    checks.append(
+        _check(
+            "telemetry contract covers every witness result",
+            telemetry_ok,
+            "ok"
+            if telemetry_ok
+            else json.dumps(
+                {
+                    "contract": telemetry_contract,
+                    "required_fields": sorted(required_telemetry_fields),
+                    "witness_telemetry_ok": witness_telemetry_ok,
+                },
+                sort_keys=True,
+            ),
         )
     )
 
@@ -411,6 +547,8 @@ def _evaluate(root: Path) -> dict[str, Any]:
         "bead_references_resolve": bead_references_ok,
         "summary_markdown_matches_source": summary_ok,
         "static_seed_notes_present": notes_ok,
+        "completion_debt_coverage_present": coverage_ok,
+        "telemetry_contract_present": telemetry_ok,
     }
 
     passed = sum(1 for item in checks if item["passed"])
@@ -463,6 +601,7 @@ def _materialize_self_test_fixture(root: Path) -> None:
     )
 
     synthetic_fixture_paths = set(_artifact_paths_from_evidence(evidence))
+    synthetic_fixture_paths.update(_coverage_evidence_paths(evidence))
     synthetic_fixture_paths.update(_source_paths_from_witnesses(witness_matrix))
     synthetic_fixture_paths.update(_excluded_surface_paths(evidence))
     already_written = {

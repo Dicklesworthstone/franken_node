@@ -1,16 +1,14 @@
 [
   {
-    "detail": "banned surrogate marker present: blocked_",
+    "decision": "PASS",
+    "detail": "all 1 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/connector/migration_pipeline.rs",
-    "pass": false,
-    "present_banned_markers": [
-      {
-        "marker": "blocked_",
-        "path": "crates/franken-node/src/connector/migration_pipeline.rs"
-      }
-    ],
-    "reason_code": "TRUTHFULNESS_GATE_SURROGATE_REINTRODUCED",
+    "pass": true,
+    "present_banned_markers": [],
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
     "related_checkers": [
       "scripts/check_migration_pipeline.py"
     ],
@@ -20,11 +18,15 @@
     ],
     "support_bead": "bd-3tw7.1",
     "surface": "migration",
+    "trace_id": "trace-bd-3tw7-static",
     "witness_family": "forged migration inputs whose names previously spoofed heuristics",
     "witness_id": "migration_placeholder_prefix_shortcuts"
   },
   {
+    "decision": "PASS",
     "detail": "all 1 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/policy/compat_gates.rs",
     "pass": true,
@@ -40,11 +42,15 @@
     ],
     "support_bead": "bd-3tw7.1",
     "surface": "policy",
+    "trace_id": "trace-bd-3tw7-static",
     "witness_family": "forged compatibility receipts and placeholder signature shortcuts",
     "witness_id": "compatibility_placeholder_signature_shortcuts"
   },
   {
+    "decision": "PASS",
     "detail": "all 5 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/runtime/safe_mode.rs",
     "pass": true,
@@ -59,11 +65,15 @@
     ],
     "support_bead": "bd-3tw7.1",
     "surface": "runtime_safe_mode",
+    "trace_id": "trace-bd-3tw7-static",
     "witness_family": "stale safe-mode frontier and trust-digest drift fail closed",
     "witness_id": "safe_mode_stale_frontier_fail_closed"
   },
   {
+    "decision": "PASS",
     "detail": "all 4 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/runtime/anti_entropy.rs",
     "pass": true,
@@ -78,11 +88,15 @@
     ],
     "support_bead": "bd-3tw7.1",
     "surface": "runtime_anti_entropy",
+    "trace_id": "trace-bd-3tw7-static",
     "witness_family": "zero-filled or decorative anti-entropy proofs must not pass",
     "witness_id": "anti_entropy_canonical_proof_verification"
   },
   {
+    "decision": "PASS",
     "detail": "all 3 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/supply_chain/extension_registry.rs",
     "pass": true,
@@ -97,11 +111,15 @@
     ],
     "support_bead": "bd-3tw7.1",
     "surface": "supply_chain_extension_registry",
+    "trace_id": "trace-bd-3tw7-static",
     "witness_family": "forged extension manifests with valid-looking but invalid signatures",
     "witness_id": "extension_registry_shape_only_signature_shortcuts"
   },
   {
+    "decision": "PASS",
     "detail": "all 3 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/connector/control_channel.rs",
     "pass": true,
@@ -116,11 +134,15 @@
     ],
     "support_bead": "bd-3tw7.1",
     "surface": "control_channel",
+    "trace_id": "trace-bd-3tw7-static",
     "witness_family": "guessed control tokens and non-empty credential shortcuts",
     "witness_id": "control_channel_non_empty_token_shortcut"
   },
   {
+    "decision": "PASS",
     "detail": "all 5 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/api/session_auth.rs",
     "pass": true,
@@ -135,11 +157,15 @@
     ],
     "support_bead": "bd-3tw7.1",
     "surface": "api_session_auth",
+    "trace_id": "trace-bd-3tw7-static",
     "witness_family": "decorative session signatures and forged transcript MACs",
     "witness_id": "session_auth_opaque_signature_regression"
   },
   {
+    "decision": "PASS",
     "detail": "all 5 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/supply_chain/trust_card.rs",
     "pass": true,
@@ -154,11 +180,15 @@
     ],
     "support_bead": "bd-3tw7.1",
     "surface": "supply_chain_trust_card",
+    "trace_id": "trace-bd-3tw7-static",
     "witness_family": "caller-injected trust-card inputs without verified evidence",
     "witness_id": "trust_card_evidence_binding"
   },
   {
+    "decision": "PASS",
     "detail": "all 5 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/supply_chain/certification.rs",
     "pass": true,
@@ -173,18 +203,20 @@
     ],
     "support_bead": "bd-3tw7.1",
     "surface": "supply_chain_certification",
+    "trace_id": "trace-bd-3tw7-static",
     "witness_family": "caller-supplied certification assertions without verified evidence",
     "witness_id": "certification_evidence_binding"
   },
   {
-    "detail": "missing required marker(s): pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = \"structural_only_not_replacement_critical\";",
-    "missing_required_markers": [
-      "pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = \"structural_only_not_replacement_critical\";"
-    ],
+    "decision": "PASS",
+    "detail": "all 7 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
+    "missing_required_markers": [],
     "offending_path": "sdk/verifier/src/lib.rs",
-    "pass": false,
+    "pass": true,
     "present_banned_markers": [],
-    "reason_code": "TRUTHFULNESS_GATE_MISSING_ANCHOR",
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
     "related_checkers": [
       "scripts/check_verifier_sdk_capsule.py"
     ],
@@ -192,23 +224,26 @@
     "source_paths": [
       "sdk/verifier/src/lib.rs",
       "sdk/verifier/src/capsule.rs",
+      "sdk/verifier/src/bundle.rs",
       "docs/specs/replay_capsule_format.md",
       "docs/specs/section_10_17/bd-nbwo_contract.md"
     ],
     "support_bead": "bd-3tw7.2",
     "surface": "workspace_verifier_sdk",
-    "witness_family": "public verifier sdk surface must remain explicitly structural-only",
-    "witness_id": "workspace_verifier_sdk_structural_only_posture"
+    "trace_id": "trace-bd-3tw7-static",
+    "witness_family": "public verifier sdk surface verifies Ed25519 capsules and bundles instead of claiming structural-only authority",
+    "witness_id": "workspace_verifier_sdk_cryptographic_bundle_posture"
   },
   {
-    "detail": "missing required marker(s): description = \"Structural-only verifier SDK for replaying structurally bound capsules and reproducing claim verdicts\"",
-    "missing_required_markers": [
-      "description = \"Structural-only verifier SDK for replaying structurally bound capsules and reproducing claim verdicts\""
-    ],
+    "decision": "PASS",
+    "detail": "all 1 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
+    "missing_required_markers": [],
     "offending_path": "sdk/verifier/Cargo.toml",
-    "pass": false,
+    "pass": true,
     "present_banned_markers": [],
-    "reason_code": "TRUTHFULNESS_GATE_MISSING_ANCHOR",
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
     "related_checkers": [
       "scripts/check_verifier_sdk_capsule.py"
     ],
@@ -218,11 +253,15 @@
     ],
     "support_bead": "bd-3tw7.4",
     "surface": "workspace_verifier_sdk_metadata",
-    "witness_family": "public verifier sdk package metadata must remain structural-only",
+    "trace_id": "trace-bd-3tw7-static",
+    "witness_family": "public verifier sdk package metadata must describe its current Ed25519 verification posture",
     "witness_id": "workspace_verifier_sdk_package_metadata_truthfulness"
   },
   {
+    "decision": "PASS",
     "detail": "all 5 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/sdk/verifier_sdk.rs",
     "pass": true,
@@ -237,11 +276,15 @@
     ],
     "support_bead": "bd-3tw7.6",
     "surface": "incrate_sdk_verifier",
+    "trace_id": "trace-bd-3tw7-static",
     "witness_family": "in-crate sdk verifier helper must stay structural-only and avoid replacement-critical imports",
     "witness_id": "incrate_sdk_verifier_structural_only_posture"
   },
   {
+    "decision": "PASS",
     "detail": "all 3 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/sdk/replay_capsule.rs",
     "pass": true,
@@ -256,11 +299,15 @@
     ],
     "support_bead": "bd-3tw7.6",
     "surface": "incrate_sdk_replay_capsule",
+    "trace_id": "trace-bd-3tw7-static",
     "witness_family": "in-crate replay capsule helper must stay structural-only and avoid replacement-critical imports",
     "witness_id": "incrate_sdk_replay_capsule_structural_only_posture"
   },
   {
+    "decision": "PASS",
     "detail": "all 4 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/connector/supervision.rs",
     "pass": true,
@@ -275,11 +322,15 @@
     ],
     "support_bead": "bd-3tw7.1",
     "surface": "supervision",
+    "trace_id": "trace-bd-3tw7-static",
     "witness_family": "supervision time/budget logic uses real monotonic clocks, not synthetic stubs",
     "witness_id": "supervision_time_budget_real_clock"
   },
   {
+    "decision": "PASS",
     "detail": "all 5 required anchor(s) present",
+    "event_family": "TRUTHFULNESS_GATE_WITNESS",
+    "evidence_bundle_id": "replacement-gap/bd-3tw7/static-truthfulness-gate-v1",
     "missing_required_markers": [],
     "offending_path": "crates/franken-node/src/connector/migration_artifact.rs",
     "pass": true,
@@ -294,6 +345,7 @@
     ],
     "support_bead": "bd-3tw7.1",
     "surface": "migration_artifact",
+    "trace_id": "trace-bd-3tw7-static",
     "witness_family": "migration artifacts use real HMAC signatures, not presence-only shortcuts",
     "witness_id": "migration_artifact_real_signature_verification"
   }

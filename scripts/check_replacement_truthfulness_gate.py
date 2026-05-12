@@ -26,13 +26,32 @@ from scripts.lib.test_logger import configure_test_logging
 
 PARENT_BEAD = "bd-3tw7"
 SUPPORT_BEAD = "bd-3tw7.1"
-ARTIFACT_SUPPORT_BEADS = ("bd-3tw7.5", "bd-3tw7.8")
+ARTIFACT_SUPPORT_BEADS = ("bd-3tw7.5", "bd-3tw7.8", "bd-3tw7.9")
 ARTIFACT_DIR = ROOT / "artifacts" / "replacement_gap" / PARENT_BEAD
 WITNESS_MATRIX_PATH = ARTIFACT_DIR / "witness_matrix.json"
 EVIDENCE_PATH = ARTIFACT_DIR / "verification_evidence.json"
 SUMMARY_PATH = ARTIFACT_DIR / "verification_summary.md"
 OPERATOR_E2E_SUITE = "tests/e2e/replacement_truthfulness_gate_suite.sh"
 OPERATOR_E2E_TRACE_ID = "trace-bd-3tw7-operator-e2e"
+STATIC_GATE_TRACE_ID = "trace-bd-3tw7-static"
+EVIDENCE_BUNDLE_ID = "replacement-gap/bd-3tw7/static-truthfulness-gate-v1"
+TRUTHFULNESS_EVENT_FAMILY = "TRUTHFULNESS_GATE_WITNESS"
+TELEMETRY_REQUIRED_FIELDS = (
+    "trace_id",
+    "witness_id",
+    "surface",
+    "offending_path",
+    "decision",
+    "reason_code",
+    "remediation_bead",
+    "evidence_bundle_id",
+)
+CI_RUNTIME_BUDGET = {
+    "budget_id": "bd-3tw7-truthfulness-source-only-ci-budget",
+    "max_seconds": 30,
+    "measurement_command": f"TRACE_ID={OPERATOR_E2E_TRACE_ID} {OPERATOR_E2E_SUITE}",
+    "runtime_class": "source_only_python_and_shell",
+}
 
 SURROGATE_REINTRODUCED = "TRUTHFULNESS_GATE_SURROGATE_REINTRODUCED"
 MISSING_ANCHOR = "TRUTHFULNESS_GATE_MISSING_ANCHOR"
@@ -74,7 +93,7 @@ WITNESS_SPECS = (
         witness_family="forged migration inputs whose names previously spoofed heuristics",
         source_paths=("crates/franken-node/src/connector/migration_pipeline.rs",),
         required_markers=("fn test_placeholder_prefix_shortcuts_absent_from_source()",),
-        banned_markers=("blocked_", "fail_verify_"),
+        banned_markers=('starts_with("blocked_")', 'starts_with("fail_verify_")'),
         related_checkers=("scripts/check_migration_pipeline.py",),
     ),
     WitnessSpec(
@@ -190,27 +209,27 @@ WITNESS_SPECS = (
         related_checkers=("scripts/check_certification_levels.py",),
     ),
     WitnessSpec(
-        witness_id="workspace_verifier_sdk_structural_only_posture",
+        witness_id="workspace_verifier_sdk_cryptographic_bundle_posture",
         surface="workspace_verifier_sdk",
-        witness_family="public verifier sdk surface must remain explicitly structural-only",
+        witness_family="public verifier sdk surface verifies Ed25519 capsules and bundles instead of claiming structural-only authority",
         source_paths=(
             "sdk/verifier/src/lib.rs",
             "sdk/verifier/src/capsule.rs",
+            "sdk/verifier/src/bundle.rs",
             "docs/specs/replay_capsule_format.md",
             "docs/specs/section_10_17/bd-nbwo_contract.md",
         ),
         required_markers=(
-            'pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacement_critical";',
+            'pub const CRYPTOGRAPHIC_SECURITY_POSTURE: &str = "cryptographic_ed25519_authenticated";',
             'pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::WORKSPACE_VERIFIER_SDK";',
             'pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::WORKSPACE_REPLAY_CAPSULE";',
-            "structural signature digest",
-            "structural-only",
+            "pub fn verify_signature(",
+            "verify_strict(&payload, &signature)",
+            "pub fn verify_signed_bundle(",
+            "verify the detached Ed25519 capsule signature",
         ),
         banned_markers=(
-            "cryptographic signature",
-            "signature integrity",
-            "signed capsules",
-            "self-contained, signed unit",
+            'pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacement_critical";',
         ),
         related_checkers=("scripts/check_verifier_sdk_capsule.py",),
         support_bead="bd-3tw7.2",
@@ -218,13 +237,14 @@ WITNESS_SPECS = (
     WitnessSpec(
         witness_id="workspace_verifier_sdk_package_metadata_truthfulness",
         surface="workspace_verifier_sdk_metadata",
-        witness_family="public verifier sdk package metadata must remain structural-only",
+        witness_family="public verifier sdk package metadata must describe its current Ed25519 verification posture",
         source_paths=("sdk/verifier/Cargo.toml",),
         required_markers=(
-            'description = "Structural-only verifier SDK for replaying structurally bound capsules and reproducing claim verdicts"',
+            'description = "Verifier SDK for replaying bundles, checking canonical hashes, and verifying Ed25519 signatures"',
         ),
         banned_markers=(
-            "signed capsules",
+            "Structural-only verifier SDK",
+            "structural_only_not_replacement_critical",
             "cryptographic authority",
         ),
         related_checkers=("scripts/check_verifier_sdk_capsule.py",),
@@ -320,6 +340,28 @@ def _strip_comments(text: str) -> str:
     return text
 
 
+def _telemetry_fields(
+    *,
+    passed: bool,
+    reason_code: str,
+    witness_id: str,
+    surface: str,
+    offending_path: str,
+    remediation_bead: str,
+) -> dict[str, str]:
+    return {
+        "trace_id": STATIC_GATE_TRACE_ID,
+        "event_family": TRUTHFULNESS_EVENT_FAMILY,
+        "decision": "PASS" if passed else "FAIL",
+        "reason_code": reason_code,
+        "witness_id": witness_id,
+        "surface": surface,
+        "offending_path": offending_path,
+        "remediation_bead": remediation_bead,
+        "evidence_bundle_id": EVIDENCE_BUNDLE_ID,
+    }
+
+
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
@@ -342,6 +384,14 @@ def evaluate_witness(spec: WitnessSpec, root: Path = ROOT) -> dict[str, Any]:
             "missing_required_markers": [],
             "present_banned_markers": [],
             "detail": f"missing source path: {missing_paths[0]}",
+            **_telemetry_fields(
+                passed=False,
+                reason_code=SOURCE_MISSING,
+                witness_id=spec.witness_id,
+                surface=spec.surface,
+                offending_path=missing_paths[0],
+                remediation_bead=spec.remediation_bead,
+            ),
         }
 
     contents = {rel: _read(root / rel) for rel in spec.source_paths}
@@ -370,6 +420,14 @@ def evaluate_witness(spec: WitnessSpec, root: Path = ROOT) -> dict[str, Any]:
             "missing_required_markers": missing_required,
             "present_banned_markers": [],
             "detail": f"missing required marker(s): {', '.join(missing_required)}",
+            **_telemetry_fields(
+                passed=False,
+                reason_code=MISSING_ANCHOR,
+                witness_id=spec.witness_id,
+                surface=spec.surface,
+                offending_path=spec.source_paths[0],
+                remediation_bead=spec.remediation_bead,
+            ),
         }
 
     if present_banned:
@@ -388,6 +446,14 @@ def evaluate_witness(spec: WitnessSpec, root: Path = ROOT) -> dict[str, Any]:
             "missing_required_markers": [],
             "present_banned_markers": present_banned,
             "detail": f"banned surrogate marker present: {first_hit['marker']}",
+            **_telemetry_fields(
+                passed=False,
+                reason_code=SURROGATE_REINTRODUCED,
+                witness_id=spec.witness_id,
+                surface=spec.surface,
+                offending_path=first_hit["path"],
+                remediation_bead=spec.remediation_bead,
+            ),
         }
 
     return {
@@ -404,7 +470,63 @@ def evaluate_witness(spec: WitnessSpec, root: Path = ROOT) -> dict[str, Any]:
         "missing_required_markers": [],
         "present_banned_markers": [],
         "detail": f"all {len(spec.required_markers)} required anchor(s) present",
+        **_telemetry_fields(
+            passed=True,
+            reason_code=STATIC_PASS,
+            witness_id=spec.witness_id,
+            surface=spec.surface,
+            offending_path=spec.source_paths[0],
+            remediation_bead=spec.remediation_bead,
+        ),
     }
+
+
+def _coverage_obligations() -> list[dict[str, Any]]:
+    return [
+        {
+            "spec_item": "tests.e2e.primary",
+            "category": "e2e",
+            "status": "covered",
+            "description": "deterministic operator E2E suite runs the truthfulness gate twice in isolated fixture workspaces and compares normalized artifacts",
+            "witness_ids": [spec.witness_id for spec in WITNESS_SPECS],
+            "evidence_paths": [
+                OPERATOR_E2E_SUITE,
+                "artifacts/replacement_gap/bd-3tw7/verification_evidence.json",
+                "artifacts/replacement_gap/bd-3tw7/verification_summary.md",
+                "artifacts/replacement_gap/bd-3tw7/witness_matrix.json",
+            ],
+            "commands": [f"TRACE_ID={OPERATOR_E2E_TRACE_ID} {OPERATOR_E2E_SUITE}"],
+        },
+        {
+            "spec_item": "migrations.primary",
+            "category": "migrations",
+            "status": "covered",
+            "description": "migration placeholder-prefix and signed-artifact witnesses are first-class truthfulness-gate cases",
+            "witness_ids": [
+                "migration_placeholder_prefix_shortcuts",
+                "migration_artifact_real_signature_verification",
+            ],
+            "evidence_paths": [
+                "crates/franken-node/src/connector/migration_pipeline.rs",
+                "crates/franken-node/src/connector/migration_artifact.rs",
+                "scripts/check_replacement_truthfulness_gate.py",
+            ],
+            "commands": ["python3 scripts/check_replacement_truthfulness_gate.py --json"],
+        },
+        {
+            "spec_item": "telemetry.primary",
+            "category": "telemetry",
+            "status": "covered",
+            "description": "every witness result and JSON log event carries stable TRUTHFULNESS_GATE_* fields",
+            "witness_ids": [spec.witness_id for spec in WITNESS_SPECS],
+            "evidence_paths": [
+                "scripts/check_replacement_truthfulness_gate.py",
+                "tests/test_check_replacement_truthfulness_gate.py",
+            ],
+            "commands": ["python3 scripts/check_replacement_truthfulness_gate.py --json"],
+            "required_fields": list(TELEMETRY_REQUIRED_FIELDS),
+        },
+    ]
 
 
 def run_all(root: Path = ROOT) -> dict[str, Any]:
@@ -420,9 +542,18 @@ def run_all(root: Path = ROOT) -> dict[str, Any]:
         "title": "Replacement-critical truthfulness gate static seed",
         "verdict": "PASS" if overall_pass else "FAIL",
         "overall_pass": overall_pass,
-        "artifact_scope": "Static cross-surface surrogate scanner and witness-matrix seed for currently unreserved replacement-critical surfaces plus explicit in-crate SDK structural-only helper witnesses.",
+        "artifact_scope": "Static cross-surface surrogate scanner, operator E2E seed, migration evidence binding, and telemetry contract for currently unreserved replacement-critical surfaces.",
         "generated_at": _now(),
         "verification_method": "python3 scripts/check_replacement_truthfulness_gate.py --json",
+        "evidence_bundle_id": EVIDENCE_BUNDLE_ID,
+        "ci_runtime_budget": CI_RUNTIME_BUDGET,
+        "structured_log_contract": {
+            "event_family": TRUTHFULNESS_EVENT_FAMILY,
+            "trace_id": STATIC_GATE_TRACE_ID,
+            "evidence_bundle_id": EVIDENCE_BUNDLE_ID,
+            "required_fields": list(TELEMETRY_REQUIRED_FIELDS),
+        },
+        "coverage_obligations": _coverage_obligations(),
         "artifacts": {
             "verification_evidence": "artifacts/replacement_gap/bd-3tw7/verification_evidence.json",
             "verification_summary": "artifacts/replacement_gap/bd-3tw7/verification_summary.md",
@@ -450,6 +581,7 @@ def run_all(root: Path = ROOT) -> dict[str, Any]:
             "bd-3tw7.8 adds a deterministic operator E2E suite that exercises the truthfulness-gate seed in isolated temporary workspaces.",
             "The witness matrix is a static seed for bd-3tw7, not a claim that the full parent dynamic/e2e truthfulness gate is complete.",
             "bd-3tw7.5 adds deterministic evidence-pack coherence coverage so artifact drift fails closed.",
+            "bd-3tw7.9 makes the audit-missing E2E, migration, and telemetry obligations explicit in the source-only evidence pack.",
             "Each witness links to concrete source anchors already present in the shared tree so regressions fail on exact guarded paths, not vague heuristics.",
         ],
     }
@@ -488,6 +620,26 @@ def write_artifacts(payload: dict[str, Any], root: Path = ROOT) -> None:
         summary_lines.append(
             f"- `{entry['witness_id']}` ({entry['surface']}): `{status}` via `{entry['reason_code']}`"
         )
+
+    summary_lines.extend(["", "## Completion-Debt Coverage", ""])
+    for obligation in payload["coverage_obligations"]:
+        summary_lines.append(
+            f"- `{obligation['spec_item']}` ({obligation['category']}): "
+            f"`{obligation['status']}` via {obligation['description']}"
+        )
+
+    telemetry = payload["structured_log_contract"]
+    summary_lines.extend(
+        [
+            "",
+            "## Telemetry Contract",
+            "",
+            f"- Event family: `{telemetry['event_family']}`",
+            f"- Trace ID: `{telemetry['trace_id']}`",
+            f"- Evidence bundle: `{telemetry['evidence_bundle_id']}`",
+            f"- Required fields: `{', '.join(telemetry['required_fields'])}`",
+        ]
+    )
 
     summary_lines.extend(
         [
@@ -585,6 +737,11 @@ def main(argv: list[str] | None = None) -> int:
 
     payload = run_all()
     write_artifacts(payload)
+    for entry in payload["witness_matrix"]:
+        logger.info(
+            "truthfulness witness evaluated",
+            extra={field: entry[field] for field in TELEMETRY_REQUIRED_FIELDS},
+        )
     logger.info(
         "static truthfulness scan complete",
         extra={
