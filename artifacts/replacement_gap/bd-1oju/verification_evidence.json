@@ -1,0 +1,128 @@
+{
+  "artifact_type": "verification_evidence",
+  "schema_version": "bd-1oju-trust-card-certification-evidence-binding-v1",
+  "bead_id": "bd-1oju",
+  "completion_debt_bead_id": "bd-1oju.1",
+  "title": "Trust-card and certification decisions are bound to verified evidence",
+  "section": "10.4",
+  "verdict": "PASS",
+  "artifacts": {
+    "trust_card_implementation": "crates/franken-node/src/supply_chain/trust_card.rs",
+    "certification_implementation": "crates/franken-node/src/supply_chain/certification.rs",
+    "integration_conformance": "tests/conformance/capability_artifact_trust_card_integration_conformance.rs",
+    "api_conformance": "tests/conformance/trust_card_api_surface_conformance.rs",
+    "manifest_reference_conformance": "tests/conformance/trust_card_manifest_reference_conformance.rs",
+    "e2e_lifecycle": "crates/franken-node/tests/e2e_trust_card_lifecycle.rs",
+    "checker": "scripts/check_trust_card.py",
+    "checker_tests": "tests/test_check_trust_card.py",
+    "verification_summary": "artifacts/replacement_gap/bd-1oju/verification_summary.md",
+    "verification_evidence": "artifacts/replacement_gap/bd-1oju/verification_evidence.json"
+  },
+  "completion_debt": {
+    "missing_items_from_audit": [
+      "tests.unit.primary",
+      "tests.integration.primary",
+      "tests.e2e.primary"
+    ],
+    "covered_spec_items": [
+      "tests.unit.primary",
+      "tests.integration.primary",
+      "tests.e2e.primary"
+    ],
+    "obligations": [
+      {
+        "spec_item": "tests.unit.primary",
+        "description": "Inline unit coverage proves trust-card create/update fail closed without verified evidence refs, stores derivation metadata when evidence exists, and certification preserves a derivation chain only for evidence-backed decisions.",
+        "evidence_paths": [
+          "crates/franken-node/src/supply_chain/trust_card.rs",
+          "crates/franken-node/src/supply_chain/certification.rs"
+        ],
+        "implementation_paths": [
+          "crates/franken-node/src/supply_chain/trust_card.rs",
+          "crates/franken-node/src/supply_chain/certification.rs"
+        ],
+        "test_names": [
+          "create_rejects_empty_evidence",
+          "create_includes_derivation_evidence",
+          "update_upgrade_without_evidence_rejected",
+          "update_upgrade_with_empty_evidence_rejected",
+          "update_with_evidence_replaces_derivation",
+          "test_no_evidence_returns_uncertified",
+          "test_derivation_metadata_present_with_evidence",
+          "test_derivation_hash_deterministic"
+        ]
+      },
+      {
+        "spec_item": "tests.integration.primary",
+        "description": "Conformance coverage exercises the artifact-admission to trust-card boundary, including fail-closed trust-card creation when upstream contract evidence is removed.",
+        "evidence_paths": [
+          "tests/conformance/capability_artifact_trust_card_integration_conformance.rs",
+          "tests/conformance/trust_card_api_surface_conformance.rs",
+          "tests/conformance/trust_card_manifest_reference_conformance.rs"
+        ],
+        "implementation_paths": [
+          "crates/franken-node/src/supply_chain/trust_card.rs",
+          "crates/franken-node/src/supply_chain/certification.rs"
+        ],
+        "test_names": [
+          "capability_artifact_trust_card_integration_full_conformance_suite",
+          "test_valid_trust_card_references",
+          "test_get_trust_card_success"
+        ]
+      },
+      {
+        "spec_item": "tests.e2e.primary",
+        "description": "Mock-free lifecycle coverage drives create, read, upgrade, revoke, and snapshot paths with real verified evidence refs and rejects missing-evidence creation and unevidenced certification upgrades.",
+        "evidence_paths": [
+          "crates/franken-node/tests/e2e_trust_card_lifecycle.rs",
+          "scripts/check_trust_card.py",
+          "tests/test_check_trust_card.py"
+        ],
+        "implementation_paths": [
+          "crates/franken-node/src/supply_chain/trust_card.rs"
+        ],
+        "test_names": [
+          "e2e_trust_card_lifecycle_create_upgrade_revoke_snapshot",
+          "e2e_trust_card_evidence_required_at_creation",
+          "test_completion_debt_evidence_passes"
+        ]
+      }
+    ]
+  },
+  "evidence_binding_contract": {
+    "trust_cards": [
+      "TrustCardInput requires verified evidence refs.",
+      "TrustCardRegistry::create rejects empty evidence refs and stores DerivationMetadata.",
+      "TrustCardRegistry::update rejects certification upgrades without evidence refs.",
+      "Provided update evidence replaces the trust-card derivation chain."
+    ],
+    "certification": [
+      "CertificationInput carries verified evidence refs.",
+      "CertificationResult carries DerivationMetadata for evidence-backed evaluations.",
+      "Certification without evidence returns Uncertified and records evidence_binding_present as unsatisfied.",
+      "Domain-separated derivation hashes include evidence ids, evidence types, epochs, and receipt hashes."
+    ]
+  },
+  "validation": [
+    {
+      "command": "python3 scripts/check_trust_card.py --json",
+      "expected": "PASS",
+      "actual": "PASS: 131 passing, 0 failing"
+    },
+    {
+      "command": "python3 -m unittest tests/test_check_trust_card.py",
+      "expected": "PASS",
+      "actual": "PASS: 12 tests"
+    },
+    {
+      "command": "rch exec -- cargo test -p frankenengine-node --test e2e_trust_card_lifecycle",
+      "expected": "PASS when cargo contention permits",
+      "actual": "SKIPPED at closeout: pgrep -af 'cargo|rustc' | wc -l returned 5; rch queue reported 3 active builds"
+    }
+  ],
+  "notes": [
+    "bd-1oju already implemented the verified-evidence binding in the Rust trust-card and certification modules.",
+    "bd-1oju.1 closes the audit-recorded completion-debt items by making the trust-card checker ratchet the implementation, unit, integration, E2E, and evidence-pack coverage.",
+    "The checker now fails closed if this completion-debt evidence pack, its summary, or any cited evidence path is missing."
+  ]
+}

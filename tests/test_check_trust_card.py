@@ -67,5 +67,38 @@ class TestChecks(TestCase):
         self.assertIn("pub enum TrustCardCommand", mod.REQUIRED_CLI_PATTERNS)
 
 
+class TestEvidenceBindingChecks(TestCase):
+    def test_required_evidence_binding_patterns_found(self) -> None:
+        report = mod.run_checks()
+        failed = [
+            check
+            for check in report["checks"]
+            if not check["pass"] and "evidence binding" in check["check"]
+        ]
+        self.assertEqual([], failed)
+
+    def test_completion_debt_evidence_passes(self) -> None:
+        results = mod.check_completion_debt_evidence()
+        for result in results:
+            self.assertTrue(result["pass"], f"{result['check']}: {result['detail']}")
+
+    def test_completion_debt_records_all_audit_items(self) -> None:
+        results = mod.check_completion_debt_evidence()
+        coverage = next(
+            result
+            for result in results
+            if result["check"] == "completion debt evidence: all audit items covered"
+        )
+        self.assertTrue(coverage["pass"])
+        for item in mod.COMPLETION_DEBT_ITEMS:
+            self.assertIn(item, coverage["detail"])
+
+    def test_completion_debt_evidence_missing_fails_closed(self) -> None:
+        with patch.object(mod, "REPLACEMENT_EVIDENCE", Path("/no/bd-1oju-evidence.json")):
+            results = mod.check_completion_debt_evidence()
+        self.assertFalse(results[0]["pass"])
+        self.assertIn("missing", results[0]["detail"])
+
+
 if __name__ == "__main__":
     main()
