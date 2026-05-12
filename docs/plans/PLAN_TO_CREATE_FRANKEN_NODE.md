@@ -1216,7 +1216,7 @@ Canonical ownership map (non-reductive, full-feature):
   `Artifacts:` `src/planner/execution_scorer.rs`, `tests/integration/execution_planner_determinism.rs`, `artifacts/10.13/planner_decision_explanations.json`.
 - [ ] Implement predictive pre-staging engine for high-probability offline artifacts.
   `Acceptance Criteria:` Pre-staging model raises offline coverage on benchmark scenarios; budget limits prevent prefetch storms; prediction quality is measured and reported.
-  `Artifacts:` `docs/specs/predictive_prestaging.md`, `tests/perf/prestaging_coverage_improvement.rs`, `artifacts/10.13/prestaging_model_report.csv`.
+  `Artifacts:` `docs/specs/predictive_prestaging.md`, canonical contract `docs/specs/section_10_13/bd-2t5u_contract.md`, `tests/integration/prestaging_coverage_improvement.rs`, `artifacts/section_10_13/bd-2t5u/prestaging_model_report.csv`.
 - [ ] Implement offline coverage tracker and SLO dashboards (`coverage`, `availability`, `repair debt`).
   `Acceptance Criteria:` Coverage metrics are computed continuously and per policy scope; SLO breach alerts trigger automatically; dashboard values are traceable to raw events.
   `Artifacts:` `docs/observability/offline_slo_metrics.md`, `tests/integration/offline_coverage_metrics.rs`, `artifacts/10.13/offline_slo_dashboard_snapshot.json`.

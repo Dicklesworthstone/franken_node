@@ -19,6 +19,8 @@ IMPL_PATH = ROOT / "crates/franken-node/src/connector/prestage_engine.rs"
 REPORT_PATH = ROOT / "artifacts/section_10_13/bd-2t5u/prestaging_model_report.csv"
 INTEGRATION_PATH = ROOT / "tests/integration/prestaging_coverage_improvement.rs"
 SPEC_PATH = ROOT / "docs/specs/section_10_13/bd-2t5u_contract.md"
+PLAN_SPEC_PATH = ROOT / "docs/specs/predictive_prestaging.md"
+PLAN_PATH = ROOT / "docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md"
 EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-2t5u/verification_evidence.json"
 
 
@@ -264,6 +266,41 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
         "PSE-SPEC",
         "Specification with invariants and types",
         spec_exists and has_invariants and has_types,
+        emit_human=emit_human,
+    )
+
+    plan_spec_content = read_utf8(PLAN_SPEC_PATH)
+    plan_spec_valid = (
+        plan_spec_content is not None
+        and "docs/specs/section_10_13/bd-2t5u_contract.md" in plan_spec_content
+        and "tests/integration/prestaging_coverage_improvement.rs" in plan_spec_content
+        and "tests/perf/prestaging_coverage_improvement.rs" not in plan_spec_content
+        and "INV-PSE-BUDGET" in plan_spec_content
+        and "INV-PSE-QUALITY" in plan_spec_content
+    )
+    check(
+        checks,
+        "PSE-PLAN-SPEC",
+        "Plan-level spec path bridges to canonical contract and integration test",
+        plan_spec_valid,
+        emit_human=emit_human,
+    )
+
+    plan_content = read_utf8(PLAN_PATH)
+    plan_paths_valid = (
+        plan_content is not None
+        and "docs/specs/predictive_prestaging.md" in plan_content
+        and "docs/specs/section_10_13/bd-2t5u_contract.md" in plan_content
+        and "tests/integration/prestaging_coverage_improvement.rs" in plan_content
+        and "artifacts/section_10_13/bd-2t5u/prestaging_model_report.csv" in plan_content
+        and "tests/perf/prestaging_coverage_improvement.rs" not in plan_content
+        and "artifacts/10.13/prestaging_model_report.csv" not in plan_content
+    )
+    check(
+        checks,
+        "PSE-PLAN-PATHS",
+        "Project plan cites current pre-staging artifact paths",
+        plan_paths_valid,
         emit_human=emit_human,
     )
 

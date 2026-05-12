@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts/check_prestage_engine.py"
 REPORT_PATH = ROOT / "artifacts/section_10_13/bd-2t5u/prestaging_model_report.csv"
 EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-2t5u/verification_evidence.json"
+PLAN_SPEC_PATH = ROOT / "docs/specs/predictive_prestaging.md"
+PLAN_PATH = ROOT / "docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md"
 JSON_DECODER = json.JSONDecoder()
 
 
@@ -87,6 +89,22 @@ class TestPrestageSpec(unittest.TestCase):
         for code in ["PSE_BUDGET_EXCEEDED", "PSE_INVALID_CONFIG",
                      "PSE_NO_CANDIDATES", "PSE_THRESHOLD_INVALID"]:
             self.assertIn(code, self.content, f"Missing error code {code}")
+
+    def test_plan_level_spec_bridge_exists(self):
+        self.assertTrue(PLAN_SPEC_PATH.is_file())
+        bridge = PLAN_SPEC_PATH.read_text(encoding="utf-8")
+        self.assertIn("docs/specs/section_10_13/bd-2t5u_contract.md", bridge)
+        self.assertIn("tests/integration/prestaging_coverage_improvement.rs", bridge)
+        self.assertNotIn("tests/perf/prestaging_coverage_improvement.rs", bridge)
+
+    def test_project_plan_paths_are_current(self):
+        plan = PLAN_PATH.read_text(encoding="utf-8")
+        self.assertIn("docs/specs/predictive_prestaging.md", plan)
+        self.assertIn("docs/specs/section_10_13/bd-2t5u_contract.md", plan)
+        self.assertIn("tests/integration/prestaging_coverage_improvement.rs", plan)
+        self.assertIn("artifacts/section_10_13/bd-2t5u/prestaging_model_report.csv", plan)
+        self.assertNotIn("tests/perf/prestaging_coverage_improvement.rs", plan)
+        self.assertNotIn("artifacts/10.13/prestaging_model_report.csv", plan)
 
 
 class TestPrestageIntegration(unittest.TestCase):
