@@ -17,6 +17,15 @@ ROUTE_FILES = [
 ]
 REPORT = ROOT / "artifacts" / "10.16" / "fastapi_endpoint_report.json"
 SPEC = ROOT / "docs" / "specs" / "section_10_16" / "bd-2f5l_contract.md"
+CARGO_INTEGRATION = (
+    ROOT / "crates" / "franken-node" / "tests" / "fastapi_rust_control_plane_integration.rs"
+)
+REPLACEMENT_EVIDENCE_DIR = ROOT / "artifacts" / "replacement_gap" / "bd-2fqyv.5.2"
+REPLACEMENT_EVIDENCE = REPLACEMENT_EVIDENCE_DIR / "verification_evidence.json"
+REPLACEMENT_SUMMARY = REPLACEMENT_EVIDENCE_DIR / "verification_summary.md"
+REPLACEMENT_BEAD_ID = "bd-2fqyv.5.2"
+COMPLETION_DEBT_BEAD = "bd-2fqyv.5.2.1"
+COMPLETION_DEBT_ITEMS = ["tests.integration.primary"]
 
 ENDPOINTS = [
     ("GET", "/v1/operator/status"),
@@ -79,6 +88,19 @@ REQUIRED_TESTS = [
     "all_routes_versioned_v1",
 ]
 
+REQUIRED_INTEGRATION_TESTS = [
+    "canonical_api_service_builder_exposes_truthful_in_process_boundary",
+    "control_plane_service_record_captures_in_process_lifecycle_provenance",
+]
+
+INTEGRATION_MARKERS = [
+    "TransportBoundaryKind::InProcessCatalog",
+    "PerformanceBaselineStatus::UnavailablePendingTransport",
+    "caller-owned in-process dispatch only",
+    "no transport-owned cancellation boundary",
+    "No live async HTTP/gRPC transport boundary is owned",
+]
+
 SPEC_MARKERS = [
     "12 base-catalog endpoints",
     "in-process control-plane catalog boundary",
@@ -94,6 +116,13 @@ BASELINE_PROVENANCE = (
     "No live async HTTP/gRPC transport boundary is owned; load-test baselines "
     "are intentionally unavailable until that trigger exists."
 )
+
+
+def safe_rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
 
 
 def check_file(path: Path, label: str) -> dict:
@@ -532,6 +561,78 @@ def check_spec() -> list[dict]:
     return results
 
 
+def check_completion_debt_evidence() -> list[dict]:
+    results = []
+    if not REPLACEMENT_EVIDENCE.exists():
+        return [
+            {
+                "check": "Completion debt evidence exists",
+                "pass": False,
+                "detail": f"missing: {safe_rel(REPLACEMENT_EVIDENCE)}",
+            }
+        ]
+
+    try:
+        data = json.loads(REPLACEMENT_EVIDENCE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [
+            {
+                "check": "Completion debt evidence JSON parses",
+                "pass": False,
+                "detail": str(exc),
+            }
+        ]
+
+    results.append(
+        {
+            "check": "Completion debt evidence: replacement bead id",
+            "pass": data.get("bead_id") == REPLACEMENT_BEAD_ID,
+            "detail": str(data.get("bead_id")),
+        }
+    )
+    results.append(
+        {
+            "check": "Completion debt evidence: debt bead id",
+            "pass": data.get("completion_debt_bead_id") == COMPLETION_DEBT_BEAD,
+            "detail": str(data.get("completion_debt_bead_id")),
+        }
+    )
+
+    covered = set(data.get("completion_debt", {}).get("covered_spec_items", []))
+    results.append(
+        {
+            "check": "Completion debt evidence: integration item covered",
+            "pass": set(COMPLETION_DEBT_ITEMS).issubset(covered),
+            "detail": ", ".join(sorted(covered)) if covered else "none",
+        }
+    )
+
+    obligations = {
+        obligation.get("spec_item"): obligation
+        for obligation in data.get("completion_debt", {}).get("obligations", [])
+    }
+    integration = obligations.get("tests.integration.primary", {})
+    evidence_paths = set(integration.get("evidence_paths", []))
+    results.append(
+        {
+            "check": "Completion debt evidence: cargo integration test cited",
+            "pass": str(CARGO_INTEGRATION.relative_to(ROOT)) in evidence_paths,
+            "detail": ", ".join(sorted(evidence_paths)) if evidence_paths else "none",
+        }
+    )
+
+    test_names = set(integration.get("test_names", []))
+    results.append(
+        {
+            "check": "Completion debt evidence: integration test names cited",
+            "pass": set(REQUIRED_INTEGRATION_TESTS).issubset(test_names),
+            "detail": ", ".join(sorted(test_names)) if test_names else "none",
+        }
+    )
+
+    return results
+
+
 def run_checks() -> dict:
     checks = []
 
@@ -540,14 +641,20 @@ def run_checks() -> dict:
         checks.append(check_file(route_file, route_file.name))
     checks.append(check_file(REPORT, "endpoint report"))
     checks.append(check_file(SPEC, "spec doc"))
+    checks.append(check_file(CARGO_INTEGRATION, "cargo-visible integration test"))
+    checks.append(check_file(REPLACEMENT_EVIDENCE, "completion-debt evidence"))
+    checks.append(check_file(REPLACEMENT_SUMMARY, "completion-debt summary"))
 
     checks.append(check_impl_test_count())
     checks.extend(check_content(IMPL, REQUIRED_TYPES, "type"))
     checks.extend(check_content(IMPL, REQUIRED_METHODS, "method"))
     checks.extend(check_content(IMPL, REQUIRED_TESTS, "test"))
+    checks.extend(check_content(CARGO_INTEGRATION, REQUIRED_INTEGRATION_TESTS, "integration test"))
+    checks.extend(check_content(CARGO_INTEGRATION, INTEGRATION_MARKERS, "integration marker"))
     checks.extend(check_route_sources())
     checks.extend(check_report())
     checks.extend(check_spec())
+    checks.extend(check_completion_debt_evidence())
 
     passing = sum(1 for check in checks if check["pass"])
     failing = sum(1 for check in checks if not check["pass"])

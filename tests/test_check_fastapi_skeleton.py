@@ -27,6 +27,9 @@ class TestConstants(unittest.TestCase):
     def test_required_tests_count(self):
         self.assertGreaterEqual(len(mod.REQUIRED_TESTS), 11)
 
+    def test_required_integration_tests_count(self):
+        self.assertGreaterEqual(len(mod.REQUIRED_INTEGRATION_TESTS), 2)
+
 
 class TestCheckFile(unittest.TestCase):
     def test_existing(self):
@@ -142,6 +145,39 @@ class TestAllTests(unittest.TestCase):
         results = mod.check_content(mod.IMPL, mod.REQUIRED_TESTS, "test")
         for result in results:
             self.assertTrue(result["pass"], result["check"])
+
+
+class TestCargoVisibleIntegration(unittest.TestCase):
+    def test_required_integration_tests_found(self):
+        results = mod.check_content(
+            mod.CARGO_INTEGRATION, mod.REQUIRED_INTEGRATION_TESTS, "integration test"
+        )
+        for result in results:
+            self.assertTrue(result["pass"], result["check"])
+
+    def test_required_integration_markers_found(self):
+        results = mod.check_content(
+            mod.CARGO_INTEGRATION, mod.INTEGRATION_MARKERS, "integration marker"
+        )
+        for result in results:
+            self.assertTrue(result["pass"], result["check"])
+
+
+class TestCompletionDebtEvidence(unittest.TestCase):
+    def test_completion_debt_evidence_passes(self):
+        results = mod.check_completion_debt_evidence()
+        for result in results:
+            self.assertTrue(result["pass"], f"Failed: {result['check']}: {result['detail']}")
+
+    def test_completion_debt_evidence_missing_fails_closed(self):
+        original = mod.REPLACEMENT_EVIDENCE
+        try:
+            mod.REPLACEMENT_EVIDENCE = Path("/no/completion-debt-evidence.json")
+            results = mod.check_completion_debt_evidence()
+        finally:
+            mod.REPLACEMENT_EVIDENCE = original
+        self.assertFalse(results[0]["pass"])
+        self.assertIn("missing", results[0]["detail"])
 
 
 if __name__ == "__main__":

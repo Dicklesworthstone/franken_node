@@ -8,13 +8,13 @@ use frankenengine_node::api::fleet_quarantine::{
     reset_shared_fleet_control_manager_for_tests,
 };
 use frankenengine_node::api::middleware::{
-    AuthIdentity, AuthMethod, TraceContext, span_id_from_unix_nanos_for_tests,
+    AuthIdentity, AuthMethod, RequestLog, TraceContext, span_id_from_unix_nanos_for_tests,
 };
 use frankenengine_node::api::operator_routes::assert_process_start_cleanup_lock_order_for_tests;
 use frankenengine_node::api::proof_pipeline_routes::{
     ProofWorkerRestartApiRequest, proof_queue_status_route, restart_proof_workers_route,
 };
-use frankenengine_node::api::service::TransportBoundaryKind;
+use frankenengine_node::api::service::{PerformanceBaselineStatus, TransportBoundaryKind};
 use frankenengine_node::api::{
     ApiState, ServiceConfig, build_api_service, build_default_api_service,
 };
@@ -87,6 +87,102 @@ fn canonical_api_service_builder_preserves_public_state_config() {
         TransportBoundaryKind::InProcessCatalog
     );
     assert!(!api.transport_boundary().owns_listener);
+}
+
+#[test]
+fn canonical_api_service_builder_exposes_truthful_in_process_boundary() {
+    let api = build_api_service(ApiState::new(ServiceConfig {
+        bind_target_hint: "10.0.0.25:9443".to_string(),
+        ..Default::default()
+    }));
+
+    let boundary = api.transport_boundary();
+    assert_eq!(boundary.kind, TransportBoundaryKind::InProcessCatalog);
+    assert!(!boundary.owns_listener);
+    assert_eq!(boundary.bind_target_hint, "10.0.0.25:9443");
+    assert_eq!(
+        boundary.request_lifecycle,
+        "caller-owned in-process dispatch only"
+    );
+    assert_eq!(
+        boundary.cancellation_semantics,
+        "no transport-owned cancellation boundary"
+    );
+
+    let report = api.report();
+    assert_eq!(report.transport_boundary.kind, boundary.kind);
+    assert_eq!(
+        report.transport_boundary.owns_listener,
+        boundary.owns_listener
+    );
+    assert_eq!(
+        report.transport_boundary.request_lifecycle,
+        boundary.request_lifecycle
+    );
+    assert_eq!(
+        report.transport_boundary.cancellation_semantics,
+        boundary.cancellation_semantics
+    );
+    assert_eq!(report.performance_baselines.len(), report.endpoints.len());
+    assert!(report.performance_baselines.iter().all(|baseline| {
+        baseline.status == PerformanceBaselineStatus::UnavailablePendingTransport
+            && baseline.p50_ms.is_none()
+            && baseline.p95_ms.is_none()
+            && baseline.p99_ms.is_none()
+            && baseline
+                .provenance
+                .contains("No live async HTTP/gRPC transport boundary is owned")
+    }));
+}
+
+#[test]
+fn control_plane_service_record_captures_in_process_lifecycle_provenance() {
+    let mut api = build_default_api_service();
+    let log = RequestLog {
+        method: "GET".to_string(),
+        route: "/v1/operator/status".to_string(),
+        status: 200,
+        latency_ms: 3.5,
+        trace_id: "integration-control-plane-service-boundary".to_string(),
+        principal: "operator:test".to_string(),
+        endpoint_group: "operator".to_string(),
+        event_code: "FASTAPI_RESPONSE_SENT".to_string(),
+    };
+
+    assert_eq!(api.request_count(), 0);
+    assert!(api.request_lifecycle_events().is_empty());
+
+    api.record(&log);
+
+    assert_eq!(api.request_count(), 1);
+    let provenance = api
+        .request_lifecycle_events()
+        .last()
+        .expect("recorded request lifecycle provenance");
+    assert_eq!(
+        provenance.transport_boundary_kind,
+        TransportBoundaryKind::InProcessCatalog
+    );
+    assert!(!provenance.transport_owns_listener);
+    assert_eq!(provenance.endpoint_group, "operator");
+    assert_eq!(provenance.route_path, "/v1/operator/status");
+    assert_eq!(
+        provenance.perf_baseline_status,
+        PerformanceBaselineStatus::UnavailablePendingTransport
+    );
+    assert!(
+        provenance
+            .perf_baseline_provenance
+            .contains("intentionally unavailable")
+    );
+    assert_eq!(
+        provenance.request_lifecycle,
+        "caller-owned in-process dispatch only"
+    );
+    assert_eq!(
+        provenance.cancellation_semantics,
+        "no transport-owned cancellation boundary"
+    );
 }
 
 #[test]
