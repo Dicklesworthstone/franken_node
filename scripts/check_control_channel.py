@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -20,7 +21,87 @@ VECTORS_PATH = ROOT / "artifacts/section_10_13/bd-v97o/control_channel_replay_ve
 INTEG_PATH = ROOT / "tests/integration/control_channel_replay.rs"
 SPEC_PATH = ROOT / "docs/specs/section_10_13/bd-v97o_contract.md"
 EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-v97o/verification_evidence.json"
+OPERATOR_E2E_PATH = ROOT / "tests/e2e/control_channel_operator_suite.sh"
+REPLACEMENT_EVIDENCE_DIR = ROOT / "artifacts/replacement_gap/bd-3cvu"
+REPLACEMENT_EVIDENCE_PATH = REPLACEMENT_EVIDENCE_DIR / "verification_evidence.json"
+REPLACEMENT_SUMMARY_PATH = REPLACEMENT_EVIDENCE_DIR / "verification_summary.md"
+OPERATOR_LOG_PATH = REPLACEMENT_EVIDENCE_DIR / "operator_e2e_log.jsonl"
+OPERATOR_SUMMARY_PATH = REPLACEMENT_EVIDENCE_DIR / "operator_e2e_summary.json"
+PROTOCOL_VECTOR_INDEX_PATH = REPLACEMENT_EVIDENCE_DIR / "protocol_vector_index.json"
 JSON_DECODER = json.JSONDecoder()
+
+COMPLETION_DEBT_BEAD = "bd-3cvu.1"
+REPLACEMENT_BEAD = "bd-3cvu"
+COMPLETION_DEBT_ITEMS = {
+    "tests.unit.primary",
+    "tests.integration.primary",
+    "tests.e2e.primary",
+}
+
+REQUIRED_TRANSCRIPT_SOURCE_MARKERS = [
+    "struct ChannelCredential",
+    "struct TranscriptFields",
+    "TRANSCRIPT_HMAC_PREFIX",
+    "sign_channel_message",
+    "compute_transcript_mac",
+    "verify_transcript_mac",
+    "constant_time::ct_eq_bytes",
+    "regression_non_empty_string_is_not_sufficient",
+    "reject_credential_signed_for_different_audience",
+    "adversarial_wrong_direction_replay",
+    "adversarial_payload_swap_under_reused_auth",
+    "stale_authenticated_epoch_is_rejected_after_epoch_advances",
+    "same_nonce_reuse_across_directions_is_rejected",
+]
+
+REQUIRED_UNIT_TEST_MARKERS = [
+    "accept_valid_message",
+    "reject_forged_credential",
+    "adversarial_guessed_token_injection",
+    "regression_non_empty_string_is_not_sufficient",
+    "reject_credential_signed_for_different_audience",
+    "adversarial_wrong_direction_replay",
+    "immediate_same_sequence_replay_is_replay_not_sequence_regress",
+    "same_nonce_reuse_across_directions_is_rejected",
+    "prop_sign_verify_round_trip_for_random_valid_fields",
+]
+
+REQUIRED_INTEGRATION_TEST_MARKERS = [
+    "inv_acc_authenticated",
+    "inv_acc_monotonic",
+    "inv_acc_replay_window",
+    "inv_acc_auditable",
+]
+
+REQUIRED_E2E_SCENARIOS = [
+    "valid_control_traffic",
+    "guessed_token_injection_failure",
+    "replay_failure_after_restart_boundary",
+    "capability_attenuation_failure",
+]
+
+COMPLETION_DEBT_REQUIRED_PATHS = {
+    "tests.unit.primary": [
+        "crates/franken-node/src/connector/control_channel.rs",
+        "tests/test_check_control_channel.py",
+    ],
+    "tests.integration.primary": [
+        "tests/integration/control_channel_replay.rs",
+        "artifacts/section_10_13/bd-v97o/control_channel_replay_vectors.json",
+    ],
+    "tests.e2e.primary": [
+        "tests/e2e/control_channel_operator_suite.sh",
+        "artifacts/replacement_gap/bd-3cvu/operator_e2e_log.jsonl",
+        "artifacts/replacement_gap/bd-3cvu/operator_e2e_summary.json",
+        "artifacts/replacement_gap/bd-3cvu/protocol_vector_index.json",
+    ],
+}
+
+COMPLETION_DEBT_REQUIRED_TEST_NAMES = {
+    "tests.unit.primary": REQUIRED_UNIT_TEST_MARKERS,
+    "tests.integration.primary": REQUIRED_INTEGRATION_TEST_MARKERS,
+    "tests.e2e.primary": REQUIRED_E2E_SCENARIOS,
+}
 
 
 def read_utf8(path: Path) -> str | None:
@@ -44,6 +125,32 @@ def load_json_object(path: Path) -> tuple[dict[str, object] | None, str | None]:
     if not isinstance(parsed, dict):
         return None, f"expected JSON object in {path}"
     return parsed, None
+
+
+def load_jsonl(path: Path) -> tuple[list[dict[str, object]], str | None]:
+    rows: list[dict[str, object]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        return rows, f"unable to read {path}: {exc}"
+    for lineno, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            parsed = JSON_DECODER.decode(line)
+        except json.JSONDecodeError as exc:
+            return rows, f"invalid JSONL in {path}:{lineno}: {exc}"
+        if not isinstance(parsed, dict):
+            return rows, f"expected JSON object in {path}:{lineno}"
+        rows.append(parsed)
+    return rows, None
+
+
+def rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
 
 
 def record_check(
@@ -126,6 +233,169 @@ def build_evidence(checks: list[dict[str, str]], mode: str) -> dict[str, object]
     }
 
 
+def _contains_all(content: str | None, markers: list[str]) -> tuple[bool, str]:
+    if content is None:
+        return False, "file missing"
+    missing = [marker for marker in markers if marker not in content]
+    return not missing, "all found" if not missing else "missing: " + ", ".join(missing)
+
+
+def check_completion_debt_evidence(checks: list[dict[str, str]], *, emit_human: bool) -> None:
+    data, error = load_json_object(REPLACEMENT_EVIDENCE_PATH)
+    check(
+        checks,
+        "ACC-COMPLETION-EVIDENCE",
+        "bd-3cvu.1 completion-debt evidence pack",
+        data is not None,
+        error or rel(REPLACEMENT_EVIDENCE_PATH),
+        emit_human=emit_human,
+    )
+    if data is None:
+        return
+
+    check(
+        checks,
+        "ACC-COMPLETION-BEAD",
+        "Completion-debt bead id recorded",
+        data.get("completion_debt_bead_id") == COMPLETION_DEBT_BEAD
+        and data.get("bead_id") == REPLACEMENT_BEAD,
+        f"bead={data.get('bead_id')} completion={data.get('completion_debt_bead_id')}",
+        emit_human=emit_human,
+    )
+
+    completion_debt = data.get("completion_debt", {})
+    if not isinstance(completion_debt, dict):
+        check(
+            checks,
+            "ACC-COMPLETION-SHAPE",
+            "Completion-debt section is an object",
+            False,
+            "completion_debt missing or non-object",
+            emit_human=emit_human,
+        )
+        return
+
+    covered = set(completion_debt.get("covered_spec_items", []))
+    check(
+        checks,
+        "ACC-COMPLETION-ITEMS",
+        "All audit-missing test items are covered",
+        COMPLETION_DEBT_ITEMS.issubset(covered),
+        ", ".join(sorted(covered)) if covered else "none",
+        emit_human=emit_human,
+    )
+
+    obligations = {
+        item.get("spec_item"): item
+        for item in completion_debt.get("obligations", [])
+        if isinstance(item, dict)
+    }
+    for spec_item in sorted(COMPLETION_DEBT_ITEMS):
+        obligation = obligations.get(spec_item)
+        check(
+            checks,
+            f"ACC-COMPLETION-{spec_item}-OBLIGATION",
+            f"{spec_item} obligation exists",
+            obligation is not None,
+            "present" if obligation else "missing",
+            emit_human=emit_human,
+        )
+        if not isinstance(obligation, dict):
+            continue
+
+        evidence_paths = set(obligation.get("evidence_paths", []))
+        required_paths = set(COMPLETION_DEBT_REQUIRED_PATHS[spec_item])
+        check(
+            checks,
+            f"ACC-COMPLETION-{spec_item}-PATHS",
+            f"{spec_item} cites required evidence paths",
+            required_paths.issubset(evidence_paths),
+            ", ".join(sorted(evidence_paths)) if evidence_paths else "none",
+            emit_human=emit_human,
+        )
+        missing_paths = [path for path in evidence_paths if not (ROOT / path).exists()]
+        check(
+            checks,
+            f"ACC-COMPLETION-{spec_item}-FILES",
+            f"{spec_item} cited paths exist",
+            not missing_paths,
+            "all paths exist" if not missing_paths else ", ".join(missing_paths),
+            emit_human=emit_human,
+        )
+
+        test_names = set(obligation.get("test_names", []))
+        required_tests = set(COMPLETION_DEBT_REQUIRED_TEST_NAMES[spec_item])
+        check(
+            checks,
+            f"ACC-COMPLETION-{spec_item}-TESTS",
+            f"{spec_item} cites required test names",
+            required_tests.issubset(test_names),
+            ", ".join(sorted(test_names)) if test_names else "none",
+            emit_human=emit_human,
+        )
+
+
+def check_operator_e2e(checks: list[dict[str, str]], *, emit_human: bool) -> None:
+    e2e_content = read_utf8(OPERATOR_E2E_PATH)
+    ok, details = _contains_all(e2e_content, REQUIRED_E2E_SCENARIOS)
+    check(
+        checks,
+        "ACC-E2E-SCRIPT",
+        "Operator E2E suite covers required scenarios",
+        OPERATOR_E2E_PATH.is_file() and ok,
+        details if OPERATOR_E2E_PATH.is_file() else f"missing {rel(OPERATOR_E2E_PATH)}",
+        emit_human=emit_human,
+    )
+
+    summary, summary_error = load_json_object(OPERATOR_SUMMARY_PATH)
+    check(
+        checks,
+        "ACC-E2E-SUMMARY",
+        "Operator E2E summary passes",
+        summary is not None and summary.get("verdict") == "PASS",
+        summary_error or str(summary.get("verdict") if summary else "missing"),
+        emit_human=emit_human,
+    )
+
+    rows, rows_error = load_jsonl(OPERATOR_LOG_PATH)
+    scenarios = {row.get("scenario") for row in rows}
+    required_fields = {
+        "trace_id",
+        "event",
+        "scenario",
+        "decision",
+        "reason_code",
+        "retryable",
+        "channel_id",
+        "subject_id",
+        "audience",
+        "direction",
+        "sequence",
+        "freshness_state",
+    }
+    fields_ok = all(required_fields.issubset(row.keys()) for row in rows)
+    check(
+        checks,
+        "ACC-E2E-LOG",
+        "Operator E2E JSONL has scenarios and structured fields",
+        rows_error is None and set(REQUIRED_E2E_SCENARIOS).issubset(scenarios) and fields_ok,
+        rows_error
+        or f"scenarios={','.join(sorted(str(s) for s in scenarios))} rows={len(rows)}",
+        emit_human=emit_human,
+    )
+
+    vector_index, vector_error = load_json_object(PROTOCOL_VECTOR_INDEX_PATH)
+    covered = set(vector_index.get("operator_scenarios", [])) if vector_index else set()
+    check(
+        checks,
+        "ACC-E2E-VECTOR-INDEX",
+        "Protocol vector index references operator scenarios",
+        vector_index is not None and set(REQUIRED_E2E_SCENARIOS).issubset(covered),
+        vector_error or ", ".join(sorted(covered)),
+        emit_human=emit_human,
+    )
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit evidence JSON to stdout")
@@ -171,6 +441,26 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
         "ACC-IMPL",
         "Implementation with all required types",
         impl_exists and all_types,
+        emit_human=emit_human,
+    )
+
+    ok, details = _contains_all(content, REQUIRED_TRANSCRIPT_SOURCE_MARKERS)
+    check(
+        checks,
+        "ACC-TRANSCRIPT-BINDING",
+        "Transcript-bound capability verification markers",
+        ok,
+        details,
+        emit_human=emit_human,
+    )
+
+    ok, details = _contains_all(content, REQUIRED_UNIT_TEST_MARKERS)
+    check(
+        checks,
+        "ACC-UNIT-COVERAGE",
+        "Unit/adversarial tests cover transcript and shortcut regressions",
+        ok,
+        details,
         emit_human=emit_human,
     )
 
@@ -224,6 +514,8 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
         emit_human=emit_human,
     )
 
+    check_operator_e2e(checks, emit_human=emit_human)
+
     if run_tests:
         tests_pass, details = run_rust_tests()
         check(
@@ -258,6 +550,8 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
         spec_exists and has_invariants and has_types,
         emit_human=emit_human,
     )
+
+    check_completion_debt_evidence(checks, emit_human=emit_human)
 
     evidence = build_evidence(checks, "full" if run_tests else "structural")
     if emit_human:

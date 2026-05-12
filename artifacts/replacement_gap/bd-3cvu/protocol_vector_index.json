@@ -1,0 +1,19 @@
+{
+  "artifact_type": "control_channel_protocol_vector_index",
+  "bead_id": "bd-3cvu",
+  "covered_vectors": [
+    "auth_failed",
+    "independent_directions",
+    "replay_detected",
+    "sequence_regress",
+    "valid_recv",
+    "valid_send"
+  ],
+  "operator_scenarios": [
+    "valid_control_traffic",
+    "guessed_token_injection_failure",
+    "replay_failure_after_restart_boundary",
+    "capability_attenuation_failure"
+  ],
+  "source_vectors": "artifacts/section_10_13/bd-v97o/control_channel_replay_vectors.json"
+}

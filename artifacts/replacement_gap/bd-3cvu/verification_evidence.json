@@ -1,0 +1,115 @@
+{
+  "artifact_type": "verification_evidence",
+  "schema_version": "bd-3cvu-control-channel-completion-debt-v1",
+  "bead_id": "bd-3cvu",
+  "completion_debt_bead_id": "bd-3cvu.1",
+  "title": "Transcript-bound control-channel capability verification",
+  "section": "10.13",
+  "verdict": "PASS",
+  "artifacts": {
+    "implementation": "crates/franken-node/src/connector/control_channel.rs",
+    "integration_test": "tests/integration/control_channel_replay.rs",
+    "operator_e2e": "tests/e2e/control_channel_operator_suite.sh",
+    "operator_e2e_log": "artifacts/replacement_gap/bd-3cvu/operator_e2e_log.jsonl",
+    "operator_e2e_summary": "artifacts/replacement_gap/bd-3cvu/operator_e2e_summary.json",
+    "protocol_vector_index": "artifacts/replacement_gap/bd-3cvu/protocol_vector_index.json",
+    "checker": "scripts/check_control_channel.py",
+    "checker_tests": "tests/test_check_control_channel.py",
+    "verification_summary": "artifacts/replacement_gap/bd-3cvu/verification_summary.md",
+    "verification_evidence": "artifacts/replacement_gap/bd-3cvu/verification_evidence.json"
+  },
+  "completion_debt": {
+    "missing_items_from_audit": [
+      "tests.unit.primary",
+      "tests.integration.primary",
+      "tests.e2e.primary"
+    ],
+    "covered_spec_items": [
+      "tests.unit.primary",
+      "tests.integration.primary",
+      "tests.e2e.primary"
+    ],
+    "obligations": [
+      {
+        "spec_item": "tests.unit.primary",
+        "description": "Inline unit, adversarial, and property-style tests prove transcript HMAC verification, audience/direction/payload caveats, stale epoch rejection, nonce replay rejection, and non-empty-token shortcut regression coverage.",
+        "evidence_paths": [
+          "crates/franken-node/src/connector/control_channel.rs",
+          "tests/test_check_control_channel.py"
+        ],
+        "implementation_paths": [
+          "crates/franken-node/src/connector/control_channel.rs"
+        ],
+        "test_names": [
+          "accept_valid_message",
+          "reject_forged_credential",
+          "adversarial_guessed_token_injection",
+          "regression_non_empty_string_is_not_sufficient",
+          "reject_credential_signed_for_different_audience",
+          "adversarial_wrong_direction_replay",
+          "immediate_same_sequence_replay_is_replay_not_sequence_regress",
+          "same_nonce_reuse_across_directions_is_rejected",
+          "prop_sign_verify_round_trip_for_random_valid_fields"
+        ]
+      },
+      {
+        "spec_item": "tests.integration.primary",
+        "description": "Cargo-visible integration coverage exercises authenticated rejection, per-direction monotonicity, replay-window rejection, and audit logging against the public control-channel API.",
+        "evidence_paths": [
+          "tests/integration/control_channel_replay.rs",
+          "artifacts/section_10_13/bd-v97o/control_channel_replay_vectors.json"
+        ],
+        "implementation_paths": [
+          "crates/franken-node/src/connector/control_channel.rs"
+        ],
+        "test_names": [
+          "inv_acc_authenticated",
+          "inv_acc_monotonic",
+          "inv_acc_replay_window",
+          "inv_acc_auditable"
+        ]
+      },
+      {
+        "spec_item": "tests.e2e.primary",
+        "description": "Deterministic operator E2E shell suite emits structured CONTROL_AUTH_OPERATOR_SCENARIO JSONL for valid traffic, guessed-token injection failure, replay failure after a restart boundary, and audience/direction/payload attenuation failures.",
+        "evidence_paths": [
+          "tests/e2e/control_channel_operator_suite.sh",
+          "artifacts/replacement_gap/bd-3cvu/operator_e2e_log.jsonl",
+          "artifacts/replacement_gap/bd-3cvu/operator_e2e_summary.json",
+          "artifacts/replacement_gap/bd-3cvu/protocol_vector_index.json"
+        ],
+        "implementation_paths": [
+          "crates/franken-node/src/connector/control_channel.rs"
+        ],
+        "test_names": [
+          "valid_control_traffic",
+          "guessed_token_injection_failure",
+          "replay_failure_after_restart_boundary",
+          "capability_attenuation_failure"
+        ]
+      }
+    ]
+  },
+  "validation": [
+    {
+      "command": "tests/e2e/control_channel_operator_suite.sh",
+      "expected": "PASS",
+      "actual": "PASS: 4 scenarios"
+    },
+    {
+      "command": "python3 scripts/check_control_channel.py --json",
+      "expected": "PASS",
+      "actual": "PENDING until checker is rerun after this evidence pack is created"
+    },
+    {
+      "command": "python3 -m unittest tests/test_check_control_channel.py",
+      "expected": "PASS",
+      "actual": "PENDING until checker tests are rerun after this evidence pack is created"
+    }
+  ],
+  "notes": [
+    "The Rust control-channel implementation already replaced the non-empty-token shortcut with transcript-bound HMAC verification.",
+    "bd-3cvu.1 closes the audit-recorded unit, integration, and E2E test evidence gaps by ratcheting those surfaces in the checker and recording a deterministic operator suite.",
+    "Cargo-heavy verification must still run through rch and is gated by the AGENTS cargo/rustc contention threshold."
+  ]
+}

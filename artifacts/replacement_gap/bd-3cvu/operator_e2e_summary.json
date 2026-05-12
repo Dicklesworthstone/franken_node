@@ -1,0 +1,27 @@
+{
+  "artifact_type": "control_channel_operator_e2e_summary",
+  "bead_id": "bd-3cvu",
+  "completion_debt_bead_id": "bd-3cvu.1",
+  "failed_scenarios": 0,
+  "failures": [],
+  "log_path": "artifacts/replacement_gap/bd-3cvu/operator_e2e_log.jsonl",
+  "passed_scenarios": 4,
+  "protocol_vector_index": "artifacts/replacement_gap/bd-3cvu/protocol_vector_index.json",
+  "required_fields": [
+    "trace_id",
+    "event",
+    "scenario",
+    "decision",
+    "reason_code",
+    "retryable",
+    "channel_id",
+    "subject_id",
+    "audience",
+    "direction",
+    "sequence",
+    "freshness_state"
+  ],
+  "scenario_count": 4,
+  "trace_id": "trace-bd-3cvu-control-channel-operator-e2e",
+  "verdict": "PASS"
+}
