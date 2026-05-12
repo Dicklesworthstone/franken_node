@@ -4,9 +4,9 @@
 
 | Metric | Value |
 |--------|-------|
-| Verification checks | 97/97 |
-| Rust unit tests | 33 |
-| Python test suite | 32/32 |
+| Verification checks | 116/116 |
+| Rust unit tests | 47 |
+| Python test suite | 39/39 |
 | Verdict | **PASS** |
 
 ## Artifacts
@@ -15,6 +15,8 @@
 |----------|------|
 | Implementation | `crates/franken-node/src/policy/object_class_tuning.rs` |
 | Spec contract | `docs/specs/section_10_14/bd-8tvs_contract.md` |
+| Encode/decode benchmark artifact | `benchmarks/object_class_tuning/bench_encode_decode.rs` |
+| Fetch latency benchmark artifact | `benchmarks/object_class_tuning/bench_fetch_latency.rs` |
 | Policy report CSV | `artifacts/10.14/object_class_policy_report.csv` |
 | Verification script | `scripts/check_object_class_tuning.py` |
 | Python tests | `tests/test_check_object_class_tuning.py` |
@@ -30,3 +32,4 @@
 - Determinism: same class + config always yields same policy
 - CSV export: all canonical classes with correct header and values
 - Send + Sync asserted for engine type
+- Benchmark artifacts: encode/decode and fetch-latency rows cover every canonical class

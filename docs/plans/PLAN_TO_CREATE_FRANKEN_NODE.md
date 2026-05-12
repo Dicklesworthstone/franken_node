@@ -1344,7 +1344,7 @@ Canonical ownership map (non-reductive, full-feature):
   `Artifacts:` `docs/specs/object_class_profiles.md`, `config/object_class_profiles.toml`, `artifacts/10.14/object_class_registry.json`.
 - [ ] Implement per-class symbol-size/overhead/fetch policy with benchmark-derived defaults.
   `Acceptance Criteria:` Policy engine applies class-specific defaults at runtime; defaults are justified by benchmark data; policy override path is audited.
-  `Artifacts:` `src/policy/object_class_tuning.rs`, `benchmarks/object_class_tuning/*`, `artifacts/10.14/object_class_policy_report.csv`.
+  `Artifacts:` `crates/franken-node/src/policy/object_class_tuning.rs`, `benchmarks/object_class_tuning/bench_encode_decode.rs`, `benchmarks/object_class_tuning/bench_fetch_latency.rs`, `artifacts/10.14/object_class_policy_report.csv`.
 - [ ] Add profile tuning harness and publish benchmark-driven policy updates as signed artifacts.
   `Acceptance Criteria:` Harness recomputes candidate policy updates reproducibly; updates are signed and linked to benchmark provenance; unsafe regressions are auto-rejected.
   `Artifacts:` `tools/profile_tuning_harness.rs`, `docs/specs/policy_update_signing.md`, `artifacts/10.14/signed_policy_update_bundle.json`.

@@ -4,11 +4,11 @@
   "section": "10.14",
   "overall_pass": true,
   "verdict": "PASS",
-  "test_count": 33,
+  "test_count": 47,
   "summary": {
-    "passing": 97,
+    "passing": 116,
     "failing": 0,
-    "total": 97
+    "total": 116
   },
   "checks": [
     {
@@ -25,6 +25,21 @@
       "check": "file: policy report CSV",
       "pass": true,
       "detail": "exists: artifacts/10.14/object_class_policy_report.csv"
+    },
+    {
+      "check": "directory: object_class_tuning benchmarks",
+      "pass": true,
+      "detail": "exists: benchmarks/object_class_tuning"
+    },
+    {
+      "check": "file: encode/decode benchmark",
+      "pass": true,
+      "detail": "exists: benchmarks/object_class_tuning/bench_encode_decode.rs"
+    },
+    {
+      "check": "file: fetch latency benchmark",
+      "pass": true,
+      "detail": "exists: benchmarks/object_class_tuning/bench_fetch_latency.rs"
     },
     {
       "check": "module registered in mod.rs",
@@ -469,7 +484,7 @@
     {
       "check": "unit test count",
       "pass": true,
-      "detail": "33 tests (minimum 30)"
+      "detail": "47 tests (minimum 30)"
     },
     {
       "check": "CSV has header",
@@ -493,6 +508,86 @@
     },
     {
       "check": "CSV has telemetry_artifact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: EncodeDecodeRow",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: ENCODE_DECODE_ROWS",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: p50_encode_us",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: p99_decode_us",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: critical_marker",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: trust_receipt",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: replay_bundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: telemetry_artifact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: FetchLatencyRow",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: FETCH_LATENCY_ROWS",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: fetch_priority",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: p99_fetch_us",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: critical_marker",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: trust_receipt",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: replay_bundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: telemetry_artifact",
       "pass": true,
       "detail": "found"
     }

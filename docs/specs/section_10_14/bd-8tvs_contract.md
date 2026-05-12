@@ -73,4 +73,6 @@ Custom classes have no defaults and must be configured via overrides.
 | Artifact | Path |
 |----------|------|
 | Implementation | `crates/franken-node/src/policy/object_class_tuning.rs` |
+| Encode/decode benchmark artifact | `benchmarks/object_class_tuning/bench_encode_decode.rs` |
+| Fetch latency benchmark artifact | `benchmarks/object_class_tuning/bench_fetch_latency.rs` |
 | Policy report CSV | `artifacts/10.14/object_class_policy_report.csv` |

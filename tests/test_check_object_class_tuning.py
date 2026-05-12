@@ -56,6 +56,18 @@ class TestFileChecks:
         checks = mod.run_checks()
         assert next(c for c in checks if c["check"] == "file: policy report CSV")["pass"]
 
+    def test_benchmark_directory(self):
+        checks = mod.run_checks()
+        assert next(c for c in checks if c["check"] == "directory: object_class_tuning benchmarks")["pass"]
+
+    def test_encode_decode_benchmark_file(self):
+        checks = mod.run_checks()
+        assert next(c for c in checks if c["check"] == "file: encode/decode benchmark")["pass"]
+
+    def test_fetch_latency_benchmark_file(self):
+        checks = mod.run_checks()
+        assert next(c for c in checks if c["check"] == "file: fetch latency benchmark")["pass"]
+
 
 class TestTypeChecks:
     TYPES = [
@@ -121,6 +133,34 @@ class TestUnitTestCount:
         assert check["pass"]
 
 
+class TestBenchmarkArtifacts:
+    def test_encode_decode_benchmark_covers_classes(self):
+        checks = mod.run_checks()
+        for class_id in ["critical_marker", "trust_receipt", "replay_bundle", "telemetry_artifact"]:
+            assert next(c for c in checks if c["check"] == f"encode/decode benchmark: {class_id}")["pass"]
+
+    def test_fetch_latency_benchmark_covers_classes(self):
+        checks = mod.run_checks()
+        for class_id in ["critical_marker", "trust_receipt", "replay_bundle", "telemetry_artifact"]:
+            assert next(c for c in checks if c["check"] == f"fetch latency benchmark: {class_id}")["pass"]
+
+    def test_benchmark_artifact_schema_tokens(self):
+        checks = mod.run_checks()
+        for expected_check in [
+            "encode/decode benchmark: EncodeDecodeRow",
+            "encode/decode benchmark: ENCODE_DECODE_ROWS",
+            "encode/decode benchmark: p50_encode_us",
+            "encode/decode benchmark: p99_decode_us",
+            "fetch latency benchmark: FetchLatencyRow",
+            "fetch latency benchmark: FETCH_LATENCY_ROWS",
+            "fetch latency benchmark: fetch_priority",
+            "fetch latency benchmark: p99_fetch_us",
+        ]:
+            matches = [entry for entry in checks if entry["check"] == expected_check]
+            if not matches or not matches[0]["pass"]:
+                raise AssertionError(f"expected passing check {expected_check}")
+
+
 class TestSelfTest:
     def test_self_test_passes(self):
         assert mod.self_test()
@@ -129,7 +169,7 @@ class TestSelfTest:
 class TestCheckHelper:
     def test_pass_true(self):
         result = mod._check("t", True, "ok")
-        assert result["pass"] is True
+        assert bool(result["pass"])
 
     def test_pass_false(self):
         result = mod._check("t", False)
@@ -141,7 +181,22 @@ class TestJsonOutput:
         result = subprocess.run(
             [sys.executable, ROOT + "/scripts/check_object_class_tuning.py", "--json"],
             capture_output=True, text=True,
+            timeout=30,
         )
         assert result.returncode == 0
-        data = json.loads(result.stdout)
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise AssertionError(result.stdout) from exc
         assert data["verdict"] == "PASS"
+        assert data["summary"]["total"] == 116
+
+    def test_cli_write_evidence_flag_is_available(self):
+        result = subprocess.run(
+            [sys.executable, ROOT + "/scripts/check_object_class_tuning.py", "--help"],
+            capture_output=True, text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0
+        assert "--write-evidence" in result.stdout

@@ -4,76 +4,592 @@
   "section": "10.14",
   "overall_pass": true,
   "verdict": "PASS",
-  "test_count": 33,
+  "test_count": 47,
   "summary": {
-    "passing": 97,
+    "passing": 116,
     "failing": 0,
-    "total": 97
+    "total": 116
   },
   "checks": [
-    {"check": "file: implementation", "pass": true, "detail": "exists: crates/franken-node/src/policy/object_class_tuning.rs"},
-    {"check": "file: spec contract", "pass": true, "detail": "exists: docs/specs/section_10_14/bd-8tvs_contract.md"},
-    {"check": "file: policy report CSV", "pass": true, "detail": "exists: artifacts/10.14/object_class_policy_report.csv"},
-    {"check": "module registered in mod.rs", "pass": true, "detail": "found"},
-    {"check": "type: pub enum ObjectClass", "pass": true, "detail": "found"},
-    {"check": "type: pub enum FetchPriority", "pass": true, "detail": "found"},
-    {"check": "type: pub enum PrefetchPolicy", "pass": true, "detail": "found"},
-    {"check": "type: pub struct ClassTuning", "pass": true, "detail": "found"},
-    {"check": "type: pub struct BenchmarkMeasurement", "pass": true, "detail": "found"},
-    {"check": "type: pub struct TuningError", "pass": true, "detail": "found"},
-    {"check": "type: pub struct TuningEvent", "pass": true, "detail": "found"},
-    {"check": "type: pub struct ObjectClassTuningEngine", "pass": true, "detail": "found"},
-    {"check": "variant: CriticalMarker", "pass": true, "detail": "found"},
-    {"check": "variant: TrustReceipt", "pass": true, "detail": "found"},
-    {"check": "variant: ReplayBundle", "pass": true, "detail": "found"},
-    {"check": "variant: TelemetryArtifact", "pass": true, "detail": "found"},
-    {"check": "variant: Custom(", "pass": true, "detail": "found"},
-    {"check": "fetch_priority: Critical", "pass": true, "detail": "found"},
-    {"check": "fetch_priority: Normal", "pass": true, "detail": "found"},
-    {"check": "fetch_priority: Background", "pass": true, "detail": "found"},
-    {"check": "prefetch_policy: Eager", "pass": true, "detail": "found"},
-    {"check": "prefetch_policy: Lazy", "pass": true, "detail": "found"},
-    {"check": "prefetch_policy: None", "pass": true, "detail": "found"},
-    {"check": "field: symbol_size_bytes", "pass": true, "detail": "found"},
-    {"check": "field: encoding_overhead_ratio", "pass": true, "detail": "found"},
-    {"check": "field: fetch_priority", "pass": true, "detail": "found"},
-    {"check": "field: prefetch_policy", "pass": true, "detail": "found"},
-    {"check": "default: CriticalMarker 256B", "pass": true, "detail": "found"},
-    {"check": "default: TrustReceipt 1024B", "pass": true, "detail": "found"},
-    {"check": "default: ReplayBundle 16384B", "pass": true, "detail": "found"},
-    {"check": "default: TelemetryArtifact 4096B", "pass": true, "detail": "found"},
-    {"check": "method: fn resolve(", "pass": true, "detail": "found"},
-    {"check": "method: fn apply_override(", "pass": true, "detail": "found"},
-    {"check": "method: fn remove_override(", "pass": true, "detail": "found"},
-    {"check": "method: fn has_override(", "pass": true, "detail": "found"},
-    {"check": "method: fn active_overrides(", "pass": true, "detail": "found"},
-    {"check": "method: fn events(", "pass": true, "detail": "found"},
-    {"check": "method: fn load_benchmark_baseline(", "pass": true, "detail": "found"},
-    {"check": "method: fn to_csv(", "pass": true, "detail": "found"},
-    {"check": "method: fn validate(", "pass": true, "detail": "found"},
-    {"check": "method: fn default_tuning(", "pass": true, "detail": "found"},
-    {"check": "method: fn label(", "pass": true, "detail": "found"},
-    {"check": "method: fn canonical_classes(", "pass": true, "detail": "found"},
-    {"check": "method: fn with_init_event(", "pass": true, "detail": "found"},
-    {"check": "method: fn unknown_class(", "pass": true, "detail": "found"},
-    {"check": "event_code: OC_POLICY_ENGINE_INIT", "pass": true, "detail": "found"},
-    {"check": "event_code: OC_POLICY_OVERRIDE_APPLIED", "pass": true, "detail": "found"},
-    {"check": "event_code: OC_POLICY_OVERRIDE_REJECTED", "pass": true, "detail": "found"},
-    {"check": "event_code: OC_BENCHMARK_BASELINE_LOADED", "pass": true, "detail": "found"},
-    {"check": "error_code: ERR_ZERO_SYMBOL_SIZE", "pass": true, "detail": "found"},
-    {"check": "error_code: ERR_INVALID_OVERHEAD_RATIO", "pass": true, "detail": "found"},
-    {"check": "error_code: ERR_UNKNOWN_CLASS", "pass": true, "detail": "found"},
-    {"check": "invariant: INV-TUNE-CLASS-SPECIFIC", "pass": true, "detail": "found"},
-    {"check": "invariant: INV-TUNE-OVERRIDE-AUDITED", "pass": true, "detail": "found"},
-    {"check": "invariant: INV-TUNE-REJECT-INVALID", "pass": true, "detail": "found"},
-    {"check": "invariant: INV-TUNE-DETERMINISTIC", "pass": true, "detail": "found"},
-    {"check": "serde derives", "pass": true, "detail": "found"},
-    {"check": "Send + Sync asserted", "pass": true, "detail": "found"},
-    {"check": "unit test count", "pass": true, "detail": "33 tests (minimum 30)"},
-    {"check": "CSV has header", "pass": true, "detail": "found"},
-    {"check": "CSV has critical_marker", "pass": true, "detail": "found"},
-    {"check": "CSV has trust_receipt", "pass": true, "detail": "found"},
-    {"check": "CSV has replay_bundle", "pass": true, "detail": "found"},
-    {"check": "CSV has telemetry_artifact", "pass": true, "detail": "found"}
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/policy/object_class_tuning.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-8tvs_contract.md"
+    },
+    {
+      "check": "file: policy report CSV",
+      "pass": true,
+      "detail": "exists: artifacts/10.14/object_class_policy_report.csv"
+    },
+    {
+      "check": "directory: object_class_tuning benchmarks",
+      "pass": true,
+      "detail": "exists: benchmarks/object_class_tuning"
+    },
+    {
+      "check": "file: encode/decode benchmark",
+      "pass": true,
+      "detail": "exists: benchmarks/object_class_tuning/bench_encode_decode.rs"
+    },
+    {
+      "check": "file: fetch latency benchmark",
+      "pass": true,
+      "detail": "exists: benchmarks/object_class_tuning/bench_fetch_latency.rs"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum ObjectClass",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum FetchPriority",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum PrefetchPolicy",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ClassTuning",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct BenchmarkMeasurement",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct TuningError",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct TuningEvent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ObjectClassTuningEngine",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "variant: CriticalMarker",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "variant: TrustReceipt",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "variant: ReplayBundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "variant: TelemetryArtifact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "variant: Custom(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch_priority: Critical",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch_priority: Normal",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch_priority: Background",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "prefetch_policy: Eager",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "prefetch_policy: Lazy",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "prefetch_policy: None",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "field: symbol_size_bytes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "field: encoding_overhead_ratio",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "field: fetch_priority",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "field: prefetch_policy",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "default: CriticalMarker 256B",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "default: TrustReceipt 1024B",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "default: ReplayBundle 16384B",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "default: TelemetryArtifact 4096B",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn resolve(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn apply_override(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn remove_override(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn has_override(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn active_overrides(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn events(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn load_benchmark_baseline(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn to_csv(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn validate(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn default_tuning(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn label(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn canonical_classes(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn with_init_event(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn unknown_class(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: OC_POLICY_ENGINE_INIT",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: OC_POLICY_OVERRIDE_APPLIED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: OC_POLICY_OVERRIDE_REJECTED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: OC_BENCHMARK_BASELINE_LOADED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_ZERO_SYMBOL_SIZE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_INVALID_OVERHEAD_RATIO",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_UNKNOWN_CLASS",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-TUNE-CLASS-SPECIFIC",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-TUNE-OVERRIDE-AUDITED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-TUNE-REJECT-INVALID",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-TUNE-DETERMINISTIC",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "serde derives",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "Send + Sync asserted",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_critical_marker_defaults",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_trust_receipt_defaults",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_replay_bundle_defaults",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_telemetry_artifact_defaults",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_custom_class_no_default",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_all_canonical_classes_have_distinct_symbol_sizes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_validate_valid_tuning",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_validate_zero_symbol_size",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_validate_negative_overhead",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_validate_overhead_above_one",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_engine_resolve_defaults",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_engine_resolve_custom_returns_none",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_engine_apply_valid_override",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_engine_override_emits_event",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_engine_reject_invalid_override",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_engine_reject_emits_event",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_remove_override",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_active_overrides",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_with_init_event",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_load_benchmark_baseline",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_csv_export_header",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_csv_export_has_all_canonical_classes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_csv_export_row_count",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_object_class_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_fetch_priority_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_prefetch_policy_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_event_codes_defined",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_error_codes_defined",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_class_tuning_serde_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_object_class_serde_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_error_serde_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_deterministic_resolution",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_four_canonical_classes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "47 tests (minimum 30)"
+    },
+    {
+      "check": "CSV has header",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "CSV has critical_marker",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "CSV has trust_receipt",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "CSV has replay_bundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "CSV has telemetry_artifact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: EncodeDecodeRow",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: ENCODE_DECODE_ROWS",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: p50_encode_us",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: p99_decode_us",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: critical_marker",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: trust_receipt",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: replay_bundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "encode/decode benchmark: telemetry_artifact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: FetchLatencyRow",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: FETCH_LATENCY_ROWS",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: fetch_priority",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: p99_fetch_us",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: critical_marker",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: trust_receipt",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: replay_bundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fetch latency benchmark: telemetry_artifact",
+      "pass": true,
+      "detail": "found"
+    }
   ]
 }

@@ -15,6 +15,11 @@ IMPL = os.path.join(ROOT, "crates/franken-node/src/policy/object_class_tuning.rs
 MOD_RS = os.path.join(ROOT, "crates/franken-node/src/policy/mod.rs")
 SPEC = os.path.join(ROOT, "docs/specs/section_10_14/bd-8tvs_contract.md")
 CSV_ARTIFACT = os.path.join(ROOT, "artifacts/10.14/object_class_policy_report.csv")
+BENCH_DIR = os.path.join(ROOT, "benchmarks/object_class_tuning")
+BENCH_ENCODE_DECODE = os.path.join(BENCH_DIR, "bench_encode_decode.rs")
+BENCH_FETCH_LATENCY = os.path.join(BENCH_DIR, "bench_fetch_latency.rs")
+EVIDENCE_JSON = os.path.join(ROOT, "artifacts/section_10_14/bd-8tvs/verification_evidence.json")
+CHECK_REPORT_JSON = os.path.join(ROOT, "artifacts/section_10_14/bd-8tvs/check_report.json")
 
 
 def _check(name: str, passed: bool, detail: str = "") -> dict:
@@ -34,6 +39,11 @@ def run_checks() -> list[dict]:
     checks.append(_file_exists(IMPL, "implementation"))
     checks.append(_file_exists(SPEC, "spec contract"))
     checks.append(_file_exists(CSV_ARTIFACT, "policy report CSV"))
+    checks.append(_check("directory: object_class_tuning benchmarks", os.path.isdir(BENCH_DIR),
+                         f"exists: {os.path.relpath(BENCH_DIR, ROOT)}" if os.path.isdir(BENCH_DIR)
+                         else f"missing: {os.path.relpath(BENCH_DIR, ROOT)}"))
+    checks.append(_file_exists(BENCH_ENCODE_DECODE, "encode/decode benchmark"))
+    checks.append(_file_exists(BENCH_FETCH_LATENCY, "fetch latency benchmark"))
 
     # Module registered
     with open(MOD_RS) as f:
@@ -161,6 +171,32 @@ def run_checks() -> list[dict]:
                        "CSV has replay_bundle", "CSV has telemetry_artifact"]:
             checks.append(_check(label, False, "file missing"))
 
+    benchmark_expectations = [
+        (BENCH_ENCODE_DECODE, "encode/decode benchmark", [
+            "EncodeDecodeRow",
+            "ENCODE_DECODE_ROWS",
+            "p50_encode_us",
+            "p99_decode_us",
+        ]),
+        (BENCH_FETCH_LATENCY, "fetch latency benchmark", [
+            "FetchLatencyRow",
+            "FETCH_LATENCY_ROWS",
+            "fetch_priority",
+            "p99_fetch_us",
+        ]),
+    ]
+    for path, label, tokens in benchmark_expectations:
+        if os.path.isfile(path):
+            with open(path) as f:
+                benchmark_src = f.read()
+            for token in tokens:
+                checks.append(_check(f"{label}: {token}", token in benchmark_src))
+            for class_id in ["critical_marker", "trust_receipt", "replay_bundle", "telemetry_artifact"]:
+                checks.append(_check(f"{label}: {class_id}", class_id in benchmark_src))
+        else:
+            for token in tokens + ["critical_marker", "trust_receipt", "replay_bundle", "telemetry_artifact"]:
+                checks.append(_check(f"{label}: {token}", False, "file missing"))
+
     return checks
 
 
@@ -183,6 +219,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument(
+        "--write-evidence",
+        action="store_true",
+        help="write bd-8tvs verification_evidence.json and check_report.json",
+    )
     args = parser.parse_args()
 
     if args.self_test:
@@ -196,17 +237,23 @@ def main():
 
     test_count = len(re.findall(r"#\[test\]", Path(IMPL).read_text())) if os.path.isfile(IMPL) else 0
 
+    result = {
+        "bead_id": "bd-8tvs",
+        "title": "Per-class object tuning policy",
+        "section": "10.14",
+        "overall_pass": failing == 0,
+        "verdict": "PASS" if failing == 0 else "FAIL",
+        "test_count": test_count,
+        "summary": {"passing": passing, "failing": failing, "total": total},
+        "checks": checks,
+    }
+
+    if args.write_evidence:
+        payload = json.dumps(result, indent=2) + "\n"
+        Path(EVIDENCE_JSON).write_text(payload, encoding="utf-8")
+        Path(CHECK_REPORT_JSON).write_text(payload, encoding="utf-8")
+
     if args.json:
-        result = {
-            "bead_id": "bd-8tvs",
-            "title": "Per-class object tuning policy",
-            "section": "10.14",
-            "overall_pass": failing == 0,
-            "verdict": "PASS" if failing == 0 else "FAIL",
-            "test_count": test_count,
-            "summary": {"passing": passing, "failing": failing, "total": total},
-            "checks": checks,
-        }
         print(json.dumps(result, indent=2))
     else:
         for c in checks:
