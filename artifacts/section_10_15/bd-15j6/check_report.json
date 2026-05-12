@@ -4,11 +4,11 @@
   "section": "10.15",
   "overall_pass": true,
   "verdict": "PASS",
-  "test_count": "51",
+  "test_count": "76",
   "summary": {
-    "passing": 94,
+    "passing": 101,
     "failing": 0,
-    "total": 94
+    "total": 101
   },
   "checks": [
     {
@@ -25,6 +25,11 @@
       "check": "file: evidence samples JSONL",
       "pass": true,
       "detail": "exists: artifacts/10.15/control_evidence_samples.jsonl"
+    },
+    {
+      "check": "file: policy evidence required conformance test",
+      "pass": true,
+      "detail": "exists: tests/conformance/control_policy_evidence_required.rs"
     },
     {
       "check": "samples JSONL exists",
@@ -74,7 +79,7 @@
     {
       "check": "unit test count",
       "pass": true,
-      "detail": "51 tests (minimum 40)"
+      "detail": "76 tests (minimum 40)"
     },
     {
       "check": "Serialize/Deserialize derives",
@@ -478,6 +483,36 @@
     },
     {
       "check": "test: test_all_types_can_emit",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "conformance_test: policy_evidence_required",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "conformance_test: policy_evidence_required_for_every_policy_influenced_decision",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "conformance_test: policy_evidence_required_missing_entry_fails_closed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "conformance_test: policy_evidence_required_rejects_malformed_schema",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "conformance_test: policy_evidence_required_ordering_is_deterministic",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "conformance_test: policy_evidence_required_detects_ordering_violation",
       "pass": true,
       "detail": "found"
     }

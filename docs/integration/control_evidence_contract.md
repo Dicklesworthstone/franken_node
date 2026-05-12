@@ -81,3 +81,9 @@ Same inputs MUST produce the same entry sequence.
 3. Deterministic ordering MUST be verifiable
 4. Missing evidence MUST be a conformance failure (not warning)
 5. Malformed evidence MUST be rejected with EVD-004
+
+The executable conformance target is
+`tests/conformance/control_policy_evidence_required.rs`. It carries the stable
+`policy_evidence_required` sentinel and exercises every policy-influenced
+decision type, schema rejection, fail-closed missing evidence, and deterministic
+ordering.

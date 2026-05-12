@@ -3,19 +3,29 @@
   "title": "Mandatory evidence emission for policy-influenced control decisions",
   "section": "10.15",
   "verdict": "PASS",
-  "timestamp": "2026-02-20T00:00:00Z",
-  "rust_tests": 51,
-  "python_checks": 94,
-  "python_unit_tests": 31,
+  "timestamp": "2026-05-12T21:02:21Z",
+  "rust_tests": 76,
+  "rust_conformance_tests": 6,
+  "python_checks": 101,
+  "python_unit_tests": 33,
   "artifacts": {
     "implementation": "crates/franken-node/src/connector/control_evidence.rs",
     "spec": "docs/integration/control_evidence_contract.md",
     "samples": "artifacts/10.15/control_evidence_samples.jsonl",
     "verification_script": "scripts/check_control_evidence.py",
-    "test_file": "tests/test_check_control_evidence.py"
+    "test_file": "tests/test_check_control_evidence.py",
+    "conformance_test": "tests/conformance/control_policy_evidence_required.rs",
+    "cargo_target": "control_policy_evidence_required"
   },
+  "verification_commands": [
+    "python3 -m py_compile scripts/check_control_evidence.py tests/test_check_control_evidence.py",
+    "python3 scripts/check_control_evidence.py --json",
+    "python3 -m pytest tests/test_check_control_evidence.py",
+    "rch exec -- rustfmt --edition 2024 --check tests/conformance/control_policy_evidence_required.rs",
+    "rch exec -- env CARGO_TARGET_DIR=/tmp/franken-node-bd-15j6-control-policy-target cargo test -p frankenengine-node --test control_policy_evidence_required --no-default-features -- --nocapture"
+  ],
   "checks": [
-    {"group": "files", "count": 3, "pass": 3},
+    {"group": "files", "count": 4, "pass": 4},
     {"group": "samples_jsonl", "count": 3, "pass": 3},
     {"group": "spec_content", "count": 5, "pass": 5},
     {"group": "module_registration", "count": 1, "pass": 1},
@@ -25,6 +35,9 @@
     {"group": "methods", "count": 13, "pass": 13},
     {"group": "event_codes", "count": 5, "pass": 5},
     {"group": "invariants", "count": 4, "pass": 4},
-    {"group": "required_tests", "count": 51, "pass": 51}
+    {"group": "required_tests", "count": 51, "pass": 51},
+    {"group": "conformance_test_sentinel", "count": 1, "pass": 1},
+    {"group": "conformance_test_cases", "count": 5, "pass": 5},
+    {"group": "rust_conformance_target", "count": 6, "pass": 6}
   ]
 }

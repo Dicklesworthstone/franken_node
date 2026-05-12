@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import check_control_evidence as checker
+import check_control_evidence as checker  # noqa: E402
 
 
 class TestCheckFileHelper(unittest.TestCase):
@@ -93,6 +93,20 @@ class TestCheckSamplesJsonl(unittest.TestCase):
         self.assertTrue(types_check[0]["pass"])
 
 
+class TestConformanceTest(unittest.TestCase):
+    def test_conformance_test_exists(self):
+        result = checker.check_file(checker.CONFORMANCE_TEST, "policy evidence required conformance test")
+        self.assertTrue(result["pass"])
+
+    def test_policy_evidence_required_sentinel_present(self):
+        results = checker.check_content(
+            checker.CONFORMANCE_TEST,
+            [checker.POLICY_EVIDENCE_REQUIRED_SENTINEL],
+            "conformance_test",
+        )
+        self.assertTrue(results[0]["pass"])
+
+
 class TestCheckSpecContent(unittest.TestCase):
     def test_spec_has_all_types(self):
         results = checker.check_spec_content()
@@ -169,16 +183,16 @@ class TestJsonOutput(unittest.TestCase):
     def test_cli_json(self):
         proc = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_control_evidence.py"), "--json"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(proc.returncode, 0)
-        data = json.loads(proc.stdout)
+        data = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(data["verdict"], "PASS")
 
     def test_cli_human(self):
         proc = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_control_evidence.py")],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(proc.returncode, 0)
         self.assertIn("PASS", proc.stdout)

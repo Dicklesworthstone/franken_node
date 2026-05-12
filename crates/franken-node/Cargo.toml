@@ -412,6 +412,10 @@ path = "tests/policy_evidence_linkage_conformance.rs"
 required-features = ["policy-engine"]
 
 [[test]]
+name = "control_policy_evidence_required"
+path = "../../tests/conformance/control_policy_evidence_required.rs"
+
+[[test]]
 name = "runtime_cli_e2e"
 path = "tests/runtime_cli_e2e.rs"
 

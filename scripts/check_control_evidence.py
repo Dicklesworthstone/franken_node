@@ -18,6 +18,8 @@ IMPL = ROOT / "crates" / "franken-node" / "src" / "connector" / "control_evidenc
 SPEC = ROOT / "docs" / "integration" / "control_evidence_contract.md"
 MOD_RS = ROOT / "crates" / "franken-node" / "src" / "connector" / "mod.rs"
 SAMPLES = ROOT / "artifacts" / "10.15" / "control_evidence_samples.jsonl"
+CONFORMANCE_TEST = ROOT / "tests" / "conformance" / "control_policy_evidence_required.rs"
+POLICY_EVIDENCE_REQUIRED_SENTINEL = "policy_evidence_required"
 
 REQUIRED_TYPES = [
     "pub enum DecisionType",
@@ -120,6 +122,15 @@ REQUIRED_TESTS = [
     "test_invariant_constants_defined",
     "test_default_emitter",
     "test_all_types_can_emit",
+]
+
+REQUIRED_CONFORMANCE_TESTS = [
+    POLICY_EVIDENCE_REQUIRED_SENTINEL,
+    "policy_evidence_required_for_every_policy_influenced_decision",
+    "policy_evidence_required_missing_entry_fails_closed",
+    "policy_evidence_required_rejects_malformed_schema",
+    "policy_evidence_required_ordering_is_deterministic",
+    "policy_evidence_required_detects_ordering_violation",
 ]
 
 
@@ -238,6 +249,7 @@ def run_checks():
     checks.append(check_file(IMPL, "implementation"))
     checks.append(check_file(SPEC, "spec contract"))
     checks.append(check_file(SAMPLES, "evidence samples JSONL"))
+    checks.append(check_file(CONFORMANCE_TEST, "policy evidence required conformance test"))
     checks.extend(check_samples_jsonl())
     checks.extend(check_spec_content())
     checks.append(check_module_registered())
@@ -248,6 +260,7 @@ def run_checks():
     checks.extend(check_content(IMPL, EVENT_CODES, "event_code"))
     checks.extend(check_content(IMPL, INVARIANTS, "invariant"))
     checks.extend(check_content(IMPL, REQUIRED_TESTS, "test"))
+    checks.extend(check_content(CONFORMANCE_TEST, REQUIRED_CONFORMANCE_TESTS, "conformance_test"))
 
     passing = sum(1 for c in checks if c["pass"])
     failing = sum(1 for c in checks if not c["pass"])

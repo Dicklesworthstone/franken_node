@@ -67,3 +67,4 @@ All entries use the canonical EvidenceEntry schema from bd-nupr (10.14) v1.0.
 | Evidence samples | `artifacts/10.15/control_evidence_samples.jsonl` |
 | Verification script | `scripts/check_control_evidence.py` |
 | Python tests | `tests/test_check_control_evidence.py` |
+| Conformance test | `tests/conformance/control_policy_evidence_required.rs` |
