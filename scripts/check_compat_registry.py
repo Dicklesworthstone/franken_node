@@ -21,10 +21,41 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
-from pathlib import Path
 
 REGISTRY_PATH = ROOT / "docs" / "COMPATIBILITY_REGISTRY.json"
 SCHEMA_PATH = ROOT / "schemas" / "compatibility_registry.schema.json"
+
+EVIDENCE_PATHS = {
+    "primary_registry": "docs/COMPATIBILITY_REGISTRY.json",
+    "registry_schema": "schemas/compatibility_registry.schema.json",
+    "contract": "docs/specs/section_10_2/bd-2qf_contract.md",
+    "verifier": "scripts/check_compat_registry.py",
+    "regression_tests": "tests/test_check_compat_registry.py",
+    "machine_evidence": "artifacts/section_10_2/bd-2qf/verification_evidence.json",
+    "human_summary": "artifacts/section_10_2/bd-2qf/verification_summary.md",
+}
+
+VERIFICATION_COMMANDS = [
+    {
+        "command": "python3 scripts/check_compat_registry.py --json",
+        "covers": [
+            "primary compatibility registry path",
+            "registry schema path",
+            "registry structure",
+            "typed shim metadata fields",
+            "unique behavior IDs",
+            "band coverage",
+        ],
+    },
+    {
+        "command": "python3 -m pytest tests/test_check_compat_registry.py",
+        "covers": [
+            "registry verifier checks",
+            "typed metadata constants",
+            "primary implementation evidence path citations",
+        ],
+    },
+]
 
 VALID_BANDS = {"core", "high-value", "edge", "unsafe"}
 VALID_SHIM_TYPES = {"native", "polyfill", "bridge", "stub"}
@@ -59,7 +90,7 @@ def load_registry() -> tuple[dict | None, str | None]:
     if not REGISTRY_PATH.exists():
         return None, "File not found"
     try:
-        data = json.loads(REGISTRY_PATH.read_text())
+        data = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
         return data, None
     except json.JSONDecodeError as e:
         return None, f"Invalid JSON: {e}"
@@ -190,11 +221,7 @@ def check_band_coverage() -> dict:
     return check
 
 
-def main():
-    logger = configure_test_logging("check_compat_registry")
-    json_output = "--json" in sys.argv
-    timestamp = datetime.now(timezone.utc).isoformat()
-
+def build_report(timestamp: str) -> dict:
     checks = [
         check_registry_exists(),
         check_schema_exists(),
@@ -207,11 +234,13 @@ def main():
     failing = [c for c in checks if c["status"] == "FAIL"]
     verdict = "PASS" if not failing else "FAIL"
 
-    report = {
+    return {
         "gate": "compatibility_registry_verification",
         "section": "10.2",
         "verdict": verdict,
         "timestamp": timestamp,
+        "evidence_paths": EVIDENCE_PATHS,
+        "verification_commands": VERIFICATION_COMMANDS,
         "checks": checks,
         "summary": {
             "total_checks": len(checks),
@@ -220,13 +249,20 @@ def main():
         },
     }
 
+
+def main():
+    logger = configure_test_logging("check_compat_registry")
+    json_output = "--json" in sys.argv
+    timestamp = datetime.now(timezone.utc).isoformat()
+    report = build_report(timestamp)
+
     if json_output:
         print(json.dumps(report, indent=2))
     else:
         print("=== Compatibility Behavior Registry Verifier ===")
         print(f"Timestamp: {timestamp}")
         print()
-        for c in checks:
+        for c in report["checks"]:
             icon = "OK" if c["status"] == "PASS" else "FAIL"
             print(f"  [{icon}] {c['id']}")
             if c["status"] == "FAIL":
@@ -238,9 +274,9 @@ def main():
                         print(f"       Error: {e}")
         print()
         print(f"Checks: {report['summary']['passing_checks']}/{report['summary']['total_checks']} pass")
-        print(f"Verdict: {verdict}")
+        print(f"Verdict: {report['verdict']}")
 
-    sys.exit(0 if verdict == "PASS" else 1)
+    sys.exit(0 if report["verdict"] == "PASS" else 1)
 
 
 if __name__ == "__main__":

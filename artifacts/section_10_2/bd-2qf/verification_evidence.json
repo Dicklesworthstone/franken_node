@@ -5,6 +5,36 @@
   "timestamp": "2026-02-20T09:33:46.611480+00:00",
   "git_commit": "32b56e4c639fd2a39f3f0b77ee55a656ae65109e",
   "verdict": "PASS",
+  "evidence_paths": {
+    "primary_registry": "docs/COMPATIBILITY_REGISTRY.json",
+    "registry_schema": "schemas/compatibility_registry.schema.json",
+    "contract": "docs/specs/section_10_2/bd-2qf_contract.md",
+    "verifier": "scripts/check_compat_registry.py",
+    "regression_tests": "tests/test_check_compat_registry.py",
+    "machine_evidence": "artifacts/section_10_2/bd-2qf/verification_evidence.json",
+    "human_summary": "artifacts/section_10_2/bd-2qf/verification_summary.md"
+  },
+  "verification_commands": [
+    {
+      "command": "python3 scripts/check_compat_registry.py --json",
+      "covers": [
+        "primary compatibility registry path",
+        "registry schema path",
+        "registry structure",
+        "typed shim metadata fields",
+        "unique behavior IDs",
+        "band coverage"
+      ]
+    },
+    {
+      "command": "python3 -m pytest tests/test_check_compat_registry.py",
+      "covers": [
+        "registry verifier checks",
+        "typed metadata constants",
+        "primary implementation evidence path citations"
+      ]
+    }
+  ],
   "checks": [
     {
       "id": "REG-EXISTS",
@@ -32,8 +62,8 @@
     }
   ],
   "unit_tests": {
-    "total": 11,
-    "passed": 11,
+    "total": 13,
+    "passed": 13,
     "failed": 0
   },
   "outputs": [
@@ -49,18 +79,18 @@
     },
     {
       "path": "docs/specs/section_10_2/bd-2qf_contract.md",
-      "sha256": "d85a1b31145fa2ad9ed8520d2c8cd7668008a02d7486548cfa6e657818cf9f46",
-      "size_bytes": 1941
+      "sha256": "997602df6e820a25a7c3640453a899def15fa27101b128e22c407b7841048961",
+      "size_bytes": 2394
     },
     {
       "path": "scripts/check_compat_registry.py",
-      "sha256": "25edab5a22c6b984e6a17aa77308fd166fcb9c58a073af75ea9f5462a1694a62",
-      "size_bytes": 7947
+      "sha256": "765981d9d5f970d66c8f293ec77430ddadbd4a64ef20b469b44ea0b7541f8e3e",
+      "size_bytes": 9441
     },
     {
       "path": "tests/test_check_compat_registry.py",
-      "sha256": "89b5eb27394e63af90364c4bda9a528dc6b9fd89971cf547a4acf93e376557c2",
-      "size_bytes": 2207
+      "sha256": "95c4916f589362006761603dec131b198c032c04602ff9101b2786b852908f06",
+      "size_bytes": 3549
     }
   ]
 }

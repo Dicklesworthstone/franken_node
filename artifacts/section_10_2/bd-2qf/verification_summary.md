@@ -22,7 +22,17 @@
    - REG-UNIQUE: All behavior IDs unique
    - REG-COVERAGE: At least core band represented
 
-5. **Unit tests** `tests/test_check_compat_registry.py`: 11 tests
+5. **Unit tests** `tests/test_check_compat_registry.py`: 13 tests
+
+## Evidence Traceability
+
+The contract and machine-readable evidence now cite the primary compatibility
+registry implementation and the checks that verify it:
+
+- Primary registry implementation: `docs/COMPATIBILITY_REGISTRY.json`
+- Registry schema: `schemas/compatibility_registry.schema.json`
+- Verification implementation: `scripts/check_compat_registry.py`
+- Regression tests: `tests/test_check_compat_registry.py`
 
 ## Check results
 
@@ -37,4 +47,4 @@
 
 ## Unit tests
 
-- 11/11 passed, 0 failed
+- 13/13 passed, 0 failed

@@ -36,6 +36,15 @@ Each behavior entry in the registry includes:
 - **Input**: `schemas/compatibility_registry.schema.json`
 - **Output**: PASS/FAIL verdict on registry validity
 
+## Implementation and Verification Paths
+
+- Primary registry implementation: `docs/COMPATIBILITY_REGISTRY.json`
+- Registry schema: `schemas/compatibility_registry.schema.json`
+- Verification implementation: `scripts/check_compat_registry.py`
+- Regression tests: `tests/test_check_compat_registry.py`
+- Machine evidence: `artifacts/section_10_2/bd-2qf/verification_evidence.json`
+- Human summary: `artifacts/section_10_2/bd-2qf/verification_summary.md`
+
 ## Failure Semantics
 
 - Missing registry: FAIL
