@@ -6,7 +6,7 @@ import re
 import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 SRC = os.path.join(ROOT, "crates", "franken-node", "src", "connector", "supervision.rs")
 MOD = os.path.join(ROOT, "crates", "franken-node", "src", "connector", "mod.rs")
 SPEC = os.path.join(ROOT, "docs", "specs", "section_10_11", "bd-3he_contract.md")
@@ -46,7 +46,7 @@ INTEGRATION_TEST_MARKERS = [
 
 
 def _read(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return f.read()
 
 
@@ -55,7 +55,7 @@ def _rel(path):
 
 
 def _load_json(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -277,7 +277,7 @@ def self_test():
 
 
 def main():
-    logger = configure_test_logging("check_supervision_tree")
+    configure_test_logging("check_supervision_tree")
     if "--self-test" in sys.argv:
         ok = self_test()
         sys.exit(0 if ok else 1)
