@@ -225,7 +225,7 @@ pub fn verify_close_condition_receipt_signature(
     trusted_key_id: &str,
 ) -> Result<()> {
     let signature = &receipt.tamper_evidence.signature;
-    if signature.algorithm != "ed25519" {
+    if !crate::security::constant_time::ct_eq(&signature.algorithm, "ed25519") {
         anyhow::bail!(
             "unsupported close-condition receipt signature algorithm {}",
             signature.algorithm
@@ -239,11 +239,9 @@ pub fn verify_close_condition_receipt_signature(
         );
     }
 
-    let public_key_bytes = hex::decode(&signature.public_key_hex)
-        .context("close-condition receipt public key must be hex")?;
-    let public_key_bytes: [u8; 32] = public_key_bytes.try_into().map_err(|bytes: Vec<u8>| {
-        anyhow::anyhow!("expected 32 public key bytes, got {}", bytes.len())
-    })?;
+    let mut public_key_bytes = [0_u8; 32];
+    hex::decode_to_slice(&signature.public_key_hex, &mut public_key_bytes)
+        .context("close-condition receipt public key must be 32 bytes of hex")?;
     let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes)
         .context("close-condition receipt public key is invalid")?;
     let derived_key_id =
@@ -273,11 +271,9 @@ pub fn verify_close_condition_receipt_signature(
         );
     }
 
-    let signature_bytes = hex::decode(&signature.signature_hex)
-        .context("close-condition receipt signature must be hex")?;
-    let signature_bytes: [u8; 64] = signature_bytes.try_into().map_err(|bytes: Vec<u8>| {
-        anyhow::anyhow!("expected 64 signature bytes, got {}", bytes.len())
-    })?;
+    let mut signature_bytes = [0_u8; 64];
+    hex::decode_to_slice(&signature.signature_hex, &mut signature_bytes)
+        .context("close-condition receipt signature must be 64 bytes of hex")?;
     let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
     verifying_key
         .verify(&signed_preimage, &signature)
@@ -557,12 +553,23 @@ fn check_no_engine_internal_imports(root: &Path) -> Result<SplitContractCheck> {
     for rust_file in &rust_files {
         let content = fs::read_to_string(rust_file)
             .with_context(|| format!("failed to read {}", rust_file.display()))?;
-        for pattern in internal_patterns {
-            if content.contains(pattern) {
-                violations.push(serde_json::json!({
-                    "file": relative_path(root, rust_file),
-                    "pattern": pattern,
-                }));
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            for pattern in internal_patterns {
+                let matches_import = pattern.starts_with("use ")
+                    && trimmed
+                        .strip_prefix(pattern)
+                        .is_some_and(matches_rust_statement_suffix);
+                let matches_module = pattern.starts_with("mod ")
+                    && trimmed
+                        .strip_prefix(pattern)
+                        .is_some_and(matches_rust_statement_suffix);
+                if matches_import || matches_module {
+                    violations.push(serde_json::json!({
+                        "file": relative_path(root, rust_file),
+                        "pattern": pattern,
+                    }));
+                }
             }
         }
     }
@@ -625,6 +632,12 @@ fn check_governance_docs(root: &Path) -> SplitContractCheck {
             "violations": violations,
         }),
     }
+}
+
+fn matches_rust_statement_suffix(suffix: &str) -> bool {
+    suffix == ";"
+        || suffix.starts_with("::")
+        || suffix.chars().next().is_some_and(char::is_whitespace)
 }
 
 fn scan_limit_exceeded_check(id: &str, err: &CloseConditionScanError) -> SplitContractCheck {

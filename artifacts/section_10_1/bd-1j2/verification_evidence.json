@@ -1,8 +1,10 @@
 {
+  "schema_version": "franken-node/split-contract-report/v1",
   "gate": "split_contract_enforcement",
   "section": "10.1",
   "verdict": "PASS",
-  "timestamp": "2026-02-20T09:06:13.548650+00:00",
+  "timestamp": "2026-05-12T08:05:07.094512+00:00",
+  "scan_root": "/data/projects/franken_node",
   "checks": [
     {
       "id": "SPLIT-NO-LOCAL",
@@ -41,7 +43,7 @@
       "id": "SPLIT-NO-INTERNALS",
       "status": "PASS",
       "details": {
-        "files_scanned": 3
+        "files_scanned": 669
       }
     },
     {
@@ -61,6 +63,88 @@
       }
     }
   ],
+  "telemetry": {
+    "schema_version": "franken-node/split-contract-telemetry/v1",
+    "namespace": "franken_node.section_10_1.split_contract",
+    "events": [
+      {
+        "schema_version": "franken-node/split-contract-telemetry/v1",
+        "namespace": "franken_node.section_10_1.split_contract",
+        "event_code": "SPLIT_CONTRACT_CHECK_PASSED",
+        "gate": "split_contract_enforcement",
+        "section": "10.1",
+        "check_id": "SPLIT-NO-LOCAL",
+        "status": "PASS",
+        "timestamp": "2026-05-12T08:05:07.094512+00:00",
+        "fail_closed": false
+      },
+      {
+        "schema_version": "franken-node/split-contract-telemetry/v1",
+        "namespace": "franken_node.section_10_1.split_contract",
+        "event_code": "SPLIT_CONTRACT_CHECK_PASSED",
+        "gate": "split_contract_enforcement",
+        "section": "10.1",
+        "check_id": "SPLIT-PATH-DEPS",
+        "status": "PASS",
+        "timestamp": "2026-05-12T08:05:07.094512+00:00",
+        "fail_closed": false
+      },
+      {
+        "schema_version": "franken-node/split-contract-telemetry/v1",
+        "namespace": "franken_node.section_10_1.split_contract",
+        "event_code": "SPLIT_CONTRACT_CHECK_PASSED",
+        "gate": "split_contract_enforcement",
+        "section": "10.1",
+        "check_id": "SPLIT-NO-INTERNALS",
+        "status": "PASS",
+        "timestamp": "2026-05-12T08:05:07.094512+00:00",
+        "fail_closed": false
+      },
+      {
+        "schema_version": "franken-node/split-contract-telemetry/v1",
+        "namespace": "franken_node.section_10_1.split_contract",
+        "event_code": "SPLIT_CONTRACT_CHECK_PASSED",
+        "gate": "split_contract_enforcement",
+        "section": "10.1",
+        "check_id": "SPLIT-GOVERNANCE",
+        "status": "PASS",
+        "timestamp": "2026-05-12T08:05:07.094512+00:00",
+        "fail_closed": false
+      },
+      {
+        "schema_version": "franken-node/split-contract-telemetry/v1",
+        "namespace": "franken_node.section_10_1.split_contract",
+        "event_code": "SPLIT_CONTRACT_GATE_PASSED",
+        "gate": "split_contract_enforcement",
+        "section": "10.1",
+        "check_id": "SPLIT-CONTRACT-GATE",
+        "status": "PASS",
+        "timestamp": "2026-05-12T08:05:07.094512+00:00",
+        "fail_closed": false
+      }
+    ]
+  },
+  "migration_policy": {
+    "schema_version": "franken-node/split-contract-migration-policy/v1",
+    "policy_id": "SPLIT-CONTRACT-MIGRATION-POLICY",
+    "source_repository": "franken_node",
+    "engine_repository": "franken_engine",
+    "allowed_engine_path_prefixes": [
+      "../../../franken_engine/crates/",
+      "franken_engine/crates/"
+    ],
+    "forbidden_local_engine_crate_paths": [
+      "crates/franken-engine",
+      "crates/franken-extension-host"
+    ],
+    "required_governance_documents": [
+      "docs/ENGINE_SPLIT_CONTRACT.md",
+      "docs/PRODUCT_CHARTER.md"
+    ],
+    "boundary_change_rule": "Any migration that changes engine crate ownership or dependency paths must update docs/ENGINE_SPLIT_CONTRACT.md and pass this gate.",
+    "violation_action": "block_merge",
+    "fail_closed": true
+  },
   "summary": {
     "total_checks": 4,
     "passing_checks": 4,

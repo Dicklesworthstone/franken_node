@@ -113,6 +113,18 @@ fn split_path_dependency_check_status(receipt: &CloseConditionReceipt) -> Oracle
         .clone()
 }
 
+fn split_no_internals_check_status(receipt: &CloseConditionReceipt) -> OracleColor {
+    receipt
+        .core
+        .l2_engine_boundary_oracle
+        .checks
+        .iter()
+        .find(|check| check.id == "SPLIT-NO-INTERNALS")
+        .expect("no internals check")
+        .status
+        .clone()
+}
+
 mod ops {
     pub mod close_condition {
         use super::super::*;
@@ -167,6 +179,37 @@ mod ops {
             assert_eq!(
                 split_path_dependency_check_status(&receipt),
                 OracleColor::Red
+            );
+        }
+
+        #[test]
+        fn string_literals_named_like_engine_internal_imports_are_not_violations() {
+            let root = fixture_root_with_engine_paths(
+                "../../../franken_engine/crates/franken-engine",
+                "../../../franken_engine/crates/franken-extension-host",
+            );
+            write_fixture(
+                &root.path().join("crates/franken-node/src/lib.rs"),
+                r#"
+pub const ENGINE_INTERNAL_IMPORT_EXAMPLE: &str = "use frankenengine_engine::internal";
+pub const ENGINE_INTERNAL_MODULE_EXAMPLE: &str = "mod franken_engine";
+pub fn fixture() -> bool { true }
+"#,
+            );
+
+            let receipt = generate_fixture_receipt(root.path());
+
+            assert_eq!(
+                split_no_internals_check_status(&receipt),
+                OracleColor::Green
+            );
+            assert!(
+                receipt
+                    .core
+                    .l2_engine_boundary_oracle
+                    .blocking_findings
+                    .iter()
+                    .all(|finding| finding != "SPLIT-NO-INTERNALS failed")
             );
         }
     }

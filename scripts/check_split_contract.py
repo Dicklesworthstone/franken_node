@@ -15,14 +15,26 @@ Exit codes:
 """
 
 import json
+import os
 import re
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
 from pathlib import Path
+
+SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_ROOT))
+from scripts.lib.test_logger import configure_test_logging
+
+ROOT_ENV_VAR = "FRANKEN_NODE_SPLIT_CONTRACT_ROOT"
+ROOT = Path(os.environ.get(ROOT_ENV_VAR, SCRIPT_ROOT)).resolve()
+REPORT_SCHEMA_VERSION = "franken-node/split-contract-report/v1"
+TELEMETRY_SCHEMA_VERSION = "franken-node/split-contract-telemetry/v1"
+MIGRATION_POLICY_SCHEMA_VERSION = "franken-node/split-contract-migration-policy/v1"
+TELEMETRY_NAMESPACE = "franken_node.section_10_1.split_contract"
+GATE_PASSED_EVENT = "SPLIT_CONTRACT_GATE_PASSED"
+GATE_FAILED_EVENT = "SPLIT_CONTRACT_GATE_FAILED"
+CHECK_PASSED_EVENT = "SPLIT_CONTRACT_CHECK_PASSED"
+CHECK_FAILED_EVENT = "SPLIT_CONTRACT_CHECK_FAILED"
 
 
 # Directories that must NOT exist (local engine crate reintroduction)
@@ -52,6 +64,68 @@ SPLIT_CONTRACT_KEYWORDS = [
     "MUST NOT",
     "path dependencies",
 ]
+
+
+def build_telemetry(checks: list[dict], verdict: str, timestamp: str) -> dict:
+    """Build stable telemetry events for CI/audit consumers."""
+    events = []
+    for check in checks:
+        status = check["status"]
+        events.append({
+            "schema_version": TELEMETRY_SCHEMA_VERSION,
+            "namespace": TELEMETRY_NAMESPACE,
+            "event_code": CHECK_PASSED_EVENT if status == "PASS" else CHECK_FAILED_EVENT,
+            "gate": "split_contract_enforcement",
+            "section": "10.1",
+            "check_id": check["id"],
+            "status": status,
+            "timestamp": timestamp,
+            "fail_closed": status != "PASS",
+        })
+
+    events.append({
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
+        "namespace": TELEMETRY_NAMESPACE,
+        "event_code": GATE_PASSED_EVENT if verdict == "PASS" else GATE_FAILED_EVENT,
+        "gate": "split_contract_enforcement",
+        "section": "10.1",
+        "check_id": "SPLIT-CONTRACT-GATE",
+        "status": verdict,
+        "timestamp": timestamp,
+        "fail_closed": verdict != "PASS",
+    })
+
+    return {
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
+        "namespace": TELEMETRY_NAMESPACE,
+        "events": events,
+    }
+
+
+def build_migration_policy() -> dict:
+    """Describe the only allowed engine-split migration path."""
+    return {
+        "schema_version": MIGRATION_POLICY_SCHEMA_VERSION,
+        "policy_id": "SPLIT-CONTRACT-MIGRATION-POLICY",
+        "source_repository": "franken_node",
+        "engine_repository": "franken_engine",
+        "allowed_engine_path_prefixes": [
+            ENGINE_PATH_PREFIX,
+            "franken_engine/crates/",
+        ],
+        "forbidden_local_engine_crate_paths": [
+            str(path.relative_to(ROOT)) for path in FORBIDDEN_DIRS
+        ],
+        "required_governance_documents": [
+            str(path.relative_to(ROOT)) for path in REQUIRED_DOCS
+        ],
+        "boundary_change_rule": (
+            "Any migration that changes engine crate ownership or dependency paths "
+            "must update docs/ENGINE_SPLIT_CONTRACT.md and pass this gate."
+        ),
+        "violation_action": "block_merge",
+        "fail_closed": True,
+    }
 
 
 def check_no_local_engine_crates() -> dict:
@@ -122,10 +196,10 @@ def check_no_engine_internal_imports() -> dict:
 
     # Patterns that suggest direct engine-internal access
     internal_patterns = [
-        r'use\s+frankenengine_engine::internal',
-        r'use\s+frankenengine_extension_host::internal',
-        r'mod\s+franken_engine',
-        r'mod\s+franken_extension_host',
+        r'^\s*use\s+frankenengine_engine::internal\b',
+        r'^\s*use\s+frankenengine_extension_host::internal\b',
+        r'^\s*mod\s+franken_engine\s*;',
+        r'^\s*mod\s+franken_extension_host\s*;',
     ]
 
     violations = []
@@ -142,7 +216,7 @@ def check_no_engine_internal_imports() -> dict:
         except Exception:
             continue
         for pattern in internal_patterns:
-            if re.search(pattern, content):
+            if re.search(pattern, content, re.MULTILINE):
                 violations.append({
                     "file": str(rs_file.relative_to(ROOT)),
                     "pattern": pattern,
@@ -200,11 +274,15 @@ def main():
     verdict = "PASS" if not failing else "FAIL"
 
     report = {
+        "schema_version": REPORT_SCHEMA_VERSION,
         "gate": "split_contract_enforcement",
         "section": "10.1",
         "verdict": verdict,
         "timestamp": timestamp,
+        "scan_root": str(ROOT),
         "checks": checks,
+        "telemetry": build_telemetry(checks, verdict, timestamp),
+        "migration_policy": build_migration_policy(),
         "summary": {
             "total_checks": len(checks),
             "passing_checks": sum(1 for c in checks if c["status"] == "PASS"),
