@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Verification script for bd-15t category-shift reporting pipeline."""
+# ruff: noqa: E402
 
 from __future__ import annotations
 
@@ -9,10 +10,10 @@ import json
 import re
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 from typing import Any
 
 
@@ -22,6 +23,11 @@ SPEC = ROOT / "docs" / "specs" / "section_10_9" / "bd-15t_contract.md"
 POLICY = ROOT / "docs" / "policy" / "category_shift_reporting.md"
 EVIDENCE = ROOT / "artifacts" / "section_10_9" / "bd-15t" / "verification_evidence.json"
 SUMMARY = ROOT / "artifacts" / "section_10_9" / "bd-15t" / "verification_summary.md"
+REPORTS_CHECKER = ROOT / "scripts" / "check_category_shift_reports.py"
+FIXTURE_DIR = ROOT / "fixtures" / "category-shift"
+FIXTURE_MANIFEST = FIXTURE_DIR / "manifest.json"
+FIXTURE_REPORT_JSON = FIXTURE_DIR / "category_shift_report.json"
+FIXTURE_REPORT_MD = FIXTURE_DIR / "category_shift_report.md"
 
 RESULTS: list[dict[str, Any]] = []
 
@@ -157,6 +163,116 @@ def _file_contains(path: Path, pattern: str, label: str) -> dict[str, Any]:
     )
 
 
+def _add_check(results: list[dict[str, Any]], name: str, passed: bool, detail: str = "") -> None:
+    results.append(
+        {
+            "check": name,
+            "pass": bool(passed),
+            "detail": detail or ("found" if passed else "NOT FOUND"),
+        }
+    )
+
+
+def _read_json_file(path: Path) -> tuple[dict[str, Any] | None, str]:
+    try:
+        data = json.JSONDecoder().decode(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, "missing"
+    except json.JSONDecodeError as exc:
+        return None, f"invalid JSON: {exc}"
+    if not isinstance(data, dict):
+        return None, "top-level JSON must be an object"
+    return data, "valid JSON object"
+
+
+def report_fixture_checks() -> list[dict[str, Any]]:
+    """Validate the checked-in category-shift report fixtures."""
+    checks: list[dict[str, Any]] = []
+
+    _add_check(
+        checks,
+        "file: category shift reports checker",
+        REPORTS_CHECKER.is_file(),
+        f"exists: {_safe_rel(REPORTS_CHECKER)}" if REPORTS_CHECKER.is_file() else f"missing: {_safe_rel(REPORTS_CHECKER)}",
+    )
+    _add_check(
+        checks,
+        "fixture: category-shift directory",
+        FIXTURE_DIR.is_dir(),
+        f"exists: {_safe_rel(FIXTURE_DIR)}" if FIXTURE_DIR.is_dir() else f"missing: {_safe_rel(FIXTURE_DIR)}",
+    )
+    for path, label in [
+        (FIXTURE_MANIFEST, "fixture manifest"),
+        (FIXTURE_REPORT_JSON, "fixture report JSON"),
+        (FIXTURE_REPORT_MD, "fixture report Markdown"),
+    ]:
+        _add_check(
+            checks,
+            f"file: {label}",
+            path.is_file(),
+            f"exists: {_safe_rel(path)}" if path.is_file() else f"missing: {_safe_rel(path)}",
+        )
+
+    manifest, manifest_detail = _read_json_file(FIXTURE_MANIFEST)
+    _add_check(checks, "fixture manifest: valid JSON", manifest is not None, manifest_detail)
+    if manifest is not None:
+        fixture_paths = {entry.get("path") for entry in manifest.get("fixtures", []) if isinstance(entry, dict)}
+        _add_check(checks, "fixture manifest: bead_id", manifest.get("bead_id") == "bd-15t")
+        _add_check(
+            checks,
+            "fixture manifest: expected checker",
+            manifest.get("expected_checker") == "scripts/check_category_shift_reports.py",
+        )
+        _add_check(
+            checks,
+            "fixture manifest: report fixtures listed",
+            {
+                "fixtures/category-shift/category_shift_report.json",
+                "fixtures/category-shift/category_shift_report.md",
+            }.issubset(fixture_paths),
+            f"{len(fixture_paths)} fixture path(s) listed",
+        )
+
+    report, report_detail = _read_json_file(FIXTURE_REPORT_JSON)
+    _add_check(checks, "fixture report: valid JSON", report is not None, report_detail)
+    if report is not None:
+        claims = report.get("claims", [])
+        dimensions = report.get("dimensions", {})
+        thresholds = report.get("thresholds", [])
+        manifest_entries = report.get("manifest", [])
+        report_hash = report.get("report_hash", "")
+        claim_ids = {claim.get("claim_id") for claim in claims if isinstance(claim, dict)}
+
+        _add_check(checks, "fixture report: version", report.get("version") == 1)
+        _add_check(checks, "fixture report: five dimensions", isinstance(dimensions, dict) and len(dimensions) == 5)
+        _add_check(checks, "fixture report: five claims", isinstance(claims, list) and len(claims) == 5)
+        _add_check(checks, "fixture report: three thresholds", isinstance(thresholds, list) and len(thresholds) == 3)
+        _add_check(checks, "fixture report: manifest entries", isinstance(manifest_entries, list) and len(manifest_entries) >= 5)
+        _add_check(
+            checks,
+            "fixture report: deterministic claim ids",
+            {f"CSR-CLAIM-{idx:03d}" for idx in range(1, 6)}.issubset(claim_ids),
+        )
+        _add_check(
+            checks,
+            "fixture report: report hash",
+            isinstance(report_hash, str) and bool(re.fullmatch(r"[0-9a-f]{64}", report_hash)),
+            "64 lowercase hex chars" if isinstance(report_hash, str) else "not a string",
+        )
+
+    if FIXTURE_REPORT_MD.is_file():
+        md = FIXTURE_REPORT_MD.read_text(encoding="utf-8")
+        _add_check(checks, "fixture markdown: title", "# Category-Shift Report v1" in md)
+        _add_check(checks, "fixture markdown: claim id", "CSR-CLAIM-001" in md)
+        _add_check(checks, "fixture markdown: manifest", "## Artifact Manifest" in md)
+    else:
+        _add_check(checks, "fixture markdown: title", False, "file missing")
+        _add_check(checks, "fixture markdown: claim id", False, "file missing")
+        _add_check(checks, "fixture markdown: manifest", False, "file missing")
+
+    return checks
+
+
 # ── Simulation ───────────────────────────────────────────────────────────────
 
 
@@ -238,7 +354,7 @@ def simulate_pipeline() -> dict[str, Any]:
     # Dimension 3: Migration velocity
     claims.append(_build_claim(
         "CSR-CLAIM-003", "migration_velocity",
-        "franken_node migration is 4.1x faster than manual migration",
+        "franken_node migration runs 4.1x faster than manual migration",
         4.1, "factor",
         "artifacts/migration/demo_results.json",
         '{"success_rate":0.97,"median_time_hours":1.2}',
@@ -362,6 +478,7 @@ def run_all() -> dict[str, Any]:
     _file_exists(POLICY, "category shift reporting policy")
     _file_exists(EVIDENCE, "verification evidence")
     _file_exists(SUMMARY, "verification summary")
+    RESULTS.extend(report_fixture_checks())
 
     # Module wiring
     if MOD_FILE.is_file():
@@ -438,7 +555,7 @@ def run_all() -> dict[str, Any]:
     # Evidence file structure
     if EVIDENCE.is_file():
         try:
-            evidence_data = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+            evidence_data = json.JSONDecoder().decode(EVIDENCE.read_text(encoding="utf-8"))
             _check("evidence: has bead_id", evidence_data.get("bead_id") == "bd-15t")
             _check("evidence: has section", evidence_data.get("section") == "10.9")
             _check("evidence: has verdict", "verdict" in evidence_data)
@@ -470,7 +587,7 @@ def self_test() -> tuple[bool, list[dict[str, Any]]]:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_category_shift")
+    configure_test_logging("check_category_shift")
     parser = argparse.ArgumentParser(
         description="Verify bd-15t category-shift reporting pipeline"
     )

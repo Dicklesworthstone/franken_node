@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "generated_at_secs": 10000000,
+  "generated_at_iso": "1970-04-26T17:46:40Z",
+  "dimensions": {
+    "adoption_trends": {
+      "source_name": "verifier-portal-fixture",
+      "source_bead": "bd-m8p"
+    },
+    "benchmark_comparisons": {
+      "source_name": "compat-benchmark-fixture",
+      "source_bead": "bd-f5d"
+    },
+    "economic_impact": {
+      "source_name": "trust-economics-fixture",
+      "source_bead": "bd-10c"
+    },
+    "migration_velocity": {
+      "source_name": "migration-demo-fixture",
+      "source_bead": "bd-1e0"
+    },
+    "security_posture": {
+      "source_name": "adversarial-campaign-fixture",
+      "source_bead": "bd-9is"
+    }
+  },
+  "thresholds": [
+    {
+      "name": "compatibility",
+      "target": 95.0,
+      "actual": 96.2,
+      "unit": "%",
+      "status": "met"
+    },
+    {
+      "name": "migration_velocity",
+      "target": 3.0,
+      "actual": 4.1,
+      "unit": "x",
+      "status": "exceeded"
+    },
+    {
+      "name": "compromise_reduction",
+      "target": 10.0,
+      "actual": 12.5,
+      "unit": "x",
+      "status": "exceeded"
+    }
+  ],
+  "bet_status": [
+    {
+      "initiative_id": "moonshot-compat",
+      "title": "95% API Compatibility",
+      "status": "on_track",
+      "progress_percent": 96,
+      "blockers": [],
+      "projected_completion": "2026-Q2"
+    },
+    {
+      "initiative_id": "moonshot-migration",
+      "title": "3x Migration Velocity",
+      "status": "completed",
+      "progress_percent": 100,
+      "blockers": [],
+      "projected_completion": "2026-Q1"
+    },
+    {
+      "initiative_id": "moonshot-security",
+      "title": "10x Compromise Reduction",
+      "status": "on_track",
+      "progress_percent": 85,
+      "blockers": [],
+      "projected_completion": "2026-Q2"
+    }
+  ],
+  "manifest": [
+    {
+      "artifact_path": "artifacts/benchmarks/compat_results.json",
+      "sha256_hash": "1e94bf0a9fbe1254a9c3982a5b70a1d7d246dc32c7e2bfb1d11c2c2225abf9fb",
+      "generated_at_secs": 9913600,
+      "freshness": "fresh"
+    },
+    {
+      "artifact_path": "artifacts/security/adversarial_results.json",
+      "sha256_hash": "2e94bf0a9fbe1254a9c3982a5b70a1d7d246dc32c7e2bfb1d11c2c2225abf9fb",
+      "generated_at_secs": 9827200,
+      "freshness": "fresh"
+    },
+    {
+      "artifact_path": "artifacts/migration/demo_results.json",
+      "sha256_hash": "3e94bf0a9fbe1254a9c3982a5b70a1d7d246dc32c7e2bfb1d11c2c2225abf9fb",
+      "generated_at_secs": 9740800,
+      "freshness": "fresh"
+    },
+    {
+      "artifact_path": "artifacts/adoption/verifier_stats.json",
+      "sha256_hash": "4e94bf0a9fbe1254a9c3982a5b70a1d7d246dc32c7e2bfb1d11c2c2225abf9fb",
+      "generated_at_secs": 9956800,
+      "freshness": "fresh"
+    },
+    {
+      "artifact_path": "artifacts/economics/trust_economics.json",
+      "sha256_hash": "5e94bf0a9fbe1254a9c3982a5b70a1d7d246dc32c7e2bfb1d11c2c2225abf9fb",
+      "generated_at_secs": 9913600,
+      "freshness": "fresh"
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "CSR-CLAIM-001",
+      "dimension": "benchmark_comparisons",
+      "summary": "franken_node achieves 96.2% Node.js API compatibility",
+      "value": 96.2,
+      "unit": "percent",
+      "outcome": "verified"
+    },
+    {
+      "claim_id": "CSR-CLAIM-002",
+      "dimension": "security_posture",
+      "summary": "franken_node achieves 12.5x compromise surface reduction",
+      "value": 12.5,
+      "unit": "factor",
+      "outcome": "verified"
+    },
+    {
+      "claim_id": "CSR-CLAIM-003",
+      "dimension": "migration_velocity",
+      "summary": "franken_node migration runs 4.1x faster than manual migration",
+      "value": 4.1,
+      "unit": "factor",
+      "outcome": "verified"
+    },
+    {
+      "claim_id": "CSR-CLAIM-004",
+      "dimension": "adoption_trends",
+      "summary": "142 verifiers registered with 8934 attestations",
+      "value": 142.0,
+      "unit": "count",
+      "outcome": "verified"
+    },
+    {
+      "claim_id": "CSR-CLAIM-005",
+      "dimension": "economic_impact",
+      "summary": "4.2x cost-benefit ratio with -87% attacker ROI",
+      "value": 4.2,
+      "unit": "ratio",
+      "outcome": "verified"
+    }
+  ],
+  "report_hash": "9b08a1a9f5c4ac764dc796918078acb20e921f05f3b2a54dd99a44dffdd6f5aa"
+}

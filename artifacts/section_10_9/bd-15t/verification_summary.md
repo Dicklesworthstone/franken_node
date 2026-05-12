@@ -6,9 +6,10 @@
 
 | Category | Pass | Total |
 |----------|------|-------|
-| Python verification checks | 83 | 83 |
+| Python verification checks | 105 | 105 |
 | Rust unit tests | 34 | 34 |
 | Simulation checks | 10 | 10 |
+| Report fixture checks | 20 | 20 |
 
 ## Implementation
 
@@ -36,6 +37,7 @@
 - `diff_reports()` — historical trending across report periods
 - `sha256_hex()` — artifact integrity hashing
 - `demo_pipeline()` — end-to-end demonstration
+- `scripts/check_category_shift_reports.py` — fixture-level report verifier
 
 ### Category-Defining Thresholds
 | Threshold | Target | Description |
@@ -56,6 +58,18 @@
 ## Verification Commands
 
 ```bash
-python3 scripts/check_category_shift.py --json    # 83/83 PASS
+python3 scripts/check_category_shift.py --json    # 105/105 PASS
+python3 scripts/check_category_shift_reports.py --json    # report fixture PASS
 python3 -m pytest tests/test_check_category_shift.py  # Python unit tests
+python3 -m pytest tests/test_check_category_shift_reports.py  # report checker unit tests
+python3 -m json.tool artifacts/section_10_9/bd-15t/report_fixture_check.json
 ```
+
+## Report Fixtures
+
+- `fixtures/category-shift/manifest.json`
+- `fixtures/category-shift/category_shift_report.json`
+- `fixtures/category-shift/category_shift_report.md`
+- `artifacts/section_10_9/bd-15t/report_fixture_check.json`
+
+The fixture manifest records `scripts/check_category_shift_reports.py` as the expected report verifier entrypoint and lists both machine-readable and human-readable category-shift report fixtures.

@@ -158,7 +158,12 @@ from the previous version including:
 - `docs/policy/category_shift_reporting.md` -- reporting policy
 - `crates/franken-node/src/supply_chain/category_shift.rs` -- Rust implementation
 - `scripts/check_category_shift.py` -- verification script
+- `scripts/check_category_shift_reports.py` -- report fixture verification entrypoint
 - `tests/test_check_category_shift.py` -- unit tests
+- `fixtures/category-shift/manifest.json` -- fixture inventory
+- `fixtures/category-shift/category_shift_report.json` -- machine-readable report fixture
+- `fixtures/category-shift/category_shift_report.md` -- human-readable report fixture
+- `artifacts/section_10_9/bd-15t/report_fixture_check.json` -- report fixture verification output
 - `artifacts/section_10_9/bd-15t/verification_evidence.json`
 - `artifacts/section_10_9/bd-15t/verification_summary.md`
 

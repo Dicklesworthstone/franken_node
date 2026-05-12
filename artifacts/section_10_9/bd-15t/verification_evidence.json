@@ -9,11 +9,17 @@
     "implementation": "crates/franken-node/src/supply_chain/category_shift.rs",
     "policy": "docs/policy/category_shift_reporting.md",
     "verification_script": "scripts/check_category_shift.py",
-    "python_tests": "tests/test_check_category_shift.py"
+    "report_verification_script": "scripts/check_category_shift_reports.py",
+    "python_tests": "tests/test_check_category_shift.py",
+    "report_python_tests": "tests/test_check_category_shift_reports.py",
+    "fixture_manifest": "fixtures/category-shift/manifest.json",
+    "report_fixture_json": "fixtures/category-shift/category_shift_report.json",
+    "report_fixture_markdown": "fixtures/category-shift/category_shift_report.md",
+    "report_fixture_check": "artifacts/section_10_9/bd-15t/report_fixture_check.json"
   },
   "metrics": {
-    "python_checks_total": 83,
-    "python_checks_passing": 83,
+    "python_checks_total": 105,
+    "python_checks_passing": 105,
     "python_checks_failing": 0,
     "rust_unit_tests": 34,
     "structs_verified": 12,
@@ -27,7 +33,8 @@
     "policy_sections_verified": 8,
     "simulation_checks": 10,
     "report_dimensions": 5,
-    "output_formats": 2
+    "output_formats": 2,
+    "report_fixture_checks": 20
   },
   "acceptance_criteria": {
     "AC1_data_aggregation": "PASS — pipeline aggregates from 5 sources (benchmarks, security, migration, adoption, economics)",

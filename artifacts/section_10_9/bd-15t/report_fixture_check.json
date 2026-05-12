@@ -1,0 +1,116 @@
+{
+  "bead_id": "bd-15t",
+  "title": "Category-shift report fixture verification",
+  "section": "10.9",
+  "verdict": "PASS",
+  "total": 20,
+  "passed": 20,
+  "failed": 0,
+  "fixtures": [
+    "fixtures/category-shift/manifest.json",
+    "fixtures/category-shift/category_shift_report.json",
+    "fixtures/category-shift/category_shift_report.md"
+  ],
+  "checks": [
+    {
+      "check": "file: category shift reports checker",
+      "pass": true,
+      "detail": "exists: scripts/check_category_shift_reports.py"
+    },
+    {
+      "check": "fixture: category-shift directory",
+      "pass": true,
+      "detail": "exists: fixtures/category-shift"
+    },
+    {
+      "check": "file: fixture manifest",
+      "pass": true,
+      "detail": "exists: fixtures/category-shift/manifest.json"
+    },
+    {
+      "check": "file: fixture report JSON",
+      "pass": true,
+      "detail": "exists: fixtures/category-shift/category_shift_report.json"
+    },
+    {
+      "check": "file: fixture report Markdown",
+      "pass": true,
+      "detail": "exists: fixtures/category-shift/category_shift_report.md"
+    },
+    {
+      "check": "fixture manifest: valid JSON",
+      "pass": true,
+      "detail": "valid JSON object"
+    },
+    {
+      "check": "fixture manifest: bead_id",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fixture manifest: expected checker",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fixture manifest: report fixtures listed",
+      "pass": true,
+      "detail": "2 fixture path(s) listed"
+    },
+    {
+      "check": "fixture report: valid JSON",
+      "pass": true,
+      "detail": "valid JSON object"
+    },
+    {
+      "check": "fixture report: version",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fixture report: five dimensions",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fixture report: five claims",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fixture report: three thresholds",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fixture report: manifest entries",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fixture report: deterministic claim ids",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fixture report: report hash",
+      "pass": true,
+      "detail": "64 lowercase hex chars"
+    },
+    {
+      "check": "fixture markdown: title",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fixture markdown: claim id",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "fixture markdown: manifest",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

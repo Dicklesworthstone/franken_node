@@ -1,0 +1,18 @@
+{
+  "bead_id": "bd-15t",
+  "section": "10.9",
+  "purpose": "Deterministic fixtures for the category-shift report verifier.",
+  "expected_checker": "scripts/check_category_shift_reports.py",
+  "fixtures": [
+    {
+      "path": "fixtures/category-shift/category_shift_report.json",
+      "kind": "machine_report",
+      "description": "Canonical JSON report with five dimensions, five claims, three thresholds, and manifest evidence."
+    },
+    {
+      "path": "fixtures/category-shift/category_shift_report.md",
+      "kind": "human_report",
+      "description": "Human-readable report generated from the same claim identifiers and manifest entries."
+    }
+  ]
+}

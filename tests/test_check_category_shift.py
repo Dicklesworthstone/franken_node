@@ -1,4 +1,5 @@
 """Unit tests for scripts/check_category_shift.py."""
+# ruff: noqa: E402
 
 import json
 import sys
@@ -105,7 +106,14 @@ class TestRunAll(unittest.TestCase):
 
     def test_many_checks(self):
         result = mod.run_all()
-        self.assertGreaterEqual(result["total"], 80)
+        self.assertGreaterEqual(result["total"], 100)
+
+    def test_report_fixture_checks_present(self):
+        result = mod.run_all()
+        check_names = {check["check"] for check in result["checks"]}
+        self.assertIn("file: category shift reports checker", check_names)
+        self.assertIn("fixture: category-shift directory", check_names)
+        self.assertIn("fixture report: five dimensions", check_names)
 
     def _failing(self, result):
         failures = [c for c in result["checks"] if not c["pass"]]
@@ -121,7 +129,7 @@ class TestSelfTest(unittest.TestCase):
 class TestJsonOutput(unittest.TestCase):
     def test_serializable(self):
         result = mod.run_all()
-        parsed = json.loads(json.dumps(result))
+        parsed = json.JSONDecoder().decode(json.dumps(result))
         self.assertEqual(parsed["bead_id"], "bd-15t")
 
     def test_all_fields(self):
@@ -165,6 +173,11 @@ class TestHelpers(unittest.TestCase):
         )
         self.assertEqual(claim["outcome"], "stale")
         self.assertEqual(claim["evidence"]["freshness"], "stale")
+
+    def test_report_fixture_checks_pass(self):
+        checks = mod.report_fixture_checks()
+        failures = [check for check in checks if not check["pass"]]
+        self.assertEqual(failures, [])
 
 
 class TestFileChecks(unittest.TestCase):
