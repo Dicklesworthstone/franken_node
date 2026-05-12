@@ -97,7 +97,7 @@ fn rejects_artifact_when_provenance_publisher_differs_from_author() {
     assert!(matches!(
         err,
         ArtifactError::InvalidEnvelope { ref detail, .. }
-            if detail == "publisher must match artifact author"
+            if matches!(detail.as_str(), "publisher must match artifact author")
     ));
 }
 
@@ -115,7 +115,7 @@ fn rejects_artifact_when_provenance_signature_is_not_bound_to_inputs() {
     assert!(matches!(
         err,
         ArtifactError::InvalidEnvelope { ref detail, .. }
-            if detail == "artifact provenance signature mismatch"
+            if matches!(detail.as_str(), "artifact provenance signature mismatch")
     ));
 }
 
