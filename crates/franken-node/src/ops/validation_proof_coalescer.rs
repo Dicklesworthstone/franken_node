@@ -26,6 +26,8 @@ use std::time::Duration;
 pub const WORK_KEY_SCHEMA_VERSION: &str = "franken-node/validation-proof-coalescer/work-key/v1";
 pub const LEASE_SCHEMA_VERSION: &str = "franken-node/validation-proof-coalescer/lease/v1";
 pub const DECISION_SCHEMA_VERSION: &str = "franken-node/validation-proof-coalescer/decision/v1";
+pub const TELEMETRY_EVENT_SCHEMA_VERSION: &str =
+    "franken-node/validation-proof-coalescer/telemetry-event/v1";
 pub const CAPACITY_SNAPSHOT_SCHEMA_VERSION: &str =
     "franken-node/validation-proof-coalescer/rch-capacity-snapshot/v1";
 pub const ADMISSION_POLICY_SCHEMA_VERSION: &str =
@@ -1856,6 +1858,121 @@ pub struct ValidationProofCoalescerOutcome {
     pub lease: Option<ValidationProofCoalescerLease>,
     pub lease_path: PathBuf,
     pub decision: ValidationProofCoalescerDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationProofCoalescerTelemetryEvent {
+    pub schema_version: String,
+    pub trace_id: String,
+    pub proof_work_key: String,
+    pub proof_cache_key: String,
+    pub lease_id: String,
+    pub lease_state: String,
+    pub decision: String,
+    pub reason_code: String,
+    pub event_code: String,
+    pub required_action: String,
+    pub producer_agent: String,
+    pub waiter_agent: String,
+    pub bead_id: String,
+    pub receipt_path: String,
+    pub cache_key: String,
+    pub fencing_token: String,
+    pub target_dir_policy_id: String,
+    pub dirty_state_policy: String,
+    pub fail_closed: bool,
+}
+
+impl ValidationProofCoalescerTelemetryEvent {
+    #[must_use]
+    pub fn from_decision(
+        decision: &ValidationProofCoalescerDecision,
+        receipt_path: Option<&str>,
+    ) -> Self {
+        let lease_ref = decision.lease_ref.as_ref();
+        let producer_agent = lease_ref
+            .map(|lease| lease.owner_agent.as_str())
+            .unwrap_or(decision.agent_name.as_str());
+        let waiter_agent = if matches!(
+            decision.decision,
+            ValidationProofCoalescerDecisionKind::JoinExistingProof
+                | ValidationProofCoalescerDecisionKind::WaitForReceipt
+                | ValidationProofCoalescerDecisionKind::RetryAfterStaleLease
+                | ValidationProofCoalescerDecisionKind::RepairState
+        ) {
+            decision.agent_name.as_str()
+        } else {
+            "none"
+        };
+
+        Self {
+            schema_version: TELEMETRY_EVENT_SCHEMA_VERSION.to_string(),
+            trace_id: decision.trace_id.clone(),
+            proof_work_key: decision.proof_work_key.hex.clone(),
+            proof_cache_key: decision.proof_work_key.proof_cache_key.hex.clone(),
+            lease_id: lease_ref
+                .map(|lease| lease.lease_id.clone())
+                .unwrap_or_else(|| "no-lease".to_string()),
+            lease_state: lease_ref
+                .map(|lease| lease.state.as_str().to_string())
+                .unwrap_or_else(|| "no-lease".to_string()),
+            decision: decision.decision.as_str().to_string(),
+            reason_code: decision.reason_code.clone(),
+            event_code: decision.diagnostics.event_code.clone(),
+            required_action: decision.required_action.as_str().to_string(),
+            producer_agent: producer_agent.to_string(),
+            waiter_agent: waiter_agent.to_string(),
+            bead_id: decision.bead_id.clone(),
+            receipt_path: receipt_path.unwrap_or("none").to_string(),
+            cache_key: decision.proof_work_key.proof_cache_key.hex.clone(),
+            fencing_token: lease_ref
+                .map(|lease| lease.fencing_token.clone())
+                .unwrap_or_else(|| "no-fence".to_string()),
+            target_dir_policy_id: decision.proof_work_key.target_dir_policy_id.clone(),
+            dirty_state_policy: decision
+                .proof_work_key
+                .dirty_state_policy
+                .as_str()
+                .to_string(),
+            fail_closed: decision.diagnostics.fail_closed,
+        }
+    }
+
+    #[must_use]
+    pub fn from_completed_lease(lease: &ValidationProofCoalescerLease) -> Self {
+        let receipt_path = lease
+            .receipt_ref
+            .as_ref()
+            .map(|receipt| receipt.path.as_str())
+            .unwrap_or("none");
+        Self {
+            schema_version: TELEMETRY_EVENT_SCHEMA_VERSION.to_string(),
+            trace_id: lease.diagnostics.trace_id.clone(),
+            proof_work_key: lease.proof_work_key.hex.clone(),
+            proof_cache_key: lease.proof_cache_key.hex.clone(),
+            lease_id: lease.lease_id.clone(),
+            lease_state: lease.state.as_str().to_string(),
+            decision: lease.state.as_str().to_string(),
+            reason_code: lease.diagnostics.reason_code.clone(),
+            event_code: lease.diagnostics.event_code.clone(),
+            required_action: ValidationProofCoalescerRequiredAction::WaitForReceipt
+                .as_str()
+                .to_string(),
+            producer_agent: lease.owner_agent.clone(),
+            waiter_agent: lease
+                .diagnostics
+                .waiter_agent
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+            bead_id: lease.owner_bead_id.clone(),
+            receipt_path: receipt_path.to_string(),
+            cache_key: lease.proof_cache_key.hex.clone(),
+            fencing_token: lease.fencing_token.clone(),
+            target_dir_policy_id: lease.target_dir_policy_id.clone(),
+            dirty_state_policy: lease.proof_work_key.dirty_state_policy.as_str().to_string(),
+            fail_closed: lease.diagnostics.fail_closed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

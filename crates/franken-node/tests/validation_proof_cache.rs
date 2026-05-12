@@ -28,10 +28,10 @@ use frankenengine_node::ops::validation_proof_coalescer::{
     ValidationProofAdmissionPolicy, ValidationProofCoalescerDecision,
     ValidationProofCoalescerDecisionKind, ValidationProofCoalescerOutcome,
     ValidationProofCoalescerReceiptRef, ValidationProofCoalescerRequiredAction,
-    ValidationProofCoalescerStore, ValidationProofLeaseState, ValidationProofPriority,
-    ValidationProofRchCapacitySnapshot, ValidationProofRchCommand,
-    ValidationProofRchWorkerCapacity, ValidationProofTargetDirClass, ValidationProofWorkKey,
-    ValidationProofWorkKeyParts, ValidationSwarmSchedulerBuildInput,
+    ValidationProofCoalescerStore, ValidationProofCoalescerTelemetryEvent,
+    ValidationProofLeaseState, ValidationProofPriority, ValidationProofRchCapacitySnapshot,
+    ValidationProofRchCommand, ValidationProofRchWorkerCapacity, ValidationProofTargetDirClass,
+    ValidationProofWorkKey, ValidationProofWorkKeyParts, ValidationSwarmSchedulerBuildInput,
     ValidationSwarmSchedulerCapacitySnapshot, ValidationSwarmSchedulerCoalescerState,
     ValidationSwarmSchedulerDecision, ValidationSwarmSchedulerDecisionKind,
     ValidationSwarmSchedulerDigestRef, ValidationSwarmSchedulerFlightRecorderState,
@@ -40,8 +40,8 @@ use frankenengine_node::ops::validation_proof_coalescer::{
     ValidationSwarmSchedulerTargetDirClass, build_validation_swarm_scheduler_input,
     decide_validation_proof_admission, decide_validation_swarm_schedule,
     decide_validation_swarm_schedule_from_build_input, error_codes as coalescer_error_codes,
-    order_validation_swarm_scheduler_inputs, reason_codes as coalescer_reason_codes,
-    swarm_scheduler_error_codes,
+    event_codes as coalescer_event_codes, order_validation_swarm_scheduler_inputs,
+    reason_codes as coalescer_reason_codes, swarm_scheduler_error_codes,
 };
 use frankenengine_node::ops::validation_proof_debt_ledger::{
     ValidationProofDebtClass, build_validation_proof_debt_ledger,
@@ -1204,6 +1204,101 @@ fn swarm_scheduler_performance_decisions(
 struct CoalescerStressAttempt {
     agent: String,
     outcome: ValidationProofCoalescerOutcome,
+}
+
+#[test]
+fn validation_proof_coalescer_store_lifecycle_telemetry_events_cover_lease_transitions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let store = ValidationProofCoalescerStore::new(dir.path());
+    let log_path = dir.path().join("proof-coalescer-lifecycle.ndjson");
+    let receipt_path = "receipts/bd-y4coj-telemetry.json";
+
+    let producer_request =
+        coalescer_create_request("telemetry", "SnowyBeaver", "bd-y4coj", ts(1), ts(20));
+    let producer = store.create_or_join(producer_request.clone())?;
+    let producer_event =
+        ValidationProofCoalescerTelemetryEvent::from_decision(&producer.decision, None);
+    assert_eq!(
+        producer_event.event_code,
+        coalescer_event_codes::PRODUCER_ADMITTED
+    );
+    assert_eq!(
+        producer_event.required_action,
+        ValidationProofCoalescerRequiredAction::StartRchValidation.as_str()
+    );
+    append_log_event(&log_path, &serde_json::to_value(&producer_event)?);
+
+    let waiter = store.create_or_join(coalescer_create_request(
+        "telemetry",
+        "LifecycleWaiter",
+        "bd-y4coj",
+        ts(2),
+        ts(20),
+    ))?;
+    let waiter_event =
+        ValidationProofCoalescerTelemetryEvent::from_decision(&waiter.decision, None);
+    assert_eq!(
+        waiter_event.event_code,
+        coalescer_event_codes::WAITER_JOINED
+    );
+    assert_eq!(waiter_event.waiter_agent, "LifecycleWaiter");
+    assert_eq!(waiter_event.lease_id, producer_event.lease_id);
+    append_log_event(&log_path, &serde_json::to_value(&waiter_event)?);
+
+    let completed = store.complete_lease(CompleteLeaseRequest {
+        proof_work_key: producer_request.proof_work_key,
+        owner_agent: producer_request.owner_agent,
+        owner_bead_id: producer_request.owner_bead_id,
+        fencing_token: producer_request.fencing_token,
+        completed_at: ts(3),
+        receipt_ref: coalescer_receipt_ref("telemetry", "bd-y4coj", receipt_path),
+    })?;
+    let completed_event = ValidationProofCoalescerTelemetryEvent::from_completed_lease(&completed);
+    assert_eq!(
+        completed_event.event_code,
+        coalescer_event_codes::RECEIPT_HANDOFF_COMPLETED
+    );
+    assert_eq!(
+        completed_event.lease_state,
+        ValidationProofLeaseState::Completed.as_str()
+    );
+    assert_eq!(completed_event.receipt_path, receipt_path);
+    append_log_event(&log_path, &serde_json::to_value(&completed_event)?);
+
+    let events = read_log_events(&log_path);
+    assert_eq!(events.len(), 3);
+    for event in &events {
+        assert_coalescer_log_event_fields(event);
+        assert_eq!(
+            event
+                .get("schema_version")
+                .and_then(serde_json::Value::as_str),
+            Some("franken-node/validation-proof-coalescer/telemetry-event/v1")
+        );
+        assert!(
+            event
+                .get("required_action")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        );
+        assert!(
+            event
+                .get("lease_state")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        );
+    }
+    assert!(events.iter().any(|event| {
+        event.get("event_code").and_then(serde_json::Value::as_str)
+            == Some(coalescer_event_codes::RECEIPT_HANDOFF_COMPLETED)
+            && event
+                .get("receipt_path")
+                .and_then(serde_json::Value::as_str)
+                == Some(receipt_path)
+    }));
+
+    Ok(())
 }
 
 #[test]
