@@ -33,5 +33,8 @@ Recorded validation:
   tests/test_check_trust_card.py`: PASS.
 - `jq -e . artifacts/replacement_gap/bd-1oju/verification_evidence.json`: PASS.
 - `git diff --check`: PASS.
+- `ubs scripts/check_trust_card.py tests/test_check_trust_card.py
+  artifacts/replacement_gap/bd-1oju/verification_evidence.json
+  artifacts/replacement_gap/bd-1oju/verification_summary.md`: PASS, exit 0.
 - Focused cargo E2E was skipped because `pgrep -af 'cargo|rustc' | wc -l`
   returned 5 and `rch queue` reported 3 active builds.

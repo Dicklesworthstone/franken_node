@@ -10,11 +10,11 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from typing import Any
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 TRUST_CARD_IMPL = ROOT / "crates" / "franken-node" / "src" / "supply_chain" / "trust_card.rs"
@@ -250,11 +250,21 @@ def _canonical(value: Any) -> Any:
     return value
 
 
+def _canonical_text(value: Any) -> str:
+    return json.dumps(_canonical(value), separators=(",", ":"), ensure_ascii=True)
+
+
+def _values_differ(left: Any, right: Any) -> bool:
+    left_text = _canonical_text(left)
+    right_text = _canonical_text(right)
+    return not hmac.compare_digest(left_text, right_text)
+
+
 def _compute_card_hash(card: dict[str, Any]) -> str:
     canon = dict(card)
     canon["card_hash"] = ""
     canon["registry_signature"] = ""
-    payload = json.dumps(_canonical(canon), separators=(",", ":"), ensure_ascii=True)
+    payload = _canonical_text(canon)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -278,7 +288,8 @@ def _verify_card(card: dict[str, Any], key: bytes) -> bool:
         expected_hash.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
-    return card.get("registry_signature") == expected_sig
+    signature = card.get("registry_signature", "")
+    return isinstance(signature, str) and hmac.compare_digest(signature, expected_sig)
 
 
 def _build_base_card(extension_id: str, version: str, trust_version: int, previous_hash: str | None) -> dict[str, Any]:
@@ -351,14 +362,14 @@ def simulate_trust_card_flow() -> dict[str, Any]:
         "active_quarantine",
         "extension",
     ]:
-        if v1[field] != v2[field]:
+        if _values_differ(v1[field], v2[field]):
             changed_fields.append(field)
 
     return {
-        "deterministic": v1["card_hash"] == v1_repeat["card_hash"],
+        "deterministic": hmac.compare_digest(v1["card_hash"], v1_repeat["card_hash"]),
         "v1_verified": _verify_card(v1, key),
         "v2_verified": _verify_card(v2, key),
-        "hash_chain_linked": v2["previous_version_hash"] == v1["card_hash"],
+        "hash_chain_linked": hmac.compare_digest(v2["previous_version_hash"], v1["card_hash"]),
         "changed_fields": changed_fields,
         "v1": v1,
         "v2": v2,
@@ -377,7 +388,8 @@ def check_completion_debt_evidence() -> list[dict[str, Any]]:
         ]
 
     try:
-        data = json.loads(REPLACEMENT_EVIDENCE.read_text(encoding="utf-8"))
+        with REPLACEMENT_EVIDENCE.open(encoding="utf-8") as evidence_file:
+            data = json.load(evidence_file)
     except json.JSONDecodeError as exc:
         return [_check("completion debt evidence JSON parses", False, str(exc))]
 
@@ -579,7 +591,7 @@ def self_test() -> tuple[bool, list[dict[str, Any]]]:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_trust_card")
+    configure_test_logging("check_trust_card")
     parser = argparse.ArgumentParser(description="Verify bd-2yh trust-card implementation")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON report")
     parser.add_argument("--self-test", action="store_true", help="Run self-test mode")

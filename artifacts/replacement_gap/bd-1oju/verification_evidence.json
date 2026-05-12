@@ -118,6 +118,11 @@
       "command": "rch exec -- cargo test -p frankenengine-node --test e2e_trust_card_lifecycle",
       "expected": "PASS when cargo contention permits",
       "actual": "SKIPPED at closeout: pgrep -af 'cargo|rustc' | wc -l returned 5; rch queue reported 3 active builds"
+    },
+    {
+      "command": "ubs scripts/check_trust_card.py tests/test_check_trust_card.py artifacts/replacement_gap/bd-1oju/verification_evidence.json artifacts/replacement_gap/bd-1oju/verification_summary.md",
+      "expected": "PASS",
+      "actual": "PASS: exit 0, 0 critical findings"
     }
   ],
   "notes": [
