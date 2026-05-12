@@ -373,6 +373,8 @@ def self_test():
 
 
 if __name__ == "__main__":
+    logger = configure_test_logging("check_frankensqlite_adapter")
+    logger.info("starting %s verification", "check_frankensqlite_adapter")
     result = run_checks()
     if "--json" in sys.argv:
         print(json.dumps(result, indent=2))

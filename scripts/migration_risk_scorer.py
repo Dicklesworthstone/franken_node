@@ -245,6 +245,8 @@ def self_test() -> dict:
 
 
 def main():
+    logger = configure_test_logging("migration_risk_scorer")
+    logger.info("starting migration risk scorer")
     json_output = "--json" in sys.argv
     is_self_test = "--self-test" in sys.argv
 

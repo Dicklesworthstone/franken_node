@@ -272,6 +272,8 @@ def self_test():
 
 
 if __name__ == "__main__":
+    logger = configure_test_logging("check_policy_explainer")
+    logger.info("starting %s verification", "check_policy_explainer")
     result = run_checks()
     if "--json" in sys.argv:
         print(json.dumps(result, indent=2))
