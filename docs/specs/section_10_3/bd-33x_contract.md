@@ -12,6 +12,12 @@ Build a migration risk scoring model with explainable features that:
 3. Provides per-feature explanations for the score
 4. Classifies overall migration difficulty
 
+## Primary Implementation Surface
+
+- `scripts/migration_risk_scorer.py` is the executable scorer implementation. It owns feature extraction, weighted score computation, difficulty classification, CLI output, and the self-test evidence emitted by `--self-test --json`.
+- `scripts/check_risk_scorer.py` is the verifier for this contract. Its `SCORER-IMPL` check fails if the primary scorer implementation path is missing from this contract.
+- `tests/test_check_risk_scorer.py` covers the scorer behavior and requires checked-in machine evidence to cite the primary implementation path.
+
 ## Scoring Formula
 
 ```

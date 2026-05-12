@@ -12,7 +12,8 @@
 4. `tests/test_check_risk_scorer.py`
 
 ## Verification Results
-- 5 verification checks: all passed
-- 15 unit tests: all passed
+- 6 verification checks: all passed
+- 20 unit tests: all passed
+- Primary implementation citation: `scripts/migration_risk_scorer.py` is cited in the contract and checked by `SCORER-IMPL`.
 
 ## Verdict: PASS

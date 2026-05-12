@@ -17,6 +17,68 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+PRIMARY_IMPLEMENTATION_PATHS = {
+    "risk_scorer": "scripts/migration_risk_scorer.py",
+}
+
+EVIDENCE_PATHS = {
+    "risk_scorer": PRIMARY_IMPLEMENTATION_PATHS["risk_scorer"],
+    "contract": "docs/specs/section_10_3/bd-33x_contract.md",
+    "verifier": "scripts/check_risk_scorer.py",
+    "regression_tests": "tests/test_check_risk_scorer.py",
+    "machine_evidence": "artifacts/section_10_3/bd-33x/verification_evidence.json",
+    "human_summary": "artifacts/section_10_3/bd-33x/verification_summary.md",
+}
+
+VERIFICATION_COMMANDS = [
+    {
+        "command": "python3 scripts/check_risk_scorer.py --json",
+        "covers": [
+            "risk scorer implementation citation",
+            "feature weights",
+            "difficulty bands",
+            "self-test verdict",
+            "bounded score behavior",
+        ],
+    },
+    {
+        "command": "python3 -m pytest tests/test_check_risk_scorer.py",
+        "covers": [
+            "risk scorer unit tests",
+            "report evidence path citations",
+            "checked-in machine evidence citations",
+        ],
+    },
+]
+
+
+def check_primary_implementation_cited() -> dict:
+    """Verify the primary scorer implementation is cited in the contract."""
+    details = {
+        "contract_path": EVIDENCE_PATHS["contract"],
+        "contract_exists": (ROOT / EVIDENCE_PATHS["contract"]).exists(),
+    }
+
+    try:
+        contract_text = (ROOT / EVIDENCE_PATHS["contract"]).read_text(encoding="utf-8")
+    except OSError as exc:
+        details["contract_read_error"] = str(exc)
+        contract_text = ""
+
+    for name, path in PRIMARY_IMPLEMENTATION_PATHS.items():
+        details[f"{name}_path"] = path
+        details[f"{name}_exists"] = (ROOT / path).exists()
+        details[f"{name}_cited_in_contract"] = path in contract_text
+
+    citation_keys = [
+        key
+        for key in details
+        if key.endswith("_exists") or key.endswith("_cited_in_contract")
+    ]
+    status = "PASS" if citation_keys and all(details[key] for key in citation_keys) else "FAIL"
+    return {"id": "RISK-IMPL", "status": status, "details": details}
+
+
 # Feature weights
 WEIGHTS = {
     "critical_api_count": 10,
@@ -117,7 +179,7 @@ def load_scan_report(report_path: Path) -> dict:
 
 def self_test() -> dict:
     """Run self-test with synthetic scan reports."""
-    checks = []
+    checks = [check_primary_implementation_cited()]
 
     # Test 1: Clean project
     clean = {
@@ -171,6 +233,8 @@ def self_test() -> dict:
         "section": "10.3",
         "verdict": "PASS" if not failing else "FAIL",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "evidence_paths": EVIDENCE_PATHS,
+        "verification_commands": VERIFICATION_COMMANDS,
         "checks": checks,
         "summary": {"total_checks": len(checks), "passing_checks": len(checks) - len(failing), "failing_checks": len(failing)},
     }

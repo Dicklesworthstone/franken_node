@@ -2,8 +2,47 @@
   "gate": "risk_scorer_verification",
   "section": "10.3",
   "verdict": "PASS",
-  "timestamp": "2026-02-20T10:10:25.047478+00:00",
+  "timestamp": "2026-05-12T20:41:21.178851+00:00",
+  "evidence_paths": {
+    "risk_scorer": "scripts/migration_risk_scorer.py",
+    "contract": "docs/specs/section_10_3/bd-33x_contract.md",
+    "verifier": "scripts/check_risk_scorer.py",
+    "regression_tests": "tests/test_check_risk_scorer.py",
+    "machine_evidence": "artifacts/section_10_3/bd-33x/verification_evidence.json",
+    "human_summary": "artifacts/section_10_3/bd-33x/verification_summary.md"
+  },
+  "verification_commands": [
+    {
+      "command": "python3 scripts/check_risk_scorer.py --json",
+      "covers": [
+        "risk scorer implementation citation",
+        "feature weights",
+        "difficulty bands",
+        "self-test verdict",
+        "bounded score behavior"
+      ]
+    },
+    {
+      "command": "python3 -m pytest tests/test_check_risk_scorer.py",
+      "covers": [
+        "risk scorer unit tests",
+        "report evidence path citations",
+        "checked-in machine evidence citations"
+      ]
+    }
+  ],
   "checks": [
+    {
+      "id": "SCORER-IMPL",
+      "status": "PASS",
+      "details": {
+        "contract_path": "docs/specs/section_10_3/bd-33x_contract.md",
+        "contract_exists": true,
+        "risk_scorer_path": "scripts/migration_risk_scorer.py",
+        "risk_scorer_exists": true,
+        "risk_scorer_cited_in_contract": true
+      }
+    },
     {
       "id": "SCORER-EXISTS",
       "status": "PASS",
@@ -50,8 +89,36 @@
     }
   ],
   "summary": {
-    "total_checks": 5,
-    "passing_checks": 5,
+    "total_checks": 6,
+    "passing_checks": 6,
     "failing_checks": 0
-  }
+  },
+  "unit_tests": {
+    "command": "python3 -m pytest tests/test_check_risk_scorer.py",
+    "total": 20,
+    "passed": 20,
+    "failed": 0
+  },
+  "outputs": [
+    {
+      "path": "scripts/migration_risk_scorer.py",
+      "sha256": "b092bf7791d46c9f6c2e57ace3f23302d7e46a5eca9f03989c8bdb356fc32077",
+      "bytes": 10842
+    },
+    {
+      "path": "scripts/check_risk_scorer.py",
+      "sha256": "8b7f79d8b4102846f0c7d32d827dbda9253ede5d7db13f93c5b16b23f807a4c4",
+      "bytes": 4031
+    },
+    {
+      "path": "tests/test_check_risk_scorer.py",
+      "sha256": "5683f8f9dfe1d1d1e013ebfadca7f93d21d038169867b155dca7c28d77435d41",
+      "bytes": 6490
+    },
+    {
+      "path": "docs/specs/section_10_3/bd-33x_contract.md",
+      "sha256": "24606ee6bdc996948f23aab5ca9f74d2a5b4edd0f199276b8009299ff9a18131",
+      "bytes": 2467
+    }
+  ]
 }

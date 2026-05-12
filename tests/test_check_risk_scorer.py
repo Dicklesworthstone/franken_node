@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Unit tests for migration_risk_scorer.py."""
 
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-import migration_risk_scorer as scorer
+import migration_risk_scorer as scorer  # noqa: E402
 
 
 class TestExtractFeatures(unittest.TestCase):
@@ -141,6 +144,33 @@ class TestSelfTest(unittest.TestCase):
     def test_passes(self):
         result = scorer.self_test()
         self.assertEqual(result["verdict"], "PASS")
+
+    def test_reports_primary_implementation_citation(self):
+        result = scorer.self_test()
+        checks = {check["id"]: check for check in result["checks"]}
+        self.assertIn("RISK-IMPL", checks)
+        self.assertEqual(
+            result["evidence_paths"]["risk_scorer"],
+            "scripts/migration_risk_scorer.py",
+        )
+        self.assertTrue(checks["RISK-IMPL"]["details"]["risk_scorer_exists"])
+        self.assertTrue(checks["RISK-IMPL"]["details"]["risk_scorer_cited_in_contract"])
+
+
+class TestCheckedInEvidence(unittest.TestCase):
+    def test_machine_evidence_cites_primary_implementation(self):
+        evidence_path = ROOT / scorer.EVIDENCE_PATHS["machine_evidence"]
+        try:
+            evidence = json.JSONDecoder().decode(evidence_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            self.fail(f"invalid checked-in risk scorer evidence JSON: {exc}")
+        check_ids = {check["id"] for check in evidence["checks"]}
+
+        self.assertEqual(
+            evidence["evidence_paths"]["risk_scorer"],
+            "scripts/migration_risk_scorer.py",
+        )
+        self.assertIn("SCORER-IMPL", check_ids)
 
 
 if __name__ == "__main__":

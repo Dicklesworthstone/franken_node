@@ -19,6 +19,15 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import migration_risk_scorer as scorer  # noqa: E402
 
 
+def check_primary_implementation_cited() -> dict:
+    check = scorer.check_primary_implementation_cited()
+    return {
+        "id": "SCORER-IMPL",
+        "status": check["status"],
+        "details": check["details"],
+    }
+
+
 def check_scorer_exists() -> dict:
     check = {"id": "SCORER-EXISTS", "status": "PASS", "details": {}}
     check["details"]["scorer"] = (ROOT / "scripts" / "migration_risk_scorer.py").exists()
@@ -79,6 +88,7 @@ def main():
     timestamp = datetime.now(timezone.utc).isoformat()
 
     checks = [
+        check_primary_implementation_cited(),
         check_scorer_exists(),
         check_weights_defined(),
         check_difficulty_bands(),
@@ -94,6 +104,8 @@ def main():
         "section": "10.3",
         "verdict": verdict,
         "timestamp": timestamp,
+        "evidence_paths": scorer.EVIDENCE_PATHS,
+        "verification_commands": scorer.VERIFICATION_COMMANDS,
         "checks": checks,
         "summary": {"total_checks": len(checks), "passing_checks": len(checks) - len(failing), "failing_checks": len(failing)},
     }
