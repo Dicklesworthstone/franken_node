@@ -1,0 +1,9 @@
+# bd-jcq1z legacy real-service/metamorphic drafts are intentionally
+# source-only until bd-jcq1z.2 ports or replaces them with registered tests.
+crates/franken-node/tests/api_session_auth_real_service_integration.rs
+crates/franken-node/tests/connector_lifecycle_real_service_integration.rs
+crates/franken-node/tests/integration_api_session_auth_real_service.rs
+crates/franken-node/tests/integration_connector_lifecycle_stress.rs
+crates/franken-node/tests/integration_remote_capability_real_enforcement.rs
+crates/franken-node/tests/integration_vef_receipt_chain_real_service.rs
+crates/franken-node/tests/vef_receipt_real_service_integration.rs
