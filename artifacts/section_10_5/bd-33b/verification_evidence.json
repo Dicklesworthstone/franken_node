@@ -3,21 +3,48 @@
   "bead": "bd-33b",
   "section": "10.5",
   "verdict": "PASS",
+  "implementation_artifacts": {
+    "rust_implementation": "crates/franken-node/src/connector/execution_scorer.rs",
+    "spec_contract": "docs/specs/section_10_5/bd-33b_contract.md",
+    "verification_script": "scripts/check_loss_scoring.py",
+    "verification_tests": "tests/test_check_loss_scoring.py",
+    "verification_evidence": "artifacts/section_10_5/bd-33b/verification_evidence.json"
+  },
+  "artifact_truthing": {
+    "audit_expected_names": [
+      "scripts/check_expected_loss_scoring.py",
+      "tests/test_check_expected_loss_scoring.py"
+    ],
+    "canonical_paths": {
+      "script": "scripts/check_loss_scoring.py",
+      "tests": "tests/test_check_loss_scoring.py"
+    },
+    "resolution": "bd-33b ships the expected-loss scoring verifier under the canonical check_loss_scoring names declared by the spec contract."
+  },
   "checks": [
     {
       "id": "ELS-IMPL",
       "description": "Rust implementation exposes required expected-loss scoring symbols",
-      "status": "PASS"
+      "status": "PASS",
+      "details": "crates/franken-node/src/connector/execution_scorer.rs"
     },
     {
       "id": "ELS-SPEC",
       "description": "Spec contract exists with expected invariants",
-      "status": "PASS"
+      "status": "PASS",
+      "details": "docs/specs/section_10_5/bd-33b_contract.md"
+    },
+    {
+      "id": "ELS-SCRIPT",
+      "description": "Canonical Python verifier script exists",
+      "status": "PASS",
+      "details": "scripts/check_loss_scoring.py"
     },
     {
       "id": "ELS-TESTS",
       "description": "Python verification test file exists",
-      "status": "PASS"
+      "status": "PASS",
+      "details": "tests/test_check_loss_scoring.py"
     },
     {
       "id": "ELS-SELFTEST",
@@ -52,8 +79,8 @@
     }
   },
   "summary": {
-    "total_checks": 4,
-    "passing_checks": 4,
+    "total_checks": 5,
+    "passing_checks": 5,
     "failing_checks": 0
   }
 }

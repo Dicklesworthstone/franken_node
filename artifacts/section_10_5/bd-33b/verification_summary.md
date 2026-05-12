@@ -14,8 +14,8 @@
 
 ## Verification Results
 
-- `python3 scripts/check_loss_scoring.py --json` -> PASS (4/4 checks, self-test 3/3)
-- `python3 -m unittest tests/test_check_loss_scoring.py` -> PASS (9 tests)
+- `python3 scripts/check_loss_scoring.py --json` -> PASS (5/5 checks, self-test 3/3)
+- `python3 -m unittest tests/test_check_loss_scoring.py` -> PASS (11 tests)
 - `rch exec -- cargo test connector::execution_scorer -- --nocapture` -> PASS (29 tests)
 - `rch exec -- cargo check --all-targets` -> PASS (build success; existing repo warnings outside bead scope)
 - `rch exec -- cargo clippy --all-targets -- -D warnings` -> FAIL due pre-existing repository-wide lint debt outside `bd-33b` scope
@@ -24,6 +24,7 @@
 
 - All cargo commands were executed through `rch exec -- ...` as required.
 - The expected-loss API contract for `LossMatrix`, `score_action`, `compare_actions`, and sensitivity analysis is implemented and covered by Rust + Python verification.
+- The verification evidence now names the canonical `scripts/check_loss_scoring.py` and `tests/test_check_loss_scoring.py` paths and records that those supersede the audit's expected `check_expected_loss_scoring` aliases.
 - `cargo clippy` failures are not introduced by this bead; errors include existing dead-code and lint-policy violations across unrelated modules.
 
 ## Verdict: PASS (Scoped to bd-33b Deliverables)

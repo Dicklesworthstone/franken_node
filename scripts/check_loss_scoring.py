@@ -6,15 +6,48 @@ from pathlib import Path
 
 import argparse
 import json
-import os
 import sys
 from typing import Any
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT_PATH = Path(__file__).resolve().parent.parent
+ROOT = str(ROOT_PATH)
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging
 CHECKS: list[dict[str, str]] = []
 EPSILON = 1e-9
 DEFAULT_DELTA = 0.05
+IMPL_PATH = ROOT_PATH / "crates" / "franken-node" / "src" / "connector" / "execution_scorer.rs"
+SPEC_PATH = ROOT_PATH / "docs" / "specs" / "section_10_5" / "bd-33b_contract.md"
+SCRIPT_PATH = ROOT_PATH / "scripts" / "check_loss_scoring.py"
+TEST_PATH = ROOT_PATH / "tests" / "test_check_loss_scoring.py"
+EVIDENCE_PATH = ROOT_PATH / "artifacts" / "section_10_5" / "bd-33b" / "verification_evidence.json"
+
+
+def _rel(path: Path) -> str:
+    return path.relative_to(ROOT_PATH).as_posix()
+
+
+def canonical_artifacts() -> dict[str, str]:
+    return {
+        "rust_implementation": _rel(IMPL_PATH),
+        "spec_contract": _rel(SPEC_PATH),
+        "verification_script": _rel(SCRIPT_PATH),
+        "verification_tests": _rel(TEST_PATH),
+        "verification_evidence": _rel(EVIDENCE_PATH),
+    }
+
+
+def audit_alias_resolution() -> dict[str, Any]:
+    return {
+        "audit_expected_names": [
+            "scripts/check_expected_loss_scoring.py",
+            "tests/test_check_expected_loss_scoring.py",
+        ],
+        "canonical_paths": {
+            "script": _rel(SCRIPT_PATH),
+            "tests": _rel(TEST_PATH),
+        },
+        "resolution": "bd-33b ships the expected-loss scoring verifier under the canonical check_loss_scoring names declared by the spec contract.",
+    }
 
 
 def check(check_id: str, description: str, passed: bool, details: str | None = None) -> bool:
@@ -251,7 +284,7 @@ def self_test() -> dict[str, Any]:
 
 
 def main() -> int:
-    logger = configure_test_logging("check_loss_scoring")
+    configure_test_logging("check_loss_scoring")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--json",
@@ -263,9 +296,8 @@ def main() -> int:
     print("bd-33b: Expected-loss scoring verification\n")
     all_pass = True
 
-    impl_path = os.path.join(ROOT, "crates/franken-node/src/connector/execution_scorer.rs")
-    impl_exists = os.path.isfile(impl_path)
-    impl_content = Path(impl_path).read_text() if impl_exists else ""
+    impl_exists = IMPL_PATH.is_file()
+    impl_content = IMPL_PATH.read_text(encoding="utf-8") if impl_exists else ""
     required_symbols = [
         "struct LossMatrix",
         "struct ExpectedLossScore",
@@ -279,11 +311,11 @@ def main() -> int:
         "ELS-IMPL",
         "Rust implementation exposes required expected-loss scoring symbols",
         impl_exists and all(symbol in impl_content for symbol in required_symbols),
+        _rel(IMPL_PATH),
     )
 
-    spec_path = os.path.join(ROOT, "docs/specs/section_10_5/bd-33b_contract.md")
-    spec_exists = os.path.isfile(spec_path)
-    spec_content = Path(spec_path).read_text() if spec_exists else ""
+    spec_exists = SPEC_PATH.is_file()
+    spec_content = SPEC_PATH.read_text(encoding="utf-8") if spec_exists else ""
     spec_markers = [
         "INV-ELS-MATRIX-EXPLICIT",
         "INV-ELS-PROBABILITY-VALID",
@@ -294,13 +326,21 @@ def main() -> int:
         "ELS-SPEC",
         "Spec contract exists with expected invariants",
         spec_exists and all(marker in spec_content for marker in spec_markers),
+        _rel(SPEC_PATH),
     )
 
-    script_tests_path = os.path.join(ROOT, "tests/test_check_loss_scoring.py")
+    all_pass &= check(
+        "ELS-SCRIPT",
+        "Canonical Python verifier script exists",
+        SCRIPT_PATH.is_file(),
+        _rel(SCRIPT_PATH),
+    )
+
     all_pass &= check(
         "ELS-TESTS",
         "Python verification test file exists",
-        os.path.isfile(script_tests_path),
+        TEST_PATH.is_file(),
+        _rel(TEST_PATH),
     )
 
     self_test_result = self_test()
@@ -320,6 +360,8 @@ def main() -> int:
         "bead": "bd-33b",
         "section": "10.5",
         "verdict": "PASS" if all_pass else "FAIL",
+        "implementation_artifacts": canonical_artifacts(),
+        "artifact_truthing": audit_alias_resolution(),
         "checks": CHECKS,
         "self_test": self_test_result,
         "summary": {
@@ -329,9 +371,8 @@ def main() -> int:
         },
     }
 
-    evidence_dir = os.path.join(ROOT, "artifacts/section_10_5/bd-33b")
-    os.makedirs(evidence_dir, exist_ok=True)
-    with open(os.path.join(evidence_dir, "verification_evidence.json"), "w") as handle:
+    EVIDENCE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with EVIDENCE_PATH.open("w", encoding="utf-8") as handle:
         json.dump(evidence, handle, indent=2)
         handle.write("\n")
 

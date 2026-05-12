@@ -83,6 +83,26 @@ class TestVerificationAssets(unittest.TestCase):
         self.assertEqual(result["verdict"], "PASS")
         self.assertEqual(result["summary"]["failing_checks"], 0)
 
+    def test_canonical_artifact_paths_are_exposed(self):
+        artifacts = scorer.canonical_artifacts()
+        self.assertEqual(
+            artifacts["rust_implementation"],
+            "crates/franken-node/src/connector/execution_scorer.rs",
+        )
+        self.assertEqual(artifacts["verification_script"], "scripts/check_loss_scoring.py")
+        self.assertEqual(artifacts["verification_tests"], "tests/test_check_loss_scoring.py")
+
+    def test_audit_alias_resolution_names_canonical_paths(self):
+        resolution = scorer.audit_alias_resolution()
+        self.assertIn(
+            "scripts/check_expected_loss_scoring.py",
+            resolution["audit_expected_names"],
+        )
+        self.assertEqual(
+            resolution["canonical_paths"]["script"],
+            "scripts/check_loss_scoring.py",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
