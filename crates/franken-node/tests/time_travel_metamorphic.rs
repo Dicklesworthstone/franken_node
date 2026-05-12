@@ -172,10 +172,15 @@ fn trace_builder_preserves_step_order() {
             let mut expected_seqs = Vec::new();
 
             for (expected_seq, step_data) in steps_data.iter().enumerate() {
+                let side_effects: Vec<SideEffect> = step_data
+                    .side_effects
+                    .iter()
+                    .map(side_effect_from_data)
+                    .collect();
                 let actual_seq = builder.record_step(
                     step_data.input.clone(),
                     step_data.output.clone(),
-                    vec![], // no side effects for this test
+                    side_effects,
                     step_data.timestamp_ns,
                 );
 
@@ -188,14 +193,20 @@ fn trace_builder_preserves_step_order() {
             }
 
             // Build the final trace
-            let (trace, _audit_log) = builder.build().expect("trace should build successfully");
+            let (trace, capture_audit) = builder.build().expect("trace should build successfully");
 
             // METAMORPHIC PROPERTY: Order preservation
             // The final trace must have exactly the same number of steps
             prop_assert_eq!(trace.steps.len(), steps_data.len());
 
-            // Each step's sequence number must match its position in the vector
+            // Each step's sequence number and payload must match its position in the vector.
             for (index, step) in trace.steps.iter().enumerate() {
+                let expected_step = &steps_data[index];
+                let expected_side_effects: Vec<SideEffect> = expected_step
+                    .side_effects
+                    .iter()
+                    .map(side_effect_from_data)
+                    .collect();
                 prop_assert_eq!(
                     step.seq,
                     index as u64,
@@ -204,7 +215,24 @@ fn trace_builder_preserves_step_order() {
                     step.seq,
                     index
                 );
+                prop_assert_eq!(&step.input, &expected_step.input);
+                prop_assert_eq!(&step.output, &expected_step.output);
+                prop_assert_eq!(&step.side_effects, &expected_side_effects);
+                prop_assert_eq!(step.timestamp_ns, expected_step.timestamp_ns);
             }
+
+            let capture_codes = audit_event_codes(&capture_audit);
+            prop_assert_eq!(capture_codes.first().copied(), Some(event_codes::TTR_001));
+            prop_assert!(capture_codes.contains(&event_codes::TTR_008));
+            prop_assert_eq!(
+                capture_codes
+                    .iter()
+                    .filter(|code| **code == event_codes::TTR_002)
+                    .count(),
+                steps_data.len()
+            );
+            prop_assert!(capture_codes.contains(&event_codes::TTR_003));
+            prop_assert!(capture_codes.contains(&event_codes::TTR_009));
 
             // Additional invariant: sequence numbers must be strictly ascending
             let seq_numbers: Vec<u64> = trace.steps.iter().map(|s| s.seq).collect();
