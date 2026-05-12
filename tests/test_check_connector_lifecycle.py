@@ -81,6 +81,13 @@ class TestCheckRustImpl(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
 
 
+class TestRustProofMode(unittest.TestCase):
+    def test_rust_tests_are_explicit_in_structural_mode(self):
+        result = cl.check_rust_tests_pass()
+        self.assertEqual(result["status"], "SKIP")
+        self.assertIn("--run-rust-tests", result["details"]["reason"])
+
+
 class TestCheckSpec(unittest.TestCase):
     def test_passes(self):
         result = cl.check_spec_document()
@@ -95,6 +102,27 @@ class TestCheckTransitionMatrix(unittest.TestCase):
         self.assertEqual(result["details"]["legal_count"], 21)
 
 
+class TestCompletionDebtChecks(unittest.TestCase):
+    def test_conformance_target_is_cargo_visible(self):
+        result = cl.check_conformance_test_target()
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["details"]["missing_manifest_markers"], [])
+        self.assertEqual(result["details"]["missing_test_markers"], [])
+
+    def test_e2e_telemetry_evidence_is_structured(self):
+        result = cl.check_e2e_telemetry_evidence()
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["details"]["missing_markers"], [])
+
+    def test_migration_catalog_records_lifecycle_transition_cache(self):
+        result = cl.check_migration_catalog_entry()
+        self.assertEqual(result["status"], "PASS")
+        entry = result["details"]["entry"]
+        self.assertEqual(entry["domain"], "lifecycle_transition_cache")
+        self.assertEqual(entry["owner_module"], "crates/franken-node/src/connector/lifecycle.rs")
+        self.assertEqual(entry["replay_strategy"], "recomputed_from_transition_rules")
+
+
 class TestSelfTest(unittest.TestCase):
     def test_passes(self):
         result = cl.self_test()
@@ -103,7 +131,7 @@ class TestSelfTest(unittest.TestCase):
 
     def test_has_all_checks(self):
         result = cl.self_test()
-        self.assertGreaterEqual(result["summary"]["total_checks"], 10)
+        self.assertGreaterEqual(result["summary"]["total_checks"], 13)
 
 
 class TestIllegalTransitions(unittest.TestCase):
