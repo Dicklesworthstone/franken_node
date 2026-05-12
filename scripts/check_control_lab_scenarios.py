@@ -18,6 +18,7 @@ from pathlib import Path
 SCENARIOS_DOC = ROOT / "docs" / "testing" / "control_lab_scenarios.md"
 SEED_MATRIX = ROOT / "artifacts" / "10.15" / "control_lab_seed_matrix.json"
 SPEC_CONTRACT = ROOT / "docs" / "specs" / "section_10_15" / "bd-145n_contract.md"
+SCENARIO_INDEX = ROOT / "tests" / "lab" / "control_protocol_scenarios.rs"
 TEST_FILE = ROOT / "tests" / "test_check_control_lab_scenarios.py"
 
 REQUIRED_SCENARIOS = [
@@ -150,6 +151,26 @@ def check_spec_contract_exists() -> dict:
             "details": {"path": str(SPEC_CONTRACT.relative_to(ROOT))}}
 
 
+def check_scenario_index_exists() -> dict:
+    if not SCENARIO_INDEX.exists():
+        return {"id": "CLS-SCENARIO-INDEX", "status": "FAIL", "details": {"error": "not found"}}
+    content = SCENARIO_INDEX.read_text()
+    missing = [s for s in REQUIRED_SCENARIOS if s not in content]
+    has_seed_matrix = "INTERESTING_SEEDS" in content and "u64::MAX" in content
+    has_failure_artifact = "FailureArtifact" in content and "invariant_violated" in content
+    ok = not missing and has_seed_matrix and has_failure_artifact
+    return {
+        "id": "CLS-SCENARIO-INDEX",
+        "status": "PASS" if ok else "FAIL",
+        "details": {
+            "path": str(SCENARIO_INDEX.relative_to(ROOT)),
+            "missing": missing,
+            "seed_matrix": has_seed_matrix,
+            "failure_artifact": has_failure_artifact,
+        },
+    }
+
+
 def check_test_file_exists() -> dict:
     exists = TEST_FILE.exists()
     return {"id": "CLS-TESTS", "status": "PASS" if exists else "FAIL",
@@ -168,6 +189,7 @@ def self_test() -> dict:
         check_matrix_all_pass(),
         check_matrix_boundary_seeds(),
         check_spec_contract_exists(),
+        check_scenario_index_exists(),
         check_test_file_exists(),
     ]
 

@@ -19,6 +19,7 @@ Seed-controlled scheduling, 5 scenarios, 5 boundary seeds, reproducible traces.
 ## Artifacts
 
 - `docs/testing/control_lab_scenarios.md`
+- `tests/lab/control_protocol_scenarios.rs`
 - `artifacts/10.15/control_lab_seed_matrix.json`
 - `scripts/check_control_lab_scenarios.py`
 - `tests/test_check_control_lab_scenarios.py`

@@ -82,6 +82,16 @@ class TestCheckSpecContractExists(unittest.TestCase):
         self.assertEqual(r["status"], "PASS")
 
 
+class TestCheckScenarioIndexExists(unittest.TestCase):
+    def test_passes(self):
+        r = cls_mod.check_scenario_index_exists()
+        self.assertEqual(r["status"], "PASS")
+
+    def test_named_control_protocol_scenarios_present(self):
+        r = cls_mod.check_scenario_index_exists()
+        self.assertEqual(r["details"]["missing"], [])
+
+
 class TestCheckTestFileExists(unittest.TestCase):
     def test_passes(self):
         r = cls_mod.check_test_file_exists()
