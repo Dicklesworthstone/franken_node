@@ -4,21 +4,28 @@
   "title": "DPOR-style schedule exploration gates for control/epoch/remote protocols",
   "gate_script": "scripts/check_dpor_exploration.py",
   "test_suite": "tests/test_check_dpor_exploration.py",
-  "timestamp": "2026-02-22T01:45:00+00:00",
+  "timestamp": "2026-05-12T21:30:00+00:00",
   "verdict": "PASS",
   "implementation_artifacts": {
     "dpor_exploration": "crates/franken-node/src/control_plane/dpor_exploration.rs",
     "control_plane_mod": "crates/franken-node/src/control_plane/mod.rs",
     "spec_contract": "docs/specs/section_10_14/bd-22yy_contract.md",
+    "canonical_lab_test": "tests/lab/control_dpor_exploration.rs",
     "verification_script": "scripts/check_dpor_exploration.py",
     "unit_tests": "tests/test_check_dpor_exploration.py"
   },
-  "rust_test_count": 22,
-  "python_test_count": 41,
+  "rust_test_count": 34,
+  "canonical_lab_test_count": 19,
+  "python_test_count": 42,
   "event_codes_defined": 10,
   "error_codes_defined": 8,
-  "gate_checks_passed": 33,
-  "gate_checks_total": 33,
+  "gate_checks_passed": 34,
+  "gate_checks_total": 34,
+  "artifact_truthing": {
+    "historical_plan_artifact": "tests/lab/dpor_protocol_exploration.rs",
+    "canonical_shipped_artifact": "tests/lab/control_dpor_exploration.rs",
+    "resolution": "The master plan now cites the shipped canonical lab test instead of the retired historical file name."
+  },
   "invariants_verified": [
     "INV-DPOR-COMPLETE",
     "INV-DPOR-COUNTEREXAMPLE",

@@ -59,4 +59,11 @@ stream mutations to verify no schedule produces a safety violation.
 - **bd-3hdv**: Monotonic control epoch (epoch model semantics)
 - **bd-ac83**: Named remote computation registry (remote model identifiers)
 
+## Verification Artifacts
+
+- `crates/franken-node/src/control_plane/dpor_exploration.rs`: canonical DPOR framework.
+- `tests/lab/control_dpor_exploration.rs`: canonical lab coverage for control-plane DPOR interactions. This is the shipped artifact that supersedes the historical master-plan name `tests/lab/dpor_protocol_exploration.rs`.
+- `scripts/check_dpor_exploration.py`: verification gate for the framework, contract, module wiring, and canonical lab test presence.
+- `artifacts/section_10_14/bd-22yy/verification_evidence.json`: machine-readable verification evidence.
+
 Schema version: `dpor-v1.0`

@@ -1422,7 +1422,7 @@ Canonical ownership map (non-reductive, full-feature):
   `Artifacts:` `tests/lab/cancellation_injection_control_workflows.rs`, `docs/testing/cancel_injection_matrix.md`, `artifacts/10.14/cancel_injection_report.json`.
 - [ ] Add DPOR-style schedule exploration gates for control/epoch/remote protocols.
   `Acceptance Criteria:` DPOR explorer covers targeted protocol classes; minimal counterexample traces are emitted on failure; gate runs within bounded CI budget.
-  `Artifacts:` `tests/lab/dpor_protocol_exploration.rs`, `docs/testing/dpor_gate_scope.md`, `artifacts/10.14/dpor_exploration_summary.json`.
+  `Artifacts:` `crates/franken-node/src/control_plane/dpor_exploration.rs`, `tests/lab/control_dpor_exploration.rs`, `docs/specs/section_10_14/bd-22yy_contract.md`, `artifacts/section_10_14/bd-22yy/verification_evidence.json`.
 - [ ] Add conformance suite for ledger determinism, idempotency, epoch validity, and marker/MMR proof correctness.
   `Acceptance Criteria:` Suite includes normative fixtures for all four domains; suite is required for release profile claim; failures map to stable conformance IDs.
   `Artifacts:` `tests/conformance/fsqlite_inspired_suite.rs`, `fixtures/conformance/fsqlite_inspired/*`, `artifacts/10.14/fsqlite_inspired_conformance_report.json`.

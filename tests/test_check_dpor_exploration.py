@@ -17,30 +17,30 @@ spec.loader.exec_module(mod)
 
 class TestSelfTest:
     def test_self_test_passes(self):
-        assert mod.self_test() is True
+        assert mod.self_test()
 
 
 class TestJsonOutput:
     def test_json_output(self):
-        result = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True, timeout=60)
         data = json.loads(result.stdout)
         assert data["bead_id"] == "bd-22yy"
         assert data["section"] == "10.14"
         assert isinstance(data["checks"], list)
 
     def test_verdict_field(self):
-        result = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True, timeout=60)
         data = json.loads(result.stdout)
         assert data["verdict"] in ("PASS", "FAIL")
 
     def test_checks_have_fields(self):
-        result = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True, timeout=60)
         data = json.loads(result.stdout)
         for c in data["checks"]:
             assert "check" in c and "passed" in c and "detail" in c
 
     def test_minimum_check_count(self):
-        result = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True, timeout=60)
         data = json.loads(result.stdout)
         assert len(data["checks"]) >= 28
 
@@ -82,6 +82,7 @@ class TestIndividualChecks:
     def test_invariants(self, results): assert results["invariants"]["passed"]
     def test_schema_version(self, results): assert results["schema_version"]["passed"]
     def test_spec_alignment(self, results): assert results["spec_alignment"]["passed"]
+    def test_canonical_lab_test(self, results): assert results["canonical_lab_test"]["passed"]
     def test_test_coverage(self, results): assert results["test_coverage"]["passed"]
 
 
@@ -91,9 +92,9 @@ class TestOverall:
         assert len(failed) == 0, f"Failed: {[r['check'] for r in failed]}"
 
     def test_verdict_is_pass(self):
-        result = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True, timeout=60)
         assert json.loads(result.stdout)["verdict"] == "PASS"
 
     def test_human_output(self):
-        result = subprocess.run([sys.executable, SCRIPT], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, SCRIPT], capture_output=True, text=True, timeout=60)
         assert "bd-22yy" in result.stdout and "PASS" in result.stdout

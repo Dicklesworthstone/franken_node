@@ -10,6 +10,7 @@ from scripts.lib.test_logger import configure_test_logging
 IMPL = os.path.join(ROOT, "crates", "franken-node", "src", "control_plane", "dpor_exploration.rs")
 MOD_RS = os.path.join(ROOT, "crates", "franken-node", "src", "control_plane", "mod.rs")
 SPEC = os.path.join(ROOT, "docs", "specs", "section_10_14", "bd-22yy_contract.md")
+LAB_TEST = os.path.join(ROOT, "tests", "lab", "control_dpor_exploration.rs")
 BEAD, SECTION = "bd-22yy", "10.14"
 
 EVENT_CODES = [
@@ -87,6 +88,12 @@ def _checks():
 
     ok("schema_version", "dpor-v1.0" in src, "dpor-v1.0")
     ok("spec_alignment", os.path.isfile(SPEC), SPEC)
+    lab_src = _read(LAB_TEST) if os.path.isfile(LAB_TEST) else ""
+    ok(
+        "canonical_lab_test",
+        os.path.isfile(LAB_TEST) and "DPOR" in lab_src and "DporExplorer" in lab_src,
+        LAB_TEST,
+    )
 
     test_count = len(re.findall(r"#\[test\]", src))
     ok("test_coverage", test_count >= 18, f"{test_count} tests")
