@@ -8,12 +8,15 @@ Usage:
 
 import csv
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 IMPL = ROOT / "tests" / "integration" / "frankentui_surface_migration.rs"
 INVENTORY_CSV = ROOT / "artifacts" / "10.16" / "frankentui_surface_inventory.csv"
@@ -305,6 +308,8 @@ def self_test():
 
 
 if __name__ == "__main__":
+    logger = configure_test_logging("check_frankentui_migration")
+    logger.info("starting %s verification", "check_frankentui_migration")
     result = run_checks()
     if "--json" in sys.argv:
         print(json.dumps(result, indent=2))

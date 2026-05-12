@@ -2,7 +2,7 @@
   "bead_id": "bd-2yc",
   "section": "10.5",
   "title": "Operator Copilot Action Recommendation API",
-  "timestamp": "2026-03-24T23:41:20.532911+00:00",
+  "timestamp": "2026-05-12T22:14:02.897554+00:00",
   "overall_pass": true,
   "checks": {
     "files": {
@@ -14,12 +14,12 @@
       "rust_impl": {
         "path": "crates/franken-node/src/security/copilot_engine.rs",
         "exists": true,
-        "size_bytes": 33131
+        "size_bytes": 89462
       },
       "mod_rs": {
         "path": "crates/franken-node/src/security/mod.rs",
         "exists": true,
-        "size_bytes": 788
+        "size_bytes": 31863
       }
     },
     "spec_invariants": {

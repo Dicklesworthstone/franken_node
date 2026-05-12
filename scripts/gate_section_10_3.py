@@ -7,10 +7,14 @@ Usage:
 """
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -91,6 +95,8 @@ def check_evidence() -> dict:
 
 
 def main():
+    logger = configure_test_logging("gate_section_10_3")
+    logger.info("starting section 10.3 verification gate")
     json_output = "--json" in sys.argv
     timestamp = datetime.now(timezone.utc).isoformat()
 

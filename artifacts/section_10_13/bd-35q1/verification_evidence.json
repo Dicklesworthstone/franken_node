@@ -2,7 +2,8 @@
   "gate": "threshold_sig_verification",
   "bead": "bd-35q1",
   "section": "10.13",
-  "verdict": "PASS",
+  "mode": "full",
+  "verdict": "FAIL",
   "checks": [
     {
       "id": "TS-IMPL",
@@ -23,12 +24,14 @@
     {
       "id": "TS-FIXTURES",
       "description": "Verification scenarios fixture",
-      "status": "PASS"
+      "status": "PASS",
+      "details": "found 6 cases"
     },
     {
       "id": "TS-VECTORS",
       "description": "Threshold signature test vectors",
-      "status": "PASS"
+      "status": "PASS",
+      "details": "found 4 vectors"
     },
     {
       "id": "TS-SECURITY-TESTS",
@@ -36,20 +39,32 @@
       "status": "PASS"
     },
     {
+      "id": "TS-SECURITY-TEST-COUNT",
+      "description": "Security test surface has at least 12 explicit Rust #[test] cases",
+      "status": "PASS",
+      "details": "found 15 tests"
+    },
+    {
       "id": "TS-TESTS",
       "description": "Rust unit tests pass",
-      "status": "PASS",
-      "details": "24 tests passed"
+      "status": "FAIL",
+      "details": "0 tests passed"
     },
     {
       "id": "TS-SPEC",
       "description": "Specification with invariants and failure reasons",
       "status": "PASS"
+    },
+    {
+      "id": "TS-PUBLIC-SPEC",
+      "description": "Public threshold_signatures.md spec alias cites the authoritative contract and executable evidence",
+      "status": "PASS"
     }
   ],
   "summary": {
-    "total_checks": 8,
-    "passing_checks": 8,
-    "failing_checks": 0
+    "total_checks": 10,
+    "passing_checks": 9,
+    "failing_checks": 1,
+    "skipped_checks": 0
   }
 }

@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
+
 import argparse
 import json
 import re
@@ -97,6 +101,8 @@ def scan(source_root: Path, allowed_dominant: set[str]) -> list[Finding]:
 
 
 def main() -> int:
+    logger = configure_test_logging("check_push_bounded_duplicates")
+    logger.info("starting push_bounded duplicate scan")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", default=str(DEFAULT_SOURCE_ROOT))
     parser.add_argument(

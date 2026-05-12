@@ -55,7 +55,7 @@ fn artifact_with_sigs(
             .iter()
             .zip(cfg.signer_keys.iter())
             .take(count)
-            .map(|(sk, key)| sign(sk, &key.key_id, hash))
+            .map(|(sk, key)| sign(sk, &key.key_id, "art-test", "conn-test", hash))
             .collect(),
     }
 }
@@ -147,4 +147,84 @@ fn invalid_config_rejected() {
     let art = artifact_with_sigs(&sks2, &cfg2, "h9", 2);
     let result = verify_threshold(&cfg, &art, "t9", "ts");
     assert!(!result.verified);
+}
+
+#[test]
+fn content_hash_mismatch_rejected() {
+    let (sks, cfg) = config(2, 3);
+    let mut art = artifact_with_sigs(&sks, &cfg, "h10-original", 2);
+    art.content_hash = "h10-tampered".into();
+    let result = verify_threshold(&cfg, &art, "t10", "ts");
+    assert!(!result.verified);
+    assert_eq!(result.valid_signatures, 0);
+    assert!(matches!(
+        result.failure_reason,
+        Some(FailureReason::InvalidSignature { .. })
+    ));
+}
+
+#[test]
+fn signer_identity_must_match_key_id() {
+    let (sks, cfg) = config(2, 3);
+    let mut art = artifact_with_sigs(&sks, &cfg, "h11", 2);
+    art.signatures[0].signer_id = cfg.signer_keys[1].key_id.clone();
+    let result = verify_threshold(&cfg, &art, "t11", "ts");
+    assert!(!result.verified);
+    assert_eq!(result.valid_signatures, 1);
+    assert!(matches!(
+        result.failure_reason,
+        Some(FailureReason::InvalidSignature { .. })
+    ));
+}
+
+#[test]
+fn cached_verifier_matches_standard_verifier() {
+    let (sks, cfg) = config(2, 3);
+    let art = artifact_with_sigs(&sks, &cfg, "h12", 2);
+    let cached = CachedThresholdConfig::new(cfg.clone()).expect("valid threshold config");
+    let standard = verify_threshold(&cfg, &art, "t12", "ts");
+    let cached_result = verify_threshold_cached(&cached, &art, "t12", "ts");
+    assert_eq!(standard.verified, cached_result.verified);
+    assert_eq!(standard.valid_signatures, cached_result.valid_signatures);
+    assert_eq!(standard.failure_reason, cached_result.failure_reason);
+}
+
+#[test]
+fn invalid_artifact_id_rejected_before_counting_signatures() {
+    let (sks, cfg) = config(2, 3);
+    let mut art = artifact_with_sigs(&sks, &cfg, "h13", 2);
+    art.artifact_id = "../escape".into();
+    let result = verify_threshold(&cfg, &art, "t13", "ts");
+    assert!(!result.verified);
+    assert_eq!(result.valid_signatures, 0);
+    assert!(matches!(
+        result.failure_reason,
+        Some(FailureReason::InvalidArtifactId { .. })
+    ));
+}
+
+#[test]
+fn zero_threshold_rejected_as_invalid_config() {
+    let (sks, mut cfg) = config(1, 3);
+    cfg.threshold = 0;
+    let art = artifact_with_sigs(&sks, &cfg, "h14", 1);
+    let result = verify_threshold(&cfg, &art, "t14", "ts");
+    assert!(!result.verified);
+    assert!(matches!(
+        result.failure_reason,
+        Some(FailureReason::ConfigInvalid { .. })
+    ));
+}
+
+#[test]
+fn total_signer_count_mismatch_rejected_as_invalid_config() {
+    let (sks, mut cfg) = config(2, 3);
+    cfg.total_signers = 2;
+    let art = artifact_with_sigs(&sks, &cfg, "h15", 2);
+    let result = verify_threshold(&cfg, &art, "t15", "ts");
+    assert!(!result.verified);
+    assert!(matches!(
+        result.failure_reason,
+        Some(FailureReason::ConfigInvalid { .. })
+    ));
 }

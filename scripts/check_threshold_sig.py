@@ -20,6 +20,7 @@ FIXTURE_PATH = ROOT / "fixtures/threshold_sig/verification_scenarios.json"
 VECTORS_PATH = ROOT / "artifacts/section_10_13/bd-35q1/threshold_signature_vectors.json"
 SECURITY_TEST_PATH = ROOT / "tests/security/threshold_signature_verification.rs"
 SPEC_PATH = ROOT / "docs/specs/section_10_13/bd-35q1_contract.md"
+PUBLIC_SPEC_PATH = ROOT / "docs/specs/threshold_signatures.md"
 EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-35q1/verification_evidence.json"
 JSON_DECODER = json.JSONDecoder()
 
@@ -266,13 +267,23 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
         has_quorum = "quorum" in security_content
         has_partial = "partial" in security_content
         has_duplicate = "duplicate" in security_content
+        security_test_count = security_content.count("#[test]")
     else:
         has_quorum = has_partial = has_duplicate = False
+        security_test_count = 0
     check(
         checks,
         "TS-SECURITY-TESTS",
         "Security tests cover quorum, partial, duplicate",
         sec_exists and has_quorum and has_partial and has_duplicate,
+        emit_human=emit_human,
+    )
+    check(
+        checks,
+        "TS-SECURITY-TEST-COUNT",
+        "Security test surface has at least 12 explicit Rust #[test] cases",
+        security_test_count >= 12,
+        f"found {security_test_count} tests",
         emit_human=emit_human,
     )
 
@@ -297,6 +308,7 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
         )
 
     spec_content = read_utf8(SPEC_PATH)
+    public_spec_content = read_utf8(PUBLIC_SPEC_PATH)
     spec_exists = spec_content is not None
     if spec_content is not None:
         has_invariants = "INV-THRESH" in spec_content
@@ -308,6 +320,20 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
         "TS-SPEC",
         "Specification with invariants and failure reasons",
         spec_exists and has_invariants and has_failure,
+        emit_human=emit_human,
+    )
+    public_spec_valid = (
+        public_spec_content is not None
+        and "docs/specs/section_10_13/bd-35q1_contract.md" in public_spec_content
+        and "tests/security/threshold_signature_verification.rs" in public_spec_content
+        and "artifacts/section_10_13/bd-35q1/threshold_signature_vectors.json"
+        in public_spec_content
+    )
+    check(
+        checks,
+        "TS-PUBLIC-SPEC",
+        "Public threshold_signatures.md spec alias cites the authoritative contract and executable evidence",
+        public_spec_valid,
         emit_human=emit_human,
     )
 

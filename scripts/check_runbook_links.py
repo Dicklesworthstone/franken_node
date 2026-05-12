@@ -10,8 +10,12 @@ Usage:
 """
 
 import json
+import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -317,6 +321,8 @@ def self_test():
 
 
 if __name__ == "__main__":
+    logger = configure_test_logging("check_runbook_links")
+    logger.info("starting runbook links verification")
     result = run_checks()
     if "--json" in sys.argv:
         print(json.dumps(result, indent=2))

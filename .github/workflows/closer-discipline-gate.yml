@@ -1,0 +1,81 @@
+name: closer-discipline-gate
+
+# Per beads_compliance_audit/closer_discipline_memo.md + bd-8vo8v:
+# blocks PRs that introduce thin / fabricated close_reasons in .beads/issues.jsonl.
+#
+# Mode ramps up over time:
+#   - 2026-05-12 → 2026-06-15: --warn-only (informational; never fails the job)
+#   - 2026-06-15 onward:       --strict (REJECT-level findings fail the job)
+#
+# Opt-out: set the secret CLOSER_DISCIPLINE_SKIP=1 (emergency only — should
+# require human review). The pre-commit hook honors the same env-var.
+
+on:
+  pull_request:
+    paths:
+      - '.beads/issues.jsonl'
+      - 'scripts/check_close_reason_quality.py'
+      - '.github/workflows/closer-discipline-gate.yml'
+  push:
+    branches: [main, master]
+    paths:
+      - '.beads/issues.jsonl'
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # we need history for --since checks
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Determine mode (date-based ramp-up)
+        id: mode
+        run: |
+          today=$(date -u +%Y-%m-%d)
+          strict_after="2026-06-15"
+          if [[ "$today" > "$strict_after" || "$today" == "$strict_after" ]]; then
+            echo "mode=--strict" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=--warn-only" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Emergency skip check
+        if: ${{ env.SKIP_CLOSER_DISCIPLINE_CHECK == '1' }}
+        env:
+          SKIP_CLOSER_DISCIPLINE_CHECK: ${{ secrets.CLOSER_DISCIPLINE_SKIP }}
+        run: |
+          echo "::warning::closer-discipline-gate skipped via SKIP_CLOSER_DISCIPLINE_CHECK secret"
+          exit 0
+
+      - name: Determine diff range
+        id: diff
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "since=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            # push: compare against the parent
+            echo "since=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run close-reason quality guard
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          SINCE: ${{ steps.diff.outputs.since }}
+        run: |
+          set -e
+          echo "::group::closer-discipline-gate (mode=$MODE since=$SINCE)"
+          if [[ -z "$SINCE" || "$SINCE" == "0000000000000000000000000000000000000000" ]]; then
+            # First commit on branch — fall back to auditing the whole JSONL
+            python3 scripts/check_close_reason_quality.py --all $MODE
+          else
+            python3 scripts/check_close_reason_quality.py --since "$SINCE" $MODE
+          fi
+          echo "::endgroup::"

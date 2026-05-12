@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -13,6 +14,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -507,6 +511,8 @@ def self_test() -> tuple[bool, list[dict[str, Any]]]:
 
 
 def main() -> None:
+    logger = configure_test_logging("gate_section_10_4")
+    logger.info("starting section 10.4 comprehensive verification gate")
     parser = argparse.ArgumentParser(description="Section 10.4 comprehensive gate")
     parser.add_argument("--json", action="store_true", help="Emit JSON report")
     parser.add_argument("--self-test", action="store_true", help="Run deterministic self-test")

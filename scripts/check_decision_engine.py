@@ -6,12 +6,15 @@ Usage:
     python3 scripts/check_decision_engine.py --json    # machine-readable
 """
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 IMPL = ROOT / "crates" / "franken-node" / "src" / "policy" / "decision_engine.rs"
 MOD_RS = ROOT / "crates" / "franken-node" / "src" / "policy" / "mod.rs"
 SPEC = ROOT / "docs" / "specs" / "section_10_14" / "bd-15u3_contract.md"

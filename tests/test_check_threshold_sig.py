@@ -106,6 +106,22 @@ class TestThresholdSigImplementation(unittest.TestCase):
             self.assertIn(code, self.content, f"Missing error code {code}")
 
 
+class TestThresholdSigSecurityTestSurface(unittest.TestCase):
+
+    def setUp(self):
+        self.security_test_path = ROOT / "tests/security/threshold_signature_verification.rs"
+        self.assertTrue(self.security_test_path.is_file())
+        self.content = self.security_test_path.read_text(encoding="utf-8")
+
+    def test_has_at_least_twelve_explicit_tests(self):
+        self.assertGreaterEqual(self.content.count("#[test]"), 12)
+
+    def test_covers_cached_verifier_and_identifier_edges(self):
+        self.assertIn("cached_verifier_matches_standard_verifier", self.content)
+        self.assertIn("invalid_artifact_id_rejected_before_counting_signatures", self.content)
+        self.assertIn("signer_identity_must_match_key_id", self.content)
+
+
 class TestThresholdSigSpec(unittest.TestCase):
 
     def setUp(self):
@@ -125,6 +141,17 @@ class TestThresholdSigSpec(unittest.TestCase):
 
     def test_has_failure_reason_type(self):
         self.assertIn("FailureReason", self.content)
+
+    def test_public_spec_alias_cites_authoritative_contract(self):
+        public_spec = ROOT / "docs/specs/threshold_signatures.md"
+        self.assertTrue(public_spec.is_file())
+        content = public_spec.read_text(encoding="utf-8")
+        self.assertIn("docs/specs/section_10_13/bd-35q1_contract.md", content)
+        self.assertIn("tests/security/threshold_signature_verification.rs", content)
+        self.assertIn(
+            "artifacts/section_10_13/bd-35q1/threshold_signature_vectors.json",
+            content,
+        )
 
 
 class TestThresholdSigCli(unittest.TestCase):
@@ -149,6 +176,8 @@ class TestThresholdSigCli(unittest.TestCase):
         self.assertEqual(evidence["gate"], "threshold_sig_verification")
         self.assertEqual(evidence["mode"], "structural")
         self.assertEqual(evidence["verdict"], "PARTIAL")
+        self.assertEqual(statuses["TS-SECURITY-TEST-COUNT"], "PASS")
+        self.assertEqual(statuses["TS-PUBLIC-SPEC"], "PASS")
         self.assertEqual(statuses["TS-TESTS"], "SKIP")
         self.assertEqual(evidence["summary"]["skipped_checks"], 1)
         self.assertEqual(result.returncode, 1)

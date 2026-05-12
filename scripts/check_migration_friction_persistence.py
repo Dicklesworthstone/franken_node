@@ -7,11 +7,14 @@ Usage:
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 BEAD_ID = "bd-3jc1"
 SECTION = "12"
@@ -282,6 +285,8 @@ def self_test() -> tuple[bool, list[dict]]:
 
 
 if __name__ == "__main__":
+    logger = configure_test_logging("check_migration_friction_persistence")
+    logger.info("starting %s verification", "check_migration_friction_persistence")
     result = run_checks()
     if "--json" in sys.argv:
         print(json.dumps(result, indent=2))

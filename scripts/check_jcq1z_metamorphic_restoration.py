@@ -11,7 +11,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.lib.test_logger import configure_test_logging
 
 ROOT = Path(__file__).resolve().parent.parent
 CARGO_TOML = ROOT / "crates/franken-node/Cargo.toml"
@@ -169,6 +174,8 @@ def run_checks(root: Path = ROOT) -> dict[str, object]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    logger = configure_test_logging("check_jcq1z_metamorphic_restoration")
+    logger.info("starting %s verification", "check_jcq1z_metamorphic_restoration")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = parser.parse_args(argv)

@@ -760,8 +760,62 @@ br sync --flush-only  # Export to JSONL (NO git operations)
 1. **Start**: Run `br ready` to find actionable work
 2. **Claim**: Use `br update <id> --status=in_progress`
 3. **Work**: Implement the task
-4. **Complete**: Use `br close <id>`
+4. **Complete**: Use `br close <id> --reason "<DETAILED reason; see Closer Discipline below>"`
 5. **Sync**: Run `br sync --flush-only` then manually commit
+
+### Closer Discipline — `close_reason` quality (added 2026-05-12, MANDATORY)
+
+The 2026-05-11 beads compliance audit found 18 of 2,944 closed beads were genuinely false-closed (2.4%), and **1,354 of 3,627 closed beads had thin/empty close_reasons (37%)**. The dominant anti-pattern: closer marks `status=closed` with `close_reason: "done"` AND drops a fabricated `verification_evidence.json` claiming "20/20 PASS" but the cited source file doesn't exist on disk.
+
+**Full analysis:** `beads_compliance_audit/closer_discipline_memo.md`.
+
+**Mandatory close_reason format** for `bug`, `feature`, `task`, `enhancement`, `performance` beads:
+
+> A one-paragraph (≥ 80 chars) close_reason that includes at least ONE of:
+> - a commit SHA (`4c732669` or longer)
+> - a PR reference (`PR #42`)
+> - a file:line citation (`crates/franken-node/src/foo.rs:123-150`)
+>
+> AND for `bug`/`feature` types, at least one test name that newly passes (`test_foo_regression`).
+
+**Examples:**
+
+```
+# ✗ REJECTED (R1 — empty)
+br close bd-XXX
+
+# ✗ REJECTED (R2 — thin)
+br close bd-XXX --reason "done"
+br close bd-XXX --reason "Completed"
+br close bd-XXX --reason "fix"
+
+# ⚠ WARN (R3 — too short)
+br close bd-XXX --reason "Fixed in 4c732669"
+
+# ⚠ WARN (R4 — no citation)
+br close bd-XXX --reason "Implemented the validator following the spec; all tests pass."
+
+# ✓ ACCEPTED
+br close bd-XXX --reason "Fixed via 4c732669: hardened compute_inputs_hash to length-prefix
+each participant individually (crates/franken-node/src/sdk/replay_capsule.rs:5210-5255).
+New regression test test_compute_inputs_hash_negative_paths in the same file at line 5275
+exercises the cartesian-collision attack; 26 inline tests pass under rch exec cargo test."
+```
+
+**Fabricated-evidence anti-pattern (R5 — REJECTED):**
+
+If the close_reason cites an `artifacts/<...>/verification_evidence.json` artifact, the artifact's `cited_files` / `source_paths` entries MUST reference paths that exist in `git ls-files`. A `verification_evidence.json` that claims "20/20 PASS" for a `src/<module>/<file>.rs` not in the tree is a fake close.
+
+**Pre-commit guard:** `scripts/check_close_reason_quality.py --staged --warn-only`
+**CI gate:** `.github/workflows/closer-discipline-gate.yml` (runs `--ci` mode, blocking)
+
+Run the guard at any time on the current bead store:
+
+```bash
+python scripts/check_close_reason_quality.py --all --warn-only
+```
+
+Tracking bead for the initiative: **`bd-8vo8v`** (P1).
 
 ### Key Concepts
 
