@@ -162,6 +162,17 @@ def _checks():
     # 18. bd-18sp completion-debt evidence exists and covers all audit items.
     check("BD18SP_REPLACEMENT_EVIDENCE_EXISTS", os.path.isfile(REPLACEMENT_EVIDENCE), REPLACEMENT_EVIDENCE)
     check("BD18SP_REPLACEMENT_SUMMARY_EXISTS", os.path.isfile(REPLACEMENT_SUMMARY), REPLACEMENT_SUMMARY)
+    replacement_summary = _read(REPLACEMENT_SUMMARY) if os.path.isfile(REPLACEMENT_SUMMARY) else ""
+    check(
+        "BD18SP_REPLACEMENT_SUMMARY_COMPLETION_BEAD",
+        BD18SP_COMPLETION_DEBT_BEAD in replacement_summary,
+        _rel(REPLACEMENT_SUMMARY),
+    )
+    check(
+        "BD18SP_REPLACEMENT_SUMMARY_EVIDENCE_LINK",
+        _rel(REPLACEMENT_EVIDENCE) in replacement_summary,
+        _rel(REPLACEMENT_EVIDENCE),
+    )
 
     replacement_data = None
     if os.path.isfile(REPLACEMENT_EVIDENCE):
