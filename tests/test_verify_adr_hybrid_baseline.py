@@ -1,5 +1,7 @@
 """Tests for scripts/verify_adr_hybrid_baseline.py."""
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -44,15 +46,15 @@ def test_adr_references_plan():
     result = check_adr_references()
     assert result["status"] == "PASS"
     refs = {r["name"]: r["found"] for r in result["details"]["references"]}
-    assert refs["PLAN_TO_CREATE_FRANKEN_NODE"] is True
-    assert refs["PRODUCT_CHARTER"] is True
-    assert refs["ENGINE_SPLIT_CONTRACT"] is True
+    assert refs["PLAN_TO_CREATE_FRANKEN_NODE"]
+    assert refs["PRODUCT_CHARTER"]
+    assert refs["ENGINE_SPLIT_CONTRACT"]
 
 
 def test_charter_cross_references_adr():
     result = check_charter_xref()
     assert result["status"] == "PASS"
-    assert result["details"]["cross_referenced"] is True
+    assert result["details"]["cross_referenced"]
 
 
 def test_adr_file_content_has_title():
@@ -65,3 +67,21 @@ def test_adr_file_has_consequences_section():
     adr_path = ROOT / "docs" / "adr" / "ADR-001-hybrid-baseline-strategy.md"
     text = adr_path.read_text()
     assert "## Consequences" in text
+
+
+def test_adr_hybrid_baseline_checker_e2e_json_passes():
+    result = subprocess.run(  # nosec B603 - fixed verifier command under repo root.
+        [sys.executable, "scripts/verify_adr_hybrid_baseline.py", "--json"],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["gate"] == "adr_hybrid_baseline_verification"
+    assert payload["verdict"] == "PASS"
+    assert payload["summary"]["total_checks"] == 5
+    assert payload["summary"]["failing_checks"] == 0
