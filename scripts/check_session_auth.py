@@ -126,6 +126,20 @@ LEGACY_ACTIVE_COVERAGE_CLAIMS = [
     "No mocked authentication",
 ]
 
+SESSION_AUTH_GIT_XREF = [
+    {
+        "bead_id": "bd-390wi",
+        "commit": "d790ce19df1a4d0c4a45a66d67b4623ae89ed867",
+        "subject": "fix(session-auth): pin send/recv seq at saturation when checked_add overflows",
+        "paths": ["crates/franken-node/src/api/session_auth.rs"],
+        "evidence": [
+            "send_seq is pinned to sequence when checked_add(1) overflows",
+            "recv_seq is pinned to sequence when checked_add(1) overflows",
+            "send_seq_exhausted and recv_seq_exhausted fail closed future accepted messages",
+        ],
+    }
+]
+
 REQUIRED_POLICY_CONTENT = [
     "Session-Authenticated Control Channel Policy",
     "INV-SCC-SESSION-AUTH",
@@ -541,6 +555,26 @@ def check_session_auth_test_registration_truth() -> list:
     return checks
 
 
+def check_session_auth_git_xref() -> list:
+    src = _read(IMPL_FILE)
+    xref = next((entry for entry in SESSION_AUTH_GIT_XREF if entry["bead_id"] == "bd-390wi"), None)
+    has_commit = xref is not None and len(xref["commit"]) == 40
+    has_sequence_guard = (
+        "checked_add(1)" in src
+        and "send_seq_exhausted = true" in src
+        and "recv_seq_exhausted = true" in src
+        and "SessionError::SequenceExhausted" in src
+        and "test_send_sequence_exhaustion_rejected_before_duplicate_terminal_use" in src
+    )
+    return [
+        _check(
+            "git_xref: bd-390wi session_auth sequence exhaustion",
+            bool(has_commit and has_sequence_guard),
+            xref["commit"] if xref else "missing bd-390wi git_xref",
+        )
+    ]
+
+
 # ── Main check runner ──────────────────────────────────────────────────────
 
 def run_checks() -> dict:
@@ -562,6 +596,7 @@ def run_checks() -> dict:
     checks.extend(check_acceptance_criteria())
     checks.extend(check_real_session_auth_evidence())
     checks.extend(check_session_auth_test_registration_truth())
+    checks.extend(check_session_auth_git_xref())
 
     passed = sum(1 for c in checks if c["pass"])
     failed = sum(1 for c in checks if not c["pass"])
@@ -574,6 +609,7 @@ def run_checks() -> dict:
         "total": len(checks),
         "passed": passed,
         "failed": failed,
+        "git_xref": SESSION_AUTH_GIT_XREF,
         "checks": checks,
     }
 

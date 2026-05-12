@@ -1,16 +1,17 @@
 # bd-oty: Session-Authenticated Control Channel Integration
 
-**Section:** 10.10 | **Verdict:** PASS | **Date:** 2026-05-06
+**Section:** 10.10 | **Verdict:** PASS | **Date:** 2026-05-12
 
 ## Metrics
 
 | Category | Pass | Total |
 |----------|------|-------|
-| Python verification checks | 108 | 108 |
-| Python unit tests (pytest) | 30 | 30 |
-| Rust unit tests present | 146 | 146 |
+| Python verification checks | 122 | 122 |
+| Python unit tests (pytest) | 35 | 35 |
+| Rust unit tests present | 147 | 147 |
 | Real Rust evidence checks | 7 | 7 |
 | Synthetic lifecycle checks | 0 | 0 |
+| Git xref checks | 1 | 1 |
 
 ## Implementation
 
@@ -92,12 +93,13 @@
 | Bead | Description | Status |
 |------|-------------|--------|
 | bd-ac8j | Mutual-authenticated capability sessions (HMAC transcript binding) | CLOSED |
+| bd-390wi | Fail-closed session_auth sequence exhaustion | CLOSED; direct git_xref `d790ce19df1a4d0c4a45a66d67b4623ae89ed867` |
 
 ## Verification Commands
 
 ```bash
-python3 scripts/check_session_auth.py --json          # 108/108 PASS
-python3 scripts/check_session_auth.py --self-test     # 108/108 PASS
-python3 -m pytest tests/test_check_session_auth.py -q # 30 passed
+python3 scripts/check_session_auth.py --json          # 122/122 PASS
+python3 scripts/check_session_auth.py --self-test     # 122/122 PASS
+python3 -m pytest tests/test_check_session_auth.py -q # 35 passed
 python3 -m py_compile scripts/check_session_auth.py tests/test_check_session_auth.py
 ```

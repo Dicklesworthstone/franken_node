@@ -1,5 +1,5 @@
 Command: python3 scripts/check_session_auth.py --self-test
-Result: self-test: 108/108 PASS
+Result: self-test: 122/122 PASS
 
 Real Rust evidence rows:
   [PASS] real evidence: HMAC transcript authentication
@@ -9,5 +9,8 @@ Real Rust evidence rows:
   [PASS] real evidence: max-session and duplicate capacity gates
   [PASS] real evidence: key-role validation fail-closed
   [PASS] real evidence: audited rejection events
+
+Git xref rows:
+  [PASS] git_xref: bd-390wi session_auth sequence exhaustion
 
 Legacy Python lifecycle model rows: 0

@@ -51,6 +51,11 @@ class TestConstants(unittest.TestCase):
     def test_legacy_session_auth_files_count(self):
         self.assertEqual(len(mod.LEGACY_UNREGISTERED_SESSION_AUTH_TESTS), 2)
 
+    def test_session_auth_git_xref_has_bd_390wi(self):
+        refs = [entry for entry in mod.SESSION_AUTH_GIT_XREF if entry["bead_id"] == "bd-390wi"]
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(len(refs[0]["commit"]), 40)
+
 class TestRealRustEvidence(unittest.TestCase):
     def test_real_evidence_checks_pass(self):
         checks = mod.check_real_session_auth_evidence()
@@ -75,6 +80,12 @@ class TestRealRustEvidence(unittest.TestCase):
     def test_legacy_unregistered_session_auth_files_are_truthful(self):
         checks = mod.check_session_auth_test_registration_truth()
         self.assertGreaterEqual(len(checks), 13)
+        for check in checks:
+            self.assertTrue(check["pass"], f"{check['check']}: {check['detail']}")
+
+    def test_git_xref_checks_pass(self):
+        checks = mod.check_session_auth_git_xref()
+        self.assertEqual(len(checks), 1)
         for check in checks:
             self.assertTrue(check["pass"], f"{check['check']}: {check['detail']}")
 
@@ -126,7 +137,7 @@ class TestJsonOutput(unittest.TestCase):
 
     def test_all_fields(self):
         result = mod.run_checks()
-        for key in ["bead_id", "title", "section", "verdict", "total", "passed", "failed", "checks"]:
+        for key in ["bead_id", "title", "section", "verdict", "total", "passed", "failed", "git_xref", "checks"]:
             self.assertIn(key, result)
 
 

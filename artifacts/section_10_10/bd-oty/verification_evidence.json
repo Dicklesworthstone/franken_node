@@ -2,8 +2,13 @@
   "bead_id": "bd-oty",
   "section": "10.10",
   "title": "Session-authenticated control channel integration",
-  "timestamp": "2026-05-06T15:09:19Z",
+  "timestamp": "2026-05-12T21:47:38Z",
   "verdict": "PASS",
+  "completion_debt_resolution": {
+    "bead_id": "bd-390wi.1",
+    "finding": "session_auth sequence-exhaustion closure had no direct git_xref",
+    "resolution": "session-auth verifier now exposes direct bd-390wi git_xref evidence for the sequence-exhaustion implementation commit"
+  },
   "files": {
     "spec": "docs/specs/section_10_10/bd-oty_contract.md",
     "policy": "docs/policy/session_authenticated_control.md",
@@ -12,12 +17,27 @@
     "verification_script": "scripts/check_session_auth.py",
     "python_tests": "tests/test_check_session_auth.py"
   },
+  "git_xref": [
+    {
+      "bead_id": "bd-390wi",
+      "commit": "d790ce19df1a4d0c4a45a66d67b4623ae89ed867",
+      "subject": "fix(session-auth): pin send/recv seq at saturation when checked_add overflows",
+      "paths": [
+        "crates/franken-node/src/api/session_auth.rs"
+      ],
+      "evidence": [
+        "send_seq is pinned to sequence when checked_add(1) overflows",
+        "recv_seq is pinned to sequence when checked_add(1) overflows",
+        "send_seq_exhausted and recv_seq_exhausted fail closed future accepted messages"
+      ]
+    }
+  ],
   "metrics": {
-    "python_checks_total": 108,
-    "python_checks_passing": 108,
+    "python_checks_total": 122,
+    "python_checks_passing": 122,
     "python_checks_failing": 0,
-    "python_unit_tests": 30,
-    "rust_unit_tests": 146,
+    "python_unit_tests": 35,
+    "rust_unit_tests": 147,
     "structs_verified": 8,
     "event_codes_verified": 4,
     "error_codes_verified": 6,
@@ -31,7 +51,8 @@
     "acceptance_criteria_verified": 8,
     "serde_derives_verified": 6,
     "key_role_integration_checks": 3,
-    "direction_integration_checks": 3
+    "direction_integration_checks": 3,
+    "git_xref_checks": 1
   },
   "acceptance_criteria": {
     "AC1_session_requirement": "PASS — every control message requires active authenticated session (INV-SCC-SESSION-AUTH)",
@@ -41,12 +62,13 @@
     "AC5_terminated_rejects": "PASS — terminated sessions reject all messages with ERR_SCC_SESSION_TERMINATED (INV-SCC-TERMINATED)",
     "AC6_concurrent_session_limit": "PASS — SessionManager enforces max_sessions with ERR_SCC_MAX_SESSIONS",
     "AC7_traced_events": "PASS — all events include trace_id and session_id",
-    "AC8_unit_test_coverage": "PASS — 146 Rust tests covering lifecycle, sequence, replay, role keys, HMAC verification",
+    "AC8_unit_test_coverage": "PASS — 147 Rust tests covering lifecycle, sequence, replay, role keys, HMAC verification",
     "AC9_real_rust_evidence": "PASS — checker now verifies real Rust evidence rows for HMAC, sequence, replay, termination, capacity, key roles, and audited rejection events",
     "AC10_no_synthetic_lifecycle_rows": "PASS — Python lifecycle model rows removed from the verification report"
   },
   "gap_closures": {
-    "bd-ac8j": "CLOSED — Replaced placeholder session-auth with HMAC-SHA256 mutual-authenticated capability sessions (handshake transcript binding, per-message chain MAC, epoch-derived keys)"
+    "bd-ac8j": "CLOSED — Replaced placeholder session-auth with HMAC-SHA256 mutual-authenticated capability sessions (handshake transcript binding, per-message chain MAC, epoch-derived keys)",
+    "bd-390wi": "CLOSED — Fail-closed session_auth sequence exhaustion is directly traced to commit d790ce19df1a4d0c4a45a66d67b4623ae89ed867"
   },
   "upstream_dependencies": {
     "bd-v97o": "CLOSED — connector::control_channel::Direction (per-direction sequence monotonicity)",

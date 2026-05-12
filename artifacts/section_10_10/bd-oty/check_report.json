@@ -3,9 +3,24 @@
   "title": "Session-authenticated control channel integration",
   "section": "10.10",
   "verdict": "PASS",
-  "total": 108,
-  "passed": 108,
+  "total": 122,
+  "passed": 122,
   "failed": 0,
+  "git_xref": [
+    {
+      "bead_id": "bd-390wi",
+      "commit": "d790ce19df1a4d0c4a45a66d67b4623ae89ed867",
+      "subject": "fix(session-auth): pin send/recv seq at saturation when checked_add overflows",
+      "paths": [
+        "crates/franken-node/src/api/session_auth.rs"
+      ],
+      "evidence": [
+        "send_seq is pinned to sequence when checked_add(1) overflows",
+        "recv_seq is pinned to sequence when checked_add(1) overflows",
+        "send_seq_exhausted and recv_seq_exhausted fail closed future accepted messages"
+      ]
+    }
+  ],
   "checks": [
     {
       "check": "session_auth implementation exists",
@@ -348,9 +363,9 @@
       "detail": "ok"
     },
     {
-      "check": "Rust unit tests present (146)",
+      "check": "Rust unit tests present (147)",
       "pass": true,
-      "detail": "146 tests found"
+      "detail": "147 tests found"
     },
     {
       "check": "test: lifecycle tests",
@@ -546,6 +561,76 @@
       "check": "real evidence: audited rejection events",
       "pass": true,
       "detail": "ok"
+    },
+    {
+      "check": "registered session-auth target: session_auth_real_lifecycle",
+      "pass": true,
+      "detail": "tests/session_auth_real_lifecycle.rs"
+    },
+    {
+      "check": "registered session-auth target: session_auth_key_roles",
+      "pass": true,
+      "detail": "tests/session_auth_key_roles.rs"
+    },
+    {
+      "check": "registered session-auth target: session_auth_real_lifecycle_structured",
+      "pass": true,
+      "detail": "tests/session_auth_real_lifecycle_structured.rs"
+    },
+    {
+      "check": "legacy session-auth file exists: tests/integration_api_session_auth_real_service.rs",
+      "pass": true,
+      "detail": "tests/integration_api_session_auth_real_service.rs"
+    },
+    {
+      "check": "legacy session-auth file not registered: tests/integration_api_session_auth_real_service.rs",
+      "pass": true,
+      "detail": "source-only legacy file"
+    },
+    {
+      "check": "legacy session-auth file marked: tests/integration_api_session_auth_real_service.rs",
+      "pass": true,
+      "detail": "LEGACY-UNREGISTERED-SESSION-AUTH-COVERAGE"
+    },
+    {
+      "check": "legacy session-auth file points to active targets: tests/integration_api_session_auth_real_service.rs",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "check": "legacy session-auth file has no active no-mock claim: tests/integration_api_session_auth_real_service.rs",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "check": "legacy session-auth file exists: tests/api_session_auth_real_service_integration.rs",
+      "pass": true,
+      "detail": "tests/api_session_auth_real_service_integration.rs"
+    },
+    {
+      "check": "legacy session-auth file not registered: tests/api_session_auth_real_service_integration.rs",
+      "pass": true,
+      "detail": "source-only legacy file"
+    },
+    {
+      "check": "legacy session-auth file marked: tests/api_session_auth_real_service_integration.rs",
+      "pass": true,
+      "detail": "LEGACY-UNREGISTERED-SESSION-AUTH-COVERAGE"
+    },
+    {
+      "check": "legacy session-auth file points to active targets: tests/api_session_auth_real_service_integration.rs",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "check": "legacy session-auth file has no active no-mock claim: tests/api_session_auth_real_service_integration.rs",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "check": "git_xref: bd-390wi session_auth sequence exhaustion",
+      "pass": true,
+      "detail": "d790ce19df1a4d0c4a45a66d67b4623ae89ed867"
     }
   ]
 }
