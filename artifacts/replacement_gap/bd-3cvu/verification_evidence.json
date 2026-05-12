@@ -99,12 +99,12 @@
     {
       "command": "python3 scripts/check_control_channel.py --json",
       "expected": "PASS",
-      "actual": "PENDING until checker is rerun after this evidence pack is created"
+      "actual": "PASS: 26 passing checks, 0 failing checks, 1 skipped Rust-test check in structural mode"
     },
     {
       "command": "python3 -m unittest tests/test_check_control_channel.py",
       "expected": "PASS",
-      "actual": "PENDING until checker tests are rerun after this evidence pack is created"
+      "actual": "PASS: 19 tests"
     }
   ],
   "notes": [

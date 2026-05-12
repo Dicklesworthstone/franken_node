@@ -26,5 +26,9 @@ bd-3cvu.1 records the audit-missing items in
 The checker now fails closed if the source markers, unit/integration markers,
 operator E2E artifacts, or completion-debt evidence pack disappear.
 
-Recorded validation will be updated after the checker and unit tests are rerun
-with this evidence pack present.
+Recorded validation:
+
+- `tests/e2e/control_channel_operator_suite.sh`: PASS, 4 scenarios
+- `python3 scripts/check_control_channel.py --json`: PASS, 26 passing checks,
+  0 failing checks, 1 skipped Rust-test check in structural mode
+- `python3 -m unittest tests/test_check_control_channel.py`: PASS, 19 tests
