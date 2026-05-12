@@ -1,6 +1,7 @@
 # bd-18sp Verification Summary
 
-**Section:** 10.11  
+**Section:** 10.11
+**Completion-debt bead:** bd-18sp.1
 **Verdict:** PASS
 
 ## Scope Delivered
@@ -15,6 +16,10 @@ so synthetic time stubs do not silently return.
 
 ## Verification Status
 
+- bd-18sp.1 completion-debt items are covered in
+  `artifacts/replacement_gap/bd-18sp/verification_evidence.json`:
+  `tests.unit.primary`, `tests.integration.primary`, `tests.e2e.primary`, and
+  `tests.property.primary`.
 - Package-level `cargo check -p frankenengine-node --lib --tests` is currently
   blocked by unrelated upstream errors in
   `franken_engine/src/ts_module_resolution.rs` (`lookup_exact_slot` missing).

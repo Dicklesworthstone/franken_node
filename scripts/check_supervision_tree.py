@@ -13,11 +13,50 @@ SPEC = os.path.join(ROOT, "docs", "specs", "section_10_11", "bd-3he_contract.md"
 TEST_SUITE = os.path.join(ROOT, "tests", "test_check_supervision_tree.py")
 EVIDENCE = os.path.join(ROOT, "artifacts", "section_10_11", "bd-3he", "verification_evidence.json")
 SUMMARY = os.path.join(ROOT, "artifacts", "section_10_11", "bd-3he", "verification_summary.md")
+REPLACEMENT_EVIDENCE_DIR = os.path.join(ROOT, "artifacts", "replacement_gap", "bd-18sp")
+REPLACEMENT_EVIDENCE = os.path.join(REPLACEMENT_EVIDENCE_DIR, "verification_evidence.json")
+REPLACEMENT_SUMMARY = os.path.join(REPLACEMENT_EVIDENCE_DIR, "verification_summary.md")
+REPO_PUBLIC_API_TEST = os.path.join(
+    ROOT, "crates", "franken-node", "tests", "supervision_temporal_kernel.rs"
+)
+HARNESS_LIB = os.path.join(REPLACEMENT_EVIDENCE_DIR, "supervision_kernel_harness", "src", "lib.rs")
+HARNESS_PUBLIC_API_TEST = os.path.join(
+    REPLACEMENT_EVIDENCE_DIR, "supervision_kernel_harness", "tests", "public_api.rs"
+)
+HYPERFINE_SCRIPT = os.path.join(REPLACEMENT_EVIDENCE_DIR, "run_hyperfine.sh")
+HYPERFINE_RESULTS = os.path.join(REPLACEMENT_EVIDENCE_DIR, "hyperfine_supervision_kernel.json")
+BD18SP_REPLACEMENT_BEAD = "bd-18sp"
+BD18SP_COMPLETION_DEBT_BEAD = "bd-18sp.1"
+COMPLETION_DEBT_ITEMS = {
+    "tests.unit.primary",
+    "tests.integration.primary",
+    "tests.e2e.primary",
+    "tests.property.primary",
+}
+PROPERTY_TEST_MARKERS = [
+    "test_restart_budget_matches_reference_window_model",
+    "test_adversarial_burst_schedule_matches_reference_kernel",
+    "find_minimal_counterexample",
+    "verify_schedule_equivalence",
+]
+INTEGRATION_TEST_MARKERS = [
+    "public_api_uses_elapsed_time_for_restart_window_expiry",
+    "public_api_can_record_structured_health_reports",
+]
 
 
 def _read(path):
     with open(path) as f:
         return f.read()
+
+
+def _rel(path):
+    return os.path.relpath(path, ROOT)
+
+
+def _load_json(path):
+    with open(path) as f:
+        return json.load(f)
 
 
 def _checks():
@@ -119,6 +158,98 @@ def _checks():
 
     # 17. Summary exists
     check("SUMMARY_EXISTS", os.path.isfile(SUMMARY), SUMMARY)
+
+    # 18. bd-18sp completion-debt evidence exists and covers all audit items.
+    check("BD18SP_REPLACEMENT_EVIDENCE_EXISTS", os.path.isfile(REPLACEMENT_EVIDENCE), REPLACEMENT_EVIDENCE)
+    check("BD18SP_REPLACEMENT_SUMMARY_EXISTS", os.path.isfile(REPLACEMENT_SUMMARY), REPLACEMENT_SUMMARY)
+
+    replacement_data = None
+    if os.path.isfile(REPLACEMENT_EVIDENCE):
+        try:
+            replacement_data = _load_json(REPLACEMENT_EVIDENCE)
+            check("BD18SP_REPLACEMENT_EVIDENCE_JSON", True, REPLACEMENT_EVIDENCE)
+        except json.JSONDecodeError as exc:
+            check("BD18SP_REPLACEMENT_EVIDENCE_JSON", False, str(exc))
+    else:
+        check("BD18SP_REPLACEMENT_EVIDENCE_JSON", False, "replacement evidence missing")
+
+    if replacement_data:
+        check(
+            "BD18SP_REPLACEMENT_BEAD_ID",
+            replacement_data.get("bead_id") == BD18SP_REPLACEMENT_BEAD,
+            str(replacement_data.get("bead_id")),
+        )
+        check(
+            "BD18SP_COMPLETION_DEBT_BEAD_ID",
+            replacement_data.get("completion_debt_bead_id") == BD18SP_COMPLETION_DEBT_BEAD,
+            str(replacement_data.get("completion_debt_bead_id")),
+        )
+        covered_items = set(replacement_data.get("completion_debt", {}).get("covered_spec_items", []))
+        check(
+            "BD18SP_COMPLETION_DEBT_ITEMS_COVERED",
+            COMPLETION_DEBT_ITEMS.issubset(covered_items),
+            ",".join(sorted(covered_items)) if covered_items else "none",
+        )
+        obligations = {
+            item.get("spec_item"): item
+            for item in replacement_data.get("completion_debt", {}).get("obligations", [])
+        }
+        for spec_item in sorted(COMPLETION_DEBT_ITEMS):
+            obligation = obligations.get(spec_item, {})
+            evidence_paths = obligation.get("evidence_paths", [])
+            missing_paths = [
+                path for path in evidence_paths
+                if not os.path.exists(os.path.join(ROOT, path))
+            ]
+            check(
+                f"BD18SP_{spec_item}_EVIDENCE_PATHS",
+                bool(evidence_paths) and not missing_paths,
+                "ok" if evidence_paths and not missing_paths else f"missing {missing_paths}",
+            )
+            check(
+                f"BD18SP_{spec_item}_TEST_NAMES",
+                bool(obligation.get("test_names")),
+                ",".join(obligation.get("test_names", [])) or "none",
+            )
+    else:
+        check("BD18SP_REPLACEMENT_BEAD_ID", False, "replacement evidence unavailable")
+        check("BD18SP_COMPLETION_DEBT_BEAD_ID", False, "replacement evidence unavailable")
+        check("BD18SP_COMPLETION_DEBT_ITEMS_COVERED", False, "replacement evidence unavailable")
+
+    for marker in INTEGRATION_TEST_MARKERS:
+        repo_test = _read(REPO_PUBLIC_API_TEST) if os.path.isfile(REPO_PUBLIC_API_TEST) else ""
+        harness_test = _read(HARNESS_PUBLIC_API_TEST) if os.path.isfile(HARNESS_PUBLIC_API_TEST) else ""
+        check(
+            f"BD18SP_INTEGRATION_MARKER_{marker}",
+            marker in repo_test and marker in harness_test,
+            f"{_rel(REPO_PUBLIC_API_TEST)} + {_rel(HARNESS_PUBLIC_API_TEST)}",
+        )
+
+    for marker in PROPERTY_TEST_MARKERS:
+        check(
+            f"BD18SP_PROPERTY_MARKER_{marker}",
+            marker in src,
+            "connector/supervision.rs",
+        )
+
+    if os.path.isfile(HYPERFINE_RESULTS):
+        try:
+            hyperfine = _load_json(HYPERFINE_RESULTS)
+            commands = {entry.get("command") for entry in hyperfine.get("results", [])}
+            exit_codes_ok = all(
+                all(code == 0 for code in entry.get("exit_codes", []))
+                for entry in hyperfine.get("results", [])
+            )
+            check(
+                "BD18SP_E2E_HYPERFINE_RESULTS",
+                {"reference", "monotone-queue"}.issubset(commands) and exit_codes_ok,
+                ",".join(sorted(commands)) if commands else "none",
+            )
+        except json.JSONDecodeError as exc:
+            check("BD18SP_E2E_HYPERFINE_RESULTS", False, str(exc))
+    else:
+        check("BD18SP_E2E_HYPERFINE_RESULTS", False, HYPERFINE_RESULTS)
+    check("BD18SP_E2E_HYPERFINE_SCRIPT", os.path.isfile(HYPERFINE_SCRIPT), HYPERFINE_SCRIPT)
 
     return results
 

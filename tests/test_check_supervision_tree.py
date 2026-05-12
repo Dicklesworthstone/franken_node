@@ -22,7 +22,7 @@ class TestChecksStructure(unittest.TestCase):
         self.results = mod._checks()
 
     def test_minimum_check_count(self):
-        self.assertGreaterEqual(len(self.results), 17)
+        self.assertGreaterEqual(len(self.results), 41)
 
     def test_checks_have_required_fields(self):
         for r in self.results:
@@ -164,6 +164,33 @@ class TestOverallVerdict(unittest.TestCase):
         failed = [r for r in results if not r["passed"]]
         self.assertEqual(len(failed), 0,
                          f"Failing checks: {[r['check'] for r in failed]}")
+
+
+class TestBd18spCompletionDebt(unittest.TestCase):
+    def setUp(self):
+        self.results = {r["check"]: r for r in mod._checks()}
+
+    def test_replacement_evidence_is_checked(self):
+        self.assertTrue(self.results["BD18SP_REPLACEMENT_EVIDENCE_EXISTS"]["passed"])
+        self.assertTrue(self.results["BD18SP_REPLACEMENT_EVIDENCE_JSON"]["passed"])
+        self.assertTrue(self.results["BD18SP_REPLACEMENT_BEAD_ID"]["passed"])
+        self.assertTrue(self.results["BD18SP_COMPLETION_DEBT_BEAD_ID"]["passed"])
+
+    def test_all_completion_debt_items_are_covered(self):
+        self.assertTrue(self.results["BD18SP_COMPLETION_DEBT_ITEMS_COVERED"]["passed"])
+        for spec_item in mod.COMPLETION_DEBT_ITEMS:
+            self.assertTrue(self.results[f"BD18SP_{spec_item}_EVIDENCE_PATHS"]["passed"])
+            self.assertTrue(self.results[f"BD18SP_{spec_item}_TEST_NAMES"]["passed"])
+
+    def test_property_and_integration_markers_are_checked(self):
+        for marker in mod.PROPERTY_TEST_MARKERS:
+            self.assertTrue(self.results[f"BD18SP_PROPERTY_MARKER_{marker}"]["passed"])
+        for marker in mod.INTEGRATION_TEST_MARKERS:
+            self.assertTrue(self.results[f"BD18SP_INTEGRATION_MARKER_{marker}"]["passed"])
+
+    def test_e2e_hyperfine_artifacts_are_checked(self):
+        self.assertTrue(self.results["BD18SP_E2E_HYPERFINE_SCRIPT"]["passed"])
+        self.assertTrue(self.results["BD18SP_E2E_HYPERFINE_RESULTS"]["passed"])
 
 
 if __name__ == "__main__":

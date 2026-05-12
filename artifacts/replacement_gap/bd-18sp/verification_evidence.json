@@ -1,6 +1,7 @@
 {
   "artifact_type": "verification_evidence",
   "bead_id": "bd-18sp",
+  "completion_debt_bead_id": "bd-18sp.1",
   "title": "Replace supervision clock stub with monotonic temporal kernel and restart-budget proof harness",
   "section": "10.11",
   "verdict": "PASS",
@@ -15,6 +16,71 @@
     "hyperfine_results": "artifacts/replacement_gap/bd-18sp/hyperfine_supervision_kernel.json",
     "verification_summary": "artifacts/replacement_gap/bd-18sp/verification_summary.md",
     "verification_evidence": "artifacts/replacement_gap/bd-18sp/verification_evidence.json"
+  },
+  "completion_debt": {
+    "missing_items_from_audit": [
+      "tests.unit.primary",
+      "tests.integration.primary",
+      "tests.e2e.primary",
+      "tests.property.primary"
+    ],
+    "covered_spec_items": [
+      "tests.unit.primary",
+      "tests.integration.primary",
+      "tests.e2e.primary",
+      "tests.property.primary"
+    ],
+    "obligations": [
+      {
+        "spec_item": "tests.unit.primary",
+        "description": "Unit coverage for deterministic monotonic clocks, elapsed restart-window expiry, regression rejection, and negative supervision state transitions.",
+        "evidence_paths": [
+          "crates/franken-node/src/connector/supervision.rs",
+          "artifacts/replacement_gap/bd-18sp/supervision_kernel_harness/src/lib.rs"
+        ],
+        "test_names": [
+          "test_budget_window_resets_after_elapsed_time",
+          "test_deterministic_clock_regression_rejected",
+          "negative_deterministic_clock_rejects_regression_without_time_mutation",
+          "negative_steady_clock_rejects_manual_advance_without_events"
+        ]
+      },
+      {
+        "spec_item": "tests.integration.primary",
+        "description": "Cargo-visible and isolated external-crate integration tests proving public API restart-window expiry and structured health-report emission.",
+        "evidence_paths": [
+          "crates/franken-node/tests/supervision_temporal_kernel.rs",
+          "artifacts/replacement_gap/bd-18sp/supervision_kernel_harness/tests/public_api.rs"
+        ],
+        "test_names": [
+          "public_api_uses_elapsed_time_for_restart_window_expiry",
+          "public_api_can_record_structured_health_reports"
+        ]
+      },
+      {
+        "spec_item": "tests.e2e.primary",
+        "description": "Checked-in hyperfine E2E script and captured same-worker output comparing the retained Vec reference kernel with the monotone-queue kernel.",
+        "evidence_paths": [
+          "artifacts/replacement_gap/bd-18sp/run_hyperfine.sh",
+          "artifacts/replacement_gap/bd-18sp/hyperfine_supervision_kernel.json"
+        ],
+        "test_names": [
+          "rch_hyperfine_kernel_comparison"
+        ]
+      },
+      {
+        "spec_item": "tests.property.primary",
+        "description": "Reference-model and adversarial burst schedule properties prove the optimized restart-budget kernel matches the retained Vec model.",
+        "evidence_paths": [
+          "crates/franken-node/src/connector/supervision.rs"
+        ],
+        "test_names": [
+          "test_restart_budget_matches_reference_window_model",
+          "test_adversarial_burst_schedule_matches_reference_kernel",
+          "test_supervision_source_rejects_synthetic_time_stubs"
+        ]
+      }
+    ]
   },
   "verification_steps": [
     {
