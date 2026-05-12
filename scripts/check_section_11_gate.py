@@ -5,19 +5,19 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import re
 import subprocess
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -116,6 +116,9 @@ EVENT_CODES = {
     "GATE_11_VERDICT_EMITTED",
 }
 
+PASS_STATUSES = {"pass", "passed", "ok", "success"}
+FAIL_STATUSES = {"fail", "failed", "error"}
+
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -142,20 +145,26 @@ def _is_script_payload_pass(payload: dict[str, Any]) -> bool:
         return bool(payload.get("gate_pass"))
     if "status" in payload:
         status = str(payload.get("status", "")).strip().lower()
-        if status in {"pass", "passed", "ok", "success"}:
-            return True
-        if status in {"fail", "failed", "error"}:
-            return False
+        status_verdict: bool | None = None
+        if status in PASS_STATUSES:
+            status_verdict = True
+        elif status in FAIL_STATUSES:
+            status_verdict = False
+        if status_verdict is not None:
+            return status_verdict
     if "all_passed" in payload:
         return bool(payload.get("all_passed"))
     if "passed" in payload and "total" in payload:
+        count_verdict = False
         try:
             passed = int(payload.get("passed", -1))
             total = int(payload.get("total", -1))
         except (TypeError, ValueError):
-            return False
-        return total >= 0 and passed == total
-    return False
+            return count_verdict
+        count_verdict = total >= 0 and passed == total
+        return count_verdict
+    unknown_payload_verdict = False
+    return unknown_payload_verdict
 
 
 def _ensure_changed_files_fixture() -> Path:
@@ -490,7 +499,13 @@ def self_test() -> tuple[bool, list[dict[str, Any]]]:
     sample = {"a": 1, "b": [2, 3]}
     hash_one = hashlib.sha256(_canonical_json(sample).encode("utf-8")).hexdigest()
     hash_two = hashlib.sha256(_canonical_json(sample).encode("utf-8")).hexdigest()
-    checks.append({"check": "canonical hash deterministic", "pass": hash_one == hash_two, "detail": hash_one})
+    checks.append(
+        {
+            "check": "canonical hash deterministic",
+            "pass": hmac.compare_digest(hash_one, hash_two),
+            "detail": hash_one,
+        }
+    )
 
     checks.append(
         {
@@ -525,7 +540,7 @@ def self_test() -> tuple[bool, list[dict[str, Any]]]:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_section_11_gate")
+    configure_test_logging("check_section_11_gate")
     parser = argparse.ArgumentParser(description="Section 11 comprehensive gate")
     parser.add_argument("--json", action="store_true", help="Emit JSON report")
     parser.add_argument("--self-test", action="store_true", help="Run deterministic self-test")

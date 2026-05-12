@@ -4,7 +4,7 @@
   "section": "11",
   "gate_pass": true,
   "verdict": "PASS",
-  "timestamp": "2026-02-21T01:11:10.785971+00:00",
+  "timestamp": "2026-05-12T21:20:06.028203+00:00",
   "beads_tested": [
     "bd-3se1",
     "bd-36wa",
@@ -26,7 +26,7 @@
     {
       "event_code": "GATE_11_EVALUATION_STARTED",
       "severity": "info",
-      "timestamp": "2026-02-21T01:11:10.785971+00:00"
+      "timestamp": "2026-05-12T21:20:06.028203+00:00"
     },
     {
       "event_code": "GATE_11_BEAD_CHECKED",
@@ -1369,5 +1369,5 @@
     "scripts_total": 9,
     "test_coverage_pct": 100.0
   },
-  "content_hash": "64298ea92eb91af35e15f261711f0db6732170da37b63280e2e121a97e1155ca"
+  "content_hash": "8de6f24d713cb8b89f09de59887c1091408b0c13052f053db7b55925bbe9003c"
 }

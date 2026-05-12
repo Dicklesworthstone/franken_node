@@ -49,9 +49,17 @@ class TestHelpers(TestCase):
         payload = {"status": "failed", "all_passed": False, "passed": 4, "total": 5}
         self.assertFalse(mod._is_script_payload_pass(payload))
 
+    def test_script_payload_rejects_unknown_status_without_counts(self) -> None:
+        payload = {"status": "queued"}
+        self.assertFalse(mod._is_script_payload_pass(payload))
+
     def test_script_payload_accepts_passed_equals_total(self) -> None:
         payload = {"passed": 7, "total": 7}
         self.assertTrue(mod._is_script_payload_pass(payload))
+
+    def test_script_payload_rejects_non_numeric_counts(self) -> None:
+        payload = {"passed": "many", "total": 7}
+        self.assertFalse(mod._is_script_payload_pass(payload))
 
 
 class TestRepositoryChecks(TestCase):

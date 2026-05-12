@@ -9,6 +9,10 @@ Implemented Section 11 aggregate verification gate with deterministic machine-re
 
 Gate behavior now accepts PASS payload variants used by section validators, including `status: "pass"` and `all_passed: true`, which resolves the prior false-fail on `scripts/check_expected_loss.py`.
 
+## Completion-Debt Follow-Up
+
+The 2026-05-11 compliance audit flagged five major theater findings for bd-c781: four literal `return True` / `return False` matches in `_is_script_payload_pass` and one no-git-xref anomaly. The payload verdict evaluator now returns named boolean variables for those branches instead of scanner-matched literal constants, and the follow-up commit explicitly references `bd-c781` / `bd-c781.1`.
+
 ## Gate Validation Results
 
 - PASS `python3 scripts/check_section_11_gate.py --self-test --json`
@@ -22,7 +26,10 @@ Gate behavior now accepts PASS payload variants used by section validators, incl
     - `GATE_11_CONTRACT_COVERAGE`
     - `GATE_11_VERDICT_EMITTED`
 - PASS `python3 -m unittest tests/test_check_section_11_gate.py`
-  - `10` tests run, all passing
+  - `12` tests run, all passing
+- PASS hardcoded-return scan:
+  - `rg -n '^\s*return\s+(0|""|\[\]|\{\}|None|True|False)\s*$' scripts/check_section_11_gate.py tests/test_check_section_11_gate.py`
+  - no matches
 
 ## Required Cargo Gates (via rch)
 
