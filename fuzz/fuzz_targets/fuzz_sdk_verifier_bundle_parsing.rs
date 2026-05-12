@@ -1,12 +1,12 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
 use frankenengine_verifier_sdk::bundle::{
-    ReplayBundle, BundleHeader, TimelineEvent, BundleChunk,
-    BundleArtifact, BundleSignature, deserialize,
-    hash, integrity_hash, verify,
+    deserialize, hash, integrity_hash, verify, BundleArtifact, BundleChunk, BundleHeader,
+    BundleSignature, ReplayBundle, TimelineEvent,
 };
+use hex::FromHex;
+use libfuzzer_sys::fuzz_target;
 
 // Fuzz target for SDK verifier bundle parsing and verification.
 //
@@ -21,7 +21,7 @@ use frankenengine_verifier_sdk::bundle::{
 fuzz_target!(|data: FuzzInput| {
     match data {
         FuzzInput::StructuredBundle(bundle) => {
-            fuzz_bundle_structured(bundle);
+            fuzz_bundle_structured(*bundle);
         }
         FuzzInput::StructuredEvent(event) => {
             fuzz_timeline_event_structured(event);
@@ -106,7 +106,7 @@ fn fuzz_bundle_signature_structured(signature: BundleSignature) {
     }
 
     // Test hex decoding edge cases
-    let _ = hex::decode(&signature.signature_hex);
+    fuzz_hex_parse(&signature.signature_hex);
 
     // Test signature verification with fuzzed signature
     let test_bundle = create_minimal_bundle_with_signature(signature);
@@ -160,6 +160,20 @@ fn create_minimal_bundle_with_signature(signature: BundleSignature) -> ReplayBun
     bundle
 }
 
+/// Helper to create minimal bundle with a fuzzed artifact.
+fn create_minimal_bundle_with_artifact(artifact: BundleArtifact) -> ReplayBundle {
+    let payload_length_bytes = u64::try_from(artifact.bytes_hex.len()).unwrap_or(u64::MAX);
+    let mut bundle = create_minimal_bundle_with_header(BundleHeader {
+        hash_algorithm: "sha256".to_string(),
+        payload_length_bytes,
+        chunk_count: 0,
+    });
+    bundle
+        .artifacts
+        .insert("fuzz-artifact".to_string(), artifact);
+    bundle
+}
+
 /// Fuzz structured BundleArtifact objects
 fn fuzz_bundle_artifact_structured(artifact: BundleArtifact) {
     if let Ok(json) = serde_json::to_vec(&artifact) {
@@ -167,8 +181,12 @@ fn fuzz_bundle_artifact_structured(artifact: BundleArtifact) {
     }
 
     // Test hex decoding edge cases
-    let _ = hex::decode(&artifact.bytes_hex);
-    let _ = hex::decode(&artifact.digest);
+    fuzz_hex_parse(&artifact.bytes_hex);
+    fuzz_hex_parse(&artifact.digest);
+
+    let test_bundle = create_minimal_bundle_with_artifact(artifact);
+    let _ = integrity_hash(&test_bundle);
+    verify_structured_bundle(&test_bundle);
 }
 
 /// Fuzz raw bundle bytes (coverage-guided approach)
@@ -304,11 +322,15 @@ fn bytes_json(bytes: Vec<u8>) -> serde_json::Value {
     })
 }
 
+fn fuzz_hex_parse(candidate: &str) {
+    let _ = Vec::<u8>::from_hex(candidate);
+}
+
 /// Input structure for hybrid structure-aware + coverage-guided fuzzing.
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
     /// Generate structured ReplayBundle values then test canonical SDK parsing.
-    StructuredBundle(FuzzReplayBundle),
+    StructuredBundle(Box<FuzzReplayBundle>),
     /// Generate structured TimelineEvent values then test event parsing and bundle context.
     StructuredEvent(FuzzTimelineEvent),
     /// Generate valid structured BundleHeader then test in bundle context
