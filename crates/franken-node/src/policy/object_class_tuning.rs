@@ -76,13 +76,13 @@ impl ObjectClass {
     }
 
     fn validate_for_override(&self) -> Result<(), TuningError> {
-        if let Self::Custom(class_id) = self {
-            if let Some(detail) = invalid_custom_class_id_detail(class_id) {
-                return Err(TuningError::new(
-                    ERR_UNKNOWN_CLASS,
-                    format!("Unknown object class {class_id:?}: {detail}"),
-                ));
-            }
+        if let Self::Custom(class_id) = self
+            && let Some(detail) = invalid_custom_class_id_detail(class_id)
+        {
+            return Err(TuningError::new(
+                ERR_UNKNOWN_CLASS,
+                format!("Unknown object class {class_id:?}: {detail}"),
+            ));
         }
         Ok(())
     }

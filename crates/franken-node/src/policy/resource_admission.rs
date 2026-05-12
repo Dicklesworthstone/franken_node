@@ -444,6 +444,9 @@ impl AdmissionController {
         self.usage.queued_work = self.usage.queued_work.saturating_sub(request.queue_depth);
     }
 
+    // Keep the complete denial outcome in the error path so callers can emit
+    // the same recovery hint and telemetry fields they would get from admit().
+    #[allow(clippy::result_large_err)]
     pub fn run_if_admitted<T>(
         &mut self,
         request: &ResourceAdmissionRequest,
