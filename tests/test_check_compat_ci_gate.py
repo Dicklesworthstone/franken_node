@@ -47,20 +47,31 @@ class TestRegistryHasEntries(unittest.TestCase):
 
 
 class TestImplementationCompliance(unittest.TestCase):
+    def assert_single_violation(self, body, **expected_flags):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            compat_dir = Path(tmpdir)
+            rs_file = compat_dir / "test_shim.rs"
+            rs_file.write_text(body, encoding="utf-8")
+            with patch.object(gate, "COMPAT_SRC_DIRS", [compat_dir]):
+                result = gate.check_implementation_compliance()
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(len(result["details"]["violations"]), 1)
+        violation = result["details"]["violations"][0]
+        for key, value in expected_flags.items():
+            self.assertEqual(violation[key], value)
+
     def test_no_compat_files_passes(self):
         result = gate.check_implementation_compliance()
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["details"]["compat_files_found"], 0)
 
     def test_noncompliant_file_fails(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            compat_dir = Path(tmpdir)
-            rs_file = compat_dir / "test_shim.rs"
-            rs_file.write_text("fn stub() { /* no refs */ }")
-            with patch.object(gate, "COMPAT_SRC_DIRS", [compat_dir]):
-                result = gate.check_implementation_compliance()
-                self.assertEqual(result["status"], "FAIL")
-                self.assertEqual(len(result["details"]["violations"]), 1)
+        self.assert_single_violation(
+            "fn stub() { /* no refs */ }",
+            missing_spec_ref=True,
+            missing_fixture_ref=True,
+            missing_band_decl=True,
+        )
 
     def test_compliant_file_passes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -70,11 +81,54 @@ class TestImplementationCompliance(unittest.TestCase):
                 "// Spec: Section 10.2\n"
                 "// fixture:fs:readFile:utf8-basic\n"
                 "// Band: core\n"
-                "fn read_file() {}\n"
+                "fn read_file() {}\n",
+                encoding="utf-8",
             )
             with patch.object(gate, "COMPAT_SRC_DIRS", [compat_dir]):
                 result = gate.check_implementation_compliance()
                 self.assertEqual(result["status"], "PASS")
+
+    def test_missing_spec_reference_fails(self):
+        self.assert_single_violation(
+            "// fixture:fs:readFile:utf8-basic\n"
+            "// Band: core\n"
+            "fn read_file() {}\n",
+            missing_spec_ref=True,
+            missing_fixture_ref=False,
+            missing_band_decl=False,
+        )
+
+    def test_missing_fixture_reference_fails(self):
+        self.assert_single_violation(
+            "// Spec: Section 10.2\n"
+            "// Band: core\n"
+            "fn read_file() {}\n",
+            missing_spec_ref=False,
+            missing_fixture_ref=True,
+            missing_band_decl=False,
+        )
+
+    def test_missing_band_declaration_fails(self):
+        self.assert_single_violation(
+            "// Spec: Section 10.2\n"
+            "// fixture:fs:readFile:utf8-basic\n"
+            "fn read_file() {}\n",
+            missing_spec_ref=False,
+            missing_fixture_ref=False,
+            missing_band_decl=True,
+        )
+
+    def test_unresolved_fixture_reference_fails(self):
+        self.assert_single_violation(
+            "// Spec: Section 10.2\n"
+            "// fixture:fs:readFile:not-in-corpus\n"
+            "// Band: core\n"
+            "fn read_file() {}\n",
+            missing_spec_ref=False,
+            missing_fixture_ref=False,
+            missing_band_decl=False,
+            unresolved_fixtures=["fixture:fs:readFile:not-in-corpus"],
+        )
 
 
 class TestCollectFixtureIds(unittest.TestCase):

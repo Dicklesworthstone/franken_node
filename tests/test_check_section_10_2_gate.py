@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
 import sys
 import unittest
+from importlib import util as importlib_util
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_section_10_2_gate.py"
 
-spec = importlib.util.spec_from_file_location("check_section_10_2_gate", SCRIPT)
-mod = importlib.util.module_from_spec(spec)
+spec = importlib_util.spec_from_file_location("check_section_10_2_gate", SCRIPT)
+mod = importlib_util.module_from_spec(spec)
 sys.modules[spec.name] = mod
 spec.loader.exec_module(mod)
+
+
+def parse_json_output(payload: str) -> dict:
+    decoder = json.JSONDecoder()
+    try:
+        return decoder.decode(payload)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(f"expected valid JSON output: {exc}: {payload!r}") from exc
 
 
 class TestRunAllShape(unittest.TestCase):
@@ -83,7 +91,7 @@ class TestCli(unittest.TestCase):
             check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        parsed = json.loads(proc.stdout)
+        parsed = parse_json_output(proc.stdout)
         self.assertEqual(parsed["bead_id"], "bd-23ys")
         self.assertEqual(parsed["mode"], "self-test")
 
@@ -95,7 +103,7 @@ class TestCli(unittest.TestCase):
             timeout=30,
             check=False,
         )
-        parsed = json.loads(proc.stdout)
+        parsed = parse_json_output(proc.stdout)
         self.assertEqual(parsed["bead_id"], "bd-23ys")
         self.assertIn("checks", parsed)
 
@@ -116,6 +124,16 @@ class TestConstants(unittest.TestCase):
 
     def test_gate_bead_id(self) -> None:
         self.assertEqual(mod.GATE_BEAD, "bd-23ys")
+
+    def test_bd_7mt_key_artifacts_are_required(self) -> None:
+        expected = {
+            "artifacts/section_10_2/bd-7mt/check_report.json",
+            "artifacts/section_10_2/bd-7mt/unit_tests.txt",
+            "artifacts/section_10_2/bd-7mt/adversarial_fixture_report.json",
+            "artifacts/section_10_2/bd-7mt/artifact_inventory.json",
+        }
+        actual = {path for _, path in mod.KEY_ARTIFACTS}
+        self.assertTrue(expected.issubset(actual))
 
 
 class TestEvidencePass(unittest.TestCase):

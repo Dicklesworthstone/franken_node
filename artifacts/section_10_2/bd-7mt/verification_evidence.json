@@ -1,8 +1,17 @@
 {
   "gate": "compat_ci_gate_verification",
   "section": "10.2",
+  "bead_id": "bd-7mt",
   "verdict": "PASS",
-  "timestamp": "2026-02-20T10:03:09.142826+00:00",
+  "timestamp": "2026-05-12T22:34:00Z",
+  "completion_debt_closed_by": "bd-7mt.1",
+  "evidence_artifacts": [
+    "artifacts/section_10_2/bd-7mt/check_report.json",
+    "artifacts/section_10_2/bd-7mt/unit_tests.txt",
+    "artifacts/section_10_2/bd-7mt/adversarial_fixture_report.json",
+    "artifacts/section_10_2/bd-7mt/artifact_inventory.json",
+    "artifacts/section_10_2/bd-7mt/verification_summary.md"
+  ],
   "checks": [
     {
       "id": "CI-GATE-SPEC",
@@ -47,5 +56,27 @@
     "total_checks": 5,
     "passing_checks": 5,
     "failing_checks": 0
+  },
+  "verification_results": {
+    "check_script": {
+      "command": "python3 scripts/check_compat_ci_gate.py --json",
+      "verdict": "PASS",
+      "output_path": "artifacts/section_10_2/bd-7mt/check_report.json"
+    },
+    "unit_tests": {
+      "command": "python3 -m unittest tests.test_check_compat_ci_gate",
+      "verdict": "PASS",
+      "tests_ran": 16,
+      "output_path": "artifacts/section_10_2/bd-7mt/unit_tests.txt"
+    },
+    "adversarial_fixture_matrix": {
+      "verdict": "PASS",
+      "scenario_count": 6,
+      "output_path": "artifacts/section_10_2/bd-7mt/adversarial_fixture_report.json"
+    },
+    "section_gate_artifact_enforcement": {
+      "script": "scripts/check_section_10_2_gate.py",
+      "required_artifact_count": 4
+    }
   }
 }

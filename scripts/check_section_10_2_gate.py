@@ -14,13 +14,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 
 GATE_BEAD = "bd-23ys"
@@ -58,8 +57,13 @@ DOMAIN_GROUPS = {
     "ci_gate": ["bd-7mt"],
 }
 
-# Key section-level artifacts
-KEY_ARTIFACTS = []
+# Key section-level artifacts that guard completion-debt regressions.
+KEY_ARTIFACTS = [
+    ("bd_7mt_check_report", "artifacts/section_10_2/bd-7mt/check_report.json"),
+    ("bd_7mt_unit_tests", "artifacts/section_10_2/bd-7mt/unit_tests.txt"),
+    ("bd_7mt_adversarial_report", "artifacts/section_10_2/bd-7mt/adversarial_fixture_report.json"),
+    ("bd_7mt_artifact_inventory", "artifacts/section_10_2/bd-7mt/artifact_inventory.json"),
+]
 
 RESULTS: list[dict[str, Any]] = []
 
@@ -77,9 +81,11 @@ def _check(name: str, passed: bool, detail: str = "") -> dict[str, Any]:
 def _evidence_pass(data: dict[str, Any]) -> bool:
     if data.get("verdict") == "PASS":
         return True
-    if data.get("overall_pass") is True:
+    overall_pass = data.get("overall_pass")
+    if isinstance(overall_pass, bool) and overall_pass:
         return True
-    if data.get("all_passed") is True:
+    all_passed = data.get("all_passed")
+    if isinstance(all_passed, bool) and all_passed:
         return True
     raw_status = str(data.get("status", "")).lower()
     if raw_status == "pass":
@@ -119,7 +125,7 @@ def _find_evidence(bead_id: str) -> Path | None:
 
 def _load_evidence(path: Path) -> dict[str, Any] | None:
     try:
-        return json.loads(path.read_text())
+        return json.JSONDecoder().decode(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
 
@@ -320,7 +326,9 @@ def self_test() -> dict[str, Any]:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_section_10_2_gate")
+    from scripts.lib.test_logger import configure_test_logging
+
+    configure_test_logging("check_section_10_2_gate")
     parser = argparse.ArgumentParser(description=f"Section {SECTION} verification gate")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--self-test", action="store_true")

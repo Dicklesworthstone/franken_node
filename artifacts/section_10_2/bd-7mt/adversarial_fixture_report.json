@@ -1,0 +1,70 @@
+{
+  "bead_id": "bd-7mt",
+  "section": "10.2",
+  "report_type": "compat_ci_gate_adversarial_fixture_matrix",
+  "generated_at": "2026-05-12T22:34:00Z",
+  "verdict": "PASS",
+  "purpose": "Records the explicit pass/fail fixture-reference scenarios covered by tests/test_check_compat_ci_gate.py so the CI-gate evidence is not limited to final summary files.",
+  "scenarios": [
+    {
+      "name": "missing_all_references_rejected",
+      "unit_test": "TestImplementationCompliance.test_noncompliant_file_fails",
+      "expected_status": "FAIL",
+      "expected_violation_fields": [
+        "missing_spec_ref",
+        "missing_fixture_ref",
+        "missing_band_decl"
+      ],
+      "status": "covered"
+    },
+    {
+      "name": "missing_spec_reference_rejected",
+      "unit_test": "TestImplementationCompliance.test_missing_spec_reference_fails",
+      "expected_status": "FAIL",
+      "expected_violation_fields": [
+        "missing_spec_ref"
+      ],
+      "status": "covered"
+    },
+    {
+      "name": "missing_fixture_reference_rejected",
+      "unit_test": "TestImplementationCompliance.test_missing_fixture_reference_fails",
+      "expected_status": "FAIL",
+      "expected_violation_fields": [
+        "missing_fixture_ref"
+      ],
+      "status": "covered"
+    },
+    {
+      "name": "missing_band_declaration_rejected",
+      "unit_test": "TestImplementationCompliance.test_missing_band_declaration_fails",
+      "expected_status": "FAIL",
+      "expected_violation_fields": [
+        "missing_band_decl"
+      ],
+      "status": "covered"
+    },
+    {
+      "name": "unresolved_fixture_reference_rejected",
+      "unit_test": "TestImplementationCompliance.test_unresolved_fixture_reference_fails",
+      "expected_status": "FAIL",
+      "expected_unresolved_fixtures": [
+        "fixture:fs:readFile:not-in-corpus"
+      ],
+      "status": "covered"
+    },
+    {
+      "name": "valid_spec_fixture_band_accepted",
+      "unit_test": "TestImplementationCompliance.test_compliant_file_passes",
+      "expected_status": "PASS",
+      "fixture_id": "fixture:fs:readFile:utf8-basic",
+      "status": "covered"
+    }
+  ],
+  "invariants": [
+    "Compatibility implementation files require a spec reference.",
+    "Compatibility implementation files require a fixture ID reference.",
+    "Compatibility implementation files require a compatibility-band declaration.",
+    "Cited fixture IDs must resolve to the checked-in fixture corpus."
+  ]
+}
