@@ -5,12 +5,19 @@
 
 **Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
 **Related**: [COMPATIBILITY_BANDS.md](COMPATIBILITY_BANDS.md), [fixture_runner.py](../scripts/fixture_runner.py)
+**Primary implementation**: `crates/franken-node/src/runtime/lockstep_harness.rs`
 
 ---
 
 ## 1. Overview
 
 The L1 Product Oracle validates that franken_node's external behavior matches Node.js and Bun for core and high-value compatibility bands. It operates by executing identical fixture inputs across all configured runtimes and comparing canonicalized outputs.
+
+## Implementation Map
+
+- `crates/franken-node/src/runtime/lockstep_harness.rs` owns `LockstepHarness`, runtime validation, corpus manifest validation, concurrent runtime execution, report evaluation, and divergence fixture emission.
+- `crates/franken-node/src/main.rs` dispatches `franken-node verify lockstep` into `LockstepHarness::verify_lockstep` and returns a failing process status when the harness reports divergence or setup errors.
+- `crates/franken-node/src/cli.rs` defines `VerifyCommand::Lockstep` and `VerifyLockstepArgs`, including the project path, comma-separated runtime list, and divergence fixture emission flag.
 
 ## 2. Architecture
 

@@ -13,6 +13,12 @@ The L1 lockstep runner:
 4. Compares canonical outputs to detect divergences
 5. Produces a structured delta report
 
+## Primary Implementation Surface
+
+- `crates/franken-node/src/runtime/lockstep_harness.rs` is the Rust implementation for `LockstepHarness`, including runtime validation, corpus entry resolution, runtime execution, oracle comparison, divergence verdict handling, and optional fixture emission.
+- `crates/franken-node/src/main.rs` wires the `franken-node verify lockstep` command to `LockstepHarness::verify_lockstep` and exits non-zero on harness failures.
+- `crates/franken-node/src/cli.rs` defines `VerifyCommand::Lockstep` and `VerifyLockstepArgs`, including project path, runtime list, and `--emit-fixtures` control.
+
 ## Runner Configuration
 
 ```json

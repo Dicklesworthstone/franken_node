@@ -5,9 +5,48 @@
   "timestamp": "2026-02-20T09:42:26.095619+00:00",
   "git_commit": "32b56e4c639fd2a39f3f0b77ee55a656ae65109e",
   "verdict": "PASS",
+  "evidence_paths": {
+    "primary_lockstep_harness": "crates/franken-node/src/runtime/lockstep_harness.rs",
+    "verify_cli_dispatch": "crates/franken-node/src/main.rs",
+    "verify_cli_args": "crates/franken-node/src/cli.rs",
+    "design": "docs/L1_LOCKSTEP_RUNNER.md",
+    "runner_config_schema": "schemas/lockstep_runner_config.schema.json",
+    "compatibility_fixture_schema": "schemas/compatibility_fixture.schema.json",
+    "contract": "docs/specs/section_10_2/bd-2vi_contract.md",
+    "verifier": "scripts/check_lockstep_runner.py",
+    "regression_tests": "tests/test_check_lockstep_runner.py",
+    "machine_evidence": "artifacts/section_10_2/bd-2vi/verification_evidence.json",
+    "human_summary": "artifacts/section_10_2/bd-2vi/verification_summary.md"
+  },
+  "verification_commands": [
+    {
+      "command": "python3 scripts/check_lockstep_runner.py --json",
+      "covers": [
+        "L1 lockstep design document",
+        "primary Rust implementation path citations",
+        "verify lockstep CLI dispatch citations",
+        "runner configuration schema",
+        "phase coverage",
+        "delta report format",
+        "release gating rules"
+      ]
+    },
+    {
+      "command": "python3 -m pytest tests/test_check_lockstep_runner.py",
+      "covers": [
+        "lockstep runner verifier checks",
+        "report evidence path citations",
+        "checked-in machine evidence citations"
+      ]
+    }
+  ],
   "checks": [
     {
       "id": "L1-DESIGN",
+      "status": "PASS"
+    },
+    {
+      "id": "L1-IMPL",
       "status": "PASS"
     },
     {
@@ -28,15 +67,15 @@
     }
   ],
   "unit_tests": {
-    "total": 8,
-    "passed": 8,
+    "total": 11,
+    "passed": 11,
     "failed": 0
   },
   "outputs": [
     {
       "path": "docs/L1_LOCKSTEP_RUNNER.md",
-      "sha256": "9159bebc438186144a0bc39f0eb95794175d507a8738a504bc12a669a08fa32d",
-      "size_bytes": 3702
+      "sha256": "32c8e67abf574e40cd394a60e604026cfdcf01e38a9bf496f4feee9b2f2aaaf2",
+      "size_bytes": 4423
     },
     {
       "path": "schemas/lockstep_runner_config.schema.json",
@@ -45,18 +84,18 @@
     },
     {
       "path": "docs/specs/section_10_2/bd-2vi_contract.md",
-      "sha256": "f7a04cfebf50c61fa2ceb6a659f455fa351edbb4fa18c22b11db6d8688a5b4b1",
-      "size_bytes": 1523
+      "sha256": "ca96e8bb0132837ecd2f49851aa76947c7a2dadb79d40f92e759bb365689fc9e",
+      "size_bytes": 2145
     },
     {
       "path": "scripts/check_lockstep_runner.py",
-      "sha256": "d0fd48f1ade41ca188498cc12f1644497a90d89fa8c2aa691819b4a9e8e9c2fa",
-      "size_bytes": 5522
+      "sha256": "8b98d31b542553cd0e2249b107ca2487906d5ed3e6d76fd2cc1963b961ec955c",
+      "size_bytes": 9385
     },
     {
       "path": "tests/test_check_lockstep_runner.py",
-      "sha256": "713fd6327c88229fe166bac33972f3bbe5c0bfb2eb2fd49b280b4d13fbfdc0d9",
-      "size_bytes": 1641
+      "sha256": "272ca042d711cca07bc473c22edae107f1d686a171d7108373b1ef17c418fe1f",
+      "size_bytes": 5036
     }
   ]
 }
