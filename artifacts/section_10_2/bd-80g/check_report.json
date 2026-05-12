@@ -1,0 +1,96 @@
+{
+  "gate": "fixture_corpus_verification",
+  "section": "10.2",
+  "bead_id": "bd-80g",
+  "verdict": "PASS",
+  "timestamp": "2026-05-12T22:39:00Z",
+  "command": "python3 scripts/check_fixture_corpus.py --json",
+  "checks": [
+    {
+      "id": "CORPUS-STRUCTURE",
+      "status": "PASS",
+      "details": {
+        "dirs": {
+          "core": true,
+          "high-value": true,
+          "edge": true
+        }
+      }
+    },
+    {
+      "id": "CORPUS-CAPTURES",
+      "status": "PASS",
+      "details": {
+        "programs": {
+          "capture_fs.js": true,
+          "capture_path.js": true,
+          "capture_process.js": true
+        },
+        "count": 3
+      }
+    },
+    {
+      "id": "CORPUS-VALID",
+      "status": "PASS",
+      "details": {
+        "total": 27,
+        "valid": 27,
+        "invalid": []
+      }
+    },
+    {
+      "id": "CORPUS-UNIQUE",
+      "status": "PASS",
+      "details": {
+        "duplicates": []
+      }
+    },
+    {
+      "id": "CORPUS-COVERAGE",
+      "status": "PASS",
+      "details": {
+        "by_band": {
+          "core": 18,
+          "high-value": 6,
+          "edge": 3
+        },
+        "families_by_band": {
+          "core": [
+            "fs",
+            "path",
+            "process"
+          ],
+          "high-value": [
+            "crypto",
+            "http"
+          ],
+          "edge": [
+            "fs",
+            "path",
+            "process"
+          ]
+        }
+      }
+    },
+    {
+      "id": "CORPUS-REGISTRY",
+      "status": "PASS",
+      "details": {
+        "covered": [
+          "fs:readFile",
+          "fs:writeFile",
+          "path:join",
+          "process:env",
+          "http:createServer"
+        ],
+        "missing": []
+      }
+    }
+  ],
+  "summary": {
+    "total_checks": 6,
+    "passing_checks": 6,
+    "failing_checks": 0,
+    "total_fixtures": 27
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "bead_id": "bd-80g",
+  "section": "10.2",
+  "report_type": "reference_capture_program_matrix",
+  "generated_at": "2026-05-12T22:39:00Z",
+  "verdict": "PASS",
+  "capture_program_count": 3,
+  "fixture_count": 27,
+  "capture_programs": [
+    {
+      "path": "scripts/captures/capture_fs.js",
+      "api_family": "fs",
+      "captured_apis": [
+        "readFile",
+        "writeFile"
+      ],
+      "fixture_bands": [
+        "core",
+        "edge"
+      ]
+    },
+    {
+      "path": "scripts/captures/capture_path.js",
+      "api_family": "path",
+      "captured_apis": [
+        "join",
+        "resolve",
+        "parse",
+        "dirname",
+        "basename",
+        "extname"
+      ],
+      "fixture_bands": [
+        "core",
+        "edge"
+      ]
+    },
+    {
+      "path": "scripts/captures/capture_process.js",
+      "api_family": "process",
+      "captured_apis": [
+        "env",
+        "argv",
+        "cwd",
+        "pid",
+        "version"
+      ],
+      "fixture_bands": [
+        "core",
+        "edge"
+      ]
+    }
+  ],
+  "corpus_by_band": {
+    "core": {
+      "fixtures": 18,
+      "families": [
+        "fs",
+        "path",
+        "process"
+      ]
+    },
+    "high-value": {
+      "fixtures": 6,
+      "families": [
+        "crypto",
+        "http"
+      ]
+    },
+    "edge": {
+      "fixtures": 3,
+      "families": [
+        "fs",
+        "path",
+        "process"
+      ]
+    }
+  },
+  "registry_coverage": [
+    "fs:readFile",
+    "fs:writeFile",
+    "path:join",
+    "process:env",
+    "http:createServer"
+  ]
+}

@@ -1,8 +1,17 @@
 {
   "gate": "fixture_corpus_verification",
   "section": "10.2",
+  "bead_id": "bd-80g",
   "verdict": "PASS",
-  "timestamp": "2026-02-20T10:00:39.746428+00:00",
+  "timestamp": "2026-05-12T22:39:00Z",
+  "completion_debt_closed_by": "bd-80g.1",
+  "evidence_artifacts": [
+    "artifacts/section_10_2/bd-80g/check_report.json",
+    "artifacts/section_10_2/bd-80g/unit_tests.txt",
+    "artifacts/section_10_2/bd-80g/capture_program_matrix.json",
+    "artifacts/section_10_2/bd-80g/artifact_inventory.json",
+    "artifacts/section_10_2/bd-80g/verification_summary.md"
+  ],
   "checks": [
     {
       "id": "CORPUS-STRUCTURE",
@@ -90,5 +99,28 @@
     "passing_checks": 6,
     "failing_checks": 0,
     "total_fixtures": 27
+  },
+  "verification_results": {
+    "check_script": {
+      "command": "python3 scripts/check_fixture_corpus.py --json",
+      "verdict": "PASS",
+      "output_path": "artifacts/section_10_2/bd-80g/check_report.json"
+    },
+    "unit_tests": {
+      "command": "python3 -m unittest tests.test_check_fixture_corpus",
+      "verdict": "PASS",
+      "tests_ran": 15,
+      "output_path": "artifacts/section_10_2/bd-80g/unit_tests.txt"
+    },
+    "capture_program_matrix": {
+      "verdict": "PASS",
+      "capture_program_count": 3,
+      "fixture_count": 27,
+      "output_path": "artifacts/section_10_2/bd-80g/capture_program_matrix.json"
+    },
+    "section_gate_artifact_enforcement": {
+      "script": "scripts/check_section_10_2_gate.py",
+      "required_artifact_count": 4
+    }
   }
 }

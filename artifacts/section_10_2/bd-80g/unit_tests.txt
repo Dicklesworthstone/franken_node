@@ -1,0 +1,6 @@
+python3 -m unittest tests.test_check_fixture_corpus
+...............
+----------------------------------------------------------------------
+Ran 15 tests in 0.012s
+
+OK

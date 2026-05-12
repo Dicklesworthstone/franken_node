@@ -1,0 +1,43 @@
+{
+  "bead_id": "bd-80g",
+  "completion_debt_bead": "bd-80g.1",
+  "section": "10.2",
+  "generated_at": "2026-05-12T22:39:00Z",
+  "finding_remediated": "only 4 artifact files for capture programs scope",
+  "artifact_count_in_directory": 6,
+  "artifacts": [
+    {
+      "path": "artifacts/section_10_2/bd-80g/check_report.json",
+      "role": "machine-readable fixture-corpus checker output"
+    },
+    {
+      "path": "artifacts/section_10_2/bd-80g/unit_tests.txt",
+      "role": "unit-test transcript for the fixture-corpus checker"
+    },
+    {
+      "path": "artifacts/section_10_2/bd-80g/capture_program_matrix.json",
+      "role": "capture-program-to-fixture-band coverage matrix"
+    },
+    {
+      "path": "artifacts/section_10_2/bd-80g/artifact_inventory.json",
+      "role": "artifact inventory and completion-debt closure record"
+    },
+    {
+      "path": "artifacts/section_10_2/bd-80g/verification_evidence.json",
+      "role": "canonical bead verification evidence"
+    },
+    {
+      "path": "artifacts/section_10_2/bd-80g/verification_summary.md",
+      "role": "human-readable verification summary"
+    }
+  ],
+  "section_gate_enforcement": {
+    "script": "scripts/check_section_10_2_gate.py",
+    "required_artifacts": [
+      "artifacts/section_10_2/bd-80g/check_report.json",
+      "artifacts/section_10_2/bd-80g/unit_tests.txt",
+      "artifacts/section_10_2/bd-80g/capture_program_matrix.json",
+      "artifacts/section_10_2/bd-80g/artifact_inventory.json"
+    ]
+  }
+}

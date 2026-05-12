@@ -135,6 +135,16 @@ class TestConstants(unittest.TestCase):
         actual = {path for _, path in mod.KEY_ARTIFACTS}
         self.assertTrue(expected.issubset(actual))
 
+    def test_bd_80g_key_artifacts_are_required(self) -> None:
+        expected = {
+            "artifacts/section_10_2/bd-80g/check_report.json",
+            "artifacts/section_10_2/bd-80g/unit_tests.txt",
+            "artifacts/section_10_2/bd-80g/capture_program_matrix.json",
+            "artifacts/section_10_2/bd-80g/artifact_inventory.json",
+        }
+        actual = {path for _, path in mod.KEY_ARTIFACTS}
+        self.assertTrue(expected.issubset(actual))
+
 
 class TestEvidencePass(unittest.TestCase):
     def test_verdict_pass(self) -> None:

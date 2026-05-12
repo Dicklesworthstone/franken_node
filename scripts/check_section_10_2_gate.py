@@ -59,6 +59,10 @@ DOMAIN_GROUPS = {
 
 # Key section-level artifacts that guard completion-debt regressions.
 KEY_ARTIFACTS = [
+    ("bd_80g_check_report", "artifacts/section_10_2/bd-80g/check_report.json"),
+    ("bd_80g_unit_tests", "artifacts/section_10_2/bd-80g/unit_tests.txt"),
+    ("bd_80g_capture_matrix", "artifacts/section_10_2/bd-80g/capture_program_matrix.json"),
+    ("bd_80g_artifact_inventory", "artifacts/section_10_2/bd-80g/artifact_inventory.json"),
     ("bd_7mt_check_report", "artifacts/section_10_2/bd-7mt/check_report.json"),
     ("bd_7mt_unit_tests", "artifacts/section_10_2/bd-7mt/unit_tests.txt"),
     ("bd_7mt_adversarial_report", "artifacts/section_10_2/bd-7mt/adversarial_fixture_report.json"),

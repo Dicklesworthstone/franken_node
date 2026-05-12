@@ -33,6 +33,10 @@ docs/fixtures/
 - `docs/specs/section_10_2/bd-80g_contract.md`
 - `scripts/check_fixture_corpus.py`
 - `tests/test_check_fixture_corpus.py`
+- `artifacts/section_10_2/bd-80g/check_report.json`
+- `artifacts/section_10_2/bd-80g/unit_tests.txt`
+- `artifacts/section_10_2/bd-80g/capture_program_matrix.json`
+- `artifacts/section_10_2/bd-80g/artifact_inventory.json`
 
 ## Verification Results
 - **CORPUS-STRUCTURE**: PASS — All band directories exist
@@ -45,5 +49,8 @@ docs/fixtures/
 ## Test Results
 - 15 unit tests: all passed
 - 6 verification checks: all passed
+- Section 10.2 gate now requires the bd-80g check report, unit-test transcript,
+  capture-program matrix, and artifact inventory so the capture-program evidence
+  set cannot silently regress to four thin artifacts.
 
 ## Verdict: PASS
