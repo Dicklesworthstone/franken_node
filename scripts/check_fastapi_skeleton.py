@@ -111,6 +111,13 @@ SPEC_MARKERS = [
     "request lifecycle provenance",
 ]
 
+CANONICAL_API_ROOT = "crates/franken-node/src/api/"
+CANONICAL_SERVICE_PATH = f"{CANONICAL_API_ROOT}service.rs"
+OBSOLETE_SERVICE_PATHS = (
+    "services/control_plane_fastapi_rust/",
+    "services/control_plane_fastapi_rust",
+)
+
 MIN_IMPL_TESTS = 30
 BASELINE_PROVENANCE = (
     "No live async HTTP/gRPC transport boundary is owned; load-test baselines "
@@ -561,6 +568,32 @@ def check_spec() -> list[dict]:
     return results
 
 
+def _path_truth_checks(text: str, label: str) -> list[dict]:
+    obsolete_matches = sorted(
+        {obsolete_path for obsolete_path in OBSOLETE_SERVICE_PATHS if obsolete_path in text}
+    )
+    return [
+        {
+            "check": f"Path truth: {label} names canonical API service path",
+            "pass": CANONICAL_SERVICE_PATH in text,
+            "detail": CANONICAL_SERVICE_PATH
+            if CANONICAL_SERVICE_PATH in text
+            else "canonical path missing",
+        },
+        {
+            "check": f"Path truth: {label} omits obsolete service skeleton path",
+            "pass": not obsolete_matches,
+            "detail": "absent" if not obsolete_matches else ", ".join(obsolete_matches),
+        },
+    ]
+
+
+def check_path_truth() -> list[dict]:
+    if not SPEC.exists():
+        return [{"check": "Path truth: spec doc exists", "pass": False, "detail": "file missing"}]
+    return _path_truth_checks(SPEC.read_text(encoding="utf-8"), safe_rel(SPEC))
+
+
 def check_completion_debt_evidence() -> list[dict]:
     results = []
     if not REPLACEMENT_EVIDENCE.exists():
@@ -654,6 +687,7 @@ def run_checks() -> dict:
     checks.extend(check_route_sources())
     checks.extend(check_report())
     checks.extend(check_spec())
+    checks.extend(check_path_truth())
     checks.extend(check_completion_debt_evidence())
 
     passing = sum(1 for check in checks if check["pass"])

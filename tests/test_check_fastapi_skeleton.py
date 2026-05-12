@@ -90,6 +90,36 @@ class TestCheckSpec(unittest.TestCase):
             self.assertTrue(result["pass"], f"Failed: {result['check']}")
 
 
+class TestPathTruth(unittest.TestCase):
+    def test_spec_path_truth_passes(self):
+        results = mod.check_path_truth()
+        for result in results:
+            self.assertTrue(result["pass"], f"Failed: {result['check']}: {result['detail']}")
+
+    def test_obsolete_service_path_fails(self):
+        results = mod._path_truth_checks(
+            "\n".join(
+                [
+                    f"Implementation: `{mod.CANONICAL_SERVICE_PATH}`",
+                    "Legacy: `services/control_plane_fastapi_rust/`",
+                ]
+            ),
+            "fixture",
+        )
+        obsolete_check = [
+            result for result in results if "omits obsolete service skeleton path" in result["check"]
+        ][0]
+        self.assertFalse(obsolete_check["pass"])
+        self.assertIn("services/control_plane_fastapi_rust", obsolete_check["detail"])
+
+    def test_missing_canonical_service_path_fails(self):
+        results = mod._path_truth_checks("No canonical path here.", "fixture")
+        canonical_check = [
+            result for result in results if "names canonical API service path" in result["check"]
+        ][0]
+        self.assertFalse(canonical_check["pass"])
+
+
 class TestRunChecks(unittest.TestCase):
     def test_overall_pass(self):
         result = mod.run_checks()
