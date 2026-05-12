@@ -2768,6 +2768,53 @@ fn cache_lookup_misses_without_entry() {
 }
 
 #[test]
+fn feature_flag_changes_cannot_reuse_existing_cache_entry() {
+    let (_dir, store, key, _entry) = populated_store(|_| {});
+    let request = request();
+    let receipt = fresh_receipt();
+    let mut changed_flag_request = request.clone();
+    changed_flag_request.inputs.feature_flags = vec![
+        "engine".to_string(),
+        "external-commands".to_string(),
+        "http-client".to_string(),
+    ];
+    let changed_flag_key =
+        ValidationProofCacheKey::from_request_and_receipt(&changed_flag_request, &receipt, scope())
+            .expect("changed feature flag key");
+
+    assert_ne!(changed_flag_key.hex, key.hex);
+    assert_eq!(
+        changed_flag_key.feature_flags,
+        vec![
+            "engine".to_string(),
+            "external-commands".to_string(),
+            "http-client".to_string(),
+        ]
+    );
+
+    let lookup = store
+        .lookup(&changed_flag_key, ts(4))
+        .expect("feature flag mismatch lookup");
+
+    match lookup {
+        ValidationProofCacheLookup::Miss(decision) => {
+            assert_eq!(decision.decision, ValidationProofCacheDecisionKind::Miss);
+            assert_eq!(
+                decision.required_action,
+                ValidationProofCacheRequiredAction::RunValidation
+            );
+            assert!(decision.diagnostics.fail_closed);
+        }
+        ValidationProofCacheLookup::Hit(hit) => {
+            assert_eq!(
+                hit.decision.decision,
+                ValidationProofCacheDecisionKind::Miss
+            );
+        }
+    }
+}
+
+#[test]
 fn decision_renderers_surface_hit_and_miss_diagnostics() {
     let (_dir, store, key, _entry) = populated_store(|_| {});
     let lookup = store.lookup(&key, ts(4)).expect("hit lookup");

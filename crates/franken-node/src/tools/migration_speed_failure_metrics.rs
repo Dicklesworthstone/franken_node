@@ -397,7 +397,7 @@ impl MigrationSpeedFailureMetrics {
             let avg = durations.iter().fold(0u64, |a, b| a.saturating_add(*b)) as f64 / n as f64;
             durations.sort();
             let p90_idx = ((n as f64) * 0.9).ceil() as usize;
-            let p90 = durations[p90_idx.min(n).saturating_sub(1).max(0)];
+            let p90 = durations[p90_idx.min(n).saturating_sub(1)];
 
             phase_stats.push(PhaseStats {
                 phase,
