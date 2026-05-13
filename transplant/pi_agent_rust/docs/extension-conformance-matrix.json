@@ -1,0 +1,1151 @@
+{
+  "schema": "pi.ext.conformance-matrix.v1",
+  "generated_at": "2026-02-07T04:41:49Z",
+  "task": "bd-2kyq",
+  "matrix": [
+    {
+      "category": "tool",
+      "capability": "read",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Tool reads files via pi.tool(read/grep/find/ls)",
+          "protocol_surface": "host_call(method=tool, name∈{read,grep,find,ls})",
+          "pass_criteria": "Hostcall completes with correct file content; capability derived as read",
+          "fail_criteria": "Hostcall denied, wrong capability derivation, or incorrect content"
+        }
+      ],
+      "exemplar_extensions": [
+        "antigravity-image-gen",
+        "tool-override",
+        "truncated-tool"
+      ]
+    },
+    {
+      "category": "tool",
+      "capability": "write",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Tool writes/edits files via pi.tool(write/edit)",
+          "protocol_surface": "host_call(method=tool, name∈{write,edit})",
+          "pass_criteria": "Hostcall completes; file mutation applied correctly",
+          "fail_criteria": "Hostcall denied or file not mutated"
+        }
+      ],
+      "exemplar_extensions": [
+        "antigravity-image-gen",
+        "tool-override",
+        "truncated-tool"
+      ]
+    },
+    {
+      "category": "tool",
+      "capability": "exec",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Tool executes commands via pi.exec() or pi.tool(bash)",
+          "protocol_surface": "host_call(method=exec) or host_call(method=tool, name=bash)",
+          "pass_criteria": "Command runs, stdout/stderr/exitCode returned",
+          "fail_criteria": "Execution denied, timeout without error, or wrong exit code"
+        }
+      ],
+      "exemplar_extensions": [
+        "antigravity-image-gen",
+        "bash-spawn-hook",
+        "shutdown-command",
+        "truncated-tool"
+      ]
+    },
+    {
+      "category": "tool",
+      "capability": "http",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Tool makes HTTP requests via pi.http()",
+          "protocol_surface": "host_call(method=http)",
+          "pass_criteria": "Request sent, response returned with status/body",
+          "fail_criteria": "HTTP denied or malformed response"
+        }
+      ],
+      "exemplar_extensions": [
+        "antigravity-image-gen"
+      ]
+    },
+    {
+      "category": "tool",
+      "capability": "log",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Extension load emits structured log",
+          "protocol_surface": "pi.ext.log.v1",
+          "pass_criteria": "Load event logged with correct extension_id and schema",
+          "fail_criteria": "Missing load log or wrong extension_id"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "command",
+      "capability": "exec",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Command executes shell commands",
+          "protocol_surface": "host_call(method=exec)",
+          "pass_criteria": "Execution succeeds with correct output",
+          "fail_criteria": "Execution denied or wrong output"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "command",
+      "capability": "session",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Command accesses session state via pi.session.*",
+          "protocol_surface": "host_call(method=session)",
+          "pass_criteria": "Session data read/written correctly",
+          "fail_criteria": "Session call denied or data corrupted"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "command",
+      "capability": "ui",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Slash command prompts user via pi.ui.*",
+          "protocol_surface": "host_call(method=ui, op∈{select,input,confirm})",
+          "pass_criteria": "UI prompt dispatched and response routed back to handler",
+          "fail_criteria": "UI call denied in interactive mode or response lost"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "command",
+      "capability": "log",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Extension load emits structured log",
+          "protocol_surface": "pi.ext.log.v1",
+          "pass_criteria": "Load event logged with correct extension_id and schema",
+          "fail_criteria": "Missing load log or wrong extension_id"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "command",
+      "capability": "tool",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Extension calls non-core tool via pi.tool()",
+          "protocol_surface": "host_call(method=tool, name=<non-core>)",
+          "pass_criteria": "Tool capability check applied; prompt/deny in strict mode",
+          "fail_criteria": "Tool call bypasses capability check"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "provider",
+      "capability": "read",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Provider reads local config files",
+          "protocol_surface": "host_call(method=tool, name=read) or pi.fs.read",
+          "pass_criteria": "Config file read succeeds",
+          "fail_criteria": "Read denied or file not found"
+        }
+      ],
+      "exemplar_extensions": [
+        "custom-provider-gitlab-duo"
+      ]
+    },
+    {
+      "category": "provider",
+      "capability": "http",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Provider streams LLM responses via pi.http()",
+          "protocol_surface": "host_call(method=http) + streamSimple streaming",
+          "pass_criteria": "HTTP request to LLM API succeeds; streaming chunks delivered",
+          "fail_criteria": "HTTP denied, stream broken, or chunks lost"
+        }
+      ],
+      "exemplar_extensions": [
+        "custom-provider-anthropic",
+        "custom-provider-gitlab-duo"
+      ]
+    },
+    {
+      "category": "provider",
+      "capability": "log",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Extension load emits structured log",
+          "protocol_surface": "pi.ext.log.v1",
+          "pass_criteria": "Load event logged with correct extension_id and schema",
+          "fail_criteria": "Missing load log or wrong extension_id"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "provider",
+      "capability": "env",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Provider accesses API keys via process.env",
+          "protocol_surface": "process.env access (capability=env)",
+          "pass_criteria": "Environment variable accessible when env capability granted",
+          "fail_criteria": "Env access denied when capability should be granted"
+        }
+      ],
+      "exemplar_extensions": [
+        "custom-provider-gitlab-duo"
+      ]
+    },
+    {
+      "category": "provider",
+      "capability": "tool",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Extension calls non-core tool via pi.tool()",
+          "protocol_surface": "host_call(method=tool, name=<non-core>)",
+          "pass_criteria": "Tool capability check applied; prompt/deny in strict mode",
+          "fail_criteria": "Tool call bypasses capability check"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "event_hook",
+      "capability": "exec",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Event hook executes commands on events",
+          "protocol_surface": "event_hook dispatch + host_call(method=exec)",
+          "pass_criteria": "Command execution triggered by event",
+          "fail_criteria": "Execution denied or event not dispatched"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "event_hook",
+      "capability": "http",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Event hook makes HTTP requests on events",
+          "protocol_surface": "event_hook dispatch + host_call(method=http)",
+          "pass_criteria": "HTTP request sent when event fires",
+          "fail_criteria": "HTTP denied or event not dispatched"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "event_hook",
+      "capability": "session",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Event hook reads/modifies session on lifecycle events",
+          "protocol_surface": "event_hook dispatch + host_call(method=session)",
+          "pass_criteria": "Hook fires on correct event; session mutations applied",
+          "fail_criteria": "Hook not fired, wrong event, or session mutation lost"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "event_hook",
+      "capability": "ui",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Event hook renders UI elements",
+          "protocol_surface": "event_hook dispatch + host_call(method=ui)",
+          "pass_criteria": "UI elements rendered after hook fires",
+          "fail_criteria": "UI call fails or hook not dispatched"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "event_hook",
+      "capability": "log",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Extension load emits structured log",
+          "protocol_surface": "pi.ext.log.v1",
+          "pass_criteria": "Load event logged with correct extension_id and schema",
+          "fail_criteria": "Missing load log or wrong extension_id"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "event_hook",
+      "capability": "tool",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Extension calls non-core tool via pi.tool()",
+          "protocol_surface": "host_call(method=tool, name=<non-core>)",
+          "pass_criteria": "Tool capability check applied; prompt/deny in strict mode",
+          "fail_criteria": "Tool call bypasses capability check"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "ui_component",
+      "capability": "ui",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "UI component registers message renderer",
+          "protocol_surface": "registerMessageRenderer in register payload",
+          "pass_criteria": "Renderer registered and callable",
+          "fail_criteria": "Renderer not found in registration snapshot"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "ui_component",
+      "capability": "log",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Extension load emits structured log",
+          "protocol_surface": "pi.ext.log.v1",
+          "pass_criteria": "Load event logged with correct extension_id and schema",
+          "fail_criteria": "Missing load log or wrong extension_id"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "ui_component",
+      "capability": "tool",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Extension calls non-core tool via pi.tool()",
+          "protocol_surface": "host_call(method=tool, name=<non-core>)",
+          "pass_criteria": "Tool capability check applied; prompt/deny in strict mode",
+          "fail_criteria": "Tool call bypasses capability check"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "configuration",
+      "capability": "session",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Flag modifies session configuration",
+          "protocol_surface": "register(flags) + host_call(method=session)",
+          "pass_criteria": "Flag value reflected in session state",
+          "fail_criteria": "Session state not updated after flag set"
+        }
+      ],
+      "exemplar_extensions": [
+        "plan-mode",
+        "preset"
+      ]
+    },
+    {
+      "category": "configuration",
+      "capability": "ui",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Flag/shortcut activation triggers UI",
+          "protocol_surface": "register(flags/shortcuts) + host_call(method=ui)",
+          "pass_criteria": "Flag/shortcut registered; activation dispatches correctly",
+          "fail_criteria": "Registration missing or activation fails"
+        }
+      ],
+      "exemplar_extensions": [
+        "plan-mode",
+        "preset"
+      ]
+    },
+    {
+      "category": "configuration",
+      "capability": "log",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Extension load emits structured log",
+          "protocol_surface": "pi.ext.log.v1",
+          "pass_criteria": "Load event logged with correct extension_id and schema",
+          "fail_criteria": "Missing load log or wrong extension_id"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "configuration",
+      "capability": "tool",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Extension calls non-core tool via pi.tool()",
+          "protocol_surface": "host_call(method=tool, name=<non-core>)",
+          "pass_criteria": "Tool capability check applied; prompt/deny in strict mode",
+          "fail_criteria": "Tool call bypasses capability check"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "multi",
+      "capability": "read",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Multi-type extension uses Read across registrations",
+          "protocol_surface": "Multiple register types + host_call using Read",
+          "pass_criteria": "All registration types load; capability dispatched correctly",
+          "fail_criteria": "Any registration type fails or capability mismatch"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "multi",
+      "capability": "write",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Multi-type extension uses Write across registrations",
+          "protocol_surface": "Multiple register types + host_call using Write",
+          "pass_criteria": "All registration types load; capability dispatched correctly",
+          "fail_criteria": "Any registration type fails or capability mismatch"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "multi",
+      "capability": "exec",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Multi-type extension uses Exec across registrations",
+          "protocol_surface": "Multiple register types + host_call using Exec",
+          "pass_criteria": "All registration types load; capability dispatched correctly",
+          "fail_criteria": "Any registration type fails or capability mismatch"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "multi",
+      "capability": "http",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Multi-type extension uses Http across registrations",
+          "protocol_surface": "Multiple register types + host_call using Http",
+          "pass_criteria": "All registration types load; capability dispatched correctly",
+          "fail_criteria": "Any registration type fails or capability mismatch"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "multi",
+      "capability": "session",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Multi-type extension uses Session across registrations",
+          "protocol_surface": "Multiple register types + host_call using Session",
+          "pass_criteria": "All registration types load; capability dispatched correctly",
+          "fail_criteria": "Any registration type fails or capability mismatch"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "multi",
+      "capability": "ui",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Multi-type extension uses Ui across registrations",
+          "protocol_surface": "Multiple register types + host_call using Ui",
+          "pass_criteria": "All registration types load; capability dispatched correctly",
+          "fail_criteria": "Any registration type fails or capability mismatch"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "multi",
+      "capability": "log",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Extension load emits structured log",
+          "protocol_surface": "pi.ext.log.v1",
+          "pass_criteria": "Load event logged with correct extension_id and schema",
+          "fail_criteria": "Missing load log or wrong extension_id"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "multi",
+      "capability": "env",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Multi-type extension uses Env across registrations",
+          "protocol_surface": "Multiple register types + host_call using Env",
+          "pass_criteria": "All registration types load; capability dispatched correctly",
+          "fail_criteria": "Any registration type fails or capability mismatch"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "multi",
+      "capability": "tool",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "Multi-type extension uses Tool across registrations",
+          "protocol_surface": "Multiple register types + host_call using Tool",
+          "pass_criteria": "All registration types load; capability dispatched correctly",
+          "fail_criteria": "Any registration type fails or capability mismatch"
+        },
+        {
+          "description": "Extension calls non-core tool via pi.tool()",
+          "protocol_surface": "host_call(method=tool, name=<non-core>)",
+          "pass_criteria": "Tool capability check applied; prompt/deny in strict mode",
+          "fail_criteria": "Tool call bypasses capability check"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "general",
+      "capability": "session",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "General extension uses Session via export default",
+          "protocol_surface": "export default + host_call(method=Session)",
+          "pass_criteria": "Extension loads; hostcall dispatched and returns",
+          "fail_criteria": "Load failure or hostcall error"
+        }
+      ],
+      "exemplar_extensions": [
+        "auto-commit-on-exit",
+        "bookmark",
+        "confirm-destructive",
+        "custom-compaction",
+        "custom-footer",
+        "event-bus",
+        "git-checkpoint",
+        "handoff",
+        "qna",
+        "session-name",
+        "snake",
+        "space-invaders",
+        "summarize",
+        "titlebar-spinner",
+        "tools"
+      ]
+    },
+    {
+      "category": "general",
+      "capability": "ui",
+      "required": true,
+      "behaviors": [
+        {
+          "description": "General extension uses Ui via export default",
+          "protocol_surface": "export default + host_call(method=Ui)",
+          "pass_criteria": "Extension loads; hostcall dispatched and returns",
+          "fail_criteria": "Load failure or hostcall error"
+        }
+      ],
+      "exemplar_extensions": [
+        "auto-commit-on-exit",
+        "bookmark",
+        "claude-rules",
+        "confirm-destructive",
+        "custom-compaction",
+        "custom-footer",
+        "custom-header",
+        "dirty-repo-guard",
+        "doom-overlay",
+        "file-trigger",
+        "git-checkpoint",
+        "handoff",
+        "inline-bash",
+        "input-transform",
+        "interactive-shell",
+        "mac-system-theme",
+        "modal-editor",
+        "model-status",
+        "overlay-qa-tests",
+        "overlay-test",
+        "permission-gate",
+        "pirate",
+        "protected-paths",
+        "qna",
+        "rainbow-editor",
+        "rpc-demo",
+        "sandbox",
+        "send-user-message",
+        "session-name",
+        "snake",
+        "space-invaders",
+        "ssh",
+        "status-line",
+        "subagent",
+        "summarize",
+        "system-prompt-header",
+        "timed-confirm",
+        "titlebar-spinner",
+        "tools",
+        "trigger-compact",
+        "widget-placement"
+      ]
+    },
+    {
+      "category": "general",
+      "capability": "log",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Extension load emits structured log",
+          "protocol_surface": "pi.ext.log.v1",
+          "pass_criteria": "Load event logged with correct extension_id and schema",
+          "fail_criteria": "Missing load log or wrong extension_id"
+        }
+      ],
+      "exemplar_extensions": []
+    },
+    {
+      "category": "general",
+      "capability": "tool",
+      "required": false,
+      "behaviors": [
+        {
+          "description": "Extension calls non-core tool via pi.tool()",
+          "protocol_surface": "host_call(method=tool, name=<non-core>)",
+          "pass_criteria": "Tool capability check applied; prompt/deny in strict mode",
+          "fail_criteria": "Tool call bypasses capability check"
+        }
+      ],
+      "exemplar_extensions": []
+    }
+  ],
+  "fixture_assignments": [
+    {
+      "cell_key": "Tool:Read",
+      "fixture_extensions": [
+        "antigravity-image-gen",
+        "tool-override",
+        "truncated-tool"
+      ],
+      "min_fixtures": 2,
+      "coverage_met": true
+    },
+    {
+      "cell_key": "Tool:Write",
+      "fixture_extensions": [
+        "antigravity-image-gen",
+        "tool-override",
+        "truncated-tool"
+      ],
+      "min_fixtures": 2,
+      "coverage_met": true
+    },
+    {
+      "cell_key": "Tool:Exec",
+      "fixture_extensions": [
+        "antigravity-image-gen",
+        "bash-spawn-hook",
+        "shutdown-command",
+        "truncated-tool"
+      ],
+      "min_fixtures": 2,
+      "coverage_met": true
+    },
+    {
+      "cell_key": "Tool:Http",
+      "fixture_extensions": [
+        "antigravity-image-gen"
+      ],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Tool:Log",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Command:Exec",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Command:Session",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Command:Ui",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Command:Log",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Command:Tool",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Provider:Read",
+      "fixture_extensions": [
+        "custom-provider-gitlab-duo"
+      ],
+      "min_fixtures": 1,
+      "coverage_met": true
+    },
+    {
+      "cell_key": "Provider:Http",
+      "fixture_extensions": [
+        "custom-provider-anthropic",
+        "custom-provider-gitlab-duo"
+      ],
+      "min_fixtures": 2,
+      "coverage_met": true
+    },
+    {
+      "cell_key": "Provider:Log",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Provider:Env",
+      "fixture_extensions": [
+        "custom-provider-gitlab-duo"
+      ],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Provider:Tool",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "EventHook:Exec",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "EventHook:Http",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "EventHook:Session",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "EventHook:Ui",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "EventHook:Log",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "EventHook:Tool",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "UiComponent:Ui",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "UiComponent:Log",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "UiComponent:Tool",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Configuration:Session",
+      "fixture_extensions": [
+        "plan-mode",
+        "preset"
+      ],
+      "min_fixtures": 2,
+      "coverage_met": true
+    },
+    {
+      "cell_key": "Configuration:Ui",
+      "fixture_extensions": [
+        "plan-mode",
+        "preset"
+      ],
+      "min_fixtures": 2,
+      "coverage_met": true
+    },
+    {
+      "cell_key": "Configuration:Log",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Configuration:Tool",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Multi:Read",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Multi:Write",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Multi:Exec",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Multi:Http",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Multi:Session",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Multi:Ui",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Multi:Log",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Multi:Env",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "Multi:Tool",
+      "fixture_extensions": [],
+      "min_fixtures": 2,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "General:Session",
+      "fixture_extensions": [
+        "auto-commit-on-exit",
+        "bookmark",
+        "confirm-destructive",
+        "custom-compaction",
+        "custom-footer",
+        "event-bus",
+        "git-checkpoint",
+        "handoff",
+        "qna",
+        "session-name",
+        "snake",
+        "space-invaders",
+        "summarize",
+        "titlebar-spinner",
+        "tools"
+      ],
+      "min_fixtures": 2,
+      "coverage_met": true
+    },
+    {
+      "cell_key": "General:Ui",
+      "fixture_extensions": [
+        "auto-commit-on-exit",
+        "bookmark",
+        "claude-rules",
+        "confirm-destructive",
+        "custom-compaction",
+        "custom-footer",
+        "custom-header",
+        "dirty-repo-guard",
+        "doom-overlay",
+        "file-trigger",
+        "git-checkpoint",
+        "handoff",
+        "inline-bash",
+        "input-transform",
+        "interactive-shell",
+        "mac-system-theme",
+        "modal-editor",
+        "model-status",
+        "overlay-qa-tests",
+        "overlay-test",
+        "permission-gate",
+        "pirate",
+        "protected-paths",
+        "qna",
+        "rainbow-editor",
+        "rpc-demo",
+        "sandbox",
+        "send-user-message",
+        "session-name",
+        "snake",
+        "space-invaders",
+        "ssh",
+        "status-line",
+        "subagent",
+        "summarize",
+        "system-prompt-header",
+        "timed-confirm",
+        "titlebar-spinner",
+        "tools",
+        "trigger-compact",
+        "widget-placement"
+      ],
+      "min_fixtures": 2,
+      "coverage_met": true
+    },
+    {
+      "cell_key": "General:Log",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    },
+    {
+      "cell_key": "General:Tool",
+      "fixture_extensions": [],
+      "min_fixtures": 1,
+      "coverage_met": false
+    }
+  ],
+  "category_criteria": [
+    {
+      "category": "tool",
+      "must_pass": [
+        "registerTool present in registration snapshot",
+        "Tool definition includes name, description, and JSON Schema parameters",
+        "tool_call dispatch reaches handler and returns tool_result",
+        "Hostcalls use correct capability derivation (read/write/exec per tool name)"
+      ],
+      "failure_conditions": [
+        "registerTool missing from snapshot",
+        "Tool schema validation fails",
+        "tool_call dispatch error or timeout",
+        "Capability mismatch between declared and derived"
+      ],
+      "out_of_scope": [
+        "Tool output correctness beyond protocol conformance",
+        "Performance benchmarks (covered by perf harness)"
+      ]
+    },
+    {
+      "category": "command",
+      "must_pass": [
+        "registerCommand/registerSlashCommand in registration snapshot",
+        "Command definition includes name and description",
+        "slash_command dispatch reaches handler and returns slash_result",
+        "UI hostcalls (select/input/confirm) dispatch correctly"
+      ],
+      "failure_conditions": [
+        "Command missing from snapshot",
+        "slash_command dispatch fails",
+        "UI hostcall denied in interactive mode"
+      ],
+      "out_of_scope": [
+        "Command business logic correctness"
+      ]
+    },
+    {
+      "category": "provider",
+      "must_pass": [
+        "registerProvider in registration snapshot with model entries",
+        "streamSimple callable and returns AsyncIterable<string>",
+        "HTTP hostcalls dispatched with correct capability",
+        "Stream cancellation propagates correctly"
+      ],
+      "failure_conditions": [
+        "Provider missing from snapshot",
+        "streamSimple throws or hangs",
+        "HTTP capability not derived correctly",
+        "Cancellation does not terminate stream"
+      ],
+      "out_of_scope": [
+        "LLM response quality",
+        "OAuth token refresh (separate test suite)"
+      ]
+    },
+    {
+      "category": "event_hook",
+      "must_pass": [
+        "Event hooks registered for declared events",
+        "Hook fires when event dispatched",
+        "Hook can access session/UI/exec hostcalls as declared",
+        "Hook errors do not crash the host"
+      ],
+      "failure_conditions": [
+        "Event hook not registered",
+        "Hook does not fire on matching event",
+        "Hostcall denied when capability is granted",
+        "Hook error propagates as host crash"
+      ],
+      "out_of_scope": [
+        "Hook side-effect correctness"
+      ]
+    },
+    {
+      "category": "ui_component",
+      "must_pass": [
+        "registerMessageRenderer in registration snapshot",
+        "Renderer callable with message content",
+        "Rendered output is a valid string/markup"
+      ],
+      "failure_conditions": [
+        "Renderer missing from snapshot",
+        "Renderer throws on valid input"
+      ],
+      "out_of_scope": [
+        "Visual rendering correctness (requires UI testing)"
+      ]
+    },
+    {
+      "category": "configuration",
+      "must_pass": [
+        "registerFlag/registerShortcut in registration snapshot",
+        "Flag value readable after registration",
+        "Shortcut activation dispatches correctly"
+      ],
+      "failure_conditions": [
+        "Flag/shortcut missing from snapshot",
+        "Flag value not persisted",
+        "Shortcut activation does not trigger handler"
+      ],
+      "out_of_scope": [
+        "Configuration persistence across sessions"
+      ]
+    },
+    {
+      "category": "multi",
+      "must_pass": [
+        "All declared registration types present in snapshot",
+        "Each registration type independently functional",
+        "Capabilities correctly derived for each registration type"
+      ],
+      "failure_conditions": [
+        "Any declared registration type missing",
+        "Cross-type interaction causes error"
+      ],
+      "out_of_scope": [
+        "Interaction semantics between registration types"
+      ]
+    },
+    {
+      "category": "general",
+      "must_pass": [
+        "Extension loads via export default without error",
+        "Hostcalls dispatched correctly when used"
+      ],
+      "failure_conditions": [
+        "Load throws an error",
+        "Hostcall denied when capability is granted"
+      ],
+      "out_of_scope": [
+        "Extensions with no hostcalls (load-only test is sufficient)"
+      ]
+    }
+  ],
+  "coverage": {
+    "total_cells": 41,
+    "required_cells": 25,
+    "covered_cells": 9,
+    "uncovered_required_cells": 17,
+    "total_exemplar_extensions": 69,
+    "categories_covered": 5,
+    "capabilities_covered": 7
+  }
+}

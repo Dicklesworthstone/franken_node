@@ -1,0 +1,47 @@
+{
+  "schema": "pi.ext.scenario_fixture.v1",
+  "extension": {
+    "id": "minimal_multi",
+    "source": {
+      "path": "tests/ext_conformance/artifacts/base_fixtures/minimal_multi/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-minimal-multi-001",
+      "kind": "tool",
+      "summary": "Invokes the echo tool from a multi-type extension",
+      "tool_name": "echo",
+      "input": {
+        "arguments": {
+          "text": "hello multi"
+        }
+      },
+      "expect": {
+        "content_contains": [
+          "hello multi"
+        ]
+      }
+    },
+    {
+      "id": "scn-minimal-multi-002",
+      "kind": "registration",
+      "summary": "Verifies both tool and event hook are registered",
+      "expect": {
+        "tool_count": 1,
+        "event_hooks_contains": [
+          "agent_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-minimal-multi-neg-001",
+      "kind": "tool",
+      "summary": "Negative: echo tool fails with missing required text argument",
+      "tool_name": "echo",
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

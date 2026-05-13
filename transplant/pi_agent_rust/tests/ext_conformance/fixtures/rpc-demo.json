@@ -1,0 +1,41 @@
+{
+  "extension": {
+    "id": "rpc-demo",
+    "source": { "path": "rpc-demo/rpc-demo.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-rpc-demo-reg-001",
+      "kind": "registration",
+      "summary": "Verifies rpc-demo commands and event handlers are registered",
+      "expect": {
+        "commands_contains": ["rpc-editor", "rpc-input", "rpc-prefill"],
+        "event_hooks_contains": ["session_start", "tool_call", "turn_end", "turn_start"]
+      }
+    },
+    {
+      "id": "scn-rpc-demo-pos-001",
+      "kind": "command",
+      "summary": "Invokes the rpc-input command to demonstrate RPC input flow",
+      "command_name": "rpc-input",
+      "input": {
+        "arguments": "test-input"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-rpc-demo-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-rpc-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

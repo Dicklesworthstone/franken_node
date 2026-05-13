@@ -1,0 +1,55 @@
+{
+  "extension": {
+    "id": "npm/pi-bash-confirm",
+    "source": {
+      "path": "npm/pi-bash-confirm/extensions/bash-confirm.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-bash-confirm-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start",
+          "tool_call"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-bash-confirm-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes bash-confirm command",
+      "command_name": "bash-confirm",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-bash-confirm-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-bash-confirm-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

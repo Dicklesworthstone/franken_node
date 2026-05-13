@@ -1,0 +1,52 @@
+{
+  "extension": {
+    "id": "claude-rules",
+    "source": { "path": "claude-rules/claude-rules.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-claude-rules-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event handler registrations for claude-rules",
+      "expect": {
+        "event_hooks_contains": ["before_agent_start", "session_start"]
+      }
+    },
+    {
+      "id": "scn-claude-rules-pos-001",
+      "kind": "event",
+      "summary": "Fires before_agent_start event to inject claude rules",
+      "event_name": "before_agent_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-claude-rules-pos-002",
+      "kind": "event",
+      "summary": "Fires session_start event to apply session-level rules",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-claude-rules-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects graceful no-op or error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

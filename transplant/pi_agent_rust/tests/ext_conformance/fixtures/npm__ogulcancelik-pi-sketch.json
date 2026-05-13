@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "npm/ogulcancelik-pi-sketch",
+    "source": { "path": "npm/ogulcancelik-pi-sketch/extensions/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-ogulcancelik-sketch-reg",
+      "kind": "registration",
+      "summary": "Validates sketch command registration",
+      "expect": {
+        "event_hooks_contains": ["data", "end", "error"]
+      }
+    },
+    {
+      "id": "scn-npm-ogulcancelik-sketch-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes sketch command",
+      "command_name": "sketch",
+      "input": {
+        "arguments": "test"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-ogulcancelik-sketch-cmd-neg",
+      "kind": "command",
+      "summary": "Invokes sketch command with invalid input",
+      "command_name": "sketch",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

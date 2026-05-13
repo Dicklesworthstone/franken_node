@@ -1,0 +1,61 @@
+{
+  "extension": {
+    "id": "third-party/limouren-agent-things",
+    "source": {
+      "path": "third-party/limouren-agent-things/sandbox/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-limouren-agent-things-reg-001",
+      "kind": "registration",
+      "summary": "Verifies sandbox command, event hooks registered for limouren-agent-things",
+      "expect": {
+        "commands_contains": [
+          "sandbox"
+        ],
+        "event_hooks_contains": [
+          "agent_end",
+          "agent_start",
+          "session_shutdown"
+        ]
+      }
+    },
+    {
+      "id": "scn-limouren-agent-things-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes sandbox command",
+      "command_name": "sandbox",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-limouren-agent-things-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "sandbox-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-limouren-agent-things-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_end event",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

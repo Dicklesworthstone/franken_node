@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "npm/pi-threads",
+    "source": { "path": "npm/pi-threads/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-threads-reg",
+      "kind": "registration",
+      "summary": "Validates tool registrations for find_threads and read_thread",
+      "expect": {
+        "tool_count": 2
+      }
+    },
+    {
+      "id": "scn-npm-pi-threads-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes find_threads tool with basic args",
+      "tool_name": "find_threads",
+      "input": {
+        "arguments": {
+          "query": "recent"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-threads-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes find_threads with empty args expecting error",
+      "tool_name": "find_threads",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

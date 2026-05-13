@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "interactive-shell",
+    "source": { "path": "interactive-shell/interactive-shell.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-interactive-shell-reg-001",
+      "kind": "registration",
+      "summary": "Verifies user_bash event handler is registered",
+      "expect": {
+        "event_hooks_contains": ["user_bash"]
+      }
+    },
+    {
+      "id": "scn-interactive-shell-pos-001",
+      "kind": "event",
+      "summary": "Fires user_bash event to intercept shell command execution",
+      "event_name": "user_bash",
+      "input": {
+        "command": "echo hello"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-interactive-shell-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

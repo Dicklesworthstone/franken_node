@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "community/hjanuschka-clipboard",
+    "source": { "path": "community/hjanuschka-clipboard/clipboard.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-hjanuschka-clipboard-reg-001",
+      "kind": "registration",
+      "summary": "Verifies copy_to_clipboard tool is registered",
+      "expect": {
+        "tool_count": 1
+      }
+    },
+    {
+      "id": "scn-hjanuschka-clipboard-pos-001",
+      "kind": "tool",
+      "summary": "Invokes copy_to_clipboard with text content",
+      "tool_name": "copy_to_clipboard",
+      "input": {
+        "arguments": {
+          "text": "Hello from clipboard test"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-clipboard-neg-001",
+      "kind": "tool",
+      "summary": "Invokes copy_to_clipboard with empty arguments; expects error",
+      "tool_name": "copy_to_clipboard",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

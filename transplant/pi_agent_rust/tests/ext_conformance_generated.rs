@@ -1,0 +1,5223 @@
+#![cfg(feature = "ext-conformance")]
+//! Auto-generated conformance tests for all extensions in the validated manifest (bd-15jg).
+//!
+//! Each extension in `tests/ext_conformance/VALIDATED_MANIFEST.json` gets its own `#[test]`
+//! function via the `conformance_test!` macro. This provides:
+//! - Parallelism (cargo test runs tests in parallel)
+//! - Isolation (one failure does not block others)
+//! - Clear reporting (each extension shows as pass/fail in test output)
+//!
+//! Tiers 1–2 run by default; tiers 3–5 are owner-bead-stamped `#[ignore]`
+//! cases (multi-file, npm deps, UI, platform).
+//!
+//! Run tracked stretch tiers:
+//!   cargo test --test `ext_conformance_generated` --features ext-conformance -- --include-ignored
+//!
+//! Run only tier 1–2 (default):
+//!   cargo test --test `ext_conformance_generated`
+
+mod common;
+
+use pi::extensions::{ExtensionManager, JsExtensionLoadSpec, JsExtensionRuntimeHandle};
+use pi::extensions_js::PiJsRuntimeConfig;
+use pi::tools::ToolRegistry;
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+
+// ─── Manifest types ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct ManifestEntry {
+    id: String,
+    entry_path: String,
+    conformance_tier: u32,
+    capabilities: Capabilities,
+    registrations: Registrations,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code, clippy::struct_excessive_bools)]
+struct Capabilities {
+    registers_tools: bool,
+    registers_commands: bool,
+    registers_flags: bool,
+    registers_providers: bool,
+    subscribes_events: Vec<String>,
+    is_multi_file: bool,
+    has_npm_deps: bool,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct Registrations {
+    tools: Vec<String>,
+    commands: Vec<String>,
+    flags: Vec<String>,
+    event_handlers: Vec<String>,
+}
+
+#[derive(Debug)]
+struct Manifest {
+    extensions: Vec<ManifestEntry>,
+}
+
+impl Manifest {
+    fn find(&self, ext_id: &str) -> Option<&ManifestEntry> {
+        self.extensions.iter().find(|e| e.id == ext_id)
+    }
+}
+
+// ─── Manifest loading ───────────────────────────────────────────────────────
+
+fn artifacts_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("ext_conformance")
+        .join("artifacts")
+}
+
+fn manifest_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("ext_conformance")
+        .join("VALIDATED_MANIFEST.json")
+}
+
+fn load_manifest() -> &'static Manifest {
+    static MANIFEST: OnceLock<Manifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        let data = std::fs::read_to_string(manifest_path())
+            .expect("Failed to read VALIDATED_MANIFEST.json");
+        let json: Value =
+            serde_json::from_str(&data).expect("Failed to parse VALIDATED_MANIFEST.json");
+
+        let extensions = json["extensions"]
+            .as_array()
+            .expect("manifest.extensions should be an array")
+            .iter()
+            .map(|e| {
+                let caps = &e["capabilities"];
+                let regs = &e["registrations"];
+                ManifestEntry {
+                    id: e["id"].as_str().unwrap_or("").to_string(),
+                    entry_path: e["entry_path"].as_str().unwrap_or("").to_string(),
+                    conformance_tier: u32::try_from(e["conformance_tier"].as_u64().unwrap_or(0))
+                        .unwrap_or(0),
+                    capabilities: Capabilities {
+                        registers_tools: caps["registers_tools"].as_bool().unwrap_or(false),
+                        registers_commands: caps["registers_commands"].as_bool().unwrap_or(false),
+                        registers_flags: caps["registers_flags"].as_bool().unwrap_or(false),
+                        registers_providers: caps["registers_providers"].as_bool().unwrap_or(false),
+                        subscribes_events: caps["subscribes_events"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        is_multi_file: caps["is_multi_file"].as_bool().unwrap_or(false),
+                        has_npm_deps: caps["has_npm_deps"].as_bool().unwrap_or(false),
+                    },
+                    registrations: Registrations {
+                        tools: regs["tools"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        commands: regs["commands"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        flags: regs["flags"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        event_handlers: regs["event_handlers"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    },
+                }
+            })
+            .collect();
+
+        Manifest { extensions }
+    })
+}
+
+fn hermetic_conformance_env(cwd: &Path) -> std::collections::HashMap<String, String> {
+    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let home = cwd.join("home");
+    let tmp = cwd.join("tmp");
+    std::fs::create_dir_all(&home).expect("create conformance home");
+    std::fs::create_dir_all(&tmp).expect("create conformance tmp");
+
+    let cwd = cwd.display().to_string();
+    let home = home.display().to_string();
+    let tmp = tmp.display().to_string();
+    std::collections::HashMap::from([
+        ("PI_DETERMINISTIC_CWD".to_string(), cwd),
+        ("HOME".to_string(), home.clone()),
+        ("USERPROFILE".to_string(), home.clone()),
+        ("PI_DETERMINISTIC_HOME".to_string(), home),
+        ("TMPDIR".to_string(), tmp.clone()),
+        ("TEMP".to_string(), tmp.clone()),
+        ("TMP".to_string(), tmp),
+    ])
+}
+
+fn conformance_work_dir(name: impl AsRef<str>) -> PathBuf {
+    let dir = std::env::temp_dir().join(name.as_ref());
+    std::fs::create_dir_all(&dir).expect("create conformance work dir");
+    std::fs::canonicalize(&dir).unwrap_or(dir)
+}
+
+// ─── Core conformance test runner ───────────────────────────────────────────
+
+/// Load an extension from the artifacts directory, validate registrations match
+/// the manifest, and capture a registration snapshot as a JSON artifact.
+#[allow(clippy::too_many_lines)]
+fn run_conformance_test(ext_id: &str) {
+    let manifest = load_manifest();
+    let Some(entry) = manifest.find(ext_id) else {
+        unreachable!("Extension '{ext_id}' not found in VALIDATED_MANIFEST.json");
+    };
+
+    let harness = common::TestHarness::new(format!("conformance_{}", ext_id.replace('/', "_")));
+    let cwd = harness.temp_dir().to_path_buf();
+
+    // Resolve the extension entry file.
+    // Some artifacts live under dist/ which rch excludes from sync.
+    // Gracefully skip when the artifact is absent (matches try_conformance behaviour).
+    let entry_file = artifacts_dir().join(&entry.entry_path);
+    if !entry_file.exists() {
+        eprintln!(
+            "SKIP: artifact not found (likely rch dist/ exclusion): {}",
+            entry_file.display()
+        );
+        return;
+    }
+
+    harness
+        .log()
+        .info_ctx("conformance", "Loading extension", |ctx| {
+            ctx.push(("ext_id".into(), ext_id.to_string()));
+            ctx.push(("entry_path".into(), entry.entry_path.clone()));
+            ctx.push(("tier".into(), entry.conformance_tier.to_string()));
+        });
+
+    // Create the load spec.
+    let spec = JsExtensionLoadSpec::from_entry_path(&entry_file).unwrap_or_else(|e| {
+        unreachable!(
+            "Failed to create JsExtensionLoadSpec for '{ext_id}' at {}: {e}",
+            entry_file.display()
+        )
+    });
+
+    // Start JS runtime and load the extension.
+    let manager = ExtensionManager::new();
+    let tools = Arc::new(ToolRegistry::new(&[], &cwd, None));
+    let js_config = PiJsRuntimeConfig {
+        cwd: cwd.display().to_string(),
+        env: hermetic_conformance_env(&cwd),
+        deny_env: false,
+        ..Default::default()
+    };
+
+    let runtime = common::run_async({
+        let manager = manager.clone();
+        let tools = Arc::clone(&tools);
+        async move {
+            JsExtensionRuntimeHandle::start(js_config, tools, manager)
+                .await
+                .expect("start JS runtime")
+        }
+    });
+    manager.set_js_runtime(runtime);
+
+    let ext_id_owned = ext_id.to_string();
+    common::run_async({
+        let manager = manager.clone();
+        async move {
+            manager
+                .load_js_extensions(vec![spec])
+                .await
+                .unwrap_or_else(|e| unreachable!("Failed to load extension '{ext_id_owned}': {e}"));
+        }
+    });
+
+    harness
+        .log()
+        .info("conformance", "Extension loaded successfully");
+
+    // Capture registration snapshot.
+    let snapshot = snapshot_registrations(&manager);
+
+    // Write snapshot artifact.
+    let snapshot_path = harness.temp_path("registration_snapshot.json");
+    let snapshot_json =
+        serde_json::to_string_pretty(&snapshot).expect("serialize registration snapshot");
+    std::fs::write(&snapshot_path, &snapshot_json).expect("write snapshot");
+    harness.record_artifact("registration_snapshot", &snapshot_path);
+
+    // ── Validate registrations against manifest ──
+
+    // Commands: verify every manifest-listed command was registered.
+    let actual_commands = manager.list_commands();
+    let actual_cmd_names: Vec<&str> = actual_commands
+        .iter()
+        .filter_map(|v| v.get("name").and_then(Value::as_str))
+        .collect();
+
+    for expected_cmd in &entry.registrations.commands {
+        assert!(
+            actual_cmd_names.contains(&expected_cmd.as_str()),
+            "Extension '{ext_id}': expected command '{expected_cmd}' not found in actual commands: {actual_cmd_names:?}"
+        );
+    }
+
+    // If the manifest says the extension registers commands, verify at least one was captured.
+    if entry.capabilities.registers_commands && !entry.registrations.commands.is_empty() {
+        assert!(
+            !actual_commands.is_empty(),
+            "Extension '{ext_id}': manifest says it registers commands, but none were captured"
+        );
+    }
+
+    // Flags: verify expected flags were registered.
+    let actual_flags = manager.list_flags();
+    let actual_flag_names: Vec<&str> = actual_flags
+        .iter()
+        .filter_map(|v| v.get("name").and_then(Value::as_str))
+        .collect();
+
+    for expected_flag in &entry.registrations.flags {
+        assert!(
+            actual_flag_names.contains(&expected_flag.as_str()),
+            "Extension '{ext_id}': expected flag '{expected_flag}' not found in actual flags: {actual_flag_names:?}"
+        );
+    }
+
+    // Tools: if manifest says the extension registers tools, verify tool defs exist.
+    if entry.capabilities.registers_tools {
+        let tool_defs = manager.extension_tool_defs();
+        assert!(
+            !tool_defs.is_empty(),
+            "Extension '{ext_id}': manifest says it registers tools, but no tool defs were captured"
+        );
+    }
+
+    // Providers: if manifest says it registers providers, verify they exist.
+    if entry.capabilities.registers_providers {
+        let providers = manager.extension_providers();
+        assert!(
+            !providers.is_empty(),
+            "Extension '{ext_id}': manifest says it registers providers, but none were captured"
+        );
+    }
+
+    harness
+        .log()
+        .info_ctx("conformance", "Validation passed", |ctx| {
+            ctx.push(("commands".into(), actual_commands.len().to_string()));
+            ctx.push(("flags".into(), actual_flags.len().to_string()));
+            ctx.push((
+                "tool_defs".into(),
+                manager.extension_tool_defs().len().to_string(),
+            ));
+            ctx.push((
+                "providers".into(),
+                manager.extension_providers().len().to_string(),
+            ));
+        });
+
+    // Write JSONL logs.
+    let logs_path = harness.temp_path("test_logs.jsonl");
+    if let Err(e) = harness.write_jsonl_logs_normalized(&logs_path) {
+        harness
+            .log()
+            .warn("jsonl", format!("Failed to write JSONL logs: {e}"));
+    } else {
+        harness.record_artifact("jsonl_logs", &logs_path);
+    }
+}
+
+/// Capture the current registration state as a JSON snapshot.
+fn snapshot_registrations(manager: &ExtensionManager) -> Value {
+    let commands = manager.list_commands();
+    let shortcuts = manager.list_shortcuts();
+    let flags = manager.list_flags();
+    let providers = manager.extension_providers();
+    let tool_defs = manager.extension_tool_defs();
+    let event_hooks = manager.list_event_hooks();
+    let models: Vec<Value> = manager
+        .extension_model_entries()
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry.model).expect("model to json"))
+        .collect();
+
+    serde_json::json!({
+        "commands": commands,
+        "shortcuts": shortcuts,
+        "flags": flags,
+        "providers": providers,
+        "tool_defs": tool_defs,
+        "event_handlers": event_hooks,
+        "event_hooks": event_hooks,
+        "models": models,
+    })
+}
+
+fn load_extension_runtime_for_journey(
+    ext_id: &str,
+) -> (ManifestEntry, ExtensionManager, JsExtensionRuntimeHandle) {
+    let manifest = load_manifest();
+    let entry = manifest
+        .find(ext_id)
+        .unwrap_or_else(|| panic!("Extension '{ext_id}' not found in VALIDATED_MANIFEST.json"))
+        .clone();
+
+    let cwd = conformance_work_dir(format!(
+        "pi-journey-regression-{}",
+        ext_id.replace('/', "_")
+    ));
+    let entry_file = artifacts_dir().join(&entry.entry_path);
+    assert!(
+        entry_file.exists(),
+        "Extension '{ext_id}' artifact must exist at {}",
+        entry_file.display()
+    );
+
+    let spec = JsExtensionLoadSpec::from_entry_path(&entry_file).unwrap_or_else(|e| {
+        panic!(
+            "Failed to create JsExtensionLoadSpec for '{ext_id}' at {}: {e}",
+            entry_file.display()
+        )
+    });
+
+    let manager = ExtensionManager::new();
+    let tools = Arc::new(ToolRegistry::new(&[], &cwd, None));
+    let js_config = PiJsRuntimeConfig {
+        cwd: cwd.display().to_string(),
+        env: hermetic_conformance_env(&cwd),
+        deny_env: false,
+        ..Default::default()
+    };
+
+    let runtime = common::run_async({
+        let manager = manager.clone();
+        let tools = Arc::clone(&tools);
+        async move {
+            JsExtensionRuntimeHandle::start(js_config, tools, manager)
+                .await
+                .expect("start JS runtime")
+        }
+    });
+    manager.set_js_runtime(runtime.clone());
+
+    let ext_id_owned = ext_id.to_string();
+    common::run_async({
+        let manager = manager.clone();
+        async move {
+            manager
+                .load_js_extensions(vec![spec])
+                .await
+                .unwrap_or_else(|e| panic!("Failed to load extension '{ext_id_owned}': {e}"));
+        }
+    });
+
+    (entry, manager, runtime)
+}
+
+fn string_array_field(value: &Value, field: &str) -> Vec<String> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("registration snapshot missing array field '{field}'"))
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .unwrap_or_else(|| {
+                    panic!("registration snapshot field '{field}' contains non-string item: {item}")
+                })
+                .to_string()
+        })
+        .collect()
+}
+
+fn assert_event_registration_evidence(ext_id: &str, expected_hooks: &[&str], regs: &Value) {
+    assert!(
+        !expected_hooks.is_empty(),
+        "test fixture '{ext_id}' must name expected runtime event hooks"
+    );
+
+    let mut actual_handlers = string_array_field(regs, "event_handlers");
+    let mut actual_hooks = string_array_field(regs, "event_hooks");
+    actual_handlers.sort();
+    actual_hooks.sort();
+
+    assert_eq!(
+        actual_hooks, actual_handlers,
+        "Extension '{ext_id}' event_hooks evidence must mirror event_handlers"
+    );
+    assert!(
+        !actual_handlers.is_empty(),
+        "Extension '{ext_id}' must expose concrete runtime event registrations"
+    );
+    for expected_hook in expected_hooks {
+        assert!(
+            actual_handlers.iter().any(|hook| hook == expected_hook),
+            "Extension '{ext_id}' runtime event evidence missing expected hook '{expected_hook}': {actual_handlers:?}"
+        );
+    }
+}
+
+#[test]
+fn event_subscriber_journeys_record_concrete_registration_evidence() {
+    let representative_ids: [(&str, &[&str]); 4] = [
+        ("auto-commit-on-exit", &["session_shutdown"]),
+        (
+            "community/prateekmedia-token-rate",
+            &[
+                "session_start",
+                "session_switch",
+                "tool_call",
+                "turn_end",
+                "turn_start",
+            ],
+        ),
+        ("npm/pi-notify", &["agent_end"]),
+        (
+            "third-party/rytswd-direnv",
+            &["session_start", "tool_result"],
+        ),
+    ];
+
+    for (ext_id, expected_hooks) in representative_ids {
+        let (entry, manager, _runtime) = load_extension_runtime_for_journey(ext_id);
+        assert_eq!(
+            JourneyCategory::classify(&entry),
+            JourneyCategory::EventSubscriber,
+            "representative '{ext_id}' must exercise the event-subscriber journey lane"
+        );
+        let regs = snapshot_registrations(&manager);
+        assert_event_registration_evidence(ext_id, expected_hooks, &regs);
+
+        let (failure, completed, journey_regs) =
+            run_category_journey(ext_id, &entry, JourneyCategory::EventSubscriber);
+        assert!(
+            failure.is_none(),
+            "event subscriber journey for '{ext_id}' failed: {failure:?}"
+        );
+        assert_eq!(
+            completed, 2,
+            "journey for '{ext_id}' should complete both event steps"
+        );
+        assert_event_registration_evidence(ext_id, expected_hooks, &journey_regs);
+    }
+}
+
+#[test]
+fn denied_capability_event_hook_keeps_registration_but_blocks_exec() {
+    let (_entry, manager, runtime) = load_extension_runtime_for_journey("negative-denied-caps");
+    let regs = snapshot_registrations(&manager);
+    assert_event_registration_evidence("negative-denied-caps", &["session:start"], &regs);
+
+    let ctx = Arc::new(serde_json::json!({
+        "hasUI": false,
+        "cwd": "/tmp/negative-event-regression",
+        "sessionEntries": [],
+        "sessionBranch": [],
+        "sessionLeafEntry": null,
+        "modelRegistry": {},
+    }));
+    let result = common::run_async({
+        async move {
+            runtime
+                .dispatch_event(
+                    "session:start".to_string(),
+                    serde_json::json!({}),
+                    Arc::clone(&ctx),
+                    10_000,
+                )
+                .await
+        }
+    });
+
+    let value = result.expect("negative-denied-caps event handler should return denial evidence");
+    assert_eq!(
+        value.get("blocked").and_then(Value::as_bool),
+        Some(true),
+        "exec in negative-denied-caps event hook should be blocked: {value}"
+    );
+    let error = value
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        error.to_lowercase().contains("denied") || error.to_lowercase().contains("exec"),
+        "denial evidence should mention exec policy denial, got: {error}"
+    );
+}
+
+// ─── Report generator (bd-31j) ──────────────────────────────────────────────
+
+/// Result of a single extension conformance check.
+#[derive(Debug, serde::Serialize)]
+struct ExtensionConformanceResult {
+    id: String,
+    tier: u32,
+    status: String, // "pass", "fail", "skip"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_path: Option<String>,
+    commands_registered: usize,
+    flags_registered: usize,
+    tools_registered: usize,
+    providers_registered: usize,
+    duration_ms: u64,
+}
+
+/// Run conformance check for a single extension, returning a result without
+/// panicking. This is used by the report generator to collect all results
+/// even when some extensions fail.
+#[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
+fn try_conformance(ext_id: &str) -> ExtensionConformanceResult {
+    let manifest = load_manifest();
+    let Some(entry) = manifest.find(ext_id) else {
+        return ExtensionConformanceResult {
+            id: ext_id.to_string(),
+            tier: 0,
+            status: "skip".to_string(),
+            failure_reason: Some("Not found in VALIDATED_MANIFEST.json".to_string()),
+            artifact_path: None,
+            commands_registered: 0,
+            flags_registered: 0,
+            tools_registered: 0,
+            providers_registered: 0,
+            duration_ms: 0,
+        };
+    };
+
+    let start = std::time::Instant::now();
+    let cwd = conformance_work_dir(format!(
+        "pi-conformance-report-{}",
+        ext_id.replace('/', "_")
+    ));
+
+    let entry_file = artifacts_dir().join(&entry.entry_path);
+    if !entry_file.exists() {
+        return ExtensionConformanceResult {
+            id: ext_id.to_string(),
+            tier: entry.conformance_tier,
+            status: "skip".to_string(),
+            failure_reason: Some(format!("Artifact not found: {}", entry_file.display())),
+            artifact_path: None,
+            commands_registered: 0,
+            flags_registered: 0,
+            tools_registered: 0,
+            providers_registered: 0,
+            duration_ms: start.elapsed().as_millis() as u64,
+        };
+    }
+
+    let spec = match JsExtensionLoadSpec::from_entry_path(&entry_file) {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtensionConformanceResult {
+                id: ext_id.to_string(),
+                tier: entry.conformance_tier,
+                status: "fail".to_string(),
+                failure_reason: Some(format!("Load spec error: {e}")),
+                artifact_path: None,
+                commands_registered: 0,
+                flags_registered: 0,
+                tools_registered: 0,
+                providers_registered: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+
+    let manager = ExtensionManager::new();
+    let tools = Arc::new(ToolRegistry::new(&[], &cwd, None));
+    // Some npm extensions gate registration behind API-key presence checks.
+    // Conformance validates registration shape, so inject deterministic dummy
+    // keys for those specific extensions.
+    let mut env = hermetic_conformance_env(&cwd);
+    match ext_id {
+        "npm/aliou-pi-linkup" => {
+            env.insert(
+                "LINKUP_API_KEY".to_string(),
+                "conformance-dummy-key".to_string(),
+            );
+        }
+        "npm/aliou-pi-synthetic" => {
+            env.insert(
+                "SYNTHETIC_API_KEY".to_string(),
+                "conformance-dummy-key".to_string(),
+            );
+        }
+        _ => {}
+    }
+
+    let js_config = PiJsRuntimeConfig {
+        cwd: cwd.display().to_string(),
+        env,
+        deny_env: false,
+        ..Default::default()
+    };
+
+    let runtime_result = common::run_async({
+        let manager = manager.clone();
+        let tools = Arc::clone(&tools);
+        async move { JsExtensionRuntimeHandle::start(js_config, tools, manager).await }
+    });
+    let runtime = match runtime_result {
+        Ok(rt) => rt,
+        Err(e) => {
+            return ExtensionConformanceResult {
+                id: ext_id.to_string(),
+                tier: entry.conformance_tier,
+                status: "fail".to_string(),
+                failure_reason: Some(format!("Runtime start error: {e}")),
+                artifact_path: None,
+                commands_registered: 0,
+                flags_registered: 0,
+                tools_registered: 0,
+                providers_registered: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+    manager.set_js_runtime(runtime);
+
+    let load_err = common::run_async({
+        let manager = manager.clone();
+        async move { manager.load_js_extensions(vec![spec]).await }
+    });
+    if let Err(e) = load_err {
+        return ExtensionConformanceResult {
+            id: ext_id.to_string(),
+            tier: entry.conformance_tier,
+            status: "fail".to_string(),
+            failure_reason: Some(format!("Load error: {e}")),
+            artifact_path: None,
+            commands_registered: 0,
+            flags_registered: 0,
+            tools_registered: 0,
+            providers_registered: 0,
+            duration_ms: start.elapsed().as_millis() as u64,
+        };
+    }
+
+    // Validate registrations against manifest.
+    let actual_commands = manager.list_commands();
+    let actual_cmd_names: Vec<&str> = actual_commands
+        .iter()
+        .filter_map(|v| v.get("name").and_then(Value::as_str))
+        .collect();
+
+    for expected_cmd in &entry.registrations.commands {
+        if !actual_cmd_names.contains(&expected_cmd.as_str()) {
+            return ExtensionConformanceResult {
+                id: ext_id.to_string(),
+                tier: entry.conformance_tier,
+                status: "fail".to_string(),
+                failure_reason: Some(format!(
+                    "Missing command '{expected_cmd}'. Actual: {actual_cmd_names:?}"
+                )),
+                artifact_path: None,
+                commands_registered: actual_commands.len(),
+                flags_registered: manager.list_flags().len(),
+                tools_registered: manager.extension_tool_defs().len(),
+                providers_registered: manager.extension_providers().len(),
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    }
+
+    let actual_flags = manager.list_flags();
+    let actual_flag_names: Vec<&str> = actual_flags
+        .iter()
+        .filter_map(|v| v.get("name").and_then(Value::as_str))
+        .collect();
+
+    for expected_flag in &entry.registrations.flags {
+        if !actual_flag_names.contains(&expected_flag.as_str()) {
+            return ExtensionConformanceResult {
+                id: ext_id.to_string(),
+                tier: entry.conformance_tier,
+                status: "fail".to_string(),
+                failure_reason: Some(format!(
+                    "Missing flag '{expected_flag}'. Actual: {actual_flag_names:?}"
+                )),
+                artifact_path: None,
+                commands_registered: actual_commands.len(),
+                flags_registered: actual_flags.len(),
+                tools_registered: manager.extension_tool_defs().len(),
+                providers_registered: manager.extension_providers().len(),
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    }
+
+    if entry.capabilities.registers_tools && manager.extension_tool_defs().is_empty() {
+        return ExtensionConformanceResult {
+            id: ext_id.to_string(),
+            tier: entry.conformance_tier,
+            status: "fail".to_string(),
+            failure_reason: Some("Manifest expects tools but none registered".to_string()),
+            artifact_path: None,
+            commands_registered: actual_commands.len(),
+            flags_registered: actual_flags.len(),
+            tools_registered: 0,
+            providers_registered: manager.extension_providers().len(),
+            duration_ms: start.elapsed().as_millis() as u64,
+        };
+    }
+
+    if entry.capabilities.registers_providers && manager.extension_providers().is_empty() {
+        return ExtensionConformanceResult {
+            id: ext_id.to_string(),
+            tier: entry.conformance_tier,
+            status: "fail".to_string(),
+            failure_reason: Some("Manifest expects providers but none registered".to_string()),
+            artifact_path: None,
+            commands_registered: actual_commands.len(),
+            flags_registered: actual_flags.len(),
+            tools_registered: manager.extension_tool_defs().len(),
+            providers_registered: 0,
+            duration_ms: start.elapsed().as_millis() as u64,
+        };
+    }
+
+    let snapshot = snapshot_registrations(&manager);
+    let snapshot_path = cwd.join("registration_snapshot.json");
+    let _ = std::fs::write(
+        &snapshot_path,
+        serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
+    );
+
+    ExtensionConformanceResult {
+        id: ext_id.to_string(),
+        tier: entry.conformance_tier,
+        status: "pass".to_string(),
+        failure_reason: None,
+        artifact_path: Some(snapshot_path.display().to_string()),
+        commands_registered: actual_commands.len(),
+        flags_registered: actual_flags.len(),
+        tools_registered: manager.extension_tool_defs().len(),
+        providers_registered: manager.extension_providers().len(),
+        duration_ms: start.elapsed().as_millis() as u64,
+    }
+}
+
+/// Generate a comprehensive conformance report for all extensions in the manifest.
+///
+/// Run: `cargo test --test ext_conformance_generated --features ext-conformance -- conformance_full_report --nocapture`
+#[test]
+#[allow(clippy::too_many_lines)]
+fn conformance_full_report() {
+    use chrono::{SecondsFormat, Utc};
+    use std::fmt::Write as _;
+
+    let manifest = load_manifest();
+    let report_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("ext_conformance")
+        .join("reports")
+        .join("conformance");
+    let _ = std::fs::create_dir_all(&report_dir);
+
+    let mut results: Vec<ExtensionConformanceResult> = Vec::new();
+    let total = manifest.extensions.len();
+
+    eprintln!("\n=== Conformance Report Generator (bd-31j) ===");
+    eprintln!("  Extensions in manifest: {total}");
+    eprintln!("  Checking extensions with available artifacts...\n");
+
+    for (idx, entry) in manifest.extensions.iter().enumerate() {
+        let entry_file = artifacts_dir().join(&entry.entry_path);
+        if !entry_file.exists() {
+            results.push(ExtensionConformanceResult {
+                id: entry.id.clone(),
+                tier: entry.conformance_tier,
+                status: "skip".to_string(),
+                failure_reason: Some("Artifact not available".to_string()),
+                artifact_path: None,
+                commands_registered: 0,
+                flags_registered: 0,
+                tools_registered: 0,
+                providers_registered: 0,
+                duration_ms: 0,
+            });
+            continue;
+        }
+
+        eprint!("  [{:>3}/{total}] {:<50} ", idx + 1, entry.id);
+        let result = try_conformance(&entry.id);
+        eprintln!(
+            "{:<6} ({}ms)",
+            result.status.to_uppercase(),
+            result.duration_ms
+        );
+        results.push(result);
+    }
+
+    // ── Compute statistics ──
+    let pass_count = results.iter().filter(|r| r.status == "pass").count();
+    let fail_count = results.iter().filter(|r| r.status == "fail").count();
+    let skip_count = results.iter().filter(|r| r.status == "skip").count();
+    let tested = pass_count + fail_count;
+    let pass_rate = if tested > 0 {
+        #[allow(clippy::cast_precision_loss)]
+        {
+            (pass_count as f64) / (tested as f64) * 100.0
+        }
+    } else {
+        0.0
+    };
+
+    let by_tier: std::collections::BTreeMap<u32, (usize, usize, usize)> = {
+        let mut m = std::collections::BTreeMap::new();
+        for r in &results {
+            let entry = m.entry(r.tier).or_insert((0, 0, 0));
+            match r.status.as_str() {
+                "pass" => entry.0 += 1,
+                "fail" => entry.1 += 1,
+                _ => entry.2 += 1,
+            }
+        }
+        m
+    };
+
+    // ── Write JSONL events ──
+    let events_path = report_dir.join("conformance_events.jsonl");
+    let mut lines: Vec<String> = Vec::new();
+    for r in &results {
+        let entry = serde_json::json!({
+            "schema": "pi.ext.conformance_result.v1",
+            "id": r.id,
+            "tier": r.tier,
+            "status": r.status,
+            "failure_reason": r.failure_reason,
+            "commands_registered": r.commands_registered,
+            "flags_registered": r.flags_registered,
+            "tools_registered": r.tools_registered,
+            "providers_registered": r.providers_registered,
+            "duration_ms": r.duration_ms,
+            "ts": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        });
+        lines.push(serde_json::to_string(&entry).unwrap_or_default());
+    }
+    let _ = std::fs::write(&events_path, lines.join("\n") + "\n");
+
+    // ── Write JSON summary ──
+    let summary = serde_json::json!({
+        "schema": "pi.ext.conformance_report.v1",
+        "generated_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        "manifest_count": total,
+        "tested": tested,
+        "passed": pass_count,
+        "failed": fail_count,
+        "skipped": skip_count,
+        "pass_rate_pct": pass_rate,
+        "by_tier": by_tier.iter().map(|(tier, (p, f, s))| {
+            serde_json::json!({
+                "tier": tier,
+                "pass": p,
+                "fail": f,
+                "skip": s,
+            })
+        }).collect::<Vec<_>>(),
+        "failures": results.iter()
+            .filter(|r| r.status == "fail")
+            .map(|r| serde_json::json!({
+                "id": r.id,
+                "tier": r.tier,
+                "reason": r.failure_reason,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    let summary_path = report_dir.join("conformance_report.json");
+    let _ = std::fs::write(
+        &summary_path,
+        serde_json::to_string_pretty(&summary).unwrap_or_default(),
+    );
+
+    // ── Write Markdown report ──
+    let mut md = String::new();
+    md.push_str("# Extension Conformance Report\n\n");
+    let _ = writeln!(
+        md,
+        "> Generated: {}",
+        Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+    );
+    md.push_str("\n## Summary\n\n");
+    md.push_str("| Metric | Value |\n|--------|-------|\n");
+    let _ = writeln!(md, "| Total in manifest | {total} |");
+    let _ = writeln!(md, "| Tested | {tested} |");
+    let _ = writeln!(md, "| Passed | {pass_count} |");
+    let _ = writeln!(md, "| Failed | {fail_count} |");
+    let _ = writeln!(md, "| Skipped | {skip_count} |");
+    let _ = writeln!(md, "| Pass rate | {pass_rate:.1}% |");
+    md.push('\n');
+
+    md.push_str("## By Tier\n\n");
+    md.push_str("| Tier | Pass | Fail | Skip |\n|------|------|------|------|\n");
+    for (tier, (p, f, s)) in &by_tier {
+        let _ = writeln!(md, "| {tier} | {p} | {f} | {s} |");
+    }
+    md.push('\n');
+
+    if fail_count > 0 {
+        md.push_str("## Failures\n\n");
+        md.push_str("| Extension | Tier | Reason |\n|-----------|------|--------|\n");
+        for r in results.iter().filter(|r| r.status == "fail") {
+            let _ = writeln!(
+                md,
+                "| {} | {} | {} |",
+                r.id,
+                r.tier,
+                r.failure_reason.as_deref().unwrap_or("unknown")
+            );
+        }
+        md.push('\n');
+    }
+
+    md.push_str("## All Results\n\n");
+    md.push_str("| Extension | Tier | Status | Cmds | Flags | Tools | Providers | Time (ms) |\n");
+    md.push_str("|-----------|------|--------|------|-------|-------|-----------|-----------|\n");
+    for r in &results {
+        let _ = writeln!(
+            md,
+            "| {} | {} | {} | {} | {} | {} | {} | {} |",
+            r.id,
+            r.tier,
+            r.status,
+            r.commands_registered,
+            r.flags_registered,
+            r.tools_registered,
+            r.providers_registered,
+            r.duration_ms
+        );
+    }
+
+    let md_path = report_dir.join("conformance_report.md");
+    let _ = std::fs::write(&md_path, &md);
+
+    // ── Print summary ──
+    eprintln!("\n=== Conformance Report Summary ===");
+    eprintln!("  Manifest: {total} extensions");
+    eprintln!("  Tested:   {tested}");
+    eprintln!("  Passed:   {pass_count}");
+    eprintln!("  Failed:   {fail_count}");
+    eprintln!("  Skipped:  {skip_count}");
+    eprintln!("  Rate:     {pass_rate:.1}%");
+    eprintln!("\n  Reports:");
+    eprintln!("    JSON:   {}", summary_path.display());
+    eprintln!("    JSONL:  {}", events_path.display());
+    eprintln!("    MD:     {}\n", md_path.display());
+
+    // Report is informational — per-extension tests enforce pass/fail individually.
+    // Log a warning if failures exist so CI logs are visible but don't block the report.
+    if fail_count > 0 {
+        eprintln!(
+            "  WARNING: {fail_count} extension(s) failed conformance. See {}",
+            summary_path.display()
+        );
+    }
+}
+
+// ─── Sharded Extension Matrix Executor (bd-1f42.4.3) ────────────────────────
+//
+// Runs the full extension corpus with parallel sharding and deterministic
+// ordering.  Each shard gets a stable, reproducible subset of extensions
+// so CI matrix jobs can fan out.
+//
+// Environment variables:
+//   PI_SHARD_INDEX  — 0-based index of this shard (default: 0)
+//   PI_SHARD_TOTAL  — total number of shards (default: 1 = no sharding)
+//   PI_SHARD_PARALLELISM — max threads within a shard (default: num_cpus or 4)
+//
+// Run:
+//   cargo test --test ext_conformance_generated --features ext-conformance \
+//     -- conformance_sharded_matrix --nocapture
+//
+// CI matrix example (4 shards):
+//   PI_SHARD_INDEX=0 PI_SHARD_TOTAL=4 cargo test ...
+//   PI_SHARD_INDEX=1 PI_SHARD_TOTAL=4 cargo test ...
+//   PI_SHARD_INDEX=2 PI_SHARD_TOTAL=4 cargo test ...
+//   PI_SHARD_INDEX=3 PI_SHARD_TOTAL=4 cargo test ...
+
+/// Failure category for triage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum FailureCategory {
+    /// Extension artifact file not found on disk.
+    ArtifactMissing,
+    /// `JsExtensionLoadSpec::from_entry_path` failed.
+    LoadSpecError,
+    /// JS runtime failed to start.
+    RuntimeStartError,
+    /// Extension load (`load_js_extensions`) failed.
+    ExtensionLoadError,
+    /// Registration mismatch (commands/flags/tools/providers).
+    RegistrationMismatch,
+    /// Extension not in the validated manifest.
+    ManifestMissing,
+    /// Unknown / uncategorized failure.
+    Unknown,
+}
+
+impl FailureCategory {
+    /// Classify a failure reason string into a category.
+    fn classify(reason: &str) -> Self {
+        if reason.contains("Artifact not") || reason.contains("not found") {
+            Self::ArtifactMissing
+        } else if reason.contains("Load spec error") {
+            Self::LoadSpecError
+        } else if reason.contains("Runtime start error") {
+            Self::RuntimeStartError
+        } else if reason.contains("Load error") {
+            Self::ExtensionLoadError
+        } else if reason.contains("Missing command")
+            || reason.contains("Missing flag")
+            || reason.contains("expects tools")
+            || reason.contains("expects providers")
+        {
+            Self::RegistrationMismatch
+        } else if reason.contains("Not found in VALIDATED_MANIFEST") {
+            Self::ManifestMissing
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
+/// Enhanced result with failure categorization.
+#[derive(Debug, serde::Serialize)]
+struct ShardedConformanceResult {
+    #[serde(flatten)]
+    inner: ExtensionConformanceResult,
+    /// Classified failure category (present only when status != "pass").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_category: Option<FailureCategory>,
+    /// Shard index that ran this extension.
+    shard_index: usize,
+}
+
+/// Configuration for sharded execution.
+struct ShardConfig {
+    /// 0-based shard index.
+    shard_index: usize,
+    /// Total number of shards.
+    shard_total: usize,
+    /// Max parallel threads within this shard.
+    parallelism: usize,
+}
+
+impl ShardConfig {
+    /// Read configuration from environment variables with sensible defaults.
+    fn from_env() -> Self {
+        let shard_index: usize = std::env::var("PI_SHARD_INDEX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let shard_total: usize = std::env::var("PI_SHARD_TOTAL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(1);
+        let parallelism: usize = std::env::var("PI_SHARD_PARALLELISM")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get().min(8)));
+        Self {
+            shard_index: shard_index.min(shard_total.saturating_sub(1)),
+            shard_total,
+            parallelism,
+        }
+    }
+}
+
+/// Deterministically assign extensions to shards using stable sorted order.
+///
+/// Extensions are sorted by ID (lexicographic) for reproducibility, then
+/// assigned to shards via round-robin.  This ensures each shard gets a
+/// balanced mix of tiers and categories.
+fn shard_extensions<'a>(
+    extensions: &'a [ManifestEntry],
+    config: &ShardConfig,
+) -> Vec<&'a ManifestEntry> {
+    let mut sorted: Vec<&ManifestEntry> = extensions.iter().collect();
+    sorted.sort_by(|a, b| a.id.cmp(&b.id));
+
+    sorted
+        .into_iter()
+        .enumerate()
+        .filter(|(idx, _)| idx % config.shard_total == config.shard_index)
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+/// Run conformance checks for a slice of extensions in parallel using threads.
+///
+/// Returns results in deterministic order (sorted by extension ID).
+fn run_shard_parallel(
+    extensions: &[&ManifestEntry],
+    shard_index: usize,
+    parallelism: usize,
+) -> Vec<ShardedConformanceResult> {
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::channel();
+
+    // Process extensions in chunks to control parallelism.
+    let chunks: Vec<Vec<String>> = extensions
+        .chunks(parallelism)
+        .map(|chunk| chunk.iter().map(|e| e.id.clone()).collect())
+        .collect();
+
+    for chunk in chunks {
+        let handles: Vec<_> = chunk
+            .into_iter()
+            .map(|ext_id| {
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    let result = try_conformance(&ext_id);
+                    let failure_category = if result.status == "pass" {
+                        None
+                    } else {
+                        Some(FailureCategory::classify(
+                            result.failure_reason.as_deref().unwrap_or(""),
+                        ))
+                    };
+                    let _ = tx.send(ShardedConformanceResult {
+                        inner: result,
+                        failure_category,
+                        shard_index,
+                    });
+                })
+            })
+            .collect();
+
+        // Wait for this chunk to complete before starting the next.
+        for handle in handles {
+            let _ = handle.join();
+        }
+    }
+
+    drop(tx);
+
+    // Collect and sort by extension ID for deterministic output.
+    let mut results: Vec<ShardedConformanceResult> = rx.into_iter().collect();
+    results.sort_by(|a, b| a.inner.id.cmp(&b.inner.id));
+    results
+}
+
+/// Shard report output for CI artifact merging.
+#[derive(Debug, serde::Serialize)]
+struct ShardReport {
+    schema: String,
+    generated_at: String,
+    shard_index: usize,
+    shard_total: usize,
+    parallelism: usize,
+    manifest_count: usize,
+    shard_count: usize,
+    tested: usize,
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+    pass_rate_pct: f64,
+    total_duration_ms: u64,
+    by_tier: Vec<serde_json::Value>,
+    by_failure_category: Vec<serde_json::Value>,
+    failures: Vec<serde_json::Value>,
+    results: Vec<ShardedConformanceResult>,
+}
+
+/// Run the sharded extension matrix executor.
+///
+/// Run with:
+/// `cargo test --test ext_conformance_generated --features ext-conformance -- conformance_sharded_matrix --nocapture`
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
+fn conformance_sharded_matrix() {
+    use chrono::{SecondsFormat, Utc};
+    use std::fmt::Write as _;
+
+    let config = ShardConfig::from_env();
+    let manifest = load_manifest();
+
+    let report_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("ext_conformance")
+        .join("reports")
+        .join("sharded");
+    let _ = std::fs::create_dir_all(&report_dir);
+
+    let shard_entries = shard_extensions(&manifest.extensions, &config);
+    let shard_count = shard_entries.len();
+    let total = manifest.extensions.len();
+
+    eprintln!("\n=== Sharded Extension Matrix Executor (bd-1f42.4.3) ===");
+    eprintln!(
+        "  Shard:       {}/{}",
+        config.shard_index + 1,
+        config.shard_total
+    );
+    eprintln!("  Extensions:  {shard_count}/{total} in this shard");
+    eprintln!("  Parallelism: {} threads", config.parallelism);
+    eprintln!();
+
+    let start = std::time::Instant::now();
+    let results = run_shard_parallel(&shard_entries, config.shard_index, config.parallelism);
+    let elapsed = start.elapsed();
+
+    // ── Compute statistics ──
+    let pass_count = results.iter().filter(|r| r.inner.status == "pass").count();
+    let fail_count = results.iter().filter(|r| r.inner.status == "fail").count();
+    let skip_count = results.iter().filter(|r| r.inner.status == "skip").count();
+    let tested = pass_count + fail_count;
+    let pass_rate = if tested > 0 {
+        (pass_count as f64) / (tested as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // By tier breakdown.
+    let by_tier: std::collections::BTreeMap<u32, (usize, usize, usize)> = {
+        let mut m = std::collections::BTreeMap::new();
+        for r in &results {
+            let entry = m.entry(r.inner.tier).or_insert((0, 0, 0));
+            match r.inner.status.as_str() {
+                "pass" => entry.0 += 1,
+                "fail" => entry.1 += 1,
+                _ => entry.2 += 1,
+            }
+        }
+        m
+    };
+
+    // By failure category breakdown.
+    let by_category: std::collections::BTreeMap<String, usize> = {
+        let mut m = std::collections::BTreeMap::new();
+        for r in &results {
+            if let Some(cat) = &r.failure_category {
+                let key = serde_json::to_value(cat)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_else(|| format!("{cat:?}"));
+                *m.entry(key).or_insert(0) += 1;
+            }
+        }
+        m
+    };
+
+    // ── Write JSONL events ──
+    let events_path = report_dir.join(format!("shard_{}_events.jsonl", config.shard_index));
+    let mut lines: Vec<String> = Vec::new();
+    for r in &results {
+        let entry = serde_json::json!({
+            "schema": "pi.ext.conformance_result.v2",
+            "id": r.inner.id,
+            "tier": r.inner.tier,
+            "status": r.inner.status,
+            "failure_reason": r.inner.failure_reason,
+            "failure_category": r.failure_category,
+            "shard_index": r.shard_index,
+            "commands_registered": r.inner.commands_registered,
+            "flags_registered": r.inner.flags_registered,
+            "tools_registered": r.inner.tools_registered,
+            "providers_registered": r.inner.providers_registered,
+            "duration_ms": r.inner.duration_ms,
+            "ts": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        });
+        lines.push(serde_json::to_string(&entry).unwrap_or_default());
+    }
+    let _ = std::fs::write(&events_path, lines.join("\n") + "\n");
+
+    // ── Write JSON shard report ──
+    let report = ShardReport {
+        schema: "pi.ext.conformance_shard_report.v1".to_string(),
+        generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        shard_index: config.shard_index,
+        shard_total: config.shard_total,
+        parallelism: config.parallelism,
+        manifest_count: total,
+        shard_count,
+        tested,
+        passed: pass_count,
+        failed: fail_count,
+        skipped: skip_count,
+        pass_rate_pct: pass_rate,
+        total_duration_ms: elapsed.as_millis() as u64,
+        by_tier: by_tier
+            .iter()
+            .map(|(tier, (p, f, s))| {
+                serde_json::json!({
+                    "tier": tier,
+                    "pass": p,
+                    "fail": f,
+                    "skip": s,
+                })
+            })
+            .collect(),
+        by_failure_category: by_category
+            .iter()
+            .map(|(cat, count)| {
+                serde_json::json!({
+                    "category": cat,
+                    "count": count,
+                })
+            })
+            .collect(),
+        failures: results
+            .iter()
+            .filter(|r| r.inner.status == "fail")
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.inner.id,
+                    "tier": r.inner.tier,
+                    "reason": r.inner.failure_reason,
+                    "category": r.failure_category,
+                    "duration_ms": r.inner.duration_ms,
+                })
+            })
+            .collect(),
+        results,
+    };
+
+    let report_path = report_dir.join(format!("shard_{}_report.json", config.shard_index));
+    let _ = std::fs::write(
+        &report_path,
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    );
+
+    // ── Write Markdown report ──
+    let mut md = String::new();
+    let _ = writeln!(
+        md,
+        "# Extension Conformance — Shard {}/{}\n",
+        config.shard_index + 1,
+        config.shard_total
+    );
+    let _ = writeln!(
+        md,
+        "> Generated: {}  \n> Duration: {}ms  \n> Parallelism: {} threads\n",
+        Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        elapsed.as_millis(),
+        config.parallelism,
+    );
+    md.push_str("## Summary\n\n");
+    md.push_str("| Metric | Value |\n|--------|-------|\n");
+    let _ = writeln!(md, "| Total in manifest | {total} |");
+    let _ = writeln!(md, "| In this shard | {shard_count} |");
+    let _ = writeln!(md, "| Tested | {tested} |");
+    let _ = writeln!(md, "| Passed | {pass_count} |");
+    let _ = writeln!(md, "| Failed | {fail_count} |");
+    let _ = writeln!(md, "| Skipped | {skip_count} |");
+    let _ = writeln!(md, "| Pass rate | {pass_rate:.1}% |");
+    let _ = writeln!(md, "| Duration | {}ms |", elapsed.as_millis());
+    md.push('\n');
+
+    md.push_str("## By Tier\n\n");
+    md.push_str("| Tier | Pass | Fail | Skip |\n|------|------|------|------|\n");
+    for (tier, (p, f, s)) in &by_tier {
+        let _ = writeln!(md, "| {tier} | {p} | {f} | {s} |");
+    }
+    md.push('\n');
+
+    if !by_category.is_empty() {
+        md.push_str("## Failure Categories\n\n");
+        md.push_str("| Category | Count |\n|----------|-------|\n");
+        for (cat, count) in &by_category {
+            let _ = writeln!(md, "| {cat} | {count} |");
+        }
+        md.push('\n');
+    }
+
+    if fail_count > 0 {
+        md.push_str("## Failures\n\n");
+        md.push_str(
+            "| Extension | Tier | Category | Reason |\n|-----------|------|----------|--------|\n",
+        );
+        for r in &report.failures {
+            let _ = writeln!(
+                md,
+                "| {} | {} | {} | {} |",
+                r.get("id").and_then(|v| v.as_str()).unwrap_or("?"),
+                r.get("tier")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                r.get("category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown"),
+                r.get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown"),
+            );
+        }
+        md.push('\n');
+    }
+
+    let md_path = report_dir.join(format!("shard_{}_report.md", config.shard_index));
+    let _ = std::fs::write(&md_path, &md);
+
+    // ── Print summary ──
+    eprintln!(
+        "=== Shard {}/{} Results ===",
+        config.shard_index + 1,
+        config.shard_total
+    );
+    eprintln!("  Extensions: {shard_count}/{total}");
+    eprintln!("  Tested:     {tested}");
+    eprintln!("  Passed:     {pass_count}");
+    eprintln!("  Failed:     {fail_count}");
+    eprintln!("  Skipped:    {skip_count}");
+    eprintln!("  Rate:       {pass_rate:.1}%");
+    eprintln!("  Duration:   {}ms", elapsed.as_millis());
+    eprintln!("  Parallelism:{} threads", config.parallelism);
+    eprintln!();
+    eprintln!("  Reports:");
+    eprintln!("    JSON:  {}", report_path.display());
+    eprintln!("    JSONL: {}", events_path.display());
+    eprintln!("    MD:    {}", md_path.display());
+
+    if !by_category.is_empty() {
+        eprintln!();
+        eprintln!("  Failure categories:");
+        for (cat, count) in &by_category {
+            eprintln!("    {cat}: {count}");
+        }
+    }
+    eprintln!();
+
+    if fail_count > 0 {
+        eprintln!(
+            "  WARNING: {fail_count} extension(s) failed. See {}",
+            report_path.display()
+        );
+    }
+}
+
+/// Merge multiple shard reports into a consolidated report.
+///
+/// Run with:
+/// `cargo test --test ext_conformance_generated --features ext-conformance -- conformance_merge_shard_reports --nocapture`
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
+fn conformance_merge_shard_reports() {
+    use chrono::{SecondsFormat, Utc};
+    use std::fmt::Write as _;
+
+    let report_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("ext_conformance")
+        .join("reports")
+        .join("sharded");
+
+    // Find all shard report files.
+    let mut shard_files: Vec<PathBuf> = std::fs::read_dir(&report_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("shard_") && n.ends_with("_report.json"))
+        })
+        .collect();
+    shard_files.sort();
+
+    if shard_files.is_empty() {
+        eprintln!("No shard reports found in {}", report_dir.display());
+        return;
+    }
+
+    eprintln!("\n=== Merging {} shard reports ===\n", shard_files.len());
+
+    // Parse all shard reports.
+    let mut all_results: Vec<serde_json::Value> = Vec::new();
+    let mut total_duration_ms: u64 = 0;
+    let mut manifest_count = 0_usize;
+    let mut shard_total = 0_usize;
+
+    for path in &shard_files {
+        let data = match std::fs::read_to_string(path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("  WARN: Failed to read {}: {e}", path.display());
+                continue;
+            }
+        };
+        let report: serde_json::Value = match serde_json::from_str(&data) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  WARN: Failed to parse {}: {e}", path.display());
+                continue;
+            }
+        };
+
+        manifest_count = report["manifest_count"].as_u64().unwrap_or(0) as usize;
+        shard_total = report["shard_total"].as_u64().unwrap_or(0) as usize;
+        total_duration_ms =
+            total_duration_ms.max(report["total_duration_ms"].as_u64().unwrap_or(0));
+
+        if let Some(results) = report["results"].as_array() {
+            all_results.extend(results.iter().cloned());
+        }
+    }
+
+    // Sort merged results by extension ID.
+    all_results.sort_by(|a, b| {
+        let a_id = a.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let b_id = b.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        a_id.cmp(b_id)
+    });
+
+    // Compute merged statistics.
+    let pass_count = all_results
+        .iter()
+        .filter(|r| r.get("status").and_then(|v| v.as_str()) == Some("pass"))
+        .count();
+    let fail_count = all_results
+        .iter()
+        .filter(|r| r.get("status").and_then(|v| v.as_str()) == Some("fail"))
+        .count();
+    let skip_count = all_results
+        .iter()
+        .filter(|r| r.get("status").and_then(|v| v.as_str()) == Some("skip"))
+        .count();
+    let tested = pass_count + fail_count;
+    let pass_rate = if tested > 0 {
+        (pass_count as f64) / (tested as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let merged = serde_json::json!({
+        "schema": "pi.ext.conformance_merged_report.v1",
+        "generated_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        "shards_merged": shard_files.len(),
+        "shard_total": shard_total,
+        "manifest_count": manifest_count,
+        "tested": tested,
+        "passed": pass_count,
+        "failed": fail_count,
+        "skipped": skip_count,
+        "pass_rate_pct": pass_rate,
+        "wall_clock_ms": total_duration_ms,
+        "failures": all_results.iter()
+            .filter(|r| r.get("status").and_then(|v| v.as_str()) == Some("fail"))
+            .cloned()
+            .collect::<Vec<_>>(),
+    });
+
+    let merged_path = report_dir.join("merged_report.json");
+    let _ = std::fs::write(
+        &merged_path,
+        serde_json::to_string_pretty(&merged).unwrap_or_default(),
+    );
+
+    // ── Merged Markdown ──
+    let mut md = String::new();
+    md.push_str("# Extension Conformance — Merged Report\n\n");
+    let _ = writeln!(
+        md,
+        "> Generated: {}  \n> Shards merged: {}  \n> Wall-clock: {}ms\n",
+        Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        shard_files.len(),
+        total_duration_ms,
+    );
+    md.push_str("## Summary\n\n");
+    md.push_str("| Metric | Value |\n|--------|-------|\n");
+    let _ = writeln!(md, "| Total in manifest | {manifest_count} |");
+    let _ = writeln!(md, "| Tested | {tested} |");
+    let _ = writeln!(md, "| Passed | {pass_count} |");
+    let _ = writeln!(md, "| Failed | {fail_count} |");
+    let _ = writeln!(md, "| Skipped | {skip_count} |");
+    let _ = writeln!(md, "| Pass rate | {pass_rate:.1}% |");
+    md.push('\n');
+
+    if fail_count > 0 {
+        md.push_str("## Failures\n\n");
+        md.push_str("| Extension | Tier | Category | Shard | Reason |\n|-----------|------|----------|-------|--------|\n");
+        for r in all_results
+            .iter()
+            .filter(|r| r.get("status").and_then(|v| v.as_str()) == Some("fail"))
+        {
+            let _ = writeln!(
+                md,
+                "| {} | {} | {} | {} | {} |",
+                r.get("id").and_then(|v| v.as_str()).unwrap_or("?"),
+                r.get("tier")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                r.get("failure_category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown"),
+                r.get("shard_index")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                r.get("failure_reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown"),
+            );
+        }
+    }
+
+    let md_path = report_dir.join("merged_report.md");
+    let _ = std::fs::write(&md_path, &md);
+
+    eprintln!("=== Merged Report ===");
+    eprintln!("  Shards:  {}", shard_files.len());
+    eprintln!("  Total:   {}", all_results.len());
+    eprintln!("  Tested:  {tested}");
+    eprintln!("  Passed:  {pass_count}");
+    eprintln!("  Failed:  {fail_count}");
+    eprintln!("  Skipped: {skip_count}");
+    eprintln!("  Rate:    {pass_rate:.1}%");
+    eprintln!();
+    eprintln!("  Reports:");
+    eprintln!("    JSON: {}", merged_path.display());
+    eprintln!("    MD:   {}\n", md_path.display());
+}
+
+// ─── Per-Extension Failure Dossier Generator (bd-1f42.4.8) ──────────────────
+//
+// Generates high-signal failure dossiers for each failing extension with
+// one-command reproduce scripts.  Dossiers are structured JSON files suitable
+// for CI artifact linking and rapid triage.
+//
+// Run:
+//   cargo test --test ext_conformance_generated --features ext-conformance \
+//     -- conformance_failure_dossiers --nocapture
+
+/// A failure dossier for a single extension.
+#[derive(Debug, serde::Serialize)]
+struct FailureDossier {
+    schema: String,
+    generated_at: String,
+    extension_id: String,
+    extension_tier: u32,
+    entry_path: String,
+    failure_category: FailureCategory,
+    failure_reason: String,
+    duration_ms: u64,
+    /// Registration state at time of failure (if the extension loaded at all).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration_snapshot: Option<serde_json::Value>,
+    /// Expected registrations from the manifest.
+    expected_registrations: serde_json::Value,
+    /// One-command reproduce script.
+    reproduce_command: String,
+    /// Cargo test command that targets just this extension.
+    cargo_test_command: String,
+    /// Environment for reproduction.
+    reproduce_env: serde_json::Value,
+}
+
+/// Detailed result capturing registration state for dossier generation.
+#[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
+fn try_conformance_detailed(
+    ext_id: &str,
+) -> (ExtensionConformanceResult, Option<serde_json::Value>) {
+    let manifest = load_manifest();
+    let Some(entry) = manifest.find(ext_id) else {
+        return (
+            ExtensionConformanceResult {
+                id: ext_id.to_string(),
+                tier: 0,
+                status: "skip".to_string(),
+                failure_reason: Some("Not found in VALIDATED_MANIFEST.json".to_string()),
+                artifact_path: None,
+                commands_registered: 0,
+                flags_registered: 0,
+                tools_registered: 0,
+                providers_registered: 0,
+                duration_ms: 0,
+            },
+            None,
+        );
+    };
+
+    let start = std::time::Instant::now();
+    let cwd = conformance_work_dir(format!("pi-dossier-{}", ext_id.replace('/', "_")));
+
+    let entry_file = artifacts_dir().join(&entry.entry_path);
+    if !entry_file.exists() {
+        return (
+            ExtensionConformanceResult {
+                id: ext_id.to_string(),
+                tier: entry.conformance_tier,
+                status: "fail".to_string(),
+                failure_reason: Some(format!("Artifact not found: {}", entry_file.display())),
+                artifact_path: None,
+                commands_registered: 0,
+                flags_registered: 0,
+                tools_registered: 0,
+                providers_registered: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            None,
+        );
+    }
+
+    let spec = match JsExtensionLoadSpec::from_entry_path(&entry_file) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                ExtensionConformanceResult {
+                    id: ext_id.to_string(),
+                    tier: entry.conformance_tier,
+                    status: "fail".to_string(),
+                    failure_reason: Some(format!("Load spec error: {e}")),
+                    artifact_path: None,
+                    commands_registered: 0,
+                    flags_registered: 0,
+                    tools_registered: 0,
+                    providers_registered: 0,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                },
+                None,
+            );
+        }
+    };
+
+    let manager = ExtensionManager::new();
+    let tools = Arc::new(ToolRegistry::new(&[], &cwd, None));
+    let js_config = PiJsRuntimeConfig {
+        cwd: cwd.display().to_string(),
+        env: hermetic_conformance_env(&cwd),
+        deny_env: false,
+        ..Default::default()
+    };
+
+    let runtime_result = common::run_async({
+        let manager = manager.clone();
+        let tools = Arc::clone(&tools);
+        async move { JsExtensionRuntimeHandle::start(js_config, tools, manager).await }
+    });
+    let runtime = match runtime_result {
+        Ok(rt) => rt,
+        Err(e) => {
+            return (
+                ExtensionConformanceResult {
+                    id: ext_id.to_string(),
+                    tier: entry.conformance_tier,
+                    status: "fail".to_string(),
+                    failure_reason: Some(format!("Runtime start error: {e}")),
+                    artifact_path: None,
+                    commands_registered: 0,
+                    flags_registered: 0,
+                    tools_registered: 0,
+                    providers_registered: 0,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                },
+                None,
+            );
+        }
+    };
+    manager.set_js_runtime(runtime);
+
+    let load_err = common::run_async({
+        let manager = manager.clone();
+        async move { manager.load_js_extensions(vec![spec]).await }
+    });
+    if let Err(e) = load_err {
+        return (
+            ExtensionConformanceResult {
+                id: ext_id.to_string(),
+                tier: entry.conformance_tier,
+                status: "fail".to_string(),
+                failure_reason: Some(format!("Load error: {e}")),
+                artifact_path: None,
+                commands_registered: 0,
+                flags_registered: 0,
+                tools_registered: 0,
+                providers_registered: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            None,
+        );
+    }
+
+    // Capture registration snapshot for the dossier.
+    let snap = snapshot_registrations(&manager);
+
+    // Validate registrations.
+    let actual_commands = manager.list_commands();
+    let actual_cmd_names: Vec<&str> = actual_commands
+        .iter()
+        .filter_map(|v| v.get("name").and_then(Value::as_str))
+        .collect();
+
+    for expected_cmd in &entry.registrations.commands {
+        if !actual_cmd_names.contains(&expected_cmd.as_str()) {
+            return (
+                ExtensionConformanceResult {
+                    id: ext_id.to_string(),
+                    tier: entry.conformance_tier,
+                    status: "fail".to_string(),
+                    failure_reason: Some(format!(
+                        "Missing command '{expected_cmd}'. Actual: {actual_cmd_names:?}"
+                    )),
+                    artifact_path: None,
+                    commands_registered: actual_commands.len(),
+                    flags_registered: manager.list_flags().len(),
+                    tools_registered: manager.extension_tool_defs().len(),
+                    providers_registered: manager.extension_providers().len(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                },
+                Some(snap),
+            );
+        }
+    }
+
+    let actual_flags = manager.list_flags();
+
+    if entry.capabilities.registers_tools && manager.extension_tool_defs().is_empty() {
+        return (
+            ExtensionConformanceResult {
+                id: ext_id.to_string(),
+                tier: entry.conformance_tier,
+                status: "fail".to_string(),
+                failure_reason: Some("Manifest expects tools but none registered".to_string()),
+                artifact_path: None,
+                commands_registered: actual_commands.len(),
+                flags_registered: actual_flags.len(),
+                tools_registered: 0,
+                providers_registered: manager.extension_providers().len(),
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            Some(snap),
+        );
+    }
+
+    if entry.capabilities.registers_providers && manager.extension_providers().is_empty() {
+        return (
+            ExtensionConformanceResult {
+                id: ext_id.to_string(),
+                tier: entry.conformance_tier,
+                status: "fail".to_string(),
+                failure_reason: Some("Manifest expects providers but none registered".to_string()),
+                artifact_path: None,
+                commands_registered: actual_commands.len(),
+                flags_registered: actual_flags.len(),
+                tools_registered: manager.extension_tool_defs().len(),
+                providers_registered: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            Some(snap),
+        );
+    }
+
+    (
+        ExtensionConformanceResult {
+            id: ext_id.to_string(),
+            tier: entry.conformance_tier,
+            status: "pass".to_string(),
+            failure_reason: None,
+            artifact_path: None,
+            commands_registered: actual_commands.len(),
+            flags_registered: actual_flags.len(),
+            tools_registered: manager.extension_tool_defs().len(),
+            providers_registered: manager.extension_providers().len(),
+            duration_ms: start.elapsed().as_millis() as u64,
+        },
+        Some(snap),
+    )
+}
+
+/// Generate failure dossiers for all failing extensions.
+///
+/// Run with:
+/// `cargo test --test ext_conformance_generated --features ext-conformance -- conformance_failure_dossiers --nocapture`
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
+fn conformance_failure_dossiers() {
+    use chrono::{SecondsFormat, Utc};
+    use std::fmt::Write as _;
+
+    let manifest = load_manifest();
+
+    let dossier_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("ext_conformance")
+        .join("reports")
+        .join("dossiers");
+    let _ = std::fs::create_dir_all(&dossier_dir);
+
+    let total = manifest.extensions.len();
+    eprintln!("\n=== Failure Dossier Generator (bd-1f42.4.8) ===");
+    eprintln!("  Extensions in manifest: {total}");
+    eprintln!("  Generating dossiers for failures...\n");
+
+    let mut dossiers: Vec<FailureDossier> = Vec::new();
+    let mut pass_count = 0_usize;
+    let mut fail_count = 0_usize;
+    let mut skip_count = 0_usize;
+
+    for (idx, entry) in manifest.extensions.iter().enumerate() {
+        let entry_file = artifacts_dir().join(&entry.entry_path);
+        if !entry_file.exists() {
+            skip_count += 1;
+            continue;
+        }
+
+        eprint!("  [{:>3}/{total}] {:<50} ", idx + 1, entry.id);
+        let (result, snapshot) = try_conformance_detailed(&entry.id);
+
+        match result.status.as_str() {
+            "pass" => {
+                eprintln!("PASS   ({}ms)", result.duration_ms);
+                pass_count += 1;
+            }
+            "skip" => {
+                eprintln!("SKIP");
+                skip_count += 1;
+            }
+            _ => {
+                eprintln!("FAIL   ({}ms)", result.duration_ms);
+                fail_count += 1;
+
+                let category =
+                    FailureCategory::classify(result.failure_reason.as_deref().unwrap_or(""));
+
+                // Build expected registrations from manifest.
+                let expected = serde_json::json!({
+                    "commands": entry.registrations.commands,
+                    "flags": entry.registrations.flags,
+                    "tools": entry.registrations.tools,
+                    "event_handlers": entry.registrations.event_handlers,
+                    "registers_tools": entry.capabilities.registers_tools,
+                    "registers_commands": entry.capabilities.registers_commands,
+                    "registers_flags": entry.capabilities.registers_flags,
+                    "registers_providers": entry.capabilities.registers_providers,
+                });
+
+                // Build the sanitized extension ID for test function name.
+                let test_fn_name = format!("ext_{}", entry.id.replace(['/', '-'], "_"));
+
+                let reproduce_cmd = format!(
+                    "cargo test --test ext_conformance_generated --features ext-conformance -- {test_fn_name} --nocapture --exact"
+                );
+
+                let cargo_test_cmd =
+                    "cargo test --test ext_conformance_generated --features ext-conformance -- conformance_failure_dossiers --nocapture".to_string();
+
+                let dossier = FailureDossier {
+                    schema: "pi.ext.failure_dossier.v1".to_string(),
+                    generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                    extension_id: entry.id.clone(),
+                    extension_tier: entry.conformance_tier,
+                    entry_path: entry.entry_path.clone(),
+                    failure_category: category,
+                    failure_reason: result
+                        .failure_reason
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    duration_ms: result.duration_ms,
+                    registration_snapshot: snapshot,
+                    expected_registrations: expected,
+                    reproduce_command: reproduce_cmd.clone(),
+                    cargo_test_command: cargo_test_cmd,
+                    reproduce_env: serde_json::json!({
+                        "RUST_LOG": "debug",
+                        "RUST_BACKTRACE": "1",
+                    }),
+                };
+
+                // Write individual dossier file.
+                let dossier_filename = format!("{}.json", entry.id.replace('/', "__"));
+                let dossier_path = dossier_dir.join(&dossier_filename);
+                let _ = std::fs::write(
+                    &dossier_path,
+                    serde_json::to_string_pretty(&dossier).unwrap_or_default(),
+                );
+
+                dossiers.push(dossier);
+            }
+        }
+    }
+
+    let tested = pass_count + fail_count;
+    let pass_rate = if tested > 0 {
+        (pass_count as f64) / (tested as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // ── Write dossier index ──
+    let by_category: std::collections::BTreeMap<String, Vec<&FailureDossier>> = {
+        let mut m: std::collections::BTreeMap<String, Vec<&FailureDossier>> =
+            std::collections::BTreeMap::new();
+        for d in &dossiers {
+            let key = serde_json::to_value(d.failure_category)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| format!("{:?}", d.failure_category));
+            m.entry(key).or_default().push(d);
+        }
+        m
+    };
+
+    let index = serde_json::json!({
+        "schema": "pi.ext.dossier_index.v1",
+        "generated_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        "manifest_count": total,
+        "tested": tested,
+        "passed": pass_count,
+        "failed": fail_count,
+        "skipped": skip_count,
+        "pass_rate_pct": pass_rate,
+        "dossier_count": dossiers.len(),
+        "by_category": by_category.iter().map(|(cat, ds)| {
+            serde_json::json!({
+                "category": cat,
+                "count": ds.len(),
+                "extensions": ds.iter().map(|d| &d.extension_id).collect::<Vec<_>>(),
+            })
+        }).collect::<Vec<_>>(),
+        "dossiers": dossiers.iter().map(|d| {
+            serde_json::json!({
+                "extension_id": d.extension_id,
+                "tier": d.extension_tier,
+                "category": d.failure_category,
+                "reason": d.failure_reason,
+                "reproduce": d.reproduce_command,
+                "file": format!("{}.json", d.extension_id.replace('/', "__")),
+            })
+        }).collect::<Vec<_>>(),
+    });
+
+    let index_path = dossier_dir.join("dossier_index.json");
+    let _ = std::fs::write(
+        &index_path,
+        serde_json::to_string_pretty(&index).unwrap_or_default(),
+    );
+
+    // ── Write Markdown triage report ──
+    let mut md = String::new();
+    md.push_str("# Extension Failure Dossiers\n\n");
+    let _ = writeln!(
+        md,
+        "> Generated: {}\n",
+        Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+    );
+
+    md.push_str("## Summary\n\n");
+    md.push_str("| Metric | Value |\n|--------|-------|\n");
+    let _ = writeln!(md, "| Manifest total | {total} |");
+    let _ = writeln!(md, "| Tested | {tested} |");
+    let _ = writeln!(md, "| Passed | {pass_count} |");
+    let _ = writeln!(md, "| Failed (dossiers) | {fail_count} |");
+    let _ = writeln!(md, "| Pass rate | {pass_rate:.1}% |");
+    md.push('\n');
+
+    if !by_category.is_empty() {
+        md.push_str("## By Failure Category\n\n");
+        md.push_str("| Category | Count | Extensions |\n|----------|-------|------------|\n");
+        for (cat, ds) in &by_category {
+            let ext_list: Vec<&str> = ds.iter().map(|d| d.extension_id.as_str()).collect();
+            let display = if ext_list.len() > 3 {
+                format!(
+                    "{}, ... (+{})",
+                    ext_list[..3].join(", "),
+                    ext_list.len() - 3
+                )
+            } else {
+                ext_list.join(", ")
+            };
+            let _ = writeln!(md, "| {cat} | {} | {display} |", ds.len());
+        }
+        md.push('\n');
+    }
+
+    if !dossiers.is_empty() {
+        md.push_str("## Failure Details\n\n");
+        for d in &dossiers {
+            let _ = writeln!(md, "### {} (tier {})\n", d.extension_id, d.extension_tier);
+            let _ = writeln!(md, "- **Category:** {:?}", d.failure_category);
+            let _ = writeln!(md, "- **Reason:** {}", d.failure_reason);
+            let _ = writeln!(md, "- **Duration:** {}ms", d.duration_ms);
+            let _ = writeln!(md, "- **Entry path:** `{}`", d.entry_path);
+            let _ = writeln!(md, "- **Reproduce:**");
+            let _ = writeln!(md, "  ```bash\n  {}\n  ```", d.reproduce_command);
+            md.push('\n');
+        }
+    }
+
+    let md_path = dossier_dir.join("dossier_report.md");
+    let _ = std::fs::write(&md_path, &md);
+
+    // ── Print summary ──
+    eprintln!("\n=== Dossier Summary ===");
+    eprintln!("  Tested:   {tested}");
+    eprintln!("  Passed:   {pass_count}");
+    eprintln!("  Failed:   {fail_count}");
+    eprintln!("  Skipped:  {skip_count}");
+    eprintln!("  Rate:     {pass_rate:.1}%");
+    eprintln!("  Dossiers: {}", dossiers.len());
+    eprintln!();
+    eprintln!("  Reports:");
+    eprintln!("    Index:  {}", index_path.display());
+    eprintln!("    MD:     {}", md_path.display());
+    eprintln!("    Dir:    {}", dossier_dir.display());
+
+    if !by_category.is_empty() {
+        eprintln!();
+        eprintln!("  Failure categories:");
+        for (cat, ds) in &by_category {
+            eprintln!("    {cat}: {}", ds.len());
+        }
+    }
+    eprintln!();
+}
+
+// ─── CI Gate for 208 Must-Pass Extensions (bd-1f42.4.4) ─────────────────────
+//
+// Hard CI gate: blocks merge if any must-pass extension (tier 1-2) fails
+// conformance.  Stretch-set (tier 3+) results are logged as non-blocking.
+//
+// Environment variables:
+//   PI_EXT_GATE_MUST_PASS_RATE  — minimum pass rate for must-pass set (default: 100.0)
+//   PI_EXT_GATE_MAX_FAILURES    — maximum allowed failures in must-pass set (default: 0)
+//   PI_EXT_GATE_MODE            — "strict" (fail test) or "warn" (log only) (default: strict)
+//
+// Run:
+//   `cargo test --test ext_conformance_generated --features ext-conformance \
+//     -- conformance_must_pass_gate --nocapture`
+
+/// Verdict for the must-pass gate.
+#[derive(Debug, serde::Serialize)]
+struct MustPassGateVerdict {
+    schema: String,
+    generated_at: String,
+    run_id: String,
+    correlation_id: String,
+    mode: String,
+    status: String, // "pass", "fail", "warn"
+    thresholds: MustPassThresholds,
+    observed: MustPassObserved,
+    checks: Vec<serde_json::Value>,
+    blocking_failures: Vec<serde_json::Value>,
+    stretch_set_summary: serde_json::Value,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct MustPassThresholds {
+    min_pass_rate_pct: f64,
+    max_failures: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct MustPassObserved {
+    must_pass_total: usize,
+    must_pass_tested: usize,
+    must_pass_passed: usize,
+    must_pass_failed: usize,
+    must_pass_skipped: usize,
+    must_pass_pass_rate_pct: f64,
+    stretch_total: usize,
+    stretch_tested: usize,
+    stretch_passed: usize,
+    stretch_failed: usize,
+    stretch_skipped: usize,
+}
+
+fn normalize_optional_env(value: Option<String>) -> Option<String> {
+    value
+        .map(|candidate| candidate.trim().to_string())
+        .filter(|candidate| !candidate.is_empty())
+}
+
+fn resolve_must_pass_gate_lineage(
+    github_run_id: Option<String>,
+    ci_run_id: Option<String>,
+    ci_correlation_id: Option<String>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (String, String) {
+    let run_id = normalize_optional_env(github_run_id)
+        .or_else(|| normalize_optional_env(ci_run_id))
+        .unwrap_or_else(|| format!("local-{}", now.format("%Y%m%dT%H%M%S%3fZ")));
+    let correlation_id = normalize_optional_env(ci_correlation_id)
+        .unwrap_or_else(|| format!("must-pass-gate-{run_id}"));
+    (run_id, correlation_id)
+}
+
+fn current_must_pass_gate_lineage(now: chrono::DateTime<chrono::Utc>) -> (String, String) {
+    resolve_must_pass_gate_lineage(
+        std::env::var("GITHUB_RUN_ID").ok(),
+        std::env::var("CI_RUN_ID").ok(),
+        std::env::var("CI_CORRELATION_ID").ok(),
+        now,
+    )
+}
+
+#[test]
+fn must_pass_lineage_prefers_github_run_and_explicit_correlation() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-02-17T00:00:00Z")
+        .expect("parse fixed RFC3339 timestamp")
+        .with_timezone(&chrono::Utc);
+    let (run_id, correlation_id) = resolve_must_pass_gate_lineage(
+        Some(" 12345 ".to_string()),
+        Some("fallback-run".to_string()),
+        Some(" corr-abc ".to_string()),
+        now,
+    );
+    assert_eq!(run_id, "12345");
+    assert_eq!(correlation_id, "corr-abc");
+}
+
+#[test]
+fn must_pass_lineage_uses_ci_run_id_when_github_run_id_missing() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-02-17T00:00:00Z")
+        .expect("parse fixed RFC3339 timestamp")
+        .with_timezone(&chrono::Utc);
+    let (run_id, correlation_id) =
+        resolve_must_pass_gate_lineage(None, Some("ci-777".to_string()), None, now);
+    assert_eq!(run_id, "ci-777");
+    assert_eq!(correlation_id, "must-pass-gate-ci-777");
+}
+
+#[test]
+fn must_pass_lineage_falls_back_to_local_run_id_when_env_missing() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-02-17T01:02:03Z")
+        .expect("parse fixed RFC3339 timestamp")
+        .with_timezone(&chrono::Utc);
+    let (run_id, correlation_id) = resolve_must_pass_gate_lineage(
+        Some("   ".to_string()),
+        Some(String::new()),
+        Some("   ".to_string()),
+        now,
+    );
+    assert!(
+        run_id.starts_with("local-20260217T010203"),
+        "unexpected local run_id format: {run_id}"
+    );
+    assert_eq!(correlation_id, format!("must-pass-gate-{run_id}"));
+}
+
+/// CI gate test that blocks merge if must-pass extensions (tier 1-2) fail.
+///
+/// Run with:
+/// `cargo test --test ext_conformance_generated --features ext-conformance -- conformance_must_pass_gate --nocapture`
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
+fn conformance_must_pass_gate() {
+    use chrono::{SecondsFormat, Utc};
+    use std::fmt::Write as _;
+
+    let manifest = load_manifest();
+
+    // ── Read gate configuration ──
+    let min_pass_rate: f64 = std::env::var("PI_EXT_GATE_MUST_PASS_RATE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100.0);
+    let max_failures: usize = std::env::var("PI_EXT_GATE_MAX_FAILURES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mode = std::env::var("PI_EXT_GATE_MODE")
+        .unwrap_or_else(|_| "strict".to_string())
+        .to_lowercase();
+    let now = Utc::now();
+    let generated_at = now.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let (run_id, correlation_id) = current_must_pass_gate_lineage(now);
+
+    let report_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("ext_conformance")
+        .join("reports")
+        .join("gate");
+    let _ = std::fs::create_dir_all(&report_dir);
+
+    // ── Partition extensions into must-pass (tier 1-2) and stretch (tier 3+) ──
+    let must_pass: Vec<&ManifestEntry> = manifest
+        .extensions
+        .iter()
+        .filter(|e| e.conformance_tier <= 2)
+        .collect();
+    let stretch: Vec<&ManifestEntry> = manifest
+        .extensions
+        .iter()
+        .filter(|e| e.conformance_tier > 2)
+        .collect();
+
+    eprintln!("\n=== Must-Pass Extension CI Gate (bd-1f42.4.4) ===");
+    eprintln!("  Mode:            {mode}");
+    eprintln!("  Run ID:          {run_id}");
+    eprintln!("  Correlation ID:  {correlation_id}");
+    eprintln!(
+        "  Must-pass set:   {} extensions (tier 1-2)",
+        must_pass.len()
+    );
+    eprintln!("  Stretch set:     {} extensions (tier 3+)", stretch.len());
+    eprintln!("  Min pass rate:   {min_pass_rate:.1}%");
+    eprintln!("  Max failures:    {max_failures}");
+    eprintln!();
+
+    // ── Run must-pass extensions ──
+    eprintln!("  Running must-pass extensions...");
+    let mut mp_results: Vec<ExtensionConformanceResult> = Vec::with_capacity(must_pass.len());
+    for (idx, entry) in must_pass.iter().enumerate() {
+        let entry_file = artifacts_dir().join(&entry.entry_path);
+        if !entry_file.exists() {
+            mp_results.push(ExtensionConformanceResult {
+                id: entry.id.clone(),
+                tier: entry.conformance_tier,
+                status: "skip".to_string(),
+                failure_reason: Some("Artifact not available".to_string()),
+                artifact_path: None,
+                commands_registered: 0,
+                flags_registered: 0,
+                tools_registered: 0,
+                providers_registered: 0,
+                duration_ms: 0,
+            });
+            continue;
+        }
+        eprint!("  [{:>3}/{}] {:<50} ", idx + 1, must_pass.len(), entry.id);
+        let result = try_conformance(&entry.id);
+        eprintln!(
+            "{:<6} ({}ms)",
+            result.status.to_uppercase(),
+            result.duration_ms
+        );
+        mp_results.push(result);
+    }
+
+    // ── Run stretch-set extensions (non-blocking) ──
+    eprintln!("\n  Running stretch-set extensions (non-blocking)...");
+    let mut stretch_results: Vec<ExtensionConformanceResult> = Vec::with_capacity(stretch.len());
+    for (idx, entry) in stretch.iter().enumerate() {
+        let entry_file = artifacts_dir().join(&entry.entry_path);
+        if !entry_file.exists() {
+            stretch_results.push(ExtensionConformanceResult {
+                id: entry.id.clone(),
+                tier: entry.conformance_tier,
+                status: "skip".to_string(),
+                failure_reason: Some("Artifact not available".to_string()),
+                artifact_path: None,
+                commands_registered: 0,
+                flags_registered: 0,
+                tools_registered: 0,
+                providers_registered: 0,
+                duration_ms: 0,
+            });
+            continue;
+        }
+        eprint!("  [{:>3}/{}] {:<50} ", idx + 1, stretch.len(), entry.id);
+        let result = try_conformance(&entry.id);
+        eprintln!(
+            "{:<6} ({}ms)",
+            result.status.to_uppercase(),
+            result.duration_ms
+        );
+        stretch_results.push(result);
+    }
+
+    // ── Compute statistics ──
+    let mp_pass = mp_results.iter().filter(|r| r.status == "pass").count();
+    let mp_fail = mp_results.iter().filter(|r| r.status == "fail").count();
+    let mp_skip = mp_results.iter().filter(|r| r.status == "skip").count();
+    let mp_tested = mp_pass + mp_fail;
+    let mp_pass_rate = if mp_tested > 0 {
+        (mp_pass as f64) / (mp_tested as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let st_pass = stretch_results
+        .iter()
+        .filter(|r| r.status == "pass")
+        .count();
+    let st_fail = stretch_results
+        .iter()
+        .filter(|r| r.status == "fail")
+        .count();
+    let st_skip = stretch_results
+        .iter()
+        .filter(|r| r.status == "skip")
+        .count();
+    let st_tested = st_pass + st_fail;
+
+    // ── Gate checks ──
+    let rate_ok = mp_pass_rate >= min_pass_rate;
+    let count_ok = mp_fail <= max_failures;
+    let gate_pass = rate_ok && count_ok;
+
+    let status = if gate_pass {
+        "pass".to_string()
+    } else if mode == "warn" {
+        "warn".to_string()
+    } else {
+        "fail".to_string()
+    };
+
+    // ── Build blocking failure list with reproduce commands ──
+    let blocking_failures: Vec<serde_json::Value> = mp_results
+        .iter()
+        .filter(|r| r.status == "fail")
+        .map(|r| {
+            let test_fn = format!("ext_{}", r.id.replace(['/', '-'], "_"));
+            let category = FailureCategory::classify(r.failure_reason.as_deref().unwrap_or(""));
+            serde_json::json!({
+                "extension_id": r.id,
+                "tier": r.tier,
+                "failure_category": category,
+                "failure_reason": r.failure_reason,
+                "reproduce_command": format!(
+                    "cargo test --test ext_conformance_generated --features ext-conformance -- {test_fn} --nocapture --exact"
+                ),
+                "dossier_command": "cargo test --test ext_conformance_generated --features ext-conformance -- conformance_failure_dossiers --nocapture",
+                "duration_ms": r.duration_ms,
+            })
+        })
+        .collect();
+
+    let checks = vec![
+        serde_json::json!({
+            "id": "must_pass_rate",
+            "description": "Must-pass set pass rate meets minimum threshold",
+            "actual": mp_pass_rate,
+            "threshold": min_pass_rate,
+            "ok": rate_ok,
+        }),
+        serde_json::json!({
+            "id": "must_pass_failure_count",
+            "description": "Must-pass set failure count within maximum",
+            "actual": mp_fail,
+            "threshold": max_failures,
+            "ok": count_ok,
+        }),
+    ];
+
+    let verdict = MustPassGateVerdict {
+        schema: "pi.ext.must_pass_gate.v1".to_string(),
+        generated_at,
+        run_id: run_id.clone(),
+        correlation_id: correlation_id.clone(),
+        mode: mode.clone(),
+        status: status.clone(),
+        thresholds: MustPassThresholds {
+            min_pass_rate_pct: min_pass_rate,
+            max_failures,
+        },
+        observed: MustPassObserved {
+            must_pass_total: must_pass.len(),
+            must_pass_tested: mp_tested,
+            must_pass_passed: mp_pass,
+            must_pass_failed: mp_fail,
+            must_pass_skipped: mp_skip,
+            must_pass_pass_rate_pct: mp_pass_rate,
+            stretch_total: stretch.len(),
+            stretch_tested: st_tested,
+            stretch_passed: st_pass,
+            stretch_failed: st_fail,
+            stretch_skipped: st_skip,
+        },
+        checks,
+        blocking_failures,
+        stretch_set_summary: serde_json::json!({
+            "note": "Stretch-set results are informational and non-blocking",
+            "total": stretch.len(),
+            "tested": st_tested,
+            "passed": st_pass,
+            "failed": st_fail,
+            "skipped": st_skip,
+        }),
+    };
+
+    // ── Write gate verdict JSON ──
+    let verdict_path = report_dir.join("must_pass_gate_verdict.json");
+    let verdict_json =
+        serde_json::to_string_pretty(&verdict).expect("serialize must-pass gate verdict JSON");
+    assert!(
+        !verdict_json.trim().is_empty(),
+        "must-pass gate verdict serialization unexpectedly empty"
+    );
+    std::fs::write(&verdict_path, verdict_json).expect("write must-pass gate verdict JSON");
+
+    // ── Write JSONL events for each must-pass result ──
+    let events_path = report_dir.join("must_pass_events.jsonl");
+    let mut event_lines: Vec<String> = Vec::new();
+    for r in &mp_results {
+        let line = serde_json::json!({
+            "schema": "pi.ext.gate_event.v1",
+            "set": "must_pass",
+            "run_id": run_id.clone(),
+            "correlation_id": correlation_id.clone(),
+            "id": r.id,
+            "tier": r.tier,
+            "status": r.status,
+            "failure_reason": r.failure_reason,
+            "duration_ms": r.duration_ms,
+            "ts": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        });
+        event_lines.push(serde_json::to_string(&line).unwrap_or_default());
+    }
+    for r in &stretch_results {
+        let line = serde_json::json!({
+            "schema": "pi.ext.gate_event.v1",
+            "set": "stretch",
+            "run_id": run_id.clone(),
+            "correlation_id": correlation_id.clone(),
+            "id": r.id,
+            "tier": r.tier,
+            "status": r.status,
+            "failure_reason": r.failure_reason,
+            "duration_ms": r.duration_ms,
+            "ts": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        });
+        event_lines.push(serde_json::to_string(&line).unwrap_or_default());
+    }
+    let events_payload = event_lines.join("\n") + "\n";
+    assert!(
+        !events_payload.trim().is_empty(),
+        "must-pass gate event payload unexpectedly empty"
+    );
+    std::fs::write(&events_path, events_payload).expect("write must-pass gate events JSONL");
+
+    // ── Write Markdown gate report ──
+    let mut md = String::new();
+    md.push_str("# Must-Pass Extension CI Gate Report\n\n");
+    let _ = writeln!(
+        md,
+        "> Generated: {}",
+        Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+    );
+    let _ = writeln!(md, "> Run ID: {run_id}");
+    let _ = writeln!(md, "> Correlation ID: {correlation_id}");
+    let _ = writeln!(md, "> Mode: {mode}\n");
+
+    md.push_str("## Gate Verdict\n\n");
+    let _ = writeln!(md, "**Status: {}**\n", status.to_uppercase());
+
+    md.push_str(
+        "| Check | Actual | Threshold | Result |\n|-------|--------|-----------|--------|\n",
+    );
+    let _ = writeln!(
+        md,
+        "| Pass rate | {mp_pass_rate:.1}% | >={min_pass_rate:.1}% | {} |",
+        if rate_ok { "PASS" } else { "FAIL" }
+    );
+    let _ = writeln!(
+        md,
+        "| Failure count | {mp_fail} | <={max_failures} | {} |",
+        if count_ok { "PASS" } else { "FAIL" }
+    );
+    md.push('\n');
+
+    md.push_str("## Must-Pass Set (Tier 1-2)\n\n");
+    md.push_str("| Metric | Value |\n|--------|-------|\n");
+    let _ = writeln!(md, "| Total | {} |", must_pass.len());
+    let _ = writeln!(md, "| Tested | {mp_tested} |");
+    let _ = writeln!(md, "| Passed | {mp_pass} |");
+    let _ = writeln!(md, "| Failed | {mp_fail} |");
+    let _ = writeln!(md, "| Skipped | {mp_skip} |");
+    let _ = writeln!(md, "| Pass rate | {mp_pass_rate:.1}% |");
+    md.push('\n');
+
+    if mp_fail > 0 {
+        md.push_str("## Blocking Failures\n\n");
+        for r in mp_results.iter().filter(|r| r.status == "fail") {
+            let test_fn = format!("ext_{}", r.id.replace(['/', '-'], "_"));
+            let _ = writeln!(md, "### {}\n", r.id);
+            let _ = writeln!(md, "- **Tier:** {}", r.tier);
+            let _ = writeln!(
+                md,
+                "- **Reason:** {}",
+                r.failure_reason.as_deref().unwrap_or("unknown")
+            );
+            let _ = writeln!(
+                md,
+                "- **Category:** {:?}",
+                FailureCategory::classify(r.failure_reason.as_deref().unwrap_or(""))
+            );
+            let _ = writeln!(md, "- **Duration:** {}ms", r.duration_ms);
+            let _ = writeln!(md, "- **Reproduce:**");
+            let _ = writeln!(
+                md,
+                "  ```bash\n  cargo test --test ext_conformance_generated --features ext-conformance -- {test_fn} --nocapture --exact\n  ```"
+            );
+            md.push('\n');
+        }
+    }
+
+    md.push_str("## Stretch Set (Tier 3+) — Non-Blocking\n\n");
+    md.push_str("| Metric | Value |\n|--------|-------|\n");
+    let _ = writeln!(md, "| Total | {} |", stretch.len());
+    let _ = writeln!(md, "| Tested | {st_tested} |");
+    let _ = writeln!(md, "| Passed | {st_pass} |");
+    let _ = writeln!(md, "| Failed | {st_fail} |");
+    let _ = writeln!(md, "| Skipped | {st_skip} |");
+    md.push('\n');
+
+    let md_path = report_dir.join("must_pass_gate_report.md");
+    std::fs::write(&md_path, &md).expect("write must-pass gate report Markdown");
+
+    let verdict_len = std::fs::metadata(&verdict_path)
+        .expect("stat must-pass gate verdict JSON")
+        .len();
+    let events_len = std::fs::metadata(&events_path)
+        .expect("stat must-pass gate events JSONL")
+        .len();
+    let md_len = std::fs::metadata(&md_path)
+        .expect("stat must-pass gate report Markdown")
+        .len();
+    assert!(
+        verdict_len > 0,
+        "must-pass gate verdict JSON is empty after write"
+    );
+    assert!(
+        events_len > 0,
+        "must-pass gate events JSONL is empty after write"
+    );
+    assert!(
+        md_len > 0,
+        "must-pass gate report Markdown is empty after write"
+    );
+
+    // ── Print summary ──
+    eprintln!("\n=== Must-Pass Gate Verdict ===");
+    eprintln!("  Status:     {}", status.to_uppercase());
+    eprintln!("  Mode:       {mode}");
+    eprintln!("  Must-pass:  {mp_pass}/{mp_tested} passed ({mp_pass_rate:.1}%)");
+    eprintln!("  Stretch:    {st_pass}/{st_tested} passed (non-blocking)");
+    if mp_fail > 0 {
+        eprintln!("  Blocking failures:");
+        for r in mp_results.iter().filter(|r| r.status == "fail") {
+            eprintln!(
+                "    - {} ({})",
+                r.id,
+                r.failure_reason.as_deref().unwrap_or("unknown")
+            );
+        }
+    }
+    eprintln!();
+    eprintln!("  Reports:");
+    eprintln!("    Verdict: {}", verdict_path.display());
+    eprintln!("    Events:  {}", events_path.display());
+    eprintln!("    MD:      {}", md_path.display());
+    eprintln!();
+
+    // ── Hard gate: fail the test if must-pass set doesn't meet thresholds ──
+    assert!(
+        mode != "strict" || gate_pass,
+        "GATE BLOCKED: Must-pass extension conformance failed.\n\
+         Pass rate: {mp_pass_rate:.1}% (min: {min_pass_rate:.1}%)\n\
+         Failures: {mp_fail} (max: {max_failures})\n\
+         See: {}\n\
+         Run dossiers: cargo test --test ext_conformance_generated --features ext-conformance -- conformance_failure_dossiers --nocapture",
+        verdict_path.display()
+    );
+}
+
+// ─── Provider Compatibility Matrix (bd-1f42.4.6) ────────────────────────────
+//
+// Validates extension behavior across simulated provider backend configurations.
+// Each provider mode defines a different set of available host capabilities,
+// reflecting what a real provider backend would expose to extensions.
+//
+// Run:
+//   `cargo test --test ext_conformance_generated --features ext-conformance \
+//     -- conformance_provider_compat_matrix --nocapture`
+
+/// A simulated provider mode with a name and the capabilities it exposes.
+#[derive(Debug, Clone)]
+struct ProviderMode {
+    /// Identifier for this provider mode (e.g., `anthropic_streaming`).
+    name: &'static str,
+    /// Description of what this mode simulates.
+    description: &'static str,
+    /// Environment overrides applied when running extensions in this mode.
+    env_overrides: Vec<(&'static str, &'static str)>,
+}
+
+/// Result of testing one extension in one provider mode.
+#[derive(Debug, serde::Serialize)]
+struct CompatibilityCell {
+    extension_id: String,
+    extension_tier: u32,
+    provider_mode: String,
+    status: String, // "pass", "fail", "skip"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_category: Option<FailureCategory>,
+    duration_ms: u64,
+    commands_registered: usize,
+    flags_registered: usize,
+    tools_registered: usize,
+    providers_registered: usize,
+}
+
+/// Full provider compatibility matrix report.
+#[derive(Debug, serde::Serialize)]
+struct ProviderCompatReport {
+    schema: String,
+    generated_at: String,
+    provider_modes: Vec<serde_json::Value>,
+    must_pass_count: usize,
+    mode_count: usize,
+    total_cells: usize,
+    passed_cells: usize,
+    failed_cells: usize,
+    skipped_cells: usize,
+    cell_pass_rate_pct: f64,
+    provider_failures: Vec<serde_json::Value>,
+    per_mode_summary: Vec<serde_json::Value>,
+}
+
+/// Define the provider modes for the compatibility matrix.
+///
+/// Each mode applies different environment overrides that influence the
+/// extension runtime behavior (e.g., different provider prefixes, API
+/// styles, or capability restrictions).
+fn provider_modes() -> Vec<ProviderMode> {
+    vec![
+        ProviderMode {
+            name: "default",
+            description: "Default configuration (no provider-specific overrides)",
+            env_overrides: vec![],
+        },
+        ProviderMode {
+            name: "anthropic_streaming",
+            description: "Anthropic Messages API with SSE streaming",
+            env_overrides: vec![
+                ("PI_DETERMINISTIC_PROVIDER_HINT", "anthropic"),
+                ("PI_DETERMINISTIC_API_STYLE", "anthropic_messages"),
+            ],
+        },
+        ProviderMode {
+            name: "openai_completions",
+            description: "OpenAI Chat Completions API",
+            env_overrides: vec![
+                ("PI_DETERMINISTIC_PROVIDER_HINT", "openai"),
+                ("PI_DETERMINISTIC_API_STYLE", "openai_completions"),
+            ],
+        },
+        ProviderMode {
+            name: "openai_responses",
+            description: "OpenAI Responses API (reasoning models)",
+            env_overrides: vec![
+                ("PI_DETERMINISTIC_PROVIDER_HINT", "openai"),
+                ("PI_DETERMINISTIC_API_STYLE", "openai_responses"),
+            ],
+        },
+        ProviderMode {
+            name: "gemini_generative",
+            description: "Google Gemini / GenerativeAI",
+            env_overrides: vec![
+                ("PI_DETERMINISTIC_PROVIDER_HINT", "google"),
+                ("PI_DETERMINISTIC_API_STYLE", "google_generative_ai"),
+            ],
+        },
+        ProviderMode {
+            name: "openai_compatible",
+            description: "Generic OpenAI-compatible endpoint (e.g., groq, deepseek, xai)",
+            env_overrides: vec![
+                ("PI_DETERMINISTIC_PROVIDER_HINT", "openai_compatible"),
+                ("PI_DETERMINISTIC_API_STYLE", "openai_completions"),
+            ],
+        },
+    ]
+}
+
+/// Run conformance for a single extension with runtime environment overrides.
+///
+/// Unlike [`try_conformance`], this creates a `PiJsRuntimeConfig` with the
+/// given env overrides passed through the config `env` map, so no process-level
+/// environment mutation is needed.
+#[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
+fn try_conformance_with_env(
+    ext_id: &str,
+    env_overrides: &[(&str, &str)],
+) -> ExtensionConformanceResult {
+    let manifest = load_manifest();
+    let Some(entry) = manifest.find(ext_id) else {
+        return ExtensionConformanceResult {
+            id: ext_id.to_string(),
+            tier: 0,
+            status: "skip".to_string(),
+            failure_reason: Some("Not found in VALIDATED_MANIFEST.json".to_string()),
+            artifact_path: None,
+            commands_registered: 0,
+            flags_registered: 0,
+            tools_registered: 0,
+            providers_registered: 0,
+            duration_ms: 0,
+        };
+    };
+
+    let start = std::time::Instant::now();
+    let cwd = conformance_work_dir(format!("pi-compat-matrix-{}", ext_id.replace('/', "_")));
+
+    let entry_file = artifacts_dir().join(&entry.entry_path);
+    if !entry_file.exists() {
+        return ExtensionConformanceResult {
+            id: ext_id.to_string(),
+            tier: entry.conformance_tier,
+            status: "skip".to_string(),
+            failure_reason: Some(format!("Artifact not found: {}", entry_file.display())),
+            artifact_path: None,
+            commands_registered: 0,
+            flags_registered: 0,
+            tools_registered: 0,
+            providers_registered: 0,
+            duration_ms: start.elapsed().as_millis() as u64,
+        };
+    }
+
+    let spec = match JsExtensionLoadSpec::from_entry_path(&entry_file) {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtensionConformanceResult {
+                id: ext_id.to_string(),
+                tier: entry.conformance_tier,
+                status: "fail".to_string(),
+                failure_reason: Some(format!("Load spec error: {e}")),
+                artifact_path: None,
+                commands_registered: 0,
+                flags_registered: 0,
+                tools_registered: 0,
+                providers_registered: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+
+    let manager = ExtensionManager::new();
+    let tools = Arc::new(ToolRegistry::new(&[], &cwd, None));
+
+    // Build env map with overrides.
+    let mut env = hermetic_conformance_env(&cwd);
+    env.extend(
+        env_overrides
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string())),
+    );
+
+    let js_config = PiJsRuntimeConfig {
+        cwd: cwd.display().to_string(),
+        env,
+        deny_env: false,
+        ..Default::default()
+    };
+
+    let runtime_result = common::run_async({
+        let manager = manager.clone();
+        let tools = Arc::clone(&tools);
+        async move { JsExtensionRuntimeHandle::start(js_config, tools, manager).await }
+    });
+    let runtime = match runtime_result {
+        Ok(rt) => rt,
+        Err(e) => {
+            return ExtensionConformanceResult {
+                id: ext_id.to_string(),
+                tier: entry.conformance_tier,
+                status: "fail".to_string(),
+                failure_reason: Some(format!("Runtime start error: {e}")),
+                artifact_path: None,
+                commands_registered: 0,
+                flags_registered: 0,
+                tools_registered: 0,
+                providers_registered: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    };
+    manager.set_js_runtime(runtime);
+
+    let load_err = common::run_async({
+        let manager = manager.clone();
+        async move { manager.load_js_extensions(vec![spec]).await }
+    });
+    if let Err(e) = load_err {
+        return ExtensionConformanceResult {
+            id: ext_id.to_string(),
+            tier: entry.conformance_tier,
+            status: "fail".to_string(),
+            failure_reason: Some(format!("Load error: {e}")),
+            artifact_path: None,
+            commands_registered: 0,
+            flags_registered: 0,
+            tools_registered: 0,
+            providers_registered: 0,
+            duration_ms: start.elapsed().as_millis() as u64,
+        };
+    }
+
+    // Validate registrations against manifest.
+    let actual_commands = manager.list_commands();
+    let actual_cmd_names: Vec<&str> = actual_commands
+        .iter()
+        .filter_map(|v| v.get("name").and_then(Value::as_str))
+        .collect();
+
+    for expected_cmd in &entry.registrations.commands {
+        if !actual_cmd_names.contains(&expected_cmd.as_str()) {
+            return ExtensionConformanceResult {
+                id: ext_id.to_string(),
+                tier: entry.conformance_tier,
+                status: "fail".to_string(),
+                failure_reason: Some(format!(
+                    "Missing command '{expected_cmd}'. Actual: {actual_cmd_names:?}"
+                )),
+                artifact_path: None,
+                commands_registered: actual_commands.len(),
+                flags_registered: manager.list_flags().len(),
+                tools_registered: manager.extension_tool_defs().len(),
+                providers_registered: manager.extension_providers().len(),
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    }
+
+    let actual_flags = manager.list_flags();
+    let actual_flag_names: Vec<&str> = actual_flags
+        .iter()
+        .filter_map(|v| v.get("name").and_then(Value::as_str))
+        .collect();
+
+    for expected_flag in &entry.registrations.flags {
+        if !actual_flag_names.contains(&expected_flag.as_str()) {
+            return ExtensionConformanceResult {
+                id: ext_id.to_string(),
+                tier: entry.conformance_tier,
+                status: "fail".to_string(),
+                failure_reason: Some(format!(
+                    "Missing flag '{expected_flag}'. Actual: {actual_flag_names:?}"
+                )),
+                artifact_path: None,
+                commands_registered: actual_commands.len(),
+                flags_registered: actual_flags.len(),
+                tools_registered: manager.extension_tool_defs().len(),
+                providers_registered: manager.extension_providers().len(),
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+    }
+
+    if entry.capabilities.registers_tools && manager.extension_tool_defs().is_empty() {
+        return ExtensionConformanceResult {
+            id: ext_id.to_string(),
+            tier: entry.conformance_tier,
+            status: "fail".to_string(),
+            failure_reason: Some("Manifest expects tools but none registered".to_string()),
+            artifact_path: None,
+            commands_registered: actual_commands.len(),
+            flags_registered: actual_flags.len(),
+            tools_registered: 0,
+            providers_registered: manager.extension_providers().len(),
+            duration_ms: start.elapsed().as_millis() as u64,
+        };
+    }
+
+    if entry.capabilities.registers_providers && manager.extension_providers().is_empty() {
+        return ExtensionConformanceResult {
+            id: ext_id.to_string(),
+            tier: entry.conformance_tier,
+            status: "fail".to_string(),
+            failure_reason: Some("Manifest expects providers but none registered".to_string()),
+            artifact_path: None,
+            commands_registered: actual_commands.len(),
+            flags_registered: actual_flags.len(),
+            tools_registered: manager.extension_tool_defs().len(),
+            providers_registered: 0,
+            duration_ms: start.elapsed().as_millis() as u64,
+        };
+    }
+
+    ExtensionConformanceResult {
+        id: ext_id.to_string(),
+        tier: entry.conformance_tier,
+        status: "pass".to_string(),
+        failure_reason: None,
+        artifact_path: None,
+        commands_registered: actual_commands.len(),
+        flags_registered: actual_flags.len(),
+        tools_registered: manager.extension_tool_defs().len(),
+        providers_registered: manager.extension_providers().len(),
+        duration_ms: start.elapsed().as_millis() as u64,
+    }
+}
+
+/// Provider compatibility matrix test.
+///
+/// Run with:
+/// `cargo test --test ext_conformance_generated --features ext-conformance -- conformance_provider_compat_matrix --nocapture`
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
+fn conformance_provider_compat_matrix() {
+    use chrono::{SecondsFormat, Utc};
+    use std::fmt::Write as _;
+
+    let manifest = load_manifest();
+    let modes = provider_modes();
+
+    let report_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("ext_conformance")
+        .join("reports")
+        .join("provider_compat");
+    let _ = std::fs::create_dir_all(&report_dir);
+
+    // Only test must-pass (tier 1-2) extensions with available artifacts.
+    let must_pass: Vec<&ManifestEntry> = manifest
+        .extensions
+        .iter()
+        .filter(|e| e.conformance_tier <= 2)
+        .filter(|e| artifacts_dir().join(&e.entry_path).exists())
+        .collect();
+
+    let total_cells = must_pass.len() * modes.len();
+
+    eprintln!("\n=== Provider Compatibility Matrix (bd-1f42.4.6) ===");
+    eprintln!(
+        "  Extensions:    {} must-pass with artifacts",
+        must_pass.len()
+    );
+    eprintln!("  Provider modes: {}", modes.len());
+    eprintln!("  Total cells:   {total_cells}");
+    eprintln!();
+
+    let mut cells: Vec<CompatibilityCell> = Vec::with_capacity(total_cells);
+
+    for mode in &modes {
+        eprintln!("  --- Mode: {} ({}) ---", mode.name, mode.description);
+
+        for (idx, entry) in must_pass.iter().enumerate() {
+            eprint!("  [{:>3}/{}] {:<50} ", idx + 1, must_pass.len(), entry.id);
+            let result = try_conformance_with_env(&entry.id, &mode.env_overrides);
+            let fc = if result.status == "pass" {
+                None
+            } else {
+                Some(FailureCategory::classify(
+                    result.failure_reason.as_deref().unwrap_or(""),
+                ))
+            };
+            eprintln!(
+                "{:<6} ({}ms)",
+                result.status.to_uppercase(),
+                result.duration_ms
+            );
+
+            cells.push(CompatibilityCell {
+                extension_id: entry.id.clone(),
+                extension_tier: entry.conformance_tier,
+                provider_mode: mode.name.to_string(),
+                status: result.status,
+                failure_reason: result.failure_reason,
+                failure_category: fc,
+                duration_ms: result.duration_ms,
+                commands_registered: result.commands_registered,
+                flags_registered: result.flags_registered,
+                tools_registered: result.tools_registered,
+                providers_registered: result.providers_registered,
+            });
+        }
+        eprintln!();
+    }
+
+    // ── Compute statistics ──
+    let passed_cells = cells.iter().filter(|c| c.status == "pass").count();
+    let failed_cells = cells.iter().filter(|c| c.status == "fail").count();
+    let skipped_cells = cells.iter().filter(|c| c.status == "skip").count();
+    let tested_cells = passed_cells + failed_cells;
+    let cell_pass_rate = if tested_cells > 0 {
+        (passed_cells as f64) / (tested_cells as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // ── Per-mode summary ──
+    let per_mode_summary: Vec<serde_json::Value> = modes
+        .iter()
+        .map(|mode| {
+            let mode_cells: Vec<&CompatibilityCell> = cells
+                .iter()
+                .filter(|c| c.provider_mode == mode.name)
+                .collect();
+            let mp = mode_cells.iter().filter(|c| c.status == "pass").count();
+            let mf = mode_cells.iter().filter(|c| c.status == "fail").count();
+            let ms = mode_cells.iter().filter(|c| c.status == "skip").count();
+            let mt = mp + mf;
+            let mr = if mt > 0 {
+                (mp as f64) / (mt as f64) * 100.0
+            } else {
+                0.0
+            };
+            serde_json::json!({
+                "mode": mode.name,
+                "description": mode.description,
+                "tested": mt,
+                "passed": mp,
+                "failed": mf,
+                "skipped": ms,
+                "pass_rate_pct": mr,
+            })
+        })
+        .collect();
+
+    // ── Identify provider-specific failures (fail in one mode, pass in default) ──
+    let provider_failures: Vec<serde_json::Value> = cells
+        .iter()
+        .filter(|c| c.status == "fail" && c.provider_mode != "default")
+        .filter(|c| {
+            cells.iter().any(|d| {
+                d.extension_id == c.extension_id
+                    && d.provider_mode == "default"
+                    && d.status == "pass"
+            })
+        })
+        .map(|c| {
+            serde_json::json!({
+                "extension_id": c.extension_id,
+                "tier": c.extension_tier,
+                "provider_mode": c.provider_mode,
+                "failure_reason": c.failure_reason,
+                "failure_category": c.failure_category,
+                "note": "Passes in default mode but fails in this provider mode",
+            })
+        })
+        .collect();
+
+    // ── Build report ──
+    let report = ProviderCompatReport {
+        schema: "pi.ext.provider_compat_matrix.v1".to_string(),
+        generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        provider_modes: modes
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "name": m.name,
+                    "description": m.description,
+                    "env_overrides": m.env_overrides.iter()
+                        .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+        must_pass_count: must_pass.len(),
+        mode_count: modes.len(),
+        total_cells,
+        passed_cells,
+        failed_cells,
+        skipped_cells,
+        cell_pass_rate_pct: cell_pass_rate,
+        provider_failures,
+        per_mode_summary,
+    };
+
+    // ── Write JSON report ──
+    let report_path = report_dir.join("provider_compat_report.json");
+    let _ = std::fs::write(
+        &report_path,
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    );
+
+    // ── Write JSONL events ──
+    let events_path = report_dir.join("provider_compat_events.jsonl");
+    let mut event_lines: Vec<String> = Vec::new();
+    for c in &cells {
+        let line = serde_json::json!({
+            "schema": "pi.ext.provider_compat_event.v1",
+            "extension_id": c.extension_id,
+            "tier": c.extension_tier,
+            "provider_mode": c.provider_mode,
+            "status": c.status,
+            "failure_reason": c.failure_reason,
+            "failure_category": c.failure_category,
+            "duration_ms": c.duration_ms,
+            "ts": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        });
+        event_lines.push(serde_json::to_string(&line).unwrap_or_default());
+    }
+    let _ = std::fs::write(&events_path, event_lines.join("\n") + "\n");
+
+    // ── Write per-cell artifact directory ──
+    let cells_dir = report_dir.join("cells");
+    let _ = std::fs::create_dir_all(&cells_dir);
+    for c in &cells {
+        let cell_file = cells_dir.join(format!(
+            "{}_{}.json",
+            c.extension_id.replace('/', "__"),
+            c.provider_mode
+        ));
+        let _ = std::fs::write(
+            &cell_file,
+            serde_json::to_string_pretty(c).unwrap_or_default(),
+        );
+    }
+
+    // ── Write Markdown report ──
+    let mut md = String::new();
+    md.push_str("# Provider Compatibility Matrix Report\n\n");
+    let _ = writeln!(
+        md,
+        "> Generated: {}\n",
+        Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+    );
+
+    md.push_str("## Summary\n\n");
+    md.push_str("| Metric | Value |\n|--------|-------|\n");
+    let _ = writeln!(md, "| Extensions | {} |", must_pass.len());
+    let _ = writeln!(md, "| Provider modes | {} |", modes.len());
+    let _ = writeln!(md, "| Total cells | {total_cells} |");
+    let _ = writeln!(md, "| Passed | {passed_cells} |");
+    let _ = writeln!(md, "| Failed | {failed_cells} |");
+    let _ = writeln!(md, "| Skipped | {skipped_cells} |");
+    let _ = writeln!(md, "| Cell pass rate | {cell_pass_rate:.1}% |");
+    md.push('\n');
+
+    md.push_str("## Per-Mode Results\n\n");
+    md.push_str("| Mode | Tested | Passed | Failed | Skipped | Rate |\n");
+    md.push_str("|------|--------|--------|--------|---------|------|\n");
+    for ms in &report.per_mode_summary {
+        let _ = writeln!(
+            md,
+            "| {} | {} | {} | {} | {} | {:.1}% |",
+            ms["mode"].as_str().unwrap_or(""),
+            ms["tested"],
+            ms["passed"],
+            ms["failed"],
+            ms["skipped"],
+            ms["pass_rate_pct"].as_f64().unwrap_or(0.0),
+        );
+    }
+    md.push('\n');
+
+    if !report.provider_failures.is_empty() {
+        md.push_str("## Provider-Specific Failures\n\n");
+        md.push_str(
+            "These extensions pass in default mode but fail in a specific provider mode:\n\n",
+        );
+        md.push_str("| Extension | Tier | Mode | Reason |\n|-----------|------|------|--------|\n");
+        for pf in &report.provider_failures {
+            let _ = writeln!(
+                md,
+                "| {} | {} | {} | {} |",
+                pf["extension_id"].as_str().unwrap_or(""),
+                pf["tier"],
+                pf["provider_mode"].as_str().unwrap_or(""),
+                pf["failure_reason"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .chars()
+                    .take(80)
+                    .collect::<String>(),
+            );
+        }
+        md.push('\n');
+    }
+
+    let md_path = report_dir.join("provider_compat_report.md");
+    let _ = std::fs::write(&md_path, &md);
+
+    // ── Print summary ──
+    eprintln!("=== Provider Compatibility Matrix Summary ===");
+    eprintln!("  Total cells:        {total_cells}");
+    eprintln!("  Passed:             {passed_cells}");
+    eprintln!("  Failed:             {failed_cells}");
+    eprintln!("  Skipped:            {skipped_cells}");
+    eprintln!("  Cell pass rate:     {cell_pass_rate:.1}%");
+    if !report.provider_failures.is_empty() {
+        eprintln!(
+            "  Provider-specific:  {} failures",
+            report.provider_failures.len()
+        );
+    }
+    eprintln!();
+    eprintln!("  Reports:");
+    eprintln!("    JSON:   {}", report_path.display());
+    eprintln!("    JSONL:  {}", events_path.display());
+    eprintln!("    MD:     {}", md_path.display());
+    eprintln!("    Cells:  {}", cells_dir.display());
+    eprintln!();
+}
+
+// ─── End-User CLI Extension Journeys (bd-1f42.4.7) ──────────────────────────
+//
+// Validates extension behavior through user-realistic CLI journeys.
+// Each extension category (Tool, Command, EventHook, Provider, Configuration)
+// has a journey template that tests the registration-to-invocation lifecycle.
+//
+// Run:
+//   `cargo test --test ext_conformance_generated --features ext-conformance \
+//     -- conformance_extension_journeys --nocapture`
+
+/// Journey category that maps to how users interact with extensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum JourneyCategory {
+    /// Extension registers tools for the agent to invoke.
+    ToolProvider,
+    /// Extension registers slash commands for user interaction.
+    CommandProvider,
+    /// Extension subscribes to lifecycle events.
+    EventSubscriber,
+    /// Extension registers as an LLM provider.
+    ModelProvider,
+    /// Extension registers CLI flags or shortcuts.
+    ConfigProvider,
+    /// Extension registers multiple types of capabilities.
+    MultiCapability,
+    /// Extension with no specific registration pattern.
+    Passive,
+}
+
+impl JourneyCategory {
+    /// Classify an extension into a journey category based on its capabilities.
+    fn classify(entry: &ManifestEntry) -> Self {
+        let has_tools = entry.capabilities.registers_tools;
+        let has_commands = entry.capabilities.registers_commands;
+        let has_providers = entry.capabilities.registers_providers;
+        let has_flags = entry.capabilities.registers_flags;
+        let has_events = !entry.capabilities.subscribes_events.is_empty();
+
+        let cap_count = usize::from(has_tools)
+            + usize::from(has_commands)
+            + usize::from(has_providers)
+            + usize::from(has_flags)
+            + usize::from(has_events);
+
+        if cap_count >= 2 {
+            Self::MultiCapability
+        } else if has_providers {
+            Self::ModelProvider
+        } else if has_tools {
+            Self::ToolProvider
+        } else if has_commands {
+            Self::CommandProvider
+        } else if has_events {
+            Self::EventSubscriber
+        } else if has_flags {
+            Self::ConfigProvider
+        } else {
+            Self::Passive
+        }
+    }
+
+    /// Description of what the journey tests for this category.
+    const fn journey_description(self) -> &'static str {
+        match self {
+            Self::ToolProvider => "Load extension -> verify tool registration -> check tool schema",
+            Self::CommandProvider => {
+                "Load extension -> verify command registration -> check command metadata"
+            }
+            Self::EventSubscriber => {
+                "Load extension -> verify event handler registration -> check subscriptions"
+            }
+            Self::ModelProvider => {
+                "Load extension -> verify provider registration -> check model entries"
+            }
+            Self::ConfigProvider => {
+                "Load extension -> verify flag/shortcut registration -> check flag metadata"
+            }
+            Self::MultiCapability => {
+                "Load extension -> verify all registration types -> cross-check capabilities"
+            }
+            Self::Passive => {
+                "Load extension -> verify basic activation -> check no registration errors"
+            }
+        }
+    }
+}
+
+/// Result of a single extension journey.
+#[derive(Debug, serde::Serialize)]
+struct JourneyResult {
+    extension_id: String,
+    extension_tier: u32,
+    journey_category: JourneyCategory,
+    journey_description: String,
+    status: String, // "pass", "fail", "skip"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_step: Option<String>,
+    reproduce_command: String,
+    duration_ms: u64,
+    steps_completed: usize,
+    steps_total: usize,
+    registrations: serde_json::Value,
+}
+
+/// Run the category-specific journey for an extension.
+#[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
+fn run_extension_journey(ext_id: &str) -> JourneyResult {
+    let manifest = load_manifest();
+    let Some(entry) = manifest.find(ext_id) else {
+        return JourneyResult {
+            extension_id: ext_id.to_string(),
+            extension_tier: 0,
+            journey_category: JourneyCategory::Passive,
+            journey_description: String::new(),
+            status: "skip".to_string(),
+            failure_reason: Some("Not in manifest".to_string()),
+            failure_step: None,
+            reproduce_command: String::new(),
+            duration_ms: 0,
+            steps_completed: 0,
+            steps_total: 0,
+            registrations: serde_json::json!({}),
+        };
+    };
+
+    let category = JourneyCategory::classify(entry);
+    let test_fn = format!("ext_{}", ext_id.replace(['/', '-'], "_"));
+    let reproduce = format!(
+        "cargo test --test ext_conformance_generated --features ext-conformance -- {test_fn} --nocapture --exact"
+    );
+
+    let start = std::time::Instant::now();
+
+    // Step 1: Load extension (via try_conformance).
+    let base_result = try_conformance(ext_id);
+
+    if base_result.status != "pass" {
+        return JourneyResult {
+            extension_id: ext_id.to_string(),
+            extension_tier: entry.conformance_tier,
+            journey_category: category,
+            journey_description: category.journey_description().to_string(),
+            status: "fail".to_string(),
+            failure_reason: base_result.failure_reason,
+            failure_step: Some("load_extension".to_string()),
+            reproduce_command: reproduce,
+            duration_ms: start.elapsed().as_millis() as u64,
+            steps_completed: 0,
+            steps_total: category_step_count(category),
+            registrations: serde_json::json!({}),
+        };
+    }
+
+    // Step 2+: Category-specific journey validation.
+    let (step_failures, steps_ok, regs) = run_category_journey(ext_id, entry, category);
+
+    let total_steps = 1 + category_step_count(category);
+    let completed = 1 + steps_ok;
+
+    if let Some((step_name, reason)) = step_failures {
+        JourneyResult {
+            extension_id: ext_id.to_string(),
+            extension_tier: entry.conformance_tier,
+            journey_category: category,
+            journey_description: category.journey_description().to_string(),
+            status: "fail".to_string(),
+            failure_reason: Some(reason),
+            failure_step: Some(step_name),
+            reproduce_command: reproduce,
+            duration_ms: start.elapsed().as_millis() as u64,
+            steps_completed: completed,
+            steps_total: total_steps,
+            registrations: regs,
+        }
+    } else {
+        JourneyResult {
+            extension_id: ext_id.to_string(),
+            extension_tier: entry.conformance_tier,
+            journey_category: category,
+            journey_description: category.journey_description().to_string(),
+            status: "pass".to_string(),
+            failure_reason: None,
+            failure_step: None,
+            reproduce_command: reproduce,
+            duration_ms: start.elapsed().as_millis() as u64,
+            steps_completed: completed,
+            steps_total: total_steps,
+            registrations: regs,
+        }
+    }
+}
+
+/// Number of validation steps for a journey category (excluding the load step).
+const fn category_step_count(cat: JourneyCategory) -> usize {
+    match cat {
+        JourneyCategory::ToolProvider
+        | JourneyCategory::CommandProvider
+        | JourneyCategory::EventSubscriber
+        | JourneyCategory::ModelProvider
+        | JourneyCategory::ConfigProvider => 2,
+        JourneyCategory::MultiCapability => 3,
+        JourneyCategory::Passive => 1,
+    }
+}
+
+/// Run the category-specific journey steps after successful load.
+///
+/// Returns `(first_failure, steps_completed_before_failure, registrations)`.
+#[allow(clippy::too_many_lines)]
+fn run_category_journey(
+    ext_id: &str,
+    entry: &ManifestEntry,
+    category: JourneyCategory,
+) -> (Option<(String, String)>, usize, serde_json::Value) {
+    // Re-load extension to get fresh registration state for journey checks.
+    let cwd = conformance_work_dir(format!("pi-journey-{}", ext_id.replace('/', "_")));
+
+    let entry_file = artifacts_dir().join(&entry.entry_path);
+    let spec = match JsExtensionLoadSpec::from_entry_path(&entry_file) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                Some(("load_spec".to_string(), format!("Load spec error: {e}"))),
+                0,
+                serde_json::json!({}),
+            );
+        }
+    };
+
+    let manager = ExtensionManager::new();
+    let tools = Arc::new(ToolRegistry::new(&[], &cwd, None));
+    let js_config = PiJsRuntimeConfig {
+        cwd: cwd.display().to_string(),
+        env: hermetic_conformance_env(&cwd),
+        deny_env: false,
+        ..Default::default()
+    };
+
+    let runtime_result = common::run_async({
+        let manager = manager.clone();
+        let tools = Arc::clone(&tools);
+        async move { JsExtensionRuntimeHandle::start(js_config, tools, manager).await }
+    });
+    let runtime = match runtime_result {
+        Ok(rt) => rt,
+        Err(e) => {
+            return (
+                Some((
+                    "runtime_start".to_string(),
+                    format!("Runtime start error: {e}"),
+                )),
+                0,
+                serde_json::json!({}),
+            );
+        }
+    };
+    manager.set_js_runtime(runtime);
+
+    if let Err(e) = common::run_async({
+        let manager = manager.clone();
+        async move { manager.load_js_extensions(vec![spec]).await }
+    }) {
+        return (
+            Some(("load_extension".to_string(), format!("Load error: {e}"))),
+            0,
+            serde_json::json!({}),
+        );
+    }
+
+    // Capture registration state.
+    let regs = snapshot_registrations(&manager);
+    let commands = manager.list_commands();
+    let flags = manager.list_flags();
+    let tool_defs = manager.extension_tool_defs();
+    let providers = manager.extension_providers();
+
+    // Run category-specific checks.
+    match category {
+        JourneyCategory::ToolProvider => {
+            // Step: verify tool registration
+            if entry.capabilities.registers_tools && tool_defs.is_empty() {
+                return (
+                    Some((
+                        "verify_tool_registration".to_string(),
+                        "Manifest expects tools but none registered".to_string(),
+                    )),
+                    0,
+                    regs,
+                );
+            }
+            // Step: check tool schemas have required fields
+            for td in &tool_defs {
+                if td.get("name").and_then(Value::as_str).is_none() {
+                    return (
+                        Some((
+                            "check_tool_schema".to_string(),
+                            format!("Tool definition missing 'name' field: {td}"),
+                        )),
+                        1,
+                        regs,
+                    );
+                }
+            }
+            (None, 2, regs)
+        }
+        JourneyCategory::CommandProvider => {
+            // Step: verify command registration
+            for expected_cmd in &entry.registrations.commands {
+                let found = commands
+                    .iter()
+                    .any(|c| c.get("name").and_then(Value::as_str) == Some(expected_cmd.as_str()));
+                if !found {
+                    return (
+                        Some((
+                            "verify_command_registration".to_string(),
+                            format!("Missing command '{expected_cmd}'"),
+                        )),
+                        0,
+                        regs,
+                    );
+                }
+            }
+            // Step: check command metadata has name field
+            for cmd in &commands {
+                if cmd.get("name").and_then(Value::as_str).is_none() {
+                    return (
+                        Some((
+                            "check_command_metadata".to_string(),
+                            format!("Command missing 'name': {cmd}"),
+                        )),
+                        1,
+                        regs,
+                    );
+                }
+            }
+            (None, 2, regs)
+        }
+        JourneyCategory::EventSubscriber => {
+            // Step: verify event handler registration
+            let handlers = regs
+                .get("event_handlers")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            if handlers == 0 && !entry.capabilities.subscribes_events.is_empty() {
+                return (
+                    Some((
+                        "verify_event_registration".to_string(),
+                        "Manifest expects event subscriptions but none registered".to_string(),
+                    )),
+                    0,
+                    regs,
+                );
+            }
+            // Step: check subscription names are non-empty
+            if let Some(arr) = regs.get("event_handlers").and_then(Value::as_array) {
+                for h in arr {
+                    if h.as_str().is_none_or(str::is_empty) {
+                        return (
+                            Some((
+                                "check_event_subscriptions".to_string(),
+                                format!("Empty event handler name: {h}"),
+                            )),
+                            1,
+                            regs,
+                        );
+                    }
+                }
+            }
+            (None, 2, regs)
+        }
+        JourneyCategory::ModelProvider => {
+            // Step: verify provider registration
+            if entry.capabilities.registers_providers && providers.is_empty() {
+                return (
+                    Some((
+                        "verify_provider_registration".to_string(),
+                        "Manifest expects providers but none registered".to_string(),
+                    )),
+                    0,
+                    regs,
+                );
+            }
+            // Step: check provider entries have model field
+            for p in &providers {
+                if p.get("models").and_then(Value::as_array).is_none()
+                    && p.get("model").and_then(Value::as_str).is_none()
+                {
+                    return (
+                        Some((
+                            "check_provider_model_entries".to_string(),
+                            format!("Provider missing models: {p}"),
+                        )),
+                        1,
+                        regs,
+                    );
+                }
+            }
+            (None, 2, regs)
+        }
+        JourneyCategory::ConfigProvider => {
+            // Step: verify flag registration
+            for expected_flag in &entry.registrations.flags {
+                let found = flags
+                    .iter()
+                    .any(|f| f.get("name").and_then(Value::as_str) == Some(expected_flag.as_str()));
+                if !found {
+                    return (
+                        Some((
+                            "verify_flag_registration".to_string(),
+                            format!("Missing flag '{expected_flag}'"),
+                        )),
+                        0,
+                        regs,
+                    );
+                }
+            }
+            // Step: check flag metadata has name
+            for f in &flags {
+                if f.get("name").and_then(Value::as_str).is_none() {
+                    return (
+                        Some((
+                            "check_flag_metadata".to_string(),
+                            format!("Flag missing 'name': {f}"),
+                        )),
+                        1,
+                        regs,
+                    );
+                }
+            }
+            (None, 2, regs)
+        }
+        JourneyCategory::MultiCapability => {
+            // Step: verify all registration types present
+            let expected_types: Vec<&str> = [
+                (entry.capabilities.registers_tools, "tools"),
+                (entry.capabilities.registers_commands, "commands"),
+                (entry.capabilities.registers_flags, "flags"),
+                (entry.capabilities.registers_providers, "providers"),
+            ]
+            .iter()
+            .filter(|(has, _)| *has)
+            .map(|(_, name)| *name)
+            .collect();
+
+            for typ in &expected_types {
+                let present = match *typ {
+                    "tools" => !tool_defs.is_empty(),
+                    "commands" => !commands.is_empty(),
+                    "flags" => !flags.is_empty(),
+                    "providers" => !providers.is_empty(),
+                    _ => true,
+                };
+                if !present {
+                    return (
+                        Some((
+                            "verify_all_registrations".to_string(),
+                            format!("Expected {typ} registration but none found"),
+                        )),
+                        0,
+                        regs,
+                    );
+                }
+            }
+            // Step: cross-check - each registered name is non-empty
+            // (already validated by try_conformance, but journey confirms)
+            // Step: consistency - manifest counts match actual counts
+            let cmd_match = entry.registrations.commands.len() <= commands.len();
+            let flag_match = entry.registrations.flags.len() <= flags.len();
+            if !cmd_match || !flag_match {
+                return (
+                    Some((
+                        "consistency_check".to_string(),
+                        format!(
+                            "Registration count mismatch: commands({}/{}), flags({}/{})",
+                            entry.registrations.commands.len(),
+                            commands.len(),
+                            entry.registrations.flags.len(),
+                            flags.len()
+                        ),
+                    )),
+                    2,
+                    regs,
+                );
+            }
+            (None, 3, regs)
+        }
+        JourneyCategory::Passive => {
+            // Step: verify no errors (extension loaded, that's the test)
+            (None, 1, regs)
+        }
+    }
+}
+
+/// End-user CLI extension journey test for the 208 must-pass set.
+///
+/// Run with:
+/// `cargo test --test ext_conformance_generated --features ext-conformance -- conformance_extension_journeys --nocapture`
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
+fn conformance_extension_journeys() {
+    use chrono::{SecondsFormat, Utc};
+    use std::fmt::Write as _;
+
+    let manifest = load_manifest();
+    let report_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("ext_conformance")
+        .join("reports")
+        .join("journeys");
+    let _ = std::fs::create_dir_all(&report_dir);
+
+    let must_pass: Vec<&ManifestEntry> = manifest
+        .extensions
+        .iter()
+        .filter(|e| e.conformance_tier <= 2)
+        .collect();
+
+    eprintln!("\n=== End-User CLI Extension Journeys (bd-1f42.4.7) ===");
+    eprintln!("  Extensions: {} must-pass (tier 1-2)", must_pass.len());
+    eprintln!();
+
+    let mut results: Vec<JourneyResult> = Vec::with_capacity(must_pass.len());
+
+    for (idx, entry) in must_pass.iter().enumerate() {
+        let category = JourneyCategory::classify(entry);
+        eprint!(
+            "  [{:>3}/{}] {:<45} {:?} ",
+            idx + 1,
+            must_pass.len(),
+            entry.id,
+            category,
+        );
+
+        let entry_file = artifacts_dir().join(&entry.entry_path);
+        if !entry_file.exists() {
+            eprintln!("SKIP  (no artifact)");
+            let test_fn = format!("ext_{}", entry.id.replace(['/', '-'], "_"));
+            results.push(JourneyResult {
+                extension_id: entry.id.clone(),
+                extension_tier: entry.conformance_tier,
+                journey_category: category,
+                journey_description: category.journey_description().to_string(),
+                status: "skip".to_string(),
+                failure_reason: Some("Artifact not available".to_string()),
+                failure_step: None,
+                reproduce_command: format!(
+                    "cargo test --test ext_conformance_generated --features ext-conformance -- {test_fn} --nocapture --exact"
+                ),
+                duration_ms: 0,
+                steps_completed: 0,
+                steps_total: 0,
+                registrations: serde_json::json!({}),
+            });
+            continue;
+        }
+
+        let result = run_extension_journey(&entry.id);
+        eprintln!(
+            "{:<6} ({}/{} steps, {}ms)",
+            result.status.to_uppercase(),
+            result.steps_completed,
+            result.steps_total,
+            result.duration_ms,
+        );
+        results.push(result);
+    }
+
+    // ── Statistics ──
+    let pass_count = results.iter().filter(|r| r.status == "pass").count();
+    let fail_count = results.iter().filter(|r| r.status == "fail").count();
+    let skip_count = results.iter().filter(|r| r.status == "skip").count();
+    let tested = pass_count + fail_count;
+    let pass_rate = if tested > 0 {
+        (pass_count as f64) / (tested as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // ── By category ──
+    let by_category: std::collections::BTreeMap<String, (usize, usize, usize)> = {
+        let mut m = std::collections::BTreeMap::new();
+        for r in &results {
+            let key = serde_json::to_value(r.journey_category)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| format!("{:?}", r.journey_category));
+            let e = m.entry(key).or_insert((0, 0, 0));
+            match r.status.as_str() {
+                "pass" => e.0 += 1,
+                "fail" => e.1 += 1,
+                _ => e.2 += 1,
+            }
+        }
+        m
+    };
+
+    // ── Write JSONL events ──
+    let events_path = report_dir.join("journey_events.jsonl");
+    let mut lines: Vec<String> = Vec::new();
+    for r in &results {
+        let line = serde_json::json!({
+            "schema": "pi.ext.journey_event.v1",
+            "extension_id": r.extension_id,
+            "tier": r.extension_tier,
+            "journey_category": r.journey_category,
+            "status": r.status,
+            "failure_reason": r.failure_reason,
+            "failure_step": r.failure_step,
+            "steps_completed": r.steps_completed,
+            "steps_total": r.steps_total,
+            "duration_ms": r.duration_ms,
+            "ts": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        });
+        lines.push(serde_json::to_string(&line).unwrap_or_default());
+    }
+    let _ = std::fs::write(&events_path, lines.join("\n") + "\n");
+
+    // ── Write JSON report ──
+    let report = serde_json::json!({
+        "schema": "pi.ext.journey_report.v1",
+        "generated_at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        "must_pass_count": must_pass.len(),
+        "tested": tested,
+        "passed": pass_count,
+        "failed": fail_count,
+        "skipped": skip_count,
+        "pass_rate_pct": pass_rate,
+        "by_category": by_category.iter().map(|(cat, (p, f, s))| {
+            serde_json::json!({
+                "category": cat,
+                "passed": p,
+                "failed": f,
+                "skipped": s,
+            })
+        }).collect::<Vec<_>>(),
+        "failures": results.iter()
+            .filter(|r| r.status == "fail")
+            .map(|r| serde_json::json!({
+                "extension_id": r.extension_id,
+                "tier": r.extension_tier,
+                "category": r.journey_category,
+                "failure_step": r.failure_step,
+                "failure_reason": r.failure_reason,
+                "reproduce": r.reproduce_command,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    let report_path = report_dir.join("journey_report.json");
+    let _ = std::fs::write(
+        &report_path,
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    );
+
+    // ── Write per-extension journey artifacts ──
+    let details_dir = report_dir.join("details");
+    let _ = std::fs::create_dir_all(&details_dir);
+    for r in &results {
+        let detail_file = details_dir.join(format!("{}.json", r.extension_id.replace('/', "__")));
+        let _ = std::fs::write(
+            &detail_file,
+            serde_json::to_string_pretty(r).unwrap_or_default(),
+        );
+    }
+
+    // ── Write Markdown report ──
+    let mut md = String::new();
+    md.push_str("# End-User CLI Extension Journey Report\n\n");
+    let _ = writeln!(
+        md,
+        "> Generated: {}\n",
+        Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+    );
+
+    md.push_str("## Summary\n\n");
+    md.push_str("| Metric | Value |\n|--------|-------|\n");
+    let _ = writeln!(md, "| Must-pass total | {} |", must_pass.len());
+    let _ = writeln!(md, "| Tested | {tested} |");
+    let _ = writeln!(md, "| Passed | {pass_count} |");
+    let _ = writeln!(md, "| Failed | {fail_count} |");
+    let _ = writeln!(md, "| Skipped | {skip_count} |");
+    let _ = writeln!(md, "| Pass rate | {pass_rate:.1}% |");
+    md.push('\n');
+
+    md.push_str("## By Journey Category\n\n");
+    md.push_str("| Category | Pass | Fail | Skip |\n|----------|------|------|------|\n");
+    for (cat, (p, f, s)) in &by_category {
+        let _ = writeln!(md, "| {cat} | {p} | {f} | {s} |");
+    }
+    md.push('\n');
+
+    if fail_count > 0 {
+        md.push_str("## Journey Failures\n\n");
+        for r in results.iter().filter(|r| r.status == "fail") {
+            let _ = writeln!(md, "### {} (tier {})\n", r.extension_id, r.extension_tier);
+            let _ = writeln!(md, "- **Category:** {:?}", r.journey_category);
+            let _ = writeln!(md, "- **Journey:** {}", r.journey_description);
+            let _ = writeln!(
+                md,
+                "- **Failed at:** {}",
+                r.failure_step.as_deref().unwrap_or("unknown")
+            );
+            let _ = writeln!(
+                md,
+                "- **Reason:** {}",
+                r.failure_reason.as_deref().unwrap_or("unknown")
+            );
+            let _ = writeln!(
+                md,
+                "- **Progress:** {}/{} steps",
+                r.steps_completed, r.steps_total
+            );
+            let _ = writeln!(md, "- **Reproduce:**");
+            let _ = writeln!(md, "  ```bash\n  {}\n  ```", r.reproduce_command);
+            md.push('\n');
+        }
+    }
+
+    let md_path = report_dir.join("journey_report.md");
+    let _ = std::fs::write(&md_path, &md);
+
+    // ── Print summary ──
+    eprintln!("\n=== Journey Summary ===");
+    eprintln!("  Tested:   {tested}");
+    eprintln!("  Passed:   {pass_count}");
+    eprintln!("  Failed:   {fail_count}");
+    eprintln!("  Skipped:  {skip_count}");
+    eprintln!("  Rate:     {pass_rate:.1}%");
+    eprintln!();
+    eprintln!("  By category:");
+    for (cat, (p, f, s)) in &by_category {
+        eprintln!("    {cat}: {p}P / {f}F / {s}S");
+    }
+    eprintln!();
+    eprintln!("  Reports:");
+    eprintln!("    JSON:    {}", report_path.display());
+    eprintln!("    JSONL:   {}", events_path.display());
+    eprintln!("    MD:      {}", md_path.display());
+    eprintln!("    Details: {}", details_dir.display());
+    eprintln!();
+}
+
+// ─── Daily Extension Health & Regression Delta (bd-1f42.4.5) ────────────────
+//
+// Compares current conformance results against the committed baseline
+// (`tests/ext_conformance/reports/conformance_baseline.json`) to detect
+// regressions (was passing, now failing), fixes (was failing, now passing),
+// and new extensions.  Designed to run daily in CI or on-demand during
+// development.
+//
+// Environment variables:
+//   PI_HEALTH_BASELINE_PATH  — override baseline file (default: auto-detected)
+//   PI_HEALTH_UPDATE_BASELINE — "true" to write a per-extension snapshot for
+//                               future comparisons (default: false)
+//   PI_HEALTH_FAIL_ON_REGRESSION — "true" to fail the test on regressions
+//                                  (default: false)
+//
+// Run:
+//   `cargo test --test ext_conformance_generated --features ext-conformance \
+//     -- conformance_health_delta --nocapture`
+
+/// Per-extension status for delta comparison.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ExtHealthStatus {
+    id: String,
+    tier: u32,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_reason: Option<String>,
+}
+
+/// Delta classification for a single extension.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ExtDelta {
+    id: String,
+    tier: u32,
+    delta_type: String, // "regression", "fix", "new_failure", "new_pass", "unchanged_pass", "unchanged_fail", "removed"
+    current_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    baseline_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    baseline_failure_reason: Option<String>,
+}
+
+/// Full health delta report.
+#[derive(Debug, serde::Serialize)]
+struct HealthDeltaReport {
+    schema: String,
+    generated_at: String,
+    baseline_path: String,
+    baseline_date: String,
+    current_summary: serde_json::Value,
+    baseline_summary: serde_json::Value,
+    aggregate_delta: serde_json::Value,
+    regressions: Vec<ExtDelta>,
+    fixes: Vec<ExtDelta>,
+    new_extensions: Vec<ExtDelta>,
+    removed_extensions: Vec<ExtDelta>,
+    unchanged_failures: Vec<ExtDelta>,
+    total_regressions: usize,
+    total_fixes: usize,
+    net_change: i64,
+}
+
+/// Daily extension health and regression delta test.
+///
+/// Run with:
+/// `cargo test --test ext_conformance_generated --features ext-conformance -- conformance_health_delta --nocapture`
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap
+)]
+fn conformance_health_delta() {
+    use chrono::{SecondsFormat, Utc};
+    use std::collections::HashMap;
+    use std::fmt::Write as _;
+
+    let manifest = load_manifest();
+
+    let report_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("ext_conformance")
+        .join("reports")
+        .join("health_delta");
+    let _ = std::fs::create_dir_all(&report_dir);
+
+    // ── Load baseline ──
+    let baseline_path = std::env::var("PI_HEALTH_BASELINE_PATH").ok().map_or_else(
+        || {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("ext_conformance")
+                .join("reports")
+                .join("conformance_baseline.json")
+        },
+        PathBuf::from,
+    );
+
+    let fail_on_regression = std::env::var("PI_HEALTH_FAIL_ON_REGRESSION")
+        .ok()
+        .is_some_and(|v| v == "true" || v == "1");
+    let update_baseline = std::env::var("PI_HEALTH_UPDATE_BASELINE")
+        .ok()
+        .is_some_and(|v| v == "true" || v == "1");
+
+    let baseline_json: serde_json::Value = if baseline_path.exists() {
+        let data = std::fs::read_to_string(&baseline_path).expect("Failed to read baseline");
+        serde_json::from_str(&data).expect("Failed to parse baseline JSON")
+    } else {
+        eprintln!(
+            "  WARN: No baseline file found at {}",
+            baseline_path.display()
+        );
+        serde_json::json!({})
+    };
+
+    let baseline_date = baseline_json
+        .get("generated_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    // Build per-extension map from baseline failure classification.
+    let mut baseline_status_map: HashMap<String, ExtHealthStatus> = HashMap::new();
+    if let Some(fc) = baseline_json.get("failure_classification") {
+        // All extensions listed under any failure category are "fail".
+        for (_category, info) in fc.as_object().into_iter().flatten() {
+            if let Some(exts) = info.get("extensions").and_then(|v| v.as_array()) {
+                for ext in exts {
+                    if let Some(id) = ext.as_str() {
+                        baseline_status_map.insert(
+                            id.to_string(),
+                            ExtHealthStatus {
+                                id: id.to_string(),
+                                tier: 0, // tier not in baseline
+                                status: "fail".to_string(),
+                                failure_reason: info
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for per-extension baseline snapshot (from previous health delta run).
+    let per_ext_baseline_path = report_dir.join("per_extension_baseline.json");
+    if per_ext_baseline_path.exists() {
+        if let Ok(data) = std::fs::read_to_string(&per_ext_baseline_path) {
+            if let Ok(statuses) = serde_json::from_str::<Vec<ExtHealthStatus>>(&data) {
+                // More precise per-extension data overrides the coarse baseline.
+                for s in statuses {
+                    baseline_status_map.insert(s.id.clone(), s);
+                }
+            }
+        }
+    }
+
+    // Baseline aggregate stats.
+    let bl_ext = &baseline_json["extension_conformance"];
+    let bl_passed = bl_ext["passed"].as_u64().unwrap_or(0);
+    let bl_failed = bl_ext["failed"].as_u64().unwrap_or(0);
+    let bl_tested = bl_ext["tested"].as_u64().unwrap_or(0);
+    let bl_rate = bl_ext["pass_rate_pct"].as_f64().unwrap_or(0.0);
+
+    eprintln!("\n=== Extension Health & Regression Delta (bd-1f42.4.5) ===");
+    eprintln!("  Baseline:    {}", baseline_path.display());
+    eprintln!("  Baseline at: {baseline_date}");
+    eprintln!("  Baseline:    {bl_passed}/{bl_tested} passed ({bl_rate:.1}%)");
+    eprintln!(
+        "  Extensions in current manifest: {}",
+        manifest.extensions.len()
+    );
+    eprintln!();
+
+    // ── Run current conformance ──
+    eprintln!("  Running current conformance...");
+    let mut current_statuses: Vec<ExtHealthStatus> = Vec::with_capacity(manifest.extensions.len());
+    let mut cur_pass = 0_usize;
+    let mut cur_fail = 0_usize;
+    let mut cur_skip = 0_usize;
+
+    for (idx, entry) in manifest.extensions.iter().enumerate() {
+        let entry_file = artifacts_dir().join(&entry.entry_path);
+        if !entry_file.exists() {
+            cur_skip += 1;
+            current_statuses.push(ExtHealthStatus {
+                id: entry.id.clone(),
+                tier: entry.conformance_tier,
+                status: "skip".to_string(),
+                failure_reason: Some("Artifact not available".to_string()),
+            });
+            continue;
+        }
+        eprint!(
+            "  [{:>3}/{}] {:<50} ",
+            idx + 1,
+            manifest.extensions.len(),
+            entry.id
+        );
+        let result = try_conformance(&entry.id);
+        match result.status.as_str() {
+            "pass" => {
+                eprintln!("PASS   ({}ms)", result.duration_ms);
+                cur_pass += 1;
+            }
+            "fail" => {
+                eprintln!("FAIL   ({}ms)", result.duration_ms);
+                cur_fail += 1;
+            }
+            _ => {
+                eprintln!("SKIP");
+                cur_skip += 1;
+            }
+        }
+        current_statuses.push(ExtHealthStatus {
+            id: entry.id.clone(),
+            tier: entry.conformance_tier,
+            status: result.status,
+            failure_reason: result.failure_reason,
+        });
+    }
+
+    let cur_tested = cur_pass + cur_fail;
+    let cur_rate = if cur_tested > 0 {
+        (cur_pass as f64) / (cur_tested as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // ── Compute deltas ──
+    let current_map: HashMap<String, &ExtHealthStatus> =
+        current_statuses.iter().map(|s| (s.id.clone(), s)).collect();
+
+    let mut regressions: Vec<ExtDelta> = Vec::new();
+    let mut fixes: Vec<ExtDelta> = Vec::new();
+    let mut new_extensions: Vec<ExtDelta> = Vec::new();
+    let mut unchanged_failures: Vec<ExtDelta> = Vec::new();
+
+    for s in &current_statuses {
+        if s.status == "skip" {
+            continue;
+        }
+
+        if let Some(bl) = baseline_status_map.get(&s.id) {
+            if bl.status == "pass" && s.status == "fail" {
+                regressions.push(ExtDelta {
+                    id: s.id.clone(),
+                    tier: s.tier,
+                    delta_type: "regression".to_string(),
+                    current_status: s.status.clone(),
+                    baseline_status: Some(bl.status.clone()),
+                    failure_reason: s.failure_reason.clone(),
+                    baseline_failure_reason: None,
+                });
+            } else if bl.status == "fail" && s.status == "pass" {
+                fixes.push(ExtDelta {
+                    id: s.id.clone(),
+                    tier: s.tier,
+                    delta_type: "fix".to_string(),
+                    current_status: s.status.clone(),
+                    baseline_status: Some(bl.status.clone()),
+                    failure_reason: None,
+                    baseline_failure_reason: bl.failure_reason.clone(),
+                });
+            } else if bl.status == "fail" && s.status == "fail" {
+                unchanged_failures.push(ExtDelta {
+                    id: s.id.clone(),
+                    tier: s.tier,
+                    delta_type: "unchanged_fail".to_string(),
+                    current_status: s.status.clone(),
+                    baseline_status: Some(bl.status.clone()),
+                    failure_reason: s.failure_reason.clone(),
+                    baseline_failure_reason: bl.failure_reason.clone(),
+                });
+            }
+            // unchanged pass: nothing to report
+        } else {
+            // Extension not in baseline = new
+            let dt = if s.status == "pass" {
+                "new_pass"
+            } else {
+                "new_failure"
+            };
+            new_extensions.push(ExtDelta {
+                id: s.id.clone(),
+                tier: s.tier,
+                delta_type: dt.to_string(),
+                current_status: s.status.clone(),
+                baseline_status: None,
+                failure_reason: s.failure_reason.clone(),
+                baseline_failure_reason: None,
+            });
+        }
+    }
+
+    // Extensions in baseline but not in current manifest.
+    let removed_extensions: Vec<ExtDelta> = baseline_status_map
+        .keys()
+        .filter(|id| !current_map.contains_key(*id))
+        .map(|id| {
+            let bl = &baseline_status_map[id];
+            ExtDelta {
+                id: id.clone(),
+                tier: bl.tier,
+                delta_type: "removed".to_string(),
+                current_status: "absent".to_string(),
+                baseline_status: Some(bl.status.clone()),
+                failure_reason: None,
+                baseline_failure_reason: bl.failure_reason.clone(),
+            }
+        })
+        .collect();
+
+    let total_regressions = regressions.len();
+    let total_fixes = fixes.len();
+    let net_change = (total_fixes as i64) - (total_regressions as i64);
+
+    // ── Build report ──
+    let report = HealthDeltaReport {
+        schema: "pi.ext.health_delta.v1".to_string(),
+        generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        baseline_path: baseline_path.display().to_string(),
+        baseline_date: baseline_date.clone(),
+        current_summary: serde_json::json!({
+            "manifest_count": manifest.extensions.len(),
+            "tested": cur_tested,
+            "passed": cur_pass,
+            "failed": cur_fail,
+            "skipped": cur_skip,
+            "pass_rate_pct": cur_rate,
+        }),
+        baseline_summary: serde_json::json!({
+            "tested": bl_tested,
+            "passed": bl_passed,
+            "failed": bl_failed,
+            "pass_rate_pct": bl_rate,
+        }),
+        aggregate_delta: serde_json::json!({
+            "pass_delta": (cur_pass as i64) - (bl_passed as i64),
+            "fail_delta": (cur_fail as i64) - (bl_failed as i64),
+            "rate_delta_pct": cur_rate - bl_rate,
+            "net_change": net_change,
+        }),
+        regressions: regressions.clone(),
+        fixes: fixes.clone(),
+        new_extensions: new_extensions.clone(),
+        removed_extensions: removed_extensions.clone(),
+        unchanged_failures: unchanged_failures.clone(),
+        total_regressions,
+        total_fixes,
+        net_change,
+    };
+
+    // ── Write JSON report ──
+    let report_path = report_dir.join("health_delta_report.json");
+    let _ = std::fs::write(
+        &report_path,
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    );
+
+    // ── Write JSONL events ──
+    let events_path = report_dir.join("health_delta_events.jsonl");
+    let mut event_lines: Vec<String> = Vec::new();
+    let all_deltas: Vec<&ExtDelta> = regressions
+        .iter()
+        .chain(fixes.iter())
+        .chain(new_extensions.iter())
+        .chain(removed_extensions.iter())
+        .chain(unchanged_failures.iter())
+        .collect();
+    for d in &all_deltas {
+        let line = serde_json::json!({
+            "schema": "pi.ext.health_delta_event.v1",
+            "id": d.id,
+            "tier": d.tier,
+            "delta_type": d.delta_type,
+            "current_status": d.current_status,
+            "baseline_status": d.baseline_status,
+            "failure_reason": d.failure_reason,
+            "ts": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        });
+        event_lines.push(serde_json::to_string(&line).unwrap_or_default());
+    }
+    let _ = std::fs::write(&events_path, event_lines.join("\n") + "\n");
+
+    // ── Write per-extension snapshot for future baseline ──
+    if update_baseline {
+        let _ = std::fs::write(
+            &per_ext_baseline_path,
+            serde_json::to_string_pretty(&current_statuses).unwrap_or_default(),
+        );
+        eprintln!(
+            "  Updated per-extension baseline: {}",
+            per_ext_baseline_path.display()
+        );
+    }
+
+    // ── Write Markdown report ──
+    let mut md = String::new();
+    md.push_str("# Extension Health & Regression Delta Report\n\n");
+    let _ = writeln!(
+        md,
+        "> Generated: {}",
+        Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+    );
+    let _ = writeln!(md, "> Baseline: {baseline_date}\n");
+
+    md.push_str("## Aggregate Comparison\n\n");
+    md.push_str(
+        "| Metric | Baseline | Current | Delta |\n|--------|----------|---------|-------|\n",
+    );
+    let _ = writeln!(
+        md,
+        "| Tested | {bl_tested} | {cur_tested} | {:+} |",
+        (cur_tested as i64) - (bl_tested as i64)
+    );
+    let _ = writeln!(
+        md,
+        "| Passed | {bl_passed} | {cur_pass} | {:+} |",
+        (cur_pass as i64) - (bl_passed as i64)
+    );
+    let _ = writeln!(
+        md,
+        "| Failed | {bl_failed} | {cur_fail} | {:+} |",
+        (cur_fail as i64) - (bl_failed as i64)
+    );
+    let _ = writeln!(
+        md,
+        "| Pass rate | {bl_rate:.1}% | {cur_rate:.1}% | {:+.1}pp |",
+        cur_rate - bl_rate
+    );
+    md.push('\n');
+
+    md.push_str("## Delta Summary\n\n");
+    md.push_str("| Category | Count |\n|----------|-------|\n");
+    let _ = writeln!(md, "| Regressions | {} |", regressions.len());
+    let _ = writeln!(md, "| Fixes | {} |", fixes.len());
+    let _ = writeln!(md, "| New extensions | {} |", new_extensions.len());
+    let _ = writeln!(md, "| Removed | {} |", removed_extensions.len());
+    let _ = writeln!(md, "| Unchanged failures | {} |", unchanged_failures.len());
+    let _ = writeln!(md, "| **Net change** | **{net_change:+}** |");
+    md.push('\n');
+
+    if !regressions.is_empty() {
+        md.push_str("## Regressions (was passing, now failing)\n\n");
+        md.push_str("| Extension | Tier | Reason |\n|-----------|------|--------|\n");
+        for d in &regressions {
+            let _ = writeln!(
+                md,
+                "| {} | {} | {} |",
+                d.id,
+                d.tier,
+                d.failure_reason.as_deref().unwrap_or("unknown")
+            );
+        }
+        md.push('\n');
+    }
+
+    if !fixes.is_empty() {
+        md.push_str("## Fixes (was failing, now passing)\n\n");
+        md.push_str(
+            "| Extension | Tier | Previous Reason |\n|-----------|------|-----------------|\n",
+        );
+        for d in &fixes {
+            let _ = writeln!(
+                md,
+                "| {} | {} | {} |",
+                d.id,
+                d.tier,
+                d.baseline_failure_reason.as_deref().unwrap_or("unknown")
+            );
+        }
+        md.push('\n');
+    }
+
+    let md_path = report_dir.join("health_delta_report.md");
+    let _ = std::fs::write(&md_path, &md);
+
+    // ── Print summary ──
+    eprintln!("\n=== Health Delta Summary ===");
+    eprintln!("  Current:     {cur_pass}/{cur_tested} passed ({cur_rate:.1}%)");
+    eprintln!("  Baseline:    {bl_passed}/{bl_tested} passed ({bl_rate:.1}%)");
+    eprintln!("  Regressions: {total_regressions}");
+    eprintln!("  Fixes:       {total_fixes}");
+    eprintln!("  Net change:  {net_change:+}");
+    if !new_extensions.is_empty() {
+        eprintln!("  New exts:    {}", new_extensions.len());
+    }
+    if !removed_extensions.is_empty() {
+        eprintln!("  Removed:     {}", removed_extensions.len());
+    }
+    eprintln!();
+    eprintln!("  Reports:");
+    eprintln!("    JSON:  {}", report_path.display());
+    eprintln!("    JSONL: {}", events_path.display());
+    eprintln!("    MD:    {}", md_path.display());
+    eprintln!();
+
+    // ── Regression gate ──
+    if fail_on_regression && total_regressions > 0 {
+        let mut msg =
+            format!("HEALTH DELTA BLOCKED: {total_regressions} regression(s) detected.\n");
+        for d in &regressions {
+            let _ = writeln!(
+                msg,
+                "  - {} (tier {}): {}",
+                d.id,
+                d.tier,
+                d.failure_reason.as_deref().unwrap_or("unknown")
+            );
+        }
+        let _ = writeln!(msg, "\nSee: {}", report_path.display());
+        panic!("{msg}");
+    }
+}
+
+// ─── Macro ──────────────────────────────────────────────────────────────────
+
+/// Generate a conformance test for a single extension.
+macro_rules! conformance_test {
+    ($name:ident, $ext_id:literal $(,)?) => {
+        #[test]
+        fn $name() {
+            run_conformance_test($ext_id);
+        }
+    };
+    ($name:ident, $ext_id:literal, ignore $(,)?) => {
+        #[test]
+        #[ignore = "bd-8t27h.17: tracked stretch conformance tier; run with --include-ignored"]
+        fn $name() {
+            run_conformance_test($ext_id);
+        }
+    };
+}
+
+#[test]
+fn ignored_generated_extension_tests_are_tracked_opt_in_lane() {
+    let source = include_str!("ext_conformance_generated.rs");
+    let old_reason = [
+        "unvendored",
+        "extension",
+        "not",
+        "yet",
+        "onboarded",
+        "into",
+        "conformance",
+        "corpus",
+    ]
+    .join(" ");
+
+    assert!(
+        !source.contains(&old_reason),
+        "generated extension conformance ignores must be owner-tracked opt-in lanes"
+    );
+    let ignore_attrs: Vec<&str> = source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("#[ignore"))
+        .collect();
+    assert!(
+        !ignore_attrs.is_empty(),
+        "expected generated extension conformance to keep an explicit opt-in tier"
+    );
+    for attr in ignore_attrs {
+        assert!(
+            attr.contains("bd-8t27h.17:")
+                && attr.contains("tracked stretch conformance tier")
+                && attr.contains("--include-ignored"),
+            "generated extension conformance ignores need an owner bead reason and opt-in command: {attr}"
+        );
+    }
+}
+
+// ─── Tier 1 — Single-file, no events, no deps (37 extensions) ──────────────
+
+conformance_test!(ext_antigravity_image_gen, "antigravity-image-gen");
+conformance_test!(ext_bash_spawn_hook, "bash-spawn-hook");
+conformance_test!(ext_bookmark, "bookmark");
+conformance_test!(
+    ext_community_hjanuschka_clipboard,
+    "community/hjanuschka-clipboard"
+);
+conformance_test!(
+    ext_community_hjanuschka_cost_tracker,
+    "community/hjanuschka-cost-tracker"
+);
+conformance_test!(
+    ext_community_hjanuschka_flicker_corp,
+    "community/hjanuschka-flicker-corp"
+);
+conformance_test!(
+    ext_community_hjanuschka_handoff,
+    "community/hjanuschka-handoff"
+);
+conformance_test!(
+    ext_community_hjanuschka_memory_mode,
+    "community/hjanuschka-memory-mode"
+);
+conformance_test!(
+    ext_community_hjanuschka_oracle,
+    "community/hjanuschka-oracle"
+);
+conformance_test!(ext_community_mitsuhiko_answer, "community/mitsuhiko-answer");
+conformance_test!(
+    ext_community_tmustier_arcade_mario_not,
+    "community/tmustier-arcade-mario-not"
+);
+conformance_test!(
+    ext_community_tmustier_arcade_picman,
+    "community/tmustier-arcade-picman"
+);
+conformance_test!(
+    ext_community_tmustier_arcade_ping,
+    "community/tmustier-arcade-ping"
+);
+conformance_test!(
+    ext_community_tmustier_arcade_spice_invaders,
+    "community/tmustier-arcade-spice-invaders"
+);
+conformance_test!(
+    ext_community_tmustier_arcade_tetris,
+    "community/tmustier-arcade-tetris"
+);
+conformance_test!(
+    ext_community_tmustier_tab_status,
+    "community/tmustier-tab-status"
+);
+conformance_test!(
+    ext_community_tmustier_usage_extension,
+    "community/tmustier-usage-extension"
+);
+conformance_test!(ext_custom_footer, "custom-footer");
+conformance_test!(ext_handoff, "handoff");
+conformance_test!(ext_hello, "hello");
+conformance_test!(ext_message_renderer, "message-renderer");
+conformance_test!(
+    ext_npm_benvargas_pi_ancestor_discovery,
+    "npm/benvargas-pi-ancestor-discovery"
+);
+conformance_test!(
+    ext_npm_benvargas_pi_antigravity_image_gen,
+    "npm/benvargas-pi-antigravity-image-gen"
+);
+conformance_test!(ext_npm_pi_command_center, "npm/pi-command-center");
+conformance_test!(ext_npm_pi_model_switch, "npm/pi-model-switch");
+conformance_test!(ext_npm_pi_threads, "npm/pi-threads");
+conformance_test!(ext_overlay_test, "overlay-test");
+conformance_test!(ext_qna, "qna");
+conformance_test!(ext_question, "question");
+conformance_test!(ext_questionnaire, "questionnaire");
+conformance_test!(ext_send_user_message, "send-user-message");
+conformance_test!(ext_session_name, "session-name");
+conformance_test!(ext_snake, "snake");
+conformance_test!(ext_space_invaders, "space-invaders");
+conformance_test!(ext_summarize, "summarize");
+conformance_test!(
+    ext_third_party_rytswd_questionnaire,
+    "third-party/rytswd-questionnaire"
+);
+conformance_test!(ext_redraws, "redraws");
+conformance_test!(ext_timed_confirm, "timed-confirm");
+
+// ─── Tier 2 — Single-file with events (83 extensions) ──────────────────────
+
+conformance_test!(ext_auto_commit_on_exit, "auto-commit-on-exit");
+conformance_test!(ext_claude_rules, "claude-rules");
+conformance_test!(ext_diff, "diff");
+conformance_test!(ext_files, "files");
+conformance_test!(
+    ext_community_ferologics_notify,
+    "community/ferologics-notify"
+);
+conformance_test!(
+    ext_community_hjanuschka_funny_working_message,
+    "community/hjanuschka-funny-working-message"
+);
+conformance_test!(ext_community_hjanuschka_loop, "community/hjanuschka-loop");
+conformance_test!(
+    ext_community_hjanuschka_plan_mode,
+    "community/hjanuschka-plan-mode"
+);
+conformance_test!(
+    ext_community_hjanuschka_resistance,
+    "community/hjanuschka-resistance"
+);
+conformance_test!(
+    ext_community_hjanuschka_speedreading,
+    "community/hjanuschka-speedreading"
+);
+conformance_test!(
+    ext_community_hjanuschka_status_widget,
+    "community/hjanuschka-status-widget"
+);
+conformance_test!(
+    ext_community_hjanuschka_ultrathink,
+    "community/hjanuschka-ultrathink"
+);
+conformance_test!(
+    ext_community_hjanuschka_usage_bar,
+    "community/hjanuschka-usage-bar"
+);
+conformance_test!(
+    ext_community_mitsuhiko_cwd_history,
+    "community/mitsuhiko-cwd-history"
+);
+conformance_test!(ext_community_mitsuhiko_files, "community/mitsuhiko-files");
+conformance_test!(ext_community_mitsuhiko_loop, "community/mitsuhiko-loop");
+conformance_test!(ext_community_mitsuhiko_notify, "community/mitsuhiko-notify");
+conformance_test!(ext_community_mitsuhiko_review, "community/mitsuhiko-review");
+conformance_test!(ext_community_mitsuhiko_todos, "community/mitsuhiko-todos");
+conformance_test!(ext_community_mitsuhiko_uv, "community/mitsuhiko-uv");
+conformance_test!(
+    ext_community_mitsuhiko_whimsical,
+    "community/mitsuhiko-whimsical"
+);
+conformance_test!(
+    ext_community_nicobailon_rewind_hook,
+    "community/nicobailon-rewind-hook"
+);
+conformance_test!(
+    ext_community_ogulcancelik_ghostty_theme_sync,
+    "community/ogulcancelik-ghostty-theme-sync"
+);
+conformance_test!(
+    ext_community_prateekmedia_token_rate,
+    "community/prateekmedia-token-rate"
+);
+conformance_test!(
+    ext_community_qualisero_background_notify,
+    "community/qualisero-background-notify",
+    ignore
+);
+conformance_test!(
+    ext_community_qualisero_compact_config,
+    "community/qualisero-compact-config"
+);
+conformance_test!(
+    ext_community_qualisero_safe_git,
+    "community/qualisero-safe-git",
+    ignore
+);
+conformance_test!(
+    ext_community_qualisero_safe_rm,
+    "community/qualisero-safe-rm"
+);
+conformance_test!(
+    ext_community_qualisero_session_color,
+    "community/qualisero-session-color"
+);
+conformance_test!(
+    ext_community_qualisero_session_emoji,
+    "community/qualisero-session-emoji"
+);
+conformance_test!(
+    ext_community_tmustier_agent_guidance,
+    "community/tmustier-agent-guidance"
+);
+conformance_test!(
+    ext_community_tmustier_ralph_wiggum,
+    "community/tmustier-ralph-wiggum"
+);
+conformance_test!(
+    ext_community_tmustier_raw_paste,
+    "community/tmustier-raw-paste"
+);
+conformance_test!(ext_negative_denied_caps, "negative-denied-caps");
+conformance_test!(ext_confirm_destructive, "confirm-destructive");
+conformance_test!(ext_custom_compaction, "custom-compaction");
+conformance_test!(ext_custom_header, "custom-header");
+conformance_test!(ext_dirty_repo_guard, "dirty-repo-guard");
+conformance_test!(ext_dynamic_resources, "dynamic-resources");
+conformance_test!(ext_event_bus, "event-bus");
+conformance_test!(ext_file_trigger, "file-trigger");
+conformance_test!(ext_git_checkpoint, "git-checkpoint");
+conformance_test!(ext_inline_bash, "inline-bash");
+conformance_test!(ext_input_transform, "input-transform");
+conformance_test!(ext_interactive_shell, "interactive-shell");
+conformance_test!(ext_mac_system_theme, "mac-system-theme");
+conformance_test!(ext_modal_editor, "modal-editor");
+conformance_test!(ext_model_status, "model-status");
+conformance_test!(ext_notify, "notify");
+conformance_test!(ext_npm_ogulcancelik_pi_sketch, "npm/ogulcancelik-pi-sketch");
+conformance_test!(ext_npm_pi_ephemeral, "npm/pi-ephemeral");
+conformance_test!(ext_npm_pi_ghostty_theme_sync, "npm/pi-ghostty-theme-sync");
+conformance_test!(ext_npm_pi_md_export, "npm/pi-md-export");
+conformance_test!(ext_npm_pi_notify, "npm/pi-notify");
+conformance_test!(ext_npm_pi_poly_notify, "npm/pi-poly-notify");
+conformance_test!(
+    ext_npm_pi_prompt_template_model,
+    "npm/pi-prompt-template-model"
+);
+conformance_test!(ext_npm_pi_session_ask, "npm/pi-session-ask");
+conformance_test!(ext_npm_pi_skill_palette, "npm/pi-skill-palette");
+conformance_test!(ext_npm_pi_voice_of_god, "npm/pi-voice-of-god");
+conformance_test!(ext_npm_token_rate_pi, "npm/token-rate-pi");
+conformance_test!(ext_npm_vpellegrino_pi_skills, "npm/vpellegrino-pi-skills");
+conformance_test!(ext_overlay_qa_tests, "overlay-qa-tests");
+conformance_test!(ext_permission_gate, "permission-gate");
+conformance_test!(ext_pirate, "pirate");
+conformance_test!(ext_preset, "preset");
+conformance_test!(ext_prompt_url_widget, "prompt-url-widget");
+conformance_test!(ext_protected_paths, "protected-paths");
+conformance_test!(ext_rainbow_editor, "rainbow-editor");
+conformance_test!(ext_rpc_demo, "rpc-demo");
+conformance_test!(ext_shutdown_command, "shutdown-command");
+conformance_test!(ext_ssh, "ssh");
+conformance_test!(ext_status_line, "status-line");
+conformance_test!(ext_system_prompt_header, "system-prompt-header");
+conformance_test!(
+    ext_third_party_graffioh_pi_screenshots_picker,
+    "third-party/graffioh-pi-screenshots-picker"
+);
+conformance_test!(
+    ext_third_party_graffioh_pi_super_curl,
+    "third-party/graffioh-pi-super-curl"
+);
+conformance_test!(
+    ext_third_party_jyaunches_pi_canvas,
+    "third-party/jyaunches-pi-canvas"
+);
+conformance_test!(
+    ext_third_party_lsj5031_pi_notification_extension,
+    "third-party/lsj5031-pi-notification-extension"
+);
+conformance_test!(
+    ext_third_party_ogulcancelik_pi_sketch,
+    "third-party/ogulcancelik-pi-sketch"
+);
+conformance_test!(
+    ext_third_party_raunovillberg_pi_stuffed,
+    "third-party/raunovillberg-pi-stuffed"
+);
+conformance_test!(ext_third_party_rytswd_direnv, "third-party/rytswd-direnv");
+conformance_test!(ext_titlebar_spinner, "titlebar-spinner");
+conformance_test!(ext_todo, "todo");
+conformance_test!(ext_tool_override, "tool-override");
+conformance_test!(ext_tools, "tools");
+conformance_test!(ext_trigger_compact, "trigger-compact");
+conformance_test!(ext_truncated_tool, "truncated-tool");
+conformance_test!(ext_widget_placement, "widget-placement");
+
+// ─── Tier 3 — Multi-file / npm deps (79 extensions) ────────────────────────
+
+conformance_test!(ext_community_jyaunches_canvas, "community/jyaunches-canvas");
+conformance_test!(
+    ext_community_nicobailon_interactive_shell,
+    "community/nicobailon-interactive-shell",
+    ignore
+);
+conformance_test!(
+    ext_community_nicobailon_mcp_adapter,
+    "community/nicobailon-mcp-adapter"
+);
+conformance_test!(
+    ext_community_nicobailon_powerline_footer,
+    "community/nicobailon-powerline-footer"
+);
+conformance_test!(
+    ext_community_nicobailon_subagents,
+    "community/nicobailon-subagents"
+);
+conformance_test!(
+    ext_community_prateekmedia_checkpoint,
+    "community/prateekmedia-checkpoint"
+);
+conformance_test!(ext_community_prateekmedia_lsp, "community/prateekmedia-lsp",);
+conformance_test!(
+    ext_community_prateekmedia_permission,
+    "community/prateekmedia-permission"
+);
+conformance_test!(
+    ext_community_prateekmedia_ralph_loop,
+    "community/prateekmedia-ralph-loop"
+);
+conformance_test!(
+    ext_community_prateekmedia_repeat,
+    "community/prateekmedia-repeat"
+);
+conformance_test!(
+    ext_community_qualisero_pi_agent_scip,
+    "community/qualisero-pi-agent-scip",
+    ignore
+);
+conformance_test!(
+    ext_community_tmustier_code_actions,
+    "community/tmustier-code-actions"
+);
+conformance_test!(
+    ext_community_tmustier_files_widget,
+    "community/tmustier-files-widget"
+);
+conformance_test!(ext_custom_provider_anthropic, "custom-provider-anthropic");
+conformance_test!(ext_custom_provider_gitlab_duo, "custom-provider-gitlab-duo");
+conformance_test!(ext_custom_provider_qwen_cli, "custom-provider-qwen-cli");
+conformance_test!(ext_doom_overlay, "doom-overlay");
+conformance_test!(ext_npm_aliou_pi_extension_dev, "npm/aliou-pi-extension-dev");
+conformance_test!(
+    ext_npm_aliou_pi_guardrails,
+    "npm/aliou-pi-guardrails",
+    ignore
+);
+conformance_test!(ext_npm_aliou_pi_linkup, "npm/aliou-pi-linkup");
+conformance_test!(ext_npm_aliou_pi_processes, "npm/aliou-pi-processes", ignore);
+conformance_test!(ext_npm_aliou_pi_synthetic, "npm/aliou-pi-synthetic");
+conformance_test!(ext_npm_aliou_pi_toolchain, "npm/aliou-pi-toolchain", ignore);
+conformance_test!(
+    ext_npm_benvargas_pi_synthetic_provider,
+    "npm/benvargas-pi-synthetic-provider"
+);
+conformance_test!(ext_npm_checkpoint_pi, "npm/checkpoint-pi");
+conformance_test!(
+    ext_npm_imsus_pi_extension_minimax_coding_plan_mcp,
+    "npm/imsus-pi-extension-minimax-coding-plan-mcp"
+);
+conformance_test!(
+    ext_npm_juanibiapina_pi_extension_settings,
+    "npm/juanibiapina-pi-extension-settings"
+);
+conformance_test!(
+    ext_npm_juanibiapina_pi_files,
+    "npm/juanibiapina-pi-files",
+    ignore
+);
+conformance_test!(ext_npm_juanibiapina_pi_gob, "npm/juanibiapina-pi-gob");
+conformance_test!(ext_npm_lsp_pi, "npm/lsp-pi");
+conformance_test!(
+    ext_npm_marckrenn_pi_sub_bar,
+    "npm/marckrenn-pi-sub-bar",
+    ignore
+);
+conformance_test!(
+    ext_npm_marckrenn_pi_sub_core,
+    "npm/marckrenn-pi-sub-core",
+    ignore
+);
+conformance_test!(ext_npm_permission_pi, "npm/permission-pi");
+conformance_test!(ext_npm_pi_agentic_compaction, "npm/pi-agentic-compaction");
+conformance_test!(ext_npm_pi_amplike, "npm/pi-amplike");
+conformance_test!(ext_npm_pi_bash_confirm, "npm/pi-bash-confirm");
+conformance_test!(ext_npm_pi_brave_search, "npm/pi-brave-search", ignore);
+conformance_test!(ext_npm_pi_mermaid, "npm/pi-mermaid", ignore);
+conformance_test!(ext_npm_pi_messenger, "npm/pi-messenger");
+conformance_test!(ext_npm_pi_moonshot, "npm/pi-moonshot");
+conformance_test!(ext_npm_pi_multicodex, "npm/pi-multicodex");
+conformance_test!(ext_npm_pi_repoprompt_mcp, "npm/pi-repoprompt-mcp");
+conformance_test!(ext_npm_pi_review_loop, "npm/pi-review-loop");
+conformance_test!(ext_npm_pi_screenshots_picker, "npm/pi-screenshots-picker");
+conformance_test!(ext_npm_pi_search_agent, "npm/pi-search-agent", ignore);
+conformance_test!(ext_npm_pi_shadow_git, "npm/pi-shadow-git");
+conformance_test!(ext_npm_pi_shell_completions, "npm/pi-shell-completions");
+conformance_test!(ext_npm_pi_subdir_context, "npm/pi-subdir-context");
+conformance_test!(ext_npm_pi_super_curl, "npm/pi-super-curl");
+conformance_test!(ext_npm_pi_telemetry_otel, "npm/pi-telemetry-otel", ignore);
+conformance_test!(ext_npm_pi_wakatime, "npm/pi-wakatime", ignore);
+conformance_test!(ext_npm_pi_watch, "npm/pi-watch", ignore);
+conformance_test!(ext_npm_pi_web_access, "npm/pi-web-access", ignore);
+conformance_test!(ext_npm_ralph_loop_pi, "npm/ralph-loop-pi");
+conformance_test!(ext_npm_repeat_pi, "npm/repeat-pi");
+conformance_test!(ext_npm_vaayne_agent_kit, "npm/vaayne-agent-kit");
+conformance_test!(ext_npm_vaayne_pi_mcp, "npm/vaayne-pi-mcp");
+conformance_test!(ext_npm_vaayne_pi_subagent, "npm/vaayne-pi-subagent");
+conformance_test!(
+    ext_npm_vaayne_pi_web_tools,
+    "npm/vaayne-pi-web-tools",
+    ignore
+);
+conformance_test!(ext_npm_walterra_pi_charts, "npm/walterra-pi-charts");
+conformance_test!(ext_npm_walterra_pi_graphviz, "npm/walterra-pi-graphviz");
+conformance_test!(ext_npm_zenobius_pi_dcp, "npm/zenobius-pi-dcp");
+conformance_test!(ext_plan_mode, "plan-mode");
+conformance_test!(ext_sandbox, "sandbox");
+conformance_test!(ext_subagent, "subagent");
+conformance_test!(
+    ext_third_party_aliou_pi_extensions,
+    "third-party/aliou-pi-extensions",
+);
+conformance_test!(
+    ext_third_party_ben_vargas_pi_packages,
+    "third-party/ben-vargas-pi-packages",
+);
+conformance_test!(
+    ext_third_party_charles_cooper_pi_extensions,
+    "third-party/charles-cooper-pi-extensions",
+);
+conformance_test!(
+    ext_third_party_cv_pi_ssh_remote,
+    "third-party/cv-pi-ssh-remote"
+);
+conformance_test!(
+    ext_third_party_limouren_agent_things,
+    "third-party/limouren-agent-things"
+);
+conformance_test!(
+    ext_third_party_marckrenn_pi_sub,
+    "third-party/marckrenn-pi-sub",
+    ignore
+);
+conformance_test!(
+    ext_third_party_michalvavra_agents,
+    "third-party/michalvavra-agents"
+);
+conformance_test!(
+    ext_third_party_openclaw_openclaw,
+    "third-party/openclaw-openclaw",
+);
+conformance_test!(
+    ext_third_party_pasky_pi_amplike,
+    "third-party/pasky-pi-amplike",
+);
+conformance_test!(
+    ext_third_party_qualisero_pi_agent_scip,
+    "third-party/qualisero-pi-agent-scip",
+    ignore
+);
+conformance_test!(
+    ext_third_party_rytswd_slow_mode,
+    "third-party/rytswd-slow-mode"
+);
+conformance_test!(
+    ext_third_party_w_winter_dot314,
+    "third-party/w-winter-dot314",
+);
+conformance_test!(
+    ext_third_party_zenobi_us_pi_dcp,
+    "third-party/zenobi-us-pi-dcp"
+);
+conformance_test!(ext_with_deps, "with-deps");
+conformance_test!(ext_base_fixtures, "base_fixtures", ignore);
+conformance_test!(ext_npm_oh_my_pi_basics, "npm/oh-my-pi-basics", ignore);
+conformance_test!(ext_npm_pi_extensions, "npm/pi-extensions", ignore);
+conformance_test!(
+    ext_npm_pi_interactive_shell,
+    "npm/pi-interactive-shell",
+    ignore
+);
+conformance_test!(ext_npm_pi_mcp_adapter, "npm/pi-mcp-adapter", ignore);
+conformance_test!(ext_npm_pi_package_test, "npm/pi-package-test");
+conformance_test!(
+    ext_npm_pi_powerline_footer,
+    "npm/pi-powerline-footer",
+    ignore
+);
+conformance_test!(
+    ext_npm_qualisero_pi_agent_scip,
+    "npm/qualisero-pi-agent-scip"
+);
+conformance_test!(ext_npm_shitty_extensions, "npm/shitty-extensions", ignore);
+conformance_test!(ext_npm_tmustier_pi_arcade, "npm/tmustier-pi-arcade", ignore);
+conformance_test!(
+    ext_npm_verioussmith_pi_openrouter,
+    "npm/verioussmith-pi-openrouter",
+    ignore
+);
+
+// ─── Tier 4 — UI-heavy extensions (2 extensions) ───────────────────────────
+
+conformance_test!(
+    ext_community_nicobailon_interview_tool,
+    "community/nicobailon-interview-tool",
+    ignore
+);
+conformance_test!(ext_npm_pi_interview, "npm/pi-interview", ignore);
+conformance_test!(
+    ext_third_party_vtemian_pi_config,
+    "third-party/vtemian-pi-config"
+);
+
+// ─── Tier 5 — Platform-specific (4 extensions) ─────────────────────────────
+
+conformance_test!(
+    ext_agents_mikeastock_extensions,
+    "agents-mikeastock/extensions",
+);
+conformance_test!(
+    ext_community_mitsuhiko_control,
+    "community/mitsuhiko-control"
+);
+conformance_test!(ext_npm_pi_annotate, "npm/pi-annotate");
+conformance_test!(ext_npm_mitsupi, "npm/mitsupi", ignore);
+conformance_test!(
+    ext_third_party_kcosr_pi_extensions,
+    "third-party/kcosr-pi-extensions"
+);

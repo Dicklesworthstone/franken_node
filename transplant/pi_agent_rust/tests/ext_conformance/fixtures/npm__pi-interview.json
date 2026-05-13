@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "npm/pi-interview",
+    "source": { "path": "npm/pi-interview/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-interview-reg",
+      "kind": "registration",
+      "summary": "Validates interview tool registration",
+      "expect": {
+        "tool_count": 1
+      }
+    },
+    {
+      "id": "scn-npm-pi-interview-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes interview tool with basic args",
+      "tool_name": "interview",
+      "input": {
+        "arguments": {
+          "topic": "software engineering"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-interview-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes interview tool with empty args expecting error",
+      "tool_name": "interview",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

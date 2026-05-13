@@ -1,0 +1,90 @@
+{
+  "extension": {
+    "id": "third-party/aliou-pi-extensions",
+    "source": {
+      "path": "third-party/aliou-pi-extensions/defaults/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-aliou-pi-extensions-reg-001",
+      "kind": "registration",
+      "summary": "Verifies 1 tool(s), ad-name command, event hooks registered for aliou-pi-extensions",
+      "expect": {
+        "tool_count": 1,
+        "commands_contains": [
+          "ad-name",
+          "dumb-zone-status",
+          "extensions:update"
+        ],
+        "event_hooks_contains": [
+          "agent_end",
+          "agent_start",
+          "before_agent_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-aliou-pi-extensions-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes nvim_context tool with basic arguments",
+      "tool_name": "nvim_context",
+      "input": {
+        "arguments": {
+          "query": "test"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-aliou-pi-extensions-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes nvim_context tool with empty arguments; expects error",
+      "tool_name": "nvim_context",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-aliou-pi-extensions-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes ad-name command",
+      "command_name": "ad-name",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-aliou-pi-extensions-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "ad-name-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-aliou-pi-extensions-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_end event",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

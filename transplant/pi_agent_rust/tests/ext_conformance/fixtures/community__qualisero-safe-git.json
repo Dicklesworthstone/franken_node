@@ -1,0 +1,62 @@
+{
+  "extension": {
+    "id": "community/qualisero-safe-git",
+    "source": {
+      "path": "community/qualisero-safe-git/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-qualisero-safe-git-reg-001",
+      "kind": "registration",
+      "summary": "Verifies safegit command, event hooks registered for qualisero-safe-git",
+      "expect": {
+        "commands_contains": [
+          "safegit",
+          "safegit-level",
+          "safegit-status"
+        ],
+        "event_hooks_contains": [
+          "session_start",
+          "tool_call"
+        ]
+      }
+    },
+    {
+      "id": "scn-qualisero-safe-git-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes safegit command",
+      "command_name": "safegit",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-safe-git-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "safegit-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-safe-git-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

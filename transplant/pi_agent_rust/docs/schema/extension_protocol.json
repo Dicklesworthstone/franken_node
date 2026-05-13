@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pi Extension Protocol",
+  "type": "object",
+  "required": ["id", "version", "type", "payload"],
+  "properties": {
+    "id": { "type": "string", "description": "Correlation id for request/response" },
+    "version": { "type": "string", "enum": ["1.0"] },
+    "type": {
+      "type": "string",
+      "enum": [
+        "register",
+        "tool_call",
+        "tool_result",
+        "slash_command",
+        "slash_result",
+        "event_hook",
+        "host_call",
+        "host_result",
+        "log",
+        "error"
+      ]
+    },
+    "payload": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "register" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/register" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "tool_call" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/tool_call" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "tool_result" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/tool_result" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "slash_command" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/slash_command" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "slash_result" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/slash_result" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "event_hook" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/event_hook" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "host_call" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/host_call" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "host_result" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/host_result" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "log" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/log" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "error" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/error" } } }
+    }
+  ],
+  "$defs": {
+    "register": {
+      "type": "object",
+      "required": ["name", "version", "api_version"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "api_version": { "type": "string" },
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "capability_manifest": { "$ref": "#/$defs/capability_manifest" },
+        "tools": { "type": "array", "items": { "type": "object" } },
+        "slash_commands": { "type": "array", "items": { "type": "object" } },
+        "event_hooks": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "capability_manifest": {
+      "type": "object",
+      "required": ["schema", "capabilities"],
+      "properties": {
+        "schema": { "type": "string", "enum": ["pi.ext.cap.v1"] },
+        "capabilities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/capability_requirement" }
+        }
+      }
+    },
+    "capability_requirement": {
+      "type": "object",
+      "required": ["capability"],
+      "properties": {
+        "capability": { "type": "string" },
+        "methods": { "type": "array", "items": { "type": "string" } },
+        "scope": { "$ref": "#/$defs/capability_scope" }
+      }
+    },
+    "capability_scope": {
+      "type": "object",
+      "properties": {
+        "paths": { "type": "array", "items": { "type": "string" } },
+        "hosts": { "type": "array", "items": { "type": "string" } },
+        "env": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "tool_call": {
+      "type": "object",
+      "required": ["call_id", "name", "input"],
+      "properties": {
+        "call_id": { "type": "string" },
+        "name": { "type": "string" },
+        "input": { "type": "object" },
+        "context": { "type": "object" }
+      }
+    },
+    "tool_result": {
+      "type": "object",
+      "required": ["call_id", "output", "is_error"],
+      "properties": {
+        "call_id": { "type": "string" },
+        "output": { "type": "object" },
+        "is_error": { "type": "boolean" }
+      }
+    },
+    "host_call": {
+      "type": "object",
+      "required": ["call_id", "capability", "method", "params"],
+      "properties": {
+        "call_id": { "type": "string" },
+        "capability": { "type": "string", "description": "Capability key to evaluate and audit (must match core-derived requirement)" },
+        "method": { "type": "string", "description": "Connector method name (e.g., tool, exec, http, session, ui)" },
+        "params": { "type": "object" },
+        "timeout_ms": { "type": "integer", "minimum": 0 },
+        "cancel_token": { "type": "string" },
+        "context": { "type": "object" }
+      }
+    },
+    "host_result": {
+      "type": "object",
+      "required": ["call_id", "output", "is_error"],
+      "properties": {
+        "call_id": { "type": "string" },
+        "output": { "type": "object" },
+        "is_error": { "type": "boolean" },
+        "error": { "$ref": "#/$defs/host_call_error" },
+        "chunk": { "$ref": "#/$defs/host_stream_chunk" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "is_error": { "const": true } } },
+          "then": { "required": ["error"] }
+        },
+        {
+          "if": { "properties": { "is_error": { "const": false } } },
+          "then": { "not": { "required": ["error"] } }
+        }
+      ]
+    },
+    "host_call_error_code": {
+      "type": "string",
+      "enum": ["timeout", "denied", "io", "invalid_request", "internal"]
+    },
+    "host_call_error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "$ref": "#/$defs/host_call_error_code" },
+        "message": { "type": "string" },
+        "details": { "type": "object" },
+        "retryable": { "type": "boolean" }
+      }
+    },
+    "host_stream_backpressure": {
+      "type": "object",
+      "properties": {
+        "credits": { "type": "integer", "minimum": 0 },
+        "delay_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "host_stream_chunk": {
+      "type": "object",
+      "required": ["index", "is_last"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "is_last": { "type": "boolean" },
+        "backpressure": { "$ref": "#/$defs/host_stream_backpressure" }
+      }
+    },
+    "slash_command": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "input": { "type": "object" }
+      }
+    },
+    "slash_result": {
+      "type": "object",
+      "required": ["output", "is_error"],
+      "properties": {
+        "output": { "type": "object" },
+        "is_error": { "type": "boolean" }
+      }
+    },
+    "event_hook": {
+      "type": "object",
+      "required": ["event"],
+      "properties": {
+        "event": { "type": "string" },
+        "data": { "type": "object" }
+      }
+    },
+    "log": {
+      "type": "object",
+      "required": ["schema", "ts", "level", "event", "message", "correlation"],
+      "properties": {
+        "schema": { "type": "string", "enum": ["pi.ext.log.v1"] },
+        "ts": { "type": "string", "format": "date-time" },
+        "level": { "type": "string", "enum": ["debug", "info", "warn", "error"] },
+        "event": { "type": "string" },
+        "message": { "type": "string" },
+        "correlation": { "$ref": "#/$defs/log_correlation" },
+        "source": { "$ref": "#/$defs/log_source" },
+        "data": { "type": "object" }
+      }
+    },
+    "log_correlation": {
+      "type": "object",
+      "required": ["extension_id", "scenario_id"],
+      "properties": {
+        "extension_id": { "type": "string" },
+        "scenario_id": { "type": "string" },
+        "session_id": { "type": "string" },
+        "run_id": { "type": "string" },
+        "artifact_id": { "type": "string" },
+        "tool_call_id": { "type": "string" },
+        "slash_command_id": { "type": "string" },
+        "event_id": { "type": "string" },
+        "host_call_id": { "type": "string" },
+        "rpc_id": { "type": "string" },
+        "trace_id": { "type": "string" },
+        "span_id": { "type": "string" }
+      }
+    },
+    "log_source": {
+      "type": "object",
+      "required": ["component"],
+      "properties": {
+        "component": {
+          "type": "string",
+          "enum": ["capture", "harness", "runtime", "extension"]
+        },
+        "host": { "type": "string" },
+        "pid": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "details": { "type": "object" }
+      }
+    }
+  }
+}

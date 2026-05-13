@@ -1,0 +1,43 @@
+{
+  "extension": {
+    "id": "npm/checkpoint-pi",
+    "source": {
+      "path": "npm/checkpoint-pi/checkpoint.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-checkpoint-pi-reg",
+      "kind": "registration",
+      "summary": "Validates checkpoint-pi registers event hooks",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start",
+          "turn_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-checkpoint-pi-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-checkpoint-pi-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

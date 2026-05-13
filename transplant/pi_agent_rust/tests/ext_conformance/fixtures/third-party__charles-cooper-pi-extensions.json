@@ -1,0 +1,88 @@
+{
+  "extension": {
+    "id": "third-party/charles-cooper-pi-extensions",
+    "source": {
+      "path": "third-party/charles-cooper-pi-extensions/per-model-system-prompt.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-charles-cooper-pi-extensions-reg-001",
+      "kind": "registration",
+      "summary": "Verifies 1 tool(s), subagent command, event hooks registered for charles-cooper-pi-extensions",
+      "expect": {
+        "tool_count": 1,
+        "commands_contains": [
+          "subagent"
+        ],
+        "event_hooks_contains": [
+          "before_agent_start",
+          "model_select",
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-charles-cooper-pi-extensions-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes subagent tool with basic arguments",
+      "tool_name": "subagent",
+      "input": {
+        "arguments": {
+          "query": "test"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-charles-cooper-pi-extensions-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes subagent tool with empty arguments; expects error",
+      "tool_name": "subagent",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-charles-cooper-pi-extensions-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes subagent command",
+      "command_name": "subagent",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-charles-cooper-pi-extensions-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "subagent-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-charles-cooper-pi-extensions-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires before_agent_start event",
+      "event_name": "before_agent_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

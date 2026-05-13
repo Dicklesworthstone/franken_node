@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "npm/walterra-pi-charts",
+    "source": { "path": "npm/walterra-pi-charts/extensions/vega-chart/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-walterra-charts-reg",
+      "kind": "registration",
+      "summary": "Validates vega_chart tool registration",
+      "expect": {
+        "tool_count": 1
+      }
+    },
+    {
+      "id": "scn-npm-walterra-charts-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes vega_chart tool with basic spec",
+      "tool_name": "vega_chart",
+      "input": {
+        "arguments": {
+          "spec": "{\"mark\": \"bar\"}"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-walterra-charts-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes vega_chart with empty args expecting error",
+      "tool_name": "vega_chart",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "message-renderer",
+    "source": { "path": "message-renderer/message-renderer.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-message-renderer-reg-001",
+      "kind": "registration",
+      "summary": "Verifies status command is registered",
+      "expect": {
+        "commands_contains": ["status"]
+      }
+    },
+    {
+      "id": "scn-message-renderer-pos-001",
+      "kind": "command",
+      "summary": "Invokes the status command to render message status",
+      "command_name": "status",
+      "input": {
+        "arguments": "test-status"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-message-renderer-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-renderer-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

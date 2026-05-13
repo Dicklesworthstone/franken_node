@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "mac-system-theme",
+    "source": { "path": "mac-system-theme/mac-system-theme.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-mac-system-theme-reg-001",
+      "kind": "registration",
+      "summary": "Verifies session_shutdown and session_start event handlers are registered",
+      "expect": {
+        "event_hooks_contains": ["session_shutdown", "session_start"]
+      }
+    },
+    {
+      "id": "scn-mac-system-theme-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event to apply macOS system theme",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mac-system-theme-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

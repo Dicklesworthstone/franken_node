@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "questionnaire",
+    "source": { "path": "questionnaire/questionnaire.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-questionnaire-reg-001",
+      "kind": "registration",
+      "summary": "Verifies questionnaire tool is registered",
+      "expect": {
+        "tool_count": 1
+      }
+    },
+    {
+      "id": "scn-questionnaire-pos-001",
+      "kind": "tool",
+      "summary": "Invokes questionnaire tool with valid questions list",
+      "tool_name": "questionnaire",
+      "input": {
+        "arguments": {
+          "questions": ["What is your name?", "What is your role?"]
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-questionnaire-neg-001",
+      "kind": "tool",
+      "summary": "Invokes questionnaire tool with empty arguments; expects error",
+      "tool_name": "questionnaire",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "extension": {
+    "id": "community/nicobailon-mcp-adapter",
+    "source": { "path": "community/nicobailon-mcp-adapter/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-nicobailon-mcp-adapter-reg-001",
+      "kind": "registration",
+      "summary": "Verifies tool, command, and event registrations for mcp-adapter",
+      "expect": {
+        "tool_count": 1,
+        "commands_contains": ["mcp", "mcp-auth"],
+        "event_hooks_contains": ["close", "error", "session_shutdown", "session_start"]
+      }
+    },
+    {
+      "id": "scn-nicobailon-mcp-adapter-pos-001",
+      "kind": "tool",
+      "summary": "Invokes mcp tool with list action",
+      "tool_name": "mcp",
+      "input": {
+        "arguments": {
+          "action": "list"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-nicobailon-mcp-adapter-pos-002",
+      "kind": "command",
+      "summary": "Invokes mcp command",
+      "command_name": "mcp",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-nicobailon-mcp-adapter-neg-001",
+      "kind": "tool",
+      "summary": "Invokes mcp tool with empty arguments; expects error",
+      "tool_name": "mcp",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

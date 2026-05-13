@@ -1,0 +1,43 @@
+{
+  "extension": {
+    "id": "npm/vpellegrino-pi-skills",
+    "source": { "path": "npm/vpellegrino-pi-skills/pi-extensions/bash-compat.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-vpellegrino-skills-reg",
+      "kind": "registration",
+      "summary": "Validates tool and event hook registrations",
+      "expect": {
+        "tool_count": 1,
+        "event_hooks_contains": ["close", "data"]
+      }
+    },
+    {
+      "id": "scn-npm-vpellegrino-skills-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes bash tool with basic args",
+      "tool_name": "bash",
+      "input": {
+        "arguments": {
+          "command": "echo hello"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-vpellegrino-skills-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes bash tool with empty args expecting error",
+      "tool_name": "bash",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

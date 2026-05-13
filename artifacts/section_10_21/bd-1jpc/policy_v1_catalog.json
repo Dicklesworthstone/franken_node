@@ -1,0 +1,42 @@
+{
+  "schema_version": "evolution-risk-scorer-v1",
+  "bead_id": "bd-1jpc",
+  "section": "10.21",
+  "title": "Unified evolution-risk scorer — weighting policy catalog",
+  "policy_version": "policy_v1",
+  "weights": {
+    "drift": 0.35,
+    "regime_shift": 0.25,
+    "hazard": 0.30,
+    "provenance": 0.10
+  },
+  "invariants": [
+    "sum(weights) == 1.0 within 1e-9",
+    "every weight is finite and non-negative",
+    "every feature value is finite and in [0, 1]",
+    "weighted sum is clamped to [0, 1] before reporting"
+  ],
+  "explainability_contract": {
+    "schema_version": "evolution-risk-scorer-v1",
+    "fields": [
+      "feature_contributions: BTreeMap<String, f64>",
+      "dominant_feature: String",
+      "weighting_policy_version: String"
+    ],
+    "deterministic_ordering": "feature_contributions iterates in sorted key order via BTreeMap"
+  },
+  "confidence_interval_contract": {
+    "method": "percentile bootstrap with Box-Muller Gaussian perturbations",
+    "default_lower_quantile": 0.025,
+    "default_upper_quantile": 0.975,
+    "determinism": "Seeded xorshift64* PRNG; identical (features, policy, noise.seed, n_bootstrap) reproduces identical (lower, upper)"
+  },
+  "rationale": {
+    "drift": "Weighted highest (0.35) because behavioral drift is the earliest pre-compromise signal in the BPET corpus.",
+    "hazard": "Weighted second (0.30) because instantaneous hazard captures imminent failure risk independent of drift trajectory.",
+    "regime_shift": "Weighted third (0.25) — covers structural break detection (BOCPD) signals that complement smooth drift.",
+    "provenance": "Weighted lowest (0.10) — provides a high-precision but lower-recall corroborating signal."
+  },
+  "source_file": "crates/franken-node/src/security/bpet/evolution_risk_scorer.rs",
+  "tracking_bead": "bd-1jpc.1"
+}

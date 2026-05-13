@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "timed-confirm",
+    "source": { "path": "timed-confirm/timed-confirm.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-timed-confirm-reg-001",
+      "kind": "registration",
+      "summary": "Verifies timed, timed-select, and timed-signal commands are registered",
+      "expect": {
+        "commands_contains": ["timed", "timed-select", "timed-signal"]
+      }
+    },
+    {
+      "id": "scn-timed-confirm-pos-001",
+      "kind": "command",
+      "summary": "Invokes the timed command to start a timed confirmation prompt",
+      "command_name": "timed",
+      "input": {
+        "arguments": "5"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-timed-confirm-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-timed-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "handoff",
+    "source": { "path": "handoff/handoff.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-handoff-reg-001",
+      "kind": "registration",
+      "summary": "Verifies handoff command is registered",
+      "expect": {
+        "commands_contains": ["handoff"]
+      }
+    },
+    {
+      "id": "scn-handoff-pos-001",
+      "kind": "command",
+      "summary": "Invokes the handoff command to transfer session context",
+      "command_name": "handoff",
+      "input": {
+        "arguments": "target-agent"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-handoff-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-handoff-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "extension": {
+    "id": "npm/pi-skill-palette",
+    "source": {
+      "path": "npm/pi-skill-palette/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-skill-palette-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "before_agent_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-skill-palette-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes skill command",
+      "command_name": "skill",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-skill-palette-evt-pos",
+      "kind": "event",
+      "summary": "Fires before_agent_start event",
+      "event_name": "before_agent_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-skill-palette-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

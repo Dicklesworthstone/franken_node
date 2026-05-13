@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/mitsuhiko-whimsical",
+    "source": { "path": "community/mitsuhiko-whimsical/whimsical.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-mitsuhiko-whimsical-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event handler registrations for mitsuhiko-whimsical",
+      "expect": {
+        "event_hooks_contains": ["turn_end", "turn_start"]
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-whimsical-pos-001",
+      "kind": "event",
+      "summary": "Fires turn_start event",
+      "event_name": "turn_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-whimsical-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

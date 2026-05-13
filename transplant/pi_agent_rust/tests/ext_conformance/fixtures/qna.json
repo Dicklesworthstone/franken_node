@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "qna",
+    "source": { "path": "qna/qna.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-qna-reg-001",
+      "kind": "registration",
+      "summary": "Verifies qna command is registered",
+      "expect": {
+        "commands_contains": ["qna"]
+      }
+    },
+    {
+      "id": "scn-qna-pos-001",
+      "kind": "command",
+      "summary": "Invokes the qna command to start a Q&A session",
+      "command_name": "qna",
+      "input": {
+        "arguments": "test-question"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-qna-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-qna-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "npm/token-rate-pi",
+    "source": {
+      "path": "npm/token-rate-pi/token-rate.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-token-rate-pi-reg",
+      "kind": "registration",
+      "summary": "Validates event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start",
+          "turn_start",
+          "turn_end"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-token-rate-pi-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-token-rate-pi-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

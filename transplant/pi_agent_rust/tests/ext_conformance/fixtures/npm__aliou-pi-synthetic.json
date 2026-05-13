@@ -1,0 +1,54 @@
+{
+  "extension": {
+    "id": "npm/aliou-pi-synthetic",
+    "source": {
+      "path": "npm/aliou-pi-synthetic/src/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-aliou-synthetic-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-aliou-synthetic-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes synthetic:quotas command",
+      "command_name": "synthetic:quotas",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-aliou-synthetic-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-aliou-synthetic-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

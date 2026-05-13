@@ -1,0 +1,56 @@
+{
+  "extension": {
+    "id": "npm/pi-ephemeral",
+    "source": {
+      "path": "npm/pi-ephemeral/extensions/ephemeral-mode.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-ephemeral-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "session_shutdown",
+          "session_start",
+          "session_tree"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-ephemeral-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes ephemeral command",
+      "command_name": "ephemeral",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-ephemeral-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-ephemeral-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "bookmark",
+    "source": { "path": "bookmark/bookmark.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-bookmark-reg-001",
+      "kind": "registration",
+      "summary": "Verifies bookmark and unbookmark commands are registered",
+      "expect": {
+        "commands_contains": ["bookmark", "unbookmark"]
+      }
+    },
+    {
+      "id": "scn-bookmark-pos-001",
+      "kind": "command",
+      "summary": "Invokes the bookmark command to create a bookmark",
+      "command_name": "bookmark",
+      "input": {
+        "arguments": "test-bookmark"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-bookmark-neg-001",
+      "kind": "command",
+      "summary": "Invokes unbookmark with nonexistent bookmark name; expects error",
+      "command_name": "unbookmark",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

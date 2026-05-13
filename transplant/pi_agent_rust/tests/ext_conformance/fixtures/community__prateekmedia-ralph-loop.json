@@ -1,0 +1,89 @@
+{
+  "extension": {
+    "id": "community/prateekmedia-ralph-loop",
+    "source": {
+      "path": "community/prateekmedia-ralph-loop/ralph-loop.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-prateekmedia-ralph-loop-reg-001",
+      "kind": "registration",
+      "summary": "Verifies 1 tool(s), ralph-clear command, event hooks registered for prateekmedia-ralph-loop",
+      "expect": {
+        "tool_count": 1,
+        "commands_contains": [
+          "ralph-clear",
+          "ralph-follow",
+          "ralph-pause"
+        ],
+        "event_hooks_contains": [
+          "close",
+          "data"
+        ]
+      }
+    },
+    {
+      "id": "scn-prateekmedia-ralph-loop-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes ralph_loop tool with basic arguments",
+      "tool_name": "ralph_loop",
+      "input": {
+        "arguments": {
+          "query": "test"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-prateekmedia-ralph-loop-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes ralph_loop tool with empty arguments; expects error",
+      "tool_name": "ralph_loop",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-prateekmedia-ralph-loop-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes ralph-clear command",
+      "command_name": "ralph-clear",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-prateekmedia-ralph-loop-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "ralph-clear-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-prateekmedia-ralph-loop-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires close event",
+      "event_name": "close",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "community/tmustier-usage-extension",
+    "source": {
+      "path": "community/tmustier-usage-extension/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-tmustier-usage-extension-reg-001",
+      "kind": "registration",
+      "summary": "Verifies usage command registered for tmustier-usage-extension",
+      "expect": {
+        "commands_contains": [
+          "usage"
+        ]
+      }
+    },
+    {
+      "id": "scn-tmustier-usage-extension-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes usage command",
+      "command_name": "usage",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-usage-extension-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "usage-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

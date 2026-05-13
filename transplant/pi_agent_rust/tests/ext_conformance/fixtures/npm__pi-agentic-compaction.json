@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "npm/pi-agentic-compaction",
+    "source": {
+      "path": "npm/pi-agentic-compaction/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-agentic-compaction-reg",
+      "kind": "registration",
+      "summary": "Validates event hook registration for session_before_compact",
+      "expect": {
+        "event_hooks_contains": [
+          "session_before_compact"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-agentic-compaction-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_before_compact event",
+      "event_name": "session_before_compact",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-agentic-compaction-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

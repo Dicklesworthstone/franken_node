@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/mitsuhiko-notify",
+    "source": { "path": "community/mitsuhiko-notify/notify.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-mitsuhiko-notify-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event handler registrations for mitsuhiko-notify",
+      "expect": {
+        "event_hooks_contains": ["agent_end"]
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-notify-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_end event to trigger notification",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-notify-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

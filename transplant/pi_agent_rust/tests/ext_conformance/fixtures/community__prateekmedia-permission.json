@@ -1,0 +1,61 @@
+{
+  "extension": {
+    "id": "community/prateekmedia-permission",
+    "source": {
+      "path": "community/prateekmedia-permission/permission.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-prateekmedia-permission-reg-001",
+      "kind": "registration",
+      "summary": "Verifies permission command, event hooks registered for prateekmedia-permission",
+      "expect": {
+        "commands_contains": [
+          "permission",
+          "permission-mode"
+        ],
+        "event_hooks_contains": [
+          "session_start",
+          "tool_call"
+        ]
+      }
+    },
+    {
+      "id": "scn-prateekmedia-permission-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes permission command",
+      "command_name": "permission",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-prateekmedia-permission-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "permission-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-prateekmedia-permission-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

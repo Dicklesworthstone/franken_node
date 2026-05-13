@@ -1,0 +1,43 @@
+{
+  "extension": {
+    "id": "npm/vaayne-pi-subagent",
+    "source": { "path": "npm/vaayne-pi-subagent/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-vaayne-pi-subagent-reg",
+      "kind": "registration",
+      "summary": "Validates tool and event hook registrations",
+      "expect": {
+        "tool_count": 1,
+        "event_hooks_contains": ["session_start", "before_agent_start"]
+      }
+    },
+    {
+      "id": "scn-npm-vaayne-pi-subagent-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes subagent tool with basic args",
+      "tool_name": "subagent",
+      "input": {
+        "arguments": {
+          "task": "test task"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-vaayne-pi-subagent-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes subagent with empty args expecting error",
+      "tool_name": "subagent",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

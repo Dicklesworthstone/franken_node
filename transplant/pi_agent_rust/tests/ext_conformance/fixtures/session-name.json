@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "session-name",
+    "source": { "path": "session-name/session-name.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-session-name-reg-001",
+      "kind": "registration",
+      "summary": "Verifies session-name command is registered",
+      "expect": {
+        "commands_contains": ["session-name"]
+      }
+    },
+    {
+      "id": "scn-session-name-pos-001",
+      "kind": "command",
+      "summary": "Invokes the session-name command to set session display name",
+      "command_name": "session-name",
+      "input": {
+        "arguments": "my-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-session-name-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-session-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

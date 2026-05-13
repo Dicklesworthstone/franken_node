@@ -1,0 +1,56 @@
+{
+  "extension": {
+    "id": "npm/pi-poly-notify",
+    "source": {
+      "path": "npm/pi-poly-notify/extensions/poly-notify/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-poly-notify-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "agent_end",
+          "agent_start",
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-poly-notify-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes notify command",
+      "command_name": "notify",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-poly-notify-evt-pos",
+      "kind": "event",
+      "summary": "Fires agent_end event",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-poly-notify-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

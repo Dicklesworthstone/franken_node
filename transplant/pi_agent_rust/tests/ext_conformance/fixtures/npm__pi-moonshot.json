@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "npm/pi-moonshot",
+    "source": { "path": "npm/pi-moonshot/extensions/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-moonshot-reg",
+      "kind": "registration",
+      "summary": "Validates provider registration (no tools/commands)",
+      "expect": {
+        "tool_count": 0
+      }
+    },
+    {
+      "id": "scn-npm-pi-moonshot-evt-pos",
+      "kind": "event",
+      "summary": "Provider extension handles session_start event gracefully",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-moonshot-tool-neg",
+      "kind": "tool",
+      "summary": "Invoking a nonexistent tool returns error",
+      "tool_name": "nonexistent_tool",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

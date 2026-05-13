@@ -1,0 +1,55 @@
+{
+  "extension": {
+    "id": "npm/pi-review-loop",
+    "source": { "path": "npm/pi-review-loop/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-review-loop-reg",
+      "kind": "registration",
+      "summary": "Validates tool, command, and event hook registrations",
+      "expect": {
+        "tool_count": 1,
+        "event_hooks_contains": ["agent_end", "session_start"]
+      }
+    },
+    {
+      "id": "scn-npm-pi-review-loop-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes review_loop tool with basic args",
+      "tool_name": "review_loop",
+      "input": {
+        "arguments": {
+          "action": "status"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-review-loop-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes review_loop with empty args expecting error",
+      "tool_name": "review_loop",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-review-loop-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes review-status command",
+      "command_name": "review-status",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

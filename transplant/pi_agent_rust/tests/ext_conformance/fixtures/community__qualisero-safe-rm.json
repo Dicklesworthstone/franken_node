@@ -1,0 +1,61 @@
+{
+  "extension": {
+    "id": "community/qualisero-safe-rm",
+    "source": {
+      "path": "community/qualisero-safe-rm/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-qualisero-safe-rm-reg-001",
+      "kind": "registration",
+      "summary": "Verifies saferm command, event hooks registered for qualisero-safe-rm",
+      "expect": {
+        "commands_contains": [
+          "saferm",
+          "saferm-clearlog",
+          "saferm-log"
+        ],
+        "event_hooks_contains": [
+          "tool_call"
+        ]
+      }
+    },
+    {
+      "id": "scn-qualisero-safe-rm-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes saferm command",
+      "command_name": "saferm",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-safe-rm-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "saferm-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-safe-rm-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires tool_call event",
+      "event_name": "tool_call",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

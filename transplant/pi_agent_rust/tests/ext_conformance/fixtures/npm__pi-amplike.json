@@ -1,0 +1,54 @@
+{
+  "extension": {
+    "id": "npm/pi-amplike",
+    "source": { "path": "npm/pi-amplike/extensions/handoff.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-amplike-reg",
+      "kind": "registration",
+      "summary": "Validates tool and command registrations",
+      "expect": {
+        "tool_count": 1
+      }
+    },
+    {
+      "id": "scn-npm-pi-amplike-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes session_query tool with basic args",
+      "tool_name": "session_query",
+      "input": {
+        "arguments": {
+          "query": "status"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-amplike-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes session_query with empty args expecting error",
+      "tool_name": "session_query",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-amplike-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes handoff command",
+      "command_name": "handoff",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

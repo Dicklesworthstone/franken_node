@@ -1,0 +1,63 @@
+{
+  "extension": {
+    "id": "community/qualisero-background-notify",
+    "source": {
+      "path": "community/qualisero-background-notify/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-qualisero-background-notify-reg-001",
+      "kind": "registration",
+      "summary": "Verifies notify-beep command, event hooks registered for qualisero-background-notify",
+      "expect": {
+        "commands_contains": [
+          "notify-beep",
+          "notify-focus",
+          "notify-save-global"
+        ],
+        "event_hooks_contains": [
+          "agent_end",
+          "agent_start",
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-qualisero-background-notify-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes notify-beep command",
+      "command_name": "notify-beep",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-background-notify-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "notify-beep-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-background-notify-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_end event",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

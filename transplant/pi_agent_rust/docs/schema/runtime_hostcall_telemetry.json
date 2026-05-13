@@ -1,0 +1,291 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Runtime Hostcall Telemetry Artifact",
+  "type": "object",
+  "required": ["schema", "generated_at_ms", "entry_count", "entries"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "enum": ["pi.ext.hostcall_telemetry.v1"]
+    },
+    "generated_at_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "entry_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/event" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "event": {
+      "type": "object",
+      "required": [
+        "schema",
+        "ts_ms",
+        "extension_id",
+        "call_id",
+        "capability",
+        "method",
+        "params_hash",
+        "args_shape_hash",
+        "resource_target_class",
+        "policy_reason",
+        "policy_profile",
+        "risk_score",
+        "latency_ms",
+        "lane",
+        "lane_decision_reason",
+        "lane_matrix_key",
+        "lane_dispatch_latency_ms",
+        "lane_latency_share_bps",
+        "marshalling_path",
+        "marshalling_latency_us",
+        "marshalling_fallback_count",
+        "marshalling_superinstruction_expected_cost_delta",
+        "marshalling_superinstruction_observed_cost_delta",
+        "outcome",
+        "selected_action",
+        "reason_codes",
+        "explanation_level",
+        "explanation_summary",
+        "top_contributors",
+        "budget_state",
+        "sequence",
+        "features",
+        "extraction_latency_us",
+        "extraction_budget_us",
+        "extraction_budget_exceeded",
+        "redaction_summary"
+      ],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "enum": ["pi.ext.hostcall_telemetry.v1"]
+        },
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "extension_id": { "type": "string" },
+        "call_id": { "type": "string" },
+        "capability": { "type": "string" },
+        "method": { "type": "string" },
+        "params_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{3,64}$"
+        },
+        "args_shape_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{3,64}$"
+        },
+        "resource_target_class": { "type": "string" },
+        "policy_reason": { "type": "string" },
+        "policy_profile": {
+          "type": "string",
+          "enum": ["strict", "balanced", "permissive"]
+        },
+        "risk_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "timeout_ms": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "latency_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lane": {
+          "type": "string",
+          "enum": ["fast", "compat", "unknown"]
+        },
+        "lane_decision_reason": {
+          "type": "string"
+        },
+        "lane_fallback_reason": {
+          "type": ["string", "null"]
+        },
+        "lane_matrix_key": {
+          "type": "string"
+        },
+        "lane_dispatch_latency_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lane_latency_share_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "marshalling_path": {
+          "type": "string"
+        },
+        "marshalling_latency_us": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "marshalling_fallback_reason": {
+          "type": ["string", "null"]
+        },
+        "marshalling_fallback_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "marshalling_superinstruction_trace_signature": {
+          "type": ["string", "null"]
+        },
+        "marshalling_superinstruction_plan_id": {
+          "type": ["string", "null"]
+        },
+        "marshalling_superinstruction_expected_cost_delta": {
+          "type": "integer"
+        },
+        "marshalling_superinstruction_observed_cost_delta": {
+          "type": "integer"
+        },
+        "marshalling_superinstruction_deopt_reason": {
+          "type": ["string", "null"]
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["success", "error"]
+        },
+        "outcome_error_code": {
+          "type": ["string", "null"]
+        },
+        "selected_action": {
+          "type": "string",
+          "enum": ["allow", "harden", "deny", "terminate"]
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "explanation_level": {
+          "type": "string",
+          "enum": ["compact", "standard", "full"]
+        },
+        "explanation_summary": {
+          "type": "string"
+        },
+        "top_contributors": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/explanation_contributor" }
+        },
+        "budget_state": {
+          "$ref": "#/$defs/budget_state"
+        },
+        "sequence": { "$ref": "#/$defs/sequence_context" },
+        "features": { "$ref": "#/$defs/feature_vector" },
+        "extraction_latency_us": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "extraction_budget_us": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "extraction_budget_exceeded": {
+          "type": "boolean"
+        },
+        "redaction_summary": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "explanation_contributor": {
+      "type": "object",
+      "required": ["code", "signed_impact", "magnitude", "rationale"],
+      "properties": {
+        "code": { "type": "string" },
+        "signed_impact": { "type": "number" },
+        "magnitude": { "type": "number", "minimum": 0 },
+        "rationale": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "budget_state": {
+      "type": "object",
+      "required": [
+        "time_budget_ms",
+        "elapsed_ms",
+        "term_budget",
+        "terms_emitted",
+        "exhausted",
+        "fallback_mode"
+      ],
+      "properties": {
+        "time_budget_ms": { "type": "integer", "minimum": 1 },
+        "elapsed_ms": { "type": "integer", "minimum": 0 },
+        "term_budget": { "type": "integer", "minimum": 1 },
+        "terms_emitted": { "type": "integer", "minimum": 0 },
+        "exhausted": { "type": "boolean" },
+        "fallback_mode": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "sequence_context": {
+      "type": "object",
+      "required": [
+        "sequence_id",
+        "burst_count_1s",
+        "burst_count_10s",
+        "recent_error_count",
+        "recent_window_count",
+        "prior_failure_streak"
+      ],
+      "properties": {
+        "sequence_id": { "type": "integer", "minimum": 1 },
+        "previous_capability": { "type": ["string", "null"] },
+        "previous_method": { "type": ["string", "null"] },
+        "previous_resource_target_class": { "type": ["string", "null"] },
+        "burst_count_1s": { "type": "integer", "minimum": 0 },
+        "burst_count_10s": { "type": "integer", "minimum": 0 },
+        "recent_error_count": { "type": "integer", "minimum": 0 },
+        "recent_window_count": { "type": "integer", "minimum": 0 },
+        "prior_failure_streak": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "feature_vector": {
+      "type": "object",
+      "required": [
+        "schema",
+        "base_score",
+        "recent_mean_score",
+        "recent_error_rate",
+        "burst_density_1s",
+        "burst_density_10s",
+        "prior_failure_streak_norm",
+        "dangerous_capability",
+        "timeout_requested",
+        "policy_prompt_bias"
+      ],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "enum": ["pi.ext.hostcall_feature_vector.v1"]
+        },
+        "base_score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "recent_mean_score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "recent_error_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "burst_density_1s": { "type": "number", "minimum": 0, "maximum": 1 },
+        "burst_density_10s": { "type": "number", "minimum": 0, "maximum": 1 },
+        "prior_failure_streak_norm": { "type": "number", "minimum": 0, "maximum": 1 },
+        "dangerous_capability": { "type": "number", "minimum": 0, "maximum": 1 },
+        "timeout_requested": { "type": "number", "minimum": 0, "maximum": 1 },
+        "policy_prompt_bias": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

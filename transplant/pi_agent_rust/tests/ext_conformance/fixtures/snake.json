@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "snake",
+    "source": { "path": "snake/snake.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-snake-reg-001",
+      "kind": "registration",
+      "summary": "Verifies snake command is registered",
+      "expect": {
+        "commands_contains": ["snake"]
+      }
+    },
+    {
+      "id": "scn-snake-pos-001",
+      "kind": "command",
+      "summary": "Invokes the snake command to launch the snake game",
+      "command_name": "snake",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-snake-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-snake-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

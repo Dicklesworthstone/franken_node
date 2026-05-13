@@ -1,0 +1,66 @@
+{
+  "extension": {
+    "id": "npm/imsus-pi-extension-minimax-coding-plan-mcp",
+    "source": { "path": "npm/imsus-pi-extension-minimax-coding-plan-mcp/extensions/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-imsus-minimax-reg",
+      "kind": "registration",
+      "summary": "Validates tool and command registrations",
+      "expect": {
+        "tool_count": 2
+      }
+    },
+    {
+      "id": "scn-npm-imsus-minimax-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes web_search tool with basic args",
+      "tool_name": "web_search",
+      "input": {
+        "arguments": {
+          "query": "test search"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-imsus-minimax-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes web_search with empty args expecting error",
+      "tool_name": "web_search",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-imsus-minimax-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes minimax-status command",
+      "command_name": "minimax-status",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-imsus-minimax-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

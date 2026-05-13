@@ -1,0 +1,53 @@
+{
+  "extension": {
+    "id": "community/nicobailon-powerline-footer",
+    "source": { "path": "community/nicobailon-powerline-footer/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-nicobailon-powerline-footer-reg-001",
+      "kind": "registration",
+      "summary": "Verifies command and event registrations for powerline-footer",
+      "expect": {
+        "commands_contains": ["powerline", "vibe"],
+        "event_hooks_contains": ["agent_end", "agent_start", "before_agent_start", "session_start"]
+      }
+    },
+    {
+      "id": "scn-nicobailon-powerline-footer-pos-001",
+      "kind": "command",
+      "summary": "Invokes powerline command",
+      "command_name": "powerline",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-nicobailon-powerline-footer-pos-002",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-nicobailon-powerline-footer-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

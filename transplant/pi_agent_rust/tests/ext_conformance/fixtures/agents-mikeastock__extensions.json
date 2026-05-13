@@ -1,0 +1,88 @@
+{
+  "extension": {
+    "id": "agents-mikeastock/extensions",
+    "source": {
+      "path": "agents-mikeastock/extensions/pi/AskUserQuestion/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-extensions-reg-001",
+      "kind": "registration",
+      "summary": "Verifies 2 tool(s), handoff command, event hooks registered for extensions",
+      "expect": {
+        "tool_count": 2,
+        "commands_contains": [
+          "handoff"
+        ],
+        "event_hooks_contains": [
+          "agent_end",
+          "agent_start",
+          "session_shutdown"
+        ]
+      }
+    },
+    {
+      "id": "scn-extensions-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes AskUserQuestion tool with basic arguments",
+      "tool_name": "AskUserQuestion",
+      "input": {
+        "arguments": {
+          "query": "test"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-extensions-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes AskUserQuestion tool with empty arguments; expects error",
+      "tool_name": "AskUserQuestion",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-extensions-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes handoff command",
+      "command_name": "handoff",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-extensions-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "handoff-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-extensions-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_end event",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

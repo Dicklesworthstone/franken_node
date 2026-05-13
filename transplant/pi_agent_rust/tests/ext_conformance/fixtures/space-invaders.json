@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "space-invaders",
+    "source": { "path": "space-invaders/space-invaders.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-space-invaders-reg-001",
+      "kind": "registration",
+      "summary": "Verifies invaders command is registered",
+      "expect": {
+        "commands_contains": ["invaders"]
+      }
+    },
+    {
+      "id": "scn-space-invaders-pos-001",
+      "kind": "command",
+      "summary": "Invokes the invaders command to launch the space invaders game",
+      "command_name": "invaders",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-space-invaders-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-invaders-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

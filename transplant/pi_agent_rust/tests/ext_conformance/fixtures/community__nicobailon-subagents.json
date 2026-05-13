@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/nicobailon-subagents",
+    "source": { "path": "community/nicobailon-subagents/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-nicobailon-subagents-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event handler registrations for subagents",
+      "expect": {
+        "event_hooks_contains": ["session_start", "session_shutdown", "session_switch"]
+      }
+    },
+    {
+      "id": "scn-nicobailon-subagents-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-nicobailon-subagents-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

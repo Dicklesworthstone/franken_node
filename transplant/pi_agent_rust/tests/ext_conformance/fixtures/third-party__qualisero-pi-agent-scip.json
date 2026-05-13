@@ -1,0 +1,60 @@
+{
+  "extension": {
+    "id": "third-party/qualisero-pi-agent-scip",
+    "source": {
+      "path": "third-party/qualisero-pi-agent-scip/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-qualisero-pi-agent-scip-reg-001",
+      "kind": "registration",
+      "summary": "Verifies 6 tool(s), event hooks registered for qualisero-pi-agent-scip",
+      "expect": {
+        "tool_count": 6,
+        "event_hooks_contains": [
+          "before_agent_start",
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-qualisero-pi-agent-scip-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes scip_find_definition tool with basic arguments",
+      "tool_name": "scip_find_definition",
+      "input": {
+        "arguments": {
+          "query": "test"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-pi-agent-scip-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes scip_find_definition tool with empty arguments; expects error",
+      "tool_name": "scip_find_definition",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-pi-agent-scip-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires before_agent_start event",
+      "event_name": "before_agent_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

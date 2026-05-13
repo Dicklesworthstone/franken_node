@@ -1,0 +1,53 @@
+{
+  "extension": {
+    "id": "npm/vaayne-agent-kit",
+    "source": { "path": "npm/vaayne-agent-kit/extensions/mcp/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-vaayne-agent-kit-reg",
+      "kind": "registration",
+      "summary": "Validates tool, command, and event hook registrations",
+      "expect": {
+        "tool_count": 5,
+        "event_hooks_contains": ["session_start", "agent_end", "tool_call"]
+      }
+    },
+    {
+      "id": "scn-npm-vaayne-agent-kit-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes mcp_list tool with basic args",
+      "tool_name": "mcp_list",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-vaayne-agent-kit-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes mcp_invoke with empty args expecting error",
+      "tool_name": "mcp_invoke",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-vaayne-agent-kit-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes powerline command",
+      "command_name": "powerline",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

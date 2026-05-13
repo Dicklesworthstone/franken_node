@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/hjanuschka-speedreading",
+    "source": { "path": "community/hjanuschka-speedreading/speedreading.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-hjanuschka-speedreading-reg-001",
+      "kind": "registration",
+      "summary": "Verifies speedread command is registered",
+      "expect": {
+        "commands_contains": ["speedread"]
+      }
+    },
+    {
+      "id": "scn-hjanuschka-speedreading-pos-001",
+      "kind": "command",
+      "summary": "Invokes speedread command",
+      "command_name": "speedread",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-speedreading-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "speedread-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

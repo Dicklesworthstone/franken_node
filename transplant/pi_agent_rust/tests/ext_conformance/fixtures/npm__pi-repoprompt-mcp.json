@@ -1,0 +1,55 @@
+{
+  "extension": {
+    "id": "npm/pi-repoprompt-mcp",
+    "source": { "path": "npm/pi-repoprompt-mcp/extensions/repoprompt-mcp/src/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-repoprompt-mcp-reg",
+      "kind": "registration",
+      "summary": "Validates tool, command, and event hook registrations",
+      "expect": {
+        "tool_count": 1,
+        "event_hooks_contains": ["session_start", "session_shutdown"]
+      }
+    },
+    {
+      "id": "scn-npm-pi-repoprompt-mcp-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes rp tool with basic args",
+      "tool_name": "rp",
+      "input": {
+        "arguments": {
+          "action": "status"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-repoprompt-mcp-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes rp tool with empty args expecting error",
+      "tool_name": "rp",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-repoprompt-mcp-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes rp command",
+      "command_name": "rp",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

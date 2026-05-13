@@ -1,0 +1,52 @@
+{
+  "extension": {
+    "id": "npm/pi-super-curl",
+    "source": { "path": "npm/pi-super-curl/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-super-curl-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": ["input", "session_start"]
+      }
+    },
+    {
+      "id": "scn-npm-pi-super-curl-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes scurl command",
+      "command_name": "scurl",
+      "input": {
+        "arguments": "https://example.com"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-super-curl-cmd-neg",
+      "kind": "command",
+      "summary": "Invokes scurl command with empty args",
+      "command_name": "scurl",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-super-curl-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

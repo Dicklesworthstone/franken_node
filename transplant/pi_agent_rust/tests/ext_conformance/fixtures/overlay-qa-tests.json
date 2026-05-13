@@ -1,0 +1,41 @@
+{
+  "extension": {
+    "id": "overlay-qa-tests",
+    "source": { "path": "overlay-qa-tests/overlay-qa-tests.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-overlay-qa-tests-reg-001",
+      "kind": "registration",
+      "summary": "Verifies overlay QA test commands and event handlers are registered",
+      "expect": {
+        "commands_contains": ["overlay-anchors", "overlay-animation", "overlay-edge", "overlay-stack", "overlay-toggle"],
+        "event_hooks_contains": ["close", "data"]
+      }
+    },
+    {
+      "id": "scn-overlay-qa-tests-pos-001",
+      "kind": "command",
+      "summary": "Invokes the overlay-stack command to test overlay stacking",
+      "command_name": "overlay-stack",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-overlay-qa-tests-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-overlay-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

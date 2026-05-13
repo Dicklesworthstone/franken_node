@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "npm/benvargas-pi-ancestor-discovery",
+    "source": { "path": "npm/benvargas-pi-ancestor-discovery/extensions/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-benvargas-ancestor-reg",
+      "kind": "registration",
+      "summary": "Validates extension loads with no registrations",
+      "expect": {
+        "tool_count": 0
+      }
+    },
+    {
+      "id": "scn-npm-benvargas-ancestor-evt-pos",
+      "kind": "event",
+      "summary": "Basic extension handles session_start event gracefully",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-benvargas-ancestor-tool-neg",
+      "kind": "tool",
+      "summary": "Invoking a nonexistent tool returns error",
+      "tool_name": "nonexistent_tool",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

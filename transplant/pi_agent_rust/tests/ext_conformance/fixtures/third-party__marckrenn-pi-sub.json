@@ -1,0 +1,63 @@
+{
+  "extension": {
+    "id": "third-party/marckrenn-pi-sub",
+    "source": {
+      "path": "third-party/marckrenn-pi-sub/sub-bar/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-marckrenn-pi-sub-reg-001",
+      "kind": "registration",
+      "summary": "Verifies sub-bar:import command, event hooks registered for marckrenn-pi-sub",
+      "expect": {
+        "commands_contains": [
+          "sub-bar:import",
+          "sub-bar:settings",
+          "sub-core:settings"
+        ],
+        "event_hooks_contains": [
+          "model_select",
+          "session_shutdown",
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-marckrenn-pi-sub-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes sub-bar:import command",
+      "command_name": "sub-bar:import",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-marckrenn-pi-sub-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "sub-bar:import-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-marckrenn-pi-sub-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires model_select event",
+      "event_name": "model_select",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

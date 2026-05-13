@@ -1,0 +1,43 @@
+{
+  "extension": {
+    "id": "truncated-tool",
+    "source": { "path": "truncated-tool/truncated-tool.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-truncated-tool-reg-001",
+      "kind": "registration",
+      "summary": "Verifies rg tool is registered",
+      "expect": {
+        "tool_count": 1
+      }
+    },
+    {
+      "id": "scn-truncated-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes rg tool with valid search pattern",
+      "tool_name": "rg",
+      "input": {
+        "arguments": {
+          "pattern": "test",
+          "path": "/tmp"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-truncated-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes rg tool with empty arguments; expects error",
+      "tool_name": "rg",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "npm/pi-prompt-template-model",
+    "source": {
+      "path": "npm/pi-prompt-template-model/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-prompt-template-reg",
+      "kind": "registration",
+      "summary": "Validates event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "agent_end",
+          "before_agent_start",
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-prompt-template-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-prompt-template-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

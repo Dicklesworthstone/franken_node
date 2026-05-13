@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "community/tmustier-arcade-spice-invaders",
+    "source": {
+      "path": "community/tmustier-arcade-spice-invaders/spice-invaders.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-tmustier-arcade-spice-invaders-reg-001",
+      "kind": "registration",
+      "summary": "Verifies spice-invaders command registered for tmustier-arcade-spice-invaders",
+      "expect": {
+        "commands_contains": [
+          "spice-invaders"
+        ]
+      }
+    },
+    {
+      "id": "scn-tmustier-arcade-spice-invaders-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes spice-invaders command",
+      "command_name": "spice-invaders",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-arcade-spice-invaders-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "spice-invaders-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

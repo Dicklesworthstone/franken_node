@@ -1,0 +1,86 @@
+{
+  "extension": {
+    "id": "third-party/jyaunches-pi-canvas",
+    "source": {
+      "path": "third-party/jyaunches-pi-canvas/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-jyaunches-pi-canvas-reg-001",
+      "kind": "registration",
+      "summary": "Verifies 3 tool(s), calendar command, event hooks registered for jyaunches-pi-canvas",
+      "expect": {
+        "tool_count": 3,
+        "commands_contains": [
+          "calendar"
+        ],
+        "event_hooks_contains": [
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-jyaunches-pi-canvas-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes canvas_calendar tool with basic arguments",
+      "tool_name": "canvas_calendar",
+      "input": {
+        "arguments": {
+          "query": "test"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-jyaunches-pi-canvas-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes canvas_calendar tool with empty arguments; expects error",
+      "tool_name": "canvas_calendar",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-jyaunches-pi-canvas-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes calendar command",
+      "command_name": "calendar",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-jyaunches-pi-canvas-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "calendar-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-jyaunches-pi-canvas-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

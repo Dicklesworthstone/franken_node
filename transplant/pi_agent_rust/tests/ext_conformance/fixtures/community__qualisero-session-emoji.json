@@ -1,0 +1,63 @@
+{
+  "extension": {
+    "id": "community/qualisero-session-emoji",
+    "source": {
+      "path": "community/qualisero-session-emoji/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-qualisero-session-emoji-reg-001",
+      "kind": "registration",
+      "summary": "Verifies emoji command, event hooks registered for qualisero-session-emoji",
+      "expect": {
+        "commands_contains": [
+          "emoji",
+          "emoji-config",
+          "emoji-history"
+        ],
+        "event_hooks_contains": [
+          "agent_start",
+          "session_start",
+          "session_switch"
+        ]
+      }
+    },
+    {
+      "id": "scn-qualisero-session-emoji-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes emoji command",
+      "command_name": "emoji",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-session-emoji-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "emoji-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-session-emoji-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_start event",
+      "event_name": "agent_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

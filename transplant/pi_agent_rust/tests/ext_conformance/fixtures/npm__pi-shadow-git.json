@@ -1,0 +1,56 @@
+{
+  "extension": {
+    "id": "npm/pi-shadow-git",
+    "source": {
+      "path": "npm/pi-shadow-git/extensions/shadow-git.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-shadow-git-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start",
+          "agent_end",
+          "tool_call"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-shadow-git-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes shadow-git command",
+      "command_name": "shadow-git",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-shadow-git-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-shadow-git-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

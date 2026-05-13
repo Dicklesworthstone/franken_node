@@ -1,0 +1,60 @@
+{
+  "extension": {
+    "id": "community/qualisero-compact-config",
+    "source": {
+      "path": "community/qualisero-compact-config/compact-config.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-qualisero-compact-config-reg-001",
+      "kind": "registration",
+      "summary": "Verifies compact-config command, event hooks registered for qualisero-compact-config",
+      "expect": {
+        "commands_contains": [
+          "compact-config"
+        ],
+        "event_hooks_contains": [
+          "agent_end",
+          "turn_end"
+        ]
+      }
+    },
+    {
+      "id": "scn-qualisero-compact-config-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes compact-config command",
+      "command_name": "compact-config",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-compact-config-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "compact-config-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-compact-config-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_end event",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

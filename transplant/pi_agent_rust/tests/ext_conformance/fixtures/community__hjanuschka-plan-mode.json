@@ -1,0 +1,68 @@
+{
+  "extension": {
+    "id": "community/hjanuschka-plan-mode",
+    "source": { "path": "community/hjanuschka-plan-mode/plan-mode.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-hjanuschka-plan-mode-reg-001",
+      "kind": "registration",
+      "summary": "Verifies tool, command, and event registrations for plan-mode",
+      "expect": {
+        "tool_count": 1,
+        "commands_contains": ["plan"],
+        "event_hooks_contains": ["before_agent_start", "session_start", "session_switch", "tool_call"]
+      }
+    },
+    {
+      "id": "scn-hjanuschka-plan-mode-pos-001",
+      "kind": "tool",
+      "summary": "Invokes plan tool",
+      "tool_name": "plan",
+      "input": {
+        "arguments": {
+          "action": "view"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-plan-mode-pos-002",
+      "kind": "command",
+      "summary": "Invokes plan command",
+      "command_name": "plan",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-plan-mode-pos-003",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-plan-mode-neg-001",
+      "kind": "tool",
+      "summary": "Invokes plan tool with empty arguments; expects error",
+      "tool_name": "plan",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

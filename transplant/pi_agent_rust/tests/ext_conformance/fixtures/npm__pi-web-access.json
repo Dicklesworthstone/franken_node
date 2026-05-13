@@ -1,0 +1,55 @@
+{
+  "extension": {
+    "id": "npm/pi-web-access",
+    "source": { "path": "npm/pi-web-access/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-web-access-reg",
+      "kind": "registration",
+      "summary": "Validates tool, command, and event hook registrations",
+      "expect": {
+        "tool_count": 3,
+        "event_hooks_contains": ["session_start", "session_shutdown"]
+      }
+    },
+    {
+      "id": "scn-npm-pi-web-access-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes web_search tool with basic args",
+      "tool_name": "web_search",
+      "input": {
+        "arguments": {
+          "query": "test search"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-web-access-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes web_search with empty args expecting error",
+      "tool_name": "web_search",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-web-access-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes search command",
+      "command_name": "search",
+      "input": {
+        "arguments": "test"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "ssh",
+    "source": { "path": "ssh/ssh.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-ssh-reg-001",
+      "kind": "registration",
+      "summary": "Verifies SSH event handlers are registered",
+      "expect": {
+        "event_hooks_contains": ["before_agent_start", "close", "data", "error", "session_start", "user_bash"]
+      }
+    },
+    {
+      "id": "scn-ssh-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event to initialize SSH connection handling",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-ssh-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

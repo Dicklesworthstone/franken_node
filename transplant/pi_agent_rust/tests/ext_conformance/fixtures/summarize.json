@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "summarize",
+    "source": { "path": "summarize/summarize.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-summarize-reg-001",
+      "kind": "registration",
+      "summary": "Verifies summarize command is registered",
+      "expect": {
+        "commands_contains": ["summarize"]
+      }
+    },
+    {
+      "id": "scn-summarize-pos-001",
+      "kind": "command",
+      "summary": "Invokes the summarize command to summarize session history",
+      "command_name": "summarize",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-summarize-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-summarize-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

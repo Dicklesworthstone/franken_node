@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "npm/pi-ghostty-theme-sync",
+    "source": {
+      "path": "npm/pi-ghostty-theme-sync/extensions/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-ghostty-theme-sync-reg",
+      "kind": "registration",
+      "summary": "Validates event hook registration for session_start",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-ghostty-theme-sync-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-ghostty-theme-sync-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "npm/benvargas-pi-antigravity-image-gen",
+    "source": { "path": "npm/benvargas-pi-antigravity-image-gen/extensions/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-benvargas-imagegen-reg",
+      "kind": "registration",
+      "summary": "Validates tool registrations for generate_image and image_quota",
+      "expect": {
+        "tool_count": 2
+      }
+    },
+    {
+      "id": "scn-npm-benvargas-imagegen-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes generate_image tool with basic args",
+      "tool_name": "generate_image",
+      "input": {
+        "arguments": {
+          "prompt": "a red circle"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-benvargas-imagegen-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes generate_image with empty args expecting error",
+      "tool_name": "generate_image",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

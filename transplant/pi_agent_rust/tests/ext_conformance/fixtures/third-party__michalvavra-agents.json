@@ -1,0 +1,46 @@
+{
+  "extension": {
+    "id": "third-party/michalvavra-agents",
+    "source": {
+      "path": "third-party/michalvavra-agents/bell.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-michalvavra-agents-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event hooks registered for michalvavra-agents",
+      "expect": {
+        "event_hooks_contains": [
+          "agent_end",
+          "before_agent_start",
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-michalvavra-agents-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_end event",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-michalvavra-agents-evt-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects graceful no-op or error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

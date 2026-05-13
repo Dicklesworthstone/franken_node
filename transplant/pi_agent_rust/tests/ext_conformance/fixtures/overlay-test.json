@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "overlay-test",
+    "source": { "path": "overlay-test/overlay-test.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-overlay-test-reg-001",
+      "kind": "registration",
+      "summary": "Verifies overlay-test command is registered",
+      "expect": {
+        "commands_contains": ["overlay-test"]
+      }
+    },
+    {
+      "id": "scn-overlay-test-pos-001",
+      "kind": "command",
+      "summary": "Invokes the overlay-test command to display test overlay",
+      "command_name": "overlay-test",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-overlay-test-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-overlay-test-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

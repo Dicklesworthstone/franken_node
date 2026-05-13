@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "third-party/rytswd-questionnaire",
+    "source": {
+      "path": "third-party/rytswd-questionnaire/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-rytswd-questionnaire-reg-001",
+      "kind": "registration",
+      "summary": "Verifies 1 tool(s) registered for rytswd-questionnaire",
+      "expect": {
+        "tool_count": 1
+      }
+    },
+    {
+      "id": "scn-rytswd-questionnaire-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes questionnaire tool with basic arguments",
+      "tool_name": "questionnaire",
+      "input": {
+        "arguments": {
+          "query": "test"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-rytswd-questionnaire-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes questionnaire tool with empty arguments; expects error",
+      "tool_name": "questionnaire",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

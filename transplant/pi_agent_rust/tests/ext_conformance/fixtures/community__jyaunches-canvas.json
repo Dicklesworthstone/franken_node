@@ -1,0 +1,57 @@
+{
+  "extension": {
+    "id": "community/jyaunches-canvas",
+    "source": { "path": "community/jyaunches-canvas/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-jyaunches-canvas-reg-001",
+      "kind": "registration",
+      "summary": "Verifies tool, command, and event registrations for jyaunches-canvas",
+      "expect": {
+        "tool_count": 3,
+        "commands_contains": ["calendar"],
+        "event_hooks_contains": ["close", "data", "error", "session_start"]
+      }
+    },
+    {
+      "id": "scn-jyaunches-canvas-pos-001",
+      "kind": "tool",
+      "summary": "Invokes canvas_document tool with basic arguments",
+      "tool_name": "canvas_document",
+      "input": {
+        "arguments": {
+          "title": "Test Document",
+          "content": "Hello world"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-jyaunches-canvas-pos-002",
+      "kind": "command",
+      "summary": "Invokes calendar command",
+      "command_name": "calendar",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-jyaunches-canvas-neg-001",
+      "kind": "tool",
+      "summary": "Invokes canvas_document with empty arguments; expects error",
+      "tool_name": "canvas_document",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

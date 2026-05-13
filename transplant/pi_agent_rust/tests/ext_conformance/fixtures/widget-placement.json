@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "widget-placement",
+    "source": { "path": "widget-placement/widget-placement.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-widget-placement-reg-001",
+      "kind": "registration",
+      "summary": "Verifies session_start and session_switch event handlers are registered",
+      "expect": {
+        "event_hooks_contains": ["session_start", "session_switch"]
+      }
+    },
+    {
+      "id": "scn-widget-placement-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event to initialize widget placement",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-widget-placement-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "extension": {
+    "id": "npm/lsp-pi",
+    "source": { "path": "npm/lsp-pi/lsp.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-lsp-pi-reg",
+      "kind": "registration",
+      "summary": "Validates lsp-pi registers tools, commands, and event hooks",
+      "expect": {
+        "tool_count": 1,
+        "event_hooks_contains": ["session_start", "agent_start"]
+      }
+    },
+    {
+      "id": "scn-npm-lsp-pi-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes lsp tool with basic args",
+      "tool_name": "lsp",
+      "input": {
+        "arguments": {
+          "action": "status"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-lsp-pi-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes lsp tool with empty args expecting error",
+      "tool_name": "lsp",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-lsp-pi-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes lsp command",
+      "command_name": "lsp",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-lsp-pi-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

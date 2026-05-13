@@ -1,0 +1,43 @@
+{
+  "extension": {
+    "id": "npm/aliou-pi-guardrails",
+    "source": {
+      "path": "npm/aliou-pi-guardrails/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-aliou-guardrails-reg",
+      "kind": "registration",
+      "summary": "Validates event hook registration for tool_call",
+      "expect": {
+        "event_hooks_contains": [
+          "tool_call"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-aliou-guardrails-evt-pos",
+      "kind": "event",
+      "summary": "Fires tool_call event",
+      "event_name": "tool_call",
+      "input": {
+        "tool_name": "test_tool",
+        "arguments": {}
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-aliou-guardrails-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

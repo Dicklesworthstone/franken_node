@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/hjanuschka-flicker-corp",
+    "source": { "path": "community/hjanuschka-flicker-corp/flicker-corp.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-hjanuschka-flicker-corp-reg-001",
+      "kind": "registration",
+      "summary": "Verifies flicker-corp and signature-flicker commands are registered",
+      "expect": {
+        "commands_contains": ["flicker-corp", "signature-flicker"]
+      }
+    },
+    {
+      "id": "scn-hjanuschka-flicker-corp-pos-001",
+      "kind": "command",
+      "summary": "Invokes flicker-corp command",
+      "command_name": "flicker-corp",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-flicker-corp-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "flicker-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/hjanuschka-oracle",
+    "source": { "path": "community/hjanuschka-oracle/oracle.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-hjanuschka-oracle-reg-001",
+      "kind": "registration",
+      "summary": "Verifies oracle command is registered",
+      "expect": {
+        "commands_contains": ["oracle"]
+      }
+    },
+    {
+      "id": "scn-hjanuschka-oracle-pos-001",
+      "kind": "command",
+      "summary": "Invokes oracle command",
+      "command_name": "oracle",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-oracle-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "oracle-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

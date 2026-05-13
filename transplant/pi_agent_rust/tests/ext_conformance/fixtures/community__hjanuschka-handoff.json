@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/hjanuschka-handoff",
+    "source": { "path": "community/hjanuschka-handoff/handoff.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-hjanuschka-handoff-reg-001",
+      "kind": "registration",
+      "summary": "Verifies handoff command is registered",
+      "expect": {
+        "commands_contains": ["handoff"]
+      }
+    },
+    {
+      "id": "scn-hjanuschka-handoff-pos-001",
+      "kind": "command",
+      "summary": "Invokes handoff command",
+      "command_name": "handoff",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-handoff-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "handoff-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

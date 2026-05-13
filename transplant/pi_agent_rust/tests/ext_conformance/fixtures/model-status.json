@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "model-status",
+    "source": { "path": "model-status/model-status.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-model-status-reg-001",
+      "kind": "registration",
+      "summary": "Verifies model_select event handler is registered",
+      "expect": {
+        "event_hooks_contains": ["model_select"]
+      }
+    },
+    {
+      "id": "scn-model-status-pos-001",
+      "kind": "event",
+      "summary": "Fires model_select event to update model status display",
+      "event_name": "model_select",
+      "input": {
+        "model": "claude-opus-4-6"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-model-status-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "extension": {
+    "id": "third-party/graffioh-pi-screenshots-picker",
+    "source": {
+      "path": "third-party/graffioh-pi-screenshots-picker/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-graffioh-pi-screenshots-picker-reg-001",
+      "kind": "registration",
+      "summary": "Verifies ss command, event hooks registered for graffioh-pi-screenshots-picker",
+      "expect": {
+        "commands_contains": [
+          "ss",
+          "ss-clear"
+        ],
+        "event_hooks_contains": [
+          "input"
+        ]
+      }
+    },
+    {
+      "id": "scn-graffioh-pi-screenshots-picker-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes ss command",
+      "command_name": "ss",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-graffioh-pi-screenshots-picker-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "ss-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-graffioh-pi-screenshots-picker-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires input event",
+      "event_name": "input",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

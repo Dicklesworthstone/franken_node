@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "send-user-message",
+    "source": { "path": "send-user-message/send-user-message.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-send-user-message-reg-001",
+      "kind": "registration",
+      "summary": "Verifies ask, askwith, followup, and steer commands are registered",
+      "expect": {
+        "commands_contains": ["ask", "askwith", "followup", "steer"]
+      }
+    },
+    {
+      "id": "scn-send-user-message-pos-001",
+      "kind": "command",
+      "summary": "Invokes the ask command to send a user message",
+      "command_name": "ask",
+      "input": {
+        "arguments": "What should I do next?"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-send-user-message-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-msg-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "extension": {
+    "id": "npm/marckrenn-pi-sub-bar",
+    "source": {
+      "path": "npm/marckrenn-pi-sub-bar/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-marckrenn-sub-bar-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start",
+          "turn_start",
+          "turn_end"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-marckrenn-sub-bar-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes sub-bar:settings command",
+      "command_name": "sub-bar:settings",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-marckrenn-sub-bar-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-marckrenn-sub-bar-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

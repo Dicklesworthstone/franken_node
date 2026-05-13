@@ -1,0 +1,41 @@
+{
+  "extension": {
+    "id": "event-bus",
+    "source": { "path": "event-bus/event-bus.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-event-bus-reg-001",
+      "kind": "registration",
+      "summary": "Verifies emit command and event handlers are registered",
+      "expect": {
+        "commands_contains": ["emit"],
+        "event_hooks_contains": ["my:notification", "session_start"]
+      }
+    },
+    {
+      "id": "scn-event-bus-pos-001",
+      "kind": "command",
+      "summary": "Invokes the emit command to publish an event on the bus",
+      "command_name": "emit",
+      "input": {
+        "arguments": "test-event"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-event-bus-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

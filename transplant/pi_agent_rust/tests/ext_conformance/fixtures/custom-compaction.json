@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "custom-compaction",
+    "source": { "path": "custom-compaction/custom-compaction.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-custom-compaction-reg-001",
+      "kind": "registration",
+      "summary": "Verifies session_before_compact event handler is registered",
+      "expect": {
+        "event_hooks_contains": ["session_before_compact"]
+      }
+    },
+    {
+      "id": "scn-custom-compaction-pos-001",
+      "kind": "event",
+      "summary": "Fires session_before_compact event to trigger custom compaction logic",
+      "event_name": "session_before_compact",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-custom-compaction-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

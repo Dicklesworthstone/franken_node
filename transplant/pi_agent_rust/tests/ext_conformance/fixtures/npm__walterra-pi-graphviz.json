@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "npm/walterra-pi-graphviz",
+    "source": { "path": "npm/walterra-pi-graphviz/extensions/graphviz-chart/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-walterra-graphviz-reg",
+      "kind": "registration",
+      "summary": "Validates graphviz_chart tool registration",
+      "expect": {
+        "tool_count": 1
+      }
+    },
+    {
+      "id": "scn-npm-walterra-graphviz-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes graphviz_chart tool with basic dot spec",
+      "tool_name": "graphviz_chart",
+      "input": {
+        "arguments": {
+          "dot": "digraph { A -> B }"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-walterra-graphviz-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes graphviz_chart with empty args expecting error",
+      "tool_name": "graphviz_chart",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

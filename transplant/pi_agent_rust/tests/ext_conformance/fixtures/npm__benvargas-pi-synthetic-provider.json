@@ -1,0 +1,55 @@
+{
+  "extension": {
+    "id": "npm/benvargas-pi-synthetic-provider",
+    "source": {
+      "path": "npm/benvargas-pi-synthetic-provider/extensions/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-benvargas-synthetic-reg",
+      "kind": "registration",
+      "summary": "Validates command and event registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "model_select",
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-benvargas-synthetic-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes synthetic-models command",
+      "command_name": "synthetic-models",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-benvargas-synthetic-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-benvargas-synthetic-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

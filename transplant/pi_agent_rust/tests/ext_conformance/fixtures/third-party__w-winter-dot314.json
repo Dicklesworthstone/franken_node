@@ -1,0 +1,90 @@
+{
+  "extension": {
+    "id": "third-party/w-winter-dot314",
+    "source": {
+      "path": "third-party/w-winter-dot314/agentic-compaction/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-w-winter-dot314-reg-001",
+      "kind": "registration",
+      "summary": "Verifies 9 tool(s), ask command, event hooks registered for w-winter-dot314",
+      "expect": {
+        "tool_count": 9,
+        "commands_contains": [
+          "ask",
+          "askwith",
+          "branch"
+        ],
+        "event_hooks_contains": [
+          "agent_end",
+          "agent_start",
+          "before_agent_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-w-winter-dot314-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes brave_grounding tool with basic arguments",
+      "tool_name": "brave_grounding",
+      "input": {
+        "arguments": {
+          "query": "test"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-w-winter-dot314-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes brave_grounding tool with empty arguments; expects error",
+      "tool_name": "brave_grounding",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-w-winter-dot314-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes ask command",
+      "command_name": "ask",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-w-winter-dot314-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "ask-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-w-winter-dot314-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_end event",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

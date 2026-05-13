@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "custom-provider-gitlab-duo",
+    "source": { "path": "custom-provider-gitlab-duo/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-custom-provider-gitlab-duo-reg-001",
+      "kind": "registration",
+      "summary": "Verifies gitlab-duo provider is registered",
+      "expect": {
+        "registers_provider": true
+      }
+    },
+    {
+      "id": "scn-custom-provider-gitlab-duo-pos-001",
+      "kind": "event",
+      "summary": "Fires provider registration event to confirm provider loads",
+      "event_name": "provider_register",
+      "input": {
+        "provider_id": "gitlab-duo"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-custom-provider-gitlab-duo-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "community/tmustier-tab-status",
+    "source": {
+      "path": "community/tmustier-tab-status/tab-status.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-tmustier-tab-status-reg-001",
+      "kind": "registration",
+      "summary": "Verifies tmustier-tab-status extension loads without error",
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-tab-status-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event to verify basic extension load",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-tab-status-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects graceful no-op or error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "community/tmustier-arcade-picman",
+    "source": {
+      "path": "community/tmustier-arcade-picman/picman.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-tmustier-arcade-picman-reg-001",
+      "kind": "registration",
+      "summary": "Verifies picman command registered for tmustier-arcade-picman",
+      "expect": {
+        "commands_contains": [
+          "picman"
+        ]
+      }
+    },
+    {
+      "id": "scn-tmustier-arcade-picman-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes picman command",
+      "command_name": "picman",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-arcade-picman-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "picman-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

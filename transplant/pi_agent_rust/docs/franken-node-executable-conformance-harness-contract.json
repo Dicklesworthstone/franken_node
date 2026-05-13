@@ -1,0 +1,76 @@
+{
+  "schema": "pi.frankennode.executable_conformance_harness_contract.v1",
+  "contract_version": "1.0.0",
+  "bead_id": "bd-3ar8v.7.3",
+  "support_bead_id": "bd-1ec8w",
+  "status": "active_blocking_policy",
+  "effective_date_utc": "2026-02-17T07:31:00Z",
+  "mission_statement": "FrankenNode compatibility claims must be backed by executable row-level conformance runs against Node and Bun with fail-closed verdict derivation and evidence lineage.",
+  "harness_execution_policy": {
+    "execution_mode": "fail_closed",
+    "required_runtime_targets": [
+      "franken-node",
+      "node",
+      "bun"
+    ],
+    "required_oracle_pairings": [
+      "franken-node-vs-node",
+      "franken-node-vs-bun"
+    ],
+    "required_row_fields": [
+      "run_id",
+      "correlation_id",
+      "scenario_id",
+      "fixture_id",
+      "runtime_target",
+      "oracle_target",
+      "verdict",
+      "artifact_path",
+      "captured_at_utc"
+    ],
+    "allowed_row_verdicts": [
+      "EXACT_PARITY",
+      "ACCEPTABLE_SUPERSET",
+      "PARTIAL_PARITY",
+      "INCOMPATIBLE",
+      "ERROR"
+    ]
+  },
+  "verdict_derivation_policy": {
+    "required_summary_fields": [
+      "run_id",
+      "correlation_id",
+      "summary_verdict",
+      "high_criticality_incompatible_count",
+      "lineage_missing_count",
+      "error_row_count",
+      "generated_at_utc"
+    ],
+    "release_block_rules": {
+      "high_criticality_incompatible_blocks_release": true,
+      "lineage_missing_blocks_release": true,
+      "error_rows_block_release": true,
+      "missing_or_stale_summary_blocks_release": true
+    }
+  },
+  "release_blockers": [
+    "Missing executable rows for any declared high-criticality scenario",
+    "Missing Node/Bun oracle pairing for any executed scenario",
+    "Any high-criticality row with INCOMPATIBLE verdict",
+    "Any row without run_id or correlation_id lineage",
+    "Any summary verdict derived from stale or partial evidence"
+  ],
+  "downstream_dependencies": {
+    "blocked_beads": [
+      "bd-3ar8v.7.4",
+      "bd-3ar8v.7.5",
+      "bd-3ar8v.7.8",
+      "bd-3ar8v.7.11",
+      "bd-3ar8v.7.14"
+    ],
+    "integration_contracts": [
+      "docs/franken-node-semantic-compatibility-matrix-contract.json",
+      "docs/franken-node-claim-gating-contract.json"
+    ]
+  }
+}

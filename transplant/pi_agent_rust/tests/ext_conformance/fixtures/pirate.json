@@ -1,0 +1,41 @@
+{
+  "extension": {
+    "id": "pirate",
+    "source": { "path": "pirate/pirate.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-pirate-reg-001",
+      "kind": "registration",
+      "summary": "Verifies pirate command and before_agent_start event handler are registered",
+      "expect": {
+        "commands_contains": ["pirate"],
+        "event_hooks_contains": ["before_agent_start"]
+      }
+    },
+    {
+      "id": "scn-pirate-pos-001",
+      "kind": "command",
+      "summary": "Invokes the pirate command to enable pirate speak mode",
+      "command_name": "pirate",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-pirate-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-pirate-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

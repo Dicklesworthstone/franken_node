@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "auto-commit-on-exit",
+    "source": { "path": "auto-commit-on-exit/auto-commit-on-exit.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-auto-commit-on-exit-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event handler registrations for auto-commit-on-exit",
+      "expect": {
+        "event_hooks_contains": ["session_shutdown"]
+      }
+    },
+    {
+      "id": "scn-auto-commit-on-exit-pos-001",
+      "kind": "event",
+      "summary": "Fires session_shutdown event to trigger auto-commit logic",
+      "event_name": "session_shutdown",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-auto-commit-on-exit-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event name; expects graceful no-op or error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

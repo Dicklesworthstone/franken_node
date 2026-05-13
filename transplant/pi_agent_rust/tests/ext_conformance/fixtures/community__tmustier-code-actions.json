@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "community/tmustier-code-actions",
+    "source": {
+      "path": "community/tmustier-code-actions/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-tmustier-code-actions-reg-001",
+      "kind": "registration",
+      "summary": "Verifies code command registered for tmustier-code-actions",
+      "expect": {
+        "commands_contains": [
+          "code"
+        ]
+      }
+    },
+    {
+      "id": "scn-tmustier-code-actions-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes code command",
+      "command_name": "code",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-code-actions-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "code-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

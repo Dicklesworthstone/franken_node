@@ -1,0 +1,53 @@
+{
+  "extension": {
+    "id": "community/mitsuhiko-review",
+    "source": { "path": "community/mitsuhiko-review/review.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-mitsuhiko-review-reg-001",
+      "kind": "registration",
+      "summary": "Verifies commands and event handlers are registered",
+      "expect": {
+        "commands_contains": ["end-review", "review"],
+        "event_hooks_contains": ["session_start", "session_switch", "session_tree"]
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-review-pos-001",
+      "kind": "command",
+      "summary": "Invokes review command",
+      "command_name": "review",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-review-pos-002",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-review-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/hjanuschka-usage-bar",
+    "source": { "path": "community/hjanuschka-usage-bar/usage-bar.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-hjanuschka-usage-bar-reg-001",
+      "kind": "registration",
+      "summary": "Verifies usage command is registered",
+      "expect": {
+        "commands_contains": ["usage"]
+      }
+    },
+    {
+      "id": "scn-hjanuschka-usage-bar-pos-001",
+      "kind": "command",
+      "summary": "Invokes usage command",
+      "command_name": "usage",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-usage-bar-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "usage-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

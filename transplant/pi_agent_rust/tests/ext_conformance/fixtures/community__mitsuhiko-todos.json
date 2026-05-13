@@ -1,0 +1,57 @@
+{
+  "extension": {
+    "id": "community/mitsuhiko-todos",
+    "source": { "path": "community/mitsuhiko-todos/todos.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-mitsuhiko-todos-reg-001",
+      "kind": "registration",
+      "summary": "Verifies tool, command, and event registrations for mitsuhiko-todos",
+      "expect": {
+        "tool_count": 1,
+        "commands_contains": ["todos"],
+        "event_hooks_contains": ["session_start"]
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-todos-pos-001",
+      "kind": "tool",
+      "summary": "Invokes todo tool with add action",
+      "tool_name": "todo",
+      "input": {
+        "arguments": {
+          "action": "add",
+          "text": "Test todo item"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-todos-pos-002",
+      "kind": "command",
+      "summary": "Invokes todos command",
+      "command_name": "todos",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-todos-neg-001",
+      "kind": "tool",
+      "summary": "Invokes todo tool with empty arguments; expects error",
+      "tool_name": "todo",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

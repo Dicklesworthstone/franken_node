@@ -1,0 +1,67 @@
+{
+  "extension": {
+    "id": "npm/aliou-pi-linkup",
+    "source": { "path": "npm/aliou-pi-linkup/src/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-aliou-linkup-reg",
+      "kind": "registration",
+      "summary": "Validates tool, command, and event hook registrations",
+      "expect": {
+        "tool_count": 3,
+        "event_hooks_contains": ["session_start"]
+      }
+    },
+    {
+      "id": "scn-npm-aliou-linkup-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes linkup_web_search tool with basic args",
+      "tool_name": "linkup_web_search",
+      "input": {
+        "arguments": {
+          "query": "test search"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-aliou-linkup-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes linkup_web_search with empty args expecting error",
+      "tool_name": "linkup_web_search",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-aliou-linkup-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes linkup:balance command",
+      "command_name": "linkup:balance",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-aliou-linkup-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "custom-footer",
+    "source": { "path": "custom-footer/custom-footer.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-custom-footer-reg-001",
+      "kind": "registration",
+      "summary": "Verifies footer command is registered",
+      "expect": {
+        "commands_contains": ["footer"]
+      }
+    },
+    {
+      "id": "scn-custom-footer-pos-001",
+      "kind": "command",
+      "summary": "Invokes the footer command to display custom footer",
+      "command_name": "footer",
+      "input": {
+        "arguments": "test-footer"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-custom-footer-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-footer-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

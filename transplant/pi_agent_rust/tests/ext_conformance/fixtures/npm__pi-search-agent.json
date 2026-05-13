@@ -1,0 +1,55 @@
+{
+  "extension": {
+    "id": "npm/pi-search-agent",
+    "source": { "path": "npm/pi-search-agent/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-search-agent-reg",
+      "kind": "registration",
+      "summary": "Validates tool, command, and event hook registrations",
+      "expect": {
+        "tool_count": 4,
+        "event_hooks_contains": ["close", "data", "error"]
+      }
+    },
+    {
+      "id": "scn-npm-pi-search-agent-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes semantic_search tool with basic args",
+      "tool_name": "semantic_search",
+      "input": {
+        "arguments": {
+          "query": "test search"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-search-agent-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes semantic_search with empty args expecting error",
+      "tool_name": "semantic_search",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-search-agent-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes semantic command",
+      "command_name": "semantic",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

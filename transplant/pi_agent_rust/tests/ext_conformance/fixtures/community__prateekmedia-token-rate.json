@@ -1,0 +1,46 @@
+{
+  "extension": {
+    "id": "community/prateekmedia-token-rate",
+    "source": {
+      "path": "community/prateekmedia-token-rate/token-rate.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-prateekmedia-token-rate-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event hooks registered for prateekmedia-token-rate",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start",
+          "session_switch",
+          "tool_call"
+        ]
+      }
+    },
+    {
+      "id": "scn-prateekmedia-token-rate-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-prateekmedia-token-rate-evt-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects graceful no-op or error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

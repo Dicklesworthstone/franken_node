@@ -1,0 +1,55 @@
+{
+  "extension": {
+    "id": "npm/zenobius-pi-dcp",
+    "source": {
+      "path": "npm/zenobius-pi-dcp/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-zenobius-dcp-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "context",
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-zenobius-dcp-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes dcp-stats command",
+      "command_name": "dcp-stats",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-zenobius-dcp-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-zenobius-dcp-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

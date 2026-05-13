@@ -1,0 +1,41 @@
+{
+  "extension": {
+    "id": "custom-header",
+    "source": { "path": "custom-header/custom-header.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-custom-header-reg-001",
+      "kind": "registration",
+      "summary": "Verifies builtin-header command and session_start event handler are registered",
+      "expect": {
+        "commands_contains": ["builtin-header"],
+        "event_hooks_contains": ["session_start"]
+      }
+    },
+    {
+      "id": "scn-custom-header-pos-001",
+      "kind": "command",
+      "summary": "Invokes the builtin-header command to display custom header",
+      "command_name": "builtin-header",
+      "input": {
+        "arguments": "test-header"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-custom-header-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-header-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

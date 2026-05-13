@@ -1,0 +1,53 @@
+{
+  "extension": {
+    "id": "community/hjanuschka-funny-working-message",
+    "source": { "path": "community/hjanuschka-funny-working-message/funny-working-message.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-hjanuschka-funny-working-message-reg-001",
+      "kind": "registration",
+      "summary": "Verifies fun-working command and event handlers are registered",
+      "expect": {
+        "commands_contains": ["fun-working"],
+        "event_hooks_contains": ["agent_end", "agent_start"]
+      }
+    },
+    {
+      "id": "scn-hjanuschka-funny-working-message-pos-001",
+      "kind": "command",
+      "summary": "Invokes fun-working command",
+      "command_name": "fun-working",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-funny-working-message-pos-002",
+      "kind": "event",
+      "summary": "Fires agent_start event",
+      "event_name": "agent_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-funny-working-message-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

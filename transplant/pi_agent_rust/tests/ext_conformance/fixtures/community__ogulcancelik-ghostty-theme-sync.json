@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/ogulcancelik-ghostty-theme-sync",
+    "source": { "path": "community/ogulcancelik-ghostty-theme-sync/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-ogulcancelik-ghostty-theme-sync-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event handler registrations for ghostty-theme-sync",
+      "expect": {
+        "event_hooks_contains": ["session_start"]
+      }
+    },
+    {
+      "id": "scn-ogulcancelik-ghostty-theme-sync-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event to trigger theme sync",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-ogulcancelik-ghostty-theme-sync-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

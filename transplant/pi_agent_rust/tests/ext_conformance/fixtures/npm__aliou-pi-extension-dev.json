@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "npm/aliou-pi-extension-dev",
+    "source": { "path": "npm/aliou-pi-extension-dev/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-aliou-ext-dev-reg",
+      "kind": "registration",
+      "summary": "Validates extensions:update command registration",
+      "expect": {
+        "tool_count": 0
+      }
+    },
+    {
+      "id": "scn-npm-aliou-ext-dev-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes extensions:update command",
+      "command_name": "extensions:update",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-aliou-ext-dev-cmd-neg",
+      "kind": "command",
+      "summary": "Invokes extensions:update with invalid args",
+      "command_name": "extensions:update",
+      "input": {
+        "arguments": "--nonexistent-flag"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

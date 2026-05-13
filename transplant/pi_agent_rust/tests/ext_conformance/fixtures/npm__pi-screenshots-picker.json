@@ -1,0 +1,54 @@
+{
+  "extension": {
+    "id": "npm/pi-screenshots-picker",
+    "source": {
+      "path": "npm/pi-screenshots-picker/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-screenshots-picker-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "input"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-screenshots-picker-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes ss command",
+      "command_name": "ss",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-screenshots-picker-evt-pos",
+      "kind": "event",
+      "summary": "Fires input event",
+      "event_name": "input",
+      "input": {
+        "text": "test input"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-screenshots-picker-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

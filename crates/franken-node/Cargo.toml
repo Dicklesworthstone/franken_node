@@ -123,6 +123,12 @@ name = "verifier_economy_conformance"
 path = "tests/verifier_economy_conformance.rs"
 required-features = ["verifier-tools", "test-support"]
 
+# bd-17ds.5.5 / bd-17ds.5.5.1: Security -> Verifier Economy integration
+[[test]]
+name = "security_economy_integration"
+path = "../../tests/integration/security_economy_integration.rs"
+required-features = ["verifier-tools", "test-support"]
+
 [[test]]
 name = "incident_cli_e2e"
 path = "tests/incident_cli_e2e.rs"
@@ -247,6 +253,10 @@ path = "tests/connector_lifecycle_public_api_e2e.rs"
 [[test]]
 name = "connector_lifecycle_transitions"
 path = "../../tests/conformance/connector_lifecycle_transitions.rs"
+
+[[test]]
+name = "connector_runtime_integration"
+path = "../../tests/integration/connector_runtime_integration.rs"
 
 [[test]]
 name = "connector_method_contract_artifact_conformance"
@@ -893,6 +903,26 @@ path = "tests/e2e_provenance_gate_evaluation.rs"
 [[test]]
 name = "threshold_sig_quorum_metamorphic"
 path = "tests/threshold_sig_quorum_metamorphic.rs"
+
+[[test]]
+name = "atc_sketches_integration"
+path = "tests/atc_sketches_integration.rs"
+required-features = ["advanced-features"]
+
+[[test]]
+name = "atc_signal_extractor_integration"
+path = "tests/atc_signal_extractor_integration.rs"
+
+[[test]]
+name = "storage_migration_integration"
+path = "../../tests/integration/storage_migration_integration.rs"
+required-features = ["control-plane", "test-support"]
+
+# bd-17ds.5.3 / bd-17ds.5.3.1: Policy -> Observability integration
+[[test]]
+name = "policy_observability_integration"
+path = "../../tests/integration/policy_observability_integration.rs"
+required-features = ["policy-engine"]
 
 [[bench]]
 name = "cuckoo_revocation_bench"

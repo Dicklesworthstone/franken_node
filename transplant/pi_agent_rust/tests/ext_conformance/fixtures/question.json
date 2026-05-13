@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "question",
+    "source": { "path": "question/question.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-question-reg-001",
+      "kind": "registration",
+      "summary": "Verifies question tool is registered",
+      "expect": {
+        "tool_count": 1
+      }
+    },
+    {
+      "id": "scn-question-pos-001",
+      "kind": "tool",
+      "summary": "Invokes question tool with a valid question",
+      "tool_name": "question",
+      "input": {
+        "arguments": {
+          "question": "What is your name?"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-question-neg-001",
+      "kind": "tool",
+      "summary": "Invokes question tool with empty arguments; expects error",
+      "tool_name": "question",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "community/nicobailon-interview-tool",
+    "source": { "path": "community/nicobailon-interview-tool/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-nicobailon-interview-tool-reg-001",
+      "kind": "registration",
+      "summary": "Verifies interview tool is registered",
+      "expect": {
+        "tool_count": 1
+      }
+    },
+    {
+      "id": "scn-nicobailon-interview-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes interview tool with basic question",
+      "tool_name": "interview",
+      "input": {
+        "arguments": {
+          "question": "What is your name?"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-nicobailon-interview-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes interview tool with empty arguments; expects error",
+      "tool_name": "interview",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

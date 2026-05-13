@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "npm/pi-shell-completions",
+    "source": {
+      "path": "npm/pi-shell-completions/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-shell-completions-reg",
+      "kind": "registration",
+      "summary": "Validates event hook registration for session_start",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-shell-completions-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-shell-completions-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

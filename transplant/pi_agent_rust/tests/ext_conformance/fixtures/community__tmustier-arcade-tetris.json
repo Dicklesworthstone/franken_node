@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "community/tmustier-arcade-tetris",
+    "source": {
+      "path": "community/tmustier-arcade-tetris/tetris.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-tmustier-arcade-tetris-reg-001",
+      "kind": "registration",
+      "summary": "Verifies tetris command registered for tmustier-arcade-tetris",
+      "expect": {
+        "commands_contains": [
+          "tetris"
+        ]
+      }
+    },
+    {
+      "id": "scn-tmustier-arcade-tetris-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes tetris command",
+      "command_name": "tetris",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-arcade-tetris-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "tetris-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

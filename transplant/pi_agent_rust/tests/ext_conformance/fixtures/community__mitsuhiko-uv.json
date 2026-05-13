@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/mitsuhiko-uv",
+    "source": { "path": "community/mitsuhiko-uv/uv.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-mitsuhiko-uv-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event handler registrations for mitsuhiko-uv",
+      "expect": {
+        "event_hooks_contains": ["session_start"]
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-uv-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event to activate uv tooling context",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-uv-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

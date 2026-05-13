@@ -1,0 +1,41 @@
+{
+  "extension": {
+    "id": "tools",
+    "source": { "path": "tools/tools.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-tools-reg-001",
+      "kind": "registration",
+      "summary": "Verifies tools command and event handlers are registered",
+      "expect": {
+        "commands_contains": ["tools"],
+        "event_hooks_contains": ["session_fork", "session_start", "session_tree"]
+      }
+    },
+    {
+      "id": "scn-tools-pos-001",
+      "kind": "command",
+      "summary": "Invokes the tools command to list available tools",
+      "command_name": "tools",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tools-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-tools-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

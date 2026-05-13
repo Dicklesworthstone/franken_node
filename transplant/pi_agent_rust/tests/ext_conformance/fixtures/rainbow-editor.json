@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "rainbow-editor",
+    "source": { "path": "rainbow-editor/rainbow-editor.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-rainbow-editor-reg-001",
+      "kind": "registration",
+      "summary": "Verifies session_start event handler is registered",
+      "expect": {
+        "event_hooks_contains": ["session_start"]
+      }
+    },
+    {
+      "id": "scn-rainbow-editor-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event to initialize rainbow editor theme",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-rainbow-editor-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

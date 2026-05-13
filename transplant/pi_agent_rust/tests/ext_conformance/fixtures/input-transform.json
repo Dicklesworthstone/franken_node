@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "input-transform",
+    "source": { "path": "input-transform/input-transform.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-input-transform-reg-001",
+      "kind": "registration",
+      "summary": "Verifies input event handler is registered",
+      "expect": {
+        "event_hooks_contains": ["input"]
+      }
+    },
+    {
+      "id": "scn-input-transform-pos-001",
+      "kind": "event",
+      "summary": "Fires input event to transform user input before processing",
+      "event_name": "input",
+      "input": {
+        "text": "test input text"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-input-transform-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

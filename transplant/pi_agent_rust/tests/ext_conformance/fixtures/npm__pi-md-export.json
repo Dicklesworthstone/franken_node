@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "npm/pi-md-export",
+    "source": { "path": "npm/pi-md-export/extensions/md.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-md-export-reg",
+      "kind": "registration",
+      "summary": "Validates md command registration",
+      "expect": {
+        "tool_count": 0
+      }
+    },
+    {
+      "id": "scn-npm-pi-md-export-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes md command",
+      "command_name": "md",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-md-export-cmd-neg",
+      "kind": "command",
+      "summary": "Invokes md command with invalid output path",
+      "command_name": "md",
+      "input": {
+        "arguments": "--output /nonexistent/dir/file.md"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

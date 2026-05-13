@@ -1,0 +1,105 @@
+{
+  "version": "1.0",
+  "tool": "write",
+  "description": "Conformance tests for the write tool (pi-mono parity)",
+  "cases": [
+    {
+      "name": "write_new_file",
+      "description": "Write content to a new file",
+      "input": {
+        "path": "newfile.txt",
+        "content": "Hello, World!\nLine 2"
+      },
+      "expected": {
+        "content_exact": "Successfully wrote 20 bytes to newfile.txt",
+        "details_none": true
+      }
+    },
+    {
+      "name": "write_creates_directories",
+      "description": "Write should create parent directories",
+      "input": {
+        "path": "nested/dir/file.txt",
+        "content": "content"
+      },
+      "expected": {
+        "content_exact": "Successfully wrote 7 bytes to nested/dir/file.txt",
+        "details_none": true
+      }
+    },
+    {
+      "name": "write_overwrites_existing",
+      "description": "Write should overwrite existing files",
+      "setup": [
+        {"type": "create_file", "path": "existing.txt", "content": "old content"}
+      ],
+      "input": {
+        "path": "existing.txt",
+        "content": "new content"
+      },
+      "expected": {
+        "content_exact": "Successfully wrote 11 bytes to existing.txt",
+        "details_none": true
+      }
+    },
+    {
+      "name": "write_empty_file",
+      "description": "Write empty content creates empty file",
+      "input": {
+        "path": "empty.txt",
+        "content": ""
+      },
+      "expected": {
+        "content_exact": "Successfully wrote 0 bytes to empty.txt",
+        "details_none": true
+      }
+    },
+    {
+      "name": "write_unicode_content",
+      "description": "Write Unicode content correctly",
+      "input": {
+        "path": "unicode.txt",
+        "content": "Hello 世界\nこんにちは\n🎉 emoji"
+      },
+      "expected": {
+        "content_exact": "Successfully wrote 23 bytes to unicode.txt",
+        "details_none": true
+      }
+    },
+    {
+      "name": "write_preserves_newlines",
+      "description": "Write preserves trailing newlines",
+      "input": {
+        "path": "trailing.txt",
+        "content": "line1\nline2\n"
+      },
+      "expected": {
+        "content_exact": "Successfully wrote 12 bytes to trailing.txt",
+        "details_none": true
+      }
+    },
+    {
+      "name": "write_special_characters",
+      "description": "Write content with special characters",
+      "input": {
+        "path": "special.txt",
+        "content": "Tab:\tNewline:\nBackslash:\\"
+      },
+      "expected": {
+        "content_exact": "Successfully wrote 25 bytes to special.txt",
+        "details_none": true
+      }
+    },
+    {
+      "name": "write_outside_cwd",
+      "description": "Writing outside the working directory should be rejected",
+      "input": {
+        "path": "../outside.txt",
+        "content": "nope"
+      },
+      "expect_error": true,
+      "error_contains": "Cannot write outside the working directory",
+      "expected": {}
+    }
+  ]
+}

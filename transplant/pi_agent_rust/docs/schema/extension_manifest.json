@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pi Extension Manifest",
+  "type": "object",
+  "required": [
+    "schema",
+    "extension_id",
+    "name",
+    "version",
+    "api_version",
+    "runtime",
+    "entrypoint"
+  ],
+  "properties": {
+    "schema": { "type": "string", "enum": ["pi.ext.manifest.v1"] },
+    "extension_id": {
+      "type": "string",
+      "description": "Stable extension identifier. Used for install dirs, policy decisions, and log correlation.",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "name": { "type": "string", "description": "Human-readable display name." },
+    "version": { "type": "string", "description": "Extension version (semver recommended)." },
+    "description": { "type": "string" },
+    "runtime": {
+      "type": "string",
+      "description": "Runtime that executes the entrypoint.",
+      "enum": ["native-rust", "wasm"]
+    },
+    "entrypoint": {
+      "type": "string",
+      "description": "Relative path to the extension descriptor (native-rust) or component (WASM)."
+    },
+    "api_version": {
+      "type": "string",
+      "description": "Protocol API version expected by the extension runtime (e.g. register payload api_version).",
+      "default": "1.0"
+    },
+    "capabilities": {
+      "type": "array",
+      "description": "Legacy flat capability list (coarse). Prefer capability_manifest.",
+      "items": { "type": "string" }
+    },
+    "capability_manifest": {
+      "description": "Structured capability requirements. v2 adds intent, connector/hostcall classes, and provenance metadata.",
+      "oneOf": [
+        { "$ref": "#/$defs/capability_manifest_v1" },
+        { "$ref": "#/$defs/capability_manifest_v2" }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "capability_manifest_v1": {
+      "type": "object",
+      "required": ["schema", "capabilities"],
+      "properties": {
+        "schema": { "type": "string", "enum": ["pi.ext.cap.v1"] },
+        "capabilities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/capability_requirement_v1" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "capability_manifest_v2": {
+      "type": "object",
+      "required": ["schema", "capabilities"],
+      "properties": {
+        "schema": { "type": "string", "enum": ["pi.ext.cap.v2"] },
+        "capabilities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/capability_requirement_v2" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "capability_requirement_v1": {
+      "type": "object",
+      "required": ["capability"],
+      "properties": {
+        "capability": { "type": "string" },
+        "methods": { "type": "array", "items": { "type": "string" } },
+        "scope": { "$ref": "#/$defs/capability_scope_v1" }
+      },
+      "additionalProperties": false
+    },
+    "capability_requirement_v2": {
+      "type": "object",
+      "required": [
+        "capability",
+        "intents",
+        "connector_classes",
+        "hostcall_classes",
+        "provenance"
+      ],
+      "properties": {
+        "capability": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "exec",
+            "env",
+            "http",
+            "session",
+            "events",
+            "ui",
+            "log",
+            "tool"
+          ]
+        },
+        "intents": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": [
+              "file_read",
+              "file_write",
+              "process_exec",
+              "environment_access",
+              "network_egress",
+              "session_state_access",
+              "event_stream_access",
+              "ui_interaction",
+              "telemetry_logging"
+            ]
+          }
+        },
+        "connector_classes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": [
+              "tool",
+              "fs",
+              "exec",
+              "env",
+              "http",
+              "session",
+              "events",
+              "ui",
+              "log"
+            ]
+          }
+        },
+        "hostcall_classes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": [
+              "tool",
+              "exec",
+              "env",
+              "http",
+              "session",
+              "events",
+              "ui",
+              "log",
+              "fs.read",
+              "fs.write",
+              "fs.list",
+              "fs.stat",
+              "fs.mkdir",
+              "fs.delete"
+            ]
+          }
+        },
+        "risk_tier": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "critical"]
+        },
+        "scope": { "$ref": "#/$defs/capability_scope_v2" },
+        "provenance": { "$ref": "#/$defs/capability_provenance" }
+      },
+      "additionalProperties": false
+    },
+    "capability_scope_v1": {
+      "type": "object",
+      "properties": {
+        "paths": { "type": "array", "items": { "type": "string" } },
+        "hosts": { "type": "array", "items": { "type": "string" } },
+        "env": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "capability_scope_v2": {
+      "type": "object",
+      "properties": {
+        "paths": { "type": "array", "items": { "type": "string" } },
+        "hosts": { "type": "array", "items": { "type": "string" } },
+        "env": { "type": "array", "items": { "type": "string" } },
+        "allowed_tools": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "capability_provenance": {
+      "type": "object",
+      "required": ["source", "integrity", "publisher"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": ["npm", "github", "registry", "local", "builtin"]
+        },
+        "integrity": { "$ref": "#/$defs/integrity_attestation" },
+        "publisher": { "$ref": "#/$defs/publisher_attestation" }
+      },
+      "additionalProperties": false
+    },
+    "integrity_attestation": {
+      "type": "object",
+      "required": ["algorithm", "digest"],
+      "properties": {
+        "algorithm": { "type": "string", "enum": ["sha256"] },
+        "digest": {
+          "type": "string",
+          "pattern": "^[a-fA-F0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "publisher_attestation": {
+      "type": "object",
+      "required": ["id", "verification"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "verification": {
+          "type": "string",
+          "enum": ["unsigned", "self_attested", "key_attested", "registry_attested"]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "extension": {
+    "id": "community/hjanuschka-ultrathink",
+    "source": { "path": "community/hjanuschka-ultrathink/ultrathink.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-hjanuschka-ultrathink-reg-001",
+      "kind": "registration",
+      "summary": "Verifies ultrathink command and event handlers are registered",
+      "expect": {
+        "commands_contains": ["ultrathink"],
+        "event_hooks_contains": ["agent_start", "before_agent_start", "session_shutdown", "session_start", "session_switch"]
+      }
+    },
+    {
+      "id": "scn-hjanuschka-ultrathink-pos-001",
+      "kind": "command",
+      "summary": "Invokes ultrathink command",
+      "command_name": "ultrathink",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-ultrathink-pos-002",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-ultrathink-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

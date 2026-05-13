@@ -1,0 +1,63 @@
+{
+  "extension": {
+    "id": "third-party/openclaw-openclaw",
+    "source": {
+      "path": "third-party/openclaw-openclaw/extensions/diff.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-openclaw-openclaw-reg-001",
+      "kind": "registration",
+      "summary": "Verifies diff command, event hooks registered for openclaw-openclaw",
+      "expect": {
+        "commands_contains": [
+          "diff",
+          "files",
+          "tui"
+        ],
+        "event_hooks_contains": [
+          "before_agent_start",
+          "session_start",
+          "session_switch"
+        ]
+      }
+    },
+    {
+      "id": "scn-openclaw-openclaw-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes diff command",
+      "command_name": "diff",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-openclaw-openclaw-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "diff-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-openclaw-openclaw-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires before_agent_start event",
+      "event_name": "before_agent_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

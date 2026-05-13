@@ -1,0 +1,43 @@
+{
+  "extension": {
+    "id": "tool-override",
+    "source": { "path": "tool-override/tool-override.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-tool-override-reg-001",
+      "kind": "registration",
+      "summary": "Verifies read tool and read-log command are registered",
+      "expect": {
+        "tools_contains": ["read"],
+        "commands_contains": ["read-log"]
+      }
+    },
+    {
+      "id": "scn-tool-override-pos-001",
+      "kind": "tool",
+      "summary": "Invokes read tool with valid file path argument",
+      "tool_name": "read",
+      "input": {
+        "arguments": {
+          "path": "/tmp/test-file.txt"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tool-override-neg-001",
+      "kind": "tool",
+      "summary": "Invokes read tool with empty arguments; expects error",
+      "tool_name": "read",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

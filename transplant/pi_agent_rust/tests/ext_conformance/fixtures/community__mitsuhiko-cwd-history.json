@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/mitsuhiko-cwd-history",
+    "source": { "path": "community/mitsuhiko-cwd-history/cwd-history.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-mitsuhiko-cwd-history-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event handler registrations for cwd-history",
+      "expect": {
+        "event_hooks_contains": ["session_start", "session_switch"]
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-cwd-history-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event to record cwd history",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-cwd-history-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

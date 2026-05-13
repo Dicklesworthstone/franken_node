@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/mitsuhiko-answer",
+    "source": { "path": "community/mitsuhiko-answer/answer.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-mitsuhiko-answer-reg-001",
+      "kind": "registration",
+      "summary": "Verifies answer command is registered",
+      "expect": {
+        "commands_contains": ["answer"]
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-answer-pos-001",
+      "kind": "command",
+      "summary": "Invokes answer command",
+      "command_name": "answer",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-answer-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "answer-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

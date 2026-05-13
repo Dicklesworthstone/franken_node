@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "npm/repeat-pi",
+    "source": { "path": "npm/repeat-pi/repeat.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-repeat-pi-reg",
+      "kind": "registration",
+      "summary": "Validates repeat command registration",
+      "expect": {
+        "tool_count": 0
+      }
+    },
+    {
+      "id": "scn-npm-repeat-pi-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes repeat command",
+      "command_name": "repeat",
+      "input": {
+        "arguments": "echo hello"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-repeat-pi-cmd-neg",
+      "kind": "command",
+      "summary": "Invokes repeat command with empty args",
+      "command_name": "repeat",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "community/prateekmedia-repeat",
+    "source": {
+      "path": "community/prateekmedia-repeat/repeat.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-prateekmedia-repeat-reg-001",
+      "kind": "registration",
+      "summary": "Verifies repeat command registered for prateekmedia-repeat",
+      "expect": {
+        "commands_contains": [
+          "repeat"
+        ]
+      }
+    },
+    {
+      "id": "scn-prateekmedia-repeat-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes repeat command",
+      "command_name": "repeat",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-prateekmedia-repeat-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "repeat-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

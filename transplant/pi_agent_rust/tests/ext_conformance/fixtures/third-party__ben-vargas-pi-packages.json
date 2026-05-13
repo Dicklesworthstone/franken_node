@@ -1,0 +1,87 @@
+{
+  "extension": {
+    "id": "third-party/ben-vargas-pi-packages",
+    "source": {
+      "path": "third-party/ben-vargas-pi-packages/pi-ancestor-discovery/extensions/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-ben-vargas-pi-packages-reg-001",
+      "kind": "registration",
+      "summary": "Verifies 4 tool(s), synthetic-models command, event hooks registered for ben-vargas-pi-packages",
+      "expect": {
+        "tool_count": 4,
+        "commands_contains": [
+          "synthetic-models"
+        ],
+        "event_hooks_contains": [
+          "model_select",
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-ben-vargas-pi-packages-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes generate_image tool with basic arguments",
+      "tool_name": "generate_image",
+      "input": {
+        "arguments": {
+          "query": "test"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-ben-vargas-pi-packages-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes generate_image tool with empty arguments; expects error",
+      "tool_name": "generate_image",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-ben-vargas-pi-packages-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes synthetic-models command",
+      "command_name": "synthetic-models",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-ben-vargas-pi-packages-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "synthetic-models-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-ben-vargas-pi-packages-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires model_select event",
+      "event_name": "model_select",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "bash-spawn-hook",
+    "source": { "path": "bash-spawn-hook/bash-spawn-hook.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-bash-spawn-hook-reg-001",
+      "kind": "registration",
+      "summary": "Verifies bash-spawn-hook registers as a tool extension",
+      "expect": {
+        "tool_count": 0
+      }
+    },
+    {
+      "id": "scn-bash-spawn-hook-pos-001",
+      "kind": "tool",
+      "summary": "Invokes bash_spawn_hook tool with a simple command",
+      "tool_name": "bash_spawn_hook",
+      "input": {
+        "arguments": {
+          "command": "echo hello"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-bash-spawn-hook-neg-001",
+      "kind": "tool",
+      "summary": "Invokes bash_spawn_hook with empty arguments; expects error",
+      "tool_name": "bash_spawn_hook",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

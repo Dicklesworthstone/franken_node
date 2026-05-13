@@ -1,0 +1,57 @@
+{
+  "correlation_id": "conformance-summary-local-20260512T192624367Z",
+  "counts": {
+    "fail": 0,
+    "na": 164,
+    "pass": 60,
+    "tested": 60,
+    "total": 224
+  },
+  "coverage_rate_pct": 26.785714285714285,
+  "evidence": {
+    "golden_fixtures": 60,
+    "load_time_benchmarks": 60,
+    "parity_logs": 16,
+    "smoke_logs": 16
+  },
+  "generated_at": "2026-05-12T19:26:24Z",
+  "negative": {
+    "fail": 0,
+    "pass": 30
+  },
+  "pass_rate_pct": 100.0,
+  "per_tier": {
+    "agents-mikeastock": {
+      "fail": 0,
+      "na": 1,
+      "pass": 0,
+      "total": 1
+    },
+    "community": {
+      "fail": 0,
+      "na": 58,
+      "pass": 0,
+      "total": 58
+    },
+    "npm-registry": {
+      "fail": 0,
+      "na": 76,
+      "pass": 0,
+      "total": 76
+    },
+    "official-pi-mono": {
+      "fail": 0,
+      "na": 6,
+      "pass": 60,
+      "total": 66
+    },
+    "third-party-github": {
+      "fail": 0,
+      "na": 23,
+      "pass": 0,
+      "total": 23
+    }
+  },
+  "run_id": "local-20260512T192624367Z",
+  "schema": "pi.ext.conformance_summary.v2"
+}

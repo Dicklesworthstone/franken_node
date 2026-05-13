@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "third-party/vtemian-pi-config",
+    "source": {
+      "path": "third-party/vtemian-pi-config/tools/subagent/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-vtemian-pi-config-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event hooks registered for vtemian-pi-config",
+      "expect": {
+        "event_hooks_contains": [
+          "tool_result"
+        ]
+      }
+    },
+    {
+      "id": "scn-vtemian-pi-config-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires tool_result event",
+      "event_name": "tool_result",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-vtemian-pi-config-evt-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects graceful no-op or error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

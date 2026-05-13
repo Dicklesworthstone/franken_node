@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "third-party/raunovillberg-pi-stuffed",
+    "source": {
+      "path": "third-party/raunovillberg-pi-stuffed/extensions/reddit.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-raunovillberg-pi-stuffed-reg-001",
+      "kind": "registration",
+      "summary": "Verifies reddit command registered for raunovillberg-pi-stuffed",
+      "expect": {
+        "commands_contains": [
+          "reddit"
+        ]
+      }
+    },
+    {
+      "id": "scn-raunovillberg-pi-stuffed-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes reddit command",
+      "command_name": "reddit",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-raunovillberg-pi-stuffed-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "reddit-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

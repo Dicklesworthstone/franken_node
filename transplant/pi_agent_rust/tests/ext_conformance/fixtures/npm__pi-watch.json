@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "npm/pi-watch",
+    "source": {
+      "path": "npm/pi-watch/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-watch-reg",
+      "kind": "registration",
+      "summary": "Validates event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start",
+          "agent_start",
+          "agent_end"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-watch-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-watch-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

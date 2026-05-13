@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "npm/pi-command-center",
+    "source": { "path": "npm/pi-command-center/extensions/command-center/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-command-center-reg",
+      "kind": "registration",
+      "summary": "Validates command-center command registration",
+      "expect": {
+        "tool_count": 0
+      }
+    },
+    {
+      "id": "scn-npm-pi-command-center-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes command-center command",
+      "command_name": "command-center",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-command-center-cmd-neg",
+      "kind": "command",
+      "summary": "Invokes command-center with invalid subcommand",
+      "command_name": "command-center",
+      "input": {
+        "arguments": "--invalid-flag-xyz"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "community/tmustier-agent-guidance",
+    "source": {
+      "path": "community/tmustier-agent-guidance/agent-guidance.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-tmustier-agent-guidance-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event hooks registered for tmustier-agent-guidance",
+      "expect": {
+        "event_hooks_contains": [
+          "before_agent_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-tmustier-agent-guidance-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires before_agent_start event",
+      "event_name": "before_agent_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-agent-guidance-evt-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects graceful no-op or error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

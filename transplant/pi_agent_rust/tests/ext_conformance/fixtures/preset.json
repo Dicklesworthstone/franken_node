@@ -1,0 +1,41 @@
+{
+  "extension": {
+    "id": "preset",
+    "source": { "path": "preset/preset.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-preset-reg-001",
+      "kind": "registration",
+      "summary": "Verifies preset command and event handlers are registered",
+      "expect": {
+        "commands_contains": ["preset"],
+        "event_hooks_contains": ["before_agent_start", "session_start", "turn_start"]
+      }
+    },
+    {
+      "id": "scn-preset-pos-001",
+      "kind": "command",
+      "summary": "Invokes the preset command to list or apply presets",
+      "command_name": "preset",
+      "input": {
+        "arguments": "list"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-preset-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-preset-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

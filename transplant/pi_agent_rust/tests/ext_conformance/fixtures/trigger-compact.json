@@ -1,0 +1,41 @@
+{
+  "extension": {
+    "id": "trigger-compact",
+    "source": { "path": "trigger-compact/trigger-compact.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-trigger-compact-reg-001",
+      "kind": "registration",
+      "summary": "Verifies trigger-compact command and turn_end event handler are registered",
+      "expect": {
+        "commands_contains": ["trigger-compact"],
+        "event_hooks_contains": ["turn_end"]
+      }
+    },
+    {
+      "id": "scn-trigger-compact-pos-001",
+      "kind": "command",
+      "summary": "Invokes the trigger-compact command to manually trigger compaction",
+      "command_name": "trigger-compact",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-trigger-compact-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "nonexistent-compact-cmd",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

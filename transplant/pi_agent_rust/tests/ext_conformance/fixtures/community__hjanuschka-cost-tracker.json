@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/hjanuschka-cost-tracker",
+    "source": { "path": "community/hjanuschka-cost-tracker/cost-tracker.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-hjanuschka-cost-tracker-reg-001",
+      "kind": "registration",
+      "summary": "Verifies cost command is registered",
+      "expect": {
+        "commands_contains": ["cost"]
+      }
+    },
+    {
+      "id": "scn-hjanuschka-cost-tracker-pos-001",
+      "kind": "command",
+      "summary": "Invokes cost command to display cost tracking info",
+      "command_name": "cost",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-cost-tracker-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "cost-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

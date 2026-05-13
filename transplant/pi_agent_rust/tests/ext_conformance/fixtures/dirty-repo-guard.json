@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "dirty-repo-guard",
+    "source": { "path": "dirty-repo-guard/dirty-repo-guard.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-dirty-repo-guard-reg-001",
+      "kind": "registration",
+      "summary": "Verifies session_before_fork and session_before_switch event handlers are registered",
+      "expect": {
+        "event_hooks_contains": ["session_before_fork", "session_before_switch"]
+      }
+    },
+    {
+      "id": "scn-dirty-repo-guard-pos-001",
+      "kind": "event",
+      "summary": "Fires session_before_fork event to check for dirty repo state",
+      "event_name": "session_before_fork",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-dirty-repo-guard-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

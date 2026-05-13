@@ -1,0 +1,55 @@
+{
+  "extension": {
+    "id": "npm/pi-multicodex",
+    "source": {
+      "path": "npm/pi-multicodex/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-multicodex-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start",
+          "session_switch"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-multicodex-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes multicodex-status command",
+      "command_name": "multicodex-status",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-multicodex-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-multicodex-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

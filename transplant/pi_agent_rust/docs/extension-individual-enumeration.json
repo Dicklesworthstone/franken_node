@@ -1,0 +1,5518 @@
+{
+  "$schema": "pi.ext.individual-enumeration.v2",
+  "generated": "2026-02-07T03:41:57Z",
+  "description": "Validated individual Pi extensions from all research sources (bd-hhzv pipeline)",
+  "pipeline_task": "bd-hhzv",
+  "validation_task": "bd-28ov",
+  "summary": {
+    "total_before_dedup": 498,
+    "total_after_dedup": 346,
+    "total_individual_extensions": 331,
+    "mention_only": 1,
+    "unknown": 14,
+    "classification_coverage_pct": 96.0,
+    "sources_merged": 38,
+    "by_tier": {
+      "agents-mikeastock": 1,
+      "community": 1,
+      "extensions": 14,
+      "npm-registry": 53,
+      "official-pi-mono": 60,
+      "skills": 2,
+      "third-party-github": 200
+    },
+    "by_capability": {
+      "ExtensionAPI_import": 222,
+      "export_default": 210,
+      "registerCommand": 102,
+      "registerTool": 83,
+      "registerShortcut": 21,
+      "registerProvider": 17,
+      "registerFlag": 14,
+      "registerMessageRenderer": 3
+    }
+  },
+  "extensions": [
+    {
+      "id": "0xsero/pi-readiness-report",
+      "name": "pi-readiness-report",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/0xSero/pi-readiness-report",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "9cog/pi-cogno",
+      "name": "pi-cogno",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerProvider"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/9cog/pi-cogno",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "aadishv/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/aadishv/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "adragomir/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/adragomir/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "aldoborrero/agent-kit",
+      "name": "agent-kit",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/aldoborrero/agent-kit",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "aliou/pi-extensions",
+      "name": "@aliou/pi-extension-dev",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "npm_scan",
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/aliou/pi-extensions",
+      "npm_package": "@aliou/pi-extension-dev",
+      "aliases": [
+        "npm:@aliou/pi-extension-dev",
+        "npm/aliou-pi-extension-dev",
+        "npm/aliou-pi-guardrails",
+        "npm/aliou-pi-processes",
+        "npm/aliou-pi-toolchain"
+      ],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "aliou/pi-linkup",
+      "name": "@aliou/pi-linkup",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/aliou/pi-linkup.git",
+      "npm_package": "aliou-pi-linkup",
+      "aliases": [
+        "npm/aliou-pi-linkup"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "aliou/pi-synthetic",
+      "name": "@aliou/pi-synthetic",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "npm_scan",
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/aliou/pi-synthetic",
+      "npm_package": "@aliou/pi-synthetic",
+      "aliases": [
+        "npm:@aliou/pi-synthetic",
+        "npm/aliou-pi-synthetic"
+      ],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "alphagov/notifications-node-client",
+      "name": "pi-poly-notify",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/alphagov/notifications-node-client.git",
+      "npm_package": "pi-poly-notify",
+      "aliases": [
+        "npm/pi-poly-notify"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "annapurna-himal/pi-memory-search",
+      "name": "pi-memory-search",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "repo_search"
+      ],
+      "repository_url": "https://github.com/annapurna-himal/pi-memory-search",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "annapurna-himal/pi-vim-editor",
+      "name": "pi-vim-editor",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "repo_search"
+      ],
+      "repository_url": "https://github.com/annapurna-himal/pi-vim-editor",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "anntnzrb/agents",
+      "name": "agents",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/anntnzrb/agents",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "anthnykr/agent-setups",
+      "name": "agent-setups",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/anthnykr/agent-setups",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "antigravity-image-gen",
+      "name": "antigravity-image-gen",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "archiecrawford/openclaw",
+      "name": "OpenClaw",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/ArchieCrawford/OpenClaw",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "asoules/pi-recall",
+      "name": "pi-recall",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/asoules/pi-recall",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "assagman/agentsbox",
+      "name": "agentsbox",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/assagman/agentsbox",
+      "npm_package": "agentsbox",
+      "aliases": [
+        "npm/agentsbox"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "assagman/phi",
+      "name": "phi",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/assagman/phi",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "assagman/pi-extensions",
+      "name": "pi-extensions",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/assagman/pi-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "atoncap/monorepo",
+      "name": "monorepo",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/ATONCAP/monorepo",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "auto-commit-on-exit",
+      "name": "auto-commit-on-exit",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "ayagmar/pi-extmgr",
+      "name": "pi-extmgr",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/ayagmar/pi-extmgr",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "az9713/clawdbot",
+      "name": "clawdbot",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/az9713/clawdbot",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "az9713/openclaw",
+      "name": "openclaw",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/az9713/openclaw",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "badlogic/pi-doom",
+      "name": "pi-doom",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-doom",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "badlogic/pi-dosbox",
+      "name": "pi-dosbox",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-dosbox",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "badlogic/pi-gitlab-duo",
+      "name": "pi-gitlab-duo",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerProvider"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-gitlab-duo",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "badlogic/pi-mono",
+      "name": "ferologics-notify",
+      "source_tier": "community",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:community",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": "juanibiapina-pi-extension-settings",
+      "aliases": [
+        "community/ferologics-notify",
+        "community/hjanuschka-clipboard",
+        "community/hjanuschka-cost-tracker",
+        "community/hjanuschka-flicker-corp",
+        "community/hjanuschka-funny-working-message",
+        "community/hjanuschka-handoff",
+        "community/hjanuschka-loop",
+        "community/hjanuschka-memory-mode",
+        "community/hjanuschka-oracle",
+        "community/hjanuschka-plan-mode",
+        "community/hjanuschka-resistance",
+        "community/hjanuschka-speedreading",
+        "community/hjanuschka-status-widget",
+        "community/hjanuschka-ultrathink",
+        "community/hjanuschka-usage-bar",
+        "community/jyaunches-canvas",
+        "community/mitsuhiko-answer",
+        "community/mitsuhiko-control",
+        "community/mitsuhiko-cwd-history",
+        "community/mitsuhiko-files",
+        "community/mitsuhiko-loop",
+        "community/mitsuhiko-notify",
+        "community/mitsuhiko-review",
+        "community/mitsuhiko-todos",
+        "community/mitsuhiko-uv",
+        "community/mitsuhiko-whimsical",
+        "community/nicobailon-interactive-shell",
+        "community/nicobailon-interview-tool",
+        "community/nicobailon-mcp-adapter",
+        "community/nicobailon-powerline-footer",
+        "community/nicobailon-rewind-hook",
+        "community/nicobailon-subagents",
+        "community/ogulcancelik-ghostty-theme-sync",
+        "community/prateekmedia-checkpoint",
+        "community/prateekmedia-lsp",
+        "community/prateekmedia-permission",
+        "community/prateekmedia-ralph-loop",
+        "community/prateekmedia-repeat",
+        "community/prateekmedia-token-rate",
+        "community/qualisero-background-notify",
+        "community/qualisero-compact-config",
+        "community/qualisero-pi-agent-scip",
+        "community/qualisero-safe-git",
+        "community/qualisero-safe-rm",
+        "community/qualisero-session-color",
+        "community/qualisero-session-emoji",
+        "community/tmustier-agent-guidance",
+        "community/tmustier-arcade-mario-not",
+        "community/tmustier-arcade-picman",
+        "community/tmustier-arcade-ping",
+        "community/tmustier-arcade-spice-invaders",
+        "community/tmustier-arcade-tetris",
+        "community/tmustier-code-actions",
+        "community/tmustier-files-widget",
+        "community/tmustier-ralph-wiggum",
+        "community/tmustier-raw-paste",
+        "community/tmustier-tab-status",
+        "community/tmustier-usage-extension",
+        "npm/juanibiapina-pi-extension-settings",
+        "npm/juanibiapina-pi-files",
+        "npm/juanibiapina-pi-gob",
+        "npm/pi-command-center",
+        "npm/pi-multicodex",
+        "npm/pi-session-ask",
+        "npm/pi-wakatime",
+        "npm/vaayne-pi-mcp",
+        "npm/vaayne-pi-subagent",
+        "npm/vpellegrino-pi-skills"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "badlogic/pi-package-test",
+      "name": "pi-package-test",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import"
+      ],
+      "sources": [
+        "npm_scan",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-package-test",
+      "npm_package": "pi-package-test",
+      "aliases": [
+        "npm:pi-package-test",
+        "npm/pi-package-test"
+      ],
+      "validation_reason": "Pi API import found; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "badlogic/pi-skills",
+      "name": "pi-skills",
+      "source_tier": "skills",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-skills",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "balaraj74/f.r.i.d.a.y",
+      "name": "F.R.I.D.A.Y",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/balaraj74/F.R.I.D.A.Y",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "bash-spawn-hook",
+      "name": "bash-spawn-hook",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "ben-vargas/pi-packages",
+      "name": "pi-packages",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/ben-vargas/pi-packages",
+      "npm_package": "benvargas-pi-ancestor-discovery",
+      "aliases": [
+        "npm/benvargas-pi-ancestor-discovery",
+        "npm/benvargas-pi-antigravity-image-gen",
+        "npm/benvargas-pi-synthetic-provider"
+      ],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "blwsk/pi-test-scope",
+      "name": "pi-test-scope",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/blwsk/pi-test-scope",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "bookmark",
+      "name": "bookmark",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "bout3fiddy/agents",
+      "name": "agents",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/bout3fiddy/agents",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "bout3fiddy/pi-langlearn",
+      "name": "pi-langlearn",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/bout3fiddy/pi-langlearn",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "brianwan19801015/labopenclaw",
+      "name": "labopenclaw",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/brianwan19801015/labopenclaw",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "bytes032/agentkit",
+      "name": "agentkit",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/bytes032/agentkit",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "cameronmaske/agent-stuff",
+      "name": "agent-stuff",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/cameronmaske/agent-stuff",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "can1357/oh-my-pi",
+      "name": "oh-my-pi",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search",
+        "npm_scan",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/can1357/oh-my-pi",
+      "npm_package": "@oh-my-pi/anthropic-websearch",
+      "aliases": [
+        "npm:@oh-my-pi/anthropic-websearch",
+        "npm:@oh-my-pi/exa",
+        "npm:@oh-my-pi/lsp",
+        "npm:@oh-my-pi/perplexity",
+        "npm/oh-my-pi-anthropic-websearch",
+        "npm/oh-my-pi-basics",
+        "npm/oh-my-pi-exa",
+        "npm/oh-my-pi-lsp",
+        "npm/oh-my-pi-pi-git-tool",
+        "npm/oh-my-pi-subagents"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "carmandale/ralph-loop",
+      "name": "ralph-loop",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/carmandale/ralph-loop",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "charlie-818/clawd",
+      "name": "CLAWD",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/charlie-818/CLAWD",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "christroutner/pi-extensions",
+      "name": "pi-extensions",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/christroutner/pi-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "claude-rules",
+      "name": "claude-rules",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "coctostan/pi-superteam",
+      "name": "pi-superteam",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/coctostan/pi-superteam",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "coctostan/pi-web-tools",
+      "name": "pi-web-tools",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/coctostan/pi-web-tools",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "coder/ghostty-web",
+      "name": "pi-ghostty-theme-sync",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/coder/ghostty-web.git",
+      "npm_package": "pi-ghostty-theme-sync",
+      "aliases": [
+        "npm/pi-ghostty-theme-sync"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "coltonbatts/loubot",
+      "name": "Loubot",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/coltonbatts/Loubot",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "confirm-destructive",
+      "name": "confirm-destructive",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "continua-ai/pi-lab",
+      "name": "pi-lab",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/continua-ai/pi-lab",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "continua-ai/tinny-pi",
+      "name": "tinny-pi",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerProvider"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/continua-ai/tinny-pi",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "cookiegraves/rarerteatsh",
+      "name": "permission-pi",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/cookiegraves/rarerteatsh.git",
+      "npm_package": "permission-pi",
+      "aliases": [
+        "npm/permission-pi"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "custom-compaction",
+      "name": "custom-compaction",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "custom-footer",
+      "name": "custom-footer",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "custom-header",
+      "name": "custom-header",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "custom-provider-anthropic",
+      "name": "pi-extension-custom-provider-anthropic",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "custom-provider-gitlab-duo",
+      "name": "pi-extension-custom-provider-gitlab-duo",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "custom-provider-qwen-cli",
+      "name": "pi-extension-custom-provider-qwen-cli",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "cv/pi-ssh-remote",
+      "name": "pi-ssh-remote",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent"
+      ],
+      "repository_url": "https://github.com/cv/pi-ssh-remote",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "datadog/sketches-js",
+      "name": "@ogulcancelik/pi-sketch",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/DataDog/sketches-js",
+      "npm_package": "ogulcancelik-pi-sketch",
+      "aliases": [
+        "npm/ogulcancelik-pi-sketch"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "davekilleen/dex",
+      "name": "Dex",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/davekilleen/Dex",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "davidgasquez/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerFlag"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/davidgasquez/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "dctrwatson/pi-squared",
+      "name": "pi-squared",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/dctrwatson/pi-squared",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "default-anton/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/default-anton/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "default-anton/pi-moonshot",
+      "name": "pi-moonshot",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import"
+      ],
+      "sources": [
+        "npm_scan",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/default-anton/pi-moonshot",
+      "npm_package": "pi-moonshot",
+      "aliases": [
+        "npm:pi-moonshot",
+        "npm/pi-moonshot"
+      ],
+      "validation_reason": "Pi API import found; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "default-anton/pi-subdir-context",
+      "name": "pi-subdir-context",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "repo_search",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/default-anton/pi-subdir-context",
+      "npm_package": "pi-subdir-context",
+      "aliases": [
+        "npm/pi-subdir-context"
+      ],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "dejanr/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/dejanr/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "deskaunedsei1983/loc_clawdbot_01",
+      "name": "loc_clawdbot_01",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Deskaunedsei1983/loc_clawdbot_01",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "deybhayden/bendows",
+      "name": "bendows",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/deybhayden/bendows",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "deybhayden/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/deybhayden/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "dinhtungdu/orange",
+      "name": "orange",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/dinhtungdu/orange",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "dirty-repo-guard",
+      "name": "dirty-repo-guard",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "ditfetzt/pi-antigravity-imagen",
+      "name": "pi-antigravity-imagen",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/ditfetzt/pi-antigravity-imagen",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "ditfetzt/pi-antigravity-quota",
+      "name": "pi-antigravity-quota",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/ditfetzt/pi-antigravity-quota",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "ditfetzt/pi-cline-free-models",
+      "name": "pi-cline-free-models",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerProvider"
+      ],
+      "sources": [
+        "repo_search"
+      ],
+      "repository_url": "https://github.com/ditfetzt/pi-cline-free-models",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "doom-overlay",
+      "name": "doom-overlay",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "dotemacs/pi-multi-prompt",
+      "name": "pi-multi-prompt",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/dotemacs/pi-multi-prompt",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "drshailesh88/krypto",
+      "name": "Krypto",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/drshailesh88/Krypto",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "dungle-scrubs/agent-config",
+      "name": "agent-config",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/dungle-scrubs/agent-config",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "dwsy/agent",
+      "name": "agent",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Dwsy/agent",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "dynamic-resources",
+      "name": "dynamic-resources",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "edmundmiller/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/edmundmiller/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "ehtbanton/controlocal",
+      "name": "controlocal",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/ehtbanton/controlocal",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "elementsai-dev/cognia",
+      "name": "Cognia",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/ElementsAI-Dev/Cognia",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "elwinliu/pi-config",
+      "name": "pi-config",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/ElwinLiu/pi-config",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "emzod/pi-subagent-with-logging",
+      "name": "pi-shadow-git",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/EmZod/pi-subagent-with-logging.git",
+      "npm_package": "pi-shadow-git",
+      "aliases": [
+        "npm/pi-shadow-git"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "ethanalgox/marketbot",
+      "name": "MarketBot",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/EthanAlgoX/MarketBot",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "event-bus",
+      "name": "event-bus",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "ex3ndr/daycare",
+      "name": "daycare",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/ex3ndr/daycare",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; registration calls detected"
+    },
+    {
+      "id": "ferologics/pi-notify",
+      "name": "pi-notify",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/ferologics/pi-notify",
+      "npm_package": "pi-notify",
+      "aliases": [
+        "npm/pi-notify"
+      ],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "file-trigger",
+      "name": "file-trigger",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "fink-andreas/pi-web-reader",
+      "name": "pi-web-reader",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/fink-andreas/pi-web-reader",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "flufybot/openclaw",
+      "name": "openclaw",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/FlufyBot/openclaw",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "forbidden-game/kimicodeprovider",
+      "name": "kimicodeprovider",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerProvider"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/forbidden-game/kimicodeprovider",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "forwardinfinity/pi-extensions",
+      "name": "pi-extensions",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/ForwardInfinity/pi-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "galz10/pickle-rick-extension",
+      "name": "pickle-rick-extension",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:web_search"
+      ],
+      "repository_url": "https://github.com/galz10/pickle-rick-extension",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "garymjr/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/garymjr/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "git-checkpoint",
+      "name": "git-checkpoint",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "goncalossilva/.agents",
+      "name": ".agents",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/goncalossilva/.agents",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "goofansu/agent-stuff",
+      "name": "agent-stuff",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/goofansu/agent-stuff",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "googlechrome/workbox",
+      "name": "@vaayne/pi-web-tools",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/googlechrome/workbox.git",
+      "npm_package": "vaayne-pi-web-tools",
+      "aliases": [
+        "npm/vaayne-pi-web-tools"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "graffioh/pi-screenshots-picker",
+      "name": "pi-screenshots-picker",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "npm_scan",
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/graffioh/pi-screenshots-picker",
+      "npm_package": "pi-screenshots-picker",
+      "aliases": [
+        "npm:pi-screenshots-picker",
+        "npm/pi-screenshots-picker"
+      ],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "graffioh/pi-super-curl",
+      "name": "pi-super-curl",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/Graffioh/pi-super-curl",
+      "npm_package": "pi-super-curl",
+      "aliases": [
+        "npm/pi-super-curl"
+      ],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "graycarl/dotshell",
+      "name": "dotshell",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/graycarl/dotshell",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "haider-patanwala/clawdbot",
+      "name": "clawdbot",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/haider-patanwala/clawdbot",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "handoff",
+      "name": "handoff",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "hdresearch/pi-v",
+      "name": "pi-v",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerFlag",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/hdresearch/pi-v",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "hello",
+      "name": "hello",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "hjanuschka/pi-qmd",
+      "name": "pi-qmd",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand",
+        "registerMessageRenderer"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/hjanuschka/pi-qmd",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "hjanuschka/shitty-extensions",
+      "name": "shitty-extensions",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search",
+        "npm_scan",
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/hjanuschka/shitty-extensions",
+      "npm_package": "shitty-extensions",
+      "aliases": [
+        "npm:shitty-extensions",
+        "npm/shitty-extensions"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "igor-makarov/pi-extension-sandbox",
+      "name": "pi-extension-sandbox",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand",
+        "registerFlag"
+      ],
+      "sources": [
+        "repo_search"
+      ],
+      "repository_url": "https://github.com/igor-makarov/pi-extension-sandbox",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "imsus/pi-extension-minimax-coding-plan-mcp",
+      "name": "@imsus/pi-extension-minimax-coding-plan-mcp",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "npm_scan",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/imsus/pi-extension-minimax-coding-plan-mcp",
+      "npm_package": "@imsus/pi-extension-minimax-coding-plan-mcp",
+      "aliases": [
+        "npm:@imsus/pi-extension-minimax-coding-plan-mcp",
+        "npm/imsus-pi-extension-minimax-coding-plan-mcp"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "inline-bash",
+      "name": "inline-bash",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "input-transform",
+      "name": "input-transform",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "interactive-shell",
+      "name": "interactive-shell",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "iranb/clawdbot",
+      "name": "clawdbot",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Iranb/clawdbot",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "isaacraja/agents-config",
+      "name": "agents-config",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerProvider"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/isaacraja/agents-config",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "isaacraja/pi-vertex-claude",
+      "name": "pi-vertex-claude",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerProvider"
+      ],
+      "sources": [
+        "repo_search"
+      ],
+      "repository_url": "https://github.com/isaacraja/pi-vertex-claude",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "istar-eldritch/pi-wakatime",
+      "name": "pi-wakatime",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "repo_search"
+      ],
+      "repository_url": "https://github.com/Istar-Eldritch/pi-wakatime",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "itsnotaka/dot-pi",
+      "name": "dot-pi",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Itsnotaka/dot-pi",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "jamwil/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/jamwil/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "jasonish/pi-sandbox",
+      "name": "pi-sandbox",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand",
+        "registerFlag",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/jasonish/pi-sandbox",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "jbuckmccready/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand",
+        "registerFlag"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/jbuckmccready/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "jcolano/openclaw",
+      "name": "openclaw",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/jcolano/openclaw",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "jhurliman/node-rate-limiter",
+      "name": "token-rate-pi",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git://github.com/jhurliman/node-rate-limiter.git",
+      "npm_package": "token-rate-pi",
+      "aliases": [
+        "npm/token-rate-pi"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "joelazar/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand",
+        "registerFlag"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/joelazar/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "jonschlinkert/repeat-string",
+      "name": "repeat-pi",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/jonschlinkert/repeat-string.git",
+      "npm_package": "repeat-pi",
+      "aliases": [
+        "npm/repeat-pi"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "jorgeavaldez/pi-config",
+      "name": "pi-config",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/jorgeavaldez/pi-config",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "joshleblanc/pi-ext",
+      "name": "pi-ext",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerProvider"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/joshleblanc/pi-ext",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "joshleblanc/pi-minimax",
+      "name": "pi-minimax",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/joshleblanc/pi-minimax",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "joshp123/ai-stack",
+      "name": "ai-stack",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/joshp123/ai-stack",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "joshuadavidthomas/agentkit",
+      "name": "agentkit",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/joshuadavidthomas/agentkit",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "jwintz/pi-island",
+      "name": "pi-island",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:web_search"
+      ],
+      "repository_url": "https://github.com/jwintz/pi-island",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "jwrunge/agent",
+      "name": "agent",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "registerProvider"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/jwrunge/agent",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; registration calls detected"
+    },
+    {
+      "id": "jyaunches/pi-canvas",
+      "name": "pi-canvas",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/jyaunches/pi-canvas",
+      "npm_package": null,
+      "aliases": [
+        "third-party/jyaunches-pi-canvas"
+      ],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "k1000/pi-reflect",
+      "name": "pi-reflect",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/k1000/pi-reflect",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "kanatti/pipi",
+      "name": "pipi",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/kanatti/pipi",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "kaofelix/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerFlag"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/kaofelix/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "kaofelix/pi-watch",
+      "name": "pi-watch",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import"
+      ],
+      "sources": [
+        "npm_scan",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/kaofelix/pi-watch",
+      "npm_package": "pi-watch",
+      "aliases": [
+        "npm:pi-watch",
+        "npm/pi-watch"
+      ],
+      "validation_reason": "Pi API import found; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "kavia-common/moltbot-311196",
+      "name": "moltbot-311196",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/kavia-common/moltbot-311196",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "kcosr/pi-extensions",
+      "name": "pi-extensions",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent"
+      ],
+      "repository_url": "https://github.com/kcosr/pi-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "knoopx/pi",
+      "name": "pi",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/knoopx/pi",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "l-lin/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/l-lin/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "langchain-ai/langgraphjs",
+      "name": "checkpoint-pi",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git@github.com:langchain-ai/langgraphjs.git",
+      "npm_package": "checkpoint-pi",
+      "aliases": [
+        "npm/checkpoint-pi"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "laulauland/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search",
+        "npm_scan",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/laulauland/dotfiles",
+      "npm_package": "pi-agentic-compaction",
+      "aliases": [
+        "npm:pi-agentic-compaction",
+        "npm:pi-shell-completions",
+        "npm:pi-threads",
+        "npm/pi-agentic-compaction",
+        "npm/pi-shell-completions",
+        "npm/pi-threads"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "leechael/pi-provider-kimi-code",
+      "name": "pi-provider-kimi-code",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerProvider"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Leechael/pi-provider-kimi-code",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "leiserfg/nix-config",
+      "name": "nix-config",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/leiserfg/nix-config",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "lenstr/pi-fetch-url",
+      "name": "pi-fetch-url",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/lenstr/pi-fetch-url",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "leopechnicki/ai-assistant",
+      "name": "AI-Assistant",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/leopechnicki/AI-Assistant",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "lepinkainen/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/lepinkainen/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "lllooollpp/clawdbot-cn",
+      "name": "clawdbot-cn",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/lllooollpp/clawdbot-cn",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "lsj5031/pi-notification-extension",
+      "name": "pi-notification-extension",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent"
+      ],
+      "repository_url": "https://github.com/lsj5031/pi-notification-extension",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "lukeus/ai-shell",
+      "name": "ai-shell",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Lukeus/ai-shell",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; registration calls detected"
+    },
+    {
+      "id": "m-dev-lab/ultimate-agent",
+      "name": "ultimate-agent",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/M-Dev-Lab/ultimate-agent",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "mac-system-theme",
+      "name": "mac-system-theme",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "markus1189/nixos-config",
+      "name": "nixos-config",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/markus1189/nixos-config",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "masonjames/dockhand-sre-agent",
+      "name": "dockhand-sre-agent",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "registerTool",
+        "registerCommand",
+        "registerProvider",
+        "registerFlag",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/masonjames/dockhand-sre-agent",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; registration calls detected"
+    },
+    {
+      "id": "max-leopold/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Max-Leopold/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "maxsumrall/homeycli",
+      "name": "homeycli",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/maxsumrall/homeycli",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "mcasper/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/mcasper/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "mcollina/pi-bash-confirm",
+      "name": "pi-bash-confirm",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/mcollina/pi-bash-confirm",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "megalithic/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/megalithic/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "mermaid-js/mermaid",
+      "name": "pi-mermaid",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/mermaid-js/mermaid.git",
+      "npm_package": "pi-mermaid",
+      "aliases": [
+        "npm/pi-mermaid"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "message-renderer",
+      "name": "message-renderer",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "messense/pi-parallel-agents",
+      "name": "pi-parallel-agents",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/messense/pi-parallel-agents",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "meteyou/pi-stuff",
+      "name": "pi-stuff",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/meteyou/pi-stuff",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "mic92/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Mic92/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "michalvavra/agents",
+      "name": "agents",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent"
+      ],
+      "repository_url": "https://github.com/michalvavra/agents",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "microsoft/vscode-languageserver-node",
+      "name": "lsp-pi",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/Microsoft/vscode-languageserver-node.git",
+      "npm_package": "lsp-pi",
+      "aliases": [
+        "npm/lsp-pi"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "mikeastock/agents",
+      "name": "extensions",
+      "source_tier": "agents-mikeastock",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:agents-mikeastock"
+      ],
+      "repository_url": "https://github.com/mikeastock/agents",
+      "npm_package": null,
+      "aliases": [
+        "agents-mikeastock/extensions"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "mikeastock/dotagents",
+      "name": "dotagents",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/mikeastock/dotagents",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "mikeyobrien/pi-agent",
+      "name": "pi-agent",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/mikeyobrien/pi-agent",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "mikeyobrien/rho",
+      "name": "rho",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/mikeyobrien/rho",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "mitsuhiko/agent-stuff",
+      "name": "agent-stuff",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search",
+        "npm_scan",
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/mitsuhiko/agent-stuff",
+      "npm_package": "mitsupi",
+      "aliases": [
+        "npm:mitsupi",
+        "npm/mitsupi"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "modal-editor",
+      "name": "modal-editor",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "model-status",
+      "name": "model-status",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "mrexodia/agent-viewer",
+      "name": "agent-viewer",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/mrexodia/agent-viewer",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "mrexodia/devdocs-cli",
+      "name": "devdocs-cli",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/mrexodia/devdocs-cli",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "mrndstvndv/nixdots",
+      "name": "nixdots",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/mrndstvndv/nixdots",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "neohope/neopimonosrc",
+      "name": "NeoPimonoSrc",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerProvider"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/neohope/NeoPimonoSrc",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "neonspectra/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/neonspectra/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "neotavern/neotavern-frontend",
+      "name": "NeoTavern-Frontend",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/NeoTavern/NeoTavern-Frontend",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; registration calls detected"
+    },
+    {
+      "id": "nexxeln/dots",
+      "name": "dots",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/nexxeln/dots",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "nicobailon/pi-annotate",
+      "name": "pi-annotate",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/nicobailon/pi-annotate",
+      "npm_package": "pi-annotate",
+      "aliases": [
+        "npm/pi-annotate"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "nicobailon/pi-coordination",
+      "name": "pi-coordination",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/nicobailon/pi-coordination",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; registration calls detected"
+    },
+    {
+      "id": "nicobailon/pi-interactive-shell",
+      "name": "pi-interactive-shell",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search",
+        "npm_scan",
+        "curated_list:web_search",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/nicobailon/pi-interactive-shell",
+      "npm_package": "pi-interactive-shell",
+      "aliases": [
+        "npm:pi-interactive-shell",
+        "community/nicobailon-interactive-shell",
+        "npm/pi-interactive-shell"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "nicobailon/pi-interview-tool",
+      "name": "pi-interview-tool",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search",
+        "npm_scan",
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/nicobailon/pi-interview-tool",
+      "npm_package": "pi-interview",
+      "aliases": [
+        "npm:pi-interview",
+        "npm/pi-interview"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "nicobailon/pi-mcp-adapter",
+      "name": "pi-mcp-adapter",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand",
+        "registerFlag"
+      ],
+      "sources": [
+        "code_search",
+        "npm_scan",
+        "curated_list:web_search",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/nicobailon/pi-mcp-adapter",
+      "npm_package": "pi-mcp-adapter",
+      "aliases": [
+        "npm:pi-mcp-adapter",
+        "community/nicobailon-mcp-adapter",
+        "npm/pi-mcp-adapter"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "nicobailon/pi-messenger",
+      "name": "pi-messenger",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search",
+        "npm_scan",
+        "curated_list:web_search",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/nicobailon/pi-messenger",
+      "npm_package": "pi-messenger",
+      "aliases": [
+        "npm:pi-messenger",
+        "npm/pi-messenger"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "nicobailon/pi-model-switch",
+      "name": "pi-model-switch",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/nicobailon/pi-model-switch",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "nicobailon/pi-powerline-footer",
+      "name": "pi-powerline-footer",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search",
+        "npm_scan",
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/nicobailon/pi-powerline-footer",
+      "npm_package": "pi-powerline-footer",
+      "aliases": [
+        "npm:pi-powerline-footer",
+        "community/nicobailon-powerline-footer",
+        "npm/pi-powerline-footer"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "nicobailon/pi-prompt-template-model",
+      "name": "pi-prompt-template-model",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/nicobailon/pi-prompt-template-model.git",
+      "npm_package": "pi-prompt-template-model",
+      "aliases": [
+        "npm/pi-prompt-template-model"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "nicobailon/pi-review-loop",
+      "name": "pi-review-loop",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search",
+        "npm_scan",
+        "curated_list:web_search",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/nicobailon/pi-review-loop",
+      "npm_package": "pi-review-loop",
+      "aliases": [
+        "npm:pi-review-loop",
+        "npm/pi-review-loop"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "nicobailon/pi-rewind-hook",
+      "name": "pi-rewind-hook",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "npm_scan",
+        "curated_list:awesome-pi-agent"
+      ],
+      "repository_url": "https://github.com/nicobailon/pi-rewind-hook",
+      "npm_package": "pi-rewind-hook",
+      "aliases": [
+        "npm:pi-rewind-hook"
+      ],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "nicobailon/pi-skill-palette",
+      "name": "pi-skill-palette",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerMessageRenderer"
+      ],
+      "sources": [
+        "code_search",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/nicobailon/pi-skill-palette",
+      "npm_package": "pi-skill-palette",
+      "aliases": [
+        "npm/pi-skill-palette"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "nicobailon/pi-subagents",
+      "name": "pi-subagents",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search",
+        "npm_scan"
+      ],
+      "repository_url": "https://github.com/nicobailon/pi-subagents",
+      "npm_package": "pi-subagents",
+      "aliases": [
+        "npm:pi-subagents"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "nicobailon/pi-web-access",
+      "name": "pi-web-access",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search",
+        "curated_list:web_search",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/nicobailon/pi-web-access",
+      "npm_package": "pi-web-access",
+      "aliases": [
+        "npm/pi-web-access"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "ninlds/pi-ding",
+      "name": "pi-ding",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerFlag"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/ninlds/pi-ding",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "nof0xgiven/pi-coding-agent-eureka",
+      "name": "pi-coding-agent-eureka",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/nof0xgiven/pi-coding-agent-eureka",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "notify",
+      "name": "notify",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "npm/marckrenn-pi-sub-bar",
+      "name": "@marckrenn/pi-sub-bar",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://www.npmjs.com/package/marckrenn-pi-sub-bar",
+      "npm_package": "marckrenn-pi-sub-bar",
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "npm/marckrenn-pi-sub-core",
+      "name": "@marckrenn/pi-sub-core",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://www.npmjs.com/package/marckrenn-pi-sub-core",
+      "npm_package": "marckrenn-pi-sub-core",
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "npm/pi-extensions",
+      "name": "pi-extensions",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": null,
+      "npm_package": "pi-extensions",
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "npm/pi-model-switch",
+      "name": "pi-model-switch",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://www.npmjs.com/package/pi-model-switch",
+      "npm_package": "pi-model-switch",
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "npm/pi-search-agent",
+      "name": "pi-search-agent",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://www.npmjs.com/package/pi-search-agent",
+      "npm_package": "pi-search-agent",
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "npm/zenobius-pi-dcp",
+      "name": "@zenobius/pi-dcp",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://www.npmjs.com/package/zenobius-pi-dcp",
+      "npm_package": "zenobius-pi-dcp",
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "nrupatunga/pi-extensions",
+      "name": "pi-extensions",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/nrupatunga/pi-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "ogulcancelik/pi-ghostty-theme-sync",
+      "name": "pi-ghostty-theme-sync",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent"
+      ],
+      "repository_url": "https://github.com/ogulcancelik/pi-ghostty-theme-sync",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "ogulcancelik/pi-sketch",
+      "name": "pi-sketch",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent"
+      ],
+      "repository_url": "https://github.com/ogulcancelik/pi-sketch",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "open-telemetry/opentelemetry-js-contrib",
+      "name": "pi-telemetry-otel",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/open-telemetry/opentelemetry-js-contrib.git",
+      "npm_package": "pi-telemetry-otel",
+      "aliases": [
+        "npm/pi-telemetry-otel"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "openclaw/openclaw",
+      "name": "openclaw",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/openclaw/openclaw",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "opus-workshop/rush",
+      "name": "rush",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/opus-workshop/rush",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "otahontas/nix",
+      "name": "nix",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/otahontas/nix",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "overlay-qa-tests",
+      "name": "overlay-qa-tests",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "overlay-test",
+      "name": "overlay-test",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "pasky/pi-amplike",
+      "name": "pi-amplike",
+      "source_tier": "skills",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/pasky/pi-amplike",
+      "npm_package": "pi-amplike",
+      "aliases": [
+        "npm/pi-amplike"
+      ],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "pauldthomson/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/pauldthomson/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "permission-gate",
+      "name": "permission-gate",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "pirate",
+      "name": "pirate",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "plan-mode",
+      "name": "plan-mode",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "prateekmedia/claude-agent-sdk-pi",
+      "name": "claude-agent-sdk-pi",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerProvider"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/prateekmedia/claude-agent-sdk-pi",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "prateekmedia/pi-hooks",
+      "name": "pi-hooks",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search",
+        "curated_list:awesome-pi-agent"
+      ],
+      "repository_url": "https://github.com/prateekmedia/pi-hooks",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "pratos/clanker-setup",
+      "name": "clanker-setup",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/pratos/clanker-setup",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "preset",
+      "name": "preset",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "protected-paths",
+      "name": "protected-paths",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "pspdfkit-labs/pi-skills",
+      "name": "pi-skills",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/PSPDFKit-labs/pi-skills",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "qna",
+      "name": "qna",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "qualisero/pi-agent-scip",
+      "name": "@qualisero/pi-agent-scip",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "npm_scan",
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/qualisero/pi-agent-scip",
+      "npm_package": "@qualisero/pi-agent-scip",
+      "aliases": [
+        "npm:@qualisero/pi-agent-scip",
+        "npm/qualisero-pi-agent-scip"
+      ],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "qualisero/rhubarb-pi",
+      "name": "rhubarb-pi",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent"
+      ],
+      "repository_url": "https://github.com/qualisero/rhubarb-pi",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "question",
+      "name": "question",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "questionnaire",
+      "name": "questionnaire",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "rainbow-editor",
+      "name": "rainbow-editor",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "rhnvrm/pi-mesh",
+      "name": "pi-mesh",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/rhnvrm/pi-mesh",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "richard-devbot/computer-agent",
+      "name": "Computer-Agent",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/richard-devbot/Computer-Agent",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "richardgill/nix",
+      "name": "nix",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/richardgill/nix",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "richardgill/pi-extensions",
+      "name": "pi-extensions",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/richardgill/pi-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; registration calls detected"
+    },
+    {
+      "id": "rkunnamp/pi-apply-patch",
+      "name": "pi-apply-patch",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/rkunnamp/pi-apply-patch",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "robextremevoice/openclaw-1",
+      "name": "openclaw-1",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/RobExtremeVoice/openclaw-1",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "rpc-demo",
+      "name": "rpc-demo",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "rytswd/pi-agent-extensions",
+      "name": "pi-agent-extensions",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search",
+        "curated_list:web_search"
+      ],
+      "repository_url": "https://github.com/rytswd/pi-agent-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "safzanpirani/pi-config",
+      "name": "pi-config",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerProvider"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/safzanpirani/pi-config",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "samuelstevens/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/samuelstevens/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "sandbox",
+      "name": "pi-extension-sandbox",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "sbattywolf/gaia",
+      "name": "GAIA",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/sbattywolf/GAIA",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "sboudrias/inquirer.js",
+      "name": "pi-bash-confirm",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/SBoudrias/Inquirer.js.git",
+      "npm_package": "pi-bash-confirm",
+      "aliases": [
+        "npm/pi-bash-confirm"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "scooter-lacroix/leindex",
+      "name": "LeIndex",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/scooter-lacroix/LeIndex",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "screenpipe/screenpipe",
+      "name": "screenpipe",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/screenpipe/screenpipe",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "send-user-message",
+      "name": "send-user-message",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "seriousben/serious-nixos-config",
+      "name": "serious-nixos-config",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/seriousben/serious-nixos-config",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "session-name",
+      "name": "session-name",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "sgtest/megarepo",
+      "name": "megarepo",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/sgtest/megarepo",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; registration calls detected"
+    },
+    {
+      "id": "shutdown-command",
+      "name": "shutdown-command",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "sibyllinesoft/scribe",
+      "name": "scribe",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/sibyllinesoft/scribe",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "sids/pi-extensions",
+      "name": "pi-extensions",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/sids/pi-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "sigtom/wow-ocp",
+      "name": "wow-ocp",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/sigtom/wow-ocp",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "skyfallsin/pi-agent-config",
+      "name": "pi-agent-config",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerFlag",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/skyfallsin/pi-agent-config",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "skyfallsin/pi-vertex-anthropic",
+      "name": "pi-vertex-anthropic",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerProvider"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/skyfallsin/pi-vertex-anthropic",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "snake",
+      "name": "snake",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "space-invaders",
+      "name": "space-invaders",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "ssh",
+      "name": "ssh",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "status-line",
+      "name": "status-line",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "stefan2904/dockerized-pi",
+      "name": "dockerized-pi",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/stefan2904/dockerized-pi",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "subagent",
+      "name": "subagent",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "subsy/ralph-tui",
+      "name": "ralph-loop-pi",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/subsy/ralph-tui.git",
+      "npm_package": "ralph-loop-pi",
+      "aliases": [
+        "npm/ralph-loop-pi"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "summarize",
+      "name": "summarize",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "surma/nixenv",
+      "name": "nixenv",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/surma/nixenv",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "svkozak/pi-acp",
+      "name": "pi-acp",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "npm_scan",
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/svkozak/pi-acp",
+      "npm_package": "pi-acp",
+      "aliases": [
+        "npm:pi-acp",
+        "npm/pi-acp"
+      ],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "system-prompt-header",
+      "name": "system-prompt-header",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/aliou-pi-extensions",
+      "name": "aliou-pi-extensions",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/aliou-pi-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/ben-vargas-pi-packages",
+      "name": "ben-vargas-pi-packages",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/ben-vargas-pi-packages",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/charles-cooper-pi-extensions",
+      "name": "charles-cooper-pi-extensions",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/charles-cooper-pi-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/cv-pi-ssh-remote",
+      "name": "cv-pi-ssh-remote",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/cv-pi-ssh-remote",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/graffioh-pi-screenshots-picker",
+      "name": "graffioh-pi-screenshots-picker",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/graffioh-pi-screenshots-picker",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/graffioh-pi-super-curl",
+      "name": "graffioh-pi-super-curl",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/graffioh-pi-super-curl",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/kcosr-pi-extensions",
+      "name": "kcosr-pi-extensions",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/kcosr-pi-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/limouren-agent-things",
+      "name": "limouren-agent-things",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/limouren-agent-things",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/lsj5031-pi-notification-extension",
+      "name": "lsj5031-pi-notification-extension",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/lsj5031-pi-notification-extension",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/marckrenn-pi-sub",
+      "name": "marckrenn-pi-sub",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/marckrenn-pi-sub",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/michalvavra-agents",
+      "name": "michalvavra-agents",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/michalvavra-agents",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/ogulcancelik-pi-sketch",
+      "name": "ogulcancelik-pi-sketch",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/ogulcancelik-pi-sketch",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/openclaw-openclaw",
+      "name": "openclaw-openclaw",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/openclaw-openclaw",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/pasky-pi-amplike",
+      "name": "pasky-pi-amplike",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/pasky-pi-amplike",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/qualisero-pi-agent-scip",
+      "name": "qualisero-pi-agent-scip",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/qualisero-pi-agent-scip",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/raunovillberg-pi-stuffed",
+      "name": "raunovillberg-pi-stuffed",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/raunovillberg-pi-stuffed",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/rytswd-direnv",
+      "name": "rytswd-direnv",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/rytswd-direnv",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/rytswd-questionnaire",
+      "name": "rytswd-questionnaire",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/rytswd-questionnaire",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/rytswd-slow-mode",
+      "name": "rytswd-slow-mode",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/rytswd-slow-mode",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/vtemian-pi-config",
+      "name": "vtemian-pi-config",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/vtemian-pi-config",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/w-winter-dot314",
+      "name": "w-winter-dot314",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/w-winter-dot314",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "third-party/zenobi-us-pi-dcp",
+      "name": "zenobi-us-pi-dcp",
+      "source_tier": "third-party-github",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:third-party-github"
+      ],
+      "repository_url": "https://github.com/zenobi-us-pi-dcp",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "thrashr888/agentkernel",
+      "name": "agentkernel",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/thrashr888/agentkernel",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "thurstonsand/ansiblonomicon",
+      "name": "ansiblonomicon",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/thurstonsand/ansiblonomicon",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "tiberriver256/mcp-server-azure-devops",
+      "name": "mcp-server-azure-devops",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerFlag"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Tiberriver256/mcp-server-azure-devops",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "timed-confirm",
+      "name": "timed-confirm",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "timofreiberg/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/TimoFreiberg/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "titlebar-spinner",
+      "name": "titlebar-spinner",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "tmustier/pi-extensions",
+      "name": "@tmustier/pi-arcade",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "npm_scan",
+        "curated_list:awesome-pi-agent",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/tmustier/pi-extensions",
+      "npm_package": "@tmustier/pi-arcade",
+      "aliases": [
+        "npm:@tmustier/pi-arcade",
+        "npm/tmustier-pi-arcade"
+      ],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "todo",
+      "name": "todo",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "tool-override",
+      "name": "tool-override",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "tools",
+      "name": "tools",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "toorusr/ai-extensions",
+      "name": "ai-extensions",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand",
+        "registerShortcut",
+        "registerMessageRenderer"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/toorusr/ai-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "towry/agent-share",
+      "name": "agent-share",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/towry/agent-share",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "trigger-compact",
+      "name": "trigger-compact",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "truncated-tool",
+      "name": "truncated-tool",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "ttttmr/pi-search-tool",
+      "name": "pi-search-tool",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/ttttmr/pi-search-tool",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "tudoroancea/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/tudoroancea/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "vaayne/agent-kit",
+      "name": "@vaayne/agent-kit",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/vaayne/agent-kit.git",
+      "npm_package": "vaayne-agent-kit",
+      "aliases": [
+        "npm/vaayne-agent-kit"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "verioussmith/pi-openrouter-extension",
+      "name": "pi-openrouter-extension",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerProvider"
+      ],
+      "sources": [
+        "code_search",
+        "npm_scan",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/verioussmith/pi-openrouter-extension",
+      "npm_package": "@verioussmith/pi-openrouter",
+      "aliases": [
+        "npm:@verioussmith/pi-openrouter",
+        "npm/@verioussmith/pi-openrouter"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "volantk/pi-agent-skills-extensions",
+      "name": "pi-agent-skills-extensions",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Volantk/pi-agent-skills-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "vrslev/dotfiles",
+      "name": "dotfiles",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/vrslev/dotfiles",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "w-winter/dot314",
+      "name": "dot314",
+      "source_tier": "npm-registry",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search",
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "https://github.com/w-winter/dot314",
+      "npm_package": "pi-brave-search",
+      "aliases": [
+        "npm/pi-brave-search",
+        "npm/pi-ephemeral",
+        "npm/pi-md-export",
+        "npm/pi-repoprompt-mcp",
+        "npm/pi-voice-of-god"
+      ],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "walterra/agent-tools",
+      "name": "@walterra/pi-charts",
+      "source_tier": "npm-registry",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:npm-registry"
+      ],
+      "repository_url": "git+https://github.com/walterra/agent-tools.git",
+      "npm_package": "walterra-pi-charts",
+      "aliases": [
+        "npm/walterra-pi-charts",
+        "npm/walterra-pi-graphviz"
+      ],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "wayanjimmy/agent-stuff",
+      "name": "agent-stuff",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/wayanjimmy/agent-stuff",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "weolopez/aardvark",
+      "name": "aardvark",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "registerTool",
+        "registerCommand",
+        "registerProvider",
+        "registerFlag",
+        "registerShortcut"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/weolopez/aardvark",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; registration calls detected"
+    },
+    {
+      "id": "whamp/glm-vision",
+      "name": "glm-vision",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Whamp/glm-vision",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "whamp/pi-agentic-compaction",
+      "name": "pi-agentic-compaction",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Whamp/pi-agentic-compaction",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "whamp/pi-automem",
+      "name": "pi-automem",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Whamp/pi-automem",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "whamp/pi-brain",
+      "name": "pi-brain",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Whamp/pi-brain",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "whamp/pi-rlm",
+      "name": "pi-rlm",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Whamp/pi-rlm",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "whodaniel/fuse",
+      "name": "fuse",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/whodaniel/fuse",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "widget-placement",
+      "name": "widget-placement",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "willem4130/android",
+      "name": "Android",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/willem4130/Android",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "willyfrog/agents-warning",
+      "name": "agents-warning",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand",
+        "registerFlag"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Willyfrog/agents-warning",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "willyfrog/pi-agent-extensions",
+      "name": "pi-agent-extensions",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerTool",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/Willyfrog/pi-agent-extensions",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "with-deps",
+      "name": "pi-extension-with-deps",
+      "source_tier": "official-pi-mono",
+      "capabilities": [],
+      "sources": [
+        "candidate_pool:official-pi-mono"
+      ],
+      "repository_url": "https://github.com/badlogic/pi-mono",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
+    },
+    {
+      "id": "xxrenzhe/autobb",
+      "name": "autobb",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/xxrenzhe/autobb",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "yesongyun/openclaw-cn",
+      "name": "openclaw-cn",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/YeSongYun/openclaw-cn",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    },
+    {
+      "id": "yulqen/conductor-pi",
+      "name": "conductor-pi",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/yulqen/conductor-pi",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "zanieb/pi-plugins",
+      "name": "pi-plugins",
+      "source_tier": "third-party-github",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default",
+        "registerCommand"
+      ],
+      "sources": [
+        "code_search"
+      ],
+      "repository_url": "https://github.com/zanieb/pi-plugins",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present; registration calls detected"
+    },
+    {
+      "id": "zenobi-us/pi-dcp",
+      "name": "pi-dcp",
+      "source_tier": "extensions",
+      "capabilities": [
+        "ExtensionAPI_import",
+        "export_default"
+      ],
+      "sources": [
+        "curated_list:awesome-pi-agent"
+      ],
+      "repository_url": "https://github.com/zenobi-us/pi-dcp",
+      "npm_package": null,
+      "aliases": [],
+      "validation_reason": "Pi API import found; export default present"
+    }
+  ]
+}

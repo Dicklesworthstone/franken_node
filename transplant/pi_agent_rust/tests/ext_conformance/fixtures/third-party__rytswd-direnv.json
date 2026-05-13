@@ -1,0 +1,45 @@
+{
+  "extension": {
+    "id": "third-party/rytswd-direnv",
+    "source": {
+      "path": "third-party/rytswd-direnv/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-rytswd-direnv-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event hooks registered for rytswd-direnv",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start",
+          "tool_result"
+        ]
+      }
+    },
+    {
+      "id": "scn-rytswd-direnv-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-rytswd-direnv-evt-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects graceful no-op or error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

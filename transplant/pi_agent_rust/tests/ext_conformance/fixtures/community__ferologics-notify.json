@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/ferologics-notify",
+    "source": { "path": "community/ferologics-notify/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-ferologics-notify-reg-001",
+      "kind": "registration",
+      "summary": "Verifies event handler registrations for ferologics-notify",
+      "expect": {
+        "event_hooks_contains": ["agent_end"]
+      }
+    },
+    {
+      "id": "scn-ferologics-notify-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_end event to trigger notification",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-ferologics-notify-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

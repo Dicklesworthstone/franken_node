@@ -1,0 +1,60 @@
+{
+  "extension": {
+    "id": "third-party/lsj5031-pi-notification-extension",
+    "source": {
+      "path": "third-party/lsj5031-pi-notification-extension/notification.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-lsj5031-pi-notification-extension-reg-001",
+      "kind": "registration",
+      "summary": "Verifies notify command, event hooks registered for lsj5031-pi-notification-extension",
+      "expect": {
+        "commands_contains": [
+          "notify"
+        ],
+        "event_hooks_contains": [
+          "agent_end",
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-lsj5031-pi-notification-extension-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes notify command",
+      "command_name": "notify",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-lsj5031-pi-notification-extension-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "notify-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-lsj5031-pi-notification-extension-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_end event",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

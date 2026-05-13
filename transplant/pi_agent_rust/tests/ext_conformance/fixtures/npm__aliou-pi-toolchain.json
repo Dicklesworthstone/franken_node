@@ -1,0 +1,43 @@
+{
+  "extension": {
+    "id": "npm/aliou-pi-toolchain",
+    "source": {
+      "path": "npm/aliou-pi-toolchain/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-aliou-pi-toolchain-reg",
+      "kind": "registration",
+      "summary": "Validates aliou-pi-toolchain registers event hooks",
+      "expect": {
+        "event_hooks_contains": [
+          "tool_call"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-aliou-pi-toolchain-evt-pos",
+      "kind": "event",
+      "summary": "Fires tool_call event hook",
+      "event_name": "tool_call",
+      "input": {
+        "tool_name": "test_tool",
+        "arguments": {}
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-aliou-pi-toolchain-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

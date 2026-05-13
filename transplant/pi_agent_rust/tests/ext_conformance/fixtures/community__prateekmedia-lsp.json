@@ -1,0 +1,88 @@
+{
+  "extension": {
+    "id": "community/prateekmedia-lsp",
+    "source": {
+      "path": "community/prateekmedia-lsp/lsp-tool.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-prateekmedia-lsp-reg-001",
+      "kind": "registration",
+      "summary": "Verifies 1 tool(s), lsp command, event hooks registered for prateekmedia-lsp",
+      "expect": {
+        "tool_count": 1,
+        "commands_contains": [
+          "lsp"
+        ],
+        "event_hooks_contains": [
+          "agent_end",
+          "agent_start",
+          "session_shutdown"
+        ]
+      }
+    },
+    {
+      "id": "scn-prateekmedia-lsp-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes lsp tool with basic arguments",
+      "tool_name": "lsp",
+      "input": {
+        "arguments": {
+          "query": "test"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-prateekmedia-lsp-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes lsp tool with empty arguments; expects error",
+      "tool_name": "lsp",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-prateekmedia-lsp-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes lsp command",
+      "command_name": "lsp",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-prateekmedia-lsp-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "lsp-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-prateekmedia-lsp-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_end event",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

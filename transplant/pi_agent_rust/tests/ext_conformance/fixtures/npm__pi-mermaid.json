@@ -1,0 +1,55 @@
+{
+  "extension": {
+    "id": "npm/pi-mermaid",
+    "source": {
+      "path": "npm/pi-mermaid/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-mermaid-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "agent_end",
+          "input"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-mermaid-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes pi-mermaid command",
+      "command_name": "pi-mermaid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-mermaid-evt-pos",
+      "kind": "event",
+      "summary": "Fires agent_end event",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-mermaid-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "extension": {
+    "id": "npm/pi-brave-search",
+    "source": { "path": "npm/pi-brave-search/extensions/brave-search/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-brave-search-reg",
+      "kind": "registration",
+      "summary": "Validates tool, command, and event hook registrations",
+      "expect": {
+        "tool_count": 2,
+        "event_hooks_contains": ["before_agent_start", "turn_end"]
+      }
+    },
+    {
+      "id": "scn-npm-pi-brave-search-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes brave_search tool with basic args",
+      "tool_name": "brave_search",
+      "input": {
+        "arguments": {
+          "query": "test search"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-brave-search-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes brave_search with empty args expecting error",
+      "tool_name": "brave_search",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-brave-search-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes ws command",
+      "command_name": "ws",
+      "input": {
+        "arguments": "test query"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

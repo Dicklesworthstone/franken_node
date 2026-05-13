@@ -1,0 +1,54 @@
+{
+  "extension": {
+    "id": "community/mitsuhiko-control",
+    "source": { "path": "community/mitsuhiko-control/control.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-mitsuhiko-control-reg-001",
+      "kind": "registration",
+      "summary": "Verifies tool, command, and event registrations for mitsuhiko-control",
+      "expect": {
+        "tool_count": 2,
+        "commands_contains": ["control-sessions"],
+        "event_hooks_contains": ["connect", "data", "error", "session_shutdown", "session_start", "session_switch", "turn_end"]
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-control-pos-001",
+      "kind": "tool",
+      "summary": "Invokes list_sessions tool",
+      "tool_name": "list_sessions",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-control-pos-002",
+      "kind": "command",
+      "summary": "Invokes control-sessions command",
+      "command_name": "control-sessions",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-control-neg-001",
+      "kind": "tool",
+      "summary": "Invokes send_to_session with empty arguments; expects error",
+      "tool_name": "send_to_session",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

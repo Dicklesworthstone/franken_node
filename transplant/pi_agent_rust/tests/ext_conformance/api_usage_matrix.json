@@ -1,0 +1,642 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-02-07",
+  "corpus_stats": {
+    "total_extensions_scanned": 230,
+    "tier1_official": 61,
+    "tier2_community": 59,
+    "tier3_npm": 81,
+    "tier3_third_party": 23,
+    "tier3_agents": 6,
+    "total_ts_js_files": 1167
+  },
+  "node_modules": [
+    {
+      "module": "node:path",
+      "extensions_using": 131,
+      "tier_breakdown": { "T1": 11, "T2": 35, "T3_npm": 67, "T3_gh": 17, "T3_ag": 1 },
+      "shim_status": "real",
+      "criticality": "P0",
+      "apis": [
+        { "name": "join", "call_count": 1220, "shim_status": "real" },
+        { "name": "resolve", "call_count": 169, "shim_status": "real" },
+        { "name": "dirname", "call_count": 165, "shim_status": "real" },
+        { "name": "basename", "call_count": 94, "shim_status": "real" },
+        { "name": "relative", "call_count": 83, "shim_status": "real" },
+        { "name": "isAbsolute", "call_count": 73, "shim_status": "real" },
+        { "name": "extname", "call_count": 26, "shim_status": "real" },
+        { "name": "sep", "call_count": 18, "shim_status": "real" },
+        { "name": "normalize", "call_count": 17, "shim_status": "real" },
+        { "name": "delimiter", "call_count": 4, "shim_status": "real" },
+        { "name": "parse", "call_count": 2, "shim_status": "real" },
+        { "name": "format", "call_count": 1, "shim_status": "real" },
+        { "name": "posix", "call_count": 1, "shim_status": "real" }
+      ]
+    },
+    {
+      "module": "node:fs",
+      "extensions_using": 119,
+      "tier_breakdown": { "T1": 10, "T2": 30, "T3_npm": 63, "T3_gh": 16 },
+      "shim_status": "real",
+      "criticality": "P0",
+      "apis": [
+        { "name": "existsSync", "call_count": 466, "shim_status": "real" },
+        { "name": "readFileSync", "call_count": 264, "shim_status": "real" },
+        { "name": "writeFileSync", "call_count": 163, "shim_status": "real" },
+        { "name": "readFile", "call_count": 131, "shim_status": "real" },
+        { "name": "mkdirSync", "call_count": 115, "shim_status": "real" },
+        { "name": "statSync", "call_count": 92, "shim_status": "real" },
+        { "name": "readdir", "call_count": 85, "shim_status": "real" },
+        { "name": "readdirSync", "call_count": 77, "shim_status": "real" },
+        { "name": "unlinkSync", "call_count": 63, "shim_status": "real" },
+        { "name": "stat", "call_count": 59, "shim_status": "real" },
+        { "name": "writeFile", "call_count": 54, "shim_status": "real" },
+        { "name": "access", "call_count": 51, "shim_status": "real" },
+        { "name": "unlink", "call_count": 32, "shim_status": "real" },
+        { "name": "rmSync", "call_count": 28, "shim_status": "real" },
+        { "name": "mkdtempSync", "call_count": 24, "shim_status": "real" },
+        { "name": "rename", "call_count": 20, "shim_status": "real" },
+        { "name": "mkdir", "call_count": 20, "shim_status": "real" },
+        { "name": "open", "call_count": 17, "shim_status": "real" },
+        { "name": "copyFile", "call_count": 17, "shim_status": "real" },
+        { "name": "realpath", "call_count": 16, "shim_status": "real" },
+        { "name": "promises", "call_count": 14, "shim_status": "real" },
+        { "name": "appendFileSync", "call_count": 14, "shim_status": "real" },
+        { "name": "rmdirSync", "call_count": 11, "shim_status": "real" },
+        { "name": "watch", "call_count": 9, "shim_status": "stub" },
+        { "name": "createReadStream", "call_count": 8, "shim_status": "stub" },
+        { "name": "closeSync", "call_count": 8, "shim_status": "real" },
+        { "name": "readlink", "call_count": 7, "shim_status": "stub" },
+        { "name": "readSync", "call_count": 7, "shim_status": "real" },
+        { "name": "symlink", "call_count": 6, "shim_status": "real" },
+        { "name": "createWriteStream", "call_count": 4, "shim_status": "stub" },
+        { "name": "chmodSync", "call_count": 4, "shim_status": "stub" },
+        { "name": "writeSync", "call_count": 2, "shim_status": "real" },
+        { "name": "lstatSync", "call_count": 2, "shim_status": "real" }
+      ]
+    },
+    {
+      "module": "node:os",
+      "extensions_using": 100,
+      "tier_breakdown": { "T1": 7, "T2": 25, "T3_npm": 53, "T3_gh": 14, "T3_ag": 1 },
+      "shim_status": "real",
+      "criticality": "P0",
+      "apis": [
+        { "name": "homedir", "call_count": 220, "shim_status": "real" },
+        { "name": "tmpdir", "call_count": 44, "shim_status": "real" },
+        { "name": "platform", "call_count": 13, "shim_status": "real" },
+        { "name": "release", "call_count": 5, "shim_status": "real" },
+        { "name": "arch", "call_count": 2, "shim_status": "real" },
+        { "name": "userInfo", "call_count": 1, "shim_status": "real" },
+        { "name": "totalmem", "call_count": 1, "shim_status": "stub" },
+        { "name": "hostname", "call_count": 1, "shim_status": "real" },
+        { "name": "freemem", "call_count": 1, "shim_status": "stub" },
+        { "name": "EOL", "call_count": 3, "shim_status": "real" },
+        { "name": "cpus", "call_count": 1, "shim_status": "stub" },
+        { "name": "type", "call_count": 1, "shim_status": "real" }
+      ]
+    },
+    {
+      "module": "node:child_process",
+      "extensions_using": 82,
+      "tier_breakdown": { "T1": 8, "T2": 18, "T3_npm": 41, "T3_gh": 14, "T3_ag": 1 },
+      "shim_status": "real",
+      "criticality": "P0",
+      "apis": [
+        { "name": "exec", "call_count": 622, "shim_status": "real" },
+        { "name": "spawn", "call_count": 306, "shim_status": "real" },
+        { "name": "execSync", "call_count": 195, "shim_status": "real" },
+        { "name": "spawnSync", "call_count": 80, "shim_status": "real" },
+        { "name": "fork", "call_count": 72, "shim_status": "error_throw" },
+        { "name": "execFileSync", "call_count": 62, "shim_status": "real" },
+        { "name": "execFile", "call_count": 44, "shim_status": "real" }
+      ]
+    },
+    {
+      "module": "node:url",
+      "extensions_using": 34,
+      "tier_breakdown": { "T1": 2, "T2": 6, "T3_npm": 21, "T3_gh": 5 },
+      "shim_status": "real",
+      "criticality": "P1",
+      "apis": [
+        { "name": "fileURLToPath", "call_count": 25, "shim_status": "real" },
+        { "name": "pathToFileURL", "call_count": 8, "shim_status": "real" },
+        { "name": "URL", "call_count": 15, "shim_status": "real" },
+        { "name": "URLSearchParams", "call_count": 5, "shim_status": "real" },
+        { "name": "parse", "call_count": 3, "shim_status": "real" },
+        { "name": "format", "call_count": 2, "shim_status": "real" },
+        { "name": "resolve", "call_count": 1, "shim_status": "real" }
+      ]
+    },
+    {
+      "module": "node:fs/promises",
+      "extensions_using": 32,
+      "tier_breakdown": { "T1": 2, "T2": 12, "T3_npm": 14, "T3_gh": 4 },
+      "shim_status": "partial",
+      "criticality": "P1",
+      "apis": [
+        { "name": "readFile", "call_count": 40, "shim_status": "real" },
+        { "name": "writeFile", "call_count": 28, "shim_status": "real" },
+        { "name": "mkdir", "call_count": 15, "shim_status": "real" },
+        { "name": "readdir", "call_count": 12, "shim_status": "real" },
+        { "name": "stat", "call_count": 10, "shim_status": "real" },
+        { "name": "access", "call_count": 8, "shim_status": "real" },
+        { "name": "unlink", "call_count": 6, "shim_status": "real" },
+        { "name": "rm", "call_count": 5, "shim_status": "real" },
+        { "name": "realpath", "call_count": 4, "shim_status": "real" },
+        { "name": "copyFile", "call_count": 3, "shim_status": "real" },
+        { "name": "rename", "call_count": 3, "shim_status": "real" },
+        { "name": "appendFile", "call_count": 2, "shim_status": "real" },
+        { "name": "chmod", "call_count": 1, "shim_status": "stub" },
+        { "name": "chown", "call_count": 1, "shim_status": "stub" },
+        { "name": "utimes", "call_count": 1, "shim_status": "stub" }
+      ]
+    },
+    {
+      "module": "node:crypto",
+      "extensions_using": 27,
+      "tier_breakdown": { "T1": 2, "T2": 7, "T3_npm": 15, "T3_gh": 3 },
+      "shim_status": "external",
+      "criticality": "P1",
+      "apis": [
+        { "name": "createHash", "call_count": 20, "shim_status": "external" },
+        { "name": "randomUUID", "call_count": 12, "shim_status": "external" },
+        { "name": "createHmac", "call_count": 8, "shim_status": "external" },
+        { "name": "randomBytes", "call_count": 6, "shim_status": "external" },
+        { "name": "timingSafeEqual", "call_count": 2, "shim_status": "external" }
+      ]
+    },
+    {
+      "module": "node:util",
+      "extensions_using": 15,
+      "tier_breakdown": { "T1": 1, "T2": 4, "T3_npm": 7, "T3_gh": 3 },
+      "shim_status": "partial",
+      "criticality": "P2",
+      "apis": [
+        { "name": "promisify", "call_count": 8, "shim_status": "real" },
+        { "name": "inspect", "call_count": 6, "shim_status": "real" },
+        { "name": "stripVTControlCharacters", "call_count": 4, "shim_status": "real" },
+        { "name": "TextDecoder", "call_count": 3, "shim_status": "real" },
+        { "name": "TextEncoder", "call_count": 3, "shim_status": "real" },
+        { "name": "deprecate", "call_count": 2, "shim_status": "real" },
+        { "name": "format", "call_count": 2, "shim_status": "real" },
+        { "name": "inherits", "call_count": 1, "shim_status": "real" },
+        { "name": "types", "call_count": 1, "shim_status": "real" }
+      ]
+    },
+    {
+      "module": "node:module",
+      "extensions_using": 10,
+      "tier_breakdown": { "T1": 1, "T2": 3, "T3_npm": 4, "T3_gh": 2 },
+      "shim_status": "real",
+      "criticality": "P2",
+      "apis": [
+        { "name": "createRequire", "call_count": 10, "shim_status": "real" }
+      ]
+    },
+    {
+      "module": "node:readline",
+      "extensions_using": 9,
+      "tier_breakdown": { "T2": 1, "T3_npm": 7, "T3_gh": 1 },
+      "shim_status": "stub",
+      "criticality": "P2",
+      "apis": [
+        { "name": "createInterface", "call_count": 7, "shim_status": "stub" },
+        { "name": "promises", "call_count": 2, "shim_status": "stub" }
+      ]
+    },
+    {
+      "module": "node:net",
+      "extensions_using": 7,
+      "tier_breakdown": { "T2": 1, "T3_npm": 4, "T3_gh": 1, "T3_ag": 1 },
+      "shim_status": "stub",
+      "criticality": "P3",
+      "apis": [
+        { "name": "createConnection", "call_count": 3, "shim_status": "stub" },
+        { "name": "createServer", "call_count": 2, "shim_status": "error_throw" },
+        { "name": "Socket", "call_count": 2, "shim_status": "stub" }
+      ]
+    },
+    {
+      "module": "node:test",
+      "extensions_using": 7,
+      "tier_breakdown": { "T3_npm": 4, "T3_gh": 3 },
+      "shim_status": "partial",
+      "criticality": "P3",
+      "notes": "Minimal runner (test/describe/it + hooks + run); reporters/concurrency not supported",
+      "apis": []
+    },
+    {
+      "module": "node:assert/strict",
+      "extensions_using": 7,
+      "tier_breakdown": { "T3_npm": 4, "T3_gh": 3 },
+      "shim_status": "missing",
+      "criticality": "P3",
+      "notes": "node:assert exists but strict variant is missing"
+    },
+    {
+      "module": "node:http",
+      "extensions_using": 6,
+      "tier_breakdown": { "T2": 1, "T3_npm": 3, "T3_gh": 2 },
+      "shim_status": "external",
+      "criticality": "P2",
+      "apis": [
+        { "name": "createServer", "call_count": 3, "shim_status": "external" },
+        { "name": "request", "call_count": 2, "shim_status": "external" },
+        { "name": "get", "call_count": 1, "shim_status": "external" }
+      ]
+    },
+    {
+      "module": "node:https",
+      "extensions_using": 5,
+      "tier_breakdown": { "T3_npm": 3, "T3_gh": 2 },
+      "shim_status": "external",
+      "criticality": "P2",
+      "apis": [
+        { "name": "request", "call_count": 2, "shim_status": "external" },
+        { "name": "get", "call_count": 1, "shim_status": "external" }
+      ]
+    },
+    {
+      "module": "node:events",
+      "extensions_using": 3,
+      "tier_breakdown": { "T3_npm": 2, "T3_gh": 1 },
+      "shim_status": "real",
+      "criticality": "P2",
+      "apis": [
+        { "name": "EventEmitter", "call_count": 15, "shim_status": "real" }
+      ]
+    },
+    {
+      "module": "node:stream",
+      "extensions_using": 2,
+      "tier_breakdown": { "T3_npm": 2 },
+      "shim_status": "stub",
+      "criticality": "P3",
+      "apis": [
+        { "name": "Readable", "call_count": 3, "shim_status": "stub" },
+        { "name": "Writable", "call_count": 2, "shim_status": "stub" },
+        { "name": "Transform", "call_count": 1, "shim_status": "stub" },
+        { "name": "PassThrough", "call_count": 1, "shim_status": "stub" }
+      ]
+    },
+    {
+      "module": "node:stream/promises",
+      "extensions_using": 2,
+      "tier_breakdown": { "T3_npm": 2 },
+      "shim_status": "stub",
+      "criticality": "P3",
+      "apis": [
+        { "name": "pipeline", "call_count": 2, "shim_status": "stub" },
+        { "name": "finished", "call_count": 1, "shim_status": "stub" }
+      ]
+    },
+    {
+      "module": "node:buffer",
+      "extensions_using": 1,
+      "tier_breakdown": { "T3_npm": 1 },
+      "shim_status": "external",
+      "criticality": "P2",
+      "notes": "Buffer is globally available; explicit import is rare",
+      "apis": [
+        { "name": "Buffer.from", "call_count": 113, "shim_status": "external" },
+        { "name": "Buffer.byteLength", "call_count": 51, "shim_status": "external" },
+        { "name": "Buffer.alloc", "call_count": 31, "shim_status": "external" },
+        { "name": "Buffer.concat", "call_count": 23, "shim_status": "external" },
+        { "name": "Buffer.isBuffer", "call_count": 12, "shim_status": "external" }
+      ]
+    },
+    {
+      "module": "node:process",
+      "extensions_using": 1,
+      "tier_breakdown": { "T3_npm": 1 },
+      "shim_status": "real",
+      "criticality": "P1",
+      "notes": "process is globally available; explicit import is rare. Global usage is very high.",
+      "apis": [
+        { "name": "process.env", "call_count": 753, "shim_status": "real" },
+        { "name": "process.cwd", "call_count": 263, "shim_status": "real" },
+        { "name": "process.exit", "call_count": 215, "shim_status": "real" },
+        { "name": "process.platform", "call_count": 134, "shim_status": "real" },
+        { "name": "process.stdout", "call_count": 78, "shim_status": "real" },
+        { "name": "process.argv", "call_count": 68, "shim_status": "real" },
+        { "name": "process.stdin", "call_count": 53, "shim_status": "real" },
+        { "name": "process.pid", "call_count": 41, "shim_status": "real" },
+        { "name": "process.on", "call_count": 39, "shim_status": "real" },
+        { "name": "process.version", "call_count": 31, "shim_status": "real" },
+        { "name": "process.kill", "call_count": 25, "shim_status": "real" },
+        { "name": "process.execPath", "call_count": 25, "shim_status": "real" },
+        { "name": "process.stderr", "call_count": 22, "shim_status": "real" },
+        { "name": "process.nextTick", "call_count": 19, "shim_status": "real" },
+        { "name": "process.chdir", "call_count": 19, "shim_status": "real" },
+        { "name": "process.memoryUsage", "call_count": 10, "shim_status": "real" },
+        { "name": "process.getuid", "call_count": 10, "shim_status": "stub" },
+        { "name": "process.arch", "call_count": 9, "shim_status": "real" },
+        { "name": "process.versions", "call_count": 8, "shim_status": "real" },
+        { "name": "process.getgid", "call_count": 6, "shim_status": "stub" }
+      ]
+    },
+    {
+      "module": "node:assert",
+      "extensions_using": 1,
+      "tier_breakdown": { "T3_npm": 1 },
+      "shim_status": "real",
+      "criticality": "P3",
+      "apis": [
+        { "name": "strictEqual", "call_count": 3, "shim_status": "real" },
+        { "name": "deepStrictEqual", "call_count": 2, "shim_status": "real" },
+        { "name": "throws", "call_count": 1, "shim_status": "real" }
+      ]
+    },
+    {
+      "module": "node:string_decoder",
+      "extensions_using": 1,
+      "tier_breakdown": { "T3_npm": 1 },
+      "shim_status": "stub",
+      "criticality": "P3",
+      "apis": []
+    },
+    {
+      "module": "node:querystring",
+      "extensions_using": 0,
+      "tier_breakdown": {},
+      "shim_status": "stub",
+      "criticality": "P3",
+      "notes": "Shimmed but not used by any corpus extension"
+    },
+    {
+      "module": "node:tty",
+      "extensions_using": 1,
+      "tier_breakdown": { "T3_npm": 1 },
+      "shim_status": "missing",
+      "criticality": "P3",
+      "apis": []
+    },
+    {
+      "module": "node:zlib",
+      "extensions_using": 1,
+      "tier_breakdown": { "T3_npm": 1 },
+      "shim_status": "missing",
+      "criticality": "P3",
+      "apis": []
+    },
+    {
+      "module": "node:v8",
+      "extensions_using": 1,
+      "tier_breakdown": { "T3_npm": 1 },
+      "shim_status": "missing",
+      "criticality": "P3",
+      "apis": []
+    },
+    {
+      "module": "node:perf_hooks",
+      "extensions_using": 1,
+      "tier_breakdown": { "T3_npm": 1 },
+      "shim_status": "missing",
+      "criticality": "P3",
+      "apis": []
+    },
+    {
+      "module": "node:vm",
+      "extensions_using": 1,
+      "tier_breakdown": { "T3_npm": 1 },
+      "shim_status": "missing",
+      "criticality": "P3",
+      "apis": []
+    },
+    {
+      "module": "node:stream/web",
+      "extensions_using": 1,
+      "tier_breakdown": { "T3_npm": 1 },
+      "shim_status": "missing",
+      "criticality": "P3",
+      "apis": []
+    },
+    {
+      "module": "node:readline/promises",
+      "extensions_using": 1,
+      "tier_breakdown": { "T3_npm": 1 },
+      "shim_status": "missing",
+      "criticality": "P3",
+      "notes": "node:readline exists but promises sub-module is missing"
+    }
+  ],
+  "npm_packages": [
+    {
+      "module": "@sinclair/typebox",
+      "extensions_using": 80,
+      "shim_status": "real",
+      "criticality": "P0",
+      "notes": "Real schema builder with JSON-Schema generation"
+    },
+    {
+      "module": "@modelcontextprotocol/sdk",
+      "extensions_using": 7,
+      "shim_status": "stub",
+      "criticality": "P1",
+      "notes": "5 variant paths shimmed (client/index, stdio, sse, streamableHttp)"
+    },
+    {
+      "module": "ws",
+      "extensions_using": 4,
+      "shim_status": "missing",
+      "criticality": "P2",
+      "notes": "WebSocket library"
+    },
+    {
+      "module": "chokidar",
+      "extensions_using": 3,
+      "shim_status": "stub",
+      "criticality": "P2"
+    },
+    {
+      "module": "jsdom",
+      "extensions_using": 3,
+      "shim_status": "stub",
+      "criticality": "P2"
+    },
+    {
+      "module": "better-sqlite3",
+      "extensions_using": 3,
+      "shim_status": "missing",
+      "criticality": "P3",
+      "notes": "Requires native binary - not feasible in QuickJS"
+    },
+    {
+      "module": "diff",
+      "extensions_using": 3,
+      "shim_status": "partial",
+      "criticality": "P2",
+      "notes": "createPatch/createTwoFilesPatch real; diffLines/diffChars are stubs"
+    },
+    {
+      "module": "glob",
+      "extensions_using": 3,
+      "shim_status": "stub",
+      "criticality": "P2"
+    },
+    {
+      "module": "dotenv",
+      "extensions_using": 3,
+      "shim_status": "partial",
+      "criticality": "P2",
+      "notes": "parse() is real; config() is stub"
+    },
+    {
+      "module": "open",
+      "extensions_using": 3,
+      "shim_status": "missing",
+      "criticality": "P2",
+      "notes": "Opens URLs/files in default application"
+    },
+    {
+      "module": "commander",
+      "extensions_using": 3,
+      "shim_status": "missing",
+      "criticality": "P3",
+      "notes": "CLI argument parsing - not needed in extension context"
+    },
+    {
+      "module": "chalk",
+      "extensions_using": 2,
+      "shim_status": "missing",
+      "criticality": "P3",
+      "notes": "ANSI color library"
+    },
+    {
+      "module": "node-pty",
+      "extensions_using": 2,
+      "shim_status": "stub",
+      "criticality": "P3",
+      "notes": "Pseudo-terminal - requires native binary"
+    },
+    {
+      "module": "@anthropic-ai/sdk",
+      "extensions_using": 2,
+      "shim_status": "stub",
+      "criticality": "P2"
+    },
+    {
+      "module": "axios",
+      "extensions_using": 2,
+      "shim_status": "missing",
+      "criticality": "P2",
+      "notes": "HTTP client"
+    },
+    {
+      "module": "express",
+      "extensions_using": 2,
+      "shim_status": "missing",
+      "criticality": "P3",
+      "notes": "HTTP server framework - not feasible in QuickJS"
+    },
+    {
+      "module": "ora",
+      "extensions_using": 2,
+      "shim_status": "missing",
+      "criticality": "P3"
+    },
+    {
+      "module": "uuid",
+      "extensions_using": 2,
+      "shim_status": "real",
+      "criticality": "P2",
+      "notes": "Real v4/v7 generation"
+    },
+    {
+      "module": "shell-quote",
+      "extensions_using": 1,
+      "shim_status": "real",
+      "criticality": "P2"
+    },
+    {
+      "module": "ms",
+      "extensions_using": 1,
+      "shim_status": "real",
+      "criticality": "P2"
+    },
+    {
+      "module": "jsonwebtoken",
+      "extensions_using": 1,
+      "shim_status": "stub",
+      "criticality": "P3"
+    }
+  ],
+  "bun_apis": {
+    "extensions_using": 5,
+    "shim_status": "missing",
+    "criticality": "P3",
+    "notes": "Bun-specific APIs are minimal in corpus. Only T3 extensions use them.",
+    "apis": [
+      { "name": "Bun.write", "call_count": 4 },
+      { "name": "Bun.connect", "call_count": 4 },
+      { "name": "Bun.which", "call_count": 2 },
+      { "name": "Bun.spawn", "call_count": 1 },
+      { "name": "Bun.listen", "call_count": 1 },
+      { "name": "Bun.file", "call_count": 1 },
+      { "name": "Bun.argv", "call_count": 1 }
+    ]
+  },
+  "global_apis": {
+    "notes": "Available globally without import",
+    "apis": [
+      { "name": "process.env", "call_count": 753, "shim_status": "real" },
+      { "name": "process.cwd()", "call_count": 263, "shim_status": "real" },
+      { "name": "process.exit()", "call_count": 215, "shim_status": "real" },
+      { "name": "Buffer.from()", "call_count": 113, "shim_status": "external" },
+      { "name": "Buffer.alloc()", "call_count": 31, "shim_status": "external" },
+      { "name": "setTimeout/setInterval", "call_count": 150, "shim_status": "real" },
+      { "name": "console.log/warn/error", "call_count": 500, "shim_status": "real" },
+      { "name": "fetch", "call_count": 45, "shim_status": "real" },
+      { "name": "TextEncoder/TextDecoder", "call_count": 20, "shim_status": "real" }
+    ]
+  },
+  "domain_packages": {
+    "notes": "Internal pi packages and custom domain libraries with virtual module stubs",
+    "modules": [
+      { "module": "@mariozechner/pi-coding-agent", "shim_status": "partial", "notes": "Mix of real utilities and stubs" },
+      { "module": "@mariozechner/pi-tui", "shim_status": "partial", "notes": "Real fuzzy matching; stubs for rendering" },
+      { "module": "@mariozechner/pi-ai", "shim_status": "partial", "notes": "Stubs and hardcoded defaults" },
+      { "module": "vscode-languageserver-protocol", "shim_status": "partial", "notes": "Real constants; stub connections" },
+      { "module": "@opentelemetry/*", "shim_status": "stub", "notes": "5 modules, all stubs" },
+      { "module": "@xterm/*", "shim_status": "stub", "notes": "2 modules, all stubs" },
+      { "module": "@aliou/*", "shim_status": "stub", "notes": "2 modules, all stubs" },
+      { "module": "@marckrenn/pi-sub-shared", "shim_status": "stub" },
+      { "module": "@juanibiapina/pi-extension-settings", "shim_status": "stub" },
+      { "module": "@anthropic-ai/sandbox-runtime", "shim_status": "stub" },
+      { "module": "beautiful-mermaid", "shim_status": "stub" },
+      { "module": "turndown", "shim_status": "stub" },
+      { "module": "turndown-plugin-gfm", "shim_status": "stub" }
+    ]
+  },
+  "summary": {
+    "total_virtual_modules": 62,
+    "shim_completeness": {
+      "real": 18,
+      "partial": 12,
+      "stub": 20,
+      "external": 5,
+      "error_throw": 2,
+      "missing_from_corpus": 8
+    },
+    "missing_modules_used_by_corpus": [
+      "node:assert/strict (7 ext)",
+      "node:tty (1 ext)",
+      "node:zlib (1 ext)",
+      "node:v8 (1 ext)",
+      "node:perf_hooks (1 ext)",
+      "node:vm (1 ext)",
+      "node:stream/web (1 ext)",
+      "node:readline/promises (1 ext)"
+    ],
+    "top_gaps_by_impact": [
+      "fs.watch (9 calls, stub - no real file watching)",
+      "fs.createReadStream (8 calls, stub)",
+      "fs.readlink (7 calls, stub)",
+      "child_process.fork (72 calls, error throw)",
+      "node:net (7 ext, stubbed sockets)",
+      "ws npm package (4 ext, missing)",
+      "glob npm package (3 ext, stub only)"
+    ]
+  }
+}

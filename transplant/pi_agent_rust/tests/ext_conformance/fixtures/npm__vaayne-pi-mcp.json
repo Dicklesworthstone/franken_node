@@ -1,0 +1,53 @@
+{
+  "extension": {
+    "id": "npm/vaayne-pi-mcp",
+    "source": { "path": "npm/vaayne-pi-mcp/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-vaayne-pi-mcp-reg",
+      "kind": "registration",
+      "summary": "Validates tool and event hook registrations",
+      "expect": {
+        "tool_count": 4,
+        "event_hooks_contains": ["session_start", "session_shutdown"]
+      }
+    },
+    {
+      "id": "scn-npm-vaayne-pi-mcp-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes mcp_list tool with basic args",
+      "tool_name": "mcp_list",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-vaayne-pi-mcp-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes mcp_invoke with empty args expecting error",
+      "tool_name": "mcp_invoke",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-vaayne-pi-mcp-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "extension": {
+    "id": "npm/pi-telemetry-otel",
+    "source": {
+      "path": "npm/pi-telemetry-otel/extensions/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-telemetry-otel-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start",
+          "agent_start",
+          "tool_call"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-telemetry-otel-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes open-jaeger-trace command",
+      "command_name": "open-jaeger-trace",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-telemetry-otel-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-telemetry-otel-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

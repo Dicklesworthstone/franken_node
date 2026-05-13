@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "system-prompt-header",
+    "source": { "path": "system-prompt-header/system-prompt-header.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-system-prompt-header-reg-001",
+      "kind": "registration",
+      "summary": "Verifies agent_start and session_shutdown event handlers are registered",
+      "expect": {
+        "event_hooks_contains": ["agent_start", "session_shutdown"]
+      }
+    },
+    {
+      "id": "scn-system-prompt-header-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_start event to inject system prompt header",
+      "event_name": "agent_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-system-prompt-header-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "extension": {
+    "id": "third-party/cv-pi-ssh-remote",
+    "source": {
+      "path": "third-party/cv-pi-ssh-remote/src/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-cv-pi-ssh-remote-reg-001",
+      "kind": "registration",
+      "summary": "Verifies 1 tool(s), event hooks registered for cv-pi-ssh-remote",
+      "expect": {
+        "tool_count": 1,
+        "event_hooks_contains": [
+          "session_shutdown",
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-cv-pi-ssh-remote-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes bash tool with basic arguments",
+      "tool_name": "bash",
+      "input": {
+        "arguments": {
+          "query": "test"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-cv-pi-ssh-remote-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes bash tool with empty arguments; expects error",
+      "tool_name": "bash",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-cv-pi-ssh-remote-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires session_shutdown event",
+      "event_name": "session_shutdown",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

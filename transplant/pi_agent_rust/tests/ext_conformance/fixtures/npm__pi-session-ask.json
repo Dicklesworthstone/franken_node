@@ -1,0 +1,55 @@
+{
+  "extension": {
+    "id": "npm/pi-session-ask",
+    "source": { "path": "npm/pi-session-ask/extensions/session-ask/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-session-ask-reg",
+      "kind": "registration",
+      "summary": "Validates tool, command, and event hook registrations",
+      "expect": {
+        "tool_count": 2,
+        "event_hooks_contains": ["before_agent_start", "context"]
+      }
+    },
+    {
+      "id": "scn-npm-pi-session-ask-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes session_ask tool with basic args",
+      "tool_name": "session_ask",
+      "input": {
+        "arguments": {
+          "question": "What is the status?"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-session-ask-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes session_ask with empty args expecting error",
+      "tool_name": "session_ask",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-session-ask-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes session-ask command",
+      "command_name": "session-ask",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

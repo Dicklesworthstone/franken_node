@@ -1,0 +1,62 @@
+{
+  "extension": {
+    "id": "community/qualisero-session-color",
+    "source": {
+      "path": "community/qualisero-session-color/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-qualisero-session-color-reg-001",
+      "kind": "registration",
+      "summary": "Verifies color command, event hooks registered for qualisero-session-color",
+      "expect": {
+        "commands_contains": [
+          "color",
+          "color-char",
+          "color-config"
+        ],
+        "event_hooks_contains": [
+          "session_start",
+          "session_switch"
+        ]
+      }
+    },
+    {
+      "id": "scn-qualisero-session-color-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes color command",
+      "command_name": "color",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-session-color-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "color-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-qualisero-session-color-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "npm/pi-notify",
+    "source": {
+      "path": "npm/pi-notify/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-notify-reg",
+      "kind": "registration",
+      "summary": "Validates event hook registration for agent_end",
+      "expect": {
+        "event_hooks_contains": [
+          "agent_end"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-notify-evt-pos",
+      "kind": "event",
+      "summary": "Fires agent_end event",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-notify-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

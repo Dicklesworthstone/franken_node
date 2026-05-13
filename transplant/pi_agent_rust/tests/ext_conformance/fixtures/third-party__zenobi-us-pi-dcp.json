@@ -1,0 +1,62 @@
+{
+  "extension": {
+    "id": "third-party/zenobi-us-pi-dcp",
+    "source": {
+      "path": "third-party/zenobi-us-pi-dcp/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-zenobi-us-pi-dcp-reg-001",
+      "kind": "registration",
+      "summary": "Verifies dcp-debug command, event hooks registered for zenobi-us-pi-dcp",
+      "expect": {
+        "commands_contains": [
+          "dcp-debug",
+          "dcp-init",
+          "dcp-logs"
+        ],
+        "event_hooks_contains": [
+          "context",
+          "session_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-zenobi-us-pi-dcp-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes dcp-debug command",
+      "command_name": "dcp-debug",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-zenobi-us-pi-dcp-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "dcp-debug-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-zenobi-us-pi-dcp-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires context event",
+      "event_name": "context",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

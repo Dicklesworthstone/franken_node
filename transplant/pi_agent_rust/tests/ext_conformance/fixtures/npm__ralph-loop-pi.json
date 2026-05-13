@@ -1,0 +1,55 @@
+{
+  "extension": {
+    "id": "npm/ralph-loop-pi",
+    "source": { "path": "npm/ralph-loop-pi/ralph-loop.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-ralph-loop-pi-reg",
+      "kind": "registration",
+      "summary": "Validates tool, command, and event hook registrations",
+      "expect": {
+        "tool_count": 1,
+        "event_hooks_contains": ["close", "data", "error"]
+      }
+    },
+    {
+      "id": "scn-npm-ralph-loop-pi-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes ralph_loop tool with basic args",
+      "tool_name": "ralph_loop",
+      "input": {
+        "arguments": {
+          "action": "status"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-ralph-loop-pi-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes ralph_loop with empty args expecting error",
+      "tool_name": "ralph_loop",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-ralph-loop-pi-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes ralph-status command",
+      "command_name": "ralph-status",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

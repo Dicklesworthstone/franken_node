@@ -1,0 +1,53 @@
+{
+  "extension": {
+    "id": "community/nicobailon-interactive-shell",
+    "source": { "path": "community/nicobailon-interactive-shell/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-nicobailon-interactive-shell-reg-001",
+      "kind": "registration",
+      "summary": "Verifies command and event registrations for interactive-shell",
+      "expect": {
+        "commands_contains": ["attach", "dismiss"],
+        "event_hooks_contains": ["session_shutdown", "session_start", "session_switch"]
+      }
+    },
+    {
+      "id": "scn-nicobailon-interactive-shell-pos-001",
+      "kind": "command",
+      "summary": "Invokes attach command",
+      "command_name": "attach",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-nicobailon-interactive-shell-pos-002",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-nicobailon-interactive-shell-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

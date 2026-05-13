@@ -1,0 +1,32 @@
+package pi:extension;
+
+/// Host-provided connector surface (capability-gated by Pi).
+///
+/// This is intentionally narrow. Extensions should call into Pi using a small
+/// set of connector operations rather than Node/Bun OS APIs.
+interface host {
+  /// Generic connector call. Input/output are JSON strings.
+  call: func(name: string, input-json: string) -> result<string, string>;
+}
+
+interface extension {
+  /// Initialize the extension and return its registration payload (JSON).
+  init: func(manifest-json: string) -> result<string, string>;
+
+  /// Handle a tool call. Returns tool_result JSON.
+  handle-tool: func(name: string, input-json: string) -> result<string, string>;
+
+  /// Handle a slash command. Returns slash_result JSON.
+  handle-slash: func(command: string, args: list<string>, input-json: string) -> result<string, string>;
+
+  /// Handle an event hook. Returns optional event response JSON.
+  handle-event: func(event-json: string) -> result<string, string>;
+
+  /// Clean shutdown (optional).
+  shutdown: func();
+}
+
+world pi-extension {
+  import host;
+  export extension;
+}

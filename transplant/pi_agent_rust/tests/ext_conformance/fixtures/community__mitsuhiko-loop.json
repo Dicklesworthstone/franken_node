@@ -1,0 +1,54 @@
+{
+  "extension": {
+    "id": "community/mitsuhiko-loop",
+    "source": { "path": "community/mitsuhiko-loop/loop.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-mitsuhiko-loop-reg-001",
+      "kind": "registration",
+      "summary": "Verifies tool, command, and event registrations for mitsuhiko-loop",
+      "expect": {
+        "tool_count": 1,
+        "commands_contains": ["loop"],
+        "event_hooks_contains": ["agent_end", "session_before_compact", "session_start", "session_switch"]
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-loop-pos-001",
+      "kind": "tool",
+      "summary": "Invokes signal_loop_success tool",
+      "tool_name": "signal_loop_success",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-loop-pos-002",
+      "kind": "command",
+      "summary": "Invokes loop command",
+      "command_name": "loop",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-loop-neg-001",
+      "kind": "event",
+      "summary": "Fires unsupported event; expects error",
+      "event_name": "unsupported_event",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

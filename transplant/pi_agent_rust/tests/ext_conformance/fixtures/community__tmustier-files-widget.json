@@ -1,0 +1,63 @@
+{
+  "extension": {
+    "id": "community/tmustier-files-widget",
+    "source": {
+      "path": "community/tmustier-files-widget/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-tmustier-files-widget-reg-001",
+      "kind": "registration",
+      "summary": "Verifies diff command, event hooks registered for tmustier-files-widget",
+      "expect": {
+        "commands_contains": [
+          "diff",
+          "readfiles",
+          "review"
+        ],
+        "event_hooks_contains": [
+          "session_start",
+          "session_switch",
+          "tool_result"
+        ]
+      }
+    },
+    {
+      "id": "scn-tmustier-files-widget-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes diff command",
+      "command_name": "diff",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-files-widget-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "diff-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-files-widget-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

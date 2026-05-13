@@ -1,0 +1,55 @@
+{
+  "extension": {
+    "id": "npm/permission-pi",
+    "source": {
+      "path": "npm/permission-pi/permission.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-permission-pi-reg",
+      "kind": "registration",
+      "summary": "Validates command and event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start",
+          "tool_call"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-permission-pi-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes permission command",
+      "command_name": "permission",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-permission-pi-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-permission-pi-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

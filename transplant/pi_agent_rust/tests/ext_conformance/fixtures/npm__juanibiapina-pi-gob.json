@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "npm/juanibiapina-pi-gob",
+    "source": { "path": "npm/juanibiapina-pi-gob/dist/index.js" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-juanibiapina-gob-reg",
+      "kind": "registration",
+      "summary": "Validates extension loads with no registrations",
+      "expect": {
+        "tool_count": 0
+      }
+    },
+    {
+      "id": "scn-npm-juanibiapina-gob-evt-pos",
+      "kind": "event",
+      "summary": "Basic extension handles session_start event gracefully",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-juanibiapina-gob-tool-neg",
+      "kind": "tool",
+      "summary": "Invoking a nonexistent tool returns error",
+      "tool_name": "nonexistent_tool",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

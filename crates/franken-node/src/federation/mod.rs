@@ -5,6 +5,8 @@
 
 pub mod atc_participation_weighting;
 pub mod atc_reciprocity;
+pub mod atc_signal_extractor;
+pub mod atc_sketches;
 
 #[cfg(test)]
 pub mod additional_edge_tests;

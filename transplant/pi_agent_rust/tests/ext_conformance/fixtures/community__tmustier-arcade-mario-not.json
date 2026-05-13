@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "community/tmustier-arcade-mario-not",
+    "source": {
+      "path": "community/tmustier-arcade-mario-not/mario-not.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-tmustier-arcade-mario-not-reg-001",
+      "kind": "registration",
+      "summary": "Verifies mario-not command registered for tmustier-arcade-mario-not",
+      "expect": {
+        "commands_contains": [
+          "mario-not"
+        ]
+      }
+    },
+    {
+      "id": "scn-tmustier-arcade-mario-not-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes mario-not command",
+      "command_name": "mario-not",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-arcade-mario-not-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "mario-not-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

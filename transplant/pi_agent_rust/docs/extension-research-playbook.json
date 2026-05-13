@@ -1,0 +1,397 @@
+{
+  "$schema": "pi.ext.research_playbook.v1",
+  "generated": "2026-02-05",
+  "description": "Authoritative discovery sources and query strategy for finding Pi/Claude Code extensions online. Explicit enough to execute verbatim. (bd-2dfa)",
+  "sources": [
+    {
+      "id": "npm-scoped",
+      "name": "npm Registry: Scoped Packages",
+      "type": "package_registry",
+      "priority": "high",
+      "update_frequency": "daily",
+      "api_available": true,
+      "queries": [
+        {
+          "endpoint": "https://registry.npmjs.org/-/v1/search?text=scope:anthropic-ai&size=100",
+          "description": "All packages in @anthropic-ai scope"
+        },
+        {
+          "endpoint": "https://registry.npmjs.org/-/v1/search?text=scope:constellos&size=100",
+          "description": "All packages in @constellos scope (claude-code-kit)"
+        },
+        {
+          "endpoint": "https://registry.npmjs.org/-/v1/search?text=scope:mariozechner&size=100",
+          "description": "All packages in @mariozechner scope (pi-coding-agent)"
+        }
+      ],
+      "known_packages": [
+        "@anthropic-ai/claude-code",
+        "@anthropic-ai/claude-agent-sdk",
+        "@constellos/claude-code-kit",
+        "@mariozechner/pi-coding-agent"
+      ],
+      "notes": "These are the primary scoped packages. Check scope pages monthly for new additions."
+    },
+    {
+      "id": "npm-keywords",
+      "name": "npm Registry: Keyword Search",
+      "type": "package_registry",
+      "priority": "high",
+      "update_frequency": "weekly",
+      "api_available": true,
+      "queries": [
+        {
+          "endpoint": "https://registry.npmjs.org/-/v1/search?text=keywords:claude-code&size=250",
+          "description": "Packages tagged with claude-code keyword"
+        },
+        {
+          "endpoint": "https://registry.npmjs.org/-/v1/search?text=keywords:claude-code-extension&size=100",
+          "description": "Packages tagged as extensions"
+        },
+        {
+          "endpoint": "https://registry.npmjs.org/-/v1/search?text=keywords:pi-extension&size=100",
+          "description": "Packages tagged with pi-extension"
+        },
+        {
+          "endpoint": "https://registry.npmjs.org/-/v1/search?text=keywords:claude-plugin&size=100",
+          "description": "Packages tagged as plugins"
+        },
+        {
+          "endpoint": "https://registry.npmjs.org/-/v1/search?text=claude-code+extension&size=250",
+          "description": "Free-text search for claude-code extension"
+        }
+      ],
+      "filters": {
+        "min_quality": 0.1,
+        "min_maintenance": 0.1,
+        "exclude_deprecated": true
+      },
+      "notes": "Keyword search is the primary discovery vector for npm. Cross-reference results with GitHub repos for deduplication."
+    },
+    {
+      "id": "github-topics",
+      "name": "GitHub Topics",
+      "type": "code_repository",
+      "priority": "high",
+      "update_frequency": "daily",
+      "api_available": true,
+      "queries": [
+        {
+          "api": "github_graphql",
+          "query": "topic:claude-code sort:stars",
+          "description": "Repositories tagged with claude-code topic (55+ repos)"
+        },
+        {
+          "api": "github_graphql",
+          "query": "topic:claude-extensions sort:stars",
+          "description": "Repositories tagged with claude-extensions"
+        },
+        {
+          "api": "github_graphql",
+          "query": "topic:claude-code-plugins sort:stars",
+          "description": "Repositories tagged as plugins"
+        },
+        {
+          "api": "github_search",
+          "query": "language:typescript claude-code extension stars:>5",
+          "description": "TypeScript repos with claude-code and extension"
+        },
+        {
+          "api": "github_search",
+          "query": "language:typescript pi-extension stars:>3",
+          "description": "TypeScript repos with pi-extension"
+        }
+      ],
+      "thresholds": {
+        "min_stars": 5,
+        "max_days_since_update": 365,
+        "exclude_archived": true,
+        "exclude_forks": true
+      }
+    },
+    {
+      "id": "github-official",
+      "name": "Official Anthropic Repositories",
+      "type": "code_repository",
+      "priority": "high",
+      "update_frequency": "daily",
+      "api_available": true,
+      "queries": [
+        {
+          "url": "https://github.com/anthropics/claude-code/tree/main/plugins",
+          "description": "Official plugins directory"
+        },
+        {
+          "api": "github_api",
+          "endpoint": "repos/anthropics/claude-code/contents/plugins",
+          "description": "List official plugins via API"
+        }
+      ],
+      "notes": "Official plugins define the canonical API surface. Any new plugin here should be added to our corpus immediately."
+    },
+    {
+      "id": "awesome-lists",
+      "name": "Awesome Lists (Community Curated)",
+      "type": "curated_list",
+      "priority": "medium",
+      "update_frequency": "monthly",
+      "api_available": false,
+      "queries": [
+        {
+          "url": "https://github.com/jmanhype/awesome-claude-code",
+          "description": "jmanhype's awesome list"
+        },
+        {
+          "url": "https://github.com/ccplugins/awesome-claude-code-plugins",
+          "description": "ccplugins official awesome list"
+        },
+        {
+          "url": "https://github.com/ComposioHQ/awesome-claude-plugins",
+          "description": "Composio ecosystem plugins"
+        },
+        {
+          "url": "https://github.com/hesreallyhim/awesome-claude-code",
+          "description": "Alternative awesome list"
+        }
+      ],
+      "notes": "Parse README.md from each repo, extract URLs, cross-reference with corpus."
+    },
+    {
+      "id": "marketplaces",
+      "name": "Plugin Marketplaces",
+      "type": "web_directory",
+      "priority": "medium",
+      "update_frequency": "weekly",
+      "api_available": false,
+      "queries": [
+        {
+          "url": "https://claudemarketplaces.com",
+          "description": "Automated directory scanning GitHub for marketplaces"
+        },
+        {
+          "url": "https://claude-plugins.dev",
+          "description": "Community registry with CLI"
+        },
+        {
+          "url": "https://awesomeclaude.ai",
+          "description": "Awesome Claude resources directory"
+        },
+        {
+          "url": "https://claudefa.st/blog/tools/mcp-extensions/best-addons",
+          "description": "Curated MCP server/extension list"
+        }
+      ],
+      "notes": "Web scraping required. These sites change frequently. Check for RSS/API feeds."
+    },
+    {
+      "id": "claude-docs",
+      "name": "Official Claude Code Documentation",
+      "type": "documentation",
+      "priority": "high",
+      "update_frequency": "weekly",
+      "api_available": false,
+      "queries": [
+        {
+          "url": "https://code.claude.com/docs/en/plugins",
+          "description": "Official plugin creation docs"
+        },
+        {
+          "url": "https://code.claude.com/docs/en/plugin-marketplaces",
+          "description": "Plugin marketplace creation docs"
+        },
+        {
+          "url": "https://code.claude.com/docs/en/mcp",
+          "description": "MCP server integration docs"
+        }
+      ],
+      "notes": "Monitor for new extension types, API changes, and officially listed extensions."
+    },
+    {
+      "id": "openclaw-clawhub",
+      "name": "OpenClaw / ClawHub Skills Marketplace",
+      "type": "skills_marketplace",
+      "priority": "high",
+      "update_frequency": "daily",
+      "api_available": true,
+      "queries": [
+        {
+          "endpoint": "https://clawhub.ai/api/v1/skills?sort=newest&limit=200",
+          "description": "List all skills (paginated, max 200 per request)"
+        },
+        {
+          "endpoint": "https://clawhub.ai/api/v1/skills/{slug}",
+          "description": "Individual skill metadata by slug"
+        },
+        {
+          "url": "https://github.com/openclaw/skills",
+          "description": "Complete offline archive of all skill versions (12,830+ commits)"
+        },
+        {
+          "url": "https://github.com/openclaw/clawhub",
+          "description": "ClawHub platform source (Convex backend, TanStack Start frontend)"
+        }
+      ],
+      "sort_options": ["newest", "downloads", "stars", "installs", "installsAllTime", "trending"],
+      "thresholds": {
+        "min_stars": 0,
+        "exclude_malicious": true,
+        "security_note": "341 malicious skills (ClawHavoc campaign) and 283 credential-leaking skills reported Feb 2026. Treat all marketplace content as untrusted."
+      },
+      "notes": "ClawHub hosts 3,000-4,000 SKILL.md skills. Skills are Pi-skill-compatible (same Agent Skills standard) but are NOT Pi TypeScript extensions. OpenClaw platform plugins (channels/tools/providers/memory via openclaw.extensions) use a separate, incompatible API. Classify ClawHub items as 'skill' type, not 'extension' type."
+    },
+    {
+      "id": "editor-stores",
+      "name": "Editor Extension Stores",
+      "type": "extension_store",
+      "priority": "low",
+      "update_frequency": "monthly",
+      "api_available": false,
+      "queries": [
+        {
+          "url": "https://marketplace.visualstudio.com/search?term=claude%20code&target=VSCode",
+          "description": "VS Code marketplace search"
+        },
+        {
+          "url": "https://plugins.jetbrains.com/search?search=claude",
+          "description": "JetBrains plugin repository"
+        }
+      ],
+      "notes": "Editor extensions may wrap or depend on claude-code CLI. Track but lower priority."
+    }
+  ],
+  "data_fields": {
+    "identity": {
+      "description": "Core identification fields",
+      "fields": [
+        { "name": "id", "type": "string", "required": true, "source": "computed", "description": "Stable unique identifier (e.g., npm package name or github owner/repo)" },
+        { "name": "name", "type": "string", "required": true, "source": "multi", "description": "Human-readable display name" },
+        { "name": "slug", "type": "string", "required": true, "source": "computed", "description": "URL-safe short identifier" },
+        { "name": "description", "type": "string", "required": false, "source": "npm|github|readme", "description": "One-line description" }
+      ]
+    },
+    "location": {
+      "description": "Where the extension lives",
+      "fields": [
+        { "name": "repository_url", "type": "url", "required": true, "source": "github|npm", "description": "Git repository URL" },
+        { "name": "npm_package", "type": "string", "required": false, "source": "npm", "description": "npm package name if published" },
+        { "name": "artifact_path", "type": "string", "required": false, "source": "corpus", "description": "Path in our artifact corpus" }
+      ]
+    },
+    "metrics": {
+      "description": "Popularity and quality signals",
+      "fields": [
+        { "name": "npm_downloads_weekly", "type": "integer", "required": false, "source": "npm_api", "description": "Weekly npm download count" },
+        { "name": "npm_downloads_monthly", "type": "integer", "required": false, "source": "npm_api", "description": "Monthly npm download count" },
+        { "name": "github_stars", "type": "integer", "required": false, "source": "github_api", "description": "GitHub star count" },
+        { "name": "github_forks", "type": "integer", "required": false, "source": "github_api", "description": "GitHub fork count" },
+        { "name": "github_open_issues", "type": "integer", "required": false, "source": "github_api", "description": "Open issue count" }
+      ]
+    },
+    "activity": {
+      "description": "Maintenance and freshness signals",
+      "fields": [
+        { "name": "created_at", "type": "datetime", "required": true, "source": "npm|github", "description": "First publication/commit date" },
+        { "name": "last_release", "type": "datetime", "required": false, "source": "npm|github", "description": "Most recent release/version date" },
+        { "name": "last_commit", "type": "datetime", "required": false, "source": "github", "description": "Most recent commit date" },
+        { "name": "total_releases", "type": "integer", "required": false, "source": "npm|github", "description": "Number of published versions/releases" }
+      ]
+    },
+    "quality": {
+      "description": "Code quality and compliance signals",
+      "fields": [
+        { "name": "license", "type": "string", "required": true, "source": "npm|github|file", "description": "SPDX license identifier" },
+        { "name": "dependencies_count", "type": "integer", "required": false, "source": "package.json", "description": "Number of runtime dependencies" },
+        { "name": "has_tests", "type": "boolean", "required": false, "source": "repo_scan", "description": "Whether test files exist" },
+        { "name": "has_types", "type": "boolean", "required": false, "source": "repo_scan", "description": "Whether TypeScript/type definitions exist" },
+        { "name": "is_archived", "type": "boolean", "required": false, "source": "github", "description": "Whether the repository is archived" },
+        { "name": "is_deprecated", "type": "boolean", "required": false, "source": "npm", "description": "Whether the npm package is deprecated" }
+      ]
+    },
+    "capability": {
+      "description": "Extension API usage (from code analysis)",
+      "fields": [
+        { "name": "capabilities", "type": "string[]", "required": true, "source": "code_analysis", "description": "List of detected capabilities (registerTool, event_hook, etc.)" },
+        { "name": "source_tier", "type": "string", "required": true, "source": "classification", "description": "official-pi-mono | community | npm-registry | third-party-github" },
+        { "name": "complexity_tier", "type": "string", "required": false, "source": "classification", "description": "simple | medium | complex | multi-file | ui-heavy" },
+        { "name": "file_count", "type": "integer", "required": true, "source": "code_analysis", "description": "Number of TypeScript source files" },
+        { "name": "checksum", "type": "string", "required": true, "source": "sha256", "description": "SHA-256 digest of artifact directory" }
+      ]
+    }
+  },
+  "workflow": {
+    "phase_1_automated_daily": {
+      "description": "Automated discovery queries run daily",
+      "steps": [
+        "Query npm API with scoped package searches (@anthropic-ai, @constellos, @mariozechner)",
+        "Query npm API with keyword searches (claude-code, claude-code-extension, pi-extension)",
+        "Query GitHub API for topic:claude-code repositories",
+        "Compare results against existing corpus, flag new entries",
+        "Capture npm download counts and GitHub star counts for tracked extensions"
+      ]
+    },
+    "phase_2_manual_monthly": {
+      "description": "Manual curation and deep discovery",
+      "steps": [
+        "Review awesome-* repositories for newly listed extensions",
+        "Check official Anthropic changelogs for new plugins",
+        "Survey plugin marketplaces (claudemarketplaces.com, claude-plugins.dev)",
+        "Audit top contributors (aliou, hjanuschka, mitsuhiko) for new repos",
+        "Cross-reference web search results with corpus"
+      ]
+    },
+    "phase_3_validation": {
+      "description": "Per-discovery validation pipeline",
+      "steps": [
+        "Clone or download artifact to tests/ext_conformance/artifacts/<tier>/<name>/",
+        "Extract TypeScript files, run capability detection (detect_patterns)",
+        "Generate SHA-256 checksum (digest_artifact_dir)",
+        "Update docs/extension-master-catalog.json with new entry",
+        "Run entry-point scanner (tests/ext_entry_scan.rs)",
+        "Run conformance tests if mock spec available"
+      ]
+    },
+    "phase_4_enrichment": {
+      "description": "Metadata enrichment for tracked extensions",
+      "steps": [
+        "Fetch npm package metadata (downloads, versions, maintainers)",
+        "Fetch GitHub metadata (stars, activity, issues, license)",
+        "Extract description from README first 500 chars",
+        "Classify complexity tier (simple/medium/complex/multi-file/ui-heavy)",
+        "Update research database with enriched fields"
+      ]
+    }
+  },
+  "known_gaps": {
+    "description": "Areas where our corpus has low coverage",
+    "gaps": [
+      {
+        "area": "registerProvider",
+        "current_count": 8,
+        "total_extensions": 205,
+        "percentage": "3.9%",
+        "action": "Search specifically for custom provider extensions (anthropic, openai, local LLM)"
+      },
+      {
+        "area": "streamSimple",
+        "current_count": 3,
+        "total_extensions": 205,
+        "percentage": "1.5%",
+        "action": "Search for streaming provider implementations"
+      },
+      {
+        "area": "registerFlag",
+        "current_count": 12,
+        "total_extensions": 205,
+        "percentage": "5.9%",
+        "action": "Search for CLI flag/feature toggle extensions"
+      },
+      {
+        "area": "MCP servers",
+        "current_count": 0,
+        "total_extensions": 205,
+        "percentage": "0%",
+        "action": "MCP servers use different API surface (not ExtensionAPI). Track separately."
+      }
+    ]
+  }
+}

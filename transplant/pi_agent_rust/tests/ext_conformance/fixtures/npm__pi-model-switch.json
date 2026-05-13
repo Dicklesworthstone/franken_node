@@ -1,0 +1,42 @@
+{
+  "extension": {
+    "id": "npm/pi-model-switch",
+    "source": { "path": "npm/pi-model-switch/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-model-switch-reg",
+      "kind": "registration",
+      "summary": "Validates switch_model tool registration",
+      "expect": {
+        "tool_count": 1
+      }
+    },
+    {
+      "id": "scn-npm-pi-model-switch-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes switch_model tool with basic args",
+      "tool_name": "switch_model",
+      "input": {
+        "arguments": {
+          "model": "claude-3-opus"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-model-switch-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes switch_model with empty args expecting error",
+      "tool_name": "switch_model",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

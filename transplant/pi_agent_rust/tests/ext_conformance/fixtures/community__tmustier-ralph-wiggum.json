@@ -1,0 +1,89 @@
+{
+  "extension": {
+    "id": "community/tmustier-ralph-wiggum",
+    "source": {
+      "path": "community/tmustier-ralph-wiggum/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-tmustier-ralph-wiggum-reg-001",
+      "kind": "registration",
+      "summary": "Verifies 2 tool(s), ralph command, event hooks registered for tmustier-ralph-wiggum",
+      "expect": {
+        "tool_count": 2,
+        "commands_contains": [
+          "ralph",
+          "ralph-stop"
+        ],
+        "event_hooks_contains": [
+          "agent_end",
+          "before_agent_start",
+          "session_shutdown"
+        ]
+      }
+    },
+    {
+      "id": "scn-tmustier-ralph-wiggum-tool-pos-001",
+      "kind": "tool",
+      "summary": "Invokes ralph_done tool with basic arguments",
+      "tool_name": "ralph_done",
+      "input": {
+        "arguments": {
+          "query": "test"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-ralph-wiggum-tool-neg-001",
+      "kind": "tool",
+      "summary": "Invokes ralph_done tool with empty arguments; expects error",
+      "tool_name": "ralph_done",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-ralph-wiggum-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes ralph command",
+      "command_name": "ralph",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-ralph-wiggum-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "ralph-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-tmustier-ralph-wiggum-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires agent_end event",
+      "event_name": "agent_end",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

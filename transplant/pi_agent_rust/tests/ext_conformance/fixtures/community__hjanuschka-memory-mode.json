@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/hjanuschka-memory-mode",
+    "source": { "path": "community/hjanuschka-memory-mode/memory-mode.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-hjanuschka-memory-mode-reg-001",
+      "kind": "registration",
+      "summary": "Verifies mem and remember commands are registered",
+      "expect": {
+        "commands_contains": ["mem", "remember"]
+      }
+    },
+    {
+      "id": "scn-hjanuschka-memory-mode-pos-001",
+      "kind": "command",
+      "summary": "Invokes mem command",
+      "command_name": "mem",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-hjanuschka-memory-mode-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "mem-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

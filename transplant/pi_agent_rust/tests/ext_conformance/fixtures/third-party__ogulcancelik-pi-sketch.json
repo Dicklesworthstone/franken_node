@@ -1,0 +1,60 @@
+{
+  "extension": {
+    "id": "third-party/ogulcancelik-pi-sketch",
+    "source": {
+      "path": "third-party/ogulcancelik-pi-sketch/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-ogulcancelik-pi-sketch-reg-001",
+      "kind": "registration",
+      "summary": "Verifies sketch command, event hooks registered for ogulcancelik-pi-sketch",
+      "expect": {
+        "commands_contains": [
+          "sketch"
+        ],
+        "event_hooks_contains": [
+          "data",
+          "end"
+        ]
+      }
+    },
+    {
+      "id": "scn-ogulcancelik-pi-sketch-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes sketch command",
+      "command_name": "sketch",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-ogulcancelik-pi-sketch-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "sketch-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-ogulcancelik-pi-sketch-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires data event",
+      "event_name": "data",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

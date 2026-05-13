@@ -1,0 +1,56 @@
+{
+  "extension": {
+    "id": "npm/pi-annotate",
+    "source": { "path": "npm/pi-annotate/index.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-annotate-reg",
+      "kind": "registration",
+      "summary": "Validates tool and command registrations",
+      "expect": {
+        "tool_count": 1,
+        "event_hooks_contains": ["close", "connect", "data", "error"]
+      }
+    },
+    {
+      "id": "scn-npm-pi-annotate-tool-pos",
+      "kind": "tool",
+      "summary": "Invokes annotate tool with basic args",
+      "tool_name": "annotate",
+      "input": {
+        "arguments": {
+          "file": "test.ts",
+          "note": "review needed"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-annotate-tool-neg",
+      "kind": "tool",
+      "summary": "Invokes annotate tool with empty args expecting error",
+      "tool_name": "annotate",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-annotate-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes annotate command",
+      "command_name": "annotate",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

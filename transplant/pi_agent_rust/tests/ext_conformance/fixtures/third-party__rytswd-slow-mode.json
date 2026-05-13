@@ -1,0 +1,59 @@
+{
+  "extension": {
+    "id": "third-party/rytswd-slow-mode",
+    "source": {
+      "path": "third-party/rytswd-slow-mode/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-rytswd-slow-mode-reg-001",
+      "kind": "registration",
+      "summary": "Verifies slow-mode command, event hooks registered for rytswd-slow-mode",
+      "expect": {
+        "commands_contains": [
+          "slow-mode"
+        ],
+        "event_hooks_contains": [
+          "tool_call"
+        ]
+      }
+    },
+    {
+      "id": "scn-rytswd-slow-mode-cmd-pos-001",
+      "kind": "command",
+      "summary": "Invokes slow-mode command",
+      "command_name": "slow-mode",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-rytswd-slow-mode-cmd-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "slow-mode-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    },
+    {
+      "id": "scn-rytswd-slow-mode-evt-pos-001",
+      "kind": "event",
+      "summary": "Fires tool_call event",
+      "event_name": "tool_call",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    }
+  ]
+}

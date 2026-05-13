@@ -1,0 +1,43 @@
+{
+  "extension": {
+    "id": "shutdown-command",
+    "source": { "path": "shutdown-command/shutdown-command.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-shutdown-command-reg-001",
+      "kind": "registration",
+      "summary": "Verifies deploy_and_exit and finish_and_exit tools plus quit command are registered",
+      "expect": {
+        "tools_contains": ["deploy_and_exit", "finish_and_exit"],
+        "commands_contains": ["quit"]
+      }
+    },
+    {
+      "id": "scn-shutdown-command-pos-001",
+      "kind": "tool",
+      "summary": "Invokes finish_and_exit tool with valid reason",
+      "tool_name": "finish_and_exit",
+      "input": {
+        "arguments": {
+          "reason": "task complete"
+        }
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-shutdown-command-neg-001",
+      "kind": "tool",
+      "summary": "Invokes finish_and_exit tool with empty arguments; expects error",
+      "tool_name": "finish_and_exit",
+      "input": {
+        "arguments": {}
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

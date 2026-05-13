@@ -1,0 +1,44 @@
+{
+  "extension": {
+    "id": "npm/pi-subdir-context",
+    "source": {
+      "path": "npm/pi-subdir-context/src/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-subdir-context-reg",
+      "kind": "registration",
+      "summary": "Validates event hook registrations",
+      "expect": {
+        "event_hooks_contains": [
+          "session_start",
+          "session_switch",
+          "tool_result"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-subdir-context-evt-pos",
+      "kind": "event",
+      "summary": "Fires session_start event",
+      "event_name": "session_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-subdir-context-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

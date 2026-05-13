@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "npm/tmustier-pi-arcade",
+    "source": { "path": "npm/tmustier-pi-arcade/spice-invaders.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-tmustier-arcade-reg",
+      "kind": "registration",
+      "summary": "Validates command registrations for arcade games",
+      "expect": {
+        "tool_count": 0
+      }
+    },
+    {
+      "id": "scn-npm-tmustier-arcade-cmd-pos",
+      "kind": "command",
+      "summary": "Invokes ping command",
+      "command_name": "ping",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-tmustier-arcade-cmd-neg",
+      "kind": "command",
+      "summary": "Invokes spice-invaders with invalid arguments",
+      "command_name": "spice-invaders",
+      "input": {
+        "arguments": "--nonexistent-flag"
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

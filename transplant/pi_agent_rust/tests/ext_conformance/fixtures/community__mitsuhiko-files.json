@@ -1,0 +1,40 @@
+{
+  "extension": {
+    "id": "community/mitsuhiko-files",
+    "source": { "path": "community/mitsuhiko-files/files.ts" }
+  },
+  "scenarios": [
+    {
+      "id": "scn-mitsuhiko-files-reg-001",
+      "kind": "registration",
+      "summary": "Verifies files command is registered",
+      "expect": {
+        "commands_contains": ["files"]
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-files-pos-001",
+      "kind": "command",
+      "summary": "Invokes files command",
+      "command_name": "files",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-mitsuhiko-files-neg-001",
+      "kind": "command",
+      "summary": "Invokes nonexistent command; expects error",
+      "command_name": "files-invalid",
+      "input": {
+        "arguments": ""
+      },
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}

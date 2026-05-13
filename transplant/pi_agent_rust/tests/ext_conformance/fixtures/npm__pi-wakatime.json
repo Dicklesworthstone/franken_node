@@ -1,0 +1,43 @@
+{
+  "extension": {
+    "id": "npm/pi-wakatime",
+    "source": {
+      "path": "npm/pi-wakatime/src/index.ts"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "scn-npm-pi-wakatime-reg",
+      "kind": "registration",
+      "summary": "Validates event hook registrations for tool_result and turn_start",
+      "expect": {
+        "event_hooks_contains": [
+          "tool_result",
+          "turn_start"
+        ]
+      }
+    },
+    {
+      "id": "scn-npm-pi-wakatime-evt-pos",
+      "kind": "event",
+      "summary": "Fires turn_start event",
+      "event_name": "turn_start",
+      "input": {
+        "session_id": "test-session"
+      },
+      "expect": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "scn-npm-pi-wakatime-evt-neg",
+      "kind": "event",
+      "summary": "Fires unsupported event expecting graceful handling",
+      "event_name": "unsupported_event",
+      "input": {},
+      "expect": {
+        "is_error": true
+      }
+    }
+  ]
+}
