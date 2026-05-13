@@ -18,6 +18,7 @@ from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 IMPL_PATH = ROOT / "crates/franken-node/src/connector/anti_amplification.rs"
 REPORT_PATH = ROOT / "artifacts/section_10_13/bd-3b8m/anti_amplification_test_results.json"
 INTEGRATION_PATH = ROOT / "tests/integration/anti_amplification_harness.rs"
+SECURITY_HARNESS_PATH = ROOT / "tests/security/anti_amplification_harness.rs"
 SPEC_PATH = ROOT / "docs/specs/section_10_13/bd-3b8m_contract.md"
 EVIDENCE_PATH = ROOT / "artifacts/section_10_13/bd-3b8m/verification_evidence.json"
 JSON_DECODER = json.JSONDecoder()
@@ -244,6 +245,24 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
         "AAR-INTEG",
         "Integration tests cover all 4 invariants",
         integ_exists and has_bounded and has_unauth and has_audit and has_det,
+        emit_human=emit_human,
+    )
+
+    security_content = read_utf8(SECURITY_HARNESS_PATH)
+    security_exists = security_content is not None
+    if security_content is not None:
+        has_bounded = "inv_aar_bounded" in security_content
+        has_unauth = "inv_aar_unauth_strict" in security_content
+        has_audit = "inv_aar_auditable" in security_content
+        has_det = "inv_aar_deterministic" in security_content
+        has_adversarial = "adversarial_" in security_content
+    else:
+        has_bounded = has_unauth = has_audit = has_det = has_adversarial = False
+    check(
+        checks,
+        "AAR-SECURITY-HARNESS",
+        "Security harness artifact covers invariants and adversarial cases",
+        security_exists and has_bounded and has_unauth and has_audit and has_det and has_adversarial,
         emit_human=emit_human,
     )
 

@@ -676,6 +676,10 @@ name = "obligation_tracked_channels"
 path = "../../tests/security/obligation_tracked_channels.rs"
 
 [[test]]
+name = "anti_amplification_harness"
+path = "../../tests/security/anti_amplification_harness.rs"
+
+[[test]]
 name = "bayesian_risk_quarantine"
 path = "tests/bayesian_risk_quarantine.rs"
 

@@ -109,6 +109,29 @@ class TestAntiAmplificationIntegration(unittest.TestCase):
         self.assertIn("inv_aar_deterministic", self.content)
 
 
+class TestAntiAmplificationSecurityHarness(unittest.TestCase):
+
+    def setUp(self):
+        self.harness_path = ROOT / "tests/security/anti_amplification_harness.rs"
+        self.assertTrue(self.harness_path.is_file())
+        self.content = self.harness_path.read_text(encoding="utf-8")
+
+    def test_covers_bounded(self):
+        self.assertIn("inv_aar_bounded", self.content)
+
+    def test_covers_unauth_strict(self):
+        self.assertIn("inv_aar_unauth_strict", self.content)
+
+    def test_covers_auditable(self):
+        self.assertIn("inv_aar_auditable", self.content)
+
+    def test_covers_deterministic(self):
+        self.assertIn("inv_aar_deterministic", self.content)
+
+    def test_covers_adversarial_cases(self):
+        self.assertIn("adversarial_", self.content)
+
+
 class TestAntiAmplificationCli(unittest.TestCase):
 
     def test_json_mode_requests_full_proof_by_default(self):
