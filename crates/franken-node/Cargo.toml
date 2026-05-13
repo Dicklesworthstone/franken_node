@@ -259,6 +259,10 @@ name = "connector_runtime_integration"
 path = "../../tests/integration/connector_runtime_integration.rs"
 
 [[test]]
+name = "cross_module_integration_index"
+path = "../../tests/integration/cross_module_integration_index.rs"
+
+[[test]]
 name = "connector_method_contract_artifact_conformance"
 path = "tests/connector_method_contract_artifact_conformance.rs"
 
