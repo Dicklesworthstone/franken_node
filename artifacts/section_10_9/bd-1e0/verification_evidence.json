@@ -3,8 +3,8 @@
   "title": "Migration Singularity Demo Pipeline",
   "section": "10.9",
   "verdict": "PASS",
-  "total": 87,
-  "passed": 87,
+  "total": 96,
+  "passed": 96,
   "failed": 0,
   "checks": [
     {
@@ -21,6 +21,51 @@
       "name": "file_exists:fixtures_dir",
       "pass": true,
       "detail": "fixtures at fixtures/migration-demos"
+    },
+    {
+      "name": "file_exists:e2e_test",
+      "pass": true,
+      "detail": "real E2E test at crates/franken-node/tests/migrate_cli_e2e.rs"
+    },
+    {
+      "name": "e2e:test_registered",
+      "pass": true,
+      "detail": "migration_demo_pipeline_runs_live_migrate_commands_end_to_end is present"
+    },
+    {
+      "name": "e2e:temporary_project",
+      "pass": true,
+      "detail": "test builds an isolated project with manifest and lockfile"
+    },
+    {
+      "name": "e2e:audit_command",
+      "pass": true,
+      "detail": "test runs franken-node migrate audit --format json"
+    },
+    {
+      "name": "e2e:rewrite_apply_command",
+      "pass": true,
+      "detail": "test runs franken-node migrate rewrite --apply --json --emit-rollback"
+    },
+    {
+      "name": "e2e:validate_command",
+      "pass": true,
+      "detail": "test runs franken-node migrate validate --format json"
+    },
+    {
+      "name": "e2e:rollback_artifact_checked",
+      "pass": true,
+      "detail": "test reads and validates the emitted rollback artifact"
+    },
+    {
+      "name": "e2e:rewrite_mutation_checked",
+      "pass": true,
+      "detail": "test asserts the live rewrite mutated the package manifest"
+    },
+    {
+      "name": "e2e:runtime_smoke_checked",
+      "pass": true,
+      "detail": "test asserts transformed-runtime smoke validation executed"
     },
     {
       "name": "flagship:min_three_configs",

@@ -120,6 +120,7 @@ Evidence is structured JSON with SHA-256 integrity hashes for every artifact.
 | Policy doc | `docs/policy/migration_singularity_demo.md` |
 | Verification script | `scripts/check_migration_demo.py` |
 | Unit tests | `tests/test_check_migration_demo.py` |
+| Live CLI E2E test | `crates/franken-node/tests/migrate_cli_e2e.rs::migration_demo_pipeline_runs_live_migrate_commands_end_to_end` |
 | Flagship configs | `fixtures/migration-demos/` |
 | Verification evidence | `artifacts/section_10_9/bd-1e0/verification_evidence.json` |
 | Verification summary | `artifacts/section_10_9/bd-1e0/verification_summary.md` |

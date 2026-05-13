@@ -45,9 +45,32 @@ class TestFilesExist(unittest.TestCase):
         checker.RESULTS.clear()
         checker.check_files_exist()
         checks = [r for r in checker.RESULTS if r["name"].startswith("file_exists:")]
-        self.assertEqual(len(checks), 3)
+        self.assertEqual(len(checks), 4)
         for r in checks:
             self.assertTrue(r["pass"], f"Failed: {r['name']}: {r['detail']}")
+
+
+class TestLiveE2EPipeline(unittest.TestCase):
+    def test_e2e_test_file_exists(self):
+        self.assertTrue(
+            checker.E2E_TEST_PATH.is_file(),
+            f"Missing: {checker._safe_rel(checker.E2E_TEST_PATH)}",
+        )
+
+    def test_e2e_function_body_extracted(self):
+        body = checker._rust_function_body(
+            checker.E2E_TEST_PATH.read_text(encoding="utf-8"),
+            checker.E2E_TEST_NAME,
+        )
+        self.assertIn("migrate", body)
+        self.assertIn("runtime smoke test passed", body)
+
+    def test_check_live_e2e_pipeline(self):
+        checker.RESULTS.clear()
+        count = checker.check_live_e2e_pipeline()
+        self.assertEqual(count, 8)
+        failing = [r for r in checker.RESULTS if not r["pass"]]
+        self.assertEqual(failing, [])
 
 
 class TestFlagshipConfigs(unittest.TestCase):

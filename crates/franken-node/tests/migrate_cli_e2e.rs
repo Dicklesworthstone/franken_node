@@ -172,6 +172,155 @@ fn write_risky_report_project(project_path: &Path) {
 }
 
 #[test]
+fn migration_demo_pipeline_runs_live_migrate_commands_end_to_end() {
+    let test_name = "migration_demo_pipeline_runs_live_migrate_commands_end_to_end";
+    let temp = TempDir::new().expect("temp dir");
+    let project_path = temp.path().join("project");
+    std::fs::create_dir_all(&project_path).expect("project dir");
+    std::fs::write(
+        project_path.join("index.js"),
+        "console.log(JSON.stringify({ demo: 'migration-singularity', ok: true }));\n",
+    )
+    .expect("write app entrypoint");
+    std::fs::write(project_path.join("package-lock.json"), "{}\n").expect("write lockfile");
+    std::fs::write(
+        project_path.join("package.json"),
+        r#"{
+  "name": "migration-singularity-e2e",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  }
+}
+"#,
+    )
+    .expect("write package manifest");
+    log_phase(
+        test_name,
+        "project_created",
+        serde_json::json!({"project_path": project_path.display().to_string()}),
+    );
+
+    let project_arg = project_path.to_string_lossy().to_string();
+    let audit_output = run_cli(&["migrate", "audit", &project_arg, "--format", "json"]);
+    assert!(
+        audit_output.status.success(),
+        "migrate audit failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&audit_output.stdout),
+        String::from_utf8_lossy(&audit_output.stderr)
+    );
+    let audit = parse_json_stdout(&audit_output, "migrate audit --format json");
+    assert_eq!(audit["schema_version"], serde_json::json!("1.0.0"));
+    assert_eq!(audit["summary"]["package_manifests"], serde_json::json!(1));
+    assert_eq!(
+        audit["summary"]["lockfiles"],
+        serde_json::json!(["package-lock.json"])
+    );
+    log_phase(
+        test_name,
+        "audit_checked",
+        serde_json::json!({
+            "files_scanned": audit["summary"]["files_scanned"],
+            "findings": audit["findings"].as_array().map_or(0, |items| items.len()),
+        }),
+    );
+
+    let (_rollback_temp, rollback_plan_path, rollback_arg) =
+        output_artifact_path(test_name, "rollback/plan.json");
+    let rewrite_output = run_cli(&[
+        "migrate",
+        "rewrite",
+        &project_arg,
+        "--apply",
+        "--json",
+        "--emit-rollback",
+        &rollback_arg,
+    ]);
+    assert!(
+        rewrite_output.status.success(),
+        "migrate rewrite --apply failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&rewrite_output.stdout),
+        String::from_utf8_lossy(&rewrite_output.stderr)
+    );
+    let rewrite = parse_json_stdout(&rewrite_output, "migrate rewrite --apply --json");
+    assert_eq!(rewrite["apply_mode"], serde_json::json!(true));
+    assert_eq!(rewrite["rewrites_applied"], serde_json::json!(1));
+    assert!(
+        String::from_utf8_lossy(&rewrite_output.stderr)
+            .contains("migration rollback artifact written:"),
+        "rewrite command must emit rollback artifact status on stderr"
+    );
+    let rollback_json =
+        std::fs::read_to_string(&rollback_plan_path).expect("rollback plan should be written");
+    let rollback: serde_json::Value = serde_json::from_str(&rollback_json)
+        .unwrap_or_else(|err| fail_test(format!("invalid rollback json: {err}\n{rollback_json}")));
+    assert_eq!(rollback["apply_mode"], serde_json::json!(true));
+    assert_eq!(rollback["entry_count"], serde_json::json!(1));
+
+    let rewritten_package =
+        std::fs::read_to_string(project_path.join("package.json")).expect("read package manifest");
+    let rewritten_manifest: serde_json::Value = serde_json::from_str(&rewritten_package)
+        .unwrap_or_else(|err| fail_test(format!("invalid rewritten package json: {err}")));
+    assert_eq!(
+        rewritten_manifest["engines"]["node"],
+        serde_json::json!(">=20 <23")
+    );
+    assert_eq!(
+        rewritten_manifest["scripts"]["start"],
+        serde_json::json!("franken-node index.js")
+    );
+    log_phase(
+        test_name,
+        "rewrite_checked",
+        serde_json::json!({
+            "rollback_entries": rollback["entry_count"],
+            "rewrites_applied": rewrite["rewrites_applied"],
+        }),
+    );
+
+    let validate_output = run_cli(&["migrate", "validate", &project_arg, "--format", "json"]);
+    assert!(
+        validate_output.status.success(),
+        "migrate validate failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&validate_output.stdout),
+        String::from_utf8_lossy(&validate_output.stderr)
+    );
+    let validate = parse_json_stdout(&validate_output, "migrate validate --format json");
+    assert_eq!(validate["status"], serde_json::json!("pass"));
+    let checks = validate
+        .get("checks")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| fail_test(format!("validation checks missing: {validate:#?}")));
+    let runtime_smoke = checks
+        .iter()
+        .find(|check| check.get("id").is_some_and(|id| id == "mig-validate-005"))
+        .unwrap_or_else(|| {
+            fail_test(format!(
+                "runtime smoke validation check missing: {checks:#?}"
+            ))
+        });
+    assert_eq!(
+        runtime_smoke.get("passed"),
+        Some(&serde_json::json!(true)),
+        "runtime smoke validation check must pass"
+    );
+    assert!(
+        runtime_smoke
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| message.contains("runtime smoke test passed")
+                && message.contains("receipt_round_trip=true")),
+        "runtime smoke check must prove the transformed project was executed: {runtime_smoke:#?}"
+    );
+    log_phase(
+        test_name,
+        "validate_checked",
+        serde_json::json!({"runtime_smoke": runtime_smoke.get("message")}),
+    );
+}
+
+#[test]
 fn migrate_report_json_stdout_composes_audit_rewrite_validate_sections() {
     let test_name = "migrate_report_json_stdout_composes_audit_rewrite_validate_sections";
     let temp = TempDir::new().expect("temp dir");

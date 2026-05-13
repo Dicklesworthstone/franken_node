@@ -21,6 +21,8 @@ from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 SPEC_PATH = ROOT / "docs" / "specs" / "section_10_9" / "bd-1e0_contract.md"
 POLICY_PATH = ROOT / "docs" / "policy" / "migration_singularity_demo.md"
 FIXTURES_DIR = ROOT / "fixtures" / "migration-demos"
+E2E_TEST_PATH = ROOT / "crates" / "franken-node" / "tests" / "migrate_cli_e2e.rs"
+E2E_TEST_NAME = "migration_demo_pipeline_runs_live_migrate_commands_end_to_end"
 
 RESULTS: list[dict] = []
 
@@ -40,6 +42,38 @@ def _safe_rel(path: Path) -> str:
     return str(path)
 
 
+def _rust_function_body(text: str, fn_name: str) -> str:
+    marker = f"fn {fn_name}("
+    start = text.find(marker)
+    if start < 0:
+        return ""
+
+    brace_start = text.find("{", start)
+    if brace_start < 0:
+        return ""
+
+    depth = 0
+    for index in range(brace_start, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return text[start:]
+
+
+def _contains_in_order(text: str, tokens: list[str]) -> bool:
+    cursor = 0
+    for token in tokens:
+        next_index = text.find(token, cursor)
+        if next_index < 0:
+            return False
+        cursor = next_index + len(token)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Check functions
 # ---------------------------------------------------------------------------
@@ -55,6 +89,71 @@ def check_files_exist() -> int:
     if _check("file_exists:fixtures_dir", FIXTURES_DIR.is_dir(),
               f"fixtures at {_safe_rel(FIXTURES_DIR)}"):
         ok += 1
+    if _check("file_exists:e2e_test", E2E_TEST_PATH.is_file(),
+              f"real E2E test at {_safe_rel(E2E_TEST_PATH)}"):
+        ok += 1
+    return ok
+
+
+def check_live_e2e_pipeline() -> int:
+    """Verify the migration demo is backed by a live CLI pipeline test."""
+    if not E2E_TEST_PATH.is_file():
+        _check("e2e:present", False, "migrate_cli_e2e.rs missing")
+        return 0
+
+    text = E2E_TEST_PATH.read_text(encoding="utf-8")
+    body = _rust_function_body(text, E2E_TEST_NAME)
+    ok = 0
+    checks = [
+        (
+            "e2e:test_registered",
+            bool(body),
+            f"{E2E_TEST_NAME} is present",
+        ),
+        (
+            "e2e:temporary_project",
+            "TempDir::new()" in body and "package.json" in body and "package-lock.json" in body,
+            "test builds an isolated project with manifest and lockfile",
+        ),
+        (
+            "e2e:audit_command",
+            _contains_in_order(body, ['"migrate"', '"audit"', '"--format"', '"json"']),
+            "test runs franken-node migrate audit --format json",
+        ),
+        (
+            "e2e:rewrite_apply_command",
+            _contains_in_order(
+                body,
+                ['"migrate"', '"rewrite"', '"--apply"', '"--json"', '"--emit-rollback"'],
+            ),
+            "test runs franken-node migrate rewrite --apply --json --emit-rollback",
+        ),
+        (
+            "e2e:validate_command",
+            _contains_in_order(body, ['"migrate"', '"validate"', '"--format"', '"json"']),
+            "test runs franken-node migrate validate --format json",
+        ),
+        (
+            "e2e:rollback_artifact_checked",
+            "rollback_plan_path" in body and "entry_count" in body,
+            "test reads and validates the emitted rollback artifact",
+        ),
+        (
+            "e2e:rewrite_mutation_checked",
+            "rewritten_manifest" in body and '"franken-node index.js"' in body,
+            "test asserts the live rewrite mutated the package manifest",
+        ),
+        (
+            "e2e:runtime_smoke_checked",
+            "mig-validate-005" in body and "runtime smoke test passed" in body
+            and "receipt_round_trip=true" in body,
+            "test asserts transformed-runtime smoke validation executed",
+        ),
+    ]
+
+    for name, passed, detail in checks:
+        if _check(name, passed, detail):
+            ok += 1
     return ok
 
 
@@ -404,6 +503,7 @@ def check_compatibility_report() -> int:
 def run_all() -> dict:
     RESULTS.clear()
     check_files_exist()
+    check_live_e2e_pipeline()
     check_flagship_configs()
     check_pipeline_stages()
     check_stage_outputs()
