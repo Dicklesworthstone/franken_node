@@ -4,21 +4,61 @@
   "title": "Cancellation injection at all await points for critical control workflows",
   "gate_script": "scripts/check_cancellation_injection.py",
   "test_suite": "tests/test_check_cancellation_injection.py",
-  "timestamp": "2026-02-22T01:40:00+00:00",
+  "timestamp": "2026-05-13T09:20:34Z",
   "verdict": "PASS",
   "implementation_artifacts": {
     "cancellation_injection": "crates/franken-node/src/control_plane/cancellation_injection.rs",
     "control_plane_mod": "crates/franken-node/src/control_plane/mod.rs",
     "spec_contract": "docs/specs/section_10_14/bd-876n_contract.md",
     "verification_script": "scripts/check_cancellation_injection.py",
-    "unit_tests": "tests/test_check_cancellation_injection.py"
+    "python_gate_tests": "tests/test_check_cancellation_injection.py"
   },
-  "rust_test_count": 25,
-  "python_test_count": 41,
-  "event_codes_defined": 10,
-  "error_codes_defined": 8,
-  "gate_checks_passed": 33,
-  "gate_checks_total": 33,
+  "source_hashes": {
+    "cancellation_injection_sha256": "8eeb66edbaff51742462bce96efe91d408598d28e3cf03ce4a2f810215bd09b3",
+    "gate_script_sha256": "670a428f61784112187870ebcdbed029a8c538f137d623d70043de6610e6dc8a",
+    "python_gate_tests_sha256": "3210cd890d877c9372c97d9ac739c877501614d380658e10c51cc36e13de3f31",
+    "spec_contract_sha256": "b44da6fd81d9a3e884ffac575938b70034825d1997e649fa19bdc7ad5b9a4c6d"
+  },
+  "lab_scope": {
+    "scope_kind": "deterministic lab and gate coverage",
+    "default_workflows": [
+      {
+        "workflow": "epoch_transition_barrier",
+        "await_points": 6,
+        "upstream_bead": "bd-2wsm"
+      },
+      {
+        "workflow": "marker_stream_append",
+        "await_points": 4,
+        "upstream_bead": "bd-126h"
+      },
+      {
+        "workflow": "root_pointer_publication",
+        "await_points": 4,
+        "upstream_bead": "bd-nwhn"
+      },
+      {
+        "workflow": "evidence_commit",
+        "await_points": 4,
+        "upstream_bead": null
+      },
+      {
+        "workflow": "eviction_saga",
+        "await_points": 6,
+        "upstream_bead": "bd-1ru2"
+      }
+    ],
+    "default_matrix_cases": 24,
+    "minimum_required_matrix_cases": 20,
+    "rust_inline_tests": 42,
+    "python_gate_tests": 41,
+    "gate_checks_passed": 33,
+    "gate_checks_total": 33,
+    "notes": [
+      "The section 10.14 artifact proves the cancellation-injection lab framework and gate coverage for all registered workflow/await-point pairs.",
+      "The default matrix is deterministic fixture/lab coverage, not a claim that production async cancellation has been injected into every runtime await site."
+    ]
+  },
   "invariants_verified": [
     "INV-CANCEL-LEAK-FREE",
     "INV-CANCEL-HALFCOMMIT-FREE",
@@ -28,11 +68,36 @@
     "INV-CANCEL-SAGA-SAFE"
   ],
   "capabilities_verified": {
-    "workflows_covered": ["epoch_transition_barrier", "marker_stream_append", "root_pointer_publication", "evidence_commit", "eviction_saga"],
-    "operations": ["register_workflow", "run_cancel_case", "register_default_workflows", "detect_halfcommit", "has_leaks", "delta"],
+    "workflow_registration": true,
+    "all_default_workflow_await_points_covered": true,
     "leak_detection": true,
     "halfcommit_detection": true,
     "cancel_matrix": true,
-    "audit_log_export": true
-  }
+    "audit_log_export": true,
+    "unknown_workflow_rejection": true,
+    "invalid_await_point_rejection": true,
+    "bounded_matrix_retention": true
+  },
+  "validation": [
+    {
+      "command": "python3 scripts/check_cancellation_injection.py --json",
+      "status": "PASS",
+      "result": "33/33 checks passed"
+    },
+    {
+      "command": "python3 scripts/check_cancellation_injection.py --self-test",
+      "status": "PASS",
+      "result": "self_test: 33 checks OK"
+    },
+    {
+      "command": "python3 -m pytest tests/test_check_cancellation_injection.py",
+      "status": "PASS",
+      "result": "41 passed in 0.39s"
+    },
+    {
+      "command": "rg -c '#\\[test\\]' crates/franken-node/src/control_plane/cancellation_injection.rs",
+      "status": "PASS",
+      "result": "42 inline Rust tests"
+    }
+  ]
 }

@@ -1,33 +1,55 @@
-# bd-876n: Cancellation Injection — Verification Summary
+# bd-876n: Cancellation Injection Verification Summary
 
-**Section:** 10.14 | **Bead:** bd-876n | **Date:** 2026-02-22
+**Section:** 10.14
+**Bead:** bd-876n
+**Refreshed:** 2026-05-13T09:20:34Z
+**Verdict:** PASS
 
-## Gate Result: PASS (33/33)
+## Scope Boundary
 
-| Metric | Value |
-|--------|-------|
-| Gate checks | 33/33 PASS |
-| Rust in-module tests | 25 |
-| Python unit tests | 41/41 PASS |
-| Event codes | 10 (CANCEL_INJECTED..CANCEL_REPORT_EXPORTED) |
-| Error codes | 8 (ERR_CANCEL_*) |
-| Invariants | 6 verified |
-| Workflows covered | 5 |
+This artifact verifies the deterministic cancellation-injection lab framework
+for critical control workflows. It proves that the registered default workflow
+matrix covers every declared workflow/await-point pair and that the gate/test
+suite exercises leak checks, half-commit checks, invalid references, audit
+export, and bounded matrix behavior.
 
-## Implementation
+It does not claim that production async cancellation has been injected into
+every runtime await site.
 
-- `crates/franken-node/src/control_plane/cancellation_injection.rs` — Framework (987 lines, 25 tests)
-- `crates/franken-node/src/control_plane/mod.rs` — Module registration
-- `docs/specs/section_10_14/bd-876n_contract.md` — Spec contract
-- `scripts/check_cancellation_injection.py` — Verification gate (33 checks)
-- `tests/test_check_cancellation_injection.py` — Python test suite (41 tests)
+## Covered Matrix
 
-## Key Capabilities
+| Workflow | Await Points | Upstream Bead |
+|---|---:|---|
+| `epoch_transition_barrier` | 6 | `bd-2wsm` |
+| `marker_stream_append` | 4 | `bd-126h` |
+| `root_pointer_publication` | 4 | `bd-nwhn` |
+| `evidence_commit` | 4 | n/a |
+| `eviction_saga` | 6 | `bd-1ru2` |
 
-- Cancel injection framework for 5 critical control workflows
-- Leak detection via ResourceSnapshot delta tracking
-- Half-commit detection via StateSnapshot comparison
-- Cancel injection matrix covering all (workflow, await_point) pairs
-- Standard catalog with 22+ await points across epoch barrier, marker stream, root pointer, evidence commit, eviction saga
-- JSONL audit log export (schema ci-v1.0)
-- Deterministic cancellation outcomes by await point index
+Total default matrix cases: 24. Minimum required by the gate: 20.
+
+## Evidence
+
+| Artifact | Result |
+|---|---|
+| `crates/franken-node/src/control_plane/cancellation_injection.rs` | Framework plus 42 inline Rust tests |
+| `scripts/check_cancellation_injection.py --json` | 33/33 checks passed |
+| `scripts/check_cancellation_injection.py --self-test` | 33 checks OK |
+| `tests/test_check_cancellation_injection.py` | 41/41 pytest tests passed |
+| `docs/specs/section_10_14/bd-876n_contract.md` | Workflow matrix and invariants aligned |
+
+## Invariants
+
+- `INV-CANCEL-LEAK-FREE`
+- `INV-CANCEL-HALFCOMMIT-FREE`
+- `INV-CANCEL-MATRIX-COMPLETE`
+- `INV-CANCEL-DETERMINISTIC`
+- `INV-CANCEL-BARRIER-SAFE`
+- `INV-CANCEL-SAGA-SAFE`
+
+## Validation Commands
+
+- `python3 scripts/check_cancellation_injection.py --json`: PASS, 33/33 checks
+- `python3 scripts/check_cancellation_injection.py --self-test`: PASS
+- `python3 -m pytest tests/test_check_cancellation_injection.py`: PASS, 41 tests
+- `rg -c '#\[test\]' crates/franken-node/src/control_plane/cancellation_injection.rs`: 42 inline Rust tests
