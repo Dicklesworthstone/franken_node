@@ -33,7 +33,7 @@ def require_equal(actual, expected, label):
 
 def read_json(path):
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.JSONDecoder().decode(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise AssertionError(f"invalid JSON in {path}") from exc
 
@@ -135,3 +135,27 @@ def test_checked_in_evidence_cites_primary_lockstep_implementation():
         "crates/franken-node/src/cli.rs",
         "checked-in verify CLI args path",
     )
+
+
+def test_lockstep_runner_release_gate_workflow_wired():
+    workflow_path = ROOT / ".github" / "workflows" / "lockstep-runner-release-gate.yml"
+    require(workflow_path.is_file(), "lockstep runner release workflow missing")
+    text = workflow_path.read_text(encoding="utf-8")
+    for token in [
+        "python3 scripts/check_lockstep_runner.py --json > /tmp/lockstep_runner_release_gate.json",
+        "python3 -m pytest tests/test_check_lockstep_runner.py",
+        "actions/upload-artifact@v4",
+        "lockstep-runner-release-gate",
+        "scripts/check_lockstep_runner.py",
+        "tests/test_check_lockstep_runner.py",
+        "docs/L1_LOCKSTEP_RUNNER.md",
+        "schemas/lockstep_runner_config.schema.json",
+        "schemas/compatibility_fixture.schema.json",
+        "docs/specs/section_10_2/bd-2vi_contract.md",
+        "crates/franken-node/src/runtime/lockstep_harness.rs",
+        "crates/franken-node/src/main.rs",
+        "crates/franken-node/src/cli.rs",
+        "artifacts/section_10_2/bd-2vi/verification_evidence.json",
+        "artifacts/section_10_2/bd-2vi/verification_summary.md",
+    ]:
+        require(token in text, f"workflow missing token: {token}")

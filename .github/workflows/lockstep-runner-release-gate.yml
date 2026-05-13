@@ -1,0 +1,53 @@
+name: Lockstep Runner Release Gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/lockstep-runner-release-gate.yml"
+      - "scripts/check_lockstep_runner.py"
+      - "tests/test_check_lockstep_runner.py"
+      - "docs/L1_LOCKSTEP_RUNNER.md"
+      - "schemas/lockstep_runner_config.schema.json"
+      - "schemas/compatibility_fixture.schema.json"
+      - "docs/specs/section_10_2/bd-2vi_contract.md"
+      - "crates/franken-node/src/runtime/lockstep_harness.rs"
+      - "crates/franken-node/src/main.rs"
+      - "crates/franken-node/src/cli.rs"
+      - "artifacts/section_10_2/bd-2vi/verification_evidence.json"
+      - "artifacts/section_10_2/bd-2vi/verification_summary.md"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/lockstep-runner-release-gate.yml"
+      - "scripts/check_lockstep_runner.py"
+      - "tests/test_check_lockstep_runner.py"
+      - "docs/L1_LOCKSTEP_RUNNER.md"
+      - "schemas/lockstep_runner_config.schema.json"
+      - "schemas/compatibility_fixture.schema.json"
+      - "docs/specs/section_10_2/bd-2vi_contract.md"
+      - "crates/franken-node/src/runtime/lockstep_harness.rs"
+      - "crates/franken-node/src/main.rs"
+      - "crates/franken-node/src/cli.rs"
+      - "artifacts/section_10_2/bd-2vi/verification_evidence.json"
+      - "artifacts/section_10_2/bd-2vi/verification_summary.md"
+
+jobs:
+  lockstep-runner-release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run lockstep runner verifier
+        run: |
+          python3 scripts/check_lockstep_runner.py --json > /tmp/lockstep_runner_release_gate.json
+
+      - name: Run lockstep runner verifier tests
+        run: |
+          python3 -m pytest tests/test_check_lockstep_runner.py
+
+      - name: Upload lockstep runner gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lockstep-runner-release-gate
+          path: /tmp/lockstep_runner_release_gate.json
