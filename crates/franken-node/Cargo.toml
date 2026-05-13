@@ -662,6 +662,10 @@ name = "threshold_signature_verification"
 path = "../../tests/security/threshold_signature_verification.rs"
 
 [[test]]
+name = "obligation_tracked_channels"
+path = "../../tests/security/obligation_tracked_channels.rs"
+
+[[test]]
 name = "bayesian_risk_quarantine"
 path = "tests/bayesian_risk_quarantine.rs"
 
