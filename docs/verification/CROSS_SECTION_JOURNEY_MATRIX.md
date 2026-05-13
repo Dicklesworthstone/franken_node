@@ -21,10 +21,10 @@ owning beads, fixtures, and failure taxonomies.
 
 | Phase | Section | Capability | Fixtures needed |
 |---|---|---|---|
-| Spec resolution | 10.2 | CAP-015 | `fixtures/j001/package_manifest.json` |
-| Compatibility check | 10.7 | CAP-010 | `fixtures/j001/compat_oracle.json` |
-| Trust verification | 10.13 | CAP-007, CAP-008 | `fixtures/j001/trust_chain.json`, `fixtures/j001/revocation_db.json` |
-| Engine validation | 10.17 | CAP-005, CAP-006b | `fixtures/j001/engine_claims.json` |
+| Spec resolution | 10.2 | CAP-015 | `fixture:J-001:spec-resolution` |
+| Compatibility check | 10.7 | CAP-010 | `fixture:J-001:compatibility-check` |
+| Trust verification | 10.13 | CAP-007, CAP-008 | `fixture:J-001:trust-verification`, `fixture:J-001:revocation-freshness` |
+| Engine validation | 10.17 | CAP-005, CAP-006b | `fixture:J-001:engine-validation` |
 
 **Happy path assertion:** Package installs, trust chain GREEN, revocation fresh, engine claims valid.
 **Edge case:** Package with expired cert but valid grace period.
@@ -42,10 +42,10 @@ owning beads, fixtures, and failure taxonomies.
 
 | Phase | Section | Capability | Fixtures needed |
 |---|---|---|---|
-| Baseline extraction | 10.2 | CAP-015 | `fixtures/j002/node_project_snapshot.json` |
-| Migration transforms | 10.3 | CAP-015 | `fixtures/j002/migration_plan.json` |
-| Epoch + idempotency | 10.14 | CAP-001, CAP-002 | `fixtures/j002/epoch_state.json`, `fixtures/j002/saga_contracts.json` |
-| Control enforcement | 10.15 | CAP-001-004 | `fixtures/j002/control_plane_config.json` |
+| Baseline extraction | 10.2 | CAP-015 | `fixture:J-002:baseline-extraction` |
+| Migration transforms | 10.3 | CAP-015 | `fixture:J-002:migration-transforms` |
+| Epoch + idempotency | 10.14 | CAP-001, CAP-002 | `fixture:J-002:epoch-state`, `fixture:J-002:saga-contracts` |
+| Control enforcement | 10.15 | CAP-001-004 | `fixture:J-002:control-enforcement` |
 
 **Happy path assertion:** Migration completes, epoch transitions clean, saga rollback never triggered.
 **Edge case:** Migration with partial transform requiring saga compensation.
@@ -63,10 +63,10 @@ owning beads, fixtures, and failure taxonomies.
 
 | Phase | Section | Capability | Fixtures needed |
 |---|---|---|---|
-| Fault injection | 10.14 | CAP-004 | `fixtures/j003/fault_scenario.json` |
-| Evidence capture | 10.14 → 10.15 | CAP-003 | `fixtures/j003/evidence_ledger.json` |
-| Verifier replay | 10.17 | CAP-005 | `fixtures/j003/replay_capsule.json` |
-| Proof verification | 10.18 | CAP-011 | `fixtures/j003/proof_bundle.json` |
+| Fault injection | 10.14 | CAP-004 | `fixture:J-003:fault-injection` |
+| Evidence capture | 10.14 -> 10.15 | CAP-003 | `fixture:J-003:evidence-capture` |
+| Verifier replay | 10.17 | CAP-005 | `fixture:J-003:verifier-replay` |
+| Proof verification | 10.18 | CAP-011 | `fixture:J-003:proof-verification` |
 
 **Happy path assertion:** Fault triggers cancellation, evidence captured, replay succeeds, proof verifies.
 **Edge case:** Fault during epoch transition boundary.
@@ -84,10 +84,10 @@ owning beads, fixtures, and failure taxonomies.
 
 | Phase | Section | Capability | Fixtures needed |
 |---|---|---|---|
-| Trust signal ingest | 10.19 | CAP-012 | `fixtures/j004/federated_signal.json` |
-| Topological scoring | 10.20 | CAP-013 | `fixtures/j004/dep_graph.json`, `fixtures/j004/contagion_scenario.json` |
-| Verifier integration | 10.17 | CAP-005 | `fixtures/j004/trust_scorecard.json` |
-| Phenotype update | 10.21 | CAP-014 | `fixtures/j004/phenotype_snapshot.json` |
+| Trust signal ingest | 10.19 | CAP-012 | `fixture:J-004:trust-signal-ingest` |
+| Topological scoring | 10.20 | CAP-013 | `fixture:J-004:topological-scoring` |
+| Verifier integration | 10.17 | CAP-005 | `fixture:J-004:verifier-integration` |
+| Phenotype update | 10.21 | CAP-014 | `fixture:J-004:phenotype-update` |
 
 **Happy path assertion:** Signal ingested, topology risk scored, verifier scorecard updated, phenotype model stable.
 **Edge case:** Conflicting trust signals from multiple federations with different priors.
@@ -105,10 +105,10 @@ owning beads, fixtures, and failure taxonomies.
 
 | Phase | Section | Capability | Fixtures needed |
 |---|---|---|---|
-| Error classification | 10.8 → 10.13 | CAP-009 | `fixtures/j005/incident_event.json` |
-| State propagation | 10.10 | CAP-007, CAP-010 | `fixtures/j005/control_state.json` |
-| Anti-replay framing | 10.13 | CAP-007 | `fixtures/j005/auth_channel.json` |
-| Quarantine + rollback | 10.20 | CAP-013 | `fixtures/j005/quarantine_plan.json` |
+| Error classification | 10.8 -> 10.13 | CAP-009 | `fixture:J-005:error-classification` |
+| State propagation | 10.10 | CAP-007, CAP-010 | `fixture:J-005:state-propagation` |
+| Anti-replay framing | 10.13 | CAP-007 | `fixture:J-005:anti-replay-framing` |
+| Quarantine + rollback | 10.20 | CAP-013 | `fixture:J-005:quarantine-rollback` |
 
 **Happy path assertion:** Incident classified, state propagated with anti-replay, quarantine scoped and executed.
 **Edge case:** Incident during active migration with in-flight epochs.
@@ -126,10 +126,10 @@ owning beads, fixtures, and failure taxonomies.
 
 | Phase | Section | Capability | Fixtures needed |
 |---|---|---|---|
-| L1 product oracle | 10.2 | CAP-006a | `fixtures/j006/l1_verdict.json` |
-| L2 engine oracle | 10.17 | CAP-006b | `fixtures/j006/l2_verdict.json` |
-| Section gates | 10.0-10.21, 11-16 | all | `fixtures/j006/section_verdicts/` |
-| Program gate | program | rch policy, xref lint | `fixtures/j006/program_verdicts/` |
+| L1 product oracle | 10.2 | CAP-006a | `fixture:J-006:l1-product-oracle` |
+| L2 engine oracle | 10.17 | CAP-006b | `fixture:J-006:l2-engine-oracle` |
+| Section gates | 10.0-10.21, 11-16 | all | `fixture:J-006:section-gates` |
+| Program gate | program | rch policy, xref lint | `fixture:J-006:program-gate` |
 
 **Happy path assertion:** All oracles GREEN, all section gates PASS, release approved.
 **Edge case:** One section YELLOW with waiver, all others GREEN.
@@ -147,10 +147,10 @@ owning beads, fixtures, and failure taxonomies.
 
 | Phase | Section | Capability | Fixtures needed |
 |---|---|---|---|
-| Telemetry collection | 10.4 | CAP-008 | `fixtures/j007/telemetry_bundle.json` |
-| Compatibility verification | 10.7 | CAP-010, CAP-015 | `fixtures/j007/compat_fixtures.json` |
-| Ecosystem distribution | 10.9 | CAP-005 | `fixtures/j007/distribution_manifest.json` |
-| Trust credential binding | 10.13 | CAP-007, CAP-008 | `fixtures/j007/trust_creds.json` |
+| Telemetry collection | 10.4 | CAP-008 | `fixture:J-007:telemetry-collection` |
+| Compatibility verification | 10.7 | CAP-010, CAP-015 | `fixture:J-007:compatibility-verification` |
+| Ecosystem distribution | 10.9 | CAP-005 | `fixture:J-007:ecosystem-distribution` |
+| Trust credential binding | 10.13 | CAP-007, CAP-008 | `fixture:J-007:trust-credential-binding` |
 
 **Happy path assertion:** Telemetry clean, compatibility verified, package published with valid trust credentials.
 **Edge case:** Package passes compat but revocation check pending.
@@ -163,12 +163,19 @@ owning beads, fixtures, and failure taxonomies.
 
 ## Fixture Contract
 
+All journey fixtures live in `docs/verification/cross_section_fixture_suite.json`
+and are validated by `scripts/validate_journey_matrix.py`. The replay path is:
+
+```bash
+python3 scripts/program_e2e_orchestrator.py --json --live --journey J-001
+```
+
 All journey fixtures follow these rules:
 
 1. **Deterministic:** Same input always produces same output. No system clock, no randomness.
 2. **Self-contained:** Each fixture pack includes all inputs, expected outputs, and assertion schemas.
 3. **Machine-indexed:** Every fixture references its journey ID, phase, and owning bead.
-4. **Replayable:** `scripts/replay_journey.sh J-NNN` re-executes the journey from fixtures.
+4. **Replayable:** `scripts/program_e2e_orchestrator.py --live --journey J-NNN` re-executes the journey from fixtures.
 5. **Versioned:** Fixtures carry a `fixture_version` field; breaking changes bump major version.
 
 ## Failure Taxonomy Rules

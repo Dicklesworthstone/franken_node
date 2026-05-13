@@ -18,10 +18,6 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 import time
 import urllib.error
 import urllib.request
@@ -29,9 +25,13 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.lib.e2e_scenario_logger import ScenarioTimeline
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from scripts.lib.e2e_scenario_logger import ScenarioTimeline  # noqa: E402
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 MATRIX_PATH = ROOT / "docs" / "verification" / "journey_matrix.json"
+FIXTURE_SUITE_PATH = ROOT / "docs" / "verification" / "cross_section_fixture_suite.json"
 CHAOS_CATALOG_PATH = ROOT / "docs" / "verification" / "chaos_scenarios.json"
 TEST_SERVER_SCRIPT = ROOT / "scripts" / "e2e_test_server.py"
 
@@ -48,7 +48,7 @@ logger = configure_test_logging("program_e2e_orchestrator")
 def load_json(path: Path) -> dict | None:
     if not path.exists():
         return None
-    with open(path) as f:
+    with path.open(encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -56,13 +56,60 @@ def generate_trace_id() -> str:
     return f"trace-{uuid.uuid4().hex[:16]}"
 
 
-def validate_journey_structural(journey: dict) -> dict:
+def _fixture_map(fixture_suite: dict | None) -> dict[str, dict]:
+    if not fixture_suite:
+        return {}
+    return {
+        fixture["id"]: fixture
+        for fixture in fixture_suite.get("fixtures", [])
+        if isinstance(fixture, dict) and fixture.get("id")
+    }
+
+
+def _validate_fixture_for_phase(journey: dict, phase: dict, fixture: dict | None) -> list[str]:
+    errors = []
+    fixture_id = phase.get("fixture")
+    if fixture is None:
+        return [f"Missing executable fixture: {fixture_id}"]
+
+    jid = journey.get("id", "UNKNOWN")
+    if fixture.get("journey_id") != jid:
+        errors.append(f"{fixture_id}: journey_id mismatch")
+    if fixture.get("section") != phase.get("section"):
+        errors.append(f"{fixture_id}: section mismatch")
+    if fixture.get("capability") != phase.get("capability"):
+        errors.append(f"{fixture_id}: capability mismatch")
+    for flag in ["deterministic", "self_contained", "machine_indexed"]:
+        if fixture.get(flag) is not True:
+            errors.append(f"{fixture_id}: {flag} must be true")
+    if not fixture.get("fixture_version"):
+        errors.append(f"{fixture_id}: missing fixture_version")
+    if not fixture.get("assertions"):
+        errors.append(f"{fixture_id}: missing assertions")
+
+    replay_step = fixture.get("replay_step")
+    if not isinstance(replay_step, dict):
+        errors.append(f"{fixture_id}: missing replay_step")
+    else:
+        if replay_step.get("method") not in {"GET", "POST", "DELETE"}:
+            errors.append(f"{fixture_id}: invalid replay method")
+        if not replay_step.get("path", "").startswith("/v1/"):
+            errors.append(f"{fixture_id}: replay path must be a /v1 API path")
+        if "expect_field" not in replay_step and "expect_ok" not in replay_step:
+            errors.append(f"{fixture_id}: replay step needs expect_field or expect_ok")
+
+    return errors
+
+
+def validate_journey_structural(journey: dict, fixture_suite: dict | None = None) -> dict:
     """Structurally validate a journey definition."""
+    fixtures_by_id = _fixture_map(fixture_suite)
     result = {
         "journey_id": journey["id"],
         "journey_name": journey["name"],
         "status": "PASS",
         "phases_validated": 0,
+        "fixtures_validated": 0,
         "errors": [],
         "trace_id": generate_trace_id(),
     }
@@ -73,6 +120,11 @@ def validate_journey_structural(journey: dict) -> dict:
             result["errors"].append(f"Phase {i}: missing section")
         if "fixture" not in phase:
             result["errors"].append(f"Phase {i}: missing fixture")
+        else:
+            fixture = fixtures_by_id.get(phase["fixture"])
+            result["errors"].extend(_validate_fixture_for_phase(journey, phase, fixture))
+            if fixture is not None:
+                result["fixtures_validated"] += 1
         result["phases_validated"] += 1
 
     # Validate failure taxonomy is non-empty
@@ -174,6 +226,15 @@ def _http_delete(base: str, path: str) -> dict:
         return json.loads(resp.read())
 
 
+def _nested_value(data: dict, field_path: str):
+    actual = data
+    for key in field_path.split("."):
+        if not isinstance(actual, dict):
+            return None
+        actual = actual.get(key)
+    return actual
+
+
 def run_live_scenario(base: str, scenario_name: str, steps: list) -> dict:
     """Execute a live E2E scenario against the running test server."""
     timeline = ScenarioTimeline(f"e2e_{scenario_name}", json_mode=False)
@@ -210,10 +271,8 @@ def run_live_scenario(base: str, scenario_name: str, steps: list) -> dict:
 
             if expect_ok and not data.get("ok"):
                 errors.append(f"{method} {path}: expected ok=true")
-            if expect_field and expect_value:
-                actual = data
-                for key in expect_field.split("."):
-                    actual = actual.get(key, {}) if isinstance(actual, dict) else None
+            if expect_field is not None:
+                actual = _nested_value(data, expect_field)
                 if actual != expect_value:
                     errors.append(f"{method} {path}: {expect_field}={actual}, expected {expect_value}")
         except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
@@ -231,6 +290,29 @@ def run_live_scenario(base: str, scenario_name: str, steps: list) -> dict:
         "request_count": report.request_count,
         "trace_id": generate_trace_id(),
     }
+
+
+def build_fixture_live_scenarios(journeys: list[dict], fixture_suite: dict | None) -> list[dict]:
+    """Convert catalog fixtures into live replay scenarios."""
+    fixtures_by_id = _fixture_map(fixture_suite)
+    scenarios = []
+
+    for journey in journeys:
+        steps = []
+        for phase in journey.get("phases", []):
+            fixture = fixtures_by_id.get(phase.get("fixture"))
+            if fixture is None:
+                continue
+            replay_step = dict(fixture.get("replay_step", {}))
+            replay_step["fixture_id"] = fixture["id"]
+            steps.append(replay_step)
+        scenarios.append({
+            "name": f"cross_section_{journey['id']}",
+            "journey_id": journey["id"],
+            "steps": steps,
+        })
+
+    return scenarios
 
 
 # Built-in live scenarios covering all API endpoint groups.
@@ -317,11 +399,12 @@ LIVE_SCENARIOS = [
 ]
 
 
-def run_live_mode() -> list[dict]:
+def run_live_mode(fixture_scenarios: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
     """Start test server, run all live scenarios, stop server."""
     proc, port = _start_test_server()
     base = f"http://127.0.0.1:{port}"
     results = []
+    fixture_results = []
     try:
         for scenario in LIVE_SCENARIOS:
             result = run_live_scenario(base, scenario["name"], scenario["steps"])
@@ -332,9 +415,20 @@ def run_live_mode() -> list[dict]:
                 scenario["name"], result["status"],
                 result["request_count"], result["duration_secs"],
             )
+        for scenario in fixture_scenarios or []:
+            result = run_live_scenario(base, scenario["name"], scenario["steps"])
+            result["journey_id"] = scenario["journey_id"]
+            result["fixture_count"] = len(scenario["steps"])
+            result["mode"] = "live_fixture"
+            fixture_results.append(result)
+            logger.info(
+                "fixture scenario %s: %s (%d fixtures, %d requests, %.3fs)",
+                scenario["name"], result["status"], result["fixture_count"],
+                result["request_count"], result["duration_secs"],
+            )
     finally:
         _stop_test_server(proc)
-    return results
+    return results, fixture_results
 
 
 def main():
@@ -350,24 +444,28 @@ def main():
 
     timestamp = datetime.now(timezone.utc).isoformat()
     orchestration_trace = generate_trace_id()
-
-    # ── Live mode: real HTTP against test server ─────────────────
-    live_results = []
-    if live_mode:
-        logger.info("running in LIVE mode")
-        live_results = run_live_mode()
-
-    # ── Structural mode: validate journey matrix ─────────────────
-    journey_results = []
     matrix = load_json(MATRIX_PATH)
+    fixture_suite = load_json(FIXTURE_SUITE_PATH)
+    journeys = []
     if matrix is not None:
         journeys = matrix.get("journeys", [])
         if target_journey:
             journeys = [j for j in journeys if j["id"] == target_journey]
-        for journey in journeys:
-            result = validate_journey_structural(journey)
-            result["mode"] = "structural"
-            journey_results.append(result)
+
+    # ── Live mode: real HTTP against test server ─────────────────
+    live_results = []
+    fixture_results = []
+    if live_mode:
+        logger.info("running in LIVE mode")
+        fixture_scenarios = build_fixture_live_scenarios(journeys, fixture_suite)
+        live_results, fixture_results = run_live_mode(fixture_scenarios)
+
+    # ── Structural mode: validate journey matrix ─────────────────
+    journey_results = []
+    for journey in journeys:
+        result = validate_journey_structural(journey, fixture_suite)
+        result["mode"] = "structural"
+        journey_results.append(result)
 
     # ── Chaos validations ────────────────────────────────────────
     chaos_results = []
@@ -378,8 +476,9 @@ def main():
     # ── Compute verdict ──────────────────────────────────────────
     journey_failures = [r for r in journey_results if r["status"] == "FAIL"]
     live_failures = [r for r in live_results if r["status"] == "FAIL"]
+    fixture_failures = [r for r in fixture_results if r["status"] == "FAIL"]
     chaos_failures = [r for r in chaos_results if r["status"] == "FAIL"]
-    verdict = "PASS" if not journey_failures and not live_failures and not chaos_failures else "FAIL"
+    verdict = "PASS" if not journey_failures and not live_failures and not fixture_failures and not chaos_failures else "FAIL"
 
     report = {
         "gate": "program_e2e_orchestration",
@@ -393,11 +492,15 @@ def main():
         "live_scenarios_executed": len(live_results),
         "live_scenarios_passed": sum(1 for r in live_results if r["status"] == "PASS"),
         "live_scenarios_failed": len(live_failures),
+        "fixture_scenarios_executed": len(fixture_results),
+        "fixture_scenarios_passed": sum(1 for r in fixture_results if r["status"] == "PASS"),
+        "fixture_scenarios_failed": len(fixture_failures),
         "chaos_scenarios": len(chaos_results),
         "chaos_passed": sum(1 for r in chaos_results if r["status"] == "PASS"),
         "chaos_skipped": sum(1 for r in chaos_results if r["status"] == "SKIP"),
         "journey_results": journey_results,
         "live_results": live_results,
+        "fixture_results": fixture_results,
         "chaos_results": chaos_results if chaos_results else [],
     }
 
@@ -418,12 +521,21 @@ def main():
                 for e in r.get("errors", []):
                     print(f"       Error: {e}")
             print()
+        if fixture_results:
+            print("Cross-Section Fixture Replay Results:")
+            for r in fixture_results:
+                icon = "OK" if r["status"] == "PASS" else "FAIL"
+                print(f"  [{icon}] {r['journey_id']}: {r['fixture_count']} fixtures, "
+                      f"{r['request_count']} requests, {r['duration_secs']:.3f}s")
+                for e in r.get("errors", []):
+                    print(f"       Error: {e}")
+            print()
         if journey_results:
             print("Structural Journey Results:")
             for r in journey_results:
                 icon = "OK" if r["status"] == "PASS" else "FAIL"
                 print(f"  [{icon}] {r['journey_id']}: {r['journey_name']} "
-                      f"({r['phases_validated']} phases)")
+                      f"({r['phases_validated']} phases, {r['fixtures_validated']} fixtures)")
                 for e in r.get("errors", []):
                     print(f"       Error: {e}")
             print()
@@ -436,6 +548,11 @@ def main():
         summary = []
         if live_results:
             summary.append(f"Live: {report['live_scenarios_passed']}/{report['live_scenarios_executed']} pass")
+        if fixture_results:
+            summary.append(
+                f"Fixtures: {report['fixture_scenarios_passed']}/"
+                f"{report['fixture_scenarios_executed']} pass"
+            )
         if journey_results:
             summary.append(f"Journeys: {report['journeys_passed']}/{report['journeys_executed']} pass")
         if chaos_results:

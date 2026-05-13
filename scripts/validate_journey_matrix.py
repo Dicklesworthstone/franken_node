@@ -30,13 +30,14 @@ from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 MATRIX_PATH = ROOT / "docs" / "verification" / "journey_matrix.json"
 REGISTRY_PATH = ROOT / "docs" / "capability_ownership_registry.json"
+FIXTURE_SUITE_PATH = ROOT / "docs" / "verification" / "cross_section_fixture_suite.json"
 
 
 def load_json(path: Path) -> dict:
     if not path.exists():
         print(f"ERROR: Not found: {path}", file=sys.stderr)
         sys.exit(2)
-    with open(path) as f:
+    with path.open(encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -121,6 +122,111 @@ def validate_failure_taxonomy(matrix: dict) -> list[str]:
     return errors
 
 
+def _fixture_map(fixture_suite: dict) -> tuple[dict[str, dict], list[str]]:
+    errors = []
+    fixtures_by_id = {}
+
+    if fixture_suite.get("schema_version") != "1.0":
+        errors.append("fixture suite: schema_version must be 1.0")
+    if fixture_suite.get("owner_bead") != matrix_owner_bead():
+        errors.append("fixture suite: owner_bead must match bd-295v")
+
+    fixtures = fixture_suite.get("fixtures")
+    if not isinstance(fixtures, list) or not fixtures:
+        errors.append("fixture suite: fixtures must be a non-empty array")
+        return fixtures_by_id, errors
+
+    for index, fixture in enumerate(fixtures):
+        fixture_id = fixture.get("id")
+        if not fixture_id:
+            errors.append(f"fixture suite entry {index}: missing id")
+            continue
+        if fixture_id in fixtures_by_id:
+            errors.append(f"fixture suite: duplicate fixture id {fixture_id}")
+        fixtures_by_id[fixture_id] = fixture
+
+    return fixtures_by_id, errors
+
+
+def matrix_owner_bead() -> str:
+    return "bd-295v"
+
+
+def validate_fixture_contract(matrix: dict, fixture_suite: dict) -> tuple[list[str], list[str]]:
+    """Validate that every matrix phase points at an executable fixture."""
+    errors = []
+    warnings = []
+    fixtures_by_id, map_errors = _fixture_map(fixture_suite)
+    errors.extend(map_errors)
+
+    referenced = set()
+    required_fields = [
+        "id",
+        "journey_id",
+        "phase",
+        "section",
+        "capability",
+        "fixture_version",
+        "deterministic",
+        "self_contained",
+        "machine_indexed",
+        "inputs",
+        "expected",
+        "assertions",
+        "failure_code",
+        "replay_step",
+    ]
+
+    for journey in matrix.get("journeys", []):
+        jid = journey.get("id", "UNKNOWN")
+        for index, phase in enumerate(journey.get("phases", [])):
+            fixture_id = phase.get("fixture")
+            if not fixture_id:
+                errors.append(f"{jid} phase {index}: missing fixture id")
+                continue
+
+            referenced.add(fixture_id)
+            fixture = fixtures_by_id.get(fixture_id)
+            if fixture is None:
+                errors.append(f"{jid} phase {index}: fixture '{fixture_id}' missing from catalog")
+                continue
+
+            for field in required_fields:
+                if field not in fixture:
+                    errors.append(f"{fixture_id}: missing fixture field '{field}'")
+
+            if fixture.get("journey_id") != jid:
+                errors.append(f"{fixture_id}: journey_id does not match {jid}")
+            if fixture.get("section") != phase.get("section"):
+                errors.append(f"{fixture_id}: section does not match matrix phase")
+            if fixture.get("capability") != phase.get("capability"):
+                errors.append(f"{fixture_id}: capability does not match matrix phase")
+            if fixture.get("deterministic") is not True:
+                errors.append(f"{fixture_id}: deterministic must be true")
+            if fixture.get("self_contained") is not True:
+                errors.append(f"{fixture_id}: self_contained must be true")
+            if fixture.get("machine_indexed") is not True:
+                errors.append(f"{fixture_id}: machine_indexed must be true")
+
+            assertions = fixture.get("assertions")
+            if not isinstance(assertions, list) or not assertions:
+                errors.append(f"{fixture_id}: assertions must be a non-empty array")
+
+            replay_step = fixture.get("replay_step", {})
+            if replay_step.get("method") not in {"GET", "POST", "DELETE"}:
+                errors.append(f"{fixture_id}: replay_step.method must be GET, POST, or DELETE")
+            if not replay_step.get("path", "").startswith("/v1/"):
+                errors.append(f"{fixture_id}: replay_step.path must be a /v1 API path")
+            if "expect_field" not in replay_step and "expect_ok" not in replay_step:
+                errors.append(f"{fixture_id}: replay_step must declare expect_field or expect_ok")
+
+    unused = set(fixtures_by_id) - referenced
+    for fixture_id in sorted(unused):
+        warnings.append(f"Fixture {fixture_id} is not referenced by the journey matrix")
+
+    return errors, warnings
+
+
 def main():
     logger = configure_test_logging("validate_journey_matrix")
     logger.info("starting validate_journey_matrix", extra={"argv": sys.argv[1:]})
@@ -128,23 +234,27 @@ def main():
 
     matrix = load_json(MATRIX_PATH)
     registry = load_json(REGISTRY_PATH)
+    fixture_suite = load_json(FIXTURE_SUITE_PATH)
 
     schema_errors = validate_schema(matrix)
     cap_warnings = validate_capability_coverage(matrix, registry)
     section_warnings = validate_section_coverage(matrix)
     taxonomy_errors = validate_failure_taxonomy(matrix)
+    fixture_errors, fixture_warnings = validate_fixture_contract(matrix, fixture_suite)
 
-    all_errors = schema_errors + taxonomy_errors
-    all_warnings = cap_warnings + section_warnings
+    all_errors = schema_errors + taxonomy_errors + fixture_errors
+    all_warnings = cap_warnings + section_warnings + fixture_warnings
 
     verdict = "PASS" if not all_errors else "FAIL"
     timestamp = datetime.now(timezone.utc).isoformat()
+    fixture_count = len(fixture_suite.get("fixtures", []))
 
     report = {
         "gate": "journey_matrix_validation",
         "verdict": verdict,
         "timestamp": timestamp,
         "journey_count": len(matrix.get("journeys", [])),
+        "fixture_count": fixture_count,
         "errors": all_errors,
         "warnings": all_warnings,
     }
@@ -154,6 +264,7 @@ def main():
     else:
         print("=== Journey Matrix Validation ===")
         print(f"Journeys: {report['journey_count']}")
+        print(f"Fixtures: {report['fixture_count']}")
         print(f"Errors: {len(all_errors)}")
         print(f"Warnings: {len(all_warnings)}")
         if all_errors:
