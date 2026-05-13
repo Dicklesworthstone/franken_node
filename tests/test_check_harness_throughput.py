@@ -155,6 +155,9 @@ class TestRunAll(TestCase):
         self.assertIn("total", report)
         self.assertIn("passed", report)
         self.assertIn("failed", report)
+        self.assertIn("source_module", report)
+        self.assertIn("test_module", report)
+        self.assertIn("git_xref", report)
         self.assertIn("checks", report)
         self.assertIsInstance(report["checks"], list)
         self.assertGreater(len(report["checks"]), 10)
@@ -165,10 +168,60 @@ class TestRunAll(TestCase):
         self.assertEqual(report["failed"], 0)
         self.assertEqual(report["passed"], report["total"])
 
+    def test_run_all_exposes_git_xref(self) -> None:
+        report = mod.run_all()
+        self.assertEqual(report["source_module"], "scripts/check_harness_throughput.py")
+        self.assertEqual(report["test_module"], "tests/test_check_harness_throughput.py")
+        self.assertGreaterEqual(len(report["git_xref"]), 4)
+        for entry in report["git_xref"]:
+            self.assertEqual(len(entry["commit"]), 40)
+            self.assertTrue(entry["paths"])
+        self.assertTrue(
+            any(c["check"] == "git_xref" and c["pass"] for c in report["checks"])
+        )
+
 
 class TestSelfTest(TestCase):
     def test_self_test_returns_true(self) -> None:
         self.assertTrue(mod.self_test())
+
+    def test_self_test_reflects_overall_pass(self) -> None:
+        failing_report = {
+            "bead_id": "bd-38m",
+            "title": "Optimize lockstep harness throughput and memory profile",
+            "section": "10.6",
+            "verdict": "FAIL",
+            "overall_pass": False,
+            "total": 1,
+            "passed": 0,
+            "failed": 1,
+            "git_xref": [],
+            "checks": [{"check": "forced_failure", "pass": False, "detail": "forced"}],
+        }
+        with patch.object(mod, "run_all", return_value=failing_report):
+            self.assertFalse(mod.self_test())
+
+    def test_self_test_cli_exits_on_failed_report(self) -> None:
+        failing_report = {
+            "bead_id": "bd-38m",
+            "title": "Optimize lockstep harness throughput and memory profile",
+            "section": "10.6",
+            "verdict": "FAIL",
+            "overall_pass": False,
+            "total": 1,
+            "passed": 0,
+            "failed": 1,
+            "git_xref": [],
+            "checks": [{"check": "forced_failure", "pass": False, "detail": "forced"}],
+        }
+        with (
+            patch.object(mod, "run_all", return_value=failing_report),
+            patch.object(sys, "argv", ["check_harness_throughput.py", "--self-test"]),
+            patch("builtins.print"),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                mod.main()
+        self.assertEqual(ctx.exception.code, 1)
 
 
 class TestSafeRelative(TestCase):
@@ -187,12 +240,18 @@ class TestJsonOutput(TestCase):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_harness_throughput.py"), "--json"],
             capture_output=True,
+            check=True,
             text=True,
+            timeout=10,
         )
-        self.assertEqual(result.returncode, 0)
-        data = json.loads(result.stdout)
+        decoder = json.JSONDecoder()
+        try:
+            data = decoder.decode(result.stdout)
+        except json.JSONDecodeError as exc:
+            self.fail(f"invalid JSON output: {exc}\nstdout={result.stdout}\nstderr={result.stderr}")
         self.assertEqual(data["bead_id"], "bd-38m")
         self.assertEqual(data["verdict"], "PASS")
+        self.assertIn("git_xref", data)
 
 
 if __name__ == "__main__":

@@ -13,15 +13,46 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
-from typing import Any
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 SPEC_PATH = ROOT / "docs" / "specs" / "section_10_6" / "bd-38m_contract.md"
 POLICY_PATH = ROOT / "docs" / "policy" / "lockstep_harness_optimization.md"
+SOURCE_MODULE = "scripts/check_harness_throughput.py"
+TEST_MODULE = "tests/test_check_harness_throughput.py"
+EVIDENCE_PATH = "artifacts/section_10_6/bd-38m/verification_evidence.json"
+SUMMARY_PATH = "artifacts/section_10_6/bd-38m/verification_summary.md"
+GIT_XREF: list[dict[str, Any]] = [
+    {
+        "commit": "d8a6e25cf4cf8c8363f41cf90fb6e0fdf6f74032",
+        "subject": "chore(scripts): consolidate ROOT definitions and reorganize imports across 400+ check scripts",
+        "paths": [SOURCE_MODULE],
+    },
+    {
+        "commit": "495e5c1bc5657778d627d99c477d7b508be50248",
+        "subject": "Harden test infrastructure: add structured logging, replace panic with unreachable, migrate to Uuid v7, and modernize Rust/Python idioms",
+        "paths": [SOURCE_MODULE, TEST_MODULE],
+    },
+    {
+        "commit": "f1d41ad9b488c06ff83cc4b4c259a9bbb48335e9",
+        "subject": "docs: add 32 policy docs, 35 spec contracts, 88 verification artifacts, CI gate, fixtures, and packaging profiles",
+        "paths": [
+            str(SPEC_PATH.relative_to(ROOT)),
+            str(POLICY_PATH.relative_to(ROOT)),
+            EVIDENCE_PATH,
+            SUMMARY_PATH,
+        ],
+    },
+    {
+        "commit": "be6ff7283f42a4f56eaaa31af6b990bd4fa19ec6",
+        "subject": "test: add 36 check scripts, 33 test suites, and 5 fuzz targets with corpus for sections 10.5-13",
+        "paths": [SOURCE_MODULE, TEST_MODULE],
+    },
+]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -216,6 +247,21 @@ def check_policy_event_codes() -> dict[str, Any]:
     return _check("policy_event_codes", ok, "all 4 event codes in policy" if ok else f"missing: {missing}")
 
 
+def check_git_xref() -> dict[str, Any]:
+    missing = [
+        xref
+        for xref in GIT_XREF
+        if len(str(xref.get("commit", ""))) != 40 or not xref.get("paths")
+    ]
+    ok = len(missing) == 0
+    detail = (
+        f"{len(GIT_XREF)} git_xref entries cite bd-38m artifacts"
+        if ok
+        else f"invalid git_xref entries: {len(missing)}"
+    )
+    return _check("git_xref", ok, detail)
+
+
 # ---------------------------------------------------------------------------
 # Aggregation
 # ---------------------------------------------------------------------------
@@ -240,6 +286,7 @@ def run_all() -> dict[str, Any]:
     check_warm_pool()
     check_streaming_normalization_rules()
     check_policy_event_codes()
+    check_git_xref()
 
     total = len(RESULTS)
     passed = sum(1 for r in RESULTS if r["pass"])
@@ -255,36 +302,42 @@ def run_all() -> dict[str, Any]:
         "total": total,
         "passed": passed,
         "failed": failed,
+        "source_module": SOURCE_MODULE,
+        "test_module": TEST_MODULE,
+        "git_xref": list(GIT_XREF),
         "checks": list(RESULTS),
     }
 
 
 def self_test() -> bool:
     report = run_all()
-    assert isinstance(report, dict), "run_all must return dict"
-    assert report["bead_id"] == "bd-38m", "bead_id mismatch"
-    assert "checks" in report, "missing checks key"
-    assert "verdict" in report, "missing verdict key"
-    assert "total" in report, "missing total key"
-    assert "passed" in report, "missing passed key"
-    assert "failed" in report, "missing failed key"
-    assert len(report["checks"]) > 0, "no checks produced"
+    if not isinstance(report, dict):
+        raise AssertionError("run_all must return dict")
+    if report["bead_id"] != "bd-38m":
+        raise AssertionError("bead_id mismatch")
+    for key in ("checks", "verdict", "total", "passed", "failed", "git_xref"):
+        if key not in report:
+            raise AssertionError(f"missing {key} key")
+    if len(report["checks"]) == 0:
+        raise AssertionError("no checks produced")
     for c in report["checks"]:
-        assert "check" in c, "check entry missing name"
-        assert "pass" in c, "check entry missing pass"
-        assert "detail" in c, "check entry missing detail"
-    return True
+        for key in ("check", "pass", "detail"):
+            if key not in c:
+                raise AssertionError(f"check entry missing {key}")
+    return bool(report["overall_pass"])
 
 
 def main() -> None:
-    logger = configure_test_logging("check_harness_throughput")
+    configure_test_logging("check_harness_throughput")
     parser = argparse.ArgumentParser(description="Verify bd-38m lockstep harness optimization")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON report")
     parser.add_argument("--self-test", action="store_true", help="Run self-test mode")
     args = parser.parse_args()
 
     if args.self_test:
-        self_test()
+        if not self_test():
+            print("self_test failed", file=sys.stderr)
+            sys.exit(1)
         print("self_test passed")
         return
 

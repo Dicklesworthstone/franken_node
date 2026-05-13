@@ -4,9 +4,46 @@
   "section": "10.6",
   "verdict": "PASS",
   "overall_pass": true,
-  "total": 21,
-  "passed": 21,
+  "total": 22,
+  "passed": 22,
   "failed": 0,
+  "source_module": "scripts/check_harness_throughput.py",
+  "test_module": "tests/test_check_harness_throughput.py",
+  "git_xref": [
+    {
+      "commit": "d8a6e25cf4cf8c8363f41cf90fb6e0fdf6f74032",
+      "subject": "chore(scripts): consolidate ROOT definitions and reorganize imports across 400+ check scripts",
+      "paths": [
+        "scripts/check_harness_throughput.py"
+      ]
+    },
+    {
+      "commit": "495e5c1bc5657778d627d99c477d7b508be50248",
+      "subject": "Harden test infrastructure: add structured logging, replace panic with unreachable, migrate to Uuid v7, and modernize Rust/Python idioms",
+      "paths": [
+        "scripts/check_harness_throughput.py",
+        "tests/test_check_harness_throughput.py"
+      ]
+    },
+    {
+      "commit": "f1d41ad9b488c06ff83cc4b4c259a9bbb48335e9",
+      "subject": "docs: add 32 policy docs, 35 spec contracts, 88 verification artifacts, CI gate, fixtures, and packaging profiles",
+      "paths": [
+        "docs/specs/section_10_6/bd-38m_contract.md",
+        "docs/policy/lockstep_harness_optimization.md",
+        "artifacts/section_10_6/bd-38m/verification_evidence.json",
+        "artifacts/section_10_6/bd-38m/verification_summary.md"
+      ]
+    },
+    {
+      "commit": "be6ff7283f42a4f56eaaa31af6b990bd4fa19ec6",
+      "subject": "test: add 36 check scripts, 33 test suites, and 5 fuzz targets with corpus for sections 10.5-13",
+      "paths": [
+        "scripts/check_harness_throughput.py",
+        "tests/test_check_harness_throughput.py"
+      ]
+    }
+  ],
   "checks": [
     {
       "check": "spec_exists",
@@ -112,6 +149,11 @@
       "check": "policy_event_codes",
       "pass": true,
       "detail": "all 4 event codes in policy"
+    },
+    {
+      "check": "git_xref",
+      "pass": true,
+      "detail": "4 git_xref entries cite bd-38m artifacts"
     }
   ]
 }

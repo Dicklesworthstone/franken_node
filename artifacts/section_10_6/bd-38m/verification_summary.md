@@ -26,10 +26,17 @@
 | Warm pool | 1 | 1 |
 | Streaming normalization | 1 | 1 |
 | Policy event codes | 1 | 1 |
-| **Total** | **21** | **21** |
+| Git xref | 1 | 1 |
+| **Total** | **22** | **22** |
 
-- `python3 scripts/check_harness_throughput.py --json` -> PASS (21/21 checks)
-- `python3 -m pytest tests/test_check_harness_throughput.py -v` -> PASS
+- `python3 scripts/check_harness_throughput.py --json` -> PASS (22/22 checks)
+- `python3 scripts/check_harness_throughput.py --self-test` -> PASS
+- `python3 -m unittest tests.test_check_harness_throughput` -> PASS (27 tests)
+
+## Completion Debt Resolution
+
+- `scripts/check_harness_throughput.py` now returns `bool(report["overall_pass"])` from `self_test()` instead of a literal success value.
+- The JSON report now exposes `source_module`, `test_module`, and `git_xref` entries so the bd-38m implementation and evidence are traceable to committed source history.
 
 ## Agent: CrimsonCrane
 
