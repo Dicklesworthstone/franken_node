@@ -433,6 +433,40 @@ class TestJsonOutput(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Test: CI workflow wiring
+# ---------------------------------------------------------------------------
+
+class TestCompatCorpusWorkflow(unittest.TestCase):
+    def setUp(self):
+        self.workflow = ROOT / ".github" / "workflows" / "compat-corpus-pass-gate.yml"
+        self.assertTrue(self.workflow.is_file())
+        self.content = self.workflow.read_text(encoding="utf-8")
+
+    def test_workflow_runs_gate_self_test_and_json_gate(self):
+        self.assertIn("python3 scripts/check_compat_corpus_gate.py --self-test", self.content)
+        self.assertIn(
+            "python3 scripts/check_compat_corpus_gate.py --json > /tmp/compat_corpus_gate_report.json",
+            self.content,
+        )
+
+    def test_workflow_runs_unit_tests_and_uploads_evidence(self):
+        self.assertIn("python3 -m unittest tests/test_check_compat_corpus_gate.py", self.content)
+        self.assertIn("actions/upload-artifact@v4", self.content)
+        self.assertIn("compat-corpus-pass-gate", self.content)
+
+    def test_workflow_triggers_on_gate_contract_inputs(self):
+        for path in [
+            ".github/workflows/compat-corpus-pass-gate.yml",
+            "scripts/check_compat_corpus_gate.py",
+            "tests/test_check_compat_corpus_gate.py",
+            "docs/specs/section_13/bd-28sz_contract.md",
+            "docs/policy/compat_corpus_gate.md",
+            "crates/franken-node/src/main.rs",
+        ]:
+            self.assertIn(path, self.content)
+
+
+# ---------------------------------------------------------------------------
 # Test: safe_rel
 # ---------------------------------------------------------------------------
 

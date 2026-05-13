@@ -1,0 +1,45 @@
+name: Compatibility Corpus Pass Gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/compat-corpus-pass-gate.yml"
+      - "scripts/check_compat_corpus_gate.py"
+      - "tests/test_check_compat_corpus_gate.py"
+      - "docs/specs/section_13/bd-28sz_contract.md"
+      - "docs/policy/compat_corpus_gate.md"
+      - "crates/franken-node/src/main.rs"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/compat-corpus-pass-gate.yml"
+      - "scripts/check_compat_corpus_gate.py"
+      - "tests/test_check_compat_corpus_gate.py"
+      - "docs/specs/section_13/bd-28sz_contract.md"
+      - "docs/policy/compat_corpus_gate.md"
+      - "crates/franken-node/src/main.rs"
+
+jobs:
+  compat-corpus-pass-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run compatibility corpus gate self-test
+        run: |
+          python3 scripts/check_compat_corpus_gate.py --self-test
+
+      - name: Run compatibility corpus gate
+        run: |
+          python3 scripts/check_compat_corpus_gate.py --json > /tmp/compat_corpus_gate_report.json
+
+      - name: Run compatibility corpus gate unit tests
+        run: |
+          python3 -m unittest tests/test_check_compat_corpus_gate.py
+
+      - name: Upload compatibility corpus gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compat-corpus-pass-gate
+          path: /tmp/compat_corpus_gate_report.json
