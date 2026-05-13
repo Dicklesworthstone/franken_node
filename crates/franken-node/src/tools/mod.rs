@@ -6,6 +6,8 @@ pub mod benchmark_suite;
 #[cfg(feature = "advanced-features")]
 pub mod compatibility_correctness_metrics;
 #[cfg(feature = "advanced-features")]
+pub mod compatibility_regression_dashboard;
+#[cfg(feature = "advanced-features")]
 pub mod containment_revocation_metrics;
 pub mod counterfactual_replay;
 #[cfg(feature = "admin-tools")]

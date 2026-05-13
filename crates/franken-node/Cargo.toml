@@ -797,6 +797,10 @@ name = "compatibility_corpus_stream"
 path = "tests/compatibility_corpus_stream.rs"
 
 [[test]]
+name = "compatibility_regression_dashboard"
+path = "tests/compatibility_regression_dashboard.rs"
+
+[[test]]
 name = "remote_api_conformance_harness"
 path = "tests/remote_api_conformance_harness.rs"
 required-features = ["control-plane"]

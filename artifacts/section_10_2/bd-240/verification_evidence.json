@@ -57,6 +57,16 @@
       "path": "tests/test_check_compat_dashboard.py",
       "sha256": "cbf9957d80423f5095522147bb9f493cbab7bc09900b914907cffb69a3867387",
       "size_bytes": 1088
+    },
+    {
+      "path": "crates/franken-node/src/tools/compatibility_regression_dashboard.rs",
+      "sha256": "843d0b8ca26da8d4c8240961317897a76d86ef41f7371bc26bba4045330f66b9",
+      "size_bytes": 16171
+    },
+    {
+      "path": "crates/franken-node/tests/compatibility_regression_dashboard.rs",
+      "sha256": "238750d2639ed45a850854aa202ea40ed129b037f23f665a7fe6666bd3c0d29f",
+      "size_bytes": 4012
     }
   ]
 }
