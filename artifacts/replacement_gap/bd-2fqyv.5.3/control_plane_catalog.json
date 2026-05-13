@@ -1,0 +1,39 @@
+{
+  "artifact_id": "control_plane_catalog",
+  "artifact_type": "control_plane_catalog_boundary_index",
+  "schema_version": "control-plane-catalog-boundary-v1",
+  "bead_id": "bd-2fqyv.5.3",
+  "generated_at": "2026-05-13T15:12:06Z",
+  "canonical_endpoint_report": "artifacts/10.16/fastapi_endpoint_report.json",
+  "implementation": "crates/franken-node/src/api/service.rs",
+  "contract_spec": "docs/specs/section_10_16/bd-2f5l_contract.md",
+  "checker": "scripts/check_fastapi_skeleton.py",
+  "checker_tests": "tests/test_check_fastapi_skeleton.py",
+  "endpoint_count": 12,
+  "group_counts": {
+    "operator": 4,
+    "verifier": 3,
+    "fleet_control": 5
+  },
+  "transport_boundary": {
+    "kind": "in_process_catalog",
+    "owns_listener": false,
+    "request_lifecycle": "caller-owned in-process dispatch only",
+    "cancellation_semantics": "no transport-owned cancellation boundary"
+  },
+  "performance_baseline_status": "unavailable_pending_transport",
+  "numeric_latency_baselines_present": false,
+  "baseline_provenance": "No live async HTTP/gRPC transport boundary is owned; load-test baselines are intentionally unavailable until that trigger exists.",
+  "evidence_paths": [
+    "artifacts/10.16/fastapi_endpoint_report.json",
+    "crates/franken-node/src/api/service.rs",
+    "docs/specs/section_10_16/bd-2f5l_contract.md",
+    "scripts/check_fastapi_skeleton.py",
+    "tests/test_check_fastapi_skeleton.py"
+  ],
+  "notes": [
+    "This artifact is the bead-local discoverability index for the control-plane catalog boundary.",
+    "The canonical endpoint details remain in artifacts/10.16/fastapi_endpoint_report.json to avoid duplicating route rows.",
+    "scripts/check_fastapi_skeleton.py fails closed if this artifact is missing or drifts from the canonical endpoint report."
+  ]
+}

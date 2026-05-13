@@ -86,6 +86,12 @@ The report must satisfy all of the following:
 7. Provenance text states that baselines are intentionally unavailable pending transport ownership.
 8. No fake gate verdict or synthetic `0.0` latency numbers appear in the artifact.
 
+`artifacts/replacement_gap/bd-2fqyv.5.3/control_plane_catalog.json` is the
+bead-local discoverability index for the same control-plane catalog boundary.
+It must point at the canonical endpoint report above and repeat only the summary
+facts needed to find and validate the boundary: endpoint count, group counts,
+transport ownership, and unavailable-baseline semantics.
+
 ## Acceptance Criteria
 
 1. The base artifact contains 12 endpoints across operator (4), verifier (3), and fleet_control (5).
@@ -109,5 +115,6 @@ The report must satisfy all of the following:
 | `crates/franken-node/src/api/verifier_routes.rs` | Verifier route metadata source |
 | `crates/franken-node/src/api/fleet_control_routes.rs` | Fleet-control route metadata source |
 | `artifacts/10.16/fastapi_endpoint_report.json` | Truthful base-catalog endpoint report |
+| `artifacts/replacement_gap/bd-2fqyv.5.3/control_plane_catalog.json` | Bead-local discoverability index for the control-plane catalog artifact |
 | `scripts/check_fastapi_skeleton.py` | Verification script for the live catalog boundary |
 | `tests/test_check_fastapi_skeleton.py` | Python unit tests for the verification script |

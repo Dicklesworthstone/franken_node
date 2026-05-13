@@ -1,0 +1,55 @@
+{
+  "artifact_type": "verification_evidence",
+  "schema_version": "bd-2fqyv-control-plane-catalog-artifact-v1",
+  "bead_id": "bd-2fqyv.5.3.1",
+  "parent_bead_id": "bd-2fqyv.5.3",
+  "title": "control_plane_catalog artifact discoverability proof",
+  "generated_at": "2026-05-13T15:12:06Z",
+  "finding": "control_plane_catalog artifact file not located",
+  "remediation": {
+    "artifact": "artifacts/replacement_gap/bd-2fqyv.5.3/control_plane_catalog.json",
+    "canonical_endpoint_report": "artifacts/10.16/fastapi_endpoint_report.json",
+    "checker": "scripts/check_fastapi_skeleton.py",
+    "checker_tests": "tests/test_check_fastapi_skeleton.py",
+    "spec": "docs/specs/section_10_16/bd-2f5l_contract.md"
+  },
+  "boundary_contract": {
+    "transport_boundary_kind": "in_process_catalog",
+    "owns_listener": false,
+    "request_lifecycle": "caller-owned in-process dispatch only",
+    "cancellation_semantics": "no transport-owned cancellation boundary",
+    "performance_baseline_status": "unavailable_pending_transport",
+    "numeric_latency_baselines_present": false
+  },
+  "validation": [
+    {
+      "command": "python3 scripts/check_fastapi_skeleton.py --json",
+      "expected": "PASS",
+      "actual": "PASS: 143 passing, 0 failing"
+    },
+    {
+      "command": "python3 -m unittest tests/test_check_fastapi_skeleton.py",
+      "expected": "PASS",
+      "actual": "PASS: 36 tests"
+    },
+    {
+      "command": "python3 -m json.tool artifacts/replacement_gap/bd-2fqyv.5.3/control_plane_catalog.json",
+      "expected": "PASS",
+      "actual": "PASS"
+    },
+    {
+      "command": "python3 -m json.tool artifacts/replacement_gap/bd-2fqyv.5.3/verification_evidence.json",
+      "expected": "PASS",
+      "actual": "PASS"
+    },
+    {
+      "command": "python3 -m py_compile scripts/check_fastapi_skeleton.py tests/test_check_fastapi_skeleton.py",
+      "expected": "PASS",
+      "actual": "PASS"
+    }
+  ],
+  "notes": [
+    "The artifact is a discoverability index; endpoint rows remain in the canonical endpoint report to prevent divergent duplicate route catalogs.",
+    "The checker compares the artifact against the canonical endpoint report so missing or stale artifact state is a validation failure."
+  ]
+}

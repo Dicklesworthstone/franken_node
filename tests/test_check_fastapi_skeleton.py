@@ -2,6 +2,7 @@
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -81,6 +82,45 @@ class TestCheckReport(unittest.TestCase):
         self.assertEqual(len(path_checks), 12)
         for result in path_checks:
             self.assertTrue(result["pass"])
+
+
+class TestControlPlaneCatalogArtifact(unittest.TestCase):
+    def test_artifact_passes(self):
+        results = mod.check_control_plane_catalog_artifact()
+        for result in results:
+            self.assertTrue(result["pass"], f"Failed: {result['check']}: {result['detail']}")
+
+    def test_missing_artifact_fails_closed(self):
+        results = mod.check_control_plane_catalog_artifact(artifact_path=Path("/no/catalog.json"))
+        self.assertFalse(results[0]["pass"])
+        self.assertIn("missing", results[0]["detail"])
+
+    def test_endpoint_count_drift_fails(self):
+        data = {
+            "bead_id": mod.PERF_BASELINE_BEAD_ID,
+            "artifact_id": "control_plane_catalog",
+            "canonical_endpoint_report": mod.safe_rel(mod.REPORT),
+            "endpoint_count": 11,
+            "group_counts": {"operator": 4, "verifier": 3, "fleet_control": 5},
+            "transport_boundary": {"kind": "in_process_catalog", "owns_listener": False},
+            "performance_baseline_status": "unavailable_pending_transport",
+            "numeric_latency_baselines_present": False,
+            "evidence_paths": [
+                mod.safe_rel(mod.REPORT),
+                mod.safe_rel(mod.IMPL),
+                mod.safe_rel(mod.SPEC),
+                mod.safe_rel(Path(mod.__file__).resolve()),
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact = Path(tmpdir) / "control_plane_catalog.json"
+            artifact.write_text(json.dumps(data), encoding="utf-8")
+            results = mod.check_control_plane_catalog_artifact(artifact_path=artifact)
+
+        endpoint_count = [
+            result for result in results if "endpoint count matches report" in result["check"]
+        ][0]
+        self.assertFalse(endpoint_count["pass"])
 
 
 class TestCheckSpec(unittest.TestCase):
