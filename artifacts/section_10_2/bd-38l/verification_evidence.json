@@ -3,7 +3,7 @@
   "bead_id": "bd-38l",
   "artifact_type": "verification_evidence",
   "timestamp": "2026-05-13T14:59:50.543897+00:00",
-  "git_commit": "pending bd-1qp.1 implementation commit",
+  "git_commit": "91d9a658440776dd267f48f35b4a375d0c600f25",
   "verdict": "PASS",
   "completion_debt_resolution": {
     "bead_id": "bd-38l.1",
