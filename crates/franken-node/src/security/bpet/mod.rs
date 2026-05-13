@@ -6,6 +6,7 @@
 pub mod adversarial_evolution;
 pub mod adversarial_harness;
 pub mod camouflage_detector;
+pub mod cohort_baselines;
 pub mod drift_features;
 pub mod economic_integration;
 pub mod evolution_risk_scorer;
