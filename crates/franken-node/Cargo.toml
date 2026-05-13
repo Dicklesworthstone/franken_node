@@ -495,6 +495,10 @@ name = "trust_card_authoritative_state_real_inputs"
 path = "tests/trust_card_authoritative_state_real_inputs.rs"
 
 [[test]]
+name = "trust_card_fuzz_smoke"
+path = "src/supply_chain/trust_card_fuzz_test.rs"
+
+[[test]]
 name = "trust_card_wire_conformance"
 path = "tests/trust_card_wire_conformance.rs"
 
