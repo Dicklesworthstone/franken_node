@@ -50,6 +50,9 @@ pub mod bpet_migration_gate;
 #[cfg(any(test, feature = "admin-tools"))]
 #[allow(dead_code)]
 pub mod dgis_migration_gate;
+#[cfg(any(test, feature = "admin-tools"))]
+#[allow(dead_code)]
+pub mod rewrite_suggestion_engine;
 
 #[cfg(test)]
 pub mod migration_protocol_conformance_tests;

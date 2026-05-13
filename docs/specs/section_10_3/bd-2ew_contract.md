@@ -10,6 +10,9 @@ After scanning a project and scoring risks, operators need actionable rewrite su
 2. Generate rewrite suggestions with before/after examples
 3. Produce rollback plan artifacts for each suggestion
 4. Prioritize suggestions by risk level and migration impact
+5. Provide a Rust module in `crates/franken-node/src/migration/rewrite_suggestion_engine.rs`
+   so the suggestion engine is available to crate code and tests, not only
+   Python gate scripts.
 
 ## Suggestion Categories
 
@@ -26,7 +29,8 @@ Each suggestion includes:
 - Original code snapshot
 - Suggested replacement
 - Test commands to verify equivalence
-- Rollback command (git restore path)
+- Rollback command (git restore path) with an argv form so operator tooling does
+  not need to parse shell text
 
 ## Invariants
 
@@ -34,6 +38,10 @@ Each suggestion includes:
 2. Rollback plans are always generated alongside suggestions.
 3. Suggestions are prioritized: critical first, then high, medium, low.
 4. Engine deterministically produces identical output for identical input.
+5. Time-dependent report fields must be injectable by tests so fixed-timestamp
+   Rust verification can prove deterministic output.
+6. Unknown API families must fail into `manual-review` suggestions rather than
+   disappearing from the report.
 
 ## References
 

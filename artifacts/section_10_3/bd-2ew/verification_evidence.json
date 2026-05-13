@@ -2,13 +2,24 @@
   "gate": "rewrite_engine_verification",
   "section": "10.3",
   "verdict": "PASS",
-  "timestamp": "2026-02-20T10:12:39.647765+00:00",
+  "timestamp": "2026-05-13T08:44:47Z",
   "checks": [
+    {
+      "id": "REWRITE-EXISTS",
+      "status": "PASS",
+      "details": {
+        "python_engine": true,
+        "rust_engine": true,
+        "rust_module": "crates/franken-node/src/migration/rewrite_suggestion_engine.rs",
+        "schema": "franken_node/migration/rewrite_suggestion_report/v1"
+      }
+    },
     {
       "id": "REWRITE-SUGGESTIONS",
       "status": "PASS",
       "details": {
-        "count": 4
+        "verification_sample_count": 4,
+        "scanner_integration_sample_count": 6
       }
     },
     {
@@ -20,7 +31,11 @@
     },
     {
       "id": "REWRITE-ROLLBACK",
-      "status": "PASS"
+      "status": "PASS",
+      "details": {
+        "argv_form": true,
+        "deduplicates_affected_files": true
+      }
     },
     {
       "id": "REWRITE-CATEGORIES",
@@ -38,11 +53,38 @@
         "rule_count": 12,
         "unsafe_count": 4
       }
+    },
+    {
+      "id": "REWRITE-RUST-INTEGRATION",
+      "status": "PASS",
+      "details": {
+        "test_target": "rewrite_suggestion_engine",
+        "tests_passed": 5,
+        "tests_failed": 0,
+        "command": "timeout 1800 rch exec -- env CARGO_BUILD_JOBS=1 cargo test -p frankenengine-node --no-default-features --features admin-tools --test rewrite_suggestion_engine"
+      }
+    },
+    {
+      "id": "REWRITE-RUST-ARTIFACTS",
+      "status": "PASS",
+      "details": {
+        "source_sha256": "c6e5eb1880a8084d0ca771385a9cea2f591b72b1d5bb0eeb5fd12e6eee5fb904",
+        "source_size_bytes": 22231,
+        "test_sha256": "ae2225b903709a9edafec50de27f1ab9c8bf8008775d5adadb9bcad4cd224812",
+        "test_size_bytes": 5907,
+        "cargo_toml_sha256": "5d273da8e81244aa54931d205f4aef062bcc03441952af88b4d6bed222f8f2f7",
+        "migration_mod_sha256": "27a90283b9e2bcf12307372c96bc2046b65abc76c590b5b11c25338c97335456"
+      }
     }
   ],
   "summary": {
-    "total_checks": 5,
-    "passing_checks": 5,
+    "total_checks": 8,
+    "passing_checks": 8,
     "failing_checks": 0
+  },
+  "validation": {
+    "rustfmt": "rustfmt --edition 2024 crates/franken-node/src/migration/rewrite_suggestion_engine.rs crates/franken-node/tests/rewrite_suggestion_engine.rs --check",
+    "diff_check": "git diff --check -- .beads/issues.jsonl crates/franken-node/src/migration/rewrite_suggestion_engine.rs crates/franken-node/tests/rewrite_suggestion_engine.rs crates/franken-node/src/migration/mod.rs crates/franken-node/Cargo.toml docs/specs/section_10_3/bd-2ew_contract.md artifacts/section_10_3/bd-2ew/verification_evidence.json artifacts/section_10_3/bd-2ew/verification_summary.md",
+    "cargo_test": "timeout 1800 rch exec -- env CARGO_BUILD_JOBS=1 cargo test -p frankenengine-node --no-default-features --features admin-tools --test rewrite_suggestion_engine"
   }
 }
