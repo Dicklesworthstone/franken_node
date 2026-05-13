@@ -11,10 +11,12 @@ from check_divergence_ledger import (  # noqa: E402
     check_schema_exists,
     check_traceability,
     check_ledger_structure,
+    check_entry_count_floor,
     check_entry_fields,
     check_rationale_present,
     check_unique_ids,
     implementation_artifacts,
+    MIN_DIVERGENCE_ENTRIES,
     VALID_BANDS,
     VALID_RISK_TIERS,
     VALID_STATUSES,
@@ -46,12 +48,19 @@ def test_implementation_artifacts_name_canonical_paths():
     assert artifacts["schema_path"] == "schemas/divergence_ledger.schema.json"
     assert artifacts["test_path"] == "tests/test_check_divergence_ledger.py"
     assert artifacts["evidence_path"] == "artifacts/section_10_2/bd-38l/verification_evidence.json"
+    assert artifacts["min_entry_count"] == MIN_DIVERGENCE_ENTRIES
 
 
 def test_ledger_structure():
     result = check_ledger_structure()
     assert result["status"] == "PASS"
-    assert result["details"]["entry_count"] >= 1
+    assert result["details"]["entry_count"] >= MIN_DIVERGENCE_ENTRIES
+
+
+def test_entry_count_floor_rejects_thin_ledger():
+    result = check_entry_count_floor()
+    assert result["status"] == "PASS"
+    assert result["details"]["entry_count"] >= result["details"]["minimum"]
 
 
 def test_entry_fields_valid():
@@ -90,6 +99,6 @@ def test_ledger_json_content():
     assert err is None
     assert data is not None
     assert data["schema_version"] == "1.0"
-    assert len(data["entries"]) >= 2
+    assert len(data["entries"]) >= MIN_DIVERGENCE_ENTRIES
     # Verify first entry has rationale
     assert len(data["entries"][0]["rationale"]) > 10

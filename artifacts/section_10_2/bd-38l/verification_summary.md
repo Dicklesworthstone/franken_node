@@ -5,7 +5,7 @@
 ## What was delivered
 
 1. **Divergence ledger** `docs/DIVERGENCE_LEDGER.json`:
-   - 2 initial entries (process.binding, vm.runInNewContext)
+   - 6 entries (process.binding, vm.runInNewContext, child_process.exec, child_process.spawn, eval, native addon loading)
    - Each entry: id, api_family, api_name, band, node/franken behavior, signed rationale, risk tier, status, timestamp, reviewer
 
 2. **JSON schema** `schemas/divergence_ledger.schema.json`:
@@ -15,10 +15,10 @@
 
 3. **Spec document** `docs/specs/section_10_2/bd-38l_contract.md`
 
-4. **Verification script** `scripts/check_divergence_ledger.py` with 7 checks:
-   - DIV-EXISTS, DIV-SCHEMA, DIV-TRACEABILITY, DIV-STRUCTURE, DIV-FIELDS, DIV-RATIONALE, DIV-UNIQUE
+4. **Verification script** `scripts/check_divergence_ledger.py` with 8 checks:
+   - DIV-EXISTS, DIV-SCHEMA, DIV-TRACEABILITY, DIV-STRUCTURE, DIV-COUNT-FLOOR, DIV-FIELDS, DIV-RATIONALE, DIV-UNIQUE
 
-5. **Unit tests** `tests/test_check_divergence_ledger.py`: 11 tests
+5. **Unit tests** `tests/test_check_divergence_ledger.py`: 12 tests
 
 6. **Traceability closure** for `bd-38l.1`:
    - Canonical source module: `scripts/check_divergence_ledger.py`
@@ -26,4 +26,4 @@
 
 ## Unit tests
 
-- 11/11 passed, 0 failed
+- 12/12 passed, 0 failed

@@ -60,6 +60,7 @@ VALID_BANDS = {"core", "high-value", "edge", "unsafe"}
 VALID_RISK_TIERS = {"critical", "high", "medium", "low"}
 VALID_STATUSES = {"accepted", "under-review", "deprecated"}
 ID_PATTERN = re.compile(r'^DIV-\d{3,}$')
+MIN_DIVERGENCE_ENTRIES = 6
 
 
 def _rel(path: Path) -> str:
@@ -77,6 +78,7 @@ def implementation_artifacts() -> dict:
         "test_path": _rel(TEST_PATH),
         "evidence_path": _rel(EVIDENCE_PATH),
         "summary_path": _rel(SUMMARY_PATH),
+        "min_entry_count": MIN_DIVERGENCE_ENTRIES,
         "git_xref": GIT_XREF,
     }
 
@@ -151,6 +153,30 @@ def check_ledger_structure() -> dict:
         check["details"]["error"] = "Missing or invalid 'entries' array"
         return check
     check["details"]["entry_count"] = len(data["entries"])
+    return check
+
+
+def check_entry_count_floor() -> dict:
+    """DIV-COUNT-FLOOR: Check the ledger has a non-thin divergence corpus."""
+    check = {
+        "id": "DIV-COUNT-FLOOR",
+        "status": "PASS",
+        "details": {"minimum": MIN_DIVERGENCE_ENTRIES},
+    }
+    data, err = load_ledger()
+    if err:
+        check["status"] = "FAIL"
+        check["details"]["error"] = err
+        return check
+
+    entry_count = len(data.get("entries", []))
+    check["details"]["entry_count"] = entry_count
+    if entry_count < MIN_DIVERGENCE_ENTRIES:
+        check["status"] = "FAIL"
+        check["details"]["error"] = (
+            f"expected at least {MIN_DIVERGENCE_ENTRIES} divergence entries, "
+            f"found {entry_count}"
+        )
     return check
 
 
@@ -247,6 +273,7 @@ def main():
         check_schema_exists(),
         check_traceability(),
         check_ledger_structure(),
+        check_entry_count_floor(),
         check_entry_fields(),
         check_rationale_present(),
         check_unique_ids(),

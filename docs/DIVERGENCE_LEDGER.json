@@ -28,6 +28,62 @@
       "status": "accepted",
       "timestamp": "2025-01-15T00:00:00+00:00",
       "reviewer": "Dicklesworthstone"
+    },
+    {
+      "id": "DIV-003",
+      "behavior_id": null,
+      "api_family": "child_process",
+      "api_name": "child_process.exec",
+      "band": "unsafe",
+      "node_behavior": "child_process.exec() launches shell commands with ambient process authority and inherits host shell semantics.",
+      "franken_behavior": "Shell execution is treated as an unsafe compatibility behavior. Migration tooling marks it for sandbox policy approval, and runtime compatibility gates keep unsafe shims blocked outside explicit legacy-risky policy.",
+      "rationale": "Ambient shell execution can bypass capability boundaries and undermine deterministic replay. The divergence is intentional: operators must review and approve this behavior instead of inheriting Node's ambient authority by default.",
+      "risk_tier": "high",
+      "status": "accepted",
+      "timestamp": "2026-05-13T00:00:00+00:00",
+      "reviewer": "SnowyBeaver"
+    },
+    {
+      "id": "DIV-004",
+      "behavior_id": null,
+      "api_family": "child_process",
+      "api_name": "child_process.spawn",
+      "band": "unsafe",
+      "node_behavior": "child_process.spawn() starts arbitrary host processes with caller-selected executables, arguments, environment, and inherited descriptors.",
+      "franken_behavior": "Process spawning is reviewed as an unsafe compatibility surface and must pass sandbox/capability policy before it is treated as production behavior.",
+      "rationale": "Unreviewed process creation can widen filesystem, network, and process-control authority. The product keeps this divergence visible so migrations cannot silently preserve ambient host authority.",
+      "risk_tier": "high",
+      "status": "accepted",
+      "timestamp": "2026-05-13T00:00:00+00:00",
+      "reviewer": "SnowyBeaver"
+    },
+    {
+      "id": "DIV-005",
+      "behavior_id": null,
+      "api_family": "javascript",
+      "api_name": "eval",
+      "band": "unsafe",
+      "node_behavior": "eval() compiles and executes dynamic source text inside the current JavaScript context.",
+      "franken_behavior": "Dynamic code execution is blocked by default migration policy and must be rewritten or explicitly approved before compatibility shims may expose it.",
+      "rationale": "Dynamic code evaluation defeats static migration analysis, provenance tracking, and capability preflight. Blocking it by default preserves trust-native policy guarantees while leaving a documented compatibility escape path.",
+      "risk_tier": "high",
+      "status": "accepted",
+      "timestamp": "2026-05-13T00:00:00+00:00",
+      "reviewer": "SnowyBeaver"
+    },
+    {
+      "id": "DIV-006",
+      "behavior_id": null,
+      "api_family": "native_addons",
+      "api_name": "require_native_addon",
+      "band": "unsafe",
+      "node_behavior": "Node.js can load native addons that execute compiled host code inside the process.",
+      "franken_behavior": "Native addon loading is treated as an unsafe compatibility divergence that requires explicit policy review and cannot be silently accepted by the default compatibility mode.",
+      "rationale": "Native addons can bypass JavaScript-level sandboxing and provenance checks. The ledger records this as a first-class divergence so release gates and migration reports keep native code risk visible.",
+      "risk_tier": "critical",
+      "status": "accepted",
+      "timestamp": "2026-05-13T00:00:00+00:00",
+      "reviewer": "SnowyBeaver"
     }
   ]
 }

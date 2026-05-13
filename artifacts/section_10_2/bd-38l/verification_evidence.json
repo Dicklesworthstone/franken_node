@@ -2,13 +2,18 @@
   "schema_version": "1.0",
   "bead_id": "bd-38l",
   "artifact_type": "verification_evidence",
-  "timestamp": "2026-05-12T21:42:27.319776+00:00",
-  "git_commit": "32b56e4c639fd2a39f3f0b77ee55a656ae65109e",
+  "timestamp": "2026-05-13T14:59:50.543897+00:00",
+  "git_commit": "pending bd-1qp.1 implementation commit",
   "verdict": "PASS",
   "completion_debt_resolution": {
     "bead_id": "bd-38l.1",
     "finding": "spec and evidence were artifact-only, without an explicit source module or git_xref",
     "resolution": "canonical verifier source module and git_xref are now exposed in the checker, spec, and evidence"
+  },
+  "ledger_corpus_floor_resolution": {
+    "bead_id": "bd-1qp.1",
+    "finding": "DIVERGENCE_LEDGER.json had only two entries and no checker-level minimum corpus floor",
+    "resolution": "ledger now has six entries and DIV-COUNT-FLOOR fails thin ledgers below six entries"
   },
   "checks": [
     {
@@ -29,7 +34,18 @@
     },
     {
       "id": "DIV-STRUCTURE",
-      "status": "PASS"
+      "status": "PASS",
+      "details": {
+        "entry_count": 6
+      }
+    },
+    {
+      "id": "DIV-COUNT-FLOOR",
+      "status": "PASS",
+      "details": {
+        "minimum": 6,
+        "entry_count": 6
+      }
     },
     {
       "id": "DIV-FIELDS",
@@ -45,8 +61,8 @@
     }
   ],
   "unit_tests": {
-    "total": 11,
-    "passed": 11,
+    "total": 12,
+    "passed": 12,
     "failed": 0
   },
   "implementation_artifacts": {
@@ -58,6 +74,7 @@
     "test_path": "tests/test_check_divergence_ledger.py",
     "evidence_path": "artifacts/section_10_2/bd-38l/verification_evidence.json",
     "summary_path": "artifacts/section_10_2/bd-38l/verification_summary.md",
+    "min_entry_count": 6,
     "git_xref": [
       {
         "commit": "d8a6e25c",
@@ -91,8 +108,8 @@
   "outputs": [
     {
       "path": "docs/DIVERGENCE_LEDGER.json",
-      "sha256": "9742746024bb2dc7d3f236425a6d8789524bcaec12753c4aafc51c56dff0ece6",
-      "size_bytes": 1836
+      "sha256": "0fa1fb088913d45020ea01dd7906e4ba6d1554bf5bd8471abfb4c79eaead7ff0",
+      "size_bytes": 5287
     },
     {
       "path": "schemas/divergence_ledger.schema.json",
@@ -106,13 +123,13 @@
     },
     {
       "path": "scripts/check_divergence_ledger.py",
-      "sha256": "cd53a3e6e18be17aac20d70a25f691e597d9588634250cc180bc5162831f9bd5",
-      "size_bytes": 10192
+      "sha256": "b5f0780f5e895c5183fb278804532730aabcedaf47ed41c9591450b36ed5b207",
+      "size_bytes": 11050
     },
     {
       "path": "tests/test_check_divergence_ledger.py",
-      "sha256": "bd31be1b7e58855296416123ac6ab2e2a2ecf6ddd0dfd0884b4ddd0c0705fbbb",
-      "size_bytes": 2808
+      "sha256": "3b7af6f24baa05ed09cc7ad0f93ff2281c6f461fea13a5bf42113a572264064d",
+      "size_bytes": 3178
     }
   ]
 }

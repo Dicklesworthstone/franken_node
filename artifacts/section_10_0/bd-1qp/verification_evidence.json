@@ -4,29 +4,48 @@
   "section": "10.0",
   "title": "Compatibility envelope and divergence ledger",
   "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
+  "total": 8,
+  "passed": 8,
   "failed": 0,
+  "completion_debt_resolution": {
+    "bead_id": "bd-1qp.1",
+    "finding": "verification evidence cited a nonexistent initiatives module and the divergence ledger had only two entries",
+    "resolution": "evidence now cites actual compatibility policy/API/gate paths, docs/DIVERGENCE_LEDGER.json contains six entries, and scripts/check_divergence_ledger.py enforces DIV-COUNT-FLOOR"
+  },
+  "implementation_artifacts": {
+    "policy_modules": [
+      "crates/franken-node/src/policy/compat_gates.rs",
+      "crates/franken-node/src/policy/compatibility_gate.rs",
+      "crates/franken-node/src/api/compat_gate.rs"
+    ],
+    "ledger_path": "docs/DIVERGENCE_LEDGER.json",
+    "schema_path": "schemas/divergence_ledger.schema.json",
+    "verifier_path": "scripts/check_divergence_ledger.py",
+    "test_path": "tests/test_check_divergence_ledger.py",
+    "removed_stale_claim": "nonexistent initiatives module citation removed"
+  },
   "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
-    {"check": "event_codes_present", "pass": true},
-    {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "compatibility_envelope", "pass": true},
-    {"check": "divergence_tracking", "pass": true},
-    {"check": "migration_pipeline", "pass": true},
-    {"check": "trust_card_schema", "pass": true},
-    {"check": "oracle_lockstep", "pass": true},
-    {"check": "shim_transparency", "pass": true},
-    {"check": "quarantine_control", "pass": true},
-    {"check": "distribution_security", "pass": true},
-    {"check": "economic_model", "pass": true}
-  ]
+    {"check": "policy_modules_exist", "pass": true},
+    {"check": "ledger_schema_version", "pass": true},
+    {"check": "ledger_entry_count_floor", "pass": true},
+    {"check": "entry_fields_valid", "pass": true},
+    {"check": "rationale_present", "pass": true},
+    {"check": "unique_ids", "pass": true},
+    {"check": "traceability_paths", "pass": true},
+    {"check": "stale_initiatives_path_removed", "pass": true}
+  ],
+  "verification_results": {
+    "python_checker": {
+      "command": "python3 scripts/check_divergence_ledger.py --json",
+      "verdict": "PASS",
+      "total_checks": 8,
+      "passing_checks": 8
+    },
+    "python_unit_tests": {
+      "command": "python3 -m pytest tests/test_check_divergence_ledger.py",
+      "verdict": "PASS",
+      "total": 12,
+      "passed": 12
+    }
+  }
 }
