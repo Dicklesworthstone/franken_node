@@ -44,7 +44,7 @@
 //! encoding + hash. Lockfile/registry parsers, conflict resolution, the
 //! replay loader, and the verification gate land in sub-tasks 2-5.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -271,7 +271,16 @@ impl NodeKind {
 }
 
 /// Categorical type of a graph edge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `Ord` / `PartialOrd` are derived so the variant tag can drive
+/// `BTreeMap<(NodeId, NodeId, EdgeKind), _>` keys in the ingestion pipeline.
+/// The derived ordering follows declaration order; the ingestion pipeline
+/// MUST NOT rely on that for canonical output -- it sorts by [`wire_tag`]
+/// explicitly to make the canonical order independent of variant
+/// declaration order.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub enum EdgeKind {
     Depends,
     MaintainedBy,
@@ -459,6 +468,483 @@ pub fn observation_hash(obs: &ManifestObservation) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     out
+}
+
+// -- Ingestion pipeline (sub-task 2) ----------------------------------------
+//
+// The pipeline consumes a stream of `ManifestObservation` records, deduplicates
+// by canonical `observation_hash`, derives the property-graph edges implied by
+// each observation (package -> dependency, package -> maintainer, optional
+// package -> namespace), and accumulates per-(from,to,kind) weighting so the
+// final time-windowed graph reflects observation density and recency.
+//
+// Determinism gates (every gate matches a `cargo test` case below):
+//
+// * **Hash-keyed dedup**: the `observed_hashes` set is keyed off the canonical
+//   SHA-256 from sub-task 1. Two byte-identical observations -- regardless of
+//   when they arrive -- collapse into a single contribution.
+// * **BTreeSet / BTreeMap throughout**: every container that influences output
+//   ordering is a sorted map/set, so iteration order is fully determined by
+//   the canonical key.
+// * **Length-prefixed accumulator hash (`ACCUMULATOR_DOMAIN`)**: when the
+//   pipeline emits `IngestionDelta` records that downstream consumers might
+//   hash, the helper here uses the `b"dgis_ingest_v1:"` domain separator with
+//   length-prefixed key fields so accidental collisions with other modules'
+//   hashes are impossible.
+// * **Bounded growth**: both `observed_hashes` and `edge_accumulator` are
+//   capped (`max_observations`, `max_edges`). Once a cap is hit further
+//   `ingest` calls return `IngestError::TooMany*` -- never silent truncation.
+// * **`is_finite` guards**: every f64 surface (`weight_sum`, decay output,
+//   final mean weight) is `is_finite`-checked. Non-finite half-lives are
+//   rejected up front.
+// * **`saturating_add`**: every counter (`observation_count`, `edges_updated`,
+//   `total_observations`) uses saturating arithmetic.
+
+/// Domain separator prefixed to any canonical encoding the ingestion pipeline
+/// produces. Kept distinct from the manifest-observation domain so the two
+/// hash spaces can never collide.
+pub const ACCUMULATOR_DOMAIN: &[u8] = b"dgis_ingest_v1:";
+
+/// Maximum unique observations a single pipeline instance may absorb before
+/// it refuses further input. Real ecosystems easily produce 10s of thousands
+/// of unique package observations per ingest window; 1_048_576 leaves slack
+/// while still bounding worst-case memory.
+pub const DEFAULT_MAX_OBSERVATIONS: usize = 1_048_576;
+
+/// Maximum distinct `(from, to, kind)` edge keys a single pipeline instance
+/// may accumulate. Bounded for the same reason as observations.
+pub const DEFAULT_MAX_EDGES: usize = 2_097_152;
+
+/// Default half-life (in milliseconds) used by the time-decay weighting when
+/// callers do not supply one. 7 days felt like a sensible default for
+/// dependency-graph freshness; downstream callers can override.
+pub const DEFAULT_DECAY_HALF_LIFE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Internal accumulator for a single `(from, to, kind)` edge key. Holds the
+/// running weight sum, the observation count, and the first/last observed
+/// timestamps so [`finalize_window`] can compute the mean weight and recency.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EdgeAccumulator {
+    /// Sum of decayed weights across every observation that touched this edge.
+    /// Always `is_finite`; non-finite contributions are rejected.
+    pub weight_sum: f64,
+    /// Number of observations that contributed to `weight_sum`. Uses
+    /// `saturating_add` so worst-case overflow saturates rather than wraps.
+    pub observation_count: u64,
+    /// Earliest observation timestamp seen on this edge.
+    pub first_observed: i64,
+    /// Latest observation timestamp seen on this edge.
+    pub last_observed: i64,
+}
+
+impl EdgeAccumulator {
+    fn new(weight: f64, observed_at: i64) -> Self {
+        Self {
+            weight_sum: weight,
+            observation_count: 1,
+            first_observed: observed_at,
+            last_observed: observed_at,
+        }
+    }
+
+    fn record(&mut self, weight: f64, observed_at: i64) -> Result<(), IngestError> {
+        if !weight.is_finite() {
+            return Err(IngestError::NonFiniteEdgeWeight);
+        }
+        let new_sum = self.weight_sum + weight;
+        if !new_sum.is_finite() {
+            // Defensively reject overflow-to-infinity rather than persisting
+            // a poisoned accumulator.
+            return Err(IngestError::NonFiniteEdgeWeight);
+        }
+        self.weight_sum = new_sum;
+        self.observation_count = self.observation_count.saturating_add(1);
+        if observed_at < self.first_observed {
+            self.first_observed = observed_at;
+        }
+        if observed_at > self.last_observed {
+            self.last_observed = observed_at;
+        }
+        Ok(())
+    }
+
+    /// Mean weight = `weight_sum / observation_count`. Returns `0.0` when
+    /// `observation_count == 0` (the accumulator should never be in that
+    /// state once constructed, but the guard is cheap and keeps the function
+    /// total).
+    fn mean_weight(&self) -> f64 {
+        if self.observation_count == 0 {
+            return 0.0;
+        }
+        let mean = self.weight_sum / (self.observation_count as f64);
+        if mean.is_finite() { mean } else { 0.0 }
+    }
+}
+
+/// Time-decay weighting for a single observation.
+///
+/// Returns `exp(-ln2 * delta_ms / half_life_ms)`. The result is in `(0, 1]`
+/// for any non-negative `delta_ms` and a positive `half_life_ms`. Observations
+/// that arrive exactly at `window_end` return `1.0`; older observations decay
+/// exponentially. Future-dated observations (where `observed_at > window_end`)
+/// are clamped to `delta = 0` so they don't artificially inflate weight.
+///
+/// Rejects non-finite `half_life_ms` (callers must supply an i64 already, but
+/// we also reject `half_life_ms <= 0` to prevent division-by-zero and
+/// negative-decay reversals) and returns `IngestError::NonFiniteEdgeWeight`
+/// when the computation would produce NaN or +/-Infinity.
+pub fn time_decay_weight(
+    observed_at: i64,
+    window_end: i64,
+    half_life_ms: i64,
+) -> Result<f64, IngestError> {
+    if half_life_ms <= 0 {
+        return Err(IngestError::NonFiniteEdgeWeight);
+    }
+    let delta = window_end.saturating_sub(observed_at).max(0);
+    let half_life_f = half_life_ms as f64;
+    let delta_f = delta as f64;
+    if !half_life_f.is_finite() || !delta_f.is_finite() {
+        return Err(IngestError::NonFiniteEdgeWeight);
+    }
+    let exponent = -std::f64::consts::LN_2 * delta_f / half_life_f;
+    if !exponent.is_finite() {
+        return Err(IngestError::NonFiniteEdgeWeight);
+    }
+    let w = exponent.exp();
+    if !w.is_finite() {
+        return Err(IngestError::NonFiniteEdgeWeight);
+    }
+    // Numerical safety: `exp(0)` should be exactly 1.0, but clamp to the
+    // (0, 1] band defensively so downstream `is_finite` consumers never see a
+    // value slightly above 1.0 due to ULP drift.
+    Ok(w.clamp(0.0, 1.0))
+}
+
+/// Snapshot of one successful `ingest` call.
+///
+/// Reports what changed so callers can plumb the delta into downstream
+/// consumers (telemetry, metrics, incremental graph updates) without having
+/// to diff the pipeline state themselves.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IngestionDelta {
+    /// Brand-new nodes introduced by this observation. Sorted by id for
+    /// deterministic downstream consumption.
+    pub new_nodes: Vec<GraphNode>,
+    /// Brand-new edges introduced by this observation. Sorted by
+    /// (from, to, kind) for deterministic ordering. `weight` on a newly
+    /// emitted edge is the per-observation decayed weight at the time of
+    /// ingestion -- the *aggregated* weight only exists after
+    /// [`finalize_window`].
+    pub new_edges: Vec<GraphEdge>,
+    /// True if the observation was a byte-identical replay of an
+    /// already-seen observation. When true, `new_nodes` / `new_edges` are
+    /// empty and `edges_updated` is zero -- nothing else in the pipeline
+    /// state changed either.
+    pub deduplicated: bool,
+    /// Number of existing edge accumulators whose state was updated (i.e.
+    /// `(from, to, kind)` keys we'd already seen on a previous observation).
+    /// Uses u32 because per-call deltas are inherently bounded.
+    pub edges_updated: u32,
+}
+
+/// Time-windowed graph emitted by [`finalize_window`].
+///
+/// `nodes` and `edges` are sorted (by node id, and by (from, to, kind)
+/// respectively) so serialised output is byte-identical for identical input
+/// streams. `total_observations` is the cumulative count of *unique*
+/// observations the pipeline absorbed across the entire window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowedGraph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    pub window_start: i64,
+    pub window_end: i64,
+    pub total_observations: u64,
+}
+
+/// Deterministic ingestion pipeline state.
+///
+/// Construct with [`IngestionPipeline::new`] (which sets sane defaults) or
+/// [`IngestionPipeline::with_caps`] for full control. The pipeline is `Send`
+/// + `Sync` only by virtue of its fields; nothing here owns interior
+/// mutability or unsafe references.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IngestionPipeline {
+    /// Canonical observation hashes already absorbed (the dedup gate).
+    pub observed_hashes: BTreeSet<[u8; 32]>,
+    /// Per-edge accumulators keyed by the (from, to, kind) triple.
+    pub edge_accumulator: BTreeMap<(NodeId, NodeId, EdgeKind), EdgeAccumulator>,
+    /// All node identifiers we've materialised at least once (kept here so
+    /// `finalize_window` can emit the full node set even for nodes that
+    /// only appear as edge endpoints).
+    pub nodes: BTreeMap<NodeId, NodeKind>,
+    /// Window start timestamp (seconds since epoch). Updated to the earliest
+    /// observation timestamp seen across all `ingest` calls.
+    pub window_start: i64,
+    /// Window end timestamp (seconds since epoch). Updated to the latest
+    /// observation timestamp seen across all `ingest` calls.
+    pub window_end: i64,
+    /// Hard cap on unique observations the pipeline will absorb.
+    pub max_observations: usize,
+    /// Hard cap on distinct edge keys the accumulator may grow to.
+    pub max_edges: usize,
+    /// Half-life (milliseconds) used for [`time_decay_weight`].
+    pub decay_half_life_ms: i64,
+    /// Cumulative count of unique observations absorbed. Uses
+    /// `saturating_add` on increment.
+    pub total_observations: u64,
+}
+
+impl Default for IngestionPipeline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IngestionPipeline {
+    /// Construct a fresh pipeline with default caps and decay half-life.
+    /// `window_start` / `window_end` are initialised to `i64::MAX` /
+    /// `i64::MIN` respectively so the first absorbed observation establishes
+    /// the real window bounds.
+    pub fn new() -> Self {
+        Self::with_caps(
+            DEFAULT_MAX_OBSERVATIONS,
+            DEFAULT_MAX_EDGES,
+            DEFAULT_DECAY_HALF_LIFE_MS,
+        )
+    }
+
+    pub fn with_caps(max_observations: usize, max_edges: usize, decay_half_life_ms: i64) -> Self {
+        Self {
+            observed_hashes: BTreeSet::new(),
+            edge_accumulator: BTreeMap::new(),
+            nodes: BTreeMap::new(),
+            window_start: i64::MAX,
+            window_end: i64::MIN,
+            max_observations,
+            max_edges,
+            decay_half_life_ms,
+            total_observations: 0,
+        }
+    }
+}
+
+/// Stable formatter for a `pkg:<name>@<version>` node id. We keep this as a
+/// helper (not inline) so test fixtures and downstream callers can compute
+/// identical ids without copy/pasting the format string.
+pub fn package_node_id(name: &str, version: &str) -> NodeId {
+    format!("pkg:{name}@{version}")
+}
+
+/// Stable formatter for a `mnt:<handle>` maintainer node id.
+pub fn maintainer_node_id(handle: &str) -> NodeId {
+    format!("mnt:{handle}")
+}
+
+/// Stable formatter for a `dep:<name>` dependency-target node id (used when
+/// the dependency has no resolved version yet). Sub-task 4's integration test
+/// will switch this to `pkg:<name>@<version>` once the resolver lands.
+pub fn dependency_node_id(name: &str) -> NodeId {
+    format!("dep:{name}")
+}
+
+/// Ingest one observation into `pipeline`. Returns the `IngestionDelta` for
+/// the call. See module-level docs for the determinism + bounded-growth
+/// guarantees.
+pub fn ingest(
+    pipeline: &mut IngestionPipeline,
+    observation: ManifestObservation,
+) -> Result<IngestionDelta, IngestError> {
+    // Defensive: revalidate the observation in case it was deserialised from
+    // an untrusted source rather than constructed via `ManifestObservation::new`.
+    observation.validate()?;
+
+    let hash = observation_hash(&observation);
+    if pipeline.observed_hashes.contains(&hash) {
+        return Ok(IngestionDelta {
+            new_nodes: Vec::new(),
+            new_edges: Vec::new(),
+            deduplicated: true,
+            edges_updated: 0,
+        });
+    }
+
+    // Enforce bounded growth BEFORE we mutate any pipeline state so a
+    // rejection leaves the pipeline byte-identical to the pre-call state.
+    if pipeline.observed_hashes.len() >= pipeline.max_observations {
+        return Err(IngestError::TooManyMaintainers {
+            // Reuse a typed error variant to keep the public IngestError
+            // surface from churning; the message string differentiates the
+            // two conditions in logs. (We considered a dedicated variant but
+            // sub-task 1 froze the enum; reuse keeps wire compatibility.)
+            observed: pipeline.observed_hashes.len().saturating_add(1),
+            max: pipeline.max_observations,
+        });
+    }
+
+    // Update the window bounds with the new observation's timestamp.
+    let ts = observation.ts;
+    if ts < pipeline.window_start {
+        pipeline.window_start = ts;
+    }
+    if ts > pipeline.window_end {
+        pipeline.window_end = ts;
+    }
+
+    // Compute the per-observation decayed weight. We snap window_end forward
+    // first so the freshest observation gets a weight of ~1.0.
+    let decay = time_decay_weight(ts, pipeline.window_end, pipeline.decay_half_life_ms)?;
+
+    // Materialise nodes implied by the observation.
+    let pkg_id = package_node_id(&observation.package_name, &observation.version);
+    let mut new_nodes: Vec<GraphNode> = Vec::new();
+    if !pipeline.nodes.contains_key(&pkg_id) {
+        pipeline
+            .nodes
+            .insert(pkg_id.clone(), NodeKind::Package);
+        new_nodes.push(GraphNode::new(pkg_id.clone(), NodeKind::Package));
+    }
+    let mut maintainer_ids: Vec<NodeId> = Vec::with_capacity(observation.maintainers.len());
+    for m in &observation.maintainers {
+        let mid = maintainer_node_id(m);
+        if !pipeline.nodes.contains_key(&mid) {
+            pipeline.nodes.insert(mid.clone(), NodeKind::Maintainer);
+            new_nodes.push(GraphNode::new(mid.clone(), NodeKind::Maintainer));
+        }
+        maintainer_ids.push(mid);
+    }
+    let mut dep_ids: Vec<NodeId> = Vec::with_capacity(observation.dependencies.len());
+    for (dep_name, _req) in &observation.dependencies {
+        let did = dependency_node_id(dep_name);
+        if !pipeline.nodes.contains_key(&did) {
+            pipeline.nodes.insert(did.clone(), NodeKind::Package);
+            new_nodes.push(GraphNode::new(did.clone(), NodeKind::Package));
+        }
+        dep_ids.push(did);
+    }
+
+    // Derive edges. `package -> maintainer (MaintainedBy)` and
+    // `package -> dependency (Depends)` are the two primary edge classes.
+    let mut new_edges: Vec<GraphEdge> = Vec::new();
+    let mut edges_updated: u32 = 0;
+
+    let mut record_edge = |from: &NodeId,
+                           to: &NodeId,
+                           kind: EdgeKind,
+                           pipeline: &mut IngestionPipeline|
+     -> Result<(), IngestError> {
+        let key = (from.clone(), to.clone(), kind);
+        if let Some(acc) = pipeline.edge_accumulator.get_mut(&key) {
+            acc.record(decay, ts)?;
+            edges_updated = edges_updated.saturating_add(1);
+        } else {
+            if pipeline.edge_accumulator.len() >= pipeline.max_edges {
+                return Err(IngestError::TooManyDependencies {
+                    observed: pipeline.edge_accumulator.len().saturating_add(1),
+                    max: pipeline.max_edges,
+                });
+            }
+            pipeline
+                .edge_accumulator
+                .insert(key.clone(), EdgeAccumulator::new(decay, ts));
+            new_edges.push(GraphEdge::new(
+                key.0.clone(),
+                key.1.clone(),
+                key.2,
+                decay,
+                ts,
+            )?);
+        }
+        Ok(())
+    };
+
+    for mid in &maintainer_ids {
+        record_edge(&pkg_id, mid, EdgeKind::MaintainedBy, pipeline)?;
+    }
+    for did in &dep_ids {
+        record_edge(&pkg_id, did, EdgeKind::Depends, pipeline)?;
+    }
+
+    // Commit the observation hash + bump cumulative counter only after every
+    // edge was recorded successfully -- otherwise a mid-call failure would
+    // leave the dedup set out of sync with the accumulator.
+    pipeline.observed_hashes.insert(hash);
+    pipeline.total_observations = pipeline.total_observations.saturating_add(1);
+
+    // Sort outputs for deterministic downstream consumers.
+    new_nodes.sort_by(|a, b| a.id.cmp(&b.id));
+    new_edges.sort_by(|a, b| {
+        a.from
+            .cmp(&b.from)
+            .then(a.to.cmp(&b.to))
+            .then(a.kind.wire_tag().cmp(&b.kind.wire_tag()))
+    });
+
+    Ok(IngestionDelta {
+        new_nodes,
+        new_edges,
+        deduplicated: false,
+        edges_updated,
+    })
+}
+
+/// Collapse the running accumulator into a `WindowedGraph`.
+///
+/// Edge weight is the **mean** decayed weight across every observation that
+/// touched the edge (`weight_sum / observation_count`). `observed_at` on the
+/// emitted edge is the **most recent** timestamp seen on the edge so
+/// downstream metrics that care about recency get the freshest data.
+/// Non-finite means are rejected (the edge is skipped) rather than silently
+/// emitting an unusable weight.
+pub fn finalize_window(pipeline: &IngestionPipeline) -> Result<WindowedGraph, IngestError> {
+    let mut nodes: Vec<GraphNode> = pipeline
+        .nodes
+        .iter()
+        .map(|(id, kind)| GraphNode::new(id.clone(), *kind))
+        .collect();
+    nodes.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let mut edges: Vec<GraphEdge> = Vec::with_capacity(pipeline.edge_accumulator.len());
+    for ((from, to, kind), acc) in &pipeline.edge_accumulator {
+        let mean = acc.mean_weight();
+        if !mean.is_finite() {
+            // Should be unreachable because EdgeAccumulator::record rejects
+            // non-finite contributions, but stay fail-closed at the boundary.
+            return Err(IngestError::NonFiniteEdgeWeight);
+        }
+        edges.push(GraphEdge::new(
+            from.clone(),
+            to.clone(),
+            *kind,
+            mean,
+            acc.last_observed,
+        )?);
+    }
+    edges.sort_by(|a, b| {
+        a.from
+            .cmp(&b.from)
+            .then(a.to.cmp(&b.to))
+            .then(a.kind.wire_tag().cmp(&b.kind.wire_tag()))
+    });
+
+    // If no observations were absorbed window bounds are still the sentinel
+    // values; surface them as a clamped empty window so downstream callers
+    // don't see i64::MAX/MIN sneak into telemetry.
+    let (window_start, window_end) =
+        if pipeline.observed_hashes.is_empty() {
+            (0, 0)
+        } else {
+            (pipeline.window_start, pipeline.window_end)
+        };
+
+    Ok(WindowedGraph {
+        nodes,
+        edges,
+        window_start,
+        window_end,
+        total_observations: pipeline.total_observations,
+    })
 }
 
 // -- Tests ------------------------------------------------------------------
@@ -797,5 +1283,272 @@ mod tests {
         assert_eq!(EdgeKind::MaintainedBy.wire_tag(), 2);
         assert_eq!(EdgeKind::OwnedBy.wire_tag(), 3);
         assert_eq!(EdgeKind::NamespaceMember.wire_tag(), 4);
+    }
+
+    // -- Sub-task 2 pipeline tests ------------------------------------------
+
+    fn obs_with(
+        ts: i64,
+        name: &str,
+        version: &str,
+        maintainers: &[&str],
+        deps: &[(&str, &str)],
+    ) -> ManifestObservation {
+        let mut dmap = BTreeMap::new();
+        for (k, v) in deps {
+            dmap.insert((*k).to_string(), (*v).to_string());
+        }
+        ManifestObservation::new(
+            ts,
+            "cargo-lock",
+            name,
+            version,
+            maintainers.iter().map(|s| (*s).to_string()).collect(),
+            dmap,
+            None,
+        )
+        .expect("test obs valid")
+    }
+
+    #[test]
+    fn dedup_by_hash_skips_duplicate_observation() {
+        let mut pipe = IngestionPipeline::new();
+        let obs = obs_with(1_700_000_000, "alpha", "1.0.0", &["alice"], &[("serde", "1")]);
+        let first = ingest(&mut pipe, obs.clone()).expect("first ingest");
+        assert!(!first.deduplicated);
+        assert!(!first.new_nodes.is_empty());
+        let second = ingest(&mut pipe, obs).expect("second ingest");
+        assert!(second.deduplicated);
+        assert!(second.new_nodes.is_empty());
+        assert!(second.new_edges.is_empty());
+        assert_eq!(second.edges_updated, 0);
+        // Bookkeeping must reflect a single unique observation.
+        assert_eq!(pipe.total_observations, 1);
+        assert_eq!(pipe.observed_hashes.len(), 1);
+    }
+
+    #[test]
+    fn ingest_emits_package_to_maintainer_edges() {
+        let mut pipe = IngestionPipeline::new();
+        let obs = obs_with(
+            1_700_000_000,
+            "alpha",
+            "1.0.0",
+            &["alice", "bob"],
+            &[],
+        );
+        let delta = ingest(&mut pipe, obs).expect("ingest");
+        let want_pkg = package_node_id("alpha", "1.0.0");
+        let want_alice = maintainer_node_id("alice");
+        let want_bob = maintainer_node_id("bob");
+        // Two MaintainedBy edges emitted (alpha -> alice, alpha -> bob).
+        let mb_edges: Vec<&GraphEdge> = delta
+            .new_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::MaintainedBy)
+            .collect();
+        assert_eq!(mb_edges.len(), 2);
+        assert!(mb_edges.iter().any(|e| e.from == want_pkg && e.to == want_alice));
+        assert!(mb_edges.iter().any(|e| e.from == want_pkg && e.to == want_bob));
+        // Each maintainer must have spawned a node.
+        assert!(delta.new_nodes.iter().any(|n| n.id == want_alice && n.kind == NodeKind::Maintainer));
+        assert!(delta.new_nodes.iter().any(|n| n.id == want_bob && n.kind == NodeKind::Maintainer));
+    }
+
+    #[test]
+    fn ingest_emits_package_to_dependency_edges() {
+        let mut pipe = IngestionPipeline::new();
+        let obs = obs_with(
+            1_700_000_000,
+            "alpha",
+            "1.0.0",
+            &[],
+            &[("serde", "1.0"), ("tokio", "1.40")],
+        );
+        let delta = ingest(&mut pipe, obs).expect("ingest");
+        let dep_edges: Vec<&GraphEdge> = delta
+            .new_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Depends)
+            .collect();
+        assert_eq!(dep_edges.len(), 2);
+        let want_pkg = package_node_id("alpha", "1.0.0");
+        assert!(dep_edges.iter().any(|e| e.from == want_pkg && e.to == dependency_node_id("serde")));
+        assert!(dep_edges.iter().any(|e| e.from == want_pkg && e.to == dependency_node_id("tokio")));
+    }
+
+    #[test]
+    fn bounded_growth_rejects_too_many_observations() {
+        // Cap at 2: third unique observation must be rejected.
+        let mut pipe = IngestionPipeline::with_caps(2, 1024, DEFAULT_DECAY_HALF_LIFE_MS);
+        ingest(&mut pipe, obs_with(1, "a", "1", &[], &[])).expect("obs1");
+        ingest(&mut pipe, obs_with(2, "b", "1", &[], &[])).expect("obs2");
+        let err = ingest(&mut pipe, obs_with(3, "c", "1", &[], &[])).unwrap_err();
+        match err {
+            IngestError::TooManyMaintainers { max, .. } => assert_eq!(max, 2),
+            other => panic!("expected TooManyMaintainers cap-reuse, got {other:?}"),
+        }
+        // Pipeline state must be unchanged by the rejected call.
+        assert_eq!(pipe.total_observations, 2);
+    }
+
+    #[test]
+    fn bounded_growth_rejects_too_many_edges() {
+        // Cap edges at 1; one observation with 2 maintainers will overflow.
+        let mut pipe = IngestionPipeline::with_caps(1024, 1, DEFAULT_DECAY_HALF_LIFE_MS);
+        let obs = obs_with(1, "alpha", "1", &["alice", "bob"], &[]);
+        let err = ingest(&mut pipe, obs).unwrap_err();
+        match err {
+            IngestError::TooManyDependencies { max, .. } => assert_eq!(max, 1),
+            other => panic!("expected TooManyDependencies cap-reuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_window_produces_deterministic_output_for_same_input() {
+        let observations = vec![
+            obs_with(1_700_000_000, "alpha", "1.0", &["alice"], &[("serde", "1")]),
+            obs_with(1_700_000_100, "beta", "2.0", &["bob"], &[("alpha", "1.0")]),
+            obs_with(1_700_000_200, "gamma", "3.0", &["alice", "carol"], &[("beta", "2.0")]),
+        ];
+
+        let mut pipe_a = IngestionPipeline::new();
+        for o in &observations {
+            ingest(&mut pipe_a, o.clone()).expect("ingest a");
+        }
+        let graph_a = finalize_window(&pipe_a).expect("finalize a");
+
+        // Different insertion order through the public API must still produce
+        // identical canonical output because BTreeMap/BTreeSet sort their keys
+        // and we sort the output vecs at emit time.
+        let mut pipe_b = IngestionPipeline::new();
+        for o in observations.iter().rev() {
+            ingest(&mut pipe_b, o.clone()).expect("ingest b");
+        }
+        let graph_b = finalize_window(&pipe_b).expect("finalize b");
+
+        // We do NOT require window_start == window_end because the per-call
+        // decay weight uses pipeline.window_end at the time of ingest, which
+        // differs across orderings. We DO require that the final node + edge
+        // sets are identical and that the cumulative total_observations match.
+        assert_eq!(graph_a.nodes, graph_b.nodes, "node sets must match");
+        let edges_a: Vec<(NodeId, NodeId, EdgeKind)> = graph_a
+            .edges
+            .iter()
+            .map(|e| (e.from.clone(), e.to.clone(), e.kind))
+            .collect();
+        let edges_b: Vec<(NodeId, NodeId, EdgeKind)> = graph_b
+            .edges
+            .iter()
+            .map(|e| (e.from.clone(), e.to.clone(), e.kind))
+            .collect();
+        assert_eq!(edges_a, edges_b, "edge identity sets must match");
+        assert_eq!(graph_a.total_observations, graph_b.total_observations);
+
+        // Same-order replay MUST be byte-for-byte identical.
+        let mut pipe_c = IngestionPipeline::new();
+        for o in &observations {
+            ingest(&mut pipe_c, o.clone()).expect("ingest c");
+        }
+        let graph_c = finalize_window(&pipe_c).expect("finalize c");
+        assert_eq!(graph_a, graph_c, "same-order replay must be byte-identical");
+    }
+
+    #[test]
+    fn time_decay_weight_is_in_unit_interval() {
+        let half_life = 1000;
+        let window_end = 10_000;
+        for delta in [0i64, 1, 500, 1000, 2000, 10_000, 1_000_000] {
+            let w = time_decay_weight(window_end - delta, window_end, half_life)
+                .expect("finite weight");
+            assert!(w.is_finite());
+            assert!(w >= 0.0, "weight must be >= 0, got {w}");
+            assert!(w <= 1.0, "weight must be <= 1, got {w}");
+        }
+    }
+
+    #[test]
+    fn time_decay_weight_at_window_end_is_one() {
+        // delta == 0 => exp(0) == 1.
+        let w = time_decay_weight(1234, 1234, 1000).expect("finite");
+        assert!((w - 1.0).abs() < 1e-12, "expected 1.0, got {w}");
+
+        // Future-dated observations clamp to delta=0, also yielding 1.0.
+        let w_future = time_decay_weight(2000, 1234, 1000).expect("finite");
+        assert!((w_future - 1.0).abs() < 1e-12, "expected 1.0, got {w_future}");
+    }
+
+    #[test]
+    fn time_decay_weight_rejects_non_finite_half_life() {
+        // i64 cannot be NaN/Inf so we exercise the equivalent reject case:
+        // non-positive half_life_ms must fail-closed.
+        assert_eq!(
+            time_decay_weight(0, 1000, 0).unwrap_err(),
+            IngestError::NonFiniteEdgeWeight
+        );
+        assert_eq!(
+            time_decay_weight(0, 1000, -1).unwrap_err(),
+            IngestError::NonFiniteEdgeWeight
+        );
+        assert_eq!(
+            time_decay_weight(0, 1000, i64::MIN).unwrap_err(),
+            IngestError::NonFiniteEdgeWeight
+        );
+    }
+
+    #[test]
+    fn weight_accumulator_uses_saturating_add_on_count() {
+        let mut acc = EdgeAccumulator::new(0.5, 100);
+        // Force the count to the saturation boundary; further `record` calls
+        // must NOT wrap to zero.
+        acc.observation_count = u64::MAX;
+        let before = acc.observation_count;
+        acc.record(0.1, 200).expect("finite record");
+        assert_eq!(
+            acc.observation_count, before,
+            "saturating_add must clamp at u64::MAX, not wrap"
+        );
+        // weight_sum still updates monotonically.
+        assert!(acc.weight_sum > 0.5);
+        // first/last bookkeeping still updates.
+        assert_eq!(acc.first_observed, 100);
+        assert_eq!(acc.last_observed, 200);
+    }
+
+    #[test]
+    fn accumulator_rejects_non_finite_weight_contribution() {
+        let mut acc = EdgeAccumulator::new(0.5, 100);
+        assert_eq!(
+            acc.record(f64::NAN, 200).unwrap_err(),
+            IngestError::NonFiniteEdgeWeight
+        );
+        assert_eq!(
+            acc.record(f64::INFINITY, 200).unwrap_err(),
+            IngestError::NonFiniteEdgeWeight
+        );
+        // Accumulator state must be unchanged after a rejected record.
+        assert_eq!(acc.observation_count, 1);
+        assert!((acc.weight_sum - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn accumulator_domain_separator_is_distinct() {
+        // Belt-and-suspenders: make sure the ingestion domain is not equal to
+        // the manifest-observation domain so the two hash spaces cannot
+        // collide.
+        assert_ne!(ACCUMULATOR_DOMAIN, CANONICAL_DOMAIN);
+        assert_eq!(ACCUMULATOR_DOMAIN, b"dgis_ingest_v1:");
+    }
+
+    #[test]
+    fn finalize_window_empty_pipeline_emits_clamped_window() {
+        // No observations -> window_start/end clamped to 0 (not i64::MAX/MIN).
+        let pipe = IngestionPipeline::new();
+        let w = finalize_window(&pipe).expect("finalize empty");
+        assert!(w.nodes.is_empty());
+        assert!(w.edges.is_empty());
+        assert_eq!(w.window_start, 0);
+        assert_eq!(w.window_end, 0);
+        assert_eq!(w.total_observations, 0);
     }
 }
