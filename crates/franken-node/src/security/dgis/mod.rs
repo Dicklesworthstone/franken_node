@@ -5,6 +5,7 @@
 //! verified-fork pinning, and staged rollout fences.
 
 pub mod barrier_primitives;
+pub mod contagion_graph;
 pub mod update_copilot;
 
 #[cfg(test)]
