@@ -25,13 +25,39 @@ def _base_spec_text() -> str:
         [
             "# test spec",
             ">= 10x",
+            "benchmark_proof",
+            mod.BENCHMARK_TEST_RELATIVE_PATH,
+            mod.BENCHMARK_ARTIFACT_RELATIVE_PATH,
             *sorted(mod.REQUIRED_ATTACK_CLASSES),
             *sorted(mod.REQUIRED_EVENT_CODES),
         ]
     )
 
 
-def _make_vectors(*, total: int = 20, drop_class: str | None = None, hardened_compromised: int = 2, contained: int = 4) -> list[dict]:
+def _benchmark_proof() -> dict:
+    return {
+        "rust_test": mod.BENCHMARK_TEST_NAME,
+        "rust_test_path": mod.BENCHMARK_TEST_RELATIVE_PATH,
+        "measured_artifact": mod.BENCHMARK_ARTIFACT_RELATIVE_PATH,
+        "expected_min_ratio": 10.0,
+        "measured_ratio": 20.0,
+        "baseline_compromised": 20,
+        "franken_compromised": 0,
+        "baseline_attempts": 20,
+        "franken_attempts": 10,
+        "raw_baseline_runtimes": mod.EXPECTED_RAW_BASELINE_RUNTIMES,
+        "fail_closed_baseline_unavailable": True,
+        "proof_assertions": sorted(mod.REQUIRED_BENCHMARK_ASSERTIONS),
+    }
+
+
+def _make_vectors(
+    *,
+    total: int = 20,
+    drop_class: str | None = None,
+    hardened_compromised: int = 2,
+    contained: int = 4,
+) -> list[dict]:
     classes = [attack_class for attack_class in sorted(mod.REQUIRED_ATTACK_CLASSES) if attack_class != drop_class]
     vectors = []
     for idx in range(total):
@@ -92,6 +118,7 @@ def _make_report(
         "compromise_reduction_ratio": ratio,
         "total_attack_vectors": len(vectors),
         "containment_vectors": containment,
+        "benchmark_proof": _benchmark_proof(),
         "attack_vectors": vectors,
     }
 
@@ -170,6 +197,72 @@ class TestCompromiseReductionGate(TestCase):
         self.assertTrue(
             any(
                 check["check"] == "required attack classes covered" and not check["pass"]
+                for check in result["checks"]
+            )
+        )
+
+    def test_missing_benchmark_proof_fails(self) -> None:
+        with TemporaryDirectory(prefix="bd-3cpa-test-") as tmp:
+            root = Path(tmp)
+            spec_path = root / "spec.md"
+            report_path = root / "report.json"
+            report = _make_report()
+            del report["benchmark_proof"]
+
+            spec_path.write_text(_base_spec_text(), encoding="utf-8")
+            report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+            result = mod.run_checks(spec_path=spec_path, report_path=report_path)
+
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(
+            any(
+                check["check"] == "benchmark proof directly cites measured 10x evidence"
+                and not check["pass"]
+                for check in result["checks"]
+            )
+        )
+
+    def test_benchmark_proof_wrong_test_name_fails(self) -> None:
+        with TemporaryDirectory(prefix="bd-3cpa-test-") as tmp:
+            root = Path(tmp)
+            spec_path = root / "spec.md"
+            report_path = root / "report.json"
+            report = _make_report()
+            report["benchmark_proof"]["rust_test"] = "placeholder_benchmark"
+
+            spec_path.write_text(_base_spec_text(), encoding="utf-8")
+            report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+            result = mod.run_checks(spec_path=spec_path, report_path=report_path)
+
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(
+            any(
+                check["check"] == "benchmark proof directly cites measured 10x evidence"
+                and not check["pass"]
+                for check in result["checks"]
+            )
+        )
+
+    def test_benchmark_proof_ratio_mismatch_fails(self) -> None:
+        with TemporaryDirectory(prefix="bd-3cpa-test-") as tmp:
+            root = Path(tmp)
+            spec_path = root / "spec.md"
+            report_path = root / "report.json"
+            report = _make_report()
+            report["benchmark_proof"]["measured_ratio"] = 10.0
+
+            spec_path.write_text(_base_spec_text(), encoding="utf-8")
+            report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+            result = mod.run_checks(spec_path=spec_path, report_path=report_path)
+
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(
+            any(
+                check["check"] == "benchmark proof directly cites measured 10x evidence"
+                and not check["pass"]
                 for check in result["checks"]
             )
         )

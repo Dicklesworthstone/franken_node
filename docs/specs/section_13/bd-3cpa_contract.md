@@ -49,6 +49,23 @@ reproducible adversarial campaign.
   - `compromise_reduction_ratio`
   - `total_attack_vectors`
   - `containment_vectors`
+- Benchmark proof (`benchmark_proof`) directly citing the measured raw-runtime
+  benchmark:
+  - `rust_test` =
+    `compromise_reduction_v2_measures_raw_runtime_baseline_against_strict_policy`
+  - `rust_test_path` =
+    `crates/franken-node/tests/compromise_reduction_baseline_bench.rs`
+  - `measured_artifact` =
+    `artifacts/adversarial/compromise_reduction_v2.json`
+  - `expected_min_ratio`
+  - `measured_ratio`
+  - `baseline_compromised`
+  - `franken_compromised`
+  - `baseline_attempts`
+  - `franken_attempts`
+  - `raw_baseline_runtimes`
+  - `fail_closed_baseline_unavailable`
+  - `proof_assertions`
 - Attack vectors (`attack_vectors[]`) with required fields:
   - `attack_id`
   - `attack_class`
@@ -67,6 +84,9 @@ reproducible adversarial campaign.
   reordered vector list.
 - Gate must run an adversarial perturbation check by increasing hardened
   compromises and confirming the ratio can flip below threshold.
+- Gate must validate that `benchmark_proof` points at the raw-runtime Rust
+  benchmark, that the cited artifact exists, and that source assertions prove
+  the benchmark fails closed when raw baseline runtimes are unavailable.
 
 ## Required Scenarios
 
@@ -96,6 +116,7 @@ All events include stable `trace_id`.
 2. Validate attack vector schema, required class coverage, and vector count.
 3. Recompute baseline/hardened compromises and reduction ratio.
 4. Verify containment vector threshold (`>=3`).
-5. Validate determinism under reordered vector list.
-6. Run adversarial perturbation check.
-7. Emit structured events and pass/fail verdict.
+5. Validate the direct benchmark proof citation and measured artifact.
+6. Validate determinism under reordered vector list.
+7. Run adversarial perturbation check.
+8. Emit structured events and pass/fail verdict.

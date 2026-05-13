@@ -6,19 +6,29 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import sys
-from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 SPEC = ROOT / "docs" / "specs" / "section_13" / "bd-3cpa_contract.md"
 REPORT = ROOT / "artifacts" / "13" / "compromise_reduction_report.json"
+BENCHMARK_TEST_RELATIVE_PATH = "crates/franken-node/tests/compromise_reduction_baseline_bench.rs"
+BENCHMARK_ARTIFACT_RELATIVE_PATH = "artifacts/adversarial/compromise_reduction_v2.json"
+BENCHMARK_TEST_NAME = "compromise_reduction_v2_measures_raw_runtime_baseline_against_strict_policy"
+EXPECTED_RAW_BASELINE_RUNTIMES = ["bun", "node"]
+REQUIRED_BENCHMARK_ASSERTIONS = {
+    "status != baseline_unavailable": "baseline_unavailable",
+    "baseline_compromised == Some(20)": "baseline_compromised, Some(20)",
+    "franken_compromised == Some(0)": "franken_compromised, Some(0)",
+    "ratio == Some(20.0)": "ratio, Some(20.0)",
+    "pass_criterion.passed": "pass_criterion.passed",  # nosec B105 - artifact field name
+}
 
 REQUIRED_ATTACK_CLASSES = {
     "rce_dependency",
@@ -69,6 +79,20 @@ def _safe_rel(path: Path) -> str:
         return str(path.relative_to(ROOT))
     except ValueError:
         return str(path)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _number_close(value: Any, expected: float) -> bool:
+    return _is_number(value) and abs(float(value) - expected) <= 0.01
+
+
+def _as_float(value: Any) -> float | None:
+    if not _is_number(value):
+        return None
+    return float(value)
 
 
 def _attack_required_fields() -> tuple[str, ...]:
@@ -138,6 +162,147 @@ def _count_compromised(vectors: list[dict[str, Any]]) -> tuple[int, int, int]:
     return baseline, hardened, contained
 
 
+def _validate_benchmark_proof(report: dict[str, Any]) -> list[str]:
+    proof = report.get("benchmark_proof")
+    if not isinstance(proof, dict):
+        return ["benchmark_proof must be an object"]
+
+    errors: list[str] = []
+    required_fields = (
+        "rust_test",
+        "rust_test_path",
+        "measured_artifact",
+        "expected_min_ratio",
+        "measured_ratio",
+        "baseline_compromised",
+        "franken_compromised",
+        "baseline_attempts",
+        "franken_attempts",
+        "raw_baseline_runtimes",
+        "fail_closed_baseline_unavailable",
+        "proof_assertions",
+    )
+    missing = [field for field in required_fields if field not in proof]
+    if missing:
+        errors.append("benchmark_proof missing fields: " + ", ".join(missing))
+
+    if proof.get("rust_test") != BENCHMARK_TEST_NAME:
+        errors.append(f"benchmark_proof.rust_test must be {BENCHMARK_TEST_NAME}")
+    if proof.get("rust_test_path") != BENCHMARK_TEST_RELATIVE_PATH:
+        errors.append(
+            f"benchmark_proof.rust_test_path must be {BENCHMARK_TEST_RELATIVE_PATH}"
+        )
+    if proof.get("measured_artifact") != BENCHMARK_ARTIFACT_RELATIVE_PATH:
+        errors.append(
+            f"benchmark_proof.measured_artifact must be {BENCHMARK_ARTIFACT_RELATIVE_PATH}"
+        )
+
+    minimum_required = _as_float(report.get("minimum_required_ratio", 10.0))
+    if minimum_required is None:
+        errors.append("minimum_required_ratio must be numeric for benchmark proof")
+    else:
+        if not _number_close(proof.get("expected_min_ratio"), minimum_required):
+            errors.append(
+                "benchmark_proof.expected_min_ratio must match minimum_required_ratio"
+            )
+        measured_ratio = _as_float(proof.get("measured_ratio"))
+        if measured_ratio is None or measured_ratio < minimum_required:
+            errors.append(
+                "benchmark_proof.measured_ratio must satisfy the minimum required ratio"
+            )
+    if proof.get("baseline_compromised") != 20:
+        errors.append("benchmark_proof.baseline_compromised must be 20")
+    if proof.get("franken_compromised") != 0:
+        errors.append("benchmark_proof.franken_compromised must be 0")
+    if proof.get("baseline_attempts") != 20:
+        errors.append("benchmark_proof.baseline_attempts must be 20")
+    if proof.get("franken_attempts") != 10:
+        errors.append("benchmark_proof.franken_attempts must be 10")
+    if proof.get("raw_baseline_runtimes") != EXPECTED_RAW_BASELINE_RUNTIMES:
+        errors.append("benchmark_proof.raw_baseline_runtimes must be ['bun', 'node']")
+    if proof.get("fail_closed_baseline_unavailable") is not True:
+        errors.append("benchmark_proof.fail_closed_baseline_unavailable must be true")
+
+    provided_assertions = proof.get("proof_assertions")
+    if not isinstance(provided_assertions, list) or not all(
+        isinstance(item, str) for item in provided_assertions
+    ):
+        errors.append("benchmark_proof.proof_assertions must be a string list")
+        provided_assertion_set: set[str] = set()
+    else:
+        provided_assertion_set = set(provided_assertions)
+        missing_assertions = sorted(
+            set(REQUIRED_BENCHMARK_ASSERTIONS) - provided_assertion_set
+        )
+        if missing_assertions:
+            errors.append(
+                "benchmark_proof.proof_assertions missing: "
+                + ", ".join(missing_assertions)
+            )
+
+    test_path = ROOT / BENCHMARK_TEST_RELATIVE_PATH
+    if not test_path.is_file():
+        errors.append(f"benchmark proof rust test missing: {_safe_rel(test_path)}")
+    else:
+        test_text = test_path.read_text(encoding="utf-8")
+        if f"fn {BENCHMARK_TEST_NAME}" not in test_text:
+            errors.append("benchmark proof rust test function not found in source")
+        if f'const ARTIFACT_RELATIVE_PATH: &str = "{BENCHMARK_ARTIFACT_RELATIVE_PATH}"' not in test_text:
+            errors.append("benchmark proof source does not write the cited artifact")
+        for runtime in EXPECTED_RAW_BASELINE_RUNTIMES:
+            if f'resolve_runtime("{runtime}")' not in test_text:
+                errors.append(f"benchmark proof source does not resolve runtime {runtime}")
+        for label, snippet in REQUIRED_BENCHMARK_ASSERTIONS.items():
+            if label in provided_assertion_set and snippet not in test_text:
+                errors.append(f"benchmark proof source missing assertion snippet: {label}")
+
+    artifact_path = ROOT / BENCHMARK_ARTIFACT_RELATIVE_PATH
+    if not artifact_path.is_file():
+        errors.append(f"benchmark proof artifact missing: {_safe_rel(artifact_path)}")
+    else:
+        try:
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            errors.append(f"benchmark proof artifact invalid JSON: {exc}")
+            artifact = {}
+        if not isinstance(artifact, dict):
+            errors.append("benchmark proof artifact root must be an object")
+            artifact = {}
+
+        pass_criterion = artifact.get("pass_criterion")
+        if not isinstance(pass_criterion, dict):
+            errors.append("benchmark proof artifact pass_criterion must be an object")
+            pass_criterion = {}
+        if artifact.get("status") != "measured":
+            errors.append("benchmark proof artifact status must be measured")
+        if pass_criterion.get("criterion") != ">=10x":
+            errors.append("benchmark proof artifact criterion must be >=10x")
+        if pass_criterion.get("passed") is not True:
+            errors.append("benchmark proof artifact must have passed criterion")
+        if artifact.get("baseline_compromised") != proof.get("baseline_compromised"):
+            errors.append("benchmark proof baseline_compromised must match artifact")
+        if artifact.get("franken_compromised") != proof.get("franken_compromised"):
+            errors.append("benchmark proof franken_compromised must match artifact")
+        artifact_ratio = _as_float(artifact.get("ratio"))
+        if artifact_ratio is None:
+            errors.append("benchmark proof artifact ratio must be numeric")
+        elif not _number_close(proof.get("measured_ratio"), artifact_ratio):
+            errors.append("benchmark proof measured_ratio must match artifact ratio")
+        if artifact.get("baseline_attempts") != proof.get("baseline_attempts"):
+            errors.append("benchmark proof baseline_attempts must match artifact")
+        if artifact.get("franken_attempts") != proof.get("franken_attempts"):
+            errors.append("benchmark proof franken_attempts must match artifact")
+        artifact_runtimes = [
+            runtime.get("name")
+            for runtime in artifact.get("runtimes", [])
+            if isinstance(runtime, dict)
+        ]
+        if artifact_runtimes != EXPECTED_RAW_BASELINE_RUNTIMES:
+            errors.append("benchmark proof artifact must cite bun and node raw runtimes")
+
+    return errors
+
+
 def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, Any]:
     CHECKS.clear()
     events: list[dict[str, Any]] = []
@@ -154,6 +319,17 @@ def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, 
         all(name in spec_text for name in REQUIRED_ATTACK_CLASSES),
     )
     _check("spec event codes", all(code in spec_text for code in REQUIRED_EVENT_CODES))
+    _check(
+        "spec benchmark proof contract",
+        all(
+            token in spec_text
+            for token in (
+                "benchmark_proof",
+                BENCHMARK_TEST_RELATIVE_PATH,
+                BENCHMARK_ARTIFACT_RELATIVE_PATH,
+            )
+        ),
+    )
 
     report: dict[str, Any] = {}
     report_errors: list[str] = []
@@ -195,6 +371,7 @@ def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, 
         "compromise_reduction_ratio",
         "total_attack_vectors",
         "containment_vectors",
+        "benchmark_proof",
         "attack_vectors",
     )
     missing_top = [field for field in required_top if field not in report]
@@ -311,6 +488,13 @@ def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, 
         "compromise reduction threshold >= 10x",
         threshold_ok,
         f"ratio={ratio if ratio != float('inf') else 'infinite'}, threshold={threshold}",
+    )
+
+    benchmark_errors = _validate_benchmark_proof(report)
+    _check(
+        "benchmark proof directly cites measured 10x evidence",
+        len(benchmark_errors) == 0,
+        "; ".join(benchmark_errors[:8]) if benchmark_errors else "ok",
     )
 
     # Determinism: metrics must be order-invariant.
@@ -478,6 +662,9 @@ def self_test() -> bool:
                 [
                     "# test spec",
                     ">= 10x",
+                    "benchmark_proof",
+                    BENCHMARK_TEST_RELATIVE_PATH,
+                    BENCHMARK_ARTIFACT_RELATIVE_PATH,
                     *sorted(REQUIRED_ATTACK_CLASSES),
                     *sorted(REQUIRED_EVENT_CODES),
                 ]
@@ -528,6 +715,20 @@ def self_test() -> bool:
                     "compromise_reduction_ratio": ratio,
                     "total_attack_vectors": len(vectors),
                     "containment_vectors": contained,
+                    "benchmark_proof": {
+                        "rust_test": BENCHMARK_TEST_NAME,
+                        "rust_test_path": BENCHMARK_TEST_RELATIVE_PATH,
+                        "measured_artifact": BENCHMARK_ARTIFACT_RELATIVE_PATH,
+                        "expected_min_ratio": 10.0,
+                        "measured_ratio": 20.0,
+                        "baseline_compromised": 20,
+                        "franken_compromised": 0,
+                        "baseline_attempts": 20,
+                        "franken_attempts": 10,
+                        "raw_baseline_runtimes": EXPECTED_RAW_BASELINE_RUNTIMES,
+                        "fail_closed_baseline_unavailable": True,
+                        "proof_assertions": sorted(REQUIRED_BENCHMARK_ASSERTIONS),
+                    },
                     "attack_vectors": vectors,
                 },
                 indent=2,
@@ -555,7 +756,7 @@ def self_test() -> bool:
 
 
 def main() -> int:
-    logger = configure_test_logging("check_compromise_reduction_gate")
+    configure_test_logging("check_compromise_reduction_gate")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON output.")
     parser.add_argument("--self-test", action="store_true", help="Run internal self-test and exit.")
