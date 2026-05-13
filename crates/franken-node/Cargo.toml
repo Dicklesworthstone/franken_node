@@ -793,6 +793,10 @@ path = "tests/cross_substrate_vector_consumer_conformance.rs"
 required-features = ["engine"]
 
 [[test]]
+name = "compatibility_corpus_stream"
+path = "tests/compatibility_corpus_stream.rs"
+
+[[test]]
 name = "remote_api_conformance_harness"
 path = "tests/remote_api_conformance_harness.rs"
 required-features = ["control-plane"]
