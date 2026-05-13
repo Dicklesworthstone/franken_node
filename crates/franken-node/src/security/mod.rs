@@ -28,6 +28,7 @@ pub mod ssrf_policy;
 pub mod staking_governance;
 pub mod sybil_defense;
 pub mod threshold_sig;
+pub mod trajectory_gaming;
 pub mod trust_complexity;
 pub mod trust_zone;
 pub mod vef_degraded_mode;

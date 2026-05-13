@@ -3,6 +3,7 @@
 //! Provides longitudinal phenotype intelligence for pre-compromise
 //! trajectory detection with economic trust layer integration.
 
+pub mod adversarial_evolution;
 pub mod drift_features;
 pub mod economic_integration;
 pub mod evolution_risk_scorer;
