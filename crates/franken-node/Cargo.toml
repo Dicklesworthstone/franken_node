@@ -942,6 +942,10 @@ name = "threshold_sig_quorum_metamorphic"
 path = "tests/threshold_sig_quorum_metamorphic.rs"
 
 [[test]]
+name = "atc_partition_fallback"
+path = "tests/atc_partition_fallback.rs"
+
+[[test]]
 name = "atc_sketches_integration"
 path = "tests/atc_sketches_integration.rs"
 required-features = ["advanced-features"]
