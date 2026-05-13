@@ -3,7 +3,7 @@
   "bead": "bd-35q1",
   "section": "10.13",
   "mode": "full",
-  "verdict": "FAIL",
+  "verdict": "PASS",
   "checks": [
     {
       "id": "TS-IMPL",
@@ -47,8 +47,8 @@
     {
       "id": "TS-TESTS",
       "description": "Rust unit tests pass",
-      "status": "FAIL",
-      "details": "0 tests passed"
+      "status": "PASS",
+      "details": "15 tests passed"
     },
     {
       "id": "TS-SPEC",
@@ -63,8 +63,8 @@
   ],
   "summary": {
     "total_checks": 10,
-    "passing_checks": 9,
-    "failing_checks": 1,
+    "passing_checks": 10,
+    "failing_checks": 0,
     "skipped_checks": 0
   }
 }

@@ -658,6 +658,10 @@ name = "exfiltration_sentinel_scenarios"
 path = "../../tests/security/exfiltration_sentinel_scenarios.rs"
 
 [[test]]
+name = "threshold_signature_verification"
+path = "../../tests/security/threshold_signature_verification.rs"
+
+[[test]]
 name = "bayesian_risk_quarantine"
 path = "tests/bayesian_risk_quarantine.rs"
 

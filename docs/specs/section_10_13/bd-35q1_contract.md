@@ -70,6 +70,7 @@ produce stable, deterministic failure reasons for diagnostics.
 | Artifact | Path |
 |----------|------|
 | Spec contract | `docs/specs/section_10_13/bd-35q1_contract.md` |
+| Public spec alias | `docs/specs/threshold_signatures.md` |
 | Implementation | `crates/franken-node/src/security/threshold_sig.rs` |
 | Security tests | `tests/security/threshold_signature_verification.rs` |
 | Test vectors | `artifacts/section_10_13/bd-35q1/threshold_signature_vectors.json` |

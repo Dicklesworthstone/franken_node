@@ -162,7 +162,7 @@ class TestThresholdSigCli(unittest.TestCase):
 
         self.assertTrue(check_threshold_sig.should_run_rust_tests(args))
 
-    def test_rust_proof_uses_lib_target_filter(self):
+    def test_rust_proof_uses_security_integration_target(self):
         completed = subprocess.CompletedProcess(
             args=[],
             returncode=0,
@@ -179,10 +179,15 @@ class TestThresholdSigCli(unittest.TestCase):
         kwargs = run.call_args.kwargs
         command = run.call_args.args[0]
         self.assertEqual(kwargs["cwd"], ROOT)
-        self.assertIn("--lib", command)
-        self.assertEqual(command[:4], ["rch", "exec", "--", "cargo"])
-        self.assertNotIn("--", command[4:])
-        self.assertEqual(command[-1], "security::threshold_sig")
+        self.assertEqual(command[:4], ["rch", "exec", "--", "env"])
+        self.assertIn("RUSTFLAGS=-C linker=cc", command)
+        self.assertIn("CARGO_BUILD_JOBS=1", command)
+        self.assertIn("CARGO_INCREMENTAL=0", command)
+        self.assertIn("--test", command)
+        self.assertIn("threshold_signature_verification", command)
+        self.assertIn("--no-default-features", command)
+        self.assertNotIn("--", command[4:command.index("cargo")])
+        self.assertEqual(command[-2:], ["threshold_signature_verification", "--no-default-features"])
 
     def test_structural_json_mode_is_partial_and_machine_readable(self):
         result = subprocess.run(
