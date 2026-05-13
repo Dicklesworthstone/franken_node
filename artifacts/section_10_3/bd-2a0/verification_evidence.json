@@ -2,14 +2,16 @@
   "gate": "project_scanner_verification",
   "section": "10.3",
   "verdict": "PASS",
-  "timestamp": "2026-02-20T10:08:16.474367+00:00",
+  "timestamp": "2026-05-13T06:45:04Z",
   "checks": [
     {
       "id": "SCANNER-EXISTS",
       "status": "PASS",
       "details": {
-        "scanner": true,
-        "schema": true
+        "python_scanner": true,
+        "rust_scanner": true,
+        "schema": true,
+        "rust_module": "crates/franken-node/src/supply_chain/project_scanner.rs"
       }
     },
     {
@@ -17,22 +19,27 @@
       "status": "PASS",
       "details": {
         "api_pattern_count": 15,
-        "unsafe_pattern_count": 4
+        "unsafe_pattern_count": 4,
+        "rust_detects_js_ts_extensions": true,
+        "rust_skips_node_modules": true
       }
     },
     {
       "id": "SCANNER-REGISTRY",
       "status": "PASS",
       "details": {
-        "registry_entries": 5
+        "registry_entries": 5,
+        "rust_loads_docs_compatibility_registry": true
       }
     },
     {
-      "id": "SCANNER-SELFTEST",
+      "id": "SCANNER-RUST-INTEGRATION",
       "status": "PASS",
       "details": {
-        "self_test_verdict": "PASS",
-        "apis_detected": 5
+        "test_target": "project_scanner",
+        "tests_passed": 5,
+        "tests_failed": 0,
+        "command": "timeout 600 rch exec -- bash -lc 'CARGO_TARGET_DIR=/data/tmp/franken_node_bd2a01_target CARGO_BUILD_JOBS=1 cargo test -p frankenengine-node --no-default-features --test project_scanner'"
       }
     },
     {
@@ -62,11 +69,29 @@
           }
         ]
       }
+    },
+    {
+      "id": "SCANNER-RUST-ARTIFACTS",
+      "status": "PASS",
+      "details": {
+        "source_sha256": "61364a8c4bbfac4116ec6edf5b5422b2cf87454a81ab7eb4afd157bbbda099e8",
+        "source_size_bytes": 31320,
+        "test_sha256": "38a8e0c4f685aba937a1947e781b4ae0358aee7f6bb7bf51373952bd0bca1e2f",
+        "test_size_bytes": 5595,
+        "cargo_toml_sha256": "45c8e73888bf340bc8d8c3226438027f350fdeab4f743fa4ff9113dabae5d7d9",
+        "supply_chain_mod_sha256": "2c82f54addc8e218e8c32e190d3ca8ec66b128ae3ee88bdbef8593f3d06d8b67"
+      }
     }
   ],
   "summary": {
-    "total_checks": 5,
-    "passing_checks": 5,
+    "total_checks": 6,
+    "passing_checks": 6,
     "failing_checks": 0
+  },
+  "validation": {
+    "rustfmt": "rustfmt --edition 2024 crates/franken-node/src/supply_chain/project_scanner.rs crates/franken-node/tests/project_scanner.rs --check",
+    "diff_check": "git diff --check -- crates/franken-node/src/supply_chain/project_scanner.rs crates/franken-node/tests/project_scanner.rs crates/franken-node/src/supply_chain/mod.rs crates/franken-node/Cargo.toml",
+    "ubs": "UBS_SKIP_RUST_BUILD=1 ubs crates/franken-node/src/supply_chain/project_scanner.rs crates/franken-node/tests/project_scanner.rs crates/franken-node/Cargo.toml",
+    "cargo_test": "timeout 600 rch exec -- bash -lc 'CARGO_TARGET_DIR=/data/tmp/franken_node_bd2a01_target CARGO_BUILD_JOBS=1 cargo test -p frankenengine-node --no-default-features --test project_scanner'"
   }
 }
