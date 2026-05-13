@@ -50,6 +50,7 @@ pub mod error_codes {
     pub const ERR_LAB_ROLLOUT_UNSIGNED: &str = "ERR_LAB_ROLLOUT_UNSIGNED";
     pub const ERR_LAB_ROLLBACK_MISSING: &str = "ERR_LAB_ROLLBACK_MISSING";
     pub const ERR_LAB_LOSS_DELTA_NEGATIVE: &str = "ERR_LAB_LOSS_DELTA_NEGATIVE";
+    pub const ERR_LAB_LOSS_ARITHMETIC_OVERFLOW: &str = "ERR_LAB_LOSS_ARITHMETIC_OVERFLOW";
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +223,15 @@ pub enum LabError {
         error_codes::ERR_LAB_LOSS_DELTA_NEGATIVE
     )]
     LossDeltaNegative { mitigation_id: String, delta: i64 },
+
+    #[error(
+        "{}: mitigation {mitigation_id} overflowed expected-loss arithmetic during {operation}",
+        error_codes::ERR_LAB_LOSS_ARITHMETIC_OVERFLOW
+    )]
+    LossArithmeticOverflow {
+        mitigation_id: String,
+        operation: &'static str,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -382,14 +392,20 @@ impl IncidentLab {
         trace: &IncidentTrace,
         mitigation_id: &str,
         policy_diff: BTreeMap<String, String>,
-    ) -> MitigationCandidate {
+    ) -> Result<MitigationCandidate, LabError> {
         // Compute the net policy shift from diff values.
         // Positive diff values indicate strengthened policy -> expected loss reduction.
         // Negative diff values indicate weakened policy -> expected loss increase.
         let net_shift: i64 = policy_diff
             .values()
             .filter_map(|v| v.parse::<i64>().ok())
-            .fold(0i64, |a, b| a.saturating_add(b));
+            .try_fold(0i64, |a, b| {
+                a.checked_add(b)
+                    .ok_or_else(|| LabError::LossArithmeticOverflow {
+                        mitigation_id: mitigation_id.to_string(),
+                        operation: "policy-shift aggregation",
+                    })
+            })?;
 
         // Scale the adjustment: each unit of policy shift reduces/increases
         // expected loss by a proportional amount, clamped to prevent extreme swings.
@@ -399,16 +415,24 @@ impl IncidentLab {
         let counterfactual_decisions: Vec<LabDecision> = trace
             .decisions
             .iter()
-            .map(|d| LabDecision {
-                sequence_number: d.sequence_number,
-                action: d.action.clone(),
-                expected_loss: d.expected_loss.saturating_add(adjustment_per_decision),
-                rationale: format!(
-                    "cf:{} policy_shift={} adj={}",
-                    d.rationale, net_shift, adjustment_per_decision
-                ),
+            .map(|d| {
+                let expected_loss = checked_adjusted_loss(
+                    mitigation_id,
+                    d.sequence_number,
+                    d.expected_loss,
+                    adjustment_per_decision,
+                )?;
+                Ok(LabDecision {
+                    sequence_number: d.sequence_number,
+                    action: d.action.clone(),
+                    expected_loss,
+                    rationale: format!(
+                        "cf:{} policy_shift={} adj={}",
+                        d.rationale, net_shift, adjustment_per_decision
+                    ),
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, LabError>>()?;
 
         push_bounded(
             &mut self.events,
@@ -421,11 +445,11 @@ impl IncidentLab {
             MAX_LAB_EVENTS,
         );
 
-        MitigationCandidate {
+        Ok(MitigationCandidate {
             mitigation_id: mitigation_id.to_string(),
             policy_diff,
             counterfactual_decisions,
-        }
+        })
     }
 
     /// Compare baseline vs. counterfactual replay outcomes.
@@ -444,21 +468,29 @@ impl IncidentLab {
             return Err(LabError::ReplayDiverged { sequence_number: 0 });
         }
 
-        let baseline_total_loss: i64 = baseline
-            .iter()
-            .fold(0i64, |acc, d| acc.saturating_add(d.expected_loss));
-        let counterfactual_total_loss: i64 = candidate
-            .counterfactual_decisions
-            .iter()
-            .fold(0i64, |acc, d| acc.saturating_add(d.expected_loss));
+        let baseline_total_loss = checked_total_loss(
+            &candidate.mitigation_id,
+            "baseline loss aggregation",
+            &baseline,
+        )?;
+        let counterfactual_total_loss = checked_total_loss(
+            &candidate.mitigation_id,
+            "counterfactual loss aggregation",
+            &candidate.counterfactual_decisions,
+        )?;
 
         let decision_changes = baseline
             .iter()
             .zip(candidate.counterfactual_decisions.iter())
-            .filter(|(b, c)| b.action != c.action || b.expected_loss != c.expected_loss)
+            .filter(|(b, c)| !b.action.eq(&c.action) || !b.expected_loss.eq(&c.expected_loss))
             .count();
 
-        let loss_delta = baseline_total_loss.saturating_sub(counterfactual_total_loss);
+        let loss_delta = baseline_total_loss
+            .checked_sub(counterfactual_total_loss)
+            .ok_or_else(|| LabError::LossArithmeticOverflow {
+                mitigation_id: candidate.mitigation_id.clone(),
+                operation: "loss-delta computation",
+            })?;
 
         push_bounded(
             &mut self.events,
@@ -511,7 +543,7 @@ impl IncidentLab {
         comparison: &ReplayComparison,
         candidate: &MitigationCandidate,
     ) -> Result<PromotedMitigation, LabError> {
-        if comparison.mitigation_id != candidate.mitigation_id {
+        if !constant_time::ct_eq(&comparison.mitigation_id, &candidate.mitigation_id) {
             return Err(LabError::MitigationUnsafe {
                 mitigation_id: candidate.mitigation_id.clone(),
                 reason: format!(
@@ -621,7 +653,7 @@ impl IncidentLab {
         policy_diff: BTreeMap<String, String>,
     ) -> Result<PromotedMitigation, LabError> {
         self.load_trace(trace)?;
-        let candidate = self.synthesize_mitigation(trace, mitigation_id, policy_diff);
+        let candidate = self.synthesize_mitigation(trace, mitigation_id, policy_diff)?;
         let comparison = self.compare_replay(trace, &candidate)?;
         self.promote_mitigation(&comparison, &candidate)
     }
@@ -647,6 +679,64 @@ fn length_frame(len: usize) -> [u8; 8] {
     // Convert to u64 for consistent cross-platform hash results
     let len_u64 = u64::try_from(len).unwrap_or(u64::MAX);
     len_u64.to_le_bytes()
+}
+
+fn checked_adjusted_loss(
+    mitigation_id: &str,
+    sequence_number: u64,
+    expected_loss: i64,
+    adjustment: i64,
+) -> Result<i64, LabError> {
+    if expected_loss < 0 {
+        return Err(LabError::MitigationUnsafe {
+            mitigation_id: mitigation_id.to_string(),
+            reason: format!(
+                "expected_loss must be non-negative at seq {sequence_number}: {expected_loss}"
+            ),
+        });
+    }
+
+    let adjusted =
+        expected_loss
+            .checked_add(adjustment)
+            .ok_or_else(|| LabError::LossArithmeticOverflow {
+                mitigation_id: mitigation_id.to_string(),
+                operation: "counterfactual loss adjustment",
+            })?;
+
+    if adjusted < 0 {
+        return Err(LabError::MitigationUnsafe {
+            mitigation_id: mitigation_id.to_string(),
+            reason: format!(
+                "counterfactual expected_loss must be non-negative at seq {sequence_number}: {adjusted}"
+            ),
+        });
+    }
+
+    Ok(adjusted)
+}
+
+fn checked_total_loss(
+    mitigation_id: &str,
+    operation: &'static str,
+    decisions: &[LabDecision],
+) -> Result<i64, LabError> {
+    decisions.iter().try_fold(0i64, |acc, decision| {
+        if decision.expected_loss < 0 {
+            return Err(LabError::MitigationUnsafe {
+                mitigation_id: mitigation_id.to_string(),
+                reason: format!(
+                    "expected_loss must be non-negative at seq {}: {}",
+                    decision.sequence_number, decision.expected_loss
+                ),
+            });
+        }
+        acc.checked_add(decision.expected_loss)
+            .ok_or_else(|| LabError::LossArithmeticOverflow {
+                mitigation_id: mitigation_id.to_string(),
+                operation,
+            })
+    })
 }
 
 #[cfg(feature = "test-support")]
@@ -758,8 +848,8 @@ mod tests {
         let mut lab = fixture_lab();
         let trace = fixture_trace();
         let mut diff = BTreeMap::new();
-        diff.insert("quarantine_threshold".to_string(), "70".to_string());
-        let candidate = lab.synthesize_mitigation(&trace, "mit-001", diff);
+        diff.insert("quarantine_threshold".to_string(), "5".to_string());
+        let candidate = lab.synthesize_mitigation(&trace, "mit-001", diff).unwrap();
         assert_eq!(candidate.mitigation_id, "mit-001");
         assert_eq!(
             candidate.counterfactual_decisions.len(),
@@ -777,15 +867,16 @@ mod tests {
         let mut lab = fixture_lab();
         let trace = fixture_trace();
         let mut diff = BTreeMap::new();
-        diff.insert("quarantine_threshold".to_string(), "70".to_string());
-        let candidate = lab.synthesize_mitigation(&trace, "mit-002", diff);
+        diff.insert("quarantine_threshold".to_string(), "5".to_string());
+        let candidate = lab.synthesize_mitigation(&trace, "mit-002", diff).unwrap();
         let comparison = lab.compare_replay(&trace, &candidate).unwrap();
         assert_eq!(comparison.incident_id, trace.incident_id);
         assert_eq!(comparison.total_decisions, 3);
-        // Proportional adjustment: net_shift=70, adj=-70 per decision.
+        // Proportional adjustment: net_shift=5, adj=-5 per decision.
         // baseline_total_loss = 50+30+10 = 90
-        // counterfactual_total_loss = (50-70)+(30-70)+(10-70) = -120
-        // loss_delta = 90 - (-120) = 210
+        // counterfactual_total_loss = (50-5)+(30-5)+(10-5) = 75
+        // loss_delta = 90 - 75 = 15
+        assert_eq!(comparison.loss_delta, 15);
         assert!(
             comparison.loss_delta > 0,
             "loss_delta should be positive: {}",
@@ -798,8 +889,8 @@ mod tests {
         let mut lab = fixture_lab();
         let trace = fixture_trace();
         let mut diff = BTreeMap::new();
-        diff.insert("quarantine_threshold".to_string(), "70".to_string());
-        let candidate = lab.synthesize_mitigation(&trace, "mit-003", diff);
+        diff.insert("quarantine_threshold".to_string(), "5".to_string());
+        let candidate = lab.synthesize_mitigation(&trace, "mit-003", diff).unwrap();
         let comparison = lab.compare_replay(&trace, &candidate).unwrap();
         let promoted = lab.promote_mitigation(&comparison, &candidate).unwrap();
         assert_eq!(promoted.mitigation_id, "mit-003");
@@ -815,7 +906,7 @@ mod tests {
         // Create a candidate that increases loss (negative diff values)
         let mut diff = BTreeMap::new();
         diff.insert("quarantine_threshold".to_string(), "-70".to_string());
-        let candidate = lab.synthesize_mitigation(&trace, "mit-bad", diff);
+        let candidate = lab.synthesize_mitigation(&trace, "mit-bad", diff).unwrap();
         let comparison = lab.compare_replay(&trace, &candidate).unwrap();
         let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
         let msg = err.to_string();
@@ -831,8 +922,10 @@ mod tests {
         let mut lab = IncidentLab::new(config);
         let trace = fixture_trace();
         let mut diff = BTreeMap::new();
-        diff.insert("quarantine_threshold".to_string(), "70".to_string());
-        let candidate = lab.synthesize_mitigation(&trace, "mit-no-rb", diff);
+        diff.insert("quarantine_threshold".to_string(), "5".to_string());
+        let candidate = lab
+            .synthesize_mitigation(&trace, "mit-no-rb", diff)
+            .unwrap();
         let comparison = lab.compare_replay(&trace, &candidate).unwrap();
         let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
         let msg = err.to_string();
@@ -844,7 +937,7 @@ mod tests {
         let mut lab = fixture_lab();
         let trace = fixture_trace();
         let mut diff = BTreeMap::new();
-        diff.insert("quarantine_threshold".to_string(), "70".to_string());
+        diff.insert("quarantine_threshold".to_string(), "5".to_string());
         let promoted = lab.run_full_workflow(&trace, "mit-full", diff).unwrap();
         assert_eq!(promoted.event_code, event_codes::LAB_MITIGATION_PROMOTED);
         // Full workflow emits: LOADED, SYNTHESIZED, REPLAY_COMPARED, LOSS_DELTA_COMPUTED, PROMOTED
@@ -945,6 +1038,10 @@ mod tests {
         assert_eq!(
             error_codes::ERR_LAB_LOSS_DELTA_NEGATIVE,
             "ERR_LAB_LOSS_DELTA_NEGATIVE"
+        );
+        assert_eq!(
+            error_codes::ERR_LAB_LOSS_ARITHMETIC_OVERFLOW,
+            "ERR_LAB_LOSS_ARITHMETIC_OVERFLOW"
         );
     }
 
@@ -1052,11 +1149,10 @@ mod tests {
             }
             other => unreachable!("expected zero-delta rejection, got {other:?}"),
         }
-        assert!(
-            !lab.events()
-                .iter()
-                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
-        );
+        assert!(!lab
+            .events()
+            .iter()
+            .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED));
     }
 
     #[test]
@@ -1068,18 +1164,19 @@ mod tests {
         let mut lab = IncidentLab::new(config);
         let trace = fixture_trace();
         let mut diff = BTreeMap::new();
-        diff.insert("quarantine_threshold".to_string(), "70".to_string());
-        let candidate = lab.synthesize_mitigation(&trace, "mit-no-rollback-event", diff);
+        diff.insert("quarantine_threshold".to_string(), "5".to_string());
+        let candidate = lab
+            .synthesize_mitigation(&trace, "mit-no-rollback-event", diff)
+            .unwrap();
         let comparison = lab.compare_replay(&trace, &candidate).unwrap();
 
         let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
 
         assert!(matches!(err, LabError::RollbackMissing { .. }));
-        assert!(
-            !lab.events()
-                .iter()
-                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
-        );
+        assert!(!lab
+            .events()
+            .iter()
+            .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED));
     }
 
     #[test]
@@ -1103,11 +1200,10 @@ mod tests {
             }
             other => unreachable!("expected harmful mitigation rejection, got {other:?}"),
         }
-        assert!(
-            !lab.events()
-                .iter()
-                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
-        );
+        assert!(!lab
+            .events()
+            .iter()
+            .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED));
     }
 
     #[test]
@@ -1151,8 +1247,10 @@ mod tests {
         let mut lab = fixture_lab();
         let trace = fixture_trace();
         let mut diff = BTreeMap::new();
-        diff.insert("quarantine_threshold".to_string(), "70".to_string());
-        let candidate = lab.synthesize_mitigation(&trace, "mit-candidate", diff);
+        diff.insert("quarantine_threshold".to_string(), "5".to_string());
+        let candidate = lab
+            .synthesize_mitigation(&trace, "mit-candidate", diff)
+            .unwrap();
         let mut comparison = lab.compare_replay(&trace, &candidate).unwrap();
         comparison.mitigation_id = "mit-other".to_string();
 
@@ -1168,11 +1266,10 @@ mod tests {
             }
             other => unreachable!("expected mitigation mismatch rejection, got {other:?}"),
         }
-        assert!(
-            !lab.events()
-                .iter()
-                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
-        );
+        assert!(!lab
+            .events()
+            .iter()
+            .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED));
     }
 
     #[test]
@@ -1185,8 +1282,10 @@ mod tests {
         let mut lab = IncidentLab::new(config);
         let trace = fixture_trace();
         let mut diff = BTreeMap::new();
-        diff.insert("quarantine_threshold".to_string(), "70".to_string());
-        let candidate = lab.synthesize_mitigation(&trace, "mit-expired-window", diff);
+        diff.insert("quarantine_threshold".to_string(), "5".to_string());
+        let candidate = lab
+            .synthesize_mitigation(&trace, "mit-expired-window", diff)
+            .unwrap();
         let comparison = lab.compare_replay(&trace, &candidate).unwrap();
 
         let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
@@ -1208,18 +1307,19 @@ mod tests {
         let mut lab = IncidentLab::new(config);
         let trace = fixture_trace();
         let mut diff = BTreeMap::new();
-        diff.insert("quarantine_threshold".to_string(), "70".to_string());
-        let candidate = lab.synthesize_mitigation(&trace, "mit-blank-trigger", diff);
+        diff.insert("quarantine_threshold".to_string(), "5".to_string());
+        let candidate = lab
+            .synthesize_mitigation(&trace, "mit-blank-trigger", diff)
+            .unwrap();
         let comparison = lab.compare_replay(&trace, &candidate).unwrap();
 
         let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
 
         assert!(matches!(err, LabError::RollbackMissing { .. }));
-        assert!(
-            !lab.events()
-                .iter()
-                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
-        );
+        assert!(!lab
+            .events()
+            .iter()
+            .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED));
     }
 
     #[test]
@@ -1231,8 +1331,10 @@ mod tests {
         let mut lab = IncidentLab::new(config);
         let trace = fixture_trace();
         let mut diff = BTreeMap::new();
-        diff.insert("quarantine_threshold".to_string(), "70".to_string());
-        let candidate = lab.synthesize_mitigation(&trace, "mit-blank-policy", diff);
+        diff.insert("quarantine_threshold".to_string(), "5".to_string());
+        let candidate = lab
+            .synthesize_mitigation(&trace, "mit-blank-policy", diff)
+            .unwrap();
         let comparison = lab.compare_replay(&trace, &candidate).unwrap();
 
         let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
@@ -1379,7 +1481,7 @@ mod tests {
             .map(|i| LabDecision {
                 sequence_number: i,
                 action: format!("{massive_action}-{i}"),
-                expected_loss: i as i64,
+                expected_loss: 100 + i as i64,
                 rationale: format!("{massive_rationale}-{i}"),
             })
             .collect();
@@ -1401,8 +1503,9 @@ mod tests {
 
         // Synthesize mitigation with massive data
         let massive_mitigation_id = format!("mit-{}", "massive".repeat(10000));
-        let candidate =
-            lab.synthesize_mitigation(&trace, &massive_mitigation_id, massive_diff.clone());
+        let candidate = lab
+            .synthesize_mitigation(&trace, &massive_mitigation_id, massive_diff.clone())
+            .unwrap();
 
         // Verify bounded storage behavior
         assert_eq!(candidate.mitigation_id, massive_mitigation_id);
@@ -1442,10 +1545,12 @@ mod tests {
 
         // Create policy diff with injection attempts
         let mut malicious_diff = BTreeMap::new();
-        malicious_diff.insert(injection_attempt.clone(), "100".to_string());
+        malicious_diff.insert(injection_attempt.clone(), "5".to_string());
         malicious_diff.insert("normal_param".to_string(), json_bomb.to_string());
 
-        let candidate = lab.synthesize_mitigation(&trace, "mit-json-injection", malicious_diff);
+        let candidate = lab
+            .synthesize_mitigation(&trace, "mit-json-injection", malicious_diff)
+            .unwrap();
 
         // Verify JSON serialization integrity
         let serialized = serde_json::to_string(&candidate).unwrap();
@@ -1463,11 +1568,56 @@ mod tests {
 
     #[test]
     fn mitigation_arithmetic_overflow_protection() {
-        // Test saturating arithmetic in loss calculations
         let mut lab = fixture_lab();
 
-        // Create trace with extreme loss values
-        let extreme_decisions = vec![
+        let trace = fixture_trace();
+        let mut overflow_diff = BTreeMap::new();
+        overflow_diff.insert("param1".to_string(), i64::MAX.to_string());
+        overflow_diff.insert("param2".to_string(), "1".to_string());
+
+        let err = lab
+            .synthesize_mitigation(&trace, "mit-overflow", overflow_diff)
+            .unwrap_err();
+
+        match err {
+            LabError::LossArithmeticOverflow {
+                mitigation_id,
+                operation,
+            } => {
+                assert_eq!(mitigation_id, "mit-overflow");
+                assert_eq!(operation, "policy-shift aggregation");
+            }
+            other => unreachable!("expected loss arithmetic overflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mitigation_rejects_impossible_negative_counterfactual_loss() {
+        let mut lab = fixture_lab();
+        let trace = fixture_trace();
+        let mut diff = BTreeMap::new();
+        diff.insert("quarantine_threshold".to_string(), "100".to_string());
+
+        let err = lab
+            .synthesize_mitigation(&trace, "mit-negative-loss", diff)
+            .unwrap_err();
+
+        match err {
+            LabError::MitigationUnsafe {
+                mitigation_id,
+                reason,
+            } => {
+                assert_eq!(mitigation_id, "mit-negative-loss");
+                assert!(reason.contains("counterfactual expected_loss must be non-negative"));
+            }
+            other => unreachable!("expected unsafe negative loss rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compare_replay_rejects_expected_loss_total_overflow() {
+        let mut lab = fixture_lab();
+        let decisions = vec![
             LabDecision {
                 sequence_number: 1,
                 action: "max".to_string(),
@@ -1476,47 +1626,29 @@ mod tests {
             },
             LabDecision {
                 sequence_number: 2,
-                action: "min".to_string(),
-                expected_loss: i64::MIN,
-                rationale: "min-loss".to_string(),
-            },
-            LabDecision {
-                sequence_number: 3,
-                action: "zero".to_string(),
-                expected_loss: 0,
-                rationale: "zero-loss".to_string(),
+                action: "one".to_string(),
+                expected_loss: 1,
+                rationale: "overflow-trigger".to_string(),
             },
         ];
+        let trace = build_trace("INC-OVERFLOW", decisions, "policy-v1");
+        let candidate = MitigationCandidate {
+            mitigation_id: "mit-total-overflow".to_string(),
+            policy_diff: BTreeMap::new(),
+            counterfactual_decisions: trace.decisions.clone(),
+        };
 
-        let trace = build_trace("INC-OVERFLOW", extreme_decisions, "policy-v1");
-        assert!(lab.load_trace(&trace).is_ok());
+        let err = lab.compare_replay(&trace, &candidate).unwrap_err();
 
-        // Create policy diff that would cause extreme adjustments
-        let mut overflow_diff = BTreeMap::new();
-        overflow_diff.insert("param1".to_string(), i64::MAX.to_string());
-        overflow_diff.insert("param2".to_string(), i64::MIN.to_string());
-        overflow_diff.insert("param3".to_string(), "999999999999999999".to_string());
-
-        let candidate = lab.synthesize_mitigation(&trace, "mit-overflow", overflow_diff);
-
-        // Verify saturating arithmetic prevents overflow
-        for decision in &candidate.counterfactual_decisions {
-            assert!(decision.expected_loss >= i64::MIN);
-            assert!(decision.expected_loss <= i64::MAX);
-            // Should not crash on extreme values
-            assert!(decision.expected_loss == decision.expected_loss);
-        }
-
-        // Test comparison with overflow protection
-        let comparison = lab.compare_replay(&trace, &candidate).unwrap();
-        assert!(comparison.baseline_total_loss.is_finite() as bool);
-        assert!(comparison.counterfactual_total_loss.is_finite() as bool);
-        assert!(comparison.loss_delta.abs() < i64::MAX);
-
-        // Test sequence number bounds
-        assert_eq!(candidate.counterfactual_decisions.len(), 3);
-        for (i, decision) in candidate.counterfactual_decisions.iter().enumerate() {
-            assert_eq!(decision.sequence_number, (i + 1) as u64);
+        match err {
+            LabError::LossArithmeticOverflow {
+                mitigation_id,
+                operation,
+            } => {
+                assert_eq!(mitigation_id, "mit-total-overflow");
+                assert_eq!(operation, "baseline loss aggregation");
+            }
+            other => unreachable!("expected loss total overflow, got {other:?}"),
         }
     }
 
@@ -1611,9 +1743,11 @@ mod tests {
         let mut lab = fixture_lab();
         let trace = fixture_trace();
         let mut diff = BTreeMap::new();
-        diff.insert("quarantine_threshold".to_string(), "70".to_string());
+        diff.insert("quarantine_threshold".to_string(), "5".to_string());
 
-        let candidate = lab.synthesize_mitigation(&trace, "mit-sig-test", diff);
+        let candidate = lab
+            .synthesize_mitigation(&trace, "mit-sig-test", diff)
+            .unwrap();
         let comparison = lab.compare_replay(&trace, &candidate).unwrap();
 
         // Test legitimate promotion
@@ -1630,7 +1764,9 @@ mod tests {
         evil_config.signing_secret.push_str("-alternate");
         let mut evil_lab = IncidentLab::new(evil_config);
 
-        let evil_candidate = evil_lab.synthesize_mitigation(&trace, "mit-evil", BTreeMap::new());
+        let evil_candidate = evil_lab
+            .synthesize_mitigation(&trace, "mit-evil", BTreeMap::new())
+            .unwrap();
 
         // Evil lab should produce different signatures
         if let Ok(evil_comparison) = evil_lab.compare_replay(&trace, &evil_candidate) {
@@ -1809,7 +1945,9 @@ mod tests {
         let mut diff = BTreeMap::new();
         diff.insert("param\x1b[31mred\x1b[0m".to_string(), "value%s".to_string());
 
-        let candidate = lab.synthesize_mitigation(&fixture_trace(), "mit\x00null", diff);
+        let candidate = lab
+            .synthesize_mitigation(&fixture_trace(), "mit\x00null", diff)
+            .unwrap();
         let candidate_debug = format!("{:?}", candidate);
         assert!(!candidate_debug.contains('\x00'));
         assert!(!candidate_debug.contains('\x1b'));
@@ -1857,8 +1995,7 @@ mod tests {
             let _ = replay_result; // Allow any result, testing for crashes
 
             // Test validation boundary behavior
-            let validation_result = trace.validate_integrity();
-            assert!(validation_result == validation_result); // Tautology to check for side effects
+            assert!(trace.validate_integrity().is_ok());
         }
 
         // Test extremely long strings
@@ -1879,10 +2016,12 @@ mod tests {
         // Test policy diff with boundary values
         let mut boundary_diff = BTreeMap::new();
         boundary_diff.insert("".to_string(), "".to_string()); // Empty key/value
-        boundary_diff.insert("a".repeat(100000), i64::MAX.to_string()); // Very long key
+        boundary_diff.insert("a".repeat(100000), "5".to_string()); // Very long key
         boundary_diff.insert("normal".to_string(), "not-a-number".to_string()); // Non-numeric
 
-        let boundary_candidate = lab.synthesize_mitigation(&fixture_trace(), "", boundary_diff);
+        let boundary_candidate = lab
+            .synthesize_mitigation(&fixture_trace(), "", boundary_diff)
+            .unwrap();
         assert!(boundary_candidate.mitigation_id.is_empty());
         assert!(!boundary_candidate.policy_diff.is_empty());
 
