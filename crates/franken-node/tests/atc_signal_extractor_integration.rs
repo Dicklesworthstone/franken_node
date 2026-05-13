@@ -13,6 +13,12 @@
 //!
 //! The integration test also walks the 5-trace JSONL fixture under
 //! `tests/fixtures/atc_signal_samples.jsonl` end-to-end.
+//!
+//! The `federation` module is gated behind the `advanced-features` feature
+//! flag in `crates/franken-node/src/lib.rs`, so this entire test file is
+//! cfg-gated to match.
+
+#![cfg(feature = "advanced-features")]
 
 use frankenengine_node::federation::atc_signal_extractor::{
     AtcLocalSignal, ExtractionAuditLog, ExtractionError, ExtractionPolicy, SignalKind,
@@ -172,7 +178,7 @@ fn fixture_replay_is_deterministic() {
     let raw = fs::read_to_string(&path).unwrap();
     let policy = redacting_policy();
 
-    let mut run = |label: &str| -> Vec<String> {
+    let run = |label: &str| -> Vec<String> {
         raw.lines()
             .filter(|l| !l.trim().is_empty())
             .map(|line| {
