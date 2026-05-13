@@ -48,6 +48,34 @@ fn update_length_prefixed(hasher: &mut Sha256, field: &[u8]) -> Result<(), Chall
     Ok(())
 }
 
+/// Compare submitted challenge proof hashes without content-dependent timing.
+///
+/// Length mismatches fail closed through the shared constant-time helper; for
+/// equal-length proof hashes, comparison work is independent of mismatch
+/// position.
+#[must_use]
+pub fn proof_data_hash_matches_constant_time(submitted_hash: &str, expected_hash: &str) -> bool {
+    crate::security::constant_time::ct_eq(submitted_hash, expected_hash)
+}
+
+fn proof_type_matches_constant_time(
+    expected: &RequiredProofType,
+    submitted: &RequiredProofType,
+) -> bool {
+    match (expected, submitted) {
+        (RequiredProofType::ProvenanceAttestation, RequiredProofType::ProvenanceAttestation) => {
+            true
+        }
+        (RequiredProofType::IntegrityProof, RequiredProofType::IntegrityProof) => true,
+        (RequiredProofType::EpochBoundaryProof, RequiredProofType::EpochBoundaryProof) => true,
+        (RequiredProofType::OriginSignature, RequiredProofType::OriginSignature) => true,
+        (RequiredProofType::Custom(expected), RequiredProofType::Custom(submitted)) => {
+            crate::security::constant_time::ct_eq(expected, submitted)
+        }
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -554,19 +582,7 @@ impl ChallengeFlowController {
         if !challenge
             .required_proofs
             .iter()
-            .any(|required| match (required, &proof.proof_type) {
-                (
-                    RequiredProofType::ProvenanceAttestation,
-                    RequiredProofType::ProvenanceAttestation,
-                ) => true,
-                (RequiredProofType::IntegrityProof, RequiredProofType::IntegrityProof) => true,
-                (RequiredProofType::EpochBoundaryProof, RequiredProofType::EpochBoundaryProof) => {
-                    true
-                }
-                (RequiredProofType::OriginSignature, RequiredProofType::OriginSignature) => true,
-                (RequiredProofType::Custom(a), RequiredProofType::Custom(b)) => a == b,
-                _ => false,
-            })
+            .any(|required| proof_type_matches_constant_time(required, &proof.proof_type))
         {
             return Err(ChallengeError::new(
                 ERR_PROOF_INVALID,
@@ -619,19 +635,7 @@ impl ChallengeFlowController {
 
         // SECURITY: Check for duplicate proof submissions of the same type
         let duplicate_exists = challenge.received_proofs.iter().any(|existing| {
-            match (&existing.proof_type, &proof.proof_type) {
-                (
-                    RequiredProofType::ProvenanceAttestation,
-                    RequiredProofType::ProvenanceAttestation,
-                ) => true,
-                (RequiredProofType::IntegrityProof, RequiredProofType::IntegrityProof) => true,
-                (RequiredProofType::EpochBoundaryProof, RequiredProofType::EpochBoundaryProof) => {
-                    true
-                }
-                (RequiredProofType::OriginSignature, RequiredProofType::OriginSignature) => true,
-                (RequiredProofType::Custom(a), RequiredProofType::Custom(b)) => a == b,
-                _ => false,
-            }
+            proof_type_matches_constant_time(&existing.proof_type, &proof.proof_type)
         });
         if duplicate_exists {
             return Err(ChallengeError::new(
@@ -712,25 +716,7 @@ impl ChallengeFlowController {
             // SECURITY: Verify that all required proof types have been submitted
             for required_type in &challenge.required_proofs {
                 let type_submitted = challenge.received_proofs.iter().any(|proof| {
-                    match (required_type, &proof.proof_type) {
-                        (
-                            RequiredProofType::ProvenanceAttestation,
-                            RequiredProofType::ProvenanceAttestation,
-                        ) => true,
-                        (RequiredProofType::IntegrityProof, RequiredProofType::IntegrityProof) => {
-                            true
-                        }
-                        (
-                            RequiredProofType::EpochBoundaryProof,
-                            RequiredProofType::EpochBoundaryProof,
-                        ) => true,
-                        (
-                            RequiredProofType::OriginSignature,
-                            RequiredProofType::OriginSignature,
-                        ) => true,
-                        (RequiredProofType::Custom(a), RequiredProofType::Custom(b)) => a == b,
-                        _ => false,
-                    }
+                    proof_type_matches_constant_time(required_type, &proof.proof_type)
                 });
 
                 if !type_submitted {
@@ -1163,7 +1149,7 @@ mod tests {
                     artifact_id,
                     &proof.proof_type,
                 )?;
-                if crate::security::constant_time::ct_eq(&proof.data_hash, &expected) {
+                if proof_data_hash_matches_constant_time(&proof.data_hash, &expected) {
                     Ok(())
                 } else {
                     Err(ChallengeError::new(
@@ -1689,7 +1675,7 @@ mod tests {
                     artifact_id,
                     &proof.proof_type,
                 )?;
-                if crate::security::constant_time::ct_eq(&proof.data_hash, &expected) {
+                if proof_data_hash_matches_constant_time(&proof.data_hash, &expected) {
                     Ok(())
                 } else {
                     Err(ChallengeError::new(
@@ -3432,7 +3418,7 @@ mod tests {
         // Should be rejected due to >= comparison (fail-closed expiry)
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.error_code() == ERR_PROOF_INVALID);
+        assert_eq!(err.error_code(), ERR_PROOF_INVALID);
         assert!(err.message().contains("too old"));
         assert!(err.message().contains("3600000ms")); // age should be exactly 3600000ms
     }

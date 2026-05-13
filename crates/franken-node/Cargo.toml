@@ -353,6 +353,10 @@ name = "audience_token_security"
 path = "tests/exploit_audience_token.rs"
 
 [[test]]
+name = "challenge_flow_timing_attack_resistance"
+path = "tests/challenge_flow_timing_attack_resistance.rs"
+
+[[test]]
 name = "engine_dispatcher_pipe_drain"
 path = "tests/engine_dispatcher_pipe_drain.rs"
 
