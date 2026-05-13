@@ -14,7 +14,7 @@
       "detail": "Replay reproduced the expected pass verdict"
     }
   ],
-  "execution_timestamp": "2026-04-21T12:00:00.000000Z",
+  "execution_timestamp": "${runtime_rfc3339}",
   "verifier_identity": "verifier://facade-test",
   "artifact_binding_hash": "ef5b9576bc8bce8c63a8dff3e66f3beb484c9eeec9a339e85fc222d94dcd7318",
   "verifier_signature": "ce6ea74c132dca20d2f81466f7f2a72c3d8273916846fd953eee76917c7d49b3",

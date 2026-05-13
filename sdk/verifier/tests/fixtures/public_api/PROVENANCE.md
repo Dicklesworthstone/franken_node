@@ -39,8 +39,11 @@ Do not reintroduce obsolete placeholder contracts such as:
 
 ### `facade_result.json`
 
-Frozen `VerificationResult` JSON used by `public_api_contract.rs` to assert the
-serde contract and digest/signature field format for the verifier facade.
+`VerificationResult` JSON template used by `public_api_contract.rs` to assert
+the serde contract and digest/signature field format for the verifier facade.
+The `execution_timestamp` field is intentionally `${runtime_rfc3339}` so tests
+must materialize a fresh RFC 3339 UTC timestamp before round-tripping the
+fixture.
 
 ### `session_step.json`
 

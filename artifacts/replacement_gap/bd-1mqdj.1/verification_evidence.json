@@ -1,0 +1,55 @@
+{
+  "bead": "bd-1mqdj.1",
+  "generated_at": "2026-05-13T15:51:30Z",
+  "finding_remediated": [
+    "facade_result.json no longer freezes execution_timestamp to 2026-04-21T12:00:00.000000Z",
+    "SDK and product conformance tests now materialize a runtime RFC3339 timestamp before round-tripping the facade_result fixture",
+    "Live SDK timestamp emission remains covered by facade_emits_runtime_rfc3339_timestamps in sdk/verifier/src/lib.rs"
+  ],
+  "changed_contracts": [
+    "sdk/verifier/tests/fixtures/public_api/facade_result.json",
+    "sdk/verifier/tests/public_api_contract.rs",
+    "crates/franken-node/tests/sdk_verifier_public_api_golden_conformance.rs",
+    "sdk/verifier/tests/fixtures/public_api/PROVENANCE.md",
+    "sdk/verifier/tests/COVERAGE.md"
+  ],
+  "proofs": {
+    "fixture_timestamp_placeholder": "${runtime_rfc3339}",
+    "legacy_timestamp_guard": "2026-04-21T12:00:00.000000Z",
+    "runtime_source": "sdk/verifier/src/lib.rs: current_utc_timestamp() uses Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true)"
+  },
+  "validation": [
+    {
+      "command": "rustfmt --edition 2024 --check sdk/verifier/tests/public_api_contract.rs crates/franken-node/tests/sdk_verifier_public_api_golden_conformance.rs",
+      "status": "pass"
+    },
+    {
+      "command": "git diff --check -- .beads/issues.jsonl crates/franken-node/tests/sdk_verifier_public_api_golden_conformance.rs sdk/verifier/tests/COVERAGE.md sdk/verifier/tests/fixtures/public_api/PROVENANCE.md sdk/verifier/tests/fixtures/public_api/facade_result.json sdk/verifier/tests/public_api_contract.rs",
+      "status": "pass"
+    },
+    {
+      "command": "python3 -m json.tool sdk/verifier/tests/fixtures/public_api/facade_result.json",
+      "status": "pass"
+    },
+    {
+      "command": "ubs $(git diff --name-only --cached)",
+      "status": "blocked_by_existing_findings",
+      "notes": "UBS reported existing test-only panic/unwrap/assert and heuristic findings; its internal format, clippy, cargo check, and test build sections were clean."
+    },
+    {
+      "command": "rch exec -- cargo fmt --check",
+      "status": "blocked_by_unrelated_workspace_formatting",
+      "notes": "Fails before touched files due unrelated rustfmt drift in crates/franken-node/src/dgis/* and root integration tests."
+    },
+    {
+      "command": "rch exec -- cargo test -p frankenengine-verifier-sdk --features test-support --test public_api_contract test_verification_result_fixture_matches_live_json_contract -- --exact",
+      "status": "blocked_by_remote_compile_stall",
+      "notes": "Remote job synced 61 roots and went silent in frankenengine-engine compilation; canceled after prolonged no-progress output."
+    },
+    {
+      "command": "rch exec -- cargo test -p frankenengine-verifier-sdk --lib facade_emits_runtime_rfc3339_timestamps -- --exact",
+      "status": "blocked_by_remote_workspace_sync",
+      "notes": "Even the SDK-only target synced the full workspace dependency set; canceled after it repeated the broad sync path."
+    }
+  ]
+}

@@ -37,6 +37,8 @@ const SESSION_STEP_FIXTURE: &str =
     include_str!("../../../sdk/verifier/tests/fixtures/public_api/session_step.json");
 const TRANSPARENCY_ENTRY_FIXTURE: &str =
     include_str!("../../../sdk/verifier/tests/fixtures/public_api/transparency_entry.json");
+const FACADE_RESULT_RUNTIME_TIMESTAMP_PLACEHOLDER: &str = "${runtime_rfc3339}";
+const LEGACY_FACADE_RESULT_TIMESTAMP: &str = "2026-04-21T12:00:00.000000Z";
 #[cfg(feature = "verifier-tools")]
 const NODE_CAPSULE_BYTES_PER_COUNT_UNIT: usize = 1024;
 #[cfg(feature = "verifier-tools")]
@@ -264,11 +266,34 @@ fn parse_fixture_value(raw: &str, fixture_name: &str) -> Value {
         .unwrap_or_else(|err| panic!("failed to parse {fixture_name} fixture as JSON: {err}"))
 }
 
-fn assert_fixture_round_trip<T>(raw: &str, fixture_name: &str) -> T
+fn runtime_facade_result_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+}
+
+fn materialize_facade_result_fixture(raw: &str) -> Value {
+    let mut value = parse_fixture_value(raw, "facade_result");
+    let raw_timestamp = value
+        .get("execution_timestamp")
+        .and_then(Value::as_str)
+        .expect("facade_result.execution_timestamp must be a string");
+    assert_eq!(
+        raw_timestamp, FACADE_RESULT_RUNTIME_TIMESTAMP_PLACEHOLDER,
+        "facade_result fixture must require runtime timestamp materialization"
+    );
+    value
+        .as_object_mut()
+        .expect("facade_result must be an object")
+        .insert(
+            "execution_timestamp".to_string(),
+            Value::String(runtime_facade_result_timestamp()),
+        );
+    value
+}
+
+fn assert_value_round_trip<T>(expected_value: Value, fixture_name: &str) -> T
 where
     T: DeserializeOwned + Serialize + std::fmt::Debug,
 {
-    let expected_value = parse_fixture_value(raw, fixture_name);
     let parsed: T = serde_json::from_value(expected_value.clone())
         .unwrap_or_else(|err| panic!("failed to deserialize {fixture_name} fixture: {err}"));
     let round_tripped = serde_json::to_value(&parsed)
@@ -278,6 +303,13 @@ where
         "{fixture_name} fixture drifted from the live serde contract"
     );
     parsed
+}
+
+fn assert_fixture_round_trip<T>(raw: &str, fixture_name: &str) -> T
+where
+    T: DeserializeOwned + Serialize + std::fmt::Debug,
+{
+    assert_value_round_trip(parse_fixture_value(raw, fixture_name), fixture_name)
 }
 
 fn is_lower_hex_digest(value: &str) -> bool {
@@ -580,8 +612,16 @@ fn node_verifier_sdk_report_set_validation_declares_structural_only_scope() {
 
 #[test]
 fn sdk_verifier_public_api_golden_conformance() {
-    let facade: VerificationResult =
-        assert_fixture_round_trip(FACADE_RESULT_FIXTURE, "facade_result");
+    let raw_facade_value = parse_fixture_value(FACADE_RESULT_FIXTURE, "facade_result");
+    assert_eq!(
+        raw_facade_value
+            .get("execution_timestamp")
+            .and_then(Value::as_str),
+        Some(FACADE_RESULT_RUNTIME_TIMESTAMP_PLACEHOLDER),
+        "facade_result fixture must not freeze the execution timestamp"
+    );
+    let facade_value = materialize_facade_result_fixture(FACADE_RESULT_FIXTURE);
+    let facade: VerificationResult = assert_value_round_trip(facade_value, "facade_result");
     assert_eq!(facade.operation, VerificationOperation::Claim);
     assert_eq!(facade.verdict, VerificationVerdict::Pass);
     assert!((0.0..=1.0).contains(&facade.confidence_score));
@@ -594,11 +634,15 @@ fn sdk_verifier_public_api_golden_conformance() {
         &facade.execution_timestamp,
         "facade_result execution_timestamp",
     );
-    let facade_value = parse_fixture_value(FACADE_RESULT_FIXTURE, "facade_result");
     assert!(
-        facade_value.get("result_origin_nonce").is_none(),
+        raw_facade_value.get("result_origin_nonce").is_none(),
         "facade_result must not expose the private result_origin_nonce field"
     );
+    assert_ne!(
+        facade.execution_timestamp,
+        FACADE_RESULT_RUNTIME_TIMESTAMP_PLACEHOLDER
+    );
+    assert_ne!(facade.execution_timestamp, LEGACY_FACADE_RESULT_TIMESTAMP);
 
     let step: SessionStep = assert_fixture_round_trip(SESSION_STEP_FIXTURE, "session_step");
     assert_eq!(step.step_index, 1);
@@ -634,6 +678,7 @@ fn sdk_verifier_public_api_live_contract_invariants() {
         &result.execution_timestamp,
         "live result execution_timestamp",
     );
+    assert_ne!(result.execution_timestamp, LEGACY_FACADE_RESULT_TIMESTAMP);
 
     let result_json = serde_json::to_value(&result).expect("result should serialize to JSON");
     assert!(

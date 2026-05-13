@@ -18,6 +18,9 @@ use frankenengine_verifier_sdk::*;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+const FACADE_RESULT_RUNTIME_TIMESTAMP_PLACEHOLDER: &str = "${runtime_rfc3339}";
+const LEGACY_FACADE_RESULT_TIMESTAMP: &str = "2026-04-21T12:00:00.000000Z";
+
 /// API contract requirement levels for test prioritization
 #[derive(Debug, Clone, Copy)]
 enum RequirementLevel {
@@ -138,6 +141,30 @@ fn load_facade_result_fixture() -> Result<Value, String> {
         include_str!("fixtures/public_api/facade_result.json"),
         "facade_result",
     )
+}
+
+fn runtime_facade_result_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+}
+
+fn materialize_facade_result_fixture(fixture_value: &Value) -> Result<Value, String> {
+    let raw_timestamp =
+        fixture_object_string(fixture_value, "execution_timestamp", "facade_result")?;
+    if raw_timestamp != FACADE_RESULT_RUNTIME_TIMESTAMP_PLACEHOLDER {
+        return Err(format!(
+            "facade_result.execution_timestamp must be {FACADE_RESULT_RUNTIME_TIMESTAMP_PLACEHOLDER:?}, got {raw_timestamp:?}"
+        ));
+    }
+
+    let mut materialized = fixture_value.clone();
+    let object = materialized
+        .as_object_mut()
+        .ok_or_else(|| "facade_result must be an object".to_string())?;
+    object.insert(
+        "execution_timestamp".to_string(),
+        Value::String(runtime_facade_result_timestamp()),
+    );
+    Ok(materialized)
 }
 
 fn load_session_step_fixture() -> Result<Value, String> {
@@ -601,6 +628,7 @@ fn test_verification_result_json_shape() -> Result<(), String> {
         &result.execution_timestamp,
         "live result execution_timestamp",
     )?;
+    assert_ne!(result.execution_timestamp, LEGACY_FACADE_RESULT_TIMESTAMP);
     assert_eq!(result.verifier_identity, "verifier://shape-test");
     assert!(
         is_lower_hex_digest(&result.artifact_binding_hash),
@@ -615,7 +643,12 @@ fn test_verification_result_json_shape() -> Result<(), String> {
 }
 
 fn test_verification_result_fixture_matches_live_json_contract() -> Result<(), String> {
-    let fixture_value = load_facade_result_fixture()?;
+    let raw_fixture_value = load_facade_result_fixture()?;
+    assert_eq!(
+        fixture_object_string(&raw_fixture_value, "execution_timestamp", "facade_result")?,
+        FACADE_RESULT_RUNTIME_TIMESTAMP_PLACEHOLDER
+    );
+    let fixture_value = materialize_facade_result_fixture(&raw_fixture_value)?;
     let fixture: VerificationResult = serde_json::from_value(fixture_value.clone())
         .map_err(|err| format!("failed to deserialize facade_result fixture: {err}"))?;
 
@@ -644,6 +677,11 @@ fn test_verification_result_fixture_matches_live_json_contract() -> Result<(), S
         &fixture.execution_timestamp,
         "facade_result execution_timestamp",
     )?;
+    assert_ne!(
+        fixture.execution_timestamp,
+        FACADE_RESULT_RUNTIME_TIMESTAMP_PLACEHOLDER
+    );
+    assert_ne!(fixture.execution_timestamp, LEGACY_FACADE_RESULT_TIMESTAMP);
     assert_eq!(fixture.sdk_version, SDK_VERSION);
 
     Ok(())
