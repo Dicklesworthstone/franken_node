@@ -7,17 +7,52 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import check_release_vectors as checker
+import check_release_vectors as checker  # noqa: E402
 
 
 class TestSelfTest(unittest.TestCase):
     def test_self_test_runs(self):
         ok = checker.self_test()
         self.assertTrue(ok)
+
+    def test_self_test_reflects_failed_verdict(self):
+        failing_result = {
+            "checks": [{"name": "forced_failure", "passed": False, "detail": "forced"}],
+            "verdict": "FAIL",
+            "all_passed": False,
+        }
+        with patch.object(checker, "run_all", return_value=failing_result):
+            self.assertFalse(checker.self_test())
+
+    def test_cli_self_test_exits_on_failed_verdict(self):
+        failing_result = {
+            "checks": [{"name": "forced_failure", "passed": False, "detail": "forced"}],
+            "verdict": "FAIL",
+            "all_passed": False,
+        }
+        with (
+            patch.object(checker, "run_all", return_value=failing_result),
+            patch.object(sys, "argv", ["check_release_vectors.py", "--self-test"]),
+            patch("builtins.print"),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                checker.main()
+        self.assertEqual(ctx.exception.code, 1)
+
+
+class TestManifestLoading(unittest.TestCase):
+    def test_load_manifest_missing_returns_sentinel(self):
+        with patch.object(checker, "_read", return_value=""):
+            self.assertIsNone(checker._load_manifest())
+
+    def test_load_manifest_invalid_returns_sentinel(self):
+        with patch.object(checker, "_read", return_value="{"):
+            self.assertIsNone(checker._load_manifest())
 
 
 class TestRunAllStructure(unittest.TestCase):
@@ -170,9 +205,13 @@ class TestJsonOutput(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable,
              str(ROOT / "scripts" / "check_release_vectors.py"), "--json"],
-            capture_output=True, text=True,
+            capture_output=True, check=True, text=True, timeout=10,
         )
-        data = json.loads(proc.stdout)
+        decoder = json.JSONDecoder()
+        try:
+            data = decoder.decode(proc.stdout)
+        except json.JSONDecodeError as exc:
+            self.fail(f"invalid JSON output: {exc}\nstdout={proc.stdout}\nstderr={proc.stderr}")
         self.assertEqual(data["bead_id"], "bd-1hd")
         self.assertIn("checks", data)
 
@@ -180,7 +219,7 @@ class TestJsonOutput(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable,
              str(ROOT / "scripts" / "check_release_vectors.py"), "--self-test"],
-            capture_output=True, text=True,
+            capture_output=True, check=True, text=True, timeout=10,
         )
         self.assertEqual(proc.returncode, 0)
         self.assertIn("self_test passed", proc.stdout)

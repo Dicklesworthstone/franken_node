@@ -24,5 +24,28 @@
   "invariants": ["INV-RGV-BLOCK", "INV-RGV-REGRESSION", "INV-RGV-VERSIONED", "INV-RGV-COVERAGE"],
   "error_codes": ["ERR_RGV_MANIFEST_MISSING", "ERR_RGV_MANIFEST_INVALID", "ERR_RGV_VECTOR_FILE_MISSING", "ERR_RGV_SUITE_FAILED", "ERR_RGV_REGRESSION"],
   "coverage_report": "artifacts/section_10_10/bd-1hd/vector_coverage.json",
-  "compilation": "n/a"
+  "compilation": "n/a",
+  "completion_debt_review": {
+    "source_bead": "bd-1hd.1",
+    "scanner_artifact": "beads_compliance_audit/passes/2026-05-11T17-36-47Z/beads/bd-1hd/theater.json",
+    "hardcoded_return_findings_reviewed": 3,
+    "resolved_findings": [
+      {
+        "id": "theater.1",
+        "prior_line": 71,
+        "resolution": "missing manifest now returns the named MANIFEST_LOAD_FAILED sentinel"
+      },
+      {
+        "id": "theater.2",
+        "prior_line": 75,
+        "resolution": "invalid manifest JSON now returns the named MANIFEST_LOAD_FAILED sentinel"
+      },
+      {
+        "id": "theater.3",
+        "prior_line": 321,
+        "resolution": "self_test now returns bool(result[\"all_passed\"]) and --self-test exits nonzero on failed verifier output"
+      }
+    ],
+    "post_fix_literal_return_scan": "rg hardcoded-return pattern over scripts/check_release_vectors.py returns no matches"
+  }
 }

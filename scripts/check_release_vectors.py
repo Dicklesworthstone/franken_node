@@ -12,15 +12,19 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 BEAD_ID = "bd-1hd"
 SECTION = "10.10"
 TITLE = "Release Gate Vector Suites"
+MANIFEST_LOAD_FAILED: dict[str, Any] | None = None
+EMPTY_FILE_TEXT = ""
+JSON_DECODER = json.JSONDecoder()
 
 SPEC_PATH = ROOT / "docs" / "specs" / "section_10_10" / "bd-1hd_contract.md"
 MANIFEST_PATH = ROOT / "vectors" / "release_gate_manifest.json"
@@ -54,7 +58,7 @@ REQUIRED_MANIFEST_FIELDS = [
 ]
 
 
-def _check(name: str, passed: bool, detail: str) -> dict:
+def _check(name: str, passed: bool, detail: str) -> dict[str, Any]:
     return {"name": name, "passed": passed, "detail": detail}
 
 
@@ -62,17 +66,21 @@ def _read(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return ""
+        return EMPTY_FILE_TEXT
 
 
-def _load_manifest():
+def _decode_json(text: str) -> Any:
+    return JSON_DECODER.decode(text)
+
+
+def _load_manifest() -> dict[str, Any] | None:
     text = _read(MANIFEST_PATH)
     if not text:
-        return None
+        return MANIFEST_LOAD_FAILED
     try:
-        return json.loads(text)
+        return _decode_json(text)
     except (json.JSONDecodeError, ValueError):
-        return None
+        return MANIFEST_LOAD_FAILED
 
 
 # ── Spec checks ──────────────────────────────────────────────────────────
@@ -192,7 +200,7 @@ def check_vector_files_valid_json() -> dict:
         text = _read(vf)
         if text:
             try:
-                json.loads(text)
+                _decode_json(text)
             except (json.JSONDecodeError, ValueError):
                 invalid.append(suite.get("suite_name", "?"))
     ok = len(invalid) == 0
@@ -221,7 +229,7 @@ def check_coverage_report_exists() -> dict:
 def check_coverage_report_valid() -> dict:
     text = _read(COVERAGE_PATH)
     try:
-        data = json.loads(text)
+        data = _decode_json(text)
         ok = "covered_features" in data and "total_features" in data
     except (json.JSONDecodeError, ValueError):
         ok = False
@@ -312,17 +320,22 @@ def run_all() -> dict:
 def self_test() -> bool:
     """Smoke test."""
     result = run_all()
-    assert isinstance(result, dict)
-    assert "checks" in result
-    assert "verdict" in result
-    assert isinstance(result["checks"], list)
-    assert all("name" in c and "passed" in c and "detail" in c
-               for c in result["checks"])
-    return True
+    if not isinstance(result, dict):
+        raise AssertionError("run_all must return dict")
+    for key in ("checks", "verdict", "all_passed"):
+        if key not in result:
+            raise AssertionError(f"missing {key} key")
+    if not isinstance(result["checks"], list):
+        raise AssertionError("checks must be a list")
+    for check in result["checks"]:
+        for key in ("name", "passed", "detail"):
+            if key not in check:
+                raise AssertionError(f"check entry missing {key}")
+    return bool(result["all_passed"])
 
 
 def main():
-    logger = configure_test_logging("check_release_vectors")
+    configure_test_logging("check_release_vectors")
     import argparse
     parser = argparse.ArgumentParser(description=f"Verify {BEAD_ID}")
     parser.add_argument("--json", action="store_true")
