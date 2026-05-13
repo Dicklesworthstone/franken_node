@@ -4,9 +4,7 @@ use insta::assert_snapshot;
 #[path = "migrate_golden_helpers.rs"]
 mod migrate_golden_helpers;
 
-use migrate_golden_helpers::{
-    fixture_path, pretty_json_stdout, with_scrubbed_snapshot_settings,
-};
+use migrate_golden_helpers::{fixture_path, pretty_json_stdout, with_scrubbed_snapshot_settings};
 
 fn validate_fixture_json(fixture: &str, expect_success: bool) -> String {
     let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");

@@ -6,7 +6,7 @@
 
 use regex::Regex;
 use serde_json::Value;
-use std::{fs, path::Path, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 /// Universal golden comparison function that supports scrubbing
 pub fn assert_golden(test_name: &str, actual: &str) {
@@ -88,9 +88,10 @@ pub fn scrub_dynamic_values(input: &str) -> String {
     let dur_re = Regex::new(r"\d+(\.\d+)?\s*(ms|us|ns|s|sec|min)").unwrap();
     result = dur_re.replace_all(&result, "[DURATION]").to_string();
 
-    // Absolute paths → [PATH]
-    let path_re = Regex::new(r"/[a-zA-Z0-9/_.-]+").unwrap();
-    result = path_re.replace_all(&result, "[PATH]").to_string();
+    // Absolute paths → [PATH]. Preserve slash-separated words such as
+    // `require/export` that are not filesystem paths.
+    let path_re = Regex::new(r#"(?m)(^|[\s="'\(])(/[a-zA-Z0-9][a-zA-Z0-9/_.-]*)"#).unwrap();
+    result = path_re.replace_all(&result, "${1}[PATH]").to_string();
 
     // Hash values → [HASH]
     let hash_re = Regex::new(r"\b[a-f0-9]{40,64}\b").unwrap();
@@ -141,6 +142,13 @@ mod tests {
         let input = "path: /home/user/project/file.txt";
         let output = scrub_dynamic_values(input);
         assert_eq!(output, "path: [PATH]");
+    }
+
+    #[test]
+    fn test_scrubber_preserves_slash_separated_words() {
+        let input = "rewrote 1 CommonJS require/export declaration(s) to ESM syntax";
+        let output = scrub_dynamic_values(input);
+        assert_eq!(output, input);
     }
 
     #[test]

@@ -26466,7 +26466,7 @@ fn main() -> Result<()> {
                     })?;
                     println!("{rendered}");
                 } else {
-                    println!("{}", migration::render_rewrite_report(&report));
+                    print!("{}", migration::render_rewrite_report(&report));
                 }
 
                 if let Some(out_path) = args.emit_rollback.as_deref() {

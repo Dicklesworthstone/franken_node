@@ -2373,8 +2373,17 @@ fn create_backup_directory_safe(project_path: &Path, backup_path: &Path) -> anyh
         );
     }
 
-    // Create each subdirectory component incrementally with symlink validation
-    if let Ok(relative_backup_path) = backup_path.strip_prefix(&backup_root) {
+    let backup_parent = backup_path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "failed resolving backup parent directory for {}",
+            backup_path.display()
+        )
+    })?;
+
+    // Create each parent directory component incrementally with symlink validation.
+    // The final backup path component is the destination file and must not be
+    // created as a directory.
+    if let Ok(relative_backup_path) = backup_parent.strip_prefix(&backup_root) {
         let mut current_path = backup_root.clone();
 
         for component in relative_backup_path.components() {
