@@ -1,0 +1,82 @@
+{
+  "schema_version": "franken-node/execution-normalization-proof/v1",
+  "bead_id": "bd-2yhs.1",
+  "parent_bead_id": "bd-2yhs",
+  "generated_at": "2026-05-13T13:20:00Z",
+  "verdict": "PASS",
+  "finding_remediation": {
+    "finding": "bd-2yhs promised a CI workflow, detector, and findings report but prior evidence did not cite committed code artifacts or committed CI proof.",
+    "resolution": "The duplicate-implementation detector is now wired into a committed GitHub Actions workflow and this evidence bundle cites the detector, section gate, E2E suite, policy registry, and report artifacts."
+  },
+  "code_artifacts": [
+    {
+      "kind": "ci_workflow",
+      "path": ".github/workflows/execution-normalization-gate.yml",
+      "purpose": "Runs the duplicate-implementation detector, section 10.N gate, and semantic-boundary E2E suite on relevant source, policy, script, and workflow changes."
+    },
+    {
+      "kind": "detector",
+      "path": "scripts/check_ownership_violations.py",
+      "purpose": "Detects cross-track capability redefinitions, protected semantic-family drift, and forbidden internal boundary imports."
+    },
+    {
+      "kind": "section_gate",
+      "path": "scripts/verify_section_10n.py",
+      "purpose": "Aggregates the 10.N ownership registry, duplicate-implementation gate, oracle close-condition gate, and cross-track linter checks."
+    },
+    {
+      "kind": "unit_tests",
+      "path": "tests/test_check_ownership_violations.py",
+      "purpose": "Covers rule catalog shape, waiver handling, ownership matching, semantic-boundary drift detection, contract alignment, and forbidden internal imports."
+    },
+    {
+      "kind": "e2e_suite",
+      "path": "tests/e2e/semantic_boundary_policy_suite.sh",
+      "purpose": "Exercises pass and fail CI scenarios with fixture workspaces and stable rule IDs."
+    },
+    {
+      "kind": "policy_registry",
+      "path": "docs/capability_ownership_registry.json",
+      "purpose": "Machine-readable canonical ownership map consumed by the detector."
+    },
+    {
+      "kind": "policy_contract",
+      "path": "docs/architecture/tri_kernel_ownership_contract.md",
+      "purpose": "Human-readable semantic-boundary contract kept aligned with detector rule IDs and sanctioned path sets."
+    },
+    {
+      "kind": "waiver_config",
+      "path": "scripts/ownership_waivers.json",
+      "purpose": "Scoped, auditable waiver input for duplicate-implementation gate exceptions."
+    }
+  ],
+  "reports": [
+    {
+      "path": "artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json",
+      "type": "historical_section_gate_report",
+      "verdict": "PASS"
+    },
+    {
+      "path": "artifacts/section/10.N/bd-2yhs/verification_summary.md",
+      "type": "human_summary",
+      "verdict": "PASS"
+    }
+  ],
+  "local_validation": [
+    {
+      "command": "python3 scripts/check_ownership_violations.py --json",
+      "result": "PASS",
+      "observed": "ownership-check/v2 verdict PASS; 393 Rust files scanned; 0 active violations"
+    },
+    {
+      "command": "python3 scripts/verify_section_10n.py --json",
+      "result": "PASS",
+      "observed": "section_10n_verification verdict PASS; 4/4 checks passed; 1/1 unit test suites passed"
+    },
+    {
+      "command": "python3 -m pytest tests/test_check_ownership_violations.py",
+      "result": "PASS",
+      "observed": "21 tests passed"
+    }
+  ]
+}

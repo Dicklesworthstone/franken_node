@@ -1,0 +1,80 @@
+name: Execution Normalization Gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/execution-normalization-gate.yml"
+      - "crates/franken-node/src/**"
+      - "docs/capability_ownership_registry.json"
+      - "docs/CAPABILITY_OWNERSHIP_REGISTRY.md"
+      - "docs/DUAL_ORACLE_CLOSE_CONDITION.md"
+      - "docs/architecture/tri_kernel_ownership_contract.md"
+      - "scripts/check_ownership_violations.py"
+      - "scripts/verify_section_10n.py"
+      - "scripts/lint_cross_track_references.py"
+      - "scripts/check_oracle_close_condition.py"
+      - "scripts/ownership_waivers.json"
+      - "scripts/lib/test_logger.py"
+      - "tests/e2e/semantic_boundary_policy_suite.sh"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/execution-normalization-gate.yml"
+      - "crates/franken-node/src/**"
+      - "docs/capability_ownership_registry.json"
+      - "docs/CAPABILITY_OWNERSHIP_REGISTRY.md"
+      - "docs/DUAL_ORACLE_CLOSE_CONDITION.md"
+      - "docs/architecture/tri_kernel_ownership_contract.md"
+      - "scripts/check_ownership_violations.py"
+      - "scripts/verify_section_10n.py"
+      - "scripts/lint_cross_track_references.py"
+      - "scripts/check_oracle_close_condition.py"
+      - "scripts/ownership_waivers.json"
+      - "scripts/lib/test_logger.py"
+      - "tests/e2e/semantic_boundary_policy_suite.sh"
+
+jobs:
+  execution-normalization:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run duplicate-implementation detector
+        run: |
+          python3 scripts/check_ownership_violations.py --json > /tmp/ownership_violations.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/ownership_violations.json").read_text())
+          if payload.get("verdict") != "PASS":
+              raise SystemExit(f"ownership gate failed: {payload.get('verdict')}")
+          PY
+
+      - name: Run section 10.N verification gate
+        run: |
+          python3 scripts/verify_section_10n.py --json > /tmp/section_10n_gate.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/section_10n_gate.json").read_text())
+          if payload.get("verdict") != "PASS":
+              raise SystemExit(f"section 10.N gate failed: {payload.get('verdict')}")
+          PY
+
+      - name: Run semantic-boundary E2E suite
+        run: bash tests/e2e/semantic_boundary_policy_suite.sh
+
+      - name: Upload execution-normalization evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-normalization-gate
+          path: |
+            /tmp/ownership_violations.json
+            /tmp/section_10n_gate.json
+            artifacts/asupersync/bd-1now.5.3/semantic_boundary_e2e_summary.json
+            artifacts/asupersync/bd-1now.5.3/semantic_boundary_e2e_bundle.json
+            artifacts/asupersync/bd-1now.5.3/semantic_boundary_stage_results.jsonl
+            artifacts/asupersync/bd-1now.5.3/semantic_boundary_e2e_log.jsonl
