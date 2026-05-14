@@ -2,9 +2,11 @@
   "bead_id": "bd-1sgr",
   "section": "16",
   "gate_script": "check_report_output_contract.py",
-  "checks_passed": 18,
-  "checks_total": 18,
+  "checks_passed": 28,
+  "checks_total": 28,
   "verdict": "PASS",
+  "completion_debt_bead": "bd-1sgr.1",
+  "publishable_reports_directory": "artifacts/section_16/bd-1sgr/publishable_reports",
   "checks": [
     {
       "check": "source_exists",
@@ -94,7 +96,84 @@
     {
       "check": "test_coverage",
       "passed": true,
-      "detail": "0 tests"
+      "detail": "50 tests"
+    },
+    {
+      "check": "catalog_hash_covers_complete_bundles",
+      "passed": true,
+      "detail": "complete_bundles included in content_hash"
+    },
+    {
+      "check": "catalog_hash_length_prefixed",
+      "passed": true,
+      "detail": "Length-prefixed hash inputs with domain separator"
+    },
+    {
+      "check": "publishable_reports_dir",
+      "passed": true,
+      "detail": "/data/projects/franken_node/artifacts/section_16/bd-1sgr/publishable_reports"
+    },
+    {
+      "check": "reproducible_report_registry",
+      "passed": true,
+      "detail": "/data/projects/franken_node/artifacts/section_16/bd-1sgr/publishable_reports/reproducible_report_registry.json"
+    },
+    {
+      "check": "publishable_report_count",
+      "passed": true,
+      "detail": "3 reports"
+    },
+    {
+      "check": "publishable_report_topics",
+      "passed": true,
+      "detail": "benchmark_verification,compatibility_migration,trust_security"
+    },
+    {
+      "check": "publishable_report_artifacts",
+      "passed": true,
+      "detail": "3 report artifacts"
+    },
+    {
+      "check": "publishable_report_reproduction_inputs",
+      "passed": true,
+      "detail": "3/3 ready"
+    },
+    {
+      "check": "reproducibility_badges",
+      "passed": true,
+      "detail": "3 badges"
+    },
+    {
+      "check": "external_reproduction_within_tolerance",
+      "passed": true,
+      "detail": "3 within tolerance"
     }
-  ]
+  ],
+  "validation": [
+    {
+      "command": "python3 scripts/check_report_output_contract.py --json",
+      "result": "PASS",
+      "detail": "28/28 checks passed"
+    },
+    {
+      "command": "python3 -m pytest tests/test_check_report_output_contract.py",
+      "result": "PASS",
+      "detail": "34 tests passed"
+    },
+    {
+      "command": "python3 -m json.tool artifacts/section_16/bd-1sgr/publishable_reports/reproducible_report_registry.json",
+      "result": "PASS"
+    },
+    {
+      "command": "python3 scripts/check_section_16_gate.py --json",
+      "result": "FAIL",
+      "detail": "Broader Section 16 gate reports unrelated bd-3id1 debt; bd-1sgr and the publication checklist pass."
+    }
+  ],
+  "section_gate_note": {
+    "bd_1sgr_status": "PASS",
+    "broader_gate_status": "FAIL",
+    "unrelated_blocker": "bd-3id1",
+    "detail": "The bd-1sgr publishable report directory and registry are present and required by check_report_output_contract.py. The aggregate Section 16 gate remains red because bd-3id1 is outside this completion-debt bead."
+  }
 }

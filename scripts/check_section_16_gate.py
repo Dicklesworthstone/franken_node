@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import re
 import subprocess
@@ -326,6 +327,11 @@ def _reports_count_from_evidence(payload: dict[str, Any]) -> int | None:
     for check in checks:
         if not isinstance(check, dict):
             continue
+        if str(check.get("check")) == "publishable_report_count":
+            return _parse_count_from_detail(str(check.get("detail", "")))
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
         if str(check.get("check")) == "report_types":
             return _parse_count_from_detail(str(check.get("detail", "")))
     return None
@@ -395,7 +401,7 @@ def _publication_checklist(
             "measured": reports_count,
             "required": 3,
             "pass": isinstance(reports_count, int) and reports_count >= 3,
-            "source": "bd-1sgr report_types",
+            "source": "bd-1sgr publishable_report_count",
         },
         {
             "id": "PUB-16-REPLICATIONS",
@@ -697,7 +703,7 @@ def self_test() -> tuple[bool, list[dict[str, bool]]]:
     checks.append(
         {
             "check": "canonical_hash_deterministic",
-            "pass": digest_a == digest_b,
+            "pass": hmac.compare_digest(digest_a, digest_b),
         }
     )
 

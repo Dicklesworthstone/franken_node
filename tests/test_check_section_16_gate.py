@@ -68,6 +68,9 @@ class TestHelpers(TestCase):
         checklist = mod._publication_checklist(evidence)
         self.assertEqual(len(checklist), 4)
         ids = {item["id"] for item in checklist}
+        reports = next(item for item in checklist if item["id"] == "PUB-16-REPORTS")
+        self.assertEqual(reports["source"], "bd-1sgr publishable_report_count")
+        self.assertGreaterEqual(reports["measured"], 3)
         self.assertEqual(
             ids,
             {

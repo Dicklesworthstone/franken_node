@@ -18,37 +18,42 @@ def _load():
 
 mod = _load()
 
+def _run_json():
+    return subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True, timeout=10)
+
+def _json_output():
+    r = _run_json()
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(f"invalid JSON: {r.stdout}") from exc
+
 class TestSelfTest:
     def test_self_test_passes(self):
-        assert mod.self_test() is True
+        assert mod.self_test()
 
 class TestJsonOutput:
     def test_json_has_required_keys(self):
-        r = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True)
-        d = json.loads(r.stdout)
+        d = _json_output()
         for k in ("bead_id", "section", "gate_script", "checks_passed", "checks_total", "verdict", "checks"):
             assert k in d, f"missing key {k}"
 
     def test_bead_id(self):
-        r = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True)
-        d = json.loads(r.stdout)
+        d = _json_output()
         assert d["bead_id"] == "bd-1sgr"
         assert d["section"] == "16"
 
     def test_verdict_field(self):
-        r = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True)
-        d = json.loads(r.stdout)
+        d = _json_output()
         assert d["verdict"] in ("PASS", "FAIL")
 
     def test_checks_is_list(self):
-        r = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True)
-        d = json.loads(r.stdout)
+        d = _json_output()
         assert isinstance(d["checks"], list)
-        assert len(d["checks"]) >= 14
+        assert len(d["checks"]) >= 26
 
     def test_each_check_has_fields(self):
-        r = subprocess.run([sys.executable, SCRIPT, "--json"], capture_output=True, text=True)
-        d = json.loads(r.stdout)
+        d = _json_output()
         for c in d["checks"]:
             assert "check" in c and "passed" in c and "detail" in c
 
@@ -111,6 +116,30 @@ class TestIndividualChecks:
     def test_test_coverage(self, results):
         assert results["test_coverage"]["passed"]
 
+    def test_publishable_reports_dir(self, results):
+        assert results["publishable_reports_dir"]["passed"]
+
+    def test_reproducible_report_registry(self, results):
+        assert results["reproducible_report_registry"]["passed"]
+
+    def test_publishable_report_count(self, results):
+        assert results["publishable_report_count"]["passed"]
+
+    def test_publishable_report_topics(self, results):
+        assert results["publishable_report_topics"]["passed"]
+
+    def test_publishable_report_artifacts(self, results):
+        assert results["publishable_report_artifacts"]["passed"]
+
+    def test_publishable_report_reproduction_inputs(self, results):
+        assert results["publishable_report_reproduction_inputs"]["passed"]
+
+    def test_reproducibility_badges(self, results):
+        assert results["reproducibility_badges"]["passed"]
+
+    def test_external_reproduction_within_tolerance(self, results):
+        assert results["external_reproduction_within_tolerance"]["passed"]
+
 class TestOverall:
     def test_all_pass(self):
         results = mod._checks()
@@ -118,4 +147,4 @@ class TestOverall:
         assert not failed, f"Failed: {failed}"
 
     def test_minimum_check_count(self):
-        assert len(mod._checks()) >= 14
+        assert len(mod._checks()) >= 26
