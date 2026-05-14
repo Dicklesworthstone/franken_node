@@ -705,6 +705,10 @@ name = "anti_amplification_harness"
 path = "../../tests/security/anti_amplification_harness.rs"
 
 [[test]]
+name = "dgis_quarantine_containment"
+path = "../../tests/security/dgis_quarantine_containment.rs"
+
+[[test]]
 name = "bayesian_risk_quarantine"
 path = "tests/bayesian_risk_quarantine.rs"
 
