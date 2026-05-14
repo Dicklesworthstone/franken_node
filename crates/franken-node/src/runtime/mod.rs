@@ -34,6 +34,8 @@ mod metamorphic_scheduler_tests;
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::bulkhead::{self, BulkheadError, GlobalBulkhead};
     use super::safe_mode::{
         AnomalyClassification, Capability, ExitVerification, OperationFlags, SafeModeConfig,
@@ -916,7 +918,9 @@ mod tests {
                     // Acquire permit under memory pressure
                     let acquire_start = std::time::Instant::now();
                     let acquire_result = {
-                        let mut bh = bulkhead.lock().unwrap();
+                        let mut bh =
+                            try_lock(&bulkhead, "runtime memory pressure bulkhead acquire")
+                                .expect("bulkhead mutex should lock for acquire");
                         bh.try_acquire(&permit_id)
                     };
                     let acquire_duration = acquire_start.elapsed();
@@ -938,7 +942,9 @@ mod tests {
                             // Release permit
                             let release_start = std::time::Instant::now();
                             let release_result = {
-                                let mut bh = bulkhead.lock().unwrap();
+                                let mut bh =
+                                    try_lock(&bulkhead, "runtime memory pressure bulkhead release")
+                                        .expect("bulkhead mutex should lock for release");
                                 bh.release(&permit_id)
                             };
                             let release_duration = release_start.elapsed();
@@ -962,7 +968,9 @@ mod tests {
 
                 // Store results
                 {
-                    let mut shared = results.lock().unwrap();
+                    let mut shared =
+                        try_lock(&results, "runtime memory pressure results aggregation")
+                            .expect("results mutex should lock for aggregation");
                     shared.extend(thread_results);
                 }
             });
@@ -975,7 +983,11 @@ mod tests {
             handle.join().expect("Thread should complete");
         }
 
-        let final_results = results.lock().unwrap();
+        let final_results = try_lock(
+            &results,
+            "runtime memory pressure final results verification",
+        )
+        .expect("results mutex should lock for final verification");
         assert_eq!(final_results.len(), thread_count * operations_per_thread);
 
         // Count successes
@@ -997,7 +1009,11 @@ mod tests {
         );
 
         // Final bulkhead state should be consistent
-        let final_bulkhead = bulkhead.lock().unwrap();
+        let final_bulkhead = try_lock(
+            &bulkhead,
+            "runtime memory pressure final bulkhead verification",
+        )
+        .expect("bulkhead mutex should lock for final verification");
         assert_eq!(
             final_bulkhead.in_flight(),
             0,
