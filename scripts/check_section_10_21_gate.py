@@ -72,6 +72,7 @@ KEY_ARTIFACTS = [
     ("bpet_release_gate_report", "artifacts/10.21/bpet_release_gate_report.json"),
     ("bpet_migration_gate_results", "artifacts/10.21/bpet_migration_gate_results.json"),
     ("bpet_economic_guidance_report", "artifacts/10.21/bpet_economic_guidance_report.csv"),
+    ("bpet_dgis_escalation_report", "artifacts/10.21/bpet_dgis_escalation_report.json"),
 ]
 
 RESULTS: list[dict[str, Any]] = []

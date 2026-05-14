@@ -9,6 +9,7 @@ pub mod adversarial_scenarios;
 pub mod camouflage_detector;
 pub mod camouflage_fixtures;
 pub mod cohort_baselines;
+pub mod dgis_fusion;
 pub mod drift_features;
 pub mod economic_integration;
 pub mod evolution_risk_scorer;

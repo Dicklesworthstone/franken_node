@@ -4,29 +4,49 @@
   "section": "10.21",
   "title": "BPET with DGIS integration",
   "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
+  "total": 18,
+  "passed": 18,
   "failed": 0,
+  "implementation_refs": [
+    "crates/franken-node/src/security/bpet/dgis_fusion.rs",
+    "crates/franken-node/src/security/bpet/mod.rs",
+    "crates/franken-node/src/security/dgis/update_copilot.rs",
+    "crates/franken-node/src/security/bpet/evolution_risk_scorer.rs"
+  ],
+  "test_refs": [
+    "tests/integration/bpet_dgis_priority_escalation.rs",
+    "crates/franken-node/Cargo.toml"
+  ],
+  "artifact_refs": [
+    "artifacts/10.21/bpet_dgis_escalation_report.json",
+    "artifacts/section_10_21/bd-kwwg/verification_evidence.json",
+    "artifacts/section_10_21/bd-kwwg/verification_summary.md"
+  ],
   "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
-    {"check": "event_codes_present", "pass": true},
-    {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "genome_schema_compliance", "pass": true},
-    {"check": "phenotype_extraction", "pass": true},
-    {"check": "lineage_tracking", "pass": true},
-    {"check": "drift_detection", "pass": true},
-    {"check": "changepoint_detection", "pass": true},
-    {"check": "survival_model", "pass": true},
-    {"check": "risk_scoring", "pass": true},
-    {"check": "cross_system_integration", "pass": true},
-    {"check": "adversarial_robustness", "pass": true}
+    {"check": "rust_module_exists", "pass": true, "detail": "crates/franken-node/src/security/bpet/dgis_fusion.rs"},
+    {"check": "module_exported", "pass": true, "detail": "pub mod dgis_fusion in crates/franken-node/src/security/bpet/mod.rs"},
+    {"check": "integration_test_registered", "pass": true, "detail": "bpet_dgis_priority_escalation [[test]]"},
+    {"check": "integration_test_exists", "pass": true, "detail": "tests/integration/bpet_dgis_priority_escalation.rs"},
+    {"check": "sample_report_exists", "pass": true, "detail": "artifacts/10.21/bpet_dgis_escalation_report.json"},
+    {"check": "schema_version", "pass": true, "detail": "bpet-dgis-fusion-v1"},
+    {"check": "event_codes_present", "pass": true, "detail": "BPET-DGIS-001..004 plus fail-closed errors"},
+    {"check": "invariant_markers", "pass": true, "detail": "schema, fail-closed numerics, replay, expected loss, topology amplification"},
+    {"check": "deterministic_ordering", "pass": true, "detail": "BTreeMap attribution plus replay fingerprint"},
+    {"check": "bpet_risk_integration", "pass": true, "detail": "FeatureVector and compute_risk_score feed fusion tests"},
+    {"check": "dgis_topology_integration", "pass": true, "detail": "TopologyRiskMetrics aggregate risk and topology fields feed fusion"},
+    {"check": "expected_loss_context", "pass": true, "detail": "base loss, topology multiplier, amplified loss, confidence basis points"},
+    {"check": "priority_escalation_thresholds", "pass": true, "detail": "monitor/elevated/high/critical policy thresholds"},
+    {"check": "high_centrality_escalates", "pass": true, "detail": "articulation + high transitive pressure reaches critical"},
+    {"check": "low_centrality_degrades_gracefully", "pass": true, "detail": "same BPET score on leaf node stays below high priority"},
+    {"check": "replay_determinism", "pass": true, "detail": "sha256 replay fingerprint stable for identical input/policy"},
+    {"check": "fail_closed_topology", "pass": true, "detail": "non-finite topology metrics rejected before escalation"},
+    {"check": "fail_closed_policy", "pass": true, "detail": "invalid policy thresholds rejected before expected-loss math"}
+  ],
+  "validation_commands": [
+    "rustfmt --edition 2024 --check --config skip_children=true crates/franken-node/src/security/bpet/dgis_fusion.rs crates/franken-node/src/security/bpet/mod.rs tests/integration/bpet_dgis_priority_escalation.rs",
+    "python3 -m json.tool artifacts/10.21/bpet_dgis_escalation_report.json",
+    "python3 -m json.tool artifacts/section_10_21/bd-kwwg/verification_evidence.json",
+    "git diff --check -- crates/franken-node/src/security/bpet/dgis_fusion.rs crates/franken-node/src/security/bpet/mod.rs tests/integration/bpet_dgis_priority_escalation.rs crates/franken-node/Cargo.toml scripts/check_section_10_21_gate.py artifacts/10.21/bpet_dgis_escalation_report.json artifacts/section_10_21/bd-kwwg/verification_evidence.json artifacts/section_10_21/bd-kwwg/verification_summary.md",
+    "rch exec -- cargo test -p frankenengine-node --test bpet_dgis_priority_escalation --no-default-features -- --nocapture"
   ]
 }

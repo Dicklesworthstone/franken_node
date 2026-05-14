@@ -1011,6 +1011,11 @@ name = "bpet_atc_temporal_interop"
 path = "../../tests/integration/bpet_atc_temporal_interop.rs"
 required-features = ["advanced-features"]
 
+# bd-kwwg.1: BPET to DGIS topology-amplified priority fusion
+[[test]]
+name = "bpet_dgis_priority_escalation"
+path = "../../tests/integration/bpet_dgis_priority_escalation.rs"
+
 # bd-351r.1: DGIS to ATC topology interop bridge
 [[test]]
 name = "dgis_atc_interop"

@@ -1,0 +1,73 @@
+{
+  "schema_version": "bpet-dgis-fusion-v1",
+  "bead_id": "bd-kwwg",
+  "section": "10.21",
+  "generated_at": "2026-05-14T12:25:00Z",
+  "scenario": "high-centrality BPET trajectory anomaly",
+  "package_id": "npm:@acme/critical-auth",
+  "trace_id": "trace-npm:@acme/critical-auth",
+  "inputs": {
+    "bpet_risk_score": 0.84,
+    "bpet_confidence": 0.88,
+    "expected_loss_if_compromised_usd": 750000.0,
+    "topology_metrics": {
+      "fan_out": 84.0,
+      "betweenness_centrality": 0.82,
+      "articulation_point": true,
+      "trust_bottleneck_score": 0.91,
+      "transitive_dependency_count": 4200,
+      "max_depth_in_graph": 17
+    }
+  },
+  "policy": {
+    "bpet_weight": 0.6,
+    "topology_weight": 0.4,
+    "max_loss_multiplier": 3.0,
+    "elevated_threshold": 0.4,
+    "high_threshold": 0.65,
+    "critical_threshold": 0.8,
+    "critical_expected_loss_usd": 2000000.0
+  },
+  "output": {
+    "combined_priority_score": 0.804725,
+    "escalation_level": "critical",
+    "expected_loss": {
+      "base_expected_loss_usd": 750000.0,
+      "topology_multiplier": 3.2554375,
+      "amplified_expected_loss_usd": 2441578.125,
+      "confidence_basis_points": 8800,
+      "rationale": "BPET risk 0.840 on DGIS topology pressure 0.752; articulation_point=true"
+    },
+    "priority_attribution": {
+      "bpet_trajectory_risk": 0.504,
+      "dgis_topology_pressure": 0.300725
+    },
+    "topology_attribution": {
+      "articulation_pressure": 0.1,
+      "dgis_aggregate_risk": 0.45025,
+      "graph_depth_pressure": 0.0265625,
+      "transitive_dependency_pressure": 0.084,
+      "trust_bottleneck_pressure": 0.091
+    },
+    "recommended_action": "quarantine candidate and require DGIS barrier plan before release"
+  },
+  "invariant_markers": [
+    "INV-BPET-DGIS-SCHEMA-VERSIONED",
+    "INV-BPET-DGIS-FAIL-CLOSED-NUMERICS",
+    "INV-BPET-DGIS-DETERMINISTIC-REPLAY",
+    "INV-BPET-DGIS-EXPECTED-LOSS-CONTEXT",
+    "INV-BPET-DGIS-TOPOLOGY-AMPLIFICATION"
+  ],
+  "event_codes": [
+    "BPET-DGIS-001",
+    "BPET-DGIS-002",
+    "BPET-DGIS-003",
+    "BPET-DGIS-004"
+  ],
+  "source_refs": [
+    "crates/franken-node/src/security/bpet/dgis_fusion.rs",
+    "tests/integration/bpet_dgis_priority_escalation.rs",
+    "crates/franken-node/src/security/dgis/update_copilot.rs",
+    "crates/franken-node/src/security/bpet/evolution_risk_scorer.rs"
+  ]
+}
