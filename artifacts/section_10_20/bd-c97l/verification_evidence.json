@@ -1,32 +1,39 @@
 {
-  "schema_version": "evidence-v1.0",
-  "bead_id": "bd-c97l",
+  "schema_version": "evidence-v1.1",
+  "bead_id": "bd-c97l.1",
+  "parent_bead_id": "bd-c97l",
   "section": "10.20",
-  "title": "DGIS topological context integration",
+  "title": "DGIS topological context integration concrete artifacts",
   "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
+  "total": 9,
+  "passed": 9,
   "failed": 0,
+  "implementation": {
+    "risk_surface_module": "crates/franken-node/src/security/dgis/risk_surface_integration.rs",
+    "integration_test": "tests/integration/dgis_trust_card_integration.rs",
+    "cargo_registration": "crates/franken-node/Cargo.toml",
+    "risk_ui_snapshot": "artifacts/10.20/dgis_risk_ui_snapshot.json",
+    "gate_script": "scripts/check_section_10_20_gate.py"
+  },
+  "consumer_coverage": [
+    "trust_card_context",
+    "adversary_graph_posterior",
+    "extension_risk_ui"
+  ],
+  "validation": {
+    "rustfmt": "rustfmt --edition 2024 --check --config skip_children=true crates/franken-node/src/security/dgis/risk_surface_integration.rs tests/integration/dgis_trust_card_integration.rs",
+    "json": "python3 -m json.tool artifacts/10.20/dgis_risk_ui_snapshot.json >/dev/null && python3 -m json.tool artifacts/section_10_20/bd-c97l/verification_evidence.json >/dev/null",
+    "focused_test": "PASS on vmi1152480: RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,CARGO_INCREMENTAL,CARGO_BUILD_JOBS CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/data/tmp/franken_node-snowybeaver-bdc97l-target rch exec -- cargo test -p frankenengine-node --test dgis_trust_card_integration --no-default-features -- --nocapture (4 passed, 0 failed)"
+  },
   "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
-    {"check": "event_codes_present", "pass": true},
-    {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "graph_schema_compliance", "pass": true},
-    {"check": "topology_metrics", "pass": true},
-    {"check": "contagion_simulation", "pass": true},
-    {"check": "immunization_planning", "pass": true},
-    {"check": "cascade_economics", "pass": true},
-    {"check": "quarantine_orchestration", "pass": true},
-    {"check": "fragility_detection", "pass": true},
-    {"check": "federation_interop", "pass": true},
-    {"check": "adversarial_validation", "pass": true}
+    {"check": "risk_surface_module_exists", "pass": true, "detail": "risk_surface_integration.rs"},
+    {"check": "trust_card_context", "pass": true, "detail": "blast radius, upstream exposure, articulation point, depth"},
+    {"check": "planned_update_deltas", "pass": true, "detail": "add/update/remove dependency delta heatmap"},
+    {"check": "posterior_attribution", "pass": true, "detail": "base posterior adjusted by topology risk with attribution percentages"},
+    {"check": "fail_closed_non_finite_metrics", "pass": true, "detail": "non-finite topology metrics rejected before UI snapshot"},
+    {"check": "deterministic_replay_fingerprint", "pass": true, "detail": "sha256 fingerprint over sorted deltas and attribution"},
+    {"check": "risk_ui_snapshot_artifact", "pass": true, "detail": "artifacts/10.20/dgis_risk_ui_snapshot.json"},
+    {"check": "cargo_target_registered", "pass": true, "detail": "dgis_trust_card_integration [[test]]"},
+    {"check": "thin_artifact_set_replaced", "pass": true, "detail": "old generic 20/20 evidence replaced with concrete module, test, and UI snapshot"}
   ]
 }

@@ -7,6 +7,7 @@
 pub mod barrier_primitives;
 pub mod contagion_graph;
 pub mod immunization_planner;
+pub mod risk_surface_integration;
 pub mod update_copilot;
 
 #[cfg(test)]

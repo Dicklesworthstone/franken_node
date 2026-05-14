@@ -1,0 +1,46 @@
+{
+  "schema_version": "dgis-risk-ui-snapshot-v1",
+  "bead_id": "bd-c97l.1",
+  "parent_bead_id": "bd-c97l",
+  "generated_at": "2026-05-14T13:29:18Z",
+  "extension_id": "npm:@acme/auth-guard",
+  "trace_id": "trace-dgis-risk-ui",
+  "risk_tier": "critical",
+  "aggregate_risk_score": 0.8,
+  "downstream_transitive_dependents": 1840,
+  "articulation_point": true,
+  "upstream_risk_exposure": 0.64,
+  "posterior_update": {
+    "base_posterior": 0.22,
+    "topology_adjusted_posterior": 0.844,
+    "attribution_percentages_sum_to_one": true
+  },
+  "planned_update_deltas": [
+    {
+      "change_kind": "add_dependency",
+      "risk_delta": 0.075,
+      "risk_increased": true
+    },
+    {
+      "change_kind": "update_version",
+      "risk_delta": -0.0725,
+      "risk_increased": false
+    },
+    {
+      "change_kind": "remove_dependency",
+      "risk_delta": -0.51,
+      "risk_increased": false
+    }
+  ],
+  "consumers": [
+    "trust_card_context",
+    "adversary_graph_posterior",
+    "extension_risk_ui"
+  ],
+  "invariants": [
+    "INV-DGIS-RISK-SURFACE-SCHEMA-VERSIONED",
+    "INV-DGIS-RISK-SURFACE-FAIL-CLOSED-NUMERICS",
+    "INV-DGIS-RISK-SURFACE-DETERMINISTIC-REPLAY",
+    "INV-DGIS-RISK-SURFACE-TOPOLOGY-ATTRIBUTION"
+  ]
+}

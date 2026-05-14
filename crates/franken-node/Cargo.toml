@@ -1021,6 +1021,11 @@ required-features = ["advanced-features"]
 name = "bpet_dgis_priority_escalation"
 path = "../../tests/integration/bpet_dgis_priority_escalation.rs"
 
+# bd-c97l.1: DGIS topology context to trust-card style risk surfaces
+[[test]]
+name = "dgis_trust_card_integration"
+path = "../../tests/integration/dgis_trust_card_integration.rs"
+
 # bd-351r.1: DGIS to ATC topology interop bridge
 [[test]]
 name = "dgis_atc_interop"

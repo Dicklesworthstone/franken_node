@@ -68,6 +68,7 @@ DOMAIN_GROUPS = {
 KEY_ARTIFACTS = [
     ("dgis_barrier_enforcement_trace", "artifacts/10.20/dgis_barrier_enforcement_trace.jsonl"),
     ("dgis_atc_exchange_report", "artifacts/10.20/dgis_atc_exchange_report.json"),
+    ("dgis_risk_ui_snapshot", "artifacts/10.20/dgis_risk_ui_snapshot.json"),
     ("dgis_migration_health_report", "artifacts/10.20/dgis_migration_health_report.json"),
     ("dgis_operator_recommendation_log", "artifacts/10.20/dgis_operator_recommendation_log.jsonl"),
     ("dgis_release_gate_report", "artifacts/10.20/dgis_release_gate_report.json"),
