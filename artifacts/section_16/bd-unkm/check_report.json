@@ -2,22 +2,22 @@
   "bead_id": "bd-unkm",
   "section": "16",
   "title": "Section-wide verification gate: comprehensive unit+e2e+logging",
-  "generated_at": "2026-02-26T00:21:01.559755+00:00",
-  "verdict": "PASS",
-  "gate_pass": true,
+  "generated_at": "2026-05-14T01:45:58.536682+00:00",
+  "verdict": "FAIL",
+  "gate_pass": false,
   "beads_expected": 8,
   "beads_verified": 8,
-  "beads_passing": 8,
+  "beads_passing": 7,
   "publication_checks_passing": 4,
   "publication_checks_total": 4,
   "publication_checklist": [
     {
       "id": "PUB-16-REPORTS",
       "target": ">= 3 reproducible reports",
-      "measured": 5,
+      "measured": 3,
       "required": 3,
       "pass": true,
-      "source": "bd-1sgr report_types"
+      "source": "bd-1sgr publishable_report_count"
     },
     {
       "id": "PUB-16-REPLICATIONS",
@@ -163,7 +163,7 @@
         "test": "tests/test_check_open_trust_compat_specs.py",
         "exists": true,
         "status": "PASS",
-        "tests_ran": 4,
+        "tests_ran": 6,
         "tests_failed": 0,
         "exit_code": 0
       },
@@ -268,8 +268,8 @@
           "bead_id": "bd-2ad0",
           "section": "16",
           "gate_script": "check_reproducible_datasets.py",
-          "checks_passed": 20,
-          "checks_total": 20,
+          "checks_passed": 23,
+          "checks_total": 23,
           "verdict": "PASS",
           "checks": [
             {
@@ -370,7 +370,22 @@
             {
               "check": "test_coverage",
               "passed": true,
-              "detail": "22 tests (>=22)"
+              "detail": "44 tests (>=25)"
+            },
+            {
+              "check": "catalog_hash_covers_total_records",
+              "passed": true,
+              "detail": "total_records included in content_hash"
+            },
+            {
+              "check": "catalog_hash_covers_bundles",
+              "passed": true,
+              "detail": "bundles included in content_hash"
+            },
+            {
+              "check": "catalog_hash_length_prefixed",
+              "passed": true,
+              "detail": "Length-prefixed hash inputs with domain separator"
             }
           ]
         },
@@ -463,8 +478,8 @@
           "bead_id": "bd-nbh7",
           "section": "16",
           "gate_script": "check_benchmark_methodology.py",
-          "checks_passed": 21,
-          "checks_total": 21,
+          "checks_passed": 24,
+          "checks_total": 24,
           "verdict": "PASS",
           "checks": [
             {
@@ -528,6 +543,16 @@
               "detail": "SHA-256 integrity"
             },
             {
+              "check": "publication_hash_surface",
+              "passed": true,
+              "detail": "Publication hash covers mutable publication fields"
+            },
+            {
+              "check": "publication_mutation_rehash",
+              "passed": true,
+              "detail": "Create/status/citation paths reseal Publication.content_hash"
+            },
+            {
               "check": "reproducibility_checklist",
               "passed": true,
               "detail": "Checklist with verified flag"
@@ -536,6 +561,11 @@
               "check": "catalog_generation",
               "passed": true,
               "detail": "Catalog with by_topic/by_status"
+            },
+            {
+              "check": "catalog_hash_surface",
+              "passed": true,
+              "detail": "Catalog hash covers by_topic and by_status"
             },
             {
               "check": "search_by_topic",
@@ -570,7 +600,7 @@
             {
               "check": "test_coverage",
               "passed": true,
-              "detail": "22 tests (>=22)"
+              "detail": "63 tests (>=22)"
             }
           ]
         },
@@ -581,7 +611,7 @@
         "test": "tests/test_check_benchmark_methodology.py",
         "exists": true,
         "status": "PASS",
-        "tests_ran": 26,
+        "tests_ran": 29,
         "tests_failed": 0,
         "exit_code": 0
       },
@@ -662,24 +692,24 @@
       "criterion": "External red-team and independent evaluations are completed",
       "script": "scripts/check_redteam_evaluations.py",
       "test": "tests/test_check_redteam_evaluations.py",
-      "script_pass": true,
-      "unit_pass": true,
+      "script_pass": false,
+      "unit_pass": false,
       "evidence_pass": true,
-      "overall_pass": true,
+      "overall_pass": false,
       "script_result": {
         "bead": "bd-3id1",
         "script": "scripts/check_redteam_evaluations.py",
         "exists": true,
         "self_test_present": true,
-        "status": "PASS",
-        "exit_code": 0,
+        "status": "FAIL",
+        "exit_code": 1,
         "payload": {
           "bead_id": "bd-3id1",
           "section": "16",
           "gate_script": "check_redteam_evaluations.py",
           "checks_passed": 20,
-          "checks_total": 20,
-          "verdict": "PASS",
+          "checks_total": 21,
+          "verdict": "FAIL",
           "checks": [
             {
               "check": "source_exists",
@@ -752,6 +782,11 @@
               "detail": "Catalog with by_type/by_severity"
             },
             {
+              "check": "catalog_hashing",
+              "passed": false,
+              "detail": "Catalog hash covers totals plus type/severity distributions"
+            },
+            {
               "check": "event_codes",
               "passed": true,
               "detail": "12/12"
@@ -779,20 +814,20 @@
             {
               "check": "test_coverage",
               "passed": true,
-              "detail": "22 tests (>=22)"
+              "detail": "42 tests (>=22)"
             }
           ]
         },
-        "verdict": "PASS"
+        "verdict": "FAIL"
       },
       "unit_result": {
         "bead": "bd-3id1",
         "test": "tests/test_check_redteam_evaluations.py",
         "exists": true,
-        "status": "PASS",
-        "tests_ran": 25,
-        "tests_failed": 0,
-        "exit_code": 0
+        "status": "FAIL",
+        "tests_ran": 26,
+        "tests_failed": 3,
+        "exit_code": 1
       },
       "evidence_result": {
         "bead": "bd-3id1",
@@ -884,8 +919,8 @@
           "bead_id": "bd-10ee",
           "section": "16",
           "gate_script": "check_transparent_reports.py",
-          "checks_passed": 22,
-          "checks_total": 22,
+          "checks_passed": 23,
+          "checks_total": 23,
           "verdict": "PASS",
           "checks": [
             {
@@ -961,7 +996,12 @@
             {
               "check": "content_hashing",
               "passed": true,
-              "detail": "SHA-256 integrity"
+              "detail": "report hash covers mutable report content and refreshes on mutations"
+            },
+            {
+              "check": "catalog_hashing",
+              "passed": true,
+              "detail": "catalog hash covers category, severity, and open action state"
             },
             {
               "check": "catalog_generation",
@@ -996,7 +1036,7 @@
             {
               "check": "test_coverage",
               "passed": true,
-              "detail": "22 tests (>=22)"
+              "detail": "49 tests (>=22)"
             }
           ]
         },
@@ -1007,7 +1047,7 @@
         "test": "tests/test_check_transparent_reports.py",
         "exists": true,
         "status": "PASS",
-        "tests_ran": 27,
+        "tests_ran": 28,
         "tests_failed": 0,
         "exit_code": 0
       },
@@ -1096,8 +1136,8 @@
           "bead_id": "bd-1sgr",
           "section": "16",
           "gate_script": "check_report_output_contract.py",
-          "checks_passed": 18,
-          "checks_total": 18,
+          "checks_passed": 28,
+          "checks_total": 28,
           "verdict": "PASS",
           "checks": [
             {
@@ -1188,7 +1228,57 @@
             {
               "check": "test_coverage",
               "passed": true,
-              "detail": "0 tests"
+              "detail": "50 tests"
+            },
+            {
+              "check": "catalog_hash_covers_complete_bundles",
+              "passed": true,
+              "detail": "complete_bundles included in content_hash"
+            },
+            {
+              "check": "catalog_hash_length_prefixed",
+              "passed": true,
+              "detail": "Length-prefixed hash inputs with domain separator"
+            },
+            {
+              "check": "publishable_reports_dir",
+              "passed": true,
+              "detail": "/data/projects/franken_node/artifacts/section_16/bd-1sgr/publishable_reports"
+            },
+            {
+              "check": "reproducible_report_registry",
+              "passed": true,
+              "detail": "/data/projects/franken_node/artifacts/section_16/bd-1sgr/publishable_reports/reproducible_report_registry.json"
+            },
+            {
+              "check": "publishable_report_count",
+              "passed": true,
+              "detail": "3 reports"
+            },
+            {
+              "check": "publishable_report_topics",
+              "passed": true,
+              "detail": "benchmark_verification,compatibility_migration,trust_security"
+            },
+            {
+              "check": "publishable_report_artifacts",
+              "passed": true,
+              "detail": "3 report artifacts"
+            },
+            {
+              "check": "publishable_report_reproduction_inputs",
+              "passed": true,
+              "detail": "3/3 ready"
+            },
+            {
+              "check": "reproducibility_badges",
+              "passed": true,
+              "detail": "3 badges"
+            },
+            {
+              "check": "external_reproduction_within_tolerance",
+              "passed": true,
+              "detail": "3 within tolerance"
             }
           ]
         },
@@ -1199,7 +1289,7 @@
         "test": "tests/test_check_report_output_contract.py",
         "exists": true,
         "status": "PASS",
-        "tests_ran": 26,
+        "tests_ran": 34,
         "tests_failed": 0,
         "exit_code": 0
       },
@@ -1212,9 +1302,11 @@
           "bead_id": "bd-1sgr",
           "section": "16",
           "gate_script": "check_report_output_contract.py",
-          "checks_passed": 18,
-          "checks_total": 18,
+          "checks_passed": 28,
+          "checks_total": 28,
           "verdict": "PASS",
+          "completion_debt_bead": "bd-1sgr.1",
+          "publishable_reports_directory": "artifacts/section_16/bd-1sgr/publishable_reports",
           "checks": [
             {
               "check": "source_exists",
@@ -1304,9 +1396,86 @@
             {
               "check": "test_coverage",
               "passed": true,
-              "detail": "0 tests"
+              "detail": "50 tests"
+            },
+            {
+              "check": "catalog_hash_covers_complete_bundles",
+              "passed": true,
+              "detail": "complete_bundles included in content_hash"
+            },
+            {
+              "check": "catalog_hash_length_prefixed",
+              "passed": true,
+              "detail": "Length-prefixed hash inputs with domain separator"
+            },
+            {
+              "check": "publishable_reports_dir",
+              "passed": true,
+              "detail": "/data/projects/franken_node/artifacts/section_16/bd-1sgr/publishable_reports"
+            },
+            {
+              "check": "reproducible_report_registry",
+              "passed": true,
+              "detail": "/data/projects/franken_node/artifacts/section_16/bd-1sgr/publishable_reports/reproducible_report_registry.json"
+            },
+            {
+              "check": "publishable_report_count",
+              "passed": true,
+              "detail": "3 reports"
+            },
+            {
+              "check": "publishable_report_topics",
+              "passed": true,
+              "detail": "benchmark_verification,compatibility_migration,trust_security"
+            },
+            {
+              "check": "publishable_report_artifacts",
+              "passed": true,
+              "detail": "3 report artifacts"
+            },
+            {
+              "check": "publishable_report_reproduction_inputs",
+              "passed": true,
+              "detail": "3/3 ready"
+            },
+            {
+              "check": "reproducibility_badges",
+              "passed": true,
+              "detail": "3 badges"
+            },
+            {
+              "check": "external_reproduction_within_tolerance",
+              "passed": true,
+              "detail": "3 within tolerance"
             }
-          ]
+          ],
+          "validation": [
+            {
+              "command": "python3 scripts/check_report_output_contract.py --json",
+              "result": "PASS",
+              "detail": "28/28 checks passed"
+            },
+            {
+              "command": "python3 -m pytest tests/test_check_report_output_contract.py",
+              "result": "PASS",
+              "detail": "34 tests passed"
+            },
+            {
+              "command": "python3 -m json.tool artifacts/section_16/bd-1sgr/publishable_reports/reproducible_report_registry.json",
+              "result": "PASS"
+            },
+            {
+              "command": "python3 scripts/check_section_16_gate.py --json",
+              "result": "FAIL",
+              "detail": "Broader Section 16 gate reports unrelated bd-3id1 debt; bd-1sgr and the publication checklist pass."
+            }
+          ],
+          "section_gate_note": {
+            "bd_1sgr_status": "PASS",
+            "broader_gate_status": "FAIL",
+            "unrelated_blocker": "bd-3id1",
+            "detail": "The bd-1sgr publishable report directory and registry are present and required by check_report_output_contract.py. The aggregate Section 16 gate remains red because bd-3id1 is outside this completion-debt bead."
+          }
         },
         "verdict": "PASS"
       }
@@ -1331,8 +1500,8 @@
           "bead_id": "bd-e5cz",
           "section": "16",
           "gate_script": "check_external_replication_claims.py",
-          "checks_passed": 18,
-          "checks_total": 18,
+          "checks_passed": 19,
+          "checks_total": 19,
           "verdict": "PASS",
           "checks": [
             {
@@ -1396,6 +1565,11 @@
               "detail": "SHA-256 hashing"
             },
             {
+              "check": "catalog_hashing",
+              "passed": true,
+              "detail": "Catalog hash seals pending/category surface"
+            },
+            {
               "check": "event_codes",
               "passed": true,
               "detail": "12/12"
@@ -1434,7 +1608,7 @@
         "test": "tests/test_check_external_replication_claims.py",
         "exists": true,
         "status": "PASS",
-        "tests_ran": 26,
+        "tests_ran": 27,
         "tests_failed": 0,
         "exit_code": 0
       },
@@ -1566,8 +1740,8 @@
           "bead_id": "bd-33u2",
           "section": "16",
           "gate_script": "check_verifier_benchmark_releases.py",
-          "checks_passed": 19,
-          "checks_total": 19,
+          "checks_passed": 20,
+          "checks_total": 20,
           "verdict": "PASS",
           "checks": [
             {
@@ -1636,6 +1810,11 @@
               "detail": "SHA-256 hashing"
             },
             {
+              "check": "metrics_hashing",
+              "passed": true,
+              "detail": "Metrics hash seals downloads_by_type surface"
+            },
+            {
               "check": "event_codes",
               "passed": true,
               "detail": "12/12"
@@ -1674,7 +1853,7 @@
         "test": "tests/test_check_verifier_benchmark_releases.py",
         "exists": true,
         "status": "PASS",
-        "tests_ran": 27,
+        "tests_ran": 28,
         "tests_failed": 0,
         "exit_code": 0
       },
@@ -1795,11 +1974,11 @@
   "gate_checks": [
     {
       "id": "GATE-16-SCRIPTS",
-      "status": "PASS"
+      "status": "FAIL"
     },
     {
       "id": "GATE-16-TESTS",
-      "status": "PASS"
+      "status": "FAIL"
     },
     {
       "id": "GATE-16-EVIDENCE",
@@ -1807,7 +1986,7 @@
     },
     {
       "id": "GATE-16-PER-CONTRIBUTION",
-      "status": "PASS"
+      "status": "FAIL"
     },
     {
       "id": "GATE-16-PUBLICATION-CHECKLIST",
@@ -1815,10 +1994,15 @@
     },
     {
       "id": "GATE-16-ALL-BEADS",
-      "status": "PASS"
+      "status": "FAIL"
     }
   ],
-  "gaps": [],
+  "gaps": [
+    {
+      "id": "bd-3id1",
+      "detail": "criterion 'External red-team and independent evaluations are completed' not fully satisfied."
+    }
+  ],
   "events": [
     {
       "event_code": "GATE_16_EVALUATION_STARTED",
@@ -1842,7 +2026,7 @@
     {
       "event_code": "GATE_16_BEAD_CHECKED",
       "bead": "bd-3id1",
-      "overall_pass": true
+      "overall_pass": false
     },
     {
       "event_code": "GATE_16_BEAD_CHECKED",
@@ -1866,12 +2050,12 @@
     },
     {
       "event_code": "GATE_16_VERDICT_EMITTED",
-      "verdict": "PASS",
-      "beads_passing": 8,
+      "verdict": "FAIL",
+      "beads_passing": 7,
       "beads_total": 8,
       "publication_checks_passing": 4,
       "publication_checks_total": 4
     }
   ],
-  "content_hash": "5ebbe29b6a3c8d704aef32f3cc87e91da2ac2688ecd22b8ba4e572622bf2cab2"
+  "content_hash": "213150546d711832ac7dc3ae81d742ecf4bb3e946b1dcfc030027ec43f016cec"
 }

@@ -1,8 +1,8 @@
 # bd-unkm Verification Summary
 
 - Section: `16`
-- Verdict: `PASS`
-- Contributions passing: `8/8`
+- Verdict: `FAIL`
+- Contributions passing: `7/8`
 - Publication checklist passing: `4/4`
 
 ## Artifacts
