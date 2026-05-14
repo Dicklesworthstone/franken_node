@@ -16,6 +16,7 @@ use frankenengine_node::runtime::resource_governor::{
 };
 use fsqlite::compat::TransactionExt;
 use fsqlite::{Connection, SqliteValue};
+use proptest::test_runner::Config as ProptestConfig;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +33,7 @@ const REPO_KEY: &str = "/data/projects/franken_node";
 const POLICY_DECISION_GOLDEN_RELATIVE_PATH: &str =
     "../../tests/golden/workspace_pressure_policy_decisions.json";
 const POLICY_DECISION_GOLDEN_SCHEMA_VERSION: &str = "bd-p9mpd.4/v1";
+const MAX_POLICY_DIAGNOSTIC_REASONS_WITH_TRUNCATION: usize = 33;
 const SPARSE_EIGHT_GIB: u64 = 8 * 1024 * 1024 * 1024;
 const SPARSE_FOUR_GIB: u64 = 4 * 1024 * 1024 * 1024;
 const SPARSE_ONE_GIB: u64 = 1024 * 1024 * 1024;
@@ -327,6 +329,70 @@ fn workspace_pressure_policy_decision_golden_matches_real_policy() -> std::io::R
          rerun this test with UPDATE_GOLDENS=1 only after reviewing the diff"
     );
     Ok(())
+}
+
+proptest::proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn proptest_workspace_pressure_admission_is_bounded(
+        free_disk_bytes in 0_u64..20_000_000_000,
+        target_dir_bytes in 0_u64..80_000_000_000,
+        active_build_count in 0_u32..64,
+        rch_available_slots in proptest::option::of(0_u32..32),
+        memory_pressure in 0.0_f32..1.25,
+        active_reservations in 0_u32..256,
+        priority in 0_u32..5,
+        work_class_idx in 0_usize..6,
+    ) {
+        let work_classes = [
+            WorkCostClass::Validation,
+            WorkCostClass::Fuzzing,
+            WorkCostClass::Benchmark,
+            WorkCostClass::DocsGate,
+            WorkCostClass::SourceOnly,
+            WorkCostClass::Cleanup,
+        ];
+        let work_class = *work_classes
+            .get(work_class_idx)
+            .expect("generated work class index stays in range");
+        let inputs = WorkspacePressureInputs {
+            free_disk_bytes,
+            target_dir_bytes,
+            active_build_count,
+            rch_available_slots,
+            memory_pressure,
+            active_reservations,
+            coordination_healthy: active_reservations < 128,
+        };
+
+        let decision =
+            WorkspacePressurePolicy::with_balanced_defaults().decide_admission(
+                work_class,
+                priority,
+                &inputs,
+            );
+
+        proptest::prop_assert!(decision.confidence.is_finite());
+        proptest::prop_assert!((0.0..=1.0).contains(&decision.confidence));
+        proptest::prop_assert!(!decision.reason_code.trim().is_empty());
+        proptest::prop_assert!(!decision.summary.trim().is_empty());
+        proptest::prop_assert!(
+            decision.diagnostic_reasons.len() <= MAX_POLICY_DIAGNOSTIC_REASONS_WITH_TRUNCATION
+        );
+        proptest::prop_assert!(decision.cleanup_candidates.len() <= 2);
+
+        if work_class.prefers_rch()
+            && work_class.cost_weight() > 7
+            && inputs.rch_available_slots.is_none()
+        {
+            let queued_or_refused = matches!(
+                decision.admission,
+                AdmissionDecision::Queue { .. } | AdmissionDecision::RefuseLocalFallback
+            );
+            proptest::prop_assert!(queued_or_refused);
+        }
+    }
 }
 
 #[test]
