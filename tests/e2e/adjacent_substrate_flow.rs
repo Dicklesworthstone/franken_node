@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use frankenengine_node::lock_utils;
+
 static NEXT_PERSISTENCE_ID: AtomicU64 = AtomicU64::new(1);
 
 // ---------------------------------------------------------------------------
@@ -527,11 +529,14 @@ impl TestClock {
     }
 
     pub fn now_ms(&self) -> u64 {
-        *self.current_ms.lock().unwrap()
+        *lock_utils::try_lock(&self.current_ms, "adjacent substrate test clock now")
+            .expect("test clock mutex should lock for now")
     }
 
     pub fn advance(&self, ms: u64) {
-        let mut current = self.current_ms.lock().unwrap();
+        let mut current =
+            lock_utils::try_lock(&self.current_ms, "adjacent substrate test clock advance")
+                .expect("test clock mutex should lock for advance");
         *current += ms;
     }
 }
