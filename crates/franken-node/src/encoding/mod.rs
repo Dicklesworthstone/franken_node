@@ -1640,7 +1640,11 @@ mod encoding_root_negative_tests {
         }
 
         // Verify final state integrity
-        let final_deriver = deriver.lock().unwrap();
+        let final_deriver = crate::lock_utils::try_lock(
+            deriver.as_ref(),
+            "encoding concurrent access final deriver",
+        )
+        .expect("encoding concurrent access final deriver");
         let tracked_domains = final_deriver.tracked_domains();
         let bump_records = final_deriver.bump_records();
 

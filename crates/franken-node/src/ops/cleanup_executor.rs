@@ -961,7 +961,11 @@ mod tests {
         );
 
         // Verify the mock adapter tracked the deletion request
-        let requests = deletion_requests.lock().unwrap();
+        let requests = crate::lock_utils::try_lock(
+            deletion_requests.as_ref(),
+            "cleanup executor mock deletion requests",
+        )
+        .expect("cleanup executor mock deletion requests");
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0], test_file);
 

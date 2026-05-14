@@ -806,7 +806,11 @@ mod federation_root_negative_tests {
         }
 
         // Verify engine state remains consistent after concurrent access
-        let final_engine = reciprocity.lock().unwrap();
+        let final_engine = crate::lock_utils::try_lock(
+            reciprocity.as_ref(),
+            "federation concurrent access final engine",
+        )
+        .expect("federation concurrent access final engine");
         let final_log = final_engine.audit_log();
 
         // State must be internally consistent despite concurrent access

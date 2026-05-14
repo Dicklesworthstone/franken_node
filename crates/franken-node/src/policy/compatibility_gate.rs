@@ -1129,7 +1129,11 @@ impl GateEngine {
                         scope: "concurrent.scope".to_string(),
                         policy_context: BTreeMap::new(),
                     };
-                    let mut engine = engine_clone.lock().unwrap();
+                    let mut engine = crate::lock_utils::try_lock(
+                        engine_clone.as_ref(),
+                        "compatibility gate concurrent engine",
+                    )
+                    .expect("compatibility gate concurrent engine");
                     engine.gate_check(&request)
                 });
                 handles.push(handle);

@@ -1687,7 +1687,11 @@ mod tests {
                 let mut thread_results = Vec::new();
 
                 for op_id in 0..50 {
-                    let diagnostics = diagnostics_clone.lock().unwrap();
+                    let diagnostics = crate::lock_utils::try_lock(
+                        diagnostics_clone.as_ref(),
+                        "policy explainer shared diagnostics",
+                    )
+                    .expect("policy explainer shared diagnostics");
 
                     // Create different outcomes for each thread
                     let outcome = match thread_id % 4 {
