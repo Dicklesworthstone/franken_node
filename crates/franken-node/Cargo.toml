@@ -673,6 +673,10 @@ name = "vef_proof_service_fail_closed"
 path = "tests/vef_proof_service_fail_closed.rs"
 
 [[test]]
+name = "vef_receipt_jcq1z_real_service"
+path = "tests/vef_receipt_jcq1z_real_service.rs"
+
+[[test]]
 name = "observability_evidence_ledger_regressions"
 path = "tests/observability_evidence_ledger_regressions.rs"
 
