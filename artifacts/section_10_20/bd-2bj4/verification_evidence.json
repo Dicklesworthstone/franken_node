@@ -5,8 +5,9 @@
   "completion_debt_bead_id": "bd-2bj4.1",
   "section": "10.20",
   "title": "Deterministic graph ingestion pipeline",
-  "verdict": "PENDING_RCH_PROOF",
-  "generated_at": "2026-05-14T07:31:15Z",
+  "verdict": "PASS",
+  "generated_at": "2026-05-14T07:34:29Z",
+  "implementation_commit": "ff176145",
   "source_paths": [
     "crates/franken-node/src/dgis/graph_ingestion.rs",
     "crates/franken-node/src/dgis/graph_seeds.rs",
@@ -54,17 +55,17 @@
     "test_source": "tests/security/dgis_graph_ingestion.rs",
     "required_tests": 12,
     "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/data/tmp/franken_node-snowybeaver-bd2bj4-target cargo test -p frankenengine-node --test dgis_graph_ingestion -- --nocapture",
-    "verdict": "PENDING",
-    "reason": "an existing RCH job for cargo test -p frankenengine-node --test dgis_graph_ingestion was already active, so this session did not launch a duplicate proof",
-    "active_rch_job": {
+    "verdict": "PASS",
+    "reason": "an existing RCH job for the exact registered dgis_graph_ingestion test completed successfully; this session did not launch a duplicate proof while it was active",
+    "rch_job": {
       "id": 29840908367167878,
       "worker_id": "vmi1152480",
       "started_at": "2026-05-14T07:17:18.017119894+00:00",
-      "observed_at": "2026-05-14T07:30:56Z",
-      "detector_progress_stale": true,
-      "heartbeat_detail": "remote_exec_start",
-      "output_file": "/data/tmp/claude-1000/-data-projects-franken-node/36dfedef-eb41-460d-9c1e-2f6c7a48d9dc/tasks/brqw8hmw9.output",
-      "output_bytes": 0
+      "completed_at": "2026-05-14T07:32:39.760871653+00:00",
+      "exit_code": 0,
+      "duration_ms": 921743,
+      "location": "remote",
+      "proof_command": "cargo test -p frankenengine-node --test dgis_graph_ingestion"
     }
   },
   "acceptance_mapping": [
@@ -78,7 +79,7 @@
     },
     {
       "requirement": "gate must run the integration test",
-      "evidence": "pending active RCH job 29840908367167878; bead must not close until this field is PASS"
+      "evidence": "RCH job 29840908367167878 completed cargo test -p frankenengine-node --test dgis_graph_ingestion with exit_code 0 on vmi1152480"
     }
   ]
 }
