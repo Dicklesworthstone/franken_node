@@ -8,6 +8,7 @@
     "docs/specs/section_10_17/bd-21fo_contract.md",
     "docs/specs/optimization_governor.md",
     "crates/franken-node/src/runtime/optimization_governor.rs",
+    "crates/franken-node/src/perf/optimization_governor.rs",
     "tests/perf/governor_safety_envelope.rs",
     "scripts/check_optimization_governor.py",
     "tests/test_check_optimization_governor.py",
@@ -18,6 +19,84 @@
     "artifacts/section_10_17/bd-21fo/verification_evidence.json",
     "artifacts/section_10_17/bd-21fo/verification_summary.md"
   ],
+  "acceptance_decomposition": {
+    "purpose": "Resolve completion-debt ambiguity by splitting the broad governor surface into concrete ownership subsurfaces.",
+    "subsurfaces": [
+      {
+        "name": "runtime_core",
+        "path": "crates/franken-node/src/runtime/optimization_governor.rs",
+        "symbols": [
+          {"symbol": "RuntimeKnob", "line": 184},
+          {"symbol": "SafetyEnvelope", "line": 218},
+          {"symbol": "PredictedMetrics", "line": 322},
+          {"symbol": "OptimizationProposal", "line": 331},
+          {"symbol": "GovernorDecision", "line": 389},
+          {"symbol": "DecisionRecord", "line": 402},
+          {"symbol": "OptimizationGovernor", "line": 441},
+          {"symbol": "shadow_evaluate", "line": 558},
+          {"symbol": "submit", "line": 584},
+          {"symbol": "live_check", "line": 736},
+          {"symbol": "snapshot", "line": 782},
+          {"symbol": "export_decision_log_jsonl", "line": 813},
+          {"symbol": "export_verification_evidence", "line": 831}
+        ],
+        "inline_tests": 63,
+        "coverage": [
+          "runtime knob schema",
+          "safety envelope validation",
+          "shadow-first evaluation",
+          "proposal submission",
+          "live metric auto-revert",
+          "deterministic decision log export"
+        ]
+      },
+      {
+        "name": "perf_gate_wrapper",
+        "path": "crates/franken-node/src/perf/optimization_governor.rs",
+        "symbols": [
+          {"symbol": "GovernorGate", "line": 78},
+          {"symbol": "submit", "line": 120},
+          {"symbol": "live_check", "line": 471},
+          {"symbol": "reject_engine_internal_adjustment", "line": 716},
+          {"symbol": "enumerate_knobs", "line": 2039},
+          {"symbol": "build_dispatch_payload", "line": 2094},
+          {"symbol": "submit_and_dispatch", "line": 2148}
+        ],
+        "inline_tests": 97,
+        "coverage": [
+          "operator-facing gate audit trail",
+          "envelope rejection",
+          "auto-revert propagation",
+          "engine-internal knob rejection",
+          "dispatch payload construction"
+        ]
+      },
+      {
+        "name": "perf_contract_tests",
+        "path": "tests/perf/governor_safety_envelope.rs",
+        "tests": [
+          {"test": "governor_applies_shadow_safe_proposal", "line": 42},
+          {"test": "governor_rejects_candidate_that_breaks_envelope", "line": 52},
+          {"test": "governor_auto_reverts_when_live_metrics_regress", "line": 72},
+          {"test": "governor_decision_log_is_monotonic_under_multiple_proposals", "line": 92}
+        ]
+      },
+      {
+        "name": "checker_contract",
+        "path": "scripts/check_optimization_governor.py",
+        "anchors": [
+          {"symbol": "RUST_PATH", "line": 30},
+          {"symbol": "EVENT_CODES", "line": 37},
+          {"symbol": "INVARIANTS", "line": 41},
+          {"symbol": "ERROR_CODES", "line": 50},
+          {"symbol": "CORE_TYPES", "line": 59},
+          {"symbol": "REQUIRED_METHODS", "line": 71},
+          {"symbol": "RUNTIME_KNOB_VARIANTS", "line": 87}
+        ],
+        "python_tests": 40
+      }
+    ]
+  },
   "checker": {
     "command": "python3 scripts/check_optimization_governor.py --build-report --json",
     "exit_code": 0,
