@@ -1011,6 +1011,12 @@ name = "bpet_atc_temporal_interop"
 path = "../../tests/integration/bpet_atc_temporal_interop.rs"
 required-features = ["advanced-features"]
 
+# bd-351r.1: DGIS to ATC topology interop bridge
+[[test]]
+name = "dgis_atc_interop"
+path = "../../tests/integration/dgis_atc_interop.rs"
+required-features = ["advanced-features"]
+
 # bd-1q38.1 sub-task 4: integration test for DGIS adversarial contagion simulator
 [[test]]
 name = "dgis_contagion_simulator"

@@ -1,32 +1,41 @@
 {
-  "schema_version": "evidence-v1.0",
+  "schema_version": "evidence-v1.1",
   "bead_id": "bd-351r",
   "section": "10.20",
   "title": "ATC interoperability for topology indicators",
   "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
+  "total": 18,
+  "passed": 18,
   "failed": 0,
+  "implementation_refs": [
+    "crates/franken-node/src/federation/dgis_atc_bridge.rs",
+    "crates/franken-node/src/federation/mod.rs"
+  ],
+  "test_refs": [
+    "tests/integration/dgis_atc_interop.rs"
+  ],
+  "artifact_refs": [
+    "artifacts/10.20/dgis_atc_exchange_report.json",
+    "artifacts/section_10_20/bd-351r/verification_summary.md"
+  ],
   "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
+    {"check": "primary_bridge_impl_exists", "pass": true, "detail": "crates/franken-node/src/federation/dgis_atc_bridge.rs"},
+    {"check": "integration_test_exists", "pass": true, "detail": "tests/integration/dgis_atc_interop.rs"},
+    {"check": "sample_exchange_report_exists", "pass": true, "detail": "artifacts/10.20/dgis_atc_exchange_report.json"},
+    {"check": "schema_versioned_contract", "pass": true},
     {"check": "event_codes_present", "pass": true},
     {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "graph_schema_compliance", "pass": true},
-    {"check": "topology_metrics", "pass": true},
-    {"check": "contagion_simulation", "pass": true},
-    {"check": "immunization_planning", "pass": true},
-    {"check": "cascade_economics", "pass": true},
-    {"check": "quarantine_orchestration", "pass": true},
-    {"check": "fragility_detection", "pass": true},
-    {"check": "federation_interop", "pass": true},
-    {"check": "adversarial_validation", "pass": true}
+    {"check": "invariant_markers_present", "pass": true},
+    {"check": "raw_dependency_graph_redacted", "pass": true},
+    {"check": "raw_package_versions_redacted", "pass": true},
+    {"check": "k_anonymity_enforced", "pass": true},
+    {"check": "deterministic_hashes", "pass": true},
+    {"check": "count_min_sketch_aggregation", "pass": true},
+    {"check": "federated_prior_derivation", "pass": true},
+    {"check": "prior_ingestion_fail_closed", "pass": true},
+    {"check": "topology_metric_influence", "pass": true},
+    {"check": "rust_module_wired", "pass": true},
+    {"check": "cargo_test_registered", "pass": true},
+    {"check": "section_gate_artifact_registered", "pass": true}
   ]
 }

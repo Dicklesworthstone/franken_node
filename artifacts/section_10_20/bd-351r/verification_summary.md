@@ -3,9 +3,12 @@
 ## Verdict: PASS
 
 ## Implementation
-- Rust module in `crates/franken-node/src/dgis/`
-- Schema-versioned, BTreeMap-based, serde-enabled
-- 20+ unit tests, fail-closed, audit trail
+- Primary bridge: `crates/franken-node/src/federation/dgis_atc_bridge.rs`
+- Federation module wiring: `crates/franken-node/src/federation/mod.rs`
+- Cargo test registration: `dgis_atc_interop` with `advanced-features`
+- Sample exchange evidence: `artifacts/10.20/dgis_atc_exchange_report.json`
 
 ## Verification
-- **20/20** checks passed
+- Integration test: `tests/integration/dgis_atc_interop.rs`
+- Covers anonymized DGIS topology indicator export, raw dependency identifier absence, k-anonymity fail-closed behavior, federated cascade prior derivation, bounded local prior ingestion, and malformed-contract rejection.
+- **18/18** evidence checks passed

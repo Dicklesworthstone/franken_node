@@ -1,0 +1,68 @@
+{
+  "schema_version": "dgis-atc-bridge-v1",
+  "privacy_contract_version": "dgis-atc-privacy-contract-v1",
+  "bead_id": "bd-351r",
+  "section": "10.20",
+  "title": "DGIS ATC topology indicator exchange report",
+  "verdict": "PASS",
+  "exchange_contract": {
+    "raw_dependency_graph_included": false,
+    "raw_package_names_included": false,
+    "raw_versions_included": false,
+    "raw_trace_ids_included": false,
+    "exported_shape": "hashed region/window identifiers plus bucketed topology metrics",
+    "min_k_anonymity": 2,
+    "risk_bucket_count": 20
+  },
+  "deliverables": [
+    {
+      "path": "crates/franken-node/src/federation/dgis_atc_bridge.rs",
+      "exists": true,
+      "purpose": "privacy-preserving DGIS topology indicator export and federated cascade prior ingestion"
+    },
+    {
+      "path": "tests/integration/dgis_atc_interop.rs",
+      "exists": true,
+      "purpose": "mock-free in-process export, privacy audit, prior derivation, and prior consumption coverage"
+    }
+  ],
+  "event_codes": [
+    "DGIS-ATC-001",
+    "DGIS-ATC-002",
+    "DGIS-ATC-003",
+    "DGIS-ATC-004",
+    "DGIS-ATC-005",
+    "DGIS-ATC-006",
+    "DGIS-ATC-007",
+    "DGIS-ATC-ERR-001",
+    "DGIS-ATC-ERR-002",
+    "DGIS-ATC-ERR-003",
+    "DGIS-ATC-ERR-004"
+  ],
+  "invariant_markers": [
+    "INV-DGIS-ATC-ANONYMIZED-ONLY",
+    "INV-DGIS-ATC-NO-RAW-DEPENDENCY-LEAKAGE",
+    "INV-DGIS-ATC-K-ANONYMITY",
+    "INV-DGIS-ATC-DETERMINISTIC-HASHES",
+    "INV-DGIS-ATC-PRIOR-FAIL-CLOSED",
+    "INV-DGIS-ATC-VERSIONED-CONTRACT"
+  ],
+  "sample_exchange": {
+    "indicator_count": 2,
+    "raw_identifier_absence_checked": true,
+    "aggregate_sketch": "count-min-sketch",
+    "federated_prior": {
+      "risk_prior_range": "[0,1]",
+      "confidence_prior_range": "[0,1]",
+      "metric_priors": [
+        "aggregate_risk",
+        "cascade_risk",
+        "fan_out",
+        "betweenness_centrality",
+        "trust_bottleneck_score",
+        "transitive_dependency_count",
+        "max_depth_in_graph"
+      ]
+    }
+  }
+}
