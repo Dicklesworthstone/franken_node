@@ -1,0 +1,255 @@
+{
+  "name": "multi_kind",
+  "description": "Combined phase shift on net.egress and 50% dropout on fs.write.",
+  "config": {
+    "phase_shift_threshold": 0.3,
+    "dropout_threshold": 0.3,
+    "distribution_kl_threshold": 100.0,
+    "creep_slope_threshold": 10.0,
+    "min_samples_for_detection": 8,
+    "window_size": 10
+  },
+  "series": {
+    "samples": [
+      {
+        "ts": 0,
+        "observed_capability": {
+          "net.egress": 0.1,
+          "fs.write": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 1,
+        "observed_capability": {
+          "net.egress": 0.1,
+          "fs.write": 0.2
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 2,
+        "observed_capability": {
+          "net.egress": 0.1,
+          "fs.write": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 3,
+        "observed_capability": {
+          "net.egress": 0.1,
+          "fs.write": 0.2
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 4,
+        "observed_capability": {
+          "net.egress": 0.1,
+          "fs.write": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 5,
+        "observed_capability": {
+          "net.egress": 0.1,
+          "fs.write": 0.2
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 6,
+        "observed_capability": {
+          "net.egress": 0.1,
+          "fs.write": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 7,
+        "observed_capability": {
+          "net.egress": 0.1,
+          "fs.write": 0.2
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 8,
+        "observed_capability": {
+          "net.egress": 0.1,
+          "fs.write": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 9,
+        "observed_capability": {
+          "net.egress": 0.1,
+          "fs.write": 0.2
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 10,
+        "observed_capability": {
+          "net.egress": 0.9,
+          "fs.write": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 11,
+        "observed_capability": {
+          "net.egress": 0.9,
+          "fs.write": 0.2
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 12,
+        "observed_capability": {
+          "net.egress": 0.9,
+          "fs.write": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 13,
+        "observed_capability": {
+          "net.egress": 0.9,
+          "fs.write": 0.2
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 14,
+        "observed_capability": {
+          "net.egress": 0.9,
+          "fs.write": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 15,
+        "observed_capability": {
+          "net.egress": 0.9,
+          "fs.write": 0.2
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 16,
+        "observed_capability": {
+          "net.egress": 0.9,
+          "fs.write": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 17,
+        "observed_capability": {
+          "net.egress": 0.9,
+          "fs.write": 0.2
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 18,
+        "observed_capability": {
+          "net.egress": 0.9,
+          "fs.write": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      },
+      {
+        "ts": 19,
+        "observed_capability": {
+          "net.egress": 0.9,
+          "fs.write": 0.2
+        },
+        "declared_capability": {
+          "net.egress": 0.5,
+          "fs.write": 0.2
+        }
+      }
+    ],
+    "window_start": 0,
+    "window_end": 100000
+  },
+  "expected_hints": [
+    {
+      "kind": "PhaseShift",
+      "min_count": 1,
+      "max_count": 5,
+      "expected_sample_indices_contains": [
+        9,
+        10
+      ]
+    },
+    {
+      "kind": "Dropout",
+      "min_count": 1,
+      "max_count": 5,
+      "expected_sample_indices_contains": []
+    }
+  ]
+}

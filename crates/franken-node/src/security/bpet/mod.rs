@@ -5,11 +5,14 @@
 
 pub mod adversarial_evolution;
 pub mod adversarial_harness;
+pub mod adversarial_scenarios;
 pub mod camouflage_detector;
+pub mod camouflage_fixtures;
 pub mod cohort_baselines;
 pub mod drift_features;
 pub mod economic_integration;
 pub mod evolution_risk_scorer;
+pub mod phenotype_extractor;
 
 #[cfg(test)]
 mod negative_path_tests {

@@ -1,0 +1,32 @@
+{
+  "name": "slow_roll_drift",
+  "description": "Drift-via-many-small-updates: a steady linear ramp publishes a small declared capability increase while the adversary hides a 5% bonus on every step. Default thresholds should fire only in the second half of the campaign.",
+  "scenario": {
+    "id": "scenario-slow-roll-001",
+    "kind": "slow_roll_drift",
+    "n_steps": 100,
+    "step_interval_ms": 60000,
+    "target_capability": "capability:fs.write",
+    "ramp_curve": {"kind": "linear"}
+  },
+  "baseline": {
+    "ts": 0,
+    "fields": {
+      "capability_index": 0.05,
+      "commit_velocity": 0.20,
+      "issue_response": 0.10
+    }
+  },
+  "thresholds": {
+    "drift": 0.5,
+    "regime_shift": 0.6,
+    "hazard": 0.7,
+    "provenance": 0.5,
+    "combined": 0.55
+  },
+  "expected_verdict": {
+    "kind": "caught_late",
+    "at_step_lower": 60,
+    "at_step_upper": 80
+  }
+}

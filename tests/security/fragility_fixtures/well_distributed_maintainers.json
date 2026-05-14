@@ -1,0 +1,68 @@
+{
+  "name": "well_distributed_maintainers",
+  "description": "Every package has 3 maintainers, all with bus_factor>=3, key recovery configured, recent commits. Downloads are evenly distributed (no key person). Expect zero findings.",
+  "now_ms": 1700000000000,
+  "maintainers": {
+    "alice": {
+      "id": "alice",
+      "packages_owned": ["pkg-a", "pkg-b", "pkg-c"],
+      "total_downloads_per_month": 25000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1699900000,
+      "bus_factor": 4
+    },
+    "bob": {
+      "id": "bob",
+      "packages_owned": ["pkg-a", "pkg-b", "pkg-c"],
+      "total_downloads_per_month": 25000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1699900000,
+      "bus_factor": 4
+    },
+    "carol": {
+      "id": "carol",
+      "packages_owned": ["pkg-a", "pkg-b", "pkg-c"],
+      "total_downloads_per_month": 25000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1699900000,
+      "bus_factor": 4
+    },
+    "dave": {
+      "id": "dave",
+      "packages_owned": [],
+      "total_downloads_per_month": 25000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1699900000,
+      "bus_factor": 4
+    }
+  },
+  "publishers": {},
+  "nodes": [
+    {"id": "pkg-a", "kind": "Package", "metadata": {}},
+    {"id": "pkg-b", "kind": "Package", "metadata": {}},
+    {"id": "pkg-c", "kind": "Package", "metadata": {}}
+  ],
+  "edges": [
+    {"from": "pkg-a", "to": "alice", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-a", "to": "bob", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-a", "to": "carol", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-b", "to": "alice", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-b", "to": "bob", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-b", "to": "carol", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-c", "to": "alice", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-c", "to": "bob", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-c", "to": "carol", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000}
+  ],
+  "config_overrides": {
+    "single_maintainer_threshold": 3,
+    "key_person_threshold": 0.50,
+    "max_chain_length": 4,
+    "org_concentration_threshold": 0.30,
+    "orphan_threshold_days": 365
+  },
+  "expected_findings": []
+}

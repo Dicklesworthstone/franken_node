@@ -1,0 +1,58 @@
+{
+  "name": "diverse_org_ownership",
+  "description": "Five distinct organisations each own exactly one of five namespaces (20% each, all below the 30% default threshold). No maintainer concentration, no orphans. Expect zero findings.",
+  "now_ms": 1700000000000,
+  "maintainers": {},
+  "publishers": {
+    "pub-a": {
+      "id": "pub-a",
+      "org_id": "org-a",
+      "packages_published": ["pkg-a"],
+      "signature_keys_count": 2,
+      "key_rotation_policy": "rotate-90d",
+      "recovery_quorum": 2
+    },
+    "pub-b": {
+      "id": "pub-b",
+      "org_id": "org-b",
+      "packages_published": ["pkg-b"],
+      "signature_keys_count": 2,
+      "key_rotation_policy": "rotate-90d",
+      "recovery_quorum": 2
+    },
+    "pub-c": {
+      "id": "pub-c",
+      "org_id": "org-c",
+      "packages_published": ["pkg-c"],
+      "signature_keys_count": 2,
+      "key_rotation_policy": "rotate-90d",
+      "recovery_quorum": 2
+    },
+    "pub-d": {
+      "id": "pub-d",
+      "org_id": "org-d",
+      "packages_published": ["pkg-d"],
+      "signature_keys_count": 2,
+      "key_rotation_policy": "rotate-90d",
+      "recovery_quorum": 2
+    },
+    "pub-e": {
+      "id": "pub-e",
+      "org_id": "org-e",
+      "packages_published": ["pkg-e"],
+      "signature_keys_count": 2,
+      "key_rotation_policy": "rotate-90d",
+      "recovery_quorum": 2
+    }
+  },
+  "nodes": [
+    {"id": "ns-a", "kind": "Namespace", "metadata": {"org": "org-a"}},
+    {"id": "ns-b", "kind": "Namespace", "metadata": {"org": "org-b"}},
+    {"id": "ns-c", "kind": "Namespace", "metadata": {"org": "org-c"}},
+    {"id": "ns-d", "kind": "Namespace", "metadata": {"org": "org-d"}},
+    {"id": "ns-e", "kind": "Namespace", "metadata": {"org": "org-e"}}
+  ],
+  "edges": [],
+  "config_overrides": null,
+  "expected_findings": []
+}

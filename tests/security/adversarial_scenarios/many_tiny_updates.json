@@ -1,0 +1,30 @@
+{
+  "name": "many_tiny_updates",
+  "description": "Many-tiny-updates: a long linear ramp emits high-frequency micro-perturbations whose magnitudes are below the detector floor. The campaign should pass the detector entirely.",
+  "scenario": {
+    "id": "scenario-many-tiny-updates-001",
+    "kind": "many_tiny_updates",
+    "n_steps": 200,
+    "step_interval_ms": 60000,
+    "target_capability": "capability:fs.read",
+    "ramp_curve": {"kind": "linear"}
+  },
+  "baseline": {
+    "ts": 0,
+    "fields": {
+      "capability_index": 0.05,
+      "commit_velocity": 0.20,
+      "issue_response": 0.10
+    }
+  },
+  "thresholds": {
+    "drift": 0.99,
+    "regime_shift": 0.99,
+    "hazard": 0.99,
+    "provenance": 0.99,
+    "combined": 0.99
+  },
+  "expected_verdict": {
+    "kind": "missed_entirely"
+  }
+}

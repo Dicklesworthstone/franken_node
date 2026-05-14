@@ -1,0 +1,32 @@
+{
+  "name": "eviction_via_trust_flooding",
+  "description": "Eviction-via-trust-flooding: a stepped 4-plateau ramp couples capability nudges with an early velocity spike (trust flood). Should be detected in the early plateaus.",
+  "scenario": {
+    "id": "scenario-eviction-flooding-001",
+    "kind": "eviction_via_trust_flooding",
+    "n_steps": 60,
+    "step_interval_ms": 60000,
+    "target_capability": "capability:trust.flood",
+    "ramp_curve": {"kind": "stepped", "plateau_count": 4}
+  },
+  "baseline": {
+    "ts": 0,
+    "fields": {
+      "capability_index": 0.05,
+      "commit_velocity": 0.10,
+      "issue_response": 0.10
+    }
+  },
+  "thresholds": {
+    "drift": 0.30,
+    "regime_shift": 0.35,
+    "hazard": 0.40,
+    "provenance": 0.45,
+    "combined": 0.30
+  },
+  "expected_verdict": {
+    "kind": "caught_early",
+    "at_step_lower": 0,
+    "at_step_upper": 20
+  }
+}

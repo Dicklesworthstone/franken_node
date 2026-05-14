@@ -1,0 +1,170 @@
+{
+  "name": "dropout_clear",
+  "description": "Observed value is 0 for ~33% of declared samples (declared always 0.3).",
+  "config": {
+    "phase_shift_threshold": 100.0,
+    "dropout_threshold": 0.2,
+    "distribution_kl_threshold": 100.0,
+    "creep_slope_threshold": 100.0,
+    "min_samples_for_detection": 8,
+    "window_size": 10
+  },
+  "series": {
+    "samples": [
+      {
+        "ts": 0,
+        "observed_capability": {
+          "net.egress": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 1,
+        "observed_capability": {
+          "net.egress": 0.3
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 2,
+        "observed_capability": {
+          "net.egress": 0.3
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 3,
+        "observed_capability": {
+          "net.egress": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 4,
+        "observed_capability": {
+          "net.egress": 0.3
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 5,
+        "observed_capability": {
+          "net.egress": 0.3
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 6,
+        "observed_capability": {
+          "net.egress": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 7,
+        "observed_capability": {
+          "net.egress": 0.3
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 8,
+        "observed_capability": {
+          "net.egress": 0.3
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 9,
+        "observed_capability": {
+          "net.egress": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 10,
+        "observed_capability": {
+          "net.egress": 0.3
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 11,
+        "observed_capability": {
+          "net.egress": 0.3
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 12,
+        "observed_capability": {
+          "net.egress": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 13,
+        "observed_capability": {
+          "net.egress": 0.3
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 14,
+        "observed_capability": {
+          "net.egress": 0.3
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 15,
+        "observed_capability": {
+          "net.egress": 0.0
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      }
+    ],
+    "window_start": 0,
+    "window_end": 100000
+  },
+  "expected_hints": [
+    {
+      "kind": "Dropout",
+      "min_count": 1,
+      "max_count": 5,
+      "expected_sample_indices_contains": []
+    }
+  ]
+}

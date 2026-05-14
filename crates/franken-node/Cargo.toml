@@ -685,6 +685,10 @@ name = "observability_witness_metamorphic"
 path = "tests/observability_witness_metamorphic.rs"
 
 [[test]]
+name = "camouflage_detector"
+path = "../../tests/security/camouflage_detector.rs"
+
+[[test]]
 name = "exfiltration_sentinel_scenarios"
 path = "../../tests/security/exfiltration_sentinel_scenarios.rs"
 
@@ -970,6 +974,11 @@ required-features = ["policy-engine"]
 [[test]]
 name = "evolution_risk_scorer_integration"
 path = "tests/evolution_risk_scorer_integration.rs"
+
+# bd-2xgs.1 (section 10.21): deterministic phenotype feature extraction
+[[test]]
+name = "bpet_feature_extraction"
+path = "../../tests/conformance/bpet_feature_extraction.rs"
 
 [[bench]]
 name = "cuckoo_revocation_bench"

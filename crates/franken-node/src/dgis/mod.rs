@@ -12,7 +12,10 @@
 //! maintainer/publisher fragility type foundation used by the SPOF detector.
 
 pub mod contagion_graph;
+pub mod contagion_profiles;
 pub mod contagion_simulator;
+pub mod fragility_fixtures;
 pub mod fragility_model;
 pub mod graph_ingestion;
+pub mod graph_seeds;
 pub mod spof_detection;

@@ -1,0 +1,32 @@
+{
+  "name": "signature_rollover",
+  "description": "Signature-rollover: an exponential ramp triggers a sharp capability jump at 75% progress when a rolled maintainer key relaunders the trajectory. The harness's hazard bias for signature rollover lets the detector fire in the early steps via the hazard channel.",
+  "scenario": {
+    "id": "scenario-signature-rollover-001",
+    "kind": "signature_rollover",
+    "n_steps": 30,
+    "step_interval_ms": 60000,
+    "target_capability": "capability:release.sign",
+    "ramp_curve": {"kind": "exponential", "base": 4.0}
+  },
+  "baseline": {
+    "ts": 0,
+    "fields": {
+      "capability_index": 0.05,
+      "commit_velocity": 0.20,
+      "issue_response": 0.10
+    }
+  },
+  "thresholds": {
+    "drift": 0.30,
+    "regime_shift": 0.40,
+    "hazard": 0.05,
+    "provenance": 0.40,
+    "combined": 0.30
+  },
+  "expected_verdict": {
+    "kind": "caught_early",
+    "at_step_lower": 0,
+    "at_step_upper": 14
+  }
+}

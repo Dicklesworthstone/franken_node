@@ -1,0 +1,32 @@
+{
+  "name": "false_recovery_claim",
+  "description": "False-recovery-claim: a stepped ramp couples a fake mid-campaign recovery announcement with a resumed escalation. Detector should still catch the escalation in the late half despite the dip.",
+  "scenario": {
+    "id": "scenario-false-recovery-001",
+    "kind": "false_recovery_claim",
+    "n_steps": 40,
+    "step_interval_ms": 60000,
+    "target_capability": "capability:supply.chain",
+    "ramp_curve": {"kind": "stepped", "plateau_count": 5}
+  },
+  "baseline": {
+    "ts": 0,
+    "fields": {
+      "capability_index": 0.05,
+      "commit_velocity": 0.20,
+      "issue_response": 0.10
+    }
+  },
+  "thresholds": {
+    "drift": 0.40,
+    "regime_shift": 0.50,
+    "hazard": 0.40,
+    "provenance": 0.50,
+    "combined": 0.40
+  },
+  "expected_verdict": {
+    "kind": "caught_late",
+    "at_step_lower": 20,
+    "at_step_upper": 40
+  }
+}

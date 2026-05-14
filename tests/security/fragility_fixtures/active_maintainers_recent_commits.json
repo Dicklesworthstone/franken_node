@@ -1,0 +1,62 @@
+{
+  "name": "active_maintainers_recent_commits",
+  "description": "All maintainers committed within the last 30 days, have bus_factor>=4, and have key recovery configured. Packages are co-maintained. Expect zero findings (no orphans, no single-maintainer, no key person).",
+  "now_ms": 1700000000000,
+  "maintainers": {
+    "ann": {
+      "id": "ann",
+      "packages_owned": ["lib-x"],
+      "total_downloads_per_month": 30000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1697408000,
+      "bus_factor": 4
+    },
+    "ben": {
+      "id": "ben",
+      "packages_owned": ["lib-x"],
+      "total_downloads_per_month": 30000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1697408000,
+      "bus_factor": 4
+    },
+    "cat": {
+      "id": "cat",
+      "packages_owned": ["lib-y"],
+      "total_downloads_per_month": 30000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1697408000,
+      "bus_factor": 4
+    },
+    "dan": {
+      "id": "dan",
+      "packages_owned": ["lib-y"],
+      "total_downloads_per_month": 30000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1697408000,
+      "bus_factor": 4
+    }
+  },
+  "publishers": {},
+  "nodes": [
+    {"id": "lib-x", "kind": "Package", "metadata": {}},
+    {"id": "lib-y", "kind": "Package", "metadata": {}}
+  ],
+  "edges": [
+    {"from": "lib-x", "to": "ann", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "lib-x", "to": "ben", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "lib-y", "to": "cat", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "lib-y", "to": "dan", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000}
+  ],
+  "config_overrides": {
+    "single_maintainer_threshold": 3,
+    "key_person_threshold": 0.50,
+    "max_chain_length": 4,
+    "org_concentration_threshold": 0.30,
+    "orphan_threshold_days": 365
+  },
+  "expected_findings": []
+}

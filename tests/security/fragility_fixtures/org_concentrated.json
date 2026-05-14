@@ -1,0 +1,57 @@
+{
+  "name": "org_concentrated",
+  "description": "Organisation 'megacorp' owns 7 of 10 namespaces (70%), well above the 30% default threshold. Other orgs each own a single namespace. Expect an OrgConcentration finding rooted at megacorp.",
+  "now_ms": 1700000000000,
+  "maintainers": {},
+  "publishers": {
+    "pub-mega": {
+      "id": "pub-mega",
+      "org_id": "megacorp",
+      "packages_published": ["mp-1", "mp-2", "mp-3"],
+      "signature_keys_count": 2,
+      "key_rotation_policy": "rotate-90d",
+      "recovery_quorum": 2
+    },
+    "pub-indie-a": {
+      "id": "pub-indie-a",
+      "org_id": "indie-a",
+      "packages_published": ["ip-a"],
+      "signature_keys_count": 1,
+      "key_rotation_policy": "rotate-90d",
+      "recovery_quorum": 2
+    },
+    "pub-indie-b": {
+      "id": "pub-indie-b",
+      "org_id": "indie-b",
+      "packages_published": ["ip-b"],
+      "signature_keys_count": 1,
+      "key_rotation_policy": "rotate-90d",
+      "recovery_quorum": 2
+    },
+    "pub-indie-c": {
+      "id": "pub-indie-c",
+      "org_id": "indie-c",
+      "packages_published": ["ip-c"],
+      "signature_keys_count": 1,
+      "key_rotation_policy": "rotate-90d",
+      "recovery_quorum": 2
+    }
+  },
+  "nodes": [
+    {"id": "ns-1", "kind": "Namespace", "metadata": {"org": "megacorp"}},
+    {"id": "ns-2", "kind": "Namespace", "metadata": {"org": "megacorp"}},
+    {"id": "ns-3", "kind": "Namespace", "metadata": {"org": "megacorp"}},
+    {"id": "ns-4", "kind": "Namespace", "metadata": {"org": "megacorp"}},
+    {"id": "ns-5", "kind": "Namespace", "metadata": {"org": "megacorp"}},
+    {"id": "ns-6", "kind": "Namespace", "metadata": {"org": "megacorp"}},
+    {"id": "ns-7", "kind": "Namespace", "metadata": {"org": "megacorp"}},
+    {"id": "ns-8", "kind": "Namespace", "metadata": {"org": "indie-a"}},
+    {"id": "ns-9", "kind": "Namespace", "metadata": {"org": "indie-b"}},
+    {"id": "ns-10", "kind": "Namespace", "metadata": {"org": "indie-c"}}
+  ],
+  "edges": [],
+  "config_overrides": null,
+  "expected_findings": [
+    {"kind": "OrgConcentration", "min_count": 1, "max_count": 1}
+  ]
+}

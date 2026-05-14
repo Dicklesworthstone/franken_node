@@ -1,0 +1,206 @@
+{
+  "name": "gradual_creep_clear",
+  "description": "Observed/declared ratio creeps linearly from 0.5 to 1.5 over 20 samples.",
+  "config": {
+    "phase_shift_threshold": 1.0,
+    "dropout_threshold": 0.99,
+    "distribution_kl_threshold": 100.0,
+    "creep_slope_threshold": 0.01,
+    "min_samples_for_detection": 8,
+    "window_size": 10
+  },
+  "series": {
+    "samples": [
+      {
+        "ts": 0,
+        "observed_capability": {
+          "net.egress": 0.15
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 1,
+        "observed_capability": {
+          "net.egress": 0.16578947368421051
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 2,
+        "observed_capability": {
+          "net.egress": 0.18157894736842103
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 3,
+        "observed_capability": {
+          "net.egress": 0.19736842105263158
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 4,
+        "observed_capability": {
+          "net.egress": 0.2131578947368421
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 5,
+        "observed_capability": {
+          "net.egress": 0.2289473684210526
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 6,
+        "observed_capability": {
+          "net.egress": 0.24473684210526314
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 7,
+        "observed_capability": {
+          "net.egress": 0.26052631578947366
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 8,
+        "observed_capability": {
+          "net.egress": 0.2763157894736842
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 9,
+        "observed_capability": {
+          "net.egress": 0.2921052631578947
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 10,
+        "observed_capability": {
+          "net.egress": 0.3078947368421052
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 11,
+        "observed_capability": {
+          "net.egress": 0.3236842105263158
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 12,
+        "observed_capability": {
+          "net.egress": 0.3394736842105263
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 13,
+        "observed_capability": {
+          "net.egress": 0.3552631578947368
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 14,
+        "observed_capability": {
+          "net.egress": 0.37105263157894736
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 15,
+        "observed_capability": {
+          "net.egress": 0.3868421052631579
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 16,
+        "observed_capability": {
+          "net.egress": 0.4026315789473684
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 17,
+        "observed_capability": {
+          "net.egress": 0.41842105263157897
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 18,
+        "observed_capability": {
+          "net.egress": 0.43421052631578944
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 19,
+        "observed_capability": {
+          "net.egress": 0.44999999999999996
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      }
+    ],
+    "window_start": 0,
+    "window_end": 100000
+  },
+  "expected_hints": [
+    {
+      "kind": "GradualCreep",
+      "min_count": 1,
+      "max_count": 2,
+      "expected_sample_indices_contains": []
+    }
+  ]
+}

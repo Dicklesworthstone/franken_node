@@ -1,0 +1,62 @@
+{
+  "name": "xz_style",
+  "description": "Long-tail trusted-package compromise modeled on the xz-utils/liblzma backdoor: a single deeply-trusted maintainer pivots into two flagship libraries via MaintainerOverlap edges, those libraries propagate into a bundle of downstream packages via DependencyImport (build-script execution), and the cascade tails out through second-degree dependents. Expected ~85% spread within 50 steps.",
+  "graph": {
+    "nodes": [
+      "pkg:maintainer_xz",
+      "pkg:liblzma",
+      "pkg:xz_utils",
+      "pkg:libsystemd_consumer",
+      "pkg:openssh_consumer",
+      "pkg:zstd_optional",
+      "pkg:rpm_lzma_user",
+      "pkg:deb_xz_user",
+      "pkg:dpkg_compressor",
+      "pkg:apt_archive",
+      "pkg:cmake_artifact",
+      "pkg:liblzma_dev_app1",
+      "pkg:liblzma_dev_app2",
+      "pkg:xz_consumer_app3",
+      "pkg:xz_consumer_app4",
+      "pkg:xz_consumer_app5",
+      "pkg:secondary_user_a",
+      "pkg:secondary_user_b",
+      "pkg:secondary_user_c",
+      "pkg:isolated_pkg_quarantined"
+    ],
+    "edges": [
+      {"from": "pkg:maintainer_xz", "to": "pkg:liblzma", "weight": 0.9, "edge_kind": "MaintainerOverlap"},
+      {"from": "pkg:maintainer_xz", "to": "pkg:xz_utils", "weight": 0.9, "edge_kind": "MaintainerOverlap"},
+      {"from": "pkg:liblzma", "to": "pkg:libsystemd_consumer", "weight": 0.8, "edge_kind": "DependencyImport"},
+      {"from": "pkg:liblzma", "to": "pkg:openssh_consumer", "weight": 0.8, "edge_kind": "DependencyImport"},
+      {"from": "pkg:liblzma", "to": "pkg:zstd_optional", "weight": 0.7, "edge_kind": "DependencyImport"},
+      {"from": "pkg:liblzma", "to": "pkg:rpm_lzma_user", "weight": 0.7, "edge_kind": "DependencyImport"},
+      {"from": "pkg:liblzma", "to": "pkg:deb_xz_user", "weight": 0.7, "edge_kind": "DependencyImport"},
+      {"from": "pkg:xz_utils", "to": "pkg:dpkg_compressor", "weight": 0.8, "edge_kind": "DependencyImport"},
+      {"from": "pkg:xz_utils", "to": "pkg:apt_archive", "weight": 0.8, "edge_kind": "DependencyImport"},
+      {"from": "pkg:xz_utils", "to": "pkg:cmake_artifact", "weight": 0.6, "edge_kind": "DependencyImport"},
+      {"from": "pkg:xz_utils", "to": "pkg:liblzma_dev_app1", "weight": 0.7, "edge_kind": "DependencyImport"},
+      {"from": "pkg:xz_utils", "to": "pkg:liblzma_dev_app2", "weight": 0.7, "edge_kind": "DependencyImport"},
+      {"from": "pkg:libsystemd_consumer", "to": "pkg:xz_consumer_app3", "weight": 0.5, "edge_kind": "DependencyImport"},
+      {"from": "pkg:openssh_consumer", "to": "pkg:xz_consumer_app4", "weight": 0.5, "edge_kind": "DependencyImport"},
+      {"from": "pkg:dpkg_compressor", "to": "pkg:xz_consumer_app5", "weight": 0.5, "edge_kind": "DependencyImport"},
+      {"from": "pkg:xz_consumer_app3", "to": "pkg:secondary_user_a", "weight": 0.4, "edge_kind": "DependencyImport"},
+      {"from": "pkg:xz_consumer_app4", "to": "pkg:secondary_user_b", "weight": 0.4, "edge_kind": "DependencyImport"},
+      {"from": "pkg:xz_consumer_app5", "to": "pkg:secondary_user_c", "weight": 0.4, "edge_kind": "DependencyImport"}
+    ],
+    "seed": 13371337
+  },
+  "initial_infected": ["pkg:maintainer_xz"],
+  "config": {
+    "max_steps": 50,
+    "infection_threshold": 0.3,
+    "decay_factor": 0.9,
+    "seed": 13371337
+  },
+  "expected": {
+    "termination_reason": "Converged",
+    "min_infected_count": 18,
+    "max_infected_count": 19,
+    "terminated_by_step": 50
+  }
+}

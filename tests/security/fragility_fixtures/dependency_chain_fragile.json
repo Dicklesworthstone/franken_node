@@ -1,0 +1,81 @@
+{
+  "name": "dependency_chain_fragile",
+  "description": "Linear chain pkg-1 -> pkg-2 -> pkg-3 -> pkg-4 -> pkg-5 where each package has exactly one fragile maintainer (bus_factor=1, no key recovery). max_chain_length=5 is enforced via config_overrides so we get exactly one chain finding.",
+  "now_ms": 1700000000000,
+  "maintainers": {
+    "m1": {
+      "id": "m1",
+      "packages_owned": ["pkg-1"],
+      "total_downloads_per_month": 100,
+      "key_recovery_setup": false,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 1
+    },
+    "m2": {
+      "id": "m2",
+      "packages_owned": ["pkg-2"],
+      "total_downloads_per_month": 100,
+      "key_recovery_setup": false,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 1
+    },
+    "m3": {
+      "id": "m3",
+      "packages_owned": ["pkg-3"],
+      "total_downloads_per_month": 100,
+      "key_recovery_setup": false,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 1
+    },
+    "m4": {
+      "id": "m4",
+      "packages_owned": ["pkg-4"],
+      "total_downloads_per_month": 100,
+      "key_recovery_setup": false,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 1
+    },
+    "m5": {
+      "id": "m5",
+      "packages_owned": ["pkg-5"],
+      "total_downloads_per_month": 100,
+      "key_recovery_setup": false,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 1
+    }
+  },
+  "publishers": {},
+  "nodes": [
+    {"id": "pkg-1", "kind": "Package", "metadata": {}},
+    {"id": "pkg-2", "kind": "Package", "metadata": {}},
+    {"id": "pkg-3", "kind": "Package", "metadata": {}},
+    {"id": "pkg-4", "kind": "Package", "metadata": {}},
+    {"id": "pkg-5", "kind": "Package", "metadata": {}}
+  ],
+  "edges": [
+    {"from": "pkg-1", "to": "m1", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-2", "to": "m2", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-3", "to": "m3", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-4", "to": "m4", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-5", "to": "m5", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-1", "to": "pkg-2", "kind": "Depends", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-2", "to": "pkg-3", "kind": "Depends", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-3", "to": "pkg-4", "kind": "Depends", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-4", "to": "pkg-5", "kind": "Depends", "weight": 1.0, "observed_at": 1700000000}
+  ],
+  "config_overrides": {
+    "single_maintainer_threshold": 100,
+    "key_person_threshold": 0.99,
+    "max_chain_length": 5,
+    "org_concentration_threshold": 0.99,
+    "orphan_threshold_days": 365
+  },
+  "expected_findings": [
+    {"kind": "DependencyChain", "min_count": 1, "max_count": 1}
+  ]
+}

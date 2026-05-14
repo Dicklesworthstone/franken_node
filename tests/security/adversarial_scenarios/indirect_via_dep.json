@@ -1,0 +1,32 @@
+{
+  "name": "indirect_via_dep",
+  "description": "Indirect-via-dep: capability stays flat on the package under test while response time deteriorates as a transitive dependency drifts on an S-curve. Detection happens late once the provenance signal exceeds threshold.",
+  "scenario": {
+    "id": "scenario-indirect-dep-001",
+    "kind": "indirect_via_dep",
+    "n_steps": 60,
+    "step_interval_ms": 60000,
+    "target_capability": "capability:dep.transitive",
+    "ramp_curve": {"kind": "sigmoid", "steepness": 5.0}
+  },
+  "baseline": {
+    "ts": 0,
+    "fields": {
+      "capability_index": 0.05,
+      "commit_velocity": 0.20,
+      "issue_response": 0.05
+    }
+  },
+  "thresholds": {
+    "drift": 0.35,
+    "regime_shift": 0.50,
+    "hazard": 0.50,
+    "provenance": 0.50,
+    "combined": 0.40
+  },
+  "expected_verdict": {
+    "kind": "caught_late",
+    "at_step_lower": 25,
+    "at_step_upper": 45
+  }
+}

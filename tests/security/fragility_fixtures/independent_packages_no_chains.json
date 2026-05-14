@@ -1,0 +1,53 @@
+{
+  "name": "independent_packages_no_chains",
+  "description": "Five packages with NO Depends edges between them. Each is co-maintained, recent, and healthy. Even if any single package were fragile, no chain can form. Expect zero findings.",
+  "now_ms": 1700000000000,
+  "maintainers": {
+    "m_one": {
+      "id": "m_one",
+      "packages_owned": ["std-a", "std-b", "std-c", "std-d", "std-e"],
+      "total_downloads_per_month": 50000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1699900000,
+      "bus_factor": 6
+    },
+    "m_two": {
+      "id": "m_two",
+      "packages_owned": ["std-a", "std-b", "std-c", "std-d", "std-e"],
+      "total_downloads_per_month": 50000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1699900000,
+      "bus_factor": 6
+    }
+  },
+  "publishers": {},
+  "nodes": [
+    {"id": "std-a", "kind": "Package", "metadata": {}},
+    {"id": "std-b", "kind": "Package", "metadata": {}},
+    {"id": "std-c", "kind": "Package", "metadata": {}},
+    {"id": "std-d", "kind": "Package", "metadata": {}},
+    {"id": "std-e", "kind": "Package", "metadata": {}}
+  ],
+  "edges": [
+    {"from": "std-a", "to": "m_one", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "std-a", "to": "m_two", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "std-b", "to": "m_one", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "std-b", "to": "m_two", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "std-c", "to": "m_one", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "std-c", "to": "m_two", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "std-d", "to": "m_one", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "std-d", "to": "m_two", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "std-e", "to": "m_one", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "std-e", "to": "m_two", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000}
+  ],
+  "config_overrides": {
+    "single_maintainer_threshold": 3,
+    "key_person_threshold": 0.60,
+    "max_chain_length": 4,
+    "org_concentration_threshold": 0.30,
+    "orphan_threshold_days": 365
+  },
+  "expected_findings": []
+}

@@ -1,0 +1,76 @@
+{
+  "name": "typosquat",
+  "description": "Mass low-trust typosquats: 5 typosquats sit alongside 25 legitimate packages. Each typosquat creates a NamespaceShadow edge into the legitimate package it impersonates, simulating an accidental import. A handful of those accidentally-imported legitimate packages then propagate one hop further via DependencyImport, but most of the legitimate corpus stays clean. Expected ~30% spread within 30 steps.",
+  "graph": {
+    "nodes": [
+      "typo:requets",
+      "typo:lodahs",
+      "typo:expres",
+      "typo:reactjs",
+      "typo:jqueryui",
+      "legit:requests",
+      "legit:lodash",
+      "legit:express",
+      "legit:react",
+      "legit:jquery",
+      "legit:requests_oauthlib",
+      "legit:lodash_es",
+      "legit:express_session",
+      "legit:numpy",
+      "legit:pandas",
+      "legit:scipy",
+      "legit:matplotlib",
+      "legit:scikit_learn",
+      "legit:tensorflow",
+      "legit:torch",
+      "legit:flask",
+      "legit:django",
+      "legit:fastapi",
+      "legit:sqlalchemy",
+      "legit:psycopg2",
+      "legit:redis_py",
+      "legit:celery",
+      "legit:pytest",
+      "legit:black",
+      "legit:mypy"
+    ],
+    "edges": [
+      {"from": "typo:requets", "to": "legit:requests", "weight": 0.5, "edge_kind": "NamespaceShadow"},
+      {"from": "typo:lodahs", "to": "legit:lodash", "weight": 0.5, "edge_kind": "NamespaceShadow"},
+      {"from": "typo:expres", "to": "legit:express", "weight": 0.5, "edge_kind": "NamespaceShadow"},
+      {"from": "typo:reactjs", "to": "legit:react", "weight": 0.5, "edge_kind": "NamespaceShadow"},
+      {"from": "typo:jqueryui", "to": "legit:jquery", "weight": 0.5, "edge_kind": "NamespaceShadow"},
+      {"from": "legit:requests", "to": "legit:requests_oauthlib", "weight": 0.1, "edge_kind": "DependencyImport"},
+      {"from": "legit:lodash", "to": "legit:lodash_es", "weight": 0.1, "edge_kind": "DependencyImport"},
+      {"from": "legit:express", "to": "legit:express_session", "weight": 0.1, "edge_kind": "DependencyImport"},
+      {"from": "legit:numpy", "to": "legit:pandas", "weight": 0.1, "edge_kind": "DependencyImport"},
+      {"from": "legit:numpy", "to": "legit:scipy", "weight": 0.1, "edge_kind": "DependencyImport"},
+      {"from": "legit:scipy", "to": "legit:scikit_learn", "weight": 0.1, "edge_kind": "DependencyImport"},
+      {"from": "legit:pandas", "to": "legit:matplotlib", "weight": 0.1, "edge_kind": "DependencyImport"},
+      {"from": "legit:tensorflow", "to": "legit:torch", "weight": 0.1, "edge_kind": "DependencyImport"},
+      {"from": "legit:flask", "to": "legit:django", "weight": 0.1, "edge_kind": "DependencyImport"},
+      {"from": "legit:fastapi", "to": "legit:sqlalchemy", "weight": 0.1, "edge_kind": "DependencyImport"},
+      {"from": "legit:psycopg2", "to": "legit:redis_py", "weight": 0.1, "edge_kind": "DependencyImport"}
+    ],
+    "seed": 99887766
+  },
+  "initial_infected": [
+    "typo:requets",
+    "typo:lodahs",
+    "typo:expres",
+    "typo:reactjs",
+    "typo:jqueryui"
+  ],
+  "config": {
+    "max_steps": 30,
+    "infection_threshold": 0.3,
+    "decay_factor": 0.0,
+    "seed": 99887766
+  },
+  "expected": {
+    "termination_reason": "Converged",
+    "min_infected_count": 9,
+    "max_infected_count": 11,
+    "terminated_by_step": 30
+  }
+}

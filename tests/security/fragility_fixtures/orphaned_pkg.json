@@ -1,0 +1,44 @@
+{
+  "name": "orphaned_pkg",
+  "description": "Package 'lonely-pkg' is sole-maintained by 'sleepy' whose last commit is 500 days before now (> 365-day default orphan threshold). Other packages are healthy. We tune single_maintainer_threshold up so only OrphanedPackage fires.",
+  "now_ms": 1700000000000,
+  "maintainers": {
+    "sleepy": {
+      "id": "sleepy",
+      "packages_owned": ["lonely-pkg"],
+      "total_downloads_per_month": 1000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1656800000,
+      "bus_factor": 5
+    },
+    "active": {
+      "id": "active",
+      "packages_owned": ["fresh-pkg"],
+      "total_downloads_per_month": 1000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1699900000,
+      "bus_factor": 5
+    }
+  },
+  "publishers": {},
+  "nodes": [
+    {"id": "lonely-pkg", "kind": "Package", "metadata": {}},
+    {"id": "fresh-pkg", "kind": "Package", "metadata": {}}
+  ],
+  "edges": [
+    {"from": "lonely-pkg", "to": "sleepy", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "fresh-pkg", "to": "active", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000}
+  ],
+  "config_overrides": {
+    "single_maintainer_threshold": 100,
+    "key_person_threshold": 0.99,
+    "max_chain_length": 4,
+    "org_concentration_threshold": 0.99,
+    "orphan_threshold_days": 365
+  },
+  "expected_findings": [
+    {"kind": "OrphanedPackage", "min_count": 1, "max_count": 1}
+  ]
+}

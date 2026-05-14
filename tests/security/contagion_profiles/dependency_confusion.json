@@ -1,0 +1,51 @@
+{
+  "name": "dependency_confusion",
+  "description": "Internal+public npm-style dependency confusion: a single typosquatted public package is fetched in place of an internal namespace, then dep-import edges propagate the compromise across the internal scope. Internal packages tend to import other internal packages and a small fringe of public ones. Expected ~50% spread within 20 steps.",
+  "graph": {
+    "nodes": [
+      "public:typosquat_corp_auth",
+      "internal:corp_auth",
+      "internal:corp_db",
+      "internal:corp_api",
+      "internal:corp_cache",
+      "internal:corp_queue",
+      "internal:corp_logger",
+      "internal:corp_metrics",
+      "internal:corp_tracing",
+      "public:lodash_pinned",
+      "public:react_pinned",
+      "public:tslib_pinned",
+      "public:axios_pinned",
+      "public:zod_pinned",
+      "public:typescript_pinned"
+    ],
+    "edges": [
+      {"from": "public:typosquat_corp_auth", "to": "internal:corp_auth", "weight": 0.5, "edge_kind": "NamespaceShadow"},
+      {"from": "public:typosquat_corp_auth", "to": "internal:corp_db", "weight": 0.5, "edge_kind": "NamespaceShadow"},
+      {"from": "public:typosquat_corp_auth", "to": "internal:corp_api", "weight": 0.5, "edge_kind": "NamespaceShadow"},
+      {"from": "public:typosquat_corp_auth", "to": "internal:corp_cache", "weight": 0.5, "edge_kind": "NamespaceShadow"},
+      {"from": "internal:corp_auth", "to": "internal:corp_queue", "weight": 0.5, "edge_kind": "DependencyImport"},
+      {"from": "internal:corp_db", "to": "internal:corp_logger", "weight": 0.5, "edge_kind": "DependencyImport"},
+      {"from": "internal:corp_api", "to": "internal:corp_metrics", "weight": 0.5, "edge_kind": "DependencyImport"},
+      {"from": "internal:corp_cache", "to": "internal:corp_tracing", "weight": 0.5, "edge_kind": "DependencyImport"},
+      {"from": "internal:corp_metrics", "to": "public:lodash_pinned", "weight": 0.1, "edge_kind": "DependencyImport"},
+      {"from": "internal:corp_tracing", "to": "public:react_pinned", "weight": 0.1, "edge_kind": "DependencyImport"},
+      {"from": "public:tslib_pinned", "to": "public:typescript_pinned", "weight": 0.4, "edge_kind": "DependencyImport"},
+      {"from": "public:axios_pinned", "to": "public:zod_pinned", "weight": 0.4, "edge_kind": "DependencyImport"}
+    ],
+    "seed": 42424242
+  },
+  "initial_infected": ["public:typosquat_corp_auth"],
+  "config": {
+    "max_steps": 20,
+    "infection_threshold": 0.3,
+    "decay_factor": 0.0,
+    "seed": 42424242
+  },
+  "expected": {
+    "termination_reason": "Converged",
+    "min_infected_count": 8,
+    "max_infected_count": 10,
+    "terminated_by_step": 20
+  }
+}

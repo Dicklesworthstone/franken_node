@@ -1,0 +1,32 @@
+{
+  "name": "multi_persona_coordination",
+  "description": "Multi-persona-coordination: colluding maintainer identities ramp velocity in the first half then capability in the second on an exponential curve. The early velocity spike should fire the detector well before the midpoint.",
+  "scenario": {
+    "id": "scenario-multi-persona-001",
+    "kind": "multi_persona_coordination",
+    "n_steps": 50,
+    "step_interval_ms": 60000,
+    "target_capability": "capability:release.publish",
+    "ramp_curve": {"kind": "exponential", "base": 3.0}
+  },
+  "baseline": {
+    "ts": 0,
+    "fields": {
+      "capability_index": 0.05,
+      "commit_velocity": 0.10,
+      "issue_response": 0.10
+    }
+  },
+  "thresholds": {
+    "drift": 0.20,
+    "regime_shift": 0.25,
+    "hazard": 0.35,
+    "provenance": 0.40,
+    "combined": 0.25
+  },
+  "expected_verdict": {
+    "kind": "caught_early",
+    "at_step_lower": 0,
+    "at_step_upper": 15
+  }
+}

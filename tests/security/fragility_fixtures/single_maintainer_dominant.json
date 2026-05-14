@@ -1,0 +1,63 @@
+{
+  "name": "single_maintainer_dominant",
+  "description": "Maintainer 'alice' is the sole owner of 8 of 10 packages (bus_factor=1, no key recovery), other maintainers each own only one package. Expect SingleMaintainer SPOF rooted at alice.",
+  "now_ms": 1700000000000,
+  "maintainers": {
+    "alice": {
+      "id": "alice",
+      "packages_owned": ["pkg-a", "pkg-b", "pkg-c", "pkg-d", "pkg-e", "pkg-f", "pkg-g", "pkg-h"],
+      "total_downloads_per_month": 90000,
+      "key_recovery_setup": false,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 1
+    },
+    "bob": {
+      "id": "bob",
+      "packages_owned": ["pkg-i"],
+      "total_downloads_per_month": 5000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 5
+    },
+    "carol": {
+      "id": "carol",
+      "packages_owned": ["pkg-j"],
+      "total_downloads_per_month": 5000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 5
+    }
+  },
+  "publishers": {},
+  "nodes": [
+    {"id": "pkg-a", "kind": "Package", "metadata": {}},
+    {"id": "pkg-b", "kind": "Package", "metadata": {}},
+    {"id": "pkg-c", "kind": "Package", "metadata": {}},
+    {"id": "pkg-d", "kind": "Package", "metadata": {}},
+    {"id": "pkg-e", "kind": "Package", "metadata": {}},
+    {"id": "pkg-f", "kind": "Package", "metadata": {}},
+    {"id": "pkg-g", "kind": "Package", "metadata": {}},
+    {"id": "pkg-h", "kind": "Package", "metadata": {}},
+    {"id": "pkg-i", "kind": "Package", "metadata": {}},
+    {"id": "pkg-j", "kind": "Package", "metadata": {}}
+  ],
+  "edges": [
+    {"from": "pkg-a", "to": "alice", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-b", "to": "alice", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-c", "to": "alice", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-d", "to": "alice", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-e", "to": "alice", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-f", "to": "alice", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-g", "to": "alice", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-h", "to": "alice", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-i", "to": "bob", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "pkg-j", "to": "carol", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000}
+  ],
+  "config_overrides": null,
+  "expected_findings": [
+    {"kind": "SingleMaintainer", "min_count": 1, "max_count": 1}
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "name": "multi_quorum_publishers",
+  "description": "Three publishers across three distinct organisations, each with a 3-of-N recovery quorum and explicit rotation policy. No org owns more than ~33% of namespaces. Expect zero findings.",
+  "now_ms": 1700000000000,
+  "maintainers": {},
+  "publishers": {
+    "pub-foo": {
+      "id": "pub-foo",
+      "org_id": "foo-co",
+      "packages_published": ["foo-1", "foo-2"],
+      "signature_keys_count": 5,
+      "key_rotation_policy": "rotate-90d",
+      "recovery_quorum": 3
+    },
+    "pub-bar": {
+      "id": "pub-bar",
+      "org_id": "bar-llc",
+      "packages_published": ["bar-1", "bar-2"],
+      "signature_keys_count": 5,
+      "key_rotation_policy": "rotate-90d",
+      "recovery_quorum": 3
+    },
+    "pub-baz": {
+      "id": "pub-baz",
+      "org_id": "baz-inc",
+      "packages_published": ["baz-1", "baz-2"],
+      "signature_keys_count": 5,
+      "key_rotation_policy": "rotate-90d",
+      "recovery_quorum": 3
+    }
+  },
+  "nodes": [
+    {"id": "ns-foo-a", "kind": "Namespace", "metadata": {"org": "foo-co"}},
+    {"id": "ns-foo-b", "kind": "Namespace", "metadata": {"org": "foo-co"}},
+    {"id": "ns-bar-a", "kind": "Namespace", "metadata": {"org": "bar-llc"}},
+    {"id": "ns-bar-b", "kind": "Namespace", "metadata": {"org": "bar-llc"}},
+    {"id": "ns-baz-a", "kind": "Namespace", "metadata": {"org": "baz-inc"}},
+    {"id": "ns-baz-b", "kind": "Namespace", "metadata": {"org": "baz-inc"}}
+  ],
+  "edges": [],
+  "config_overrides": null,
+  "expected_findings": []
+}

@@ -1,0 +1,76 @@
+{
+  "name": "key_person_high_share",
+  "description": "Maintainer 'whale' accounts for 60% of total monthly downloads while every other maintainer is well below the 10% default key_person threshold. Expect a KeyPerson SPOF rooted at whale. Each package has two maintainers so SingleMaintainer must NOT fire.",
+  "now_ms": 1700000000000,
+  "maintainers": {
+    "whale": {
+      "id": "whale",
+      "packages_owned": ["wpkg-1", "wpkg-2"],
+      "total_downloads_per_month": 600000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 5
+    },
+    "minnow1": {
+      "id": "minnow1",
+      "packages_owned": ["wpkg-1"],
+      "total_downloads_per_month": 80000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 5
+    },
+    "minnow2": {
+      "id": "minnow2",
+      "packages_owned": ["wpkg-2"],
+      "total_downloads_per_month": 80000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 5
+    },
+    "minnow3": {
+      "id": "minnow3",
+      "packages_owned": [],
+      "total_downloads_per_month": 80000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 5
+    },
+    "minnow4": {
+      "id": "minnow4",
+      "packages_owned": [],
+      "total_downloads_per_month": 80000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 5
+    },
+    "minnow5": {
+      "id": "minnow5",
+      "packages_owned": [],
+      "total_downloads_per_month": 80000,
+      "key_recovery_setup": true,
+      "active_since": 1000000000,
+      "last_commit_ts": 1700000000,
+      "bus_factor": 5
+    }
+  },
+  "publishers": {},
+  "nodes": [
+    {"id": "wpkg-1", "kind": "Package", "metadata": {}},
+    {"id": "wpkg-2", "kind": "Package", "metadata": {}}
+  ],
+  "edges": [
+    {"from": "wpkg-1", "to": "whale", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "wpkg-1", "to": "minnow1", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "wpkg-2", "to": "whale", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000},
+    {"from": "wpkg-2", "to": "minnow2", "kind": "MaintainedBy", "weight": 1.0, "observed_at": 1700000000}
+  ],
+  "config_overrides": null,
+  "expected_findings": [
+    {"kind": "KeyPerson", "min_count": 1, "max_count": 1}
+  ]
+}

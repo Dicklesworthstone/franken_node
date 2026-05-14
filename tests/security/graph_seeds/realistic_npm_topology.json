@@ -1,0 +1,67 @@
+{
+  "name": "realistic_npm_topology",
+  "description": "10-package npm-style ecosystem with mixed org/maintainer overlap, dependency chains of length >=3, and a 30-day observation window. Built so downstream SPOF detection (bd-2jns) sees maintainer concentration signal and so contagion simulators (bd-1q38/bd-2ao3) have non-trivial transitive paths to walk. acme-* are scoped to the 'acme' org (alice/bob/carol overlap), globex-* to 'globex' (dave/eve), and the leaf utilities (lodash-lite, json-utils, http-client, yargs-mini, validator-x) live unscoped. Update frequency varies: acme-* and json-utils churn frequently (many observations), lodash-lite + yargs-mini have a single stale observation early in the window so stale-provenance signals fire.",
+  "window_start_ms": 0,
+  "window_end_ms": 2592000000,
+  "observations": [
+    {"ts": 100, "source": "npm-lock", "package_name": "lodash-lite", "version": "4.0.0", "maintainers": ["alice"], "dependencies": {}, "signature_hex": null},
+    {"ts": 200, "source": "npm-lock", "package_name": "yargs-mini", "version": "1.0.0", "maintainers": ["eve"], "dependencies": {}, "signature_hex": null},
+    {"ts": 50000, "source": "npm-lock", "package_name": "json-utils", "version": "1.5.2", "maintainers": ["alice", "bob"], "dependencies": {}, "signature_hex": null},
+    {"ts": 60000, "source": "npm-lock", "package_name": "validator-x", "version": "0.8.1", "maintainers": ["carol", "frank"], "dependencies": {}, "signature_hex": null},
+    {"ts": 70000, "source": "npm-lock", "package_name": "http-client", "version": "2.3.0", "maintainers": ["frank"], "dependencies": {"json-utils": "^1.5.0"}, "signature_hex": null},
+    {"ts": 80000, "source": "npm-lock", "package_name": "acme-core", "version": "1.2.0", "maintainers": ["alice", "bob"], "dependencies": {"lodash-lite": "^4.0.0", "json-utils": "^1.5.0"}, "signature_hex": "ac11ec01"},
+    {"ts": 90000, "source": "npm-lock", "package_name": "acme-api", "version": "2.0.1", "maintainers": ["alice", "carol"], "dependencies": {"acme-core": "^1.2.0", "http-client": "^2.3.0"}, "signature_hex": "ac11ec02"},
+    {"ts": 100000, "source": "npm-lock", "package_name": "acme-cli", "version": "0.9.0", "maintainers": ["bob"], "dependencies": {"acme-api": "^2.0.0", "yargs-mini": "^1.0.0"}, "signature_hex": "ac11ec03"},
+    {"ts": 110000, "source": "npm-lock", "package_name": "globex-db", "version": "3.1.0", "maintainers": ["dave", "eve"], "dependencies": {"json-utils": "^1.5.0"}, "signature_hex": null},
+    {"ts": 120000, "source": "npm-lock", "package_name": "globex-orm", "version": "1.0.5", "maintainers": ["dave"], "dependencies": {"globex-db": "^3.1.0", "validator-x": "^0.8.0"}, "signature_hex": null},
+
+    {"ts": 200000, "source": "registry:npmjs", "package_name": "json-utils", "version": "1.5.2", "maintainers": ["alice", "bob"], "dependencies": {}, "signature_hex": null},
+    {"ts": 250000, "source": "registry:npmjs", "package_name": "acme-core", "version": "1.2.0", "maintainers": ["alice", "bob"], "dependencies": {"lodash-lite": "^4.0.0", "json-utils": "^1.5.0"}, "signature_hex": "ac11ec01"},
+    {"ts": 300000, "source": "registry:npmjs", "package_name": "acme-api", "version": "2.0.1", "maintainers": ["alice", "carol"], "dependencies": {"acme-core": "^1.2.0", "http-client": "^2.3.0"}, "signature_hex": "ac11ec02"},
+    {"ts": 350000, "source": "registry:npmjs", "package_name": "acme-cli", "version": "0.9.0", "maintainers": ["bob"], "dependencies": {"acme-api": "^2.0.0", "yargs-mini": "^1.0.0"}, "signature_hex": "ac11ec03"},
+    {"ts": 400000, "source": "registry:npmjs", "package_name": "http-client", "version": "2.3.0", "maintainers": ["frank"], "dependencies": {"json-utils": "^1.5.0"}, "signature_hex": null},
+    {"ts": 450000, "source": "registry:npmjs", "package_name": "globex-db", "version": "3.1.0", "maintainers": ["dave", "eve"], "dependencies": {"json-utils": "^1.5.0"}, "signature_hex": null},
+    {"ts": 500000, "source": "registry:npmjs", "package_name": "globex-orm", "version": "1.0.5", "maintainers": ["dave"], "dependencies": {"globex-db": "^3.1.0", "validator-x": "^0.8.0"}, "signature_hex": null},
+    {"ts": 550000, "source": "registry:npmjs", "package_name": "validator-x", "version": "0.8.1", "maintainers": ["carol", "frank"], "dependencies": {}, "signature_hex": null},
+
+    {"ts": 600000, "source": "exec-evidence", "package_name": "acme-cli", "version": "0.9.0", "maintainers": ["bob"], "dependencies": {"acme-api": "^2.0.0", "yargs-mini": "^1.0.0"}, "signature_hex": "ac11ec03"},
+    {"ts": 700000, "source": "exec-evidence", "package_name": "acme-api", "version": "2.0.1", "maintainers": ["alice", "carol"], "dependencies": {"acme-core": "^1.2.0", "http-client": "^2.3.0"}, "signature_hex": "ac11ec02"},
+    {"ts": 800000, "source": "exec-evidence", "package_name": "acme-core", "version": "1.2.0", "maintainers": ["alice", "bob"], "dependencies": {"lodash-lite": "^4.0.0", "json-utils": "^1.5.0"}, "signature_hex": "ac11ec01"},
+
+    {"ts": 1000000, "source": "npm-lock", "package_name": "acme-core", "version": "1.2.1", "maintainers": ["alice", "bob"], "dependencies": {"lodash-lite": "^4.0.0", "json-utils": "^1.5.0"}, "signature_hex": "ac11ec01"},
+    {"ts": 1100000, "source": "npm-lock", "package_name": "acme-api", "version": "2.0.2", "maintainers": ["alice", "carol"], "dependencies": {"acme-core": "^1.2.1", "http-client": "^2.3.0"}, "signature_hex": "ac11ec02"},
+    {"ts": 1200000, "source": "npm-lock", "package_name": "acme-cli", "version": "0.9.1", "maintainers": ["bob"], "dependencies": {"acme-api": "^2.0.2", "yargs-mini": "^1.0.0"}, "signature_hex": "ac11ec03"},
+    {"ts": 1300000, "source": "registry:npmjs", "package_name": "acme-core", "version": "1.2.1", "maintainers": ["alice", "bob"], "dependencies": {"lodash-lite": "^4.0.0", "json-utils": "^1.5.0"}, "signature_hex": "ac11ec01"},
+    {"ts": 1400000, "source": "registry:npmjs", "package_name": "acme-api", "version": "2.0.2", "maintainers": ["alice", "carol"], "dependencies": {"acme-core": "^1.2.1", "http-client": "^2.3.0"}, "signature_hex": "ac11ec02"},
+
+    {"ts": 1500000, "source": "npm-lock", "package_name": "json-utils", "version": "1.5.3", "maintainers": ["alice", "bob"], "dependencies": {}, "signature_hex": null},
+    {"ts": 1550000, "source": "registry:npmjs", "package_name": "json-utils", "version": "1.5.3", "maintainers": ["alice", "bob"], "dependencies": {}, "signature_hex": null},
+    {"ts": 1600000, "source": "npm-lock", "package_name": "http-client", "version": "2.3.1", "maintainers": ["frank"], "dependencies": {"json-utils": "^1.5.0"}, "signature_hex": null},
+    {"ts": 1650000, "source": "registry:npmjs", "package_name": "http-client", "version": "2.3.1", "maintainers": ["frank"], "dependencies": {"json-utils": "^1.5.0"}, "signature_hex": null},
+
+    {"ts": 1700000, "source": "exec-evidence", "package_name": "globex-orm", "version": "1.0.5", "maintainers": ["dave"], "dependencies": {"globex-db": "^3.1.0", "validator-x": "^0.8.0"}, "signature_hex": null},
+    {"ts": 1750000, "source": "exec-evidence", "package_name": "globex-db", "version": "3.1.0", "maintainers": ["dave", "eve"], "dependencies": {"json-utils": "^1.5.0"}, "signature_hex": null},
+
+    {"ts": 1800000, "source": "npm-lock", "package_name": "validator-x", "version": "0.8.2", "maintainers": ["carol", "frank"], "dependencies": {}, "signature_hex": null},
+    {"ts": 1850000, "source": "registry:npmjs", "package_name": "validator-x", "version": "0.8.2", "maintainers": ["carol", "frank"], "dependencies": {}, "signature_hex": null},
+    {"ts": 1900000, "source": "npm-lock", "package_name": "globex-orm", "version": "1.0.6", "maintainers": ["dave"], "dependencies": {"globex-db": "^3.1.0", "validator-x": "^0.8.0"}, "signature_hex": null},
+    {"ts": 1950000, "source": "registry:npmjs", "package_name": "globex-orm", "version": "1.0.6", "maintainers": ["dave"], "dependencies": {"globex-db": "^3.1.0", "validator-x": "^0.8.0"}, "signature_hex": null},
+
+    {"ts": 2000000, "source": "exec-evidence", "package_name": "acme-cli", "version": "0.9.1", "maintainers": ["bob"], "dependencies": {"acme-api": "^2.0.2", "yargs-mini": "^1.0.0"}, "signature_hex": "ac11ec03"},
+    {"ts": 2050000, "source": "exec-evidence", "package_name": "acme-api", "version": "2.0.2", "maintainers": ["alice", "carol"], "dependencies": {"acme-core": "^1.2.1", "http-client": "^2.3.0"}, "signature_hex": "ac11ec02"},
+    {"ts": 2100000, "source": "exec-evidence", "package_name": "acme-core", "version": "1.2.1", "maintainers": ["alice", "bob"], "dependencies": {"lodash-lite": "^4.0.0", "json-utils": "^1.5.0"}, "signature_hex": "ac11ec01"},
+    {"ts": 2150000, "source": "exec-evidence", "package_name": "json-utils", "version": "1.5.3", "maintainers": ["alice", "bob"], "dependencies": {}, "signature_hex": null},
+    {"ts": 2200000, "source": "exec-evidence", "package_name": "http-client", "version": "2.3.1", "maintainers": ["frank"], "dependencies": {"json-utils": "^1.5.0"}, "signature_hex": null},
+
+    {"ts": 2300000, "source": "npm-lock", "package_name": "acme-core", "version": "1.2.2", "maintainers": ["alice", "bob"], "dependencies": {"lodash-lite": "^4.0.0", "json-utils": "^1.5.0"}, "signature_hex": "ac11ec01"},
+    {"ts": 2350000, "source": "registry:npmjs", "package_name": "acme-core", "version": "1.2.2", "maintainers": ["alice", "bob"], "dependencies": {"lodash-lite": "^4.0.0", "json-utils": "^1.5.0"}, "signature_hex": "ac11ec01"},
+    {"ts": 2400000, "source": "npm-lock", "package_name": "acme-api", "version": "2.0.3", "maintainers": ["alice", "carol"], "dependencies": {"acme-core": "^1.2.2", "http-client": "^2.3.0"}, "signature_hex": "ac11ec02"},
+    {"ts": 2450000, "source": "registry:npmjs", "package_name": "acme-api", "version": "2.0.3", "maintainers": ["alice", "carol"], "dependencies": {"acme-core": "^1.2.2", "http-client": "^2.3.0"}, "signature_hex": "ac11ec02"},
+    {"ts": 2500000, "source": "npm-lock", "package_name": "acme-cli", "version": "0.9.2", "maintainers": ["bob"], "dependencies": {"acme-api": "^2.0.3", "yargs-mini": "^1.0.0"}, "signature_hex": "ac11ec03"},
+    {"ts": 2550000, "source": "registry:npmjs", "package_name": "acme-cli", "version": "0.9.2", "maintainers": ["bob"], "dependencies": {"acme-api": "^2.0.3", "yargs-mini": "^1.0.0"}, "signature_hex": "ac11ec03"},
+    {"ts": 2580000, "source": "exec-evidence", "package_name": "acme-cli", "version": "0.9.2", "maintainers": ["bob"], "dependencies": {"acme-api": "^2.0.3", "yargs-mini": "^1.0.0"}, "signature_hex": "ac11ec03"},
+    {"ts": 2585000, "source": "exec-evidence", "package_name": "acme-api", "version": "2.0.3", "maintainers": ["alice", "carol"], "dependencies": {"acme-core": "^1.2.2", "http-client": "^2.3.0"}, "signature_hex": "ac11ec02"},
+    {"ts": 2590000, "source": "exec-evidence", "package_name": "acme-core", "version": "1.2.2", "maintainers": ["alice", "bob"], "dependencies": {"lodash-lite": "^4.0.0", "json-utils": "^1.5.0"}, "signature_hex": "ac11ec01"},
+    {"ts": 2591000, "source": "exec-evidence", "package_name": "globex-orm", "version": "1.0.6", "maintainers": ["dave"], "dependencies": {"globex-db": "^3.1.0", "validator-x": "^0.8.0"}, "signature_hex": null}
+  ]
+}

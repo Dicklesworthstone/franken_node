@@ -1,0 +1,199 @@
+{
+  "name": "noisy_but_aligned",
+  "description": "Observed zig-zags within \u00b10.05 of declared mean.",
+  "config": {
+    "phase_shift_threshold": 0.3,
+    "dropout_threshold": 0.5,
+    "distribution_kl_threshold": 0.5,
+    "creep_slope_threshold": 0.05,
+    "min_samples_for_detection": 8,
+    "window_size": 10
+  },
+  "series": {
+    "samples": [
+      {
+        "ts": 0,
+        "observed_capability": {
+          "net.egress": 0.25
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 1,
+        "observed_capability": {
+          "net.egress": 0.35
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 2,
+        "observed_capability": {
+          "net.egress": 0.25
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 3,
+        "observed_capability": {
+          "net.egress": 0.35
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 4,
+        "observed_capability": {
+          "net.egress": 0.25
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 5,
+        "observed_capability": {
+          "net.egress": 0.35
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 6,
+        "observed_capability": {
+          "net.egress": 0.25
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 7,
+        "observed_capability": {
+          "net.egress": 0.35
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 8,
+        "observed_capability": {
+          "net.egress": 0.25
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 9,
+        "observed_capability": {
+          "net.egress": 0.35
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 10,
+        "observed_capability": {
+          "net.egress": 0.25
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 11,
+        "observed_capability": {
+          "net.egress": 0.35
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 12,
+        "observed_capability": {
+          "net.egress": 0.25
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 13,
+        "observed_capability": {
+          "net.egress": 0.35
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 14,
+        "observed_capability": {
+          "net.egress": 0.25
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 15,
+        "observed_capability": {
+          "net.egress": 0.35
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 16,
+        "observed_capability": {
+          "net.egress": 0.25
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 17,
+        "observed_capability": {
+          "net.egress": 0.35
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 18,
+        "observed_capability": {
+          "net.egress": 0.25
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      },
+      {
+        "ts": 19,
+        "observed_capability": {
+          "net.egress": 0.35
+        },
+        "declared_capability": {
+          "net.egress": 0.3
+        }
+      }
+    ],
+    "window_start": 0,
+    "window_end": 100000
+  },
+  "expected_hints": []
+}
