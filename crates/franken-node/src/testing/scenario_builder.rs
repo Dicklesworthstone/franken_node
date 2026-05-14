@@ -2088,14 +2088,23 @@ impl ScenarioBuilder {
                         .add_node("part", "Participant", NodeRole::Participant)
                         .unwrap()
                         .build();
-                    results_clone.lock().unwrap().push(result.is_ok());
+                    crate::lock_utils::try_lock(
+                        &results_clone,
+                        "scenario builder concurrent results collection",
+                    )
+                    .expect("results mutex should lock for collection")
+                    .push(result.is_ok());
                 });
                 handles.push(handle);
             }
             for handle in handles {
                 handle.join().unwrap();
             }
-            let results = shared_results.lock().unwrap();
+            let results = crate::lock_utils::try_lock(
+                &shared_results,
+                "scenario builder concurrent results verification",
+            )
+            .expect("results mutex should lock for verification");
             assert_eq!(results.len(), 5, "All concurrent builds should complete");
             assert!(
                 results.iter().all(|&success| success),
@@ -2348,6 +2357,8 @@ impl ScenarioBuilder {
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
 
     // ---------------------------------------------------------------
@@ -4715,7 +4726,9 @@ mod tests {
 
                     // Each thread tries to add different nodes
                     let node_name = format!("thread-{}-node", i);
-                    let mut builder = builder.lock().unwrap();
+                    let mut builder =
+                        try_lock(&builder, "scenario builder concurrent builder access")
+                            .expect("builder mutex should lock for concurrent access");
                     *builder = builder.clone().add_node(&node_name);
 
                     if i == 0 {
@@ -5039,7 +5052,9 @@ mod tests {
 
                 thread::spawn(move || {
                     for i in 0..100 {
-                        let mut guard = data.lock().unwrap();
+                        let mut guard =
+                            try_lock(&data, "scenario builder state corruption simulation")
+                                .expect("shared data mutex should lock for simulation");
                         let malicious_id =
                             format!("thread_{}_item_{}_\u{202e}trojan\u{202c}", thread_id, i);
 
@@ -5055,7 +5070,11 @@ mod tests {
             handle.join().unwrap();
         }
 
-        let final_data = shared_data.lock().unwrap();
+        let final_data = try_lock(
+            &shared_data,
+            "scenario builder state corruption final verification",
+        )
+        .expect("shared data mutex should lock for final verification");
         // Verify no state corruption occurred
         assert!(
             final_data.len() <= 50,
