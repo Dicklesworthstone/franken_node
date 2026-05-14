@@ -1909,7 +1909,9 @@ mod network_guard_additional_negative_tests {
         }
 
         // Verify audit log integrity after concurrent access
-        let final_guard = guard.lock().unwrap();
+        let final_guard =
+            crate::lock_utils::try_lock(guard.as_ref(), "network guard concurrent audit log")
+                .expect("network guard concurrent audit log");
         let audit_events = final_guard.audit_events();
 
         // Audit log should be bounded and internally consistent

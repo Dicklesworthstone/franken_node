@@ -1906,7 +1906,11 @@ mod quarantine_controller_additional_negative_tests {
                     &format!("trace{}", i),
                 );
 
-                let ctrl = ctrl_clone.lock().unwrap();
+                let ctrl = crate::lock_utils::try_lock(
+                    ctrl_clone.as_ref(),
+                    "quarantine controller concurrent evaluation",
+                )
+                .expect("quarantine controller concurrent evaluation");
                 ctrl.evaluate(&test_posterior)
             });
             handles.push(handle);

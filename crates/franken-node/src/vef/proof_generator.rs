@@ -1396,7 +1396,8 @@ mod tests {
             reentrant_request_id: Arc::clone(&reentrant_request_id),
         });
         let cpg = ConcurrentProofGenerator::new(backend, ProofGeneratorConfig::default());
-        *generator_slot.lock().expect("generator slot lock") = Some(cpg.clone());
+        *crate::lock_utils::try_lock(generator_slot.as_ref(), "proof generator test slot")
+            .expect("proof generator test slot") = Some(cpg.clone());
 
         let entries = sample_chain_entries();
         let window = sample_window();
@@ -1408,12 +1409,16 @@ mod tests {
             .expect("backend should observe unlocked generator mutex");
 
         assert_eq!(proof.backend_name, "mutex-probe");
-        let reentrant_id = reentrant_request_id
-            .lock()
-            .expect("reentrant slot lock")
-            .clone()
-            .expect("backend should create reentrant request");
-        let generator_state = cpg.inner.lock().expect("generator state lock");
+        let reentrant_id = crate::lock_utils::try_lock(
+            reentrant_request_id.as_ref(),
+            "proof generator reentrant request slot",
+        )
+        .expect("proof generator reentrant request slot")
+        .clone()
+        .expect("backend should create reentrant request");
+        let generator_state =
+            crate::lock_utils::try_lock(cpg.inner.as_ref(), "proof generator state")
+                .expect("proof generator state");
         assert_eq!(
             generator_state
                 .requests()
@@ -1431,7 +1436,11 @@ mod tests {
             ProofStatus::Pending
         );
         drop(generator_state);
-        *generator_slot.lock().expect("generator slot lock") = None;
+        *crate::lock_utils::try_lock(
+            generator_slot.as_ref(),
+            "proof generator test slot cleanup",
+        )
+        .expect("proof generator test slot cleanup") = None;
     }
 
     // ── 27. Proof data hash integrity ──
@@ -2505,7 +2514,11 @@ mod tests {
                 // Simulate mutex poisoning by creating a panicking thread
                 let poison_generator = generator.clone();
                 let poison_thread = std::thread::spawn(move || {
-                    let _guard = poison_generator.inner.lock().unwrap();
+                    let _guard = crate::lock_utils::try_lock(
+                        poison_generator.inner.as_ref(),
+                        "proof generator intentional poison setup",
+                    )
+                    .expect("proof generator intentional poison setup");
                     panic!("intentional mutex poisoning for test");
                 });
 
