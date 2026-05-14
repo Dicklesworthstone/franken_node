@@ -1,7 +1,15 @@
-use frankenengine_node::security::isolation_rail_router::{
-    ISO_003, ISO_004, IsolationRail, RailRouter, RailRouterError,
+use frankenengine_node::{
+    lock_utils,
+    security::isolation_rail_router::{
+        ISO_003, ISO_004, IsolationRail, RailRouter, RailRouterError,
+    },
 };
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier, Mutex, MutexGuard};
+
+fn lock_router<'a>(router: &'a Arc<Mutex<RailRouter>>) -> MutexGuard<'a, RailRouter> {
+    lock_utils::try_lock(router.as_ref(), "isolation rail router test mutex")
+        .expect("isolation rail router test mutex should not be poisoned")
+}
 
 #[test]
 fn inv_atomic_transition_concurrent_hot_elevation_stress() {
@@ -10,7 +18,7 @@ fn inv_atomic_transition_concurrent_hot_elevation_stress() {
 
     let router = Arc::new(Mutex::new(RailRouter::with_default_policy()));
     {
-        let mut router_guard = router.lock().unwrap();
+        let mut router_guard = lock_router(&router);
         for idx in 0..WORKLOADS {
             router_guard
                 .classify_workload(&format!("atomic-workload-{idx:02}"), 0.1)
@@ -33,7 +41,7 @@ fn inv_atomic_transition_concurrent_hot_elevation_stress() {
                     _ => IsolationRail::FullIsolation,
                 };
 
-                let mut router_guard = router.lock().unwrap();
+                let mut router_guard = lock_router(&router);
                 let before = router_guard.get_rail(&workload_id).unwrap();
                 let result = router_guard.hot_elevate(
                     &workload_id,
@@ -80,7 +88,7 @@ fn inv_atomic_transition_concurrent_hot_elevation_stress() {
         handle.join().unwrap();
     }
 
-    let router_guard = router.lock().unwrap();
+    let router_guard = lock_router(&router);
     assert_eq!(router_guard.workload_count(), WORKLOADS);
     let starts = router_guard
         .audit_log()
