@@ -2642,12 +2642,14 @@ mod tests {
     #[test]
     fn telemetry_concurrent_pipeline_safety() {
         // Test concurrent telemetry operations for race conditions
+        use crate::lock_utils::try_lock;
         use std::sync::{Arc, Mutex};
         use std::thread;
 
         let pipeline = Arc::new(Mutex::new(TelemetryPipeline::new()));
         {
-            let mut p = pipeline.lock().unwrap();
+            let mut p = try_lock(&pipeline, "ecosystem telemetry collection setup")
+                .expect("telemetry pipeline mutex should not be poisoned");
             p.enable_collection();
         }
 
@@ -2661,7 +2663,9 @@ mod tests {
                 let operations = [
                     // Ingestion operations
                     || {
-                        let mut p = pipeline_clone.lock().unwrap();
+                        let mut p =
+                            try_lock(&pipeline_clone, "ecosystem telemetry concurrent ingestion")
+                                .expect("telemetry pipeline mutex should not be poisoned");
                         let point = TelemetryDataPoint {
                             point_id: format!("point-{thread_id}"),
                             timestamp: format!("2026-01-{thread_id:02}T00:00:00Z"),
@@ -2675,7 +2679,8 @@ mod tests {
                     },
                     // Query operations
                     || {
-                        let p = pipeline_clone.lock().unwrap();
+                        let p = try_lock(&pipeline_clone, "ecosystem telemetry concurrent query")
+                            .expect("telemetry pipeline mutex should not be poisoned");
                         let query = TelemetryQuery {
                             metric: Some(MetricKind::Trust(
                                 TrustMetricKind::ProvenanceCoverageRate,
@@ -2690,7 +2695,11 @@ mod tests {
                     },
                     // Anomaly detection operations
                     || {
-                        let mut p = pipeline_clone.lock().unwrap();
+                        let mut p = try_lock(
+                            &pipeline_clone,
+                            "ecosystem telemetry concurrent anomaly detection",
+                        )
+                        .expect("telemetry pipeline mutex should not be poisoned");
                         let mut baseline = BTreeMap::new();
                         baseline.insert(
                             MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate),
@@ -2715,7 +2724,8 @@ mod tests {
         }
 
         // Verify final state consistency
-        let final_pipeline = pipeline.lock().unwrap();
+        let final_pipeline = try_lock(&pipeline, "ecosystem telemetry final consistency check")
+            .expect("telemetry pipeline mutex should not be poisoned");
         assert!(final_pipeline.ingested_count() >= 10);
         assert!(
             final_pipeline.stored_count() <= final_pipeline.resource_budget().max_in_memory_points
