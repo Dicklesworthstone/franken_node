@@ -812,6 +812,8 @@ pub fn generate_timing_report(protocol: &CancellationProtocol) -> (String, Vec<S
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::{
         CancelPhase, CancelProtocolError, CancellationProtocol, CancellationRecord,
         DEFAULT_DRAIN_TIMEOUT_MS, DrainConfig, MIN_DRAIN_TIMEOUT_MS, ResourceTracker,
@@ -2195,7 +2197,9 @@ mod tests {
 
                     // Request cancellation
                     let result = {
-                        let mut locked_proto = proto_clone.lock().unwrap();
+                        let mut locked_proto =
+                            try_lock(&proto_clone, "cancellation protocol concurrent request")
+                                .expect("protocol mutex should lock for cancellation request");
                         locked_proto.request_cancel(&cancel_id, &reason, &trace)
                     };
 
@@ -2203,21 +2207,33 @@ mod tests {
                         Ok(_) => {
                             // Start drain
                             let drain_result = {
-                                let mut locked_proto = proto_clone.lock().unwrap();
+                                let mut locked_proto = try_lock(
+                                    &proto_clone,
+                                    "cancellation protocol concurrent drain start",
+                                )
+                                .expect("protocol mutex should lock for drain start");
                                 locked_proto.start_drain(&cancel_id, &trace)
                             };
 
                             if drain_result.is_ok() {
                                 // Complete drain
                                 let complete_result = {
-                                    let mut locked_proto = proto_clone.lock().unwrap();
+                                    let mut locked_proto = try_lock(
+                                        &proto_clone,
+                                        "cancellation protocol concurrent drain completion",
+                                    )
+                                    .expect("protocol mutex should lock for drain completion");
                                     locked_proto.complete_drain(&cancel_id, &trace)
                                 };
 
                                 if complete_result.is_ok() {
                                     // Finalize
                                     let finalize_result = {
-                                        let mut locked_proto = proto_clone.lock().unwrap();
+                                        let mut locked_proto = try_lock(
+                                            &proto_clone,
+                                            "cancellation protocol concurrent finalization",
+                                        )
+                                        .expect("protocol mutex should lock for finalization");
                                         locked_proto.finalize(&cancel_id, &trace, vec![])
                                     };
 
@@ -2241,7 +2257,11 @@ mod tests {
         }
 
         // Verify protocol state after concurrent access
-        let final_proto = proto.lock().unwrap();
+        let final_proto = try_lock(
+            &proto,
+            "cancellation protocol concurrent final verification",
+        )
+        .expect("protocol mutex should lock for final verification");
         let final_records = final_proto.records();
 
         // Should have some records (exact count depends on eviction and race conditions)
