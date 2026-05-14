@@ -13,6 +13,7 @@ Checks:
 9. Event codes following BPET-ECON-NNN convention
 10. Module wiring into security subsystem
 11. Rust unit test coverage
+12. Dedicated trust-surface bridge for BPET-to-trust-card mutations
 
 Usage:
     python3 scripts/check_bpet_economic.py          # human-readable
@@ -33,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 BPET_SRC = ROOT / "crates/franken-node/src/security/bpet/economic_integration.rs"
+BPET_TRUST_SURFACE_SRC = ROOT / "crates/franken-node/src/security/bpet/trust_surface_integration.rs"
 BPET_MOD = ROOT / "crates/franken-node/src/security/bpet/mod.rs"
 SECURITY_MOD = ROOT / "crates/franken-node/src/security/mod.rs"
 
@@ -93,6 +95,26 @@ REQUIRED_CAPABILITIES = {
     "audit_logging": ["BpetAuditRecord", "audit_log", "export_audit_log_jsonl"],
 }
 
+TRUST_SURFACE_REQUIRED_SYMBOLS = [
+    "TRUST_SURFACE_SCHEMA_VERSION",
+    "BpetTrustSurfaceAssessment",
+    "AdversaryPosteriorUpdate",
+    "TrustSurfaceIntegrationError",
+    "assess_guidance_for_trust_surface",
+    "trust_card_mutation_from_guidance",
+    "adversary_posterior_update_from_guidance",
+    "TrustCardMutation",
+    "RiskAssessment",
+    "RiskLevel",
+]
+
+TRUST_SURFACE_REQUIRED_TESTS = [
+    "critical_bpet_guidance_maps_to_quarantining_trust_card_mutation",
+    "routine_bpet_guidance_keeps_low_risk_without_quarantine",
+    "non_finite_bpet_propensity_is_rejected_fail_closed",
+    "adversary_posterior_update_uses_bounded_basis_points",
+]
+
 
 @dataclass
 class CheckResult:
@@ -117,6 +139,8 @@ def check_module_wiring() -> CheckResult:
         content = BPET_MOD.read_text()
         if "pub mod economic_integration" not in content:
             issues.append("economic_integration not declared in bpet/mod.rs")
+        if "pub mod trust_surface_integration" not in content:
+            issues.append("trust_surface_integration not declared in bpet/mod.rs")
 
     if not SECURITY_MOD.exists():
         issues.append("security/mod.rs not found")
@@ -278,6 +302,51 @@ def check_audit_logging() -> CheckResult:
     return CheckResult("audit_logging", True, "audit logging with JSONL export and trace IDs present")
 
 
+def check_trust_surface_integration() -> CheckResult:
+    issues = []
+    if not BPET_TRUST_SURFACE_SRC.exists():
+        return CheckResult(
+            "trust_surface_integration",
+            False,
+            "trust_surface_integration.rs not found",
+            {"path": str(BPET_TRUST_SURFACE_SRC.relative_to(ROOT))},
+        )
+
+    content = BPET_TRUST_SURFACE_SRC.read_text()
+    missing_symbols = [symbol for symbol in TRUST_SURFACE_REQUIRED_SYMBOLS if symbol not in content]
+    missing_tests = [test for test in TRUST_SURFACE_REQUIRED_TESTS if test not in content]
+    if missing_symbols:
+        issues.append(f"missing symbols: {missing_symbols}")
+    if missing_tests:
+        issues.append(f"missing tests: {missing_tests}")
+    if "BPET trust-surface assessment" not in content:
+        issues.append("operator-facing BPET trust-surface summary missing")
+    if "active_quarantine: Some(assessment.active_quarantine_recommended)" not in content:
+        issues.append("TrustCardMutation quarantine field not wired")
+    if "user_facing_risk_assessment: Some(RiskAssessment" not in content:
+        issues.append("TrustCardMutation risk assessment field not wired")
+    if "NonFinitePropensity" not in content or "InvalidMotifScore" not in content:
+        issues.append("fail-closed numeric validation missing")
+
+    if issues:
+        return CheckResult(
+            "trust_surface_integration",
+            False,
+            "; ".join(issues),
+            {"issues": issues},
+        )
+    return CheckResult(
+        "trust_surface_integration",
+        True,
+        "dedicated BPET trust-surface bridge maps guidance to trust-card mutation and posterior update",
+        {
+            "path": str(BPET_TRUST_SURFACE_SRC.relative_to(ROOT)),
+            "symbols": len(TRUST_SURFACE_REQUIRED_SYMBOLS),
+            "tests": len(TRUST_SURFACE_REQUIRED_TESTS),
+        },
+    )
+
+
 def run_all_checks() -> list[CheckResult]:
     return [
         check_source_exists(),
@@ -291,6 +360,7 @@ def run_all_checks() -> list[CheckResult]:
         check_playbook_generation(),
         check_test_coverage(),
         check_audit_logging(),
+        check_trust_surface_integration(),
     ]
 
 

@@ -1,32 +1,65 @@
 {
-  "schema_version": "evidence-v1.0",
+  "schema_version": "franken-node/verification-evidence/v1",
   "bead_id": "bd-232t",
+  "completion_debt_bead_id": "bd-232t.1",
   "section": "10.21",
   "title": "BPET trajectory signals integration",
   "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
-  "failed": 0,
-  "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
-    {"check": "event_codes_present", "pass": true},
-    {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "genome_schema_compliance", "pass": true},
-    {"check": "phenotype_extraction", "pass": true},
-    {"check": "lineage_tracking", "pass": true},
-    {"check": "drift_detection", "pass": true},
-    {"check": "changepoint_detection", "pass": true},
-    {"check": "survival_model", "pass": true},
-    {"check": "risk_scoring", "pass": true},
-    {"check": "cross_system_integration", "pass": true},
-    {"check": "adversarial_robustness", "pass": true}
+  "generated_at": "2026-05-14T00:00:00Z",
+  "source_paths": [
+    "crates/franken-node/src/security/bpet/economic_integration.rs",
+    "crates/franken-node/src/security/bpet/evolution_risk_scorer.rs",
+    "crates/franken-node/src/security/bpet/trust_surface_integration.rs",
+    "crates/franken-node/src/security/bpet/mod.rs",
+    "crates/franken-node/src/supply_chain/trust_card.rs",
+    "scripts/check_bpet_economic.py",
+    "tests/test_check_bpet_economic.py"
+  ],
+  "checks": {
+    "python_gate": {
+      "command": "python3 scripts/check_bpet_economic.py --json",
+      "verdict": "PASS",
+      "passed": 12,
+      "total": 12,
+      "trust_surface_integration": {
+        "path": "crates/franken-node/src/security/bpet/trust_surface_integration.rs",
+        "symbols": 10,
+        "inline_tests": 4
+      }
+    },
+    "python_unit_tests": {
+      "command": "python3 -m pytest tests/test_check_bpet_economic.py -q",
+      "verdict": "PASS",
+      "passed": 17,
+      "total": 17
+    },
+    "rust_format": {
+      "command": "rustfmt --edition 2024 --check --config skip_children=true crates/franken-node/src/security/bpet/trust_surface_integration.rs crates/franken-node/src/security/bpet/mod.rs",
+      "verdict": "PASS"
+    },
+    "diff_check": {
+      "command": "git diff --check -- .beads/issues.jsonl artifacts/section_10_21/bd-232t/verification_evidence.json artifacts/section_10_21/bd-232t/verification_summary.md crates/franken-node/src/security/bpet/mod.rs crates/franken-node/src/security/bpet/trust_surface_integration.rs scripts/check_bpet_economic.py tests/test_check_bpet_economic.py",
+      "verdict": "PASS"
+    },
+    "ubs": {
+      "command": "ubs crates/franken-node/src/security/bpet/trust_surface_integration.rs crates/franken-node/src/security/bpet/mod.rs scripts/check_bpet_economic.py tests/test_check_bpet_economic.py artifacts/section_10_21/bd-232t/verification_evidence.json artifacts/section_10_21/bd-232t/verification_summary.md",
+      "verdict": "PASS_EXIT_0",
+      "critical": 0
+    },
+    "cargo_validation": {
+      "command": "rch exec -- cargo check -p frankenengine-node --no-default-features --lib",
+      "verdict": "PENDING",
+      "reason": "not launched after two contention checks: local cargo/rustc count stayed high at 23 then 21, with two franken_node RCH builds already active"
+    }
+  },
+  "acceptance_mapping": [
+    {
+      "requirement": "dedicated trust_surface_integration.rs not present",
+      "evidence": "crates/franken-node/src/security/bpet/trust_surface_integration.rs exists and defines the BPET trust-surface bridge"
+    },
+    {
+      "requirement": "only trust_card has BPET refs",
+      "evidence": "BPET guidance is converted to TrustCardMutation by the dedicated security::bpet::trust_surface_integration module instead of ad hoc trust_card.rs references"
+    }
   ]
 }

@@ -112,6 +112,15 @@ class TestIndividualChecks:
         check = next(c for c in data["checks"] if c["name"] == "audit_logging")
         assert check["passed"] is True
 
+    def test_trust_surface_integration(self):
+        result = run_script("--json")
+        data = json.loads(result.stdout)
+        check = next(c for c in data["checks"] if c["name"] == "trust_surface_integration")
+        assert check["passed"] is True
+        assert check["details"]["path"] == (
+            "crates/franken-node/src/security/bpet/trust_surface_integration.rs"
+        )
+
 
 class TestOverallVerdict:
     def test_verdict_is_pass(self):

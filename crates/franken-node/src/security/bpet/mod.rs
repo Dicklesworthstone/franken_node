@@ -13,6 +13,7 @@ pub mod drift_features;
 pub mod economic_integration;
 pub mod evolution_risk_scorer;
 pub mod phenotype_extractor;
+pub mod trust_surface_integration;
 
 #[cfg(test)]
 mod negative_path_tests {
