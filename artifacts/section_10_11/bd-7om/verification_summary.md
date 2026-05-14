@@ -3,6 +3,13 @@
 ## Result
 PASS
 
+## Completion-Debt Follow-Up
+- Reconciled `bd-7om.1` against the reopened audit finding: `artifacts/10.15` currently contains 30 artifact files, including `cancel_protocol_timing.csv` and `control_evidence_replay_report.json`.
+- The 10.15 cancellation source artifact is `artifacts/10.15/cancel_protocol_timing.csv`; `scripts/check_cancellation_protocol.py:13` points at it and `scripts/check_cancellation_protocol.py:133` through `scripts/check_cancellation_protocol.py:138` validate its header and workflow rows.
+- The 10.15 control evidence replay artifact is `artifacts/10.15/control_evidence_replay_report.json`; `scripts/check_control_evidence_replay.py:20` through `scripts/check_control_evidence_replay.py:25` bind the implementation, conformance test, adoption doc, spec, report, and canonical replay validator.
+- The product-service adoption surface remains the 10.11 bd-7om runtime contract: `docs/specs/section_10_11/bd-7om_contract.md:11` through `docs/specs/section_10_11/bd-7om_contract.md:16` state that this bead adopts the canonical 10.15 cancel -> drain -> finalize protocol for product services, and `crates/franken-node/src/runtime/cancellable_task.rs` implements the `CancellableTask` / `CancellationRuntime` surface.
+- Scope boundary: `control_evidence_replay_report.json` is part of the broader 10.15 control-plane evidence corpus, not a second bd-7om implementation target. It is cross-referenced here to make the completion audit explicit about the artifact corpus named in `bd-7om.1`.
+
 ## Delivered
 - `crates/franken-node/src/runtime/cancellable_task.rs`
 - `crates/franken-node/src/runtime/mod.rs` (wired cancellable_task module)
@@ -53,3 +60,5 @@ PASS
 - `python3 scripts/check_cancellable_task_protocol.py --json` -> PASS
 - `python3 scripts/check_cancellable_task_protocol.py --self-test` -> PASS
 - `python3 -m pytest tests/test_check_cancellable_task_protocol.py -v` -> PASS
+- `python3 scripts/check_cancellation_protocol.py --json` -> PASS, validates the upstream 10.15 cancellation artifact corpus including `cancel_protocol_timing.csv`
+- `python3 scripts/check_control_evidence_replay.py --json` -> PASS, validates the 10.15 control evidence replay report named by the completion-debt finding

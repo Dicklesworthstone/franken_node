@@ -4,6 +4,54 @@
   "title": "Canonical cancel -> drain -> finalize protocol contracts for product services",
   "generated_at": "2026-02-21T12:00:00Z",
   "status": "completed",
+  "completion_debt_followup": {
+    "reopened_bead_id": "bd-7om.1",
+    "finding": "artifacts/10.15 has 30+ artifact files including cancel_protocol_timing.csv and control_evidence_replay_report.json; protocol adoption work",
+    "resolution": "The product-service adoption surface is bd-7om in section 10.11, while the canonical source artifact corpus named by the audit finding lives under artifacts/10.15. This evidence now links the product-service runtime adoption to the specific upstream artifacts so the completion audit is not relying on generic artifact presence.",
+    "artifacts_10_15_inventory": {
+      "path": "artifacts/10.15",
+      "file_count_verified": 30,
+      "required_files_present": [
+        "cancel_protocol_timing.csv",
+        "control_evidence_replay_report.json"
+      ],
+      "cancel_protocol_timing_csv": {
+        "path": "artifacts/10.15/cancel_protocol_timing.csv",
+        "validator": "scripts/check_cancellation_protocol.py",
+        "validator_refs": [
+          "scripts/check_cancellation_protocol.py:13",
+          "scripts/check_cancellation_protocol.py:133-138"
+        ],
+        "content_summary": "18 workflow phase rows across lifecycle, rollout, publish, revoke, quarantine, and migration; every row is within budget."
+      },
+      "control_evidence_replay_report": {
+        "path": "artifacts/10.15/control_evidence_replay_report.json",
+        "validator": "scripts/check_control_evidence_replay.py",
+        "validator_refs": [
+          "scripts/check_control_evidence_replay.py:20-25",
+          "scripts/check_control_evidence_replay.py:196-205"
+        ],
+        "content_summary": "Control replay evidence covers HealthGateEval, RolloutTransition, QuarantineAction, FencingDecision, and MigrationDecision verdict replay."
+      }
+    },
+    "product_service_adoption": {
+      "contract_refs": [
+        "docs/specs/section_10_11/bd-7om_contract.md:11-16",
+        "docs/specs/section_10_11/bd-7om_contract.md:65-81",
+        "docs/specs/section_10_11/bd-7om_contract.md:83-98"
+      ],
+      "implementation_refs": [
+        "crates/franken-node/src/runtime/cancellable_task.rs:29",
+        "crates/franken-node/src/runtime/cancellable_task.rs:107",
+        "crates/franken-node/src/runtime/cancellable_task.rs:297",
+        "crates/franken-node/src/runtime/cancellable_task.rs:432",
+        "crates/franken-node/src/runtime/cancellable_task.rs:450",
+        "crates/franken-node/src/runtime/cancellable_task.rs:692",
+        "crates/franken-node/src/runtime/mod.rs:6"
+      ],
+      "scope_boundary": "control_evidence_replay_report.json belongs to the broader 10.15 control-plane evidence corpus; bd-7om's concrete implementation target is the 10.11 product-service cancellation runtime."
+    }
+  },
   "gate_script": "scripts/check_cancellable_task_protocol.py",
   "test_suite": "tests/test_check_cancellable_task_protocol.py",
   "checks": [
@@ -31,6 +79,27 @@
       "command": "python3 -m pytest tests/test_check_cancellable_task_protocol.py -v",
       "exit_code": 0,
       "status": "PASS"
+    },
+    {
+      "name": "completion_debt_followup_10_15_artifact_inventory",
+      "command": "find artifacts/10.15 -maxdepth 1 -type f -printf '.\\n' | wc -l",
+      "exit_code": 0,
+      "status": "PASS",
+      "observed_count": 30
+    },
+    {
+      "name": "upstream_10_15_cancellation_artifact_gate",
+      "command": "python3 scripts/check_cancellation_protocol.py --json",
+      "exit_code": 0,
+      "status": "PASS",
+      "output_path": "artifacts/section_10_15/bd-1cs7/verification_evidence.json"
+    },
+    {
+      "name": "upstream_10_15_control_evidence_replay_gate",
+      "command": "python3 scripts/check_control_evidence_replay.py --json",
+      "exit_code": 0,
+      "status": "PASS",
+      "output_path": "artifacts/10.15/control_evidence_replay_report.json"
     }
   ],
   "contract_surface": {
