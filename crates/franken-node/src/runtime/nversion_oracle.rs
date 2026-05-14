@@ -907,6 +907,8 @@ pub fn default_risk_for_scope(scope: BoundaryScope) -> RiskTier {
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
 
     fn sample_runtime(id: &str) -> RuntimeEntry {
@@ -2400,7 +2402,8 @@ mod tests {
 
         // Pre-register runtimes
         {
-            let mut oracle_guard = oracle.lock().unwrap();
+            let mut oracle_guard = try_lock(&oracle, "n-version oracle concurrent preregistration")
+                .expect("oracle mutex should lock for preregistration");
             for i in 0..4 {
                 let runtime = RuntimeEntry {
                     runtime_id: format!("runtime-{}", i),
@@ -2428,7 +2431,9 @@ mod tests {
                     let mut outputs = BTreeMap::new();
                     outputs.insert(runtime_id, vec![thread_id as u8, i as u8]);
 
-                    let mut oracle_guard = oracle.lock().unwrap();
+                    let mut oracle_guard =
+                        try_lock(&oracle, "n-version oracle concurrent cross-check recording")
+                            .expect("oracle mutex should lock for cross-check recording");
                     let _ = oracle_guard.run_cross_check(
                         &check_id,
                         BoundaryScope::Concurrency,
@@ -2446,7 +2451,8 @@ mod tests {
         }
 
         // Verify oracle consistency
-        let final_oracle = oracle.lock().unwrap();
+        let final_oracle = try_lock(&oracle, "n-version oracle concurrent final verification")
+            .expect("oracle mutex should lock for final verification");
         assert_eq!(final_oracle.runtimes.len(), 4);
         assert!(final_oracle.cross_checks.len() > 0);
     }
