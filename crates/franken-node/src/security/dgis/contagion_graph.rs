@@ -343,12 +343,19 @@ mod tests {
         for n in g.nodes() {
             for e in g.neighbors(n) {
                 assert!(e.weight.is_finite(), "weight must be finite");
-                assert!(e.weight >= 0.0 && e.weight <= 1.0, "weight {} out of [0,1]", e.weight);
+                assert!(
+                    e.weight >= 0.0 && e.weight <= 1.0,
+                    "weight {} out of [0,1]",
+                    e.weight
+                );
                 seen += 1;
             }
         }
         assert_eq!(seen, g.edge_count());
-        assert!(g.edge_count() > 0, "density 0.4 over 32 nodes should yield edges");
+        assert!(
+            g.edge_count() > 0,
+            "density 0.4 over 32 nodes should yield edges"
+        );
     }
 
     #[test]
@@ -470,11 +477,13 @@ mod tests {
     fn add_edge_rejects_unknown_endpoints() {
         let mut g = ContagionGraph::new(5);
         g.add_node("only".to_string());
-        let edge = ContagionEdge::new("missing".to_string(), 0.5, EdgeKind::DependencyImport).unwrap();
+        let edge =
+            ContagionEdge::new("missing".to_string(), 0.5, EdgeKind::DependencyImport).unwrap();
         let err = g.add_edge(&"only".to_string(), edge).unwrap_err();
         assert!(matches!(err, GraphError::UnknownTarget(_)));
         // Unknown source.
-        let edge2 = ContagionEdge::new("only".to_string(), 0.5, EdgeKind::DependencyImport).unwrap();
+        let edge2 =
+            ContagionEdge::new("only".to_string(), 0.5, EdgeKind::DependencyImport).unwrap();
         let err2 = g.add_edge(&"phantom".to_string(), edge2).unwrap_err();
         assert!(matches!(err2, GraphError::UnknownTarget(_)));
     }

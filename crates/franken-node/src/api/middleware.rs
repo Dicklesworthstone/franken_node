@@ -1102,6 +1102,17 @@ impl PerformanceRateLimiter {
 }
 
 #[cfg(loom)]
+fn lock_loom_mutex<'a, T>(
+    mutex: &'a loom::sync::Mutex<T>,
+    _context: &str,
+) -> loom::sync::MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[cfg(loom)]
 #[doc(hidden)]
 pub fn auth_failure_limiter_cardinality_bound_loom_model() {
     use loom::sync::{Arc, Mutex};
@@ -1121,7 +1132,8 @@ pub fn auth_failure_limiter_cardinality_bound_loom_model() {
         handles.push(thread::spawn(move || {
             for i in 1..=10 {
                 let ip = format!("192.168.1.{}", i);
-                let mut guard = limiter_clone.lock().unwrap();
+                let mut guard =
+                    lock_loom_mutex(&limiter_clone, "auth failure limiter first source range");
                 guard.record_failure(&ip, AuthFailureType::KeyNotFound, "trace-1", None);
             }
         }));
@@ -1131,7 +1143,8 @@ pub fn auth_failure_limiter_cardinality_bound_loom_model() {
         handles.push(thread::spawn(move || {
             for i in 1..=20 {
                 let ip = format!("10.0.0.{}", i);
-                let mut guard = limiter_clone.lock().unwrap();
+                let mut guard =
+                    lock_loom_mutex(&limiter_clone, "auth failure limiter second source range");
                 guard.record_failure(&ip, AuthFailureType::InvalidKeyFormat, "trace-2", None);
             }
         }));
@@ -1141,7 +1154,8 @@ pub fn auth_failure_limiter_cardinality_bound_loom_model() {
         handles.push(thread::spawn(move || {
             let ip = "192.168.1.1";
             for _ in 0..5 {
-                let mut guard = limiter_clone.lock().unwrap();
+                let mut guard =
+                    lock_loom_mutex(&limiter_clone, "auth failure limiter repeated source");
                 guard.record_failure(ip, AuthFailureType::MalformedHeader, "trace-3", None);
             }
         }));
@@ -1152,7 +1166,7 @@ pub fn auth_failure_limiter_cardinality_bound_loom_model() {
         }
 
         // Verify invariants
-        let guard = limiter.lock().unwrap();
+        let guard = lock_loom_mutex(&limiter, "auth failure limiter invariant verification");
         let stats = guard.get_failure_stats();
 
         // INVARIANT 1: Cardinality bound is maintained
@@ -3990,7 +4004,8 @@ pub fn auth_failure_limiter_cardinality_loom_model() {
             // High-volume attacker - should be preserved during eviction
             let mut results = Vec::new();
             for i in 0..10 {
-                let mut guard = limiter_a.lock().unwrap();
+                let mut guard =
+                    lock_loom_mutex(&limiter_a, "auth failure limiter high-volume source");
                 results.push(guard.increment_source_failure_count("192.168.1.100"));
             }
             results
@@ -4000,7 +4015,8 @@ pub fn auth_failure_limiter_cardinality_loom_model() {
             // Medium-volume attacker
             let mut results = Vec::new();
             for i in 0..5 {
-                let mut guard = limiter_b.lock().unwrap();
+                let mut guard =
+                    lock_loom_mutex(&limiter_b, "auth failure limiter medium-volume source");
                 results.push(guard.increment_source_failure_count("192.168.1.101"));
             }
             results
@@ -4008,7 +4024,7 @@ pub fn auth_failure_limiter_cardinality_loom_model() {
 
         let handle_c = thread::spawn(move || {
             // Low-volume attacker - should be evicted first
-            let mut guard = limiter_c.lock().unwrap();
+            let mut guard = lock_loom_mutex(&limiter_c, "auth failure limiter low-volume source");
             guard.increment_source_failure_count("192.168.1.102")
         });
 
@@ -4031,7 +4047,7 @@ pub fn auth_failure_limiter_cardinality_loom_model() {
         );
 
         // Verify final state maintains invariants
-        let final_guard = limiter.lock().unwrap();
+        let final_guard = lock_loom_mutex(&limiter, "auth failure limiter final verification");
         let stats = final_guard.get_failure_stats();
 
         // Should track at most MAX_AUTH_FAILURE_SOURCES unique IPs

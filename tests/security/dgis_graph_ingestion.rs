@@ -30,8 +30,8 @@ use std::path::PathBuf;
 
 use frankenengine_node::dgis::graph_ingestion::{
     EdgeKind, GraphEdge, IngestError, IngestionPipeline, ManifestObservation, NodeKind,
-    WindowedGraph, canonical_observation_bytes, dependency_node_id, finalize_window, ingest,
-    maintainer_node_id, observation_hash, package_node_id,
+    WindowedGraph, canonical_observation_bytes, finalize_window, ingest, maintainer_node_id,
+    observation_hash, package_node_id,
 };
 use frankenengine_node::dgis::graph_seeds::{
     GraphSeed, build_windowed_graph_from_seed, load_seed_from_json, realistic_npm_topology,
