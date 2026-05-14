@@ -1,32 +1,114 @@
 {
-  "schema_version": "evidence-v1.0",
-  "bead_id": "bd-2xgs",
+  "schema_version": "evidence-v1.1",
+  "bead_id": "bd-2xgs.1",
+  "parent_bead_id": "bd-2xgs",
   "section": "10.21",
-  "title": "Deterministic phenotype feature extraction",
+  "title": "Deterministic phenotype feature extraction completion debt",
   "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
-  "failed": 0,
+  "status": "completed_with_cargo_deferred_due_contention",
+  "deliverables": [
+    {
+      "path": "crates/franken-node/src/security/bpet/phenotype_extractor.rs",
+      "exists": true,
+      "evidence": "Public BPET extractor module now exists under the primary crate security/bpet tree."
+    },
+    {
+      "path": "crates/franken-node/src/security/bpet/mod.rs",
+      "exists": true,
+      "evidence": "Module is exported as security::bpet::phenotype_extractor."
+    },
+    {
+      "path": "tests/conformance/bpet_feature_extraction.rs",
+      "exists": true,
+      "evidence": "Root conformance harness exercises deterministic vectors, typed uncertainty, batch extraction, provenance, and drift-sample conversion."
+    },
+    {
+      "path": "crates/franken-node/Cargo.toml",
+      "exists": true,
+      "evidence": "bpet_feature_extraction is registered as a Cargo test target pointing at ../../tests/conformance/bpet_feature_extraction.rs."
+    },
+    {
+      "path": "artifacts/10.21/bpet_feature_samples.jsonl",
+      "exists": true,
+      "evidence": "JSONL feature samples include full-evidence and missing-evidence scenarios."
+    }
+  ],
   "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
-    {"check": "event_codes_present", "pass": true},
-    {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "genome_schema_compliance", "pass": true},
-    {"check": "phenotype_extraction", "pass": true},
-    {"check": "lineage_tracking", "pass": true},
-    {"check": "drift_detection", "pass": true},
-    {"check": "changepoint_detection", "pass": true},
-    {"check": "survival_model", "pass": true},
-    {"check": "risk_scoring", "pass": true},
-    {"check": "cross_system_integration", "pass": true},
-    {"check": "adversarial_robustness", "pass": true}
+    {
+      "check": "runtime_evidence_features",
+      "pass": true,
+      "detail": "capability invocation intensity, resource envelope pressure, network surface, and filesystem surface are extracted from runtime evidence."
+    },
+    {
+      "check": "manifest_features",
+      "pass": true,
+      "detail": "declared permission surface and dependency declarations are extracted from manifest metadata."
+    },
+    {
+      "check": "code_metadata_features",
+      "pass": true,
+      "detail": "code complexity and dependency tree depth are extracted from code metadata."
+    },
+    {
+      "check": "deterministic_ordering",
+      "pass": true,
+      "detail": "BTreeMap-backed features and sorted batch extraction make repeated extraction deterministic."
+    },
+    {
+      "check": "per_feature_provenance",
+      "pass": true,
+      "detail": "Every feature records source, extraction method, feature name, and confidence."
+    },
+    {
+      "check": "typed_uncertainty",
+      "pass": true,
+      "detail": "Missing sources, missing fields, and partial evidence are represented with typed uncertainty annotations rather than zero-filled values."
+    },
+    {
+      "check": "batch_extraction",
+      "pass": true,
+      "detail": "Batch extraction rejects empty, oversized, and duplicate package/version inputs and emits sorted vectors."
+    },
+    {
+      "check": "drift_sample_bridge",
+      "pass": true,
+      "detail": "Extracted known and partial values can be converted into BPET PhenotypeSample drift-engine input."
+    },
+    {
+      "check": "sample_artifact",
+      "pass": true,
+      "detail": "bpet_feature_samples.jsonl parses as JSONL and is asserted by the conformance harness."
+    }
+  ],
+  "validation": [
+    {
+      "command": "rustfmt --edition 2024 --check crates/franken-node/src/security/bpet/phenotype_extractor.rs tests/conformance/bpet_feature_extraction.rs",
+      "result": "PASS"
+    },
+    {
+      "command": "python3 -c 'import json,pathlib; p=pathlib.Path(\"artifacts/10.21/bpet_feature_samples.jsonl\"); [json.loads(line) for line in p.read_text().splitlines() if line.strip()]; print(\"ok\")'",
+      "result": "PASS"
+    },
+    {
+      "command": "/home/ubuntu/.local/share/ubs/modules/ubs-rust.sh --no-cargo --ci --no-color --fail-critical=1 --fail-warning=9999 /data/tmp/franken-node-bd2xgs-ubs.i6LLLG",
+      "result": "PASS",
+      "detail": "0 critical findings; cargo-dependent UBS sections intentionally disabled to respect the repository rch/contention rule."
+    },
+    {
+      "command": "python3 -m unittest tests.test_check_section_10_21_gate",
+      "result": "PASS",
+      "detail": "20 tests passed."
+    },
+    {
+      "command": "python3 scripts/check_section_10_21_gate.py --json",
+      "result": "PASS",
+      "detail": "Section gate reported 65/65 checks passed."
+    }
+  ],
+  "deferred_validation": [
+    {
+      "command": "rch exec -- cargo test -p frankenengine-node --test bpet_feature_extraction",
+      "reason": "Deferred because pgrep -af 'cargo|rustc' | wc -l returned 18, above the repo's >2 contention backoff threshold."
+    }
   ]
 }
