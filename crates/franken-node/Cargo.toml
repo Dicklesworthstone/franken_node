@@ -186,6 +186,10 @@ name = "signed_lineage_graph_builder"
 path = "../../tests/security/signed_lineage_graph_builder.rs"
 
 [[test]]
+name = "dgis_immunization_planner"
+path = "../../tests/security/dgis_immunization_planner.rs"
+
+[[test]]
 name = "swarm_handoff_evidence"
 path = "tests/swarm_handoff_evidence.rs"
 

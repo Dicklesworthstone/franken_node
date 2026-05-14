@@ -6,7 +6,13 @@
 
 pub mod barrier_primitives;
 pub mod contagion_graph;
+pub mod immunization_planner;
 pub mod update_copilot;
+
+#[cfg(test)]
+fn is_missing_barrier_id(id: &str) -> bool {
+    matches!(id, "missing-barrier")
+}
 
 #[cfg(test)]
 mod dgis_barrier_engine_negative_tests {
@@ -287,7 +293,7 @@ mod dgis_barrier_engine_negative_tests {
             .remove_barrier("missing-barrier", "trace-remove")
             .expect_err("removing an unknown barrier must be rejected");
 
-        assert!(matches!(err, BarrierError::NotFound(id) if id == "missing-barrier"));
+        assert!(matches!(err, BarrierError::NotFound(id) if super::is_missing_barrier_id(&id)));
     }
 }
 
@@ -425,7 +431,7 @@ mod dgis_acknowledgement_negative_tests {
 
         assert!(matches!(
             err,
-            BarrierError::NotFound(barrier_id) if barrier_id == "missing-barrier"
+            BarrierError::NotFound(barrier_id) if super::is_missing_barrier_id(&barrier_id)
         ));
     }
 
@@ -440,7 +446,7 @@ mod dgis_acknowledgement_negative_tests {
 
         assert!(matches!(
             err,
-            BarrierError::NotFound(barrier_id) if barrier_id == "missing-barrier"
+            BarrierError::NotFound(barrier_id) if super::is_missing_barrier_id(&barrier_id)
         ));
     }
 
@@ -595,7 +601,7 @@ mod dgis_barrier_copilot_negative_tests {
             .remove_barrier("missing-barrier", "trace-remove-missing")
             .expect_err("unknown barrier removal must fail closed");
 
-        assert!(matches!(err, BarrierError::NotFound(id) if id == "missing-barrier"));
+        assert!(matches!(err, BarrierError::NotFound(id) if super::is_missing_barrier_id(&id)));
         assert!(engine.audit_log().is_empty());
     }
 
@@ -611,7 +617,7 @@ mod dgis_barrier_copilot_negative_tests {
             )
             .expect_err("unknown barrier override must fail closed");
 
-        assert!(matches!(err, BarrierError::NotFound(id) if id == "missing-barrier"));
+        assert!(matches!(err, BarrierError::NotFound(id) if super::is_missing_barrier_id(&id)));
         assert!(engine.audit_log().is_empty());
     }
 
@@ -810,7 +816,7 @@ mod dgis_module_negative_tests {
             .remove_barrier("missing-barrier", "trace-remove-missing")
             .expect_err("missing barrier removal must fail");
 
-        assert!(matches!(err, BarrierError::NotFound(ref id) if id == "missing-barrier"));
+        assert!(matches!(err, BarrierError::NotFound(ref id) if super::is_missing_barrier_id(id)));
         assert!(engine.audit_log().is_empty());
     }
 
@@ -979,7 +985,7 @@ mod negative_path_tests {
             .remove_barrier("missing-barrier", "trace-remove-missing")
             .expect_err("missing barrier removal must fail closed");
 
-        assert!(matches!(err, BarrierError::NotFound(id) if id == "missing-barrier"));
+        assert!(matches!(err, BarrierError::NotFound(id) if super::is_missing_barrier_id(&id)));
         assert_eq!(engine.active_barrier_count(), 0);
         assert!(engine.audit_log().is_empty());
     }

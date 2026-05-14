@@ -1,32 +1,77 @@
 {
-  "schema_version": "evidence-v1.0",
+  "schema_version": "franken-node-evidence-v1",
   "bead_id": "bd-2fid",
+  "completion_debt_bead_id": "bd-2fid.1",
   "section": "10.20",
   "title": "Critical-node immunization planner",
   "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
-  "failed": 0,
+  "source_paths": [
+    "crates/franken-node/src/security/dgis/immunization_planner.rs",
+    "crates/franken-node/src/security/dgis/mod.rs",
+    "tests/security/dgis_immunization_planner.rs",
+    "docs/specs/dgis_immunization_planner.md",
+    "artifacts/10.20/dgis_barrier_plan_catalog.json"
+  ],
   "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
-    {"check": "event_codes_present", "pass": true},
-    {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "graph_schema_compliance", "pass": true},
-    {"check": "topology_metrics", "pass": true},
-    {"check": "contagion_simulation", "pass": true},
-    {"check": "immunization_planning", "pass": true},
-    {"check": "cascade_economics", "pass": true},
-    {"check": "quarantine_orchestration", "pass": true},
-    {"check": "fragility_detection", "pass": true},
-    {"check": "federation_interop", "pass": true},
-    {"check": "adversarial_validation", "pass": true}
-  ]
+    {
+      "check": "rust_module_exists",
+      "pass": true,
+      "detail": "crates/franken-node/src/security/dgis/immunization_planner.rs is present"
+    },
+    {
+      "check": "module_wired",
+      "pass": true,
+      "detail": "security::dgis exports pub mod immunization_planner"
+    },
+    {
+      "check": "planner_inputs",
+      "pass": true,
+      "detail": "PlanningInput accepts critical nodes, policy exclusions, available barrier inventory, and config budgets"
+    },
+    {
+      "check": "barrier_synthesis",
+      "pass": true,
+      "detail": "planner synthesizes composition firewall, sandbox escalation, staged rollout, and supplied verified fork pin candidates"
+    },
+    {
+      "check": "machine_readable_rationale",
+      "pass": true,
+      "detail": "PlannedBarrier carries BarrierRationale with metric, value, risk reduction, cost, and overhead"
+    },
+    {
+      "check": "policy_exclusions",
+      "pass": true,
+      "detail": "excluded nodes are skipped and recorded with DGIS-IMMUNE-003 events"
+    },
+    {
+      "check": "performance_budget",
+      "pass": true,
+      "detail": "candidate enumeration enforces max_total_overhead_ms and max_barriers_per_plan"
+    },
+    {
+      "check": "fail_closed_no_feasible_plan",
+      "pass": true,
+      "detail": "NoFeasiblePlan is returned when constraints cannot reduce cascade loss below target"
+    },
+    {
+      "check": "incremental_replan",
+      "pass": true,
+      "detail": "plan_incremental scopes work to changed nodes and emits IncrementalReplanSummary"
+    },
+    {
+      "check": "integration_test_registered",
+      "pass": true,
+      "detail": "Cargo test target dgis_immunization_planner points at tests/security/dgis_immunization_planner.rs"
+    }
+  ],
+  "validation": {
+    "command": "CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/data/tmp/franken_node-snowybeaver-bd2fid-target rch exec -- cargo test -p frankenengine-node --test dgis_immunization_planner --no-default-features -- --nocapture",
+    "rch_job_id": 29840908367167960,
+    "worker": "vmi1264463",
+    "status": "passed",
+    "tests": {
+      "passed": 4,
+      "failed": 0
+    }
+  }
 }

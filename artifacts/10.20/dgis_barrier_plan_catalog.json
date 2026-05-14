@@ -1,0 +1,42 @@
+{
+  "schema_version": "dgis_barrier_plan_catalog_example_v1",
+  "source_module": "crates/franken-node/src/security/dgis/immunization_planner.rs",
+  "test_target": "dgis_immunization_planner",
+  "target_cascade_loss": 0.3,
+  "baseline_cascade_loss": 1.0,
+  "example_plan": {
+    "rank": 1,
+    "meets_target": true,
+    "total_cost_units": 5,
+    "total_overhead_ms": 5,
+    "expected_cascade_loss": 0.28,
+    "cumulative_risk_reduction": 0.72,
+    "planned_barriers": [
+      {
+        "node_id": "pkg-critical",
+        "barrier_type": "composition_firewall",
+        "mitigated_metric": "articulation_point_or_betweenness",
+        "metric_value": 1.0,
+        "risk_reduction": 0.72,
+        "cost_units": 5,
+        "overhead_ms": 5,
+        "rationale": "composition firewall blocks capability propagation across a dependency choke point"
+      }
+    ]
+  },
+  "policy_contract": {
+    "excluded_nodes_never_planned": true,
+    "overhead_budget_enforced": true,
+    "no_synthetic_verified_fork_material": true,
+    "no_feasible_plan_fails_closed": true
+  },
+  "incremental_replan_contract": {
+    "changed_nodes_only": true,
+    "summary_fields": [
+      "changed_nodes",
+      "scoped_node_count",
+      "skipped_node_count",
+      "reason"
+    ]
+  }
+}
