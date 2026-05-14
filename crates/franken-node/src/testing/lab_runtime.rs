@@ -1077,6 +1077,8 @@ impl LabRuntime {
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
 
     fn default_config() -> LabConfig {
@@ -5021,7 +5023,9 @@ mod tests {
                         barrier.wait();
 
                         // Each thread performs different operations
-                        let mut rt = runtime.lock().unwrap();
+                        let mut rt =
+                            try_lock(&runtime, "lab runtime concurrent access worker operation")
+                                .expect("lab runtime mutex should lock for worker operation");
 
                         match i {
                             0 => {
@@ -5070,7 +5074,8 @@ mod tests {
             }
 
             // Verify runtime remains in consistent state
-            let rt = runtime.lock().unwrap();
+            let rt = try_lock(&runtime, "lab runtime concurrent access final verification")
+                .expect("lab runtime mutex should lock for final verification");
             assert!(rt.current_tick() >= 0);
         }
 
@@ -8045,6 +8050,8 @@ mod tests {
 
 #[cfg(test)]
 mod lab_runtime_comprehensive_resilience_and_attack_vector_tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
@@ -8429,14 +8436,20 @@ mod lab_runtime_comprehensive_resilience_and_attack_vector_tests {
                         let message = format!("thread_{}_msg_{}", thread_id, msg_id).into_bytes();
 
                         let result = {
-                            let mut runtime_guard = runtime_clone.lock().unwrap();
+                            let mut runtime_guard = try_lock(
+                                &runtime_clone,
+                                "lab runtime concurrent message send operation",
+                            )
+                            .expect("lab runtime mutex should lock for message send");
                             runtime_guard.send_message(&link, message)
                         };
 
                         thread_results.push((thread_id, msg_id, result.is_ok()));
                     }
 
-                    results_clone.lock().unwrap().extend(thread_results);
+                    try_lock(&results_clone, "lab runtime concurrent results aggregation")
+                        .expect("results mutex should lock for aggregation")
+                        .extend(thread_results);
                 })
             })
             .collect();
@@ -8446,8 +8459,16 @@ mod lab_runtime_comprehensive_resilience_and_attack_vector_tests {
             handle.join().expect("Thread should complete");
         }
 
-        let final_results = results.lock().unwrap();
-        let runtime_guard = runtime_arc.lock().unwrap();
+        let final_results = try_lock(
+            &results,
+            "lab runtime concurrent results final verification",
+        )
+        .expect("results mutex should lock for final verification");
+        let runtime_guard = try_lock(
+            &runtime_arc,
+            "lab runtime concurrent runtime final verification",
+        )
+        .expect("lab runtime mutex should lock for final verification");
 
         // Verify concurrent operation integrity
         assert_eq!(
