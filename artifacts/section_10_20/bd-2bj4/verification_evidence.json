@@ -1,32 +1,84 @@
 {
-  "schema_version": "evidence-v1.0",
+  "schema_version": "franken-node/verification-evidence/v1",
+  "gate": "dgis_graph_ingestion",
   "bead_id": "bd-2bj4",
+  "completion_debt_bead_id": "bd-2bj4.1",
   "section": "10.20",
   "title": "Deterministic graph ingestion pipeline",
-  "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
-  "failed": 0,
-  "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
-    {"check": "event_codes_present", "pass": true},
-    {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "graph_schema_compliance", "pass": true},
-    {"check": "topology_metrics", "pass": true},
-    {"check": "contagion_simulation", "pass": true},
-    {"check": "immunization_planning", "pass": true},
-    {"check": "cascade_economics", "pass": true},
-    {"check": "quarantine_orchestration", "pass": true},
-    {"check": "fragility_detection", "pass": true},
-    {"check": "federation_interop", "pass": true},
-    {"check": "adversarial_validation", "pass": true}
+  "verdict": "PENDING_RCH_PROOF",
+  "generated_at": "2026-05-14T07:31:15Z",
+  "source_paths": [
+    "crates/franken-node/src/dgis/graph_ingestion.rs",
+    "crates/franken-node/src/dgis/graph_seeds.rs",
+    "tests/security/dgis_graph_ingestion.rs",
+    "tests/security/graph_seeds/realistic_npm_topology.json",
+    "crates/franken-node/Cargo.toml",
+    "scripts/check_dgis_graph_ingestion.py",
+    "tests/test_check_dgis_graph_ingestion.py"
+  ],
+  "static_gate": {
+    "command": "python3 scripts/check_dgis_graph_ingestion.py --json --skip-cargo",
+    "verdict": "PASS_STATIC_ONLY",
+    "passed": 6,
+    "total": 6
+  },
+  "python_unit_tests": {
+    "command": "python3 -m pytest tests/test_check_dgis_graph_ingestion.py -q",
+    "verdict": "PASS",
+    "passed": 7,
+    "total": 7
+  },
+  "python_compile": {
+    "command": "python3 -m py_compile scripts/check_dgis_graph_ingestion.py tests/test_check_dgis_graph_ingestion.py",
+    "verdict": "PASS"
+  },
+  "ubs": {
+    "command": "env UBS_SKIP_RUST_BUILD=1 ubs scripts/check_dgis_graph_ingestion.py tests/test_check_dgis_graph_ingestion.py artifacts/section_10_20/bd-2bj4/verification_evidence.json artifacts/section_10_20/bd-2bj4/verification_summary.md",
+    "verdict": "PASS_EXIT_0",
+    "critical_issues": 0,
+    "warning_issues": 2,
+    "reviewed_warnings": "Bandit subprocess warnings from the pytest helper that executes the repo-local checker with sys.executable; this matches the existing checker-test pattern in tests/test_check_*.py"
+  },
+  "windowed_graph_invariants": {
+    "total_observations": 51,
+    "expected_unique_observations": 51,
+    "expected_unique_package_versions": 20,
+    "expected_unique_maintainers": 6,
+    "expected_unique_dependency_targets": 8,
+    "min_total_nodes": 34,
+    "min_total_edges": 56
+  },
+  "integration_test": {
+    "registered_test": "dgis_graph_ingestion",
+    "cargo_toml_lines": "crates/franken-node/Cargo.toml:716",
+    "test_source": "tests/security/dgis_graph_ingestion.rs",
+    "required_tests": 12,
+    "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/data/tmp/franken_node-snowybeaver-bd2bj4-target cargo test -p frankenengine-node --test dgis_graph_ingestion -- --nocapture",
+    "verdict": "PENDING",
+    "reason": "an existing RCH job for cargo test -p frankenengine-node --test dgis_graph_ingestion was already active, so this session did not launch a duplicate proof",
+    "active_rch_job": {
+      "id": 29840908367167878,
+      "worker_id": "vmi1152480",
+      "started_at": "2026-05-14T07:17:18.017119894+00:00",
+      "observed_at": "2026-05-14T07:30:56Z",
+      "detector_progress_stale": true,
+      "heartbeat_detail": "remote_exec_start",
+      "output_file": "/data/tmp/claude-1000/-data-projects-franken-node/36dfedef-eb41-460d-9c1e-2f6c7a48d9dc/tasks/brqw8hmw9.output",
+      "output_bytes": 0
+    }
+  },
+  "acceptance_mapping": [
+    {
+      "requirement": "verification gate scripts/check_dgis_graph_ingestion.py",
+      "evidence": "scripts/check_dgis_graph_ingestion.py loads the realistic npm topology fixture, checks Cargo wiring, validates required integration tests, computes WindowedGraph invariants, and runs the registered test through rch unless --skip-cargo is explicitly supplied"
+    },
+    {
+      "requirement": "artifacts/section_10_20/bd-2bj4/verification_evidence.json",
+      "evidence": "this artifact now cites the real implementation, fixture, integration-test, checker, and Python unit-test paths"
+    },
+    {
+      "requirement": "gate must run the integration test",
+      "evidence": "pending active RCH job 29840908367167878; bead must not close until this field is PASS"
+    }
   ]
 }
