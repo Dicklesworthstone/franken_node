@@ -1569,7 +1569,8 @@ impl ProofCarryingDecoder {
                     format!("data_{}", i).into_bytes(),
                 );
                 let algorithm_id = AlgorithmId::new("simple_concat");
-                let mut decoder = decoder_clone.lock().unwrap();
+                let mut decoder = crate::lock_utils::try_lock(&decoder_clone)
+                    .expect("proof-carrying decoder mutex should lock");
                 decoder.decode(
                     &format!("concurrent_obj_{}", i),
                     &[fragment],
@@ -4706,6 +4707,7 @@ mod tests {
 #[cfg(test)]
 mod proof_carrying_decode_comprehensive_attack_resistance_tests {
     use super::*;
+    use crate::lock_utils::try_lock;
     use crate::security::constant_time;
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
@@ -5005,12 +5007,9 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
                         );
 
                         let audit_len = decoder_clone.audit_log().len();
-                        results_clone.lock().unwrap().push((
-                            thread_id,
-                            i,
-                            audit_len,
-                            result.is_ok(),
-                        ));
+                        try_lock(&results_clone)
+                            .expect("proof-carrying audit results mutex should lock")
+                            .push((thread_id, i, audit_len, result.is_ok()));
                     }
                 })
             })
@@ -5021,7 +5020,8 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
             handle.join().expect("Thread should complete");
         }
 
-        let final_results = results.lock().unwrap();
+        let final_results =
+            try_lock(&results).expect("proof-carrying audit results mutex should lock");
         let final_audit_log = decoder_arc.audit_log();
 
         // Verify audit log bounds maintained under concurrent stress
@@ -6390,7 +6390,8 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
 
                     // Attempt rapid concurrent access
                     let result = {
-                        let mut decoder_guard = decoder_clone.lock().unwrap();
+                        let mut decoder_guard = try_lock(&decoder_clone)
+                            .expect("proof-carrying decoder mutex should lock");
                         decoder_guard.decode_with_proof(
                             &[fragment_clone.to_vec()],
                             proof,
@@ -6405,7 +6406,9 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
                 }
 
                 // Store results for analysis
-                results_clone.lock().unwrap().extend(thread_results);
+                try_lock(&results_clone)
+                    .expect("proof-carrying attack results mutex should lock")
+                    .extend(thread_results);
             });
 
             handles.push(handle);
@@ -6417,7 +6420,8 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
         }
 
         // Analyze concurrent attack results
-        let final_results = results.lock().unwrap();
+        let final_results =
+            try_lock(&results).expect("proof-carrying attack results mutex should lock");
         let mut successful_attacks = 0;
         let mut failed_attacks = 0;
         let mut hash_mismatches_accepted = 0;
@@ -6475,7 +6479,8 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
         };
 
         let recovery_result = {
-            let mut decoder_guard = decoder.lock().unwrap();
+            let mut decoder_guard =
+                try_lock(&decoder).expect("proof-carrying decoder mutex should lock");
             decoder_guard.decode_with_proof(
                 &[post_attack_fragment.to_vec()],
                 &post_attack_proof,
@@ -6490,7 +6495,8 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
 
         // Verify audit log integrity after concurrent access
         let final_audit = {
-            let decoder_guard = decoder.lock().unwrap();
+            let decoder_guard =
+                try_lock(&decoder).expect("proof-carrying decoder mutex should lock");
             decoder_guard.audit_log().clone()
         };
 

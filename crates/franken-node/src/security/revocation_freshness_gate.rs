@@ -562,6 +562,8 @@ impl fmt::Debug for RevocationFreshnessGate {
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
 
     fn test_sig(proof: &FreshnessProof) -> String {
@@ -2483,11 +2485,13 @@ mod tests {
 
                 let test_proof = proof(tier, 100, &nonce);
 
-                let mut gate = gate_clone.lock().unwrap();
+                let mut gate =
+                    try_lock(&gate_clone).expect("revocation freshness gate mutex should lock");
                 let result =
                     gate.check(&test_proof, 100, true, false, action, &format!("tr-{}", i));
 
-                let mut results = results_clone.lock().unwrap();
+                let mut results = try_lock(&results_clone)
+                    .expect("revocation freshness results mutex should lock");
                 results.push((i, nonce, result.is_ok()));
             });
 
@@ -2499,7 +2503,7 @@ mod tests {
             handle.join().unwrap();
         }
 
-        let results = results.lock().unwrap();
+        let results = try_lock(&results).expect("revocation freshness results mutex should lock");
         assert_eq!(results.len(), 100);
 
         // Verify all operations completed successfully (no race conditions)
@@ -2510,7 +2514,7 @@ mod tests {
         );
 
         // Verify nonce consumption state is consistent
-        let gate = gate_mutex.lock().unwrap();
+        let gate = try_lock(&gate_mutex).expect("revocation freshness gate mutex should lock");
         assert_eq!(gate.consumed_nonce_count(), 100);
 
         // Verify no duplicate nonces were processed
@@ -2540,7 +2544,8 @@ mod tests {
                     let shared_nonce = format!("shared-nonce-{}", nonce_id);
                     let test_proof = proof(SafetyTier::Advisory, 100, &shared_nonce);
 
-                    let mut gate = gate_clone.lock().unwrap();
+                    let mut gate = try_lock(&gate_clone)
+                        .expect("revocation freshness replay gate mutex should lock");
                     let result = gate.check(
                         &test_proof,
                         100,
@@ -2550,7 +2555,8 @@ mod tests {
                         &format!("tr-{}-{}", thread_id, nonce_id),
                     );
 
-                    let mut results = results_clone.lock().unwrap();
+                    let mut results = try_lock(&results_clone)
+                        .expect("revocation freshness replay results mutex should lock");
                     results.push((thread_id, nonce_id, shared_nonce, result.is_ok()));
                 }
             });
@@ -2562,10 +2568,12 @@ mod tests {
             handle.join().unwrap();
         }
 
-        let replay_results = replay_results.lock().unwrap();
+        let replay_results = try_lock(&replay_results)
+            .expect("revocation freshness replay results mutex should lock");
 
         // Verify that each nonce was only accepted once across all threads
-        let gate = replay_gate.lock().unwrap();
+        let gate =
+            try_lock(&replay_gate).expect("revocation freshness replay gate mutex should lock");
         for nonce_id in 0..10 {
             let nonce = format!("shared-nonce-{}", nonce_id);
             assert!(
