@@ -4720,12 +4720,14 @@ mod tests {
     }
     #[test]
     fn prepare_message_reserves_unique_sequences_under_mutex_shared_manager() {
+        use crate::lock_utils::try_lock;
         use std::sync::{Arc, Mutex};
         use std::thread;
 
         let manager = Arc::new(Mutex::new(default_manager()));
         {
-            let mut guard = manager.lock().expect("manager lock");
+            let mut guard = try_lock(&manager, "session auth prepare message setup")
+                .expect("session auth manager mutex should not be poisoned");
             establish_test_session(&mut guard, "prepared-concurrent");
         }
 
@@ -4735,9 +4737,8 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let payload_hash = format!("prepared-hash-{idx}");
                 let trace_id = format!("prepared-trace-{idx}");
-                let prepared = manager
-                    .lock()
-                    .expect("manager lock")
+                let prepared = try_lock(&manager, "session auth prepare message concurrent")
+                    .expect("session auth manager mutex should not be poisoned")
                     .prepare_message(
                         "prepared-concurrent",
                         MessageDirection::Send,
@@ -4759,9 +4760,8 @@ mod tests {
 
         assert_eq!(sequences, (0..8).collect::<Vec<_>>());
         assert_eq!(
-            manager
-                .lock()
-                .expect("manager lock")
+            try_lock(&manager, "session auth prepare message final check")
+                .expect("session auth manager mutex should not be poisoned")
                 .get_session("prepared-concurrent")
                 .expect("session should exist")
                 .send_seq,
@@ -5647,14 +5647,15 @@ mod session_auth_boundary_negative_tests {
     /// Negative test: Concurrent session access and race conditions
     #[test]
     fn negative_concurrent_session_race_conditions() {
+        use crate::lock_utils::try_lock;
         use std::sync::{Arc, Mutex};
         use std::thread;
 
         let mgr = Arc::new(Mutex::new(malicious_manager()));
 
         // Create initial session for concurrent testing
-        mgr.lock()
-            .unwrap()
+        try_lock(&mgr, "session auth concurrent setup")
+            .expect("session auth manager mutex should not be poisoned")
             .create_session(
                 "concurrent-session",
                 b"concurrent-handshake",
@@ -5676,13 +5677,15 @@ mod session_auth_boundary_negative_tests {
                     let trace_id = format!("concurrent-trace-{}-{}", thread_id, operation);
 
                     // Attempt message authentication
-                    let result = mgr_clone.lock().unwrap().authenticate_message_valid_hmac(
-                        "concurrent-session",
-                        Direction::Inbound,
-                        &payload,
-                        2000 + (thread_id * 100) + operation as u64,
-                        &trace_id,
-                    );
+                    let result = try_lock(&mgr_clone, "session auth concurrent message auth")
+                        .expect("session auth manager mutex should not be poisoned")
+                        .authenticate_message_valid_hmac(
+                            "concurrent-session",
+                            Direction::Inbound,
+                            &payload,
+                            2000 + (thread_id * 100) + operation as u64,
+                            &trace_id,
+                        );
 
                     thread_results.push((operation, result.is_ok()));
 
@@ -5690,19 +5693,26 @@ mod session_auth_boundary_negative_tests {
                     if operation % 10 == 0 {
                         // Try to create/terminate sessions
                         let session_id = format!("temp-{}-{}", thread_id, operation);
-                        let create_result = mgr_clone.lock().unwrap().create_session(
-                            &session_id,
-                            &format!("temp-handshake-{}-{}", thread_id, operation).into_bytes(),
-                            3000 + (thread_id * 100) + operation as u64,
-                            &format!("temp-trace-{}-{}", thread_id, operation),
-                        );
+                        let create_result =
+                            try_lock(&mgr_clone, "session auth concurrent session create")
+                                .expect("session auth manager mutex should not be poisoned")
+                                .create_session(
+                                    &session_id,
+                                    &format!("temp-handshake-{}-{}", thread_id, operation)
+                                        .into_bytes(),
+                                    3000 + (thread_id * 100) + operation as u64,
+                                    &format!("temp-trace-{}-{}", thread_id, operation),
+                                );
 
                         if create_result.is_ok() {
-                            let _ = mgr_clone.lock().unwrap().terminate_session(
-                                &session_id,
-                                3100 + (thread_id * 100) + operation as u64,
-                                &format!("temp-terminate-{}-{}", thread_id, operation),
-                            );
+                            let _ =
+                                try_lock(&mgr_clone, "session auth concurrent session terminate")
+                                    .expect("session auth manager mutex should not be poisoned")
+                                    .terminate_session(
+                                        &session_id,
+                                        3100 + (thread_id * 100) + operation as u64,
+                                        &format!("temp-terminate-{}-{}", thread_id, operation),
+                                    );
                         }
                     }
                 }
@@ -5718,7 +5728,8 @@ mod session_auth_boundary_negative_tests {
         }
 
         // Verify session remains in consistent state after concurrent access
-        let final_mgr = mgr.lock().unwrap();
+        let final_mgr = try_lock(&mgr, "session auth final consistency check")
+            .expect("session auth manager mutex should not be poisoned");
         let session_result = final_mgr.get_session("concurrent-session");
 
         assert!(
