@@ -1005,6 +1005,12 @@ path = "../../tests/conformance/bpet_feature_extraction.rs"
 name = "bpet_adversarial_evolution_suite"
 path = "../../tests/security/bpet_adversarial_evolution_suite.rs"
 
+# bd-2zo1.1: BPET to ATC temporal interop bridge
+[[test]]
+name = "bpet_atc_temporal_interop"
+path = "../../tests/integration/bpet_atc_temporal_interop.rs"
+required-features = ["advanced-features"]
+
 # bd-1q38.1 sub-task 4: integration test for DGIS adversarial contagion simulator
 [[test]]
 name = "dgis_contagion_simulator"

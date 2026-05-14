@@ -1,0 +1,52 @@
+{
+  "schema_version": "bpet-atc-exchange-report-v1",
+  "bead_id": "bd-2zo1",
+  "completion_debt_bead_id": "bd-2zo1.1",
+  "section": "10.21",
+  "title": "BPET with ATC integration",
+  "implementation": {
+    "bridge_module": "crates/franken-node/src/federation/bpet_atc_bridge.rs",
+    "module_wiring": "crates/franken-node/src/federation/mod.rs",
+    "integration_test": "tests/integration/bpet_atc_temporal_interop.rs",
+    "cargo_test_name": "bpet_atc_temporal_interop"
+  },
+  "privacy_contract": {
+    "version": "bpet-atc-privacy-contract-v1",
+    "raw_package_names_exported": false,
+    "raw_versions_exported": false,
+    "raw_trace_ids_exported": false,
+    "raw_window_ids_exported": false,
+    "raw_longitudinal_features_exported": false,
+    "k_anonymity_min": 2,
+    "feature_export_shape": "top-N bucketed contribution names and bucket numbers only"
+  },
+  "verifier_checks": [
+    "k_anonymity_enforced",
+    "raw_identifiers_absent",
+    "bucketed_features_only",
+    "versioned_contract",
+    "deterministic_hashes"
+  ],
+  "event_codes": [
+    "BPET-ATC-001",
+    "BPET-ATC-002",
+    "BPET-ATC-003",
+    "BPET-ATC-004",
+    "BPET-ATC-005",
+    "BPET-ATC-006",
+    "BPET-ATC-007",
+    "BPET-ATC-ERR-001",
+    "BPET-ATC-ERR-002",
+    "BPET-ATC-ERR-003",
+    "BPET-ATC-ERR-004"
+  ],
+  "invariants": [
+    "INV-BPET-ATC-ANONYMIZED-ONLY",
+    "INV-BPET-ATC-NO-RAW-LONGITUDINAL-LEAKAGE",
+    "INV-BPET-ATC-K-ANONYMITY",
+    "INV-BPET-ATC-DETERMINISTIC-HASHES",
+    "INV-BPET-ATC-PRIOR-FAIL-CLOSED",
+    "INV-BPET-ATC-VERSIONED-CONTRACT"
+  ],
+  "verdict": "PASS"
+}

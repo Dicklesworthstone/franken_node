@@ -1,32 +1,73 @@
 {
-  "schema_version": "evidence-v1.0",
+  "schema_version": "franken-node/verification-evidence/v1",
   "bead_id": "bd-2zo1",
+  "completion_debt_bead_id": "bd-2zo1.1",
   "section": "10.21",
   "title": "BPET with ATC integration",
   "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
-  "failed": 0,
-  "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
-    {"check": "event_codes_present", "pass": true},
-    {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "genome_schema_compliance", "pass": true},
-    {"check": "phenotype_extraction", "pass": true},
-    {"check": "lineage_tracking", "pass": true},
-    {"check": "drift_detection", "pass": true},
-    {"check": "changepoint_detection", "pass": true},
-    {"check": "survival_model", "pass": true},
-    {"check": "risk_scoring", "pass": true},
-    {"check": "cross_system_integration", "pass": true},
-    {"check": "adversarial_robustness", "pass": true}
-  ]
+  "generated_at": "2026-05-14T00:00:00Z",
+  "source_paths": [
+    "crates/franken-node/src/federation/bpet_atc_bridge.rs",
+    "crates/franken-node/src/federation/mod.rs",
+    "tests/integration/bpet_atc_temporal_interop.rs",
+    "crates/franken-node/Cargo.toml",
+    "artifacts/10.21/bpet_atc_exchange_report.json"
+  ],
+  "acceptance_mapping": [
+    {
+      "requirement": "BPET exports anonymized trajectory summaries",
+      "evidence": "export_anonymized_exchange emits AnonymizedTrajectorySummary records with hashed cohort/window/trace IDs and bucketed risk/features only"
+    },
+    {
+      "requirement": "BPET consumes federated temporal priors",
+      "evidence": "derive_federated_temporal_prior and consume_federated_temporal_prior produce bounded FeatureVector updates from aggregate ATC summaries"
+    },
+    {
+      "requirement": "no raw longitudinal leakage",
+      "evidence": "tests/integration/bpet_atc_temporal_interop.rs asserts serialized exchange JSON excludes raw package, version, trace, cohort, and window identifiers"
+    },
+    {
+      "requirement": "contracts are verifier-checkable and versioned",
+      "evidence": "BPET_ATC_BRIDGE_SCHEMA_VERSION, BPET_ATC_PRIVACY_CONTRACT_VERSION, stable BPET-ATC event codes, invariant markers, verifier_checks, and content hashes are emitted"
+    }
+  ],
+  "checks": {
+    "rust_module_exists": {
+      "path": "crates/franken-node/src/federation/bpet_atc_bridge.rs",
+      "verdict": "PASS"
+    },
+    "integration_test_exists": {
+      "path": "tests/integration/bpet_atc_temporal_interop.rs",
+      "verdict": "PASS"
+    },
+    "exchange_report_exists": {
+      "path": "artifacts/10.21/bpet_atc_exchange_report.json",
+      "verdict": "PASS"
+    },
+    "rust_format": {
+      "command": "rustfmt --edition 2024 --check --config skip_children=true crates/franken-node/src/federation/bpet_atc_bridge.rs crates/franken-node/src/federation/mod.rs tests/integration/bpet_atc_temporal_interop.rs",
+      "verdict": "PASS"
+    },
+    "json_validation": {
+      "command": "python3 -m json.tool artifacts/10.21/bpet_atc_exchange_report.json && python3 -m json.tool artifacts/section_10_21/bd-2zo1/verification_evidence.json",
+      "verdict": "PASS"
+    },
+    "diff_check": {
+      "command": "git diff --check -- crates/franken-node/src/federation/bpet_atc_bridge.rs crates/franken-node/src/federation/mod.rs tests/integration/bpet_atc_temporal_interop.rs crates/franken-node/Cargo.toml artifacts/10.21/bpet_atc_exchange_report.json artifacts/section_10_21/bd-2zo1/verification_evidence.json artifacts/section_10_21/bd-2zo1/verification_summary.md",
+      "verdict": "PASS"
+    },
+    "ubs": {
+      "command": "UBS_SKIP_RUST_BUILD=1 ubs crates/franken-node/src/federation/bpet_atc_bridge.rs tests/integration/bpet_atc_temporal_interop.rs",
+      "verdict": "PASS_EXIT_0",
+      "critical": 0
+    },
+    "cargo_validation": {
+      "command": "CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/data/tmp/franken_node-snowybeaver-bd2zo1-target rch exec -- cargo test -p frankenengine-node --test bpet_atc_temporal_interop --no-default-features --features advanced-features -- --nocapture",
+      "verdict": "PASS",
+      "rch_job_id": "29840908367167969",
+      "worker": "vmi1152480",
+      "tests_passed": 4,
+      "tests_failed": 0
+    }
+  }
 }
