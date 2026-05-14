@@ -3665,7 +3665,11 @@ mod tests {
         for i in 0..10 {
             let ctrl_clone = Arc::clone(&ctrl);
             let handle = thread::spawn(move || {
-                let mut locked_ctrl = ctrl_clone.lock().unwrap();
+                let mut locked_ctrl = crate::lock_utils::try_lock(
+                    ctrl_clone.as_ref(),
+                    "safe mode concurrent controller",
+                )
+                .expect("safe mode controller lock should not be poisoned");
 
                 if i % 2 == 0 {
                     // Even threads try to enter safe mode
@@ -3693,7 +3697,8 @@ mod tests {
         }
 
         // Verify final state is consistent
-        let final_ctrl = ctrl.lock().unwrap();
+        let final_ctrl = crate::lock_utils::try_lock(ctrl.as_ref(), "safe mode final controller")
+            .expect("safe mode final controller lock should not be poisoned");
         if final_ctrl.is_active() {
             assert!(
                 final_ctrl.entry_reason().is_some(),

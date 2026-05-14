@@ -2006,7 +2006,11 @@ mod authority_audit_comprehensive_negative_tests {
                         ),
                     );
 
-                    let mut guard = guard_clone.lock().unwrap();
+                    let mut guard = crate::lock_utils::try_lock(
+                        guard_clone.as_ref(),
+                        "authority audit concurrent guard",
+                    )
+                    .expect("authority audit guard lock should not be poisoned");
                     let _ = guard.check_context(
                         &format!("crate::security::thread_{}_{}", thread_id, op_id),
                         &malicious_ctx,
@@ -2035,7 +2039,8 @@ mod authority_audit_comprehensive_negative_tests {
         }
 
         // Verify final state consistency
-        let guard = guard.lock().unwrap();
+        let guard = crate::lock_utils::try_lock(guard.as_ref(), "authority audit final guard")
+            .expect("authority audit final guard lock should not be poisoned");
         assert_eq!(guard.events().len(), MAX_EVENTS); // Should be bounded
         assert!(guard.violations().len() <= MAX_VIOLATIONS); // Should be bounded
         assert!(guard.inventory.module_count() >= 8); // Original modules + some added

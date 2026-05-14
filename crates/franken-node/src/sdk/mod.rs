@@ -950,7 +950,11 @@ mod tests {
 
                 // Merge results
                 {
-                    let mut shared = results.lock().unwrap();
+                    let mut shared = crate::lock_utils::try_lock(
+                        results.as_ref(),
+                        "sdk concurrent verification results",
+                    )
+                    .expect("sdk verification results lock should not be poisoned");
                     shared.extend(thread_results);
                 }
             });
@@ -963,7 +967,9 @@ mod tests {
             handle.join().expect("Thread should complete successfully");
         }
 
-        let final_results = results.lock().unwrap();
+        let final_results =
+            crate::lock_utils::try_lock(results.as_ref(), "sdk final verification results")
+                .expect("sdk final verification results lock should not be poisoned");
 
         // Verify all operations completed without race conditions
         assert!(final_results.len() >= thread_count * operations_per_thread / 2);

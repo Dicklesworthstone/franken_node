@@ -3123,7 +3123,11 @@ mod tests {
                 let mut thread_results = Vec::new();
 
                 for op_id in 0..50 {
-                    let mut controller = ctrl_clone.lock().unwrap();
+                    let mut controller = crate::lock_utils::try_lock(
+                        ctrl_clone.as_ref(),
+                        "challenge flow concurrent controller",
+                    )
+                    .expect("challenge flow controller lock should not be poisoned");
 
                     // Issue challenge
                     let artifact_id =
@@ -3222,7 +3226,9 @@ mod tests {
         );
 
         // Verify final state consistency
-        let final_ctrl = ctrl.lock().unwrap();
+        let final_ctrl =
+            crate::lock_utils::try_lock(ctrl.as_ref(), "challenge flow final controller")
+                .expect("challenge flow final controller lock should not be poisoned");
         let metrics = final_ctrl.metrics();
 
         // All metrics should be consistent

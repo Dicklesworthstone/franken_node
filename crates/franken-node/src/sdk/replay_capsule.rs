@@ -2579,7 +2579,11 @@ mod tests {
 
                 // Store results
                 {
-                    let mut shared = results.lock().unwrap();
+                    let mut shared = crate::lock_utils::try_lock(
+                        results.as_ref(),
+                        "replay capsule concurrent results",
+                    )
+                    .expect("replay capsule results lock should not be poisoned");
                     shared.extend(thread_results);
                 }
             });
@@ -2592,7 +2596,9 @@ mod tests {
             handle.join().expect("Thread should complete successfully");
         }
 
-        let final_results = shared_results.lock().unwrap();
+        let final_results =
+            crate::lock_utils::try_lock(shared_results.as_ref(), "replay capsule final results")
+                .expect("replay capsule final results lock should not be poisoned");
 
         // Verify all operations completed
         assert_eq!(final_results.len(), thread_count * operations_per_thread);
