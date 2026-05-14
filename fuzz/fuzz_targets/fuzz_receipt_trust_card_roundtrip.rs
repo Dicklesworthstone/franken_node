@@ -180,6 +180,7 @@ fn trust_card_from_input(input: &FuzzInput) -> TrustCard {
             trace_id: format!("trace-{}", input.selector),
         }],
         derivation_evidence: None,
+        camouflage_hints: Vec::new(),
         card_hash: format!("sha256:{:064x}", input.selector),
         registry_signature: format!("{:0128x}", input.confidence),
     }

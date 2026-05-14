@@ -193,6 +193,7 @@ impl ArbitraryTrustCardData {
             user_facing_risk_assessment: input.user_facing_risk_assessment,
             audit_history: Vec::new(),
             derivation_evidence: None,
+            camouflage_hints: Vec::new(),
             card_hash: self.card_hash.clone(),
             registry_signature: self.registry_signature.clone(),
         }

@@ -265,6 +265,7 @@ fn generated_trust_card(mut seed: u64) -> TrustCard {
             trace_id: format!("trace-{:016x}", next_seed(&mut seed)),
         }],
         derivation_evidence: None,
+        camouflage_hints: Vec::new(),
         card_hash: generated_hash(&mut seed),
         registry_signature: generated_signature(&mut seed),
     }

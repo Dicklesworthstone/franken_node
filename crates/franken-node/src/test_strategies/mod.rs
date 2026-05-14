@@ -595,6 +595,7 @@ pub fn trust_cards() -> BoxedStrategy<TrustCard> {
                 user_facing_risk_assessment,
                 audit_history,
                 derivation_evidence,
+                camouflage_hints: Vec::new(),
                 card_hash,
                 registry_signature,
             },

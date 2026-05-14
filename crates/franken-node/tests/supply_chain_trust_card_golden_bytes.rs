@@ -78,6 +78,7 @@ fn base_trust_card() -> TrustCard {
             trace_id: "trace-golden-0001".to_string(),
         }],
         derivation_evidence: None,
+        camouflage_hints: Vec::new(),
         card_hash: repeated_hex("3c", 32),
         registry_signature: repeated_hex("4d", 64),
     }

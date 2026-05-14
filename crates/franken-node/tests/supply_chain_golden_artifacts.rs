@@ -151,6 +151,7 @@ fn canonical_trust_card_fixture() -> TrustCard {
             },
         ],
         derivation_evidence: None,
+        camouflage_hints: Vec::new(),
         card_hash: String::new(),
         registry_signature: String::new(),
     };

@@ -46,7 +46,21 @@ const MAX_TELEMETRY: usize = 4096;
 const MAX_CARD_VERSIONS: usize = 512;
 const MAX_AUDIT_HISTORY: usize = 256;
 const MAX_TRUST_CARD_CAMOUFLAGE_HINTS: usize = 64;
+/// Maximum number of camouflage hint records persisted on a single TrustCard.
+///
+/// Sub-task 4 of bd-35m7.1 wires the trajectory-gaming detector into the
+/// trust-card pipeline. Hints accumulate across `apply_camouflage_assessment`
+/// invocations; `push_bounded` enforces this ceiling so a hostile or noisy
+/// detector cannot grow the card without bound.
+pub const MAX_CAMOUFLAGE_HINTS_ON_CARD: usize = MAX_TRUST_CARD_CAMOUFLAGE_HINTS;
 const TRUST_CARD_CAMOUFLAGE_CRITICAL_SEVERITY: f64 = 0.90;
+/// Severity at or above which `apply_camouflage_assessment` raises the
+/// card's `user_facing_risk_assessment.level` to at least
+/// [`RiskLevel::High`]. Mirrors the existing
+/// [`TRUST_CARD_CAMOUFLAGE_CRITICAL_SEVERITY`] critical threshold but
+/// triggers earlier so high-severity hints surface on the card before they
+/// reach "critical" status.
+const TRUST_CARD_CAMOUFLAGE_RISK_BUMP_SEVERITY: f64 = 0.50;
 
 /// Maximum extension ID length to prevent memory exhaustion DoS attacks.
 const MAX_EXTENSION_ID_LEN: usize = 256;
@@ -125,6 +139,124 @@ fn camouflage_risk_level(max_severity: f64) -> RiskLevel {
         RiskLevel::Critical
     } else {
         RiskLevel::High
+    }
+}
+
+/// Persistent on-card record of one camouflage finding (bd-35m7.1 sub-task 4).
+///
+/// This is the serde-shape that lives inside [`TrustCard::camouflage_hints`].
+/// It deliberately flattens the deep
+/// [`CamouflageHint`](crate::security::trajectory_gaming::CamouflageHint)
+/// type so the trust-card wire format does not leak detector-internal
+/// keys (e.g. `BTreeMap<String, f64>` evidence). Evidence keys are kept as
+/// a bounded sorted `Vec<String>` so an attacker cannot smuggle large
+/// values onto the card.
+///
+/// All `f64` severities are guarded with `is_finite()` on construction
+/// (severity ∈ `[0.0, 1.0]`). Growth on a card is bounded by
+/// [`MAX_CAMOUFLAGE_HINTS_ON_CARD`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CamouflageHintRecord {
+    /// Snake-case kind string (`phase_shift`, `dropout`,
+    /// `distribution_mismatch`, `gradual_creep`). Mirrors
+    /// [`CamouflageKind::as_str`].
+    pub kind: String,
+    /// Severity in `[0.0, 1.0]`. Always finite (`is_finite()` enforced on
+    /// construction).
+    pub severity: f64,
+    /// Sample indices in the originating trajectory series that drove the
+    /// hint. Bounded by [`MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES`].
+    pub sample_indices: Vec<usize>,
+    /// Sorted evidence keys (without values) that the detector used. Bounded
+    /// by [`MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS`] to prevent unbounded growth.
+    pub evidence_keys: Vec<String>,
+}
+
+/// Cap on the number of sample indices preserved per hint record.
+pub const MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES: usize = 128;
+/// Cap on the number of evidence keys preserved per hint record.
+pub const MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS: usize = 32;
+
+impl CamouflageHintRecord {
+    /// Convert a detector [`CamouflageHint`] into the serde-friendly
+    /// [`CamouflageHintRecord`] used on the card.
+    ///
+    /// Non-finite severities are clamped to `0.0`; out-of-range severities
+    /// are clamped to `[0.0, 1.0]` so a buggy detector cannot poison the
+    /// card with NaN/Inf. Sample-index and evidence-key vectors are
+    /// truncated at their respective caps.
+    fn from_hint(hint: &CamouflageHint) -> Self {
+        let severity = if hint.severity.is_finite() {
+            hint.severity.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let mut sample_indices = hint.sample_indices.clone();
+        if sample_indices.len() > MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES {
+            sample_indices.truncate(MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES);
+        }
+        let mut evidence_keys: Vec<String> = hint.evidence.keys().cloned().collect();
+        evidence_keys.sort();
+        if evidence_keys.len() > MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS {
+            evidence_keys.truncate(MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS);
+        }
+        Self {
+            kind: hint.kind.as_str().to_string(),
+            severity,
+            sample_indices,
+            evidence_keys,
+        }
+    }
+}
+
+/// Wire detector hints into a trust card (bd-35m7.1 sub-task 4).
+///
+/// This is the integration point between the trajectory-gaming camouflage
+/// detector and the trust-card pipeline. Behaviour:
+///
+/// * Convert each [`CamouflageHint`] into a [`CamouflageHintRecord`] and
+///   append it to `card.camouflage_hints` via
+///   [`push_bounded`](crate::push_bounded), capped at
+///   [`MAX_CAMOUFLAGE_HINTS_ON_CARD`].
+/// * Non-finite or out-of-range severities are clamped (defense-in-depth);
+///   this function never panics.
+/// * If any hint has severity `>= TRUST_CARD_CAMOUFLAGE_RISK_BUMP_SEVERITY`,
+///   the card's `user_facing_risk_assessment.level` is bumped to at least
+///   [`RiskLevel::High`] (or [`RiskLevel::Critical`] at the existing
+///   critical threshold). Existing higher levels are preserved
+///   (additive-only).
+/// * Calling with `hints.is_empty()` is a no-op and leaves the card
+///   untouched.
+///
+/// This helper is additive: callers that do not invoke it keep their
+/// existing card state unchanged. The companion field
+/// [`TrustCard::camouflage_hints`] uses
+/// `#[serde(default, skip_serializing_if = "Vec::is_empty")]` so old
+/// snapshots that pre-date the field still deserialise cleanly and new
+/// cards with no hints still serialise to the original wire format.
+pub fn apply_camouflage_assessment(card: &mut TrustCard, hints: &[CamouflageHint]) {
+    if hints.is_empty() {
+        return;
+    }
+
+    let mut max_severity: f64 = 0.0;
+    for hint in hints {
+        let record = CamouflageHintRecord::from_hint(hint);
+        if record.severity.is_finite() && record.severity > max_severity {
+            max_severity = record.severity;
+        }
+        push_bounded(
+            &mut card.camouflage_hints,
+            record,
+            MAX_CAMOUFLAGE_HINTS_ON_CARD,
+        );
+    }
+
+    if max_severity.is_finite() && max_severity >= TRUST_CARD_CAMOUFLAGE_RISK_BUMP_SEVERITY {
+        let bumped = camouflage_risk_level(max_severity);
+        if bumped > card.user_facing_risk_assessment.level {
+            card.user_facing_risk_assessment.level = bumped;
+        }
     }
 }
 
@@ -606,7 +738,7 @@ pub struct AuditRecord {
     pub trace_id: String,
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrustCard {
     pub schema_version: String,
     pub trust_card_version: u64,
@@ -627,6 +759,17 @@ pub struct TrustCard {
     pub audit_history: Vec<AuditRecord>,
     /// Derivation metadata linking this trust card to verified upstream evidence.
     pub derivation_evidence: Option<DerivationMetadata>,
+    /// Persistent on-card camouflage findings emitted by the trajectory-gaming
+    /// detector (bd-35m7.1 sub-task 4).
+    ///
+    /// Populated via [`apply_camouflage_assessment`] (or
+    /// [`TrustCardRegistry::mark_camouflage_suspected`], which calls into it).
+    /// `#[serde(default)]` preserves backward compatibility with snapshots
+    /// minted before this field existed; `skip_serializing_if = "Vec::is_empty"`
+    /// keeps the wire format unchanged for cards that never observed any
+    /// camouflage signals.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub camouflage_hints: Vec<CamouflageHintRecord>,
     pub card_hash: String,
     pub registry_signature: String,
 }
@@ -658,6 +801,7 @@ impl std::fmt::Debug for TrustCard {
             )
             .field("audit_history", &self.audit_history)
             .field("derivation_evidence", &self.derivation_evidence)
+            .field("camouflage_hints", &self.camouflage_hints)
             .field("card_hash", &"[REDACTED]")
             .field("registry_signature", &"[REDACTED]")
             .finish()
@@ -748,7 +892,7 @@ pub struct TelemetryEvent {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct CachedCard {
     card: TrustCard,
     cached_at_secs: u64,
@@ -763,7 +907,7 @@ pub struct TrustCardSyncReport {
     pub forced_refreshes: usize,
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustCardRegistrySnapshot {
     pub schema_version: String,
@@ -1259,6 +1403,7 @@ impl TrustCardRegistry {
                 trace_id: trace_id.to_string(),
             }],
             derivation_evidence: Some(derivation),
+            camouflage_hints: Vec::new(),
             card_hash: String::new(),
             registry_signature: String::new(),
         };
@@ -1479,6 +1624,13 @@ impl TrustCardRegistry {
             &kinds,
             max_severity,
         );
+
+        // Sub-task 4: persist the hint records on the new card version so
+        // downstream consumers (CLI / API / signed snapshot) can attribute
+        // the risk bump to specific detector findings. This call is
+        // bounded by MAX_CAMOUFLAGE_HINTS_ON_CARD and is a no-op when
+        // hints is empty (which validate_camouflage_hints already rejects).
+        apply_camouflage_assessment(&mut next, hints);
 
         push_bounded(
             &mut next.audit_history,
@@ -3013,15 +3165,17 @@ mod canonical_perf_test;
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditRecord, BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
-        DEFAULT_REGISTRY_KEY, DependencyTrustStatus, DerivationMetadata, ExtensionIdentity,
-        ProvenanceSummary, PublisherIdentity, ReputationTrend, RevocationStatus, RiskAssessment,
-        RiskLevel, SnapshotSourceContext, TRUST_CARD_CAMOUFLAGE_SUSPECTED, TRUST_CARD_CREATED,
+        AuditRecord, BehavioralProfile, CamouflageHintRecord, CapabilityDeclaration,
+        CapabilityRisk, CertificationLevel, DEFAULT_REGISTRY_KEY, DependencyTrustStatus,
+        DerivationMetadata, ExtensionIdentity, MAX_CAMOUFLAGE_HINTS_ON_CARD,
+        MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS, MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES, ProvenanceSummary,
+        PublisherIdentity, ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel,
+        SnapshotSourceContext, TRUST_CARD_CAMOUFLAGE_SUSPECTED, TRUST_CARD_CREATED,
         TRUST_CARD_QUERIED, TrustCard, TrustCardComparison, TrustCardDiffEntry, TrustCardError,
         TrustCardInput, TrustCardMutation, TrustCardRegistry, VerifiedEvidenceRef,
-        canonicalize_value, compute_trust_card_derivation_hash, render_comparison_human,
-        render_trust_card_human, sign_card_in_place, to_canonical_json, update_card_hash,
-        validate_trust_card_structure, verify_card_signature,
+        apply_camouflage_assessment, canonicalize_value, compute_trust_card_derivation_hash,
+        render_comparison_human, render_trust_card_human, sign_card_in_place, to_canonical_json,
+        update_card_hash, validate_trust_card_structure, verify_card_signature,
     };
     use crate::security::trajectory_gaming::{CamouflageHint, CamouflageKind};
     use base64::Engine as _;
@@ -3292,6 +3446,219 @@ mod tests {
             .expect_err("non-finite severity should fail closed");
 
         assert!(matches!(err, TrustCardError::InvalidInput { .. }));
+    }
+
+    // bd-35m7.1 sub-task 4: inline tests for the trust-card camouflage
+    // integration helper. These exercise the new `camouflage_hints` field on
+    // `TrustCard` plus the free `apply_camouflage_assessment` function. The
+    // existing `camouflage_hints_mark_trust_card_risk_and_audit` test above
+    // continues to cover the registry-level entry point.
+
+    fn fresh_card_for_camouflage_tests() -> TrustCard {
+        let mut registry = TrustCardRegistry::default();
+        registry
+            .create(sample_input(), 1_000, "trace-camouflage-helper")
+            .expect("create card for camouflage tests")
+    }
+
+    fn hint_with_severity(severity: f64, sample_indices: Vec<usize>) -> CamouflageHint {
+        let mut evidence = BTreeMap::new();
+        evidence.insert("phase_shift_score".to_string(), severity);
+        evidence.insert("dropout_ratio".to_string(), severity * 0.5);
+        CamouflageHint {
+            kind: CamouflageKind::PhaseShift,
+            severity,
+            evidence,
+            sample_indices,
+        }
+    }
+
+    #[test]
+    fn apply_camouflage_assessment_adds_hints_to_empty_card() {
+        let mut card = fresh_card_for_camouflage_tests();
+        assert!(
+            card.camouflage_hints.is_empty(),
+            "fresh card should have no camouflage hints"
+        );
+        let baseline_risk = card.user_facing_risk_assessment.level;
+
+        let hints = vec![
+            hint_with_severity(0.20, vec![1, 2, 3]),
+            hint_with_severity(0.10, vec![4]),
+        ];
+
+        apply_camouflage_assessment(&mut card, &hints);
+
+        assert_eq!(card.camouflage_hints.len(), 2);
+        assert_eq!(card.camouflage_hints[0].kind, "phase_shift");
+        assert_eq!(card.camouflage_hints[0].severity, 0.20);
+        assert_eq!(card.camouflage_hints[0].sample_indices, vec![1, 2, 3]);
+        // Sorted evidence keys preserved without their numeric values.
+        assert_eq!(
+            card.camouflage_hints[0].evidence_keys,
+            vec!["dropout_ratio".to_string(), "phase_shift_score".to_string()]
+        );
+        // Low severities (< 0.50) must NOT bump the user-facing risk level.
+        assert_eq!(card.user_facing_risk_assessment.level, baseline_risk);
+    }
+
+    #[test]
+    fn apply_camouflage_assessment_bounded_growth_caps_at_max() {
+        let mut card = fresh_card_for_camouflage_tests();
+        // Seed the card to almost the cap (cap is 64); push 100 more to
+        // demonstrate `push_bounded` clamps growth at MAX_CAMOUFLAGE_HINTS_ON_CARD.
+        let hints: Vec<CamouflageHint> = (0..100)
+            .map(|i| hint_with_severity(0.10 + (i as f64) * 0.001, vec![i]))
+            .collect();
+
+        apply_camouflage_assessment(&mut card, &hints);
+
+        assert_eq!(
+            card.camouflage_hints.len(),
+            MAX_CAMOUFLAGE_HINTS_ON_CARD,
+            "card camouflage_hints must be capped at MAX_CAMOUFLAGE_HINTS_ON_CARD"
+        );
+        assert_eq!(MAX_CAMOUFLAGE_HINTS_ON_CARD, 64);
+    }
+
+    #[test]
+    fn apply_camouflage_assessment_with_high_severity_bumps_risk_score() {
+        let mut card = fresh_card_for_camouflage_tests();
+        let baseline_risk = card.user_facing_risk_assessment.level;
+        // Baseline risk in `sample_input` is Low; a 0.95 severity hint
+        // should bump to Critical (>=0.90 threshold), while 0.75 would bump
+        // only to High. Use 0.95 to exercise the critical path.
+        let hints = vec![hint_with_severity(0.95, vec![10, 11])];
+
+        apply_camouflage_assessment(&mut card, &hints);
+
+        assert_eq!(card.camouflage_hints.len(), 1);
+        assert_eq!(card.camouflage_hints[0].severity, 0.95);
+        assert!(
+            card.user_facing_risk_assessment.level > baseline_risk,
+            "high-severity camouflage must bump the user-facing risk level (was {:?})",
+            baseline_risk
+        );
+        assert_eq!(card.user_facing_risk_assessment.level, RiskLevel::Critical);
+    }
+
+    #[test]
+    fn trust_card_round_trips_through_serde_with_camouflage_hints() {
+        let mut card = fresh_card_for_camouflage_tests();
+        let hints = vec![
+            hint_with_severity(0.30, vec![0, 1]),
+            hint_with_severity(0.55, vec![2, 3, 4]),
+        ];
+        apply_camouflage_assessment(&mut card, &hints);
+        assert_eq!(card.camouflage_hints.len(), 2);
+
+        let json = serde_json::to_string(&card).expect("serialize card with hints");
+        assert!(
+            json.contains("camouflage_hints"),
+            "serialized non-empty hint vec must surface camouflage_hints key"
+        );
+        assert!(json.contains("phase_shift"));
+
+        let parsed: TrustCard = serde_json::from_str(&json).expect("deserialize card");
+        assert_eq!(parsed.camouflage_hints.len(), 2);
+        assert_eq!(parsed.camouflage_hints, card.camouflage_hints);
+    }
+
+    #[test]
+    fn trust_card_with_no_hints_serializes_without_the_field() {
+        let card = fresh_card_for_camouflage_tests();
+        assert!(card.camouflage_hints.is_empty());
+
+        let json = serde_json::to_string(&card).expect("serialize card without hints");
+        assert!(
+            !json.contains("camouflage_hints"),
+            "skip_serializing_if must omit the field when empty (got: {json})"
+        );
+
+        // Backward-compat: old-shape JSON with no camouflage_hints key must
+        // still deserialise into a card with an empty hint vec.
+        let parsed: TrustCard = serde_json::from_str(&json).expect("deserialize legacy card");
+        assert!(parsed.camouflage_hints.is_empty());
+    }
+
+    #[test]
+    fn apply_camouflage_assessment_clamps_non_finite_severity_to_zero() {
+        // Defense-in-depth: validate_camouflage_hints (called from the
+        // registry path) already rejects NaN/Inf, but the free function
+        // must be robust if a caller skips validation. Severity is clamped
+        // to 0.0, no panic, no risk bump.
+        let mut card = fresh_card_for_camouflage_tests();
+        let baseline_risk = card.user_facing_risk_assessment.level;
+        let mut evidence = BTreeMap::new();
+        evidence.insert("phase_shift_score".to_string(), 0.5);
+        let bogus = CamouflageHint {
+            kind: CamouflageKind::PhaseShift,
+            severity: f64::NAN,
+            evidence,
+            sample_indices: vec![0],
+        };
+        apply_camouflage_assessment(&mut card, &[bogus]);
+        assert_eq!(card.camouflage_hints.len(), 1);
+        assert!(card.camouflage_hints[0].severity.is_finite());
+        assert_eq!(card.camouflage_hints[0].severity, 0.0);
+        assert_eq!(card.user_facing_risk_assessment.level, baseline_risk);
+    }
+
+    #[test]
+    fn camouflage_hint_record_truncates_oversized_inputs() {
+        // Sample indices / evidence keys must be truncated at the per-record
+        // caps so a noisy detector cannot bloat the card.
+        let mut card = fresh_card_for_camouflage_tests();
+        let sample_indices: Vec<usize> = (0..(MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES + 10)).collect();
+        let mut evidence = BTreeMap::new();
+        for i in 0..(MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS + 5) {
+            evidence.insert(format!("evidence_key_{i:03}"), 0.1);
+        }
+        let hint = CamouflageHint {
+            kind: CamouflageKind::DistributionMismatch,
+            severity: 0.40,
+            evidence,
+            sample_indices,
+        };
+        apply_camouflage_assessment(&mut card, &[hint]);
+        let record = &card.camouflage_hints[0];
+        assert_eq!(record.kind, "distribution_mismatch");
+        assert_eq!(
+            record.sample_indices.len(),
+            MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES
+        );
+        assert_eq!(record.evidence_keys.len(), MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS);
+    }
+
+    #[test]
+    fn mark_camouflage_suspected_populates_camouflage_hints_field() {
+        // End-to-end: the registry-level mark API must also surface the
+        // hints on the persisted card via the new field (sub-task 4 wiring).
+        let mut registry = TrustCardRegistry::default();
+        let _first = registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
+        let hints = vec![hint_with_severity(0.55, vec![3, 4, 5])];
+        let next = registry
+            .mark_camouflage_suspected(
+                "npm:@acme/plugin",
+                &hints,
+                test_evidence_refs(),
+                1_030,
+                "trace-camouflage-record",
+            )
+            .expect("mark");
+        assert_eq!(
+            next.camouflage_hints.len(),
+            1,
+            "the persisted card must surface the camouflage hint records"
+        );
+        assert_eq!(next.camouflage_hints[0].kind, "phase_shift");
+        assert!((next.camouflage_hints[0].severity - 0.55).abs() < f64::EPSILON);
+        // Signature must still verify with the new field part of the hash.
+        verify_card_signature(&next, DEFAULT_REGISTRY_KEY).expect("signature valid");
+        // Confirm the bare-bones CamouflageHintRecord shape compiles + clones.
+        let _clone: CamouflageHintRecord = next.camouflage_hints[0].clone();
     }
 
     #[test]
@@ -5544,6 +5911,7 @@ mod tests {
                 },
             ],
             derivation_evidence: Some(derivation_evidence),
+            camouflage_hints: Vec::new(),
             card_hash: String::new(),
             registry_signature: String::new(),
         };
