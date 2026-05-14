@@ -3211,6 +3211,8 @@ mod tests {
 
 #[cfg(test)]
 mod verifier_sdk_boundary_negative_tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
 
     fn malicious_request(artifact_id: &str, hash: &str, claims: Vec<&str>) -> VerificationRequest {
@@ -3798,7 +3800,8 @@ mod verifier_sdk_boundary_negative_tests {
 
                 // Merge results back
                 {
-                    let mut shared = results.lock().unwrap();
+                    let mut shared = try_lock(&results, "verifier sdk concurrent results merge")
+                        .expect("results mutex should lock for concurrent merge");
                     shared.extend(thread_results);
                 }
             });
@@ -3811,7 +3814,8 @@ mod verifier_sdk_boundary_negative_tests {
             handle.join().expect("Thread should complete successfully");
         }
 
-        let final_results = results.lock().unwrap();
+        let final_results = try_lock(&results, "verifier sdk concurrent final results")
+            .expect("results mutex should lock for concurrent final verification");
 
         // Verify all operations completed
         assert_eq!(final_results.len(), thread_count * operations_per_thread);
@@ -6441,6 +6445,8 @@ mod verifier_sdk_boundary_negative_tests {
 
 #[cfg(test)]
 mod verifier_sdk_comprehensive_attack_vector_tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::{Arc, Mutex};
@@ -6749,7 +6755,9 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
                         thread_results.push((thread_id, op_id, result.is_ok()));
                     }
 
-                    results_clone.lock().unwrap().extend(thread_results);
+                    try_lock(&results_clone, "verifier sdk stress results merge")
+                        .expect("results mutex should lock for stress merge")
+                        .extend(thread_results);
                 })
             })
             .collect();
@@ -6759,7 +6767,8 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
             handle.join().expect("Thread should complete successfully");
         }
 
-        let all_results = results.lock().unwrap();
+        let all_results = try_lock(&results, "verifier sdk stress final results")
+            .expect("results mutex should lock for stress final verification");
 
         // Verify all operations completed
         assert_eq!(all_results.len(), thread_count * operations_per_thread);
@@ -7846,7 +7855,9 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
                     thread::yield_now();
                 }
 
-                results_clone.lock().unwrap().extend(thread_results);
+                try_lock(&results_clone, "verifier sdk error pattern results merge")
+                    .expect("results mutex should lock for error pattern merge")
+                    .extend(thread_results);
             });
 
             handles.push(handle);
@@ -7856,7 +7867,8 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
             handle.join().expect("Thread should complete");
         }
 
-        let final_results = results.lock().unwrap();
+        let final_results = try_lock(&results, "verifier sdk error pattern final results")
+            .expect("results mutex should lock for error pattern final verification");
 
         // Verify error/success pattern is maintained across threads
         for &(thread_id, attempt, is_ok) in final_results.iter() {
