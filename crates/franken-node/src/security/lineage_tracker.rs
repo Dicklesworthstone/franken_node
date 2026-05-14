@@ -13,7 +13,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::push_bounded;
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+type HmacSha256 = Hmac<Sha256>;
 
 // ---------------------------------------------------------------------------
 // Schema version
@@ -38,6 +42,7 @@ pub const EVENT_CONFIG_RELOADED: &str = "FN-IFL-009";
 pub const EVENT_DEPTH_LIMIT: &str = "FN-IFL-010";
 pub const EVENT_TAINT_MERGE: &str = "FN-IFL-011";
 pub const EVENT_HEALTH_CHECK: &str = "FN-IFL-012";
+pub const EVENT_SIGNED_LINEAGE_BUILT: &str = "FN-IFL-013";
 
 // Canonical event codes required by bd-2iyk acceptance criteria.
 pub const LINEAGE_TAG_ATTACHED: &str = "LINEAGE_TAG_ATTACHED";
@@ -60,6 +65,7 @@ pub const ERR_IFL_QUERY_INVALID: &str = "ERR_IFL_QUERY_INVALID";
 pub const ERR_IFL_CONFIG_REJECTED: &str = "ERR_IFL_CONFIG_REJECTED";
 pub const ERR_IFL_ALREADY_QUARANTINED: &str = "ERR_IFL_ALREADY_QUARANTINED";
 pub const ERR_IFL_TIMEOUT: &str = "ERR_IFL_TIMEOUT";
+pub const ERR_SIGNED_LINEAGE_INVALID: &str = "ERR_SIGNED_LINEAGE_INVALID";
 
 // Canonical error codes required by bd-2iyk acceptance criteria.
 pub const ERR_LINEAGE_TAG_MISSING: &str = "ERR_LINEAGE_TAG_MISSING";
@@ -103,6 +109,11 @@ pub const INV_DETERMINISTIC: &str = "INV-IFL-DETERMINISTIC";
 /// INV-IFL-SNAPSHOT-FAITHFUL: A lineage snapshot faithfully represents the
 /// graph at the moment of capture.
 pub const INV_SNAPSHOT_FAITHFUL: &str = "INV-IFL-SNAPSHOT-FAITHFUL";
+
+/// INV-SIGNED-LINEAGE-COMPLETE: A signed supply-chain lineage graph links the
+/// released version to maintainers, dependency deltas, and build pipeline
+/// transitions before a signature can be emitted.
+pub const INV_SIGNED_LINEAGE_COMPLETE: &str = "INV-SIGNED-LINEAGE-COMPLETE";
 
 // Canonical invariant identifiers required by bd-2iyk acceptance criteria.
 
@@ -514,6 +525,402 @@ pub struct LineageSnapshot {
     pub edges: Vec<FlowEdge>,
     pub labels: BTreeMap<String, TaintLabel>,
     pub schema_version: String,
+}
+
+/// Schema version for signed supply-chain lineage graphs.
+pub const SIGNED_LINEAGE_SCHEMA_VERSION: &str = "signed-lineage-v1.0";
+
+/// Version identity at the root of a signed supply-chain lineage graph.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedLineageVersion {
+    pub package: String,
+    pub version: String,
+    pub artifact_digest: String,
+    pub published_at_ms: u64,
+}
+
+/// Maintainer identity that can be linked to a published version.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SignedLineageMaintainer {
+    pub maintainer_id: String,
+    pub key_fingerprint: String,
+    pub role: String,
+}
+
+/// Dependency edge captured in the signed lineage graph.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SignedLineageDependency {
+    pub package: String,
+    pub version_req: String,
+    pub resolved_digest: String,
+}
+
+/// Build or release pipeline transition captured in the signed lineage graph.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SignedLineagePipelineTransition {
+    pub stage: String,
+    pub runner_id: String,
+    pub input_digest: String,
+    pub output_digest: String,
+    pub timestamp_ms: u64,
+}
+
+/// Input accepted by [`SignedLineageGraphBuilder`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedLineageGraphInput {
+    pub root_version: SignedLineageVersion,
+    pub maintainers: Vec<SignedLineageMaintainer>,
+    pub dependencies: Vec<SignedLineageDependency>,
+    pub pipeline_transitions: Vec<SignedLineagePipelineTransition>,
+}
+
+/// Deterministic node emitted by the signed lineage builder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedLineageNode {
+    pub node_id: String,
+    pub kind: String,
+    pub evidence_digest: String,
+}
+
+/// Deterministic edge emitted by the signed lineage builder.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SignedLineageEdge {
+    pub source: String,
+    pub target: String,
+    pub relation: String,
+    pub evidence_digest: String,
+}
+
+/// Signature over the canonical signed-lineage digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedLineageSignature {
+    pub algorithm: String,
+    pub signer_id: String,
+    pub key_fingerprint: String,
+    pub value: String,
+}
+
+/// Signed graph linking a released version to maintainers, dependencies, and
+/// pipeline transitions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedLineageGraphArtifact {
+    pub schema_version: String,
+    pub graph_id: String,
+    pub root_version: SignedLineageVersion,
+    pub nodes: BTreeMap<String, SignedLineageNode>,
+    pub edges: Vec<SignedLineageEdge>,
+    pub canonical_digest: String,
+    pub signature: SignedLineageSignature,
+}
+
+#[derive(Debug, Serialize)]
+struct SignedLineageCanonicalPayload {
+    schema_version: &'static str,
+    root_version: SignedLineageVersion,
+    maintainers: Vec<SignedLineageMaintainer>,
+    dependencies: Vec<SignedLineageDependency>,
+    pipeline_transitions: Vec<SignedLineagePipelineTransition>,
+}
+
+/// Builder for deterministic signed supply-chain lineage graphs.
+#[derive(Debug, Clone)]
+pub struct SignedLineageGraphBuilder {
+    signer_id: String,
+    key_fingerprint: String,
+    signing_secret: Vec<u8>,
+}
+
+impl SignedLineageGraphBuilder {
+    /// Create a builder with explicit signing identity and secret material.
+    pub fn new(
+        signer_id: impl Into<String>,
+        key_fingerprint: impl Into<String>,
+        signing_secret: impl AsRef<[u8]>,
+    ) -> Result<Self, LineageError> {
+        let builder = Self {
+            signer_id: signer_id.into(),
+            key_fingerprint: key_fingerprint.into(),
+            signing_secret: signing_secret.as_ref().to_vec(),
+        };
+        builder.validate_identity()?;
+        Ok(builder)
+    }
+
+    /// Build and sign a lineage graph. Event: FN-IFL-013.
+    /// INV-SIGNED-LINEAGE-COMPLETE.
+    pub fn build(
+        &self,
+        mut input: SignedLineageGraphInput,
+    ) -> Result<SignedLineageGraphArtifact, LineageError> {
+        let _event = EVENT_SIGNED_LINEAGE_BUILT;
+        let _inv = INV_SIGNED_LINEAGE_COMPLETE;
+
+        validate_signed_lineage_input(&input)?;
+
+        input.maintainers.sort();
+        input.dependencies.sort();
+        input.pipeline_transitions.sort_by(|left, right| {
+            (
+                left.timestamp_ms,
+                &left.stage,
+                &left.runner_id,
+                &left.input_digest,
+                &left.output_digest,
+            )
+                .cmp(&(
+                    right.timestamp_ms,
+                    &right.stage,
+                    &right.runner_id,
+                    &right.input_digest,
+                    &right.output_digest,
+                ))
+        });
+
+        let canonical = SignedLineageCanonicalPayload {
+            schema_version: SIGNED_LINEAGE_SCHEMA_VERSION,
+            root_version: input.root_version.clone(),
+            maintainers: input.maintainers.clone(),
+            dependencies: input.dependencies.clone(),
+            pipeline_transitions: input.pipeline_transitions.clone(),
+        };
+        let canonical_bytes =
+            serde_json::to_vec(&canonical).map_err(|err| LineageError::SnapshotFailed {
+                detail: format!(
+                    "{}: failed serializing signed lineage canonical payload: {err}",
+                    ERR_IFL_SNAPSHOT_FAILED
+                ),
+            })?;
+        let canonical_digest = sha256_hex(&canonical_bytes);
+        let signature_value = self.sign_digest(&canonical_digest)?;
+        let graph_id = format!(
+            "signed-lineage:{}@{}:{}",
+            input.root_version.package,
+            input.root_version.version,
+            &canonical_digest[..16]
+        );
+
+        let version_node_id = version_node_id(&input.root_version);
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            version_node_id.clone(),
+            SignedLineageNode {
+                node_id: version_node_id.clone(),
+                kind: "version".to_string(),
+                evidence_digest: input.root_version.artifact_digest.clone(),
+            },
+        );
+
+        let mut edges = Vec::new();
+        for maintainer in &input.maintainers {
+            let node_id = maintainer_node_id(maintainer);
+            nodes.insert(
+                node_id.clone(),
+                SignedLineageNode {
+                    node_id: node_id.clone(),
+                    kind: "maintainer".to_string(),
+                    evidence_digest: maintainer.key_fingerprint.clone(),
+                },
+            );
+            edges.push(SignedLineageEdge {
+                source: node_id,
+                target: version_node_id.clone(),
+                relation: format!("maintains:{}", maintainer.role),
+                evidence_digest: maintainer.key_fingerprint.clone(),
+            });
+        }
+
+        for dependency in &input.dependencies {
+            let node_id = dependency_node_id(dependency);
+            nodes.insert(
+                node_id.clone(),
+                SignedLineageNode {
+                    node_id: node_id.clone(),
+                    kind: "dependency".to_string(),
+                    evidence_digest: dependency.resolved_digest.clone(),
+                },
+            );
+            edges.push(SignedLineageEdge {
+                source: version_node_id.clone(),
+                target: node_id,
+                relation: "depends_on".to_string(),
+                evidence_digest: dependency.resolved_digest.clone(),
+            });
+        }
+
+        let mut previous_pipeline_node = version_node_id.clone();
+        for transition in &input.pipeline_transitions {
+            let node_id = pipeline_node_id(transition);
+            nodes.insert(
+                node_id.clone(),
+                SignedLineageNode {
+                    node_id: node_id.clone(),
+                    kind: "pipeline_transition".to_string(),
+                    evidence_digest: transition.output_digest.clone(),
+                },
+            );
+            edges.push(SignedLineageEdge {
+                source: previous_pipeline_node,
+                target: node_id.clone(),
+                relation: "pipeline_transition".to_string(),
+                evidence_digest: format!(
+                    "{}->{}",
+                    transition.input_digest, transition.output_digest
+                ),
+            });
+            previous_pipeline_node = node_id;
+        }
+        edges.push(SignedLineageEdge {
+            source: previous_pipeline_node,
+            target: version_node_id,
+            relation: "produces_version".to_string(),
+            evidence_digest: input.root_version.artifact_digest.clone(),
+        });
+        edges.sort();
+
+        Ok(SignedLineageGraphArtifact {
+            schema_version: SIGNED_LINEAGE_SCHEMA_VERSION.to_string(),
+            graph_id,
+            root_version: input.root_version,
+            nodes,
+            edges,
+            canonical_digest,
+            signature: SignedLineageSignature {
+                algorithm: "hmac-sha256".to_string(),
+                signer_id: self.signer_id.clone(),
+                key_fingerprint: self.key_fingerprint.clone(),
+                value: signature_value,
+            },
+        })
+    }
+
+    fn validate_identity(&self) -> Result<(), LineageError> {
+        if self.signer_id.trim().is_empty()
+            || self.key_fingerprint.trim().is_empty()
+            || self.signing_secret.is_empty()
+        {
+            return Err(LineageError::QueryInvalid {
+                detail: format!(
+                    "{}: signer_id, key_fingerprint, and signing_secret must be non-empty",
+                    ERR_SIGNED_LINEAGE_INVALID
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn sign_digest(&self, canonical_digest: &str) -> Result<String, LineageError> {
+        let mut mac = HmacSha256::new_from_slice(&self.signing_secret).map_err(|err| {
+            LineageError::SnapshotFailed {
+                detail: format!(
+                    "{}: failed initializing signed lineage HMAC: {err}",
+                    ERR_IFL_SNAPSHOT_FAILED
+                ),
+            }
+        })?;
+        mac.update(canonical_digest.as_bytes());
+        Ok(hex::encode(mac.finalize().into_bytes()))
+    }
+}
+
+fn validate_signed_lineage_input(input: &SignedLineageGraphInput) -> Result<(), LineageError> {
+    if input.root_version.package.trim().is_empty()
+        || input.root_version.version.trim().is_empty()
+        || input.root_version.artifact_digest.trim().is_empty()
+    {
+        return Err(signed_lineage_invalid(
+            "root_version package, version, and artifact_digest must be non-empty",
+        ));
+    }
+    if input.maintainers.is_empty() {
+        return Err(signed_lineage_invalid(
+            "at least one maintainer is required",
+        ));
+    }
+    if input.dependencies.is_empty() {
+        return Err(signed_lineage_invalid(
+            "at least one dependency is required",
+        ));
+    }
+    if input.pipeline_transitions.is_empty() {
+        return Err(signed_lineage_invalid(
+            "at least one pipeline transition is required",
+        ));
+    }
+    for maintainer in &input.maintainers {
+        if maintainer.maintainer_id.trim().is_empty()
+            || maintainer.key_fingerprint.trim().is_empty()
+            || maintainer.role.trim().is_empty()
+        {
+            return Err(signed_lineage_invalid(
+                "maintainer id, key_fingerprint, and role must be non-empty",
+            ));
+        }
+    }
+    for dependency in &input.dependencies {
+        if dependency.package.trim().is_empty()
+            || dependency.version_req.trim().is_empty()
+            || dependency.resolved_digest.trim().is_empty()
+        {
+            return Err(signed_lineage_invalid(
+                "dependency package, version_req, and resolved_digest must be non-empty",
+            ));
+        }
+    }
+    let mut previous_timestamp = None;
+    for transition in &input.pipeline_transitions {
+        if transition.stage.trim().is_empty()
+            || transition.runner_id.trim().is_empty()
+            || transition.input_digest.trim().is_empty()
+            || transition.output_digest.trim().is_empty()
+        {
+            return Err(signed_lineage_invalid(
+                "pipeline stage, runner_id, input_digest, and output_digest must be non-empty",
+            ));
+        }
+        if let Some(previous) = previous_timestamp
+            && transition.timestamp_ms < previous
+        {
+            return Err(signed_lineage_invalid(
+                "pipeline transition timestamps must be monotonic",
+            ));
+        }
+        previous_timestamp = Some(transition.timestamp_ms);
+    }
+    Ok(())
+}
+
+fn signed_lineage_invalid(detail: &str) -> LineageError {
+    LineageError::QueryInvalid {
+        detail: format!("{}: {detail}", ERR_SIGNED_LINEAGE_INVALID),
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+fn version_node_id(version: &SignedLineageVersion) -> String {
+    format!("version:{}@{}", version.package, version.version)
+}
+
+fn maintainer_node_id(maintainer: &SignedLineageMaintainer) -> String {
+    format!("maintainer:{}", maintainer.maintainer_id)
+}
+
+fn dependency_node_id(dependency: &SignedLineageDependency) -> String {
+    format!(
+        "dependency:{}@{}",
+        dependency.package, dependency.version_req
+    )
+}
+
+fn pipeline_node_id(transition: &SignedLineagePipelineTransition) -> String {
+    format!(
+        "pipeline:{}:{}:{}",
+        transition.stage, transition.runner_id, transition.timestamp_ms
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1931,6 +2338,165 @@ mod tests {
             timestamp_ms,
             quarantined: false,
         }
+    }
+
+    fn sample_signed_lineage_input() -> SignedLineageGraphInput {
+        SignedLineageGraphInput {
+            root_version: SignedLineageVersion {
+                package: "franken-widget".to_string(),
+                version: "1.2.3".to_string(),
+                artifact_digest: "sha256:artifact-root".to_string(),
+                published_at_ms: 1_710_000_000,
+            },
+            maintainers: vec![
+                SignedLineageMaintainer {
+                    maintainer_id: "maintainer-b".to_string(),
+                    key_fingerprint: "key-b".to_string(),
+                    role: "reviewer".to_string(),
+                },
+                SignedLineageMaintainer {
+                    maintainer_id: "maintainer-a".to_string(),
+                    key_fingerprint: "key-a".to_string(),
+                    role: "publisher".to_string(),
+                },
+            ],
+            dependencies: vec![
+                SignedLineageDependency {
+                    package: "left-pad".to_string(),
+                    version_req: "^1.0.0".to_string(),
+                    resolved_digest: "sha256:left-pad".to_string(),
+                },
+                SignedLineageDependency {
+                    package: "colorize".to_string(),
+                    version_req: "2.4.0".to_string(),
+                    resolved_digest: "sha256:colorize".to_string(),
+                },
+            ],
+            pipeline_transitions: vec![
+                SignedLineagePipelineTransition {
+                    stage: "build".to_string(),
+                    runner_id: "runner-a".to_string(),
+                    input_digest: "sha256:source-tree".to_string(),
+                    output_digest: "sha256:build-output".to_string(),
+                    timestamp_ms: 1_710_000_100,
+                },
+                SignedLineagePipelineTransition {
+                    stage: "publish".to_string(),
+                    runner_id: "runner-b".to_string(),
+                    input_digest: "sha256:build-output".to_string(),
+                    output_digest: "sha256:artifact-root".to_string(),
+                    timestamp_ms: 1_710_000_200,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn signed_lineage_graph_builder_links_all_supply_chain_domains() {
+        let builder =
+            SignedLineageGraphBuilder::new("release-bot", "key-release", b"test-secret").unwrap();
+        let artifact = builder.build(sample_signed_lineage_input()).unwrap();
+
+        assert_eq!(artifact.schema_version, SIGNED_LINEAGE_SCHEMA_VERSION);
+        assert!(
+            artifact
+                .graph_id
+                .starts_with("signed-lineage:franken-widget@1.2.3:")
+        );
+        assert_eq!(artifact.nodes.len(), 7);
+        assert_eq!(artifact.edges.len(), 7);
+        assert_eq!(artifact.signature.algorithm, "hmac-sha256");
+        assert_eq!(artifact.signature.signer_id, "release-bot");
+
+        let has_maintainer_link = artifact.edges.iter().any(|edge| {
+            edge.source.as_str().eq("maintainer:maintainer-a")
+                && edge.target.as_str().eq("version:franken-widget@1.2.3")
+                && edge.relation.as_str().eq("maintains:publisher")
+        });
+        let has_dependency_link = artifact.edges.iter().any(|edge| {
+            edge.source.as_str().eq("version:franken-widget@1.2.3")
+                && edge.target.as_str().eq("dependency:left-pad@^1.0.0")
+                && edge.relation.as_str().eq("depends_on")
+        });
+        let has_pipeline_link = artifact.edges.iter().any(|edge| {
+            edge.source
+                .as_str()
+                .eq("pipeline:build:runner-a:1710000100")
+                && edge
+                    .target
+                    .as_str()
+                    .eq("pipeline:publish:runner-b:1710000200")
+                && edge.relation.as_str().eq("pipeline_transition")
+        });
+        let has_publish_link = artifact.edges.iter().any(|edge| {
+            edge.source
+                .as_str()
+                .eq("pipeline:publish:runner-b:1710000200")
+                && edge.target.as_str().eq("version:franken-widget@1.2.3")
+                && edge.relation.as_str().eq("produces_version")
+        });
+
+        assert!(has_maintainer_link);
+        assert!(has_dependency_link);
+        assert!(has_pipeline_link);
+        assert!(has_publish_link);
+    }
+
+    #[test]
+    fn signed_lineage_graph_builder_is_deterministic_for_unordered_inputs() {
+        let builder =
+            SignedLineageGraphBuilder::new("release-bot", "key-release", b"test-secret").unwrap();
+        let mut left = sample_signed_lineage_input();
+        let right = sample_signed_lineage_input();
+        left.maintainers.reverse();
+        left.dependencies.reverse();
+
+        let left_artifact = builder.build(left).unwrap();
+        let right_artifact = builder.build(right).unwrap();
+
+        assert_eq!(
+            left_artifact.canonical_digest,
+            right_artifact.canonical_digest
+        );
+        assert_eq!(
+            left_artifact.signature.value,
+            right_artifact.signature.value
+        );
+        assert_eq!(left_artifact.nodes, right_artifact.nodes);
+        assert_eq!(left_artifact.edges, right_artifact.edges);
+    }
+
+    #[test]
+    fn signed_lineage_graph_builder_rejects_missing_dependency_links() {
+        let builder =
+            SignedLineageGraphBuilder::new("release-bot", "key-release", b"test-secret").unwrap();
+        let mut input = sample_signed_lineage_input();
+        input.dependencies.clear();
+
+        let err = builder.build(input).unwrap_err();
+
+        assert!(err.to_string().contains(ERR_SIGNED_LINEAGE_INVALID));
+        assert!(err.to_string().contains("dependency"));
+    }
+
+    #[test]
+    fn signed_lineage_graph_signature_changes_when_dependency_digest_changes() {
+        let builder =
+            SignedLineageGraphBuilder::new("release-bot", "key-release", b"test-secret").unwrap();
+        let baseline = builder.build(sample_signed_lineage_input()).unwrap();
+        let mut changed = sample_signed_lineage_input();
+        let mut changed_dependency = false;
+        for dependency in &mut changed.dependencies {
+            if dependency.package.as_str().eq("left-pad") {
+                dependency.resolved_digest = "sha256:left-pad-v2".to_string();
+                changed_dependency = true;
+            }
+        }
+        assert!(changed_dependency);
+        let changed = builder.build(changed).unwrap();
+
+        assert_ne!(baseline.canonical_digest, changed.canonical_digest);
+        assert_ne!(baseline.signature.value, changed.signature.value);
     }
 
     #[test]

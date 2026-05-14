@@ -182,6 +182,10 @@ name = "validation_readiness"
 path = "tests/validation_readiness.rs"
 
 [[test]]
+name = "signed_lineage_graph_builder"
+path = "../../tests/security/signed_lineage_graph_builder.rs"
+
+[[test]]
 name = "swarm_handoff_evidence"
 path = "tests/swarm_handoff_evidence.rs"
 

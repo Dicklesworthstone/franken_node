@@ -1,32 +1,136 @@
 {
-  "schema_version": "evidence-v1.0",
+  "schema_version": "franken-node/verification-evidence/v1",
+  "gate": "signed_lineage_graph_builder",
   "bead_id": "bd-3rai",
+  "completion_debt_bead_id": "bd-3rai.1",
   "section": "10.21",
-  "title": "Signed lineage graph builder",
   "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
-  "failed": 0,
+  "passed": 6,
+  "total": 6,
+  "cargo_skipped": false,
+  "source_paths": [
+    "crates/franken-node/src/security/lineage_tracker.rs",
+    "tests/security/signed_lineage_graph_builder.rs",
+    "crates/franken-node/Cargo.toml",
+    "artifacts/section_10_21/bd-3rai/verification_evidence.json",
+    "artifacts/section_10_21/bd-3rai/verification_summary.md"
+  ],
   "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
-    {"check": "event_codes_present", "pass": true},
-    {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "genome_schema_compliance", "pass": true},
-    {"check": "phenotype_extraction", "pass": true},
-    {"check": "lineage_tracking", "pass": true},
-    {"check": "drift_detection", "pass": true},
-    {"check": "changepoint_detection", "pass": true},
-    {"check": "survival_model", "pass": true},
-    {"check": "risk_scoring", "pass": true},
-    {"check": "cross_system_integration", "pass": true},
-    {"check": "adversarial_robustness", "pass": true}
+    {
+      "name": "signed_lineage_types",
+      "passed": true,
+      "message": "lineage_tracker.rs exposes typed signed lineage inputs, nodes, edges, signatures, and artifacts",
+      "details": {
+        "line_range": "crates/franken-node/src/security/lineage_tracker.rs:530-614",
+        "symbols": [
+          "SignedLineageVersion",
+          "SignedLineageMaintainer",
+          "SignedLineageDependency",
+          "SignedLineagePipelineTransition",
+          "SignedLineageGraphInput",
+          "SignedLineageNode",
+          "SignedLineageEdge",
+          "SignedLineageSignature",
+          "SignedLineageGraphArtifact"
+        ]
+      }
+    },
+    {
+      "name": "builder_links_domains",
+      "passed": true,
+      "message": "SignedLineageGraphBuilder links the release version to maintainers, dependencies, pipeline transitions, and final produced-version edge",
+      "details": {
+        "line_range": "crates/franken-node/src/security/lineage_tracker.rs:625-823",
+        "builder_symbol": "SignedLineageGraphBuilder",
+        "relations": [
+          "maintains:<role>",
+          "depends_on",
+          "pipeline_transition",
+          "produces_version"
+        ],
+        "signature_algorithm": "hmac-sha256"
+      }
+    },
+    {
+      "name": "fail_closed_validation",
+      "passed": true,
+      "message": "builder rejects missing signer material and missing version, maintainer, dependency, or pipeline data before signing",
+      "details": {
+        "line_range": "crates/franken-node/src/security/lineage_tracker.rs:796-895",
+        "error_code": "ERR_SIGNED_LINEAGE_INVALID",
+        "invariant": "INV-SIGNED-LINEAGE-COMPLETE"
+      }
+    },
+    {
+      "name": "deterministic_signature_material",
+      "passed": true,
+      "message": "canonical payload uses sorted maintainers/dependencies and timestamp-ordered pipeline transitions before SHA-256 digest + HMAC signature",
+      "details": {
+        "line_range": "crates/franken-node/src/security/lineage_tracker.rs:658-694",
+        "digest_function": "sha256_hex",
+        "signature_function": "SignedLineageGraphBuilder::sign_digest"
+      }
+    },
+    {
+      "name": "inline_tests_present",
+      "passed": true,
+      "message": "four inline regression tests mirror the executable integration coverage for domain links, determinism, fail-closed dependency validation, and signature drift",
+      "details": {
+        "line_range": "crates/franken-node/src/security/lineage_tracker.rs:2394-2486",
+        "tests": [
+          "signed_lineage_graph_builder_links_all_supply_chain_domains",
+          "signed_lineage_graph_builder_is_deterministic_for_unordered_inputs",
+          "signed_lineage_graph_builder_rejects_missing_dependency_links",
+          "signed_lineage_graph_signature_changes_when_dependency_digest_changes"
+        ]
+      }
+    },
+    {
+      "name": "integration_test_registered",
+      "passed": true,
+      "message": "crate manifest registers the root security integration test as the signed_lineage_graph_builder target",
+      "details": {
+        "cargo_toml_range": "crates/franken-node/Cargo.toml:184-186",
+        "test_path": "tests/security/signed_lineage_graph_builder.rs",
+        "test_line_ranges": [
+          "tests/security/signed_lineage_graph_builder.rs:59-103",
+          "tests/security/signed_lineage_graph_builder.rs:106-128",
+          "tests/security/signed_lineage_graph_builder.rs:131-147",
+          "tests/security/signed_lineage_graph_builder.rs:150-168"
+        ]
+      }
+    },
+    {
+      "name": "cargo_signed_lineage_tests",
+      "passed": true,
+      "message": "RCH executed the registered signed_lineage_graph_builder integration test target successfully",
+      "details": {
+        "command": [
+          "rch",
+          "exec",
+          "--",
+          "env",
+          "CARGO_INCREMENTAL=0",
+          "CARGO_BUILD_JOBS=1",
+          "CARGO_TARGET_DIR=/data/tmp/franken_node-snowybeaver-bd3rai-integration-target",
+          "cargo",
+          "test",
+          "-p",
+          "frankenengine-node",
+          "--test",
+          "signed_lineage_graph_builder",
+          "--no-default-features",
+          "--",
+          "--nocapture"
+        ],
+        "worker": "vmi1167313",
+        "rch_job_id": "29840908367167944",
+        "exit_code": 0,
+        "duration_ms": 1052580,
+        "test_result": "4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
+        "completed_at_utc": "2026-05-14T10:36:09.474627Z",
+        "note": "The first registered-target attempt failed on a transient unrelated trust_card.rs Eq derive race; the final post-UBS rerun succeeded against the current workspace snapshot."
+      }
+    }
   ]
 }
