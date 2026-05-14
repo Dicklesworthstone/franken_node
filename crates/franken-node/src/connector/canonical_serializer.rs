@@ -3363,6 +3363,7 @@ mod tests {
 #[cfg(test)]
 mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
     use super::*;
+    use crate::lock_utils::try_lock;
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -3843,13 +3844,13 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                         };
 
                         let result = {
-                            let mut serializer_guard = serializer_clone.lock().unwrap();
+                            let mut serializer_guard =
+                                try_lock(&serializer_clone).expect("serializer mutex should lock");
                             serializer_guard.register_schema(schema)
                         };
 
-                        results_clone
-                            .lock()
-                            .unwrap()
+                        try_lock(&results_clone)
+                            .expect("registration results mutex should lock")
                             .push((thread_id, schema_id, result.is_ok()));
                     }
                 })
@@ -3861,8 +3862,10 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             handle.join().expect("Thread should complete");
         }
 
-        let final_results = registration_results.lock().unwrap();
-        let final_serializer = concurrent_serializer.lock().unwrap();
+        let final_results =
+            try_lock(&registration_results).expect("registration results mutex should lock");
+        let final_serializer =
+            try_lock(&concurrent_serializer).expect("serializer mutex should lock");
 
         // Verify concurrent registrations completed without corruption
         assert_eq!(
@@ -4312,7 +4315,8 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                         });
 
                         let result = {
-                            let serializer_guard = serializer_clone.lock().unwrap();
+                            let serializer_guard =
+                                try_lock(&serializer_clone).expect("serializer mutex should lock");
                             serializer_guard
                                 .serialize_canonical(TrustObjectType::SessionTicket, &test_data)
                         };
@@ -4323,21 +4327,15 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                                 let bytes = preimage.to_bytes();
                                 let hash = preimage.content_hash_prefix();
 
-                                results_clone.lock().unwrap().push((
-                                    thread_id,
-                                    iteration,
-                                    bytes.len(),
-                                    hash,
-                                ));
+                                try_lock(&results_clone)
+                                    .expect("roundtrip results mutex should lock")
+                                    .push((thread_id, iteration, bytes.len(), hash));
                             }
                             Err(_) => {
                                 // Track failures
-                                results_clone.lock().unwrap().push((
-                                    thread_id,
-                                    iteration,
-                                    0,
-                                    "ERROR".to_string(),
-                                ));
+                                try_lock(&results_clone)
+                                    .expect("roundtrip results mutex should lock")
+                                    .push((thread_id, iteration, 0, "ERROR".to_string()));
                             }
                         }
                     }
@@ -4350,7 +4348,8 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             handle.join().expect("Round-trip thread should complete");
         }
 
-        let final_roundtrip_results = roundtrip_results.lock().unwrap();
+        let final_roundtrip_results =
+            try_lock(&roundtrip_results).expect("roundtrip results mutex should lock");
         assert_eq!(
             final_roundtrip_results.len(),
             20 * 50,
@@ -4682,16 +4681,15 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                         });
 
                         let result = {
-                            let serializer_guard = serializer_clone.lock().unwrap();
+                            let serializer_guard =
+                                try_lock(&serializer_clone).expect("serializer mutex should lock");
                             serializer_guard
                                 .serialize_canonical(TrustObjectType::OperatorReceipt, &test_data)
                         };
 
-                        results_clone.lock().unwrap().push((
-                            thread_id,
-                            operation_id,
-                            result.is_ok(),
-                        ));
+                        try_lock(&results_clone)
+                            .expect("concurrent audit results mutex should lock")
+                            .push((thread_id, operation_id, result.is_ok()));
                     }
                 })
             })
@@ -4702,7 +4700,8 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             handle.join().expect("Audit thread should complete");
         }
 
-        let final_concurrent_results = concurrent_results.lock().unwrap();
+        let final_concurrent_results =
+            try_lock(&concurrent_results).expect("concurrent audit results mutex should lock");
         assert_eq!(
             final_concurrent_results.len(),
             30 * 20,
@@ -4722,7 +4721,8 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         );
 
         // Test 3: Audit event data integrity and tampering resistance
-        let integrity_serializer = concurrent_serializer.lock().unwrap();
+        let integrity_serializer =
+            try_lock(&concurrent_serializer).expect("serializer mutex should lock");
 
         let integrity_test_vectors = vec![
             // Normal operations
@@ -5331,7 +5331,8 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
                     expires_at: Some(1000000000 + i as u64),
                 };
 
-                let serializer_guard = serializer_clone.lock().unwrap();
+                let serializer_guard =
+                    try_lock(&serializer_clone).expect("serializer mutex should lock");
                 serializer_guard.serialize(&trust_object)
             });
             handles.push(handle);

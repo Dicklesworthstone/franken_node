@@ -1384,6 +1384,8 @@ impl Default for ControlPlaneDivergenceGate {
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::{
         ActiveDivergence, ControlPlaneDivergenceGate, DetectionResult, DivergenceGateError,
         GateState, MutationKind, OperatorAuthorization, OperatorAuthorizationKeyRecord,
@@ -3257,7 +3259,8 @@ mod tests {
                         };
 
                         let detection_result = {
-                            let mut gate_guard = gate_clone.lock().unwrap();
+                            let mut gate_guard =
+                                try_lock(&gate_clone).expect("divergence gate mutex should lock");
                             gate_guard.check_propagation(
                                 &local,
                                 &remote,
@@ -3269,7 +3272,9 @@ mod tests {
                         thread_results.push((thread_id, iteration, detection_result.0));
                     }
 
-                    results_clone.lock().unwrap().extend(thread_results);
+                    try_lock(&results_clone)
+                        .expect("divergence detection results mutex should lock")
+                        .extend(thread_results);
                 })
             })
             .collect();
@@ -3279,7 +3284,8 @@ mod tests {
             handle.join().expect("Detection thread should complete");
         }
 
-        let detection_results = results.lock().unwrap();
+        let detection_results =
+            try_lock(&results).expect("divergence detection results mutex should lock");
         assert!(
             !detection_results.is_empty(),
             "Should have detection results"
@@ -3297,7 +3303,8 @@ mod tests {
                         match response_type {
                             0 => {
                                 let _ = {
-                                    let mut gate_guard = gate_clone.lock().unwrap();
+                                    let mut gate_guard = try_lock(&gate_clone)
+                                        .expect("divergence gate mutex should lock");
                                     gate_guard.respond_halt(
                                         10000 + attempt,
                                         &format!("concurrent-halt-{}-{}", thread_id, attempt),
@@ -3306,7 +3313,8 @@ mod tests {
                             }
                             1 => {
                                 let _ = {
-                                    let mut gate_guard = gate_clone.lock().unwrap();
+                                    let mut gate_guard = try_lock(&gate_clone)
+                                        .expect("divergence gate mutex should lock");
                                     gate_guard.respond_quarantine(
                                         format!("concurrent-partition-{}-{}", thread_id, attempt),
                                         format!("concurrent-node-{}", thread_id),
@@ -3317,7 +3325,8 @@ mod tests {
                             }
                             2 => {
                                 let _ = {
-                                    let mut gate_guard = gate_clone.lock().unwrap();
+                                    let mut gate_guard = try_lock(&gate_clone)
+                                        .expect("divergence gate mutex should lock");
                                     gate_guard.respond_alert(
                                         10000 + attempt,
                                         &format!("concurrent-alert-{}-{}", thread_id, attempt),
@@ -3333,7 +3342,8 @@ mod tests {
                                     b"concurrent-key",
                                 );
                                 let _ = {
-                                    let mut gate_guard = gate_clone.lock().unwrap();
+                                    let mut gate_guard = try_lock(&gate_clone)
+                                        .expect("divergence gate mutex should lock");
                                     gate_guard.respond_recover(
                                         &auth,
                                         &auth_key(&auth, b"concurrent-key"),
@@ -3374,7 +3384,8 @@ mod tests {
 
                         let kind = &mutation_kinds[memory_iteration % mutation_kinds.len()];
                         let _ = {
-                            let mut gate_guard = gate_clone.lock().unwrap();
+                            let mut gate_guard =
+                                try_lock(&gate_clone).expect("divergence gate mutex should lock");
                             gate_guard.check_mutation(
                                 kind,
                                 11000 + memory_iteration as u64,
@@ -3394,7 +3405,7 @@ mod tests {
         }
 
         // Verify final state consistency after concurrent attacks
-        let final_gate = gate.lock().unwrap();
+        let final_gate = try_lock(&gate).expect("divergence gate mutex should lock");
 
         // Verify capacity constraints were maintained
         assert!(
