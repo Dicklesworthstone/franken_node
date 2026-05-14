@@ -1143,9 +1143,14 @@ mod tests {
 #[cfg(test)]
 mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
     use super::*;
+    use crate::lock_utils;
     use std::collections::{HashMap, HashSet};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, MutexGuard};
     use std::thread;
+
+    fn lock_test_mutex<'a, T>(mutex: &'a Arc<Mutex<T>>, context: &str) -> MutexGuard<'a, T> {
+        lock_utils::try_lock(mutex.as_ref(), context).expect(context)
+    }
 
     #[test]
     fn negative_floating_point_precision_and_nan_infinity_injection_comprehensive() {
@@ -1602,12 +1607,14 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     .unwrap();
 
                     let result = {
-                        let mut graph_guard = graph_clone.lock().unwrap();
+                        let mut graph_guard =
+                            lock_test_mutex(&graph_clone, "adversary graph concurrency mutex");
                         graph_guard.ingest(&observation)
                     };
 
                     {
-                        let mut results = results_clone.lock().unwrap();
+                        let mut results =
+                            lock_test_mutex(&results_clone, "adversary graph result mutex");
                         push_bounded(&mut *results, (principal, result), 100);
                     }
                 })
@@ -1619,8 +1626,8 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             handle.join().expect("Thread should complete");
         }
 
-        let final_results = results.lock().unwrap();
-        let final_graph = graph_arc.lock().unwrap();
+        let final_results = lock_test_mutex(&results, "adversary graph final results mutex");
+        let final_graph = lock_test_mutex(&graph_arc, "adversary graph final graph mutex");
 
         // Verify all principals are distinct in the final graph
         let posteriors = final_graph.posteriors();
@@ -2127,7 +2134,8 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                         .unwrap();
 
                         let result = {
-                            let mut graph_guard = graph_clone.lock().unwrap();
+                            let mut graph_guard =
+                                lock_test_mutex(&graph_clone, "adversary graph ingest mutex");
                             graph_guard.ingest(&observation)
                         };
 
@@ -2138,7 +2146,9 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                         );
                     }
 
-                    results_clone.lock().unwrap().extend(thread_results);
+                    let mut results =
+                        lock_test_mutex(&results_clone, "adversary graph thread results mutex");
+                    results.extend(thread_results);
                 })
             })
             .collect();
@@ -2148,8 +2158,8 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             handle.join().expect("Thread should complete successfully");
         }
 
-        let final_results = results.lock().unwrap();
-        let final_graph = graph.lock().unwrap();
+        let final_results = lock_test_mutex(&results, "adversary graph race results mutex");
+        let final_graph = lock_test_mutex(&graph, "adversary graph race state mutex");
 
         // Verify all operations completed
         assert_eq!(
@@ -2211,20 +2221,29 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                         .unwrap();
 
                         let ingest_result = {
-                            let mut graph_guard = graph_clone.lock().unwrap();
+                            let mut graph_guard = lock_test_mutex(
+                                &graph_clone,
+                                "adversary graph snapshot ingest mutex",
+                            );
                             graph_guard.ingest(&observation)
                         };
 
                         // Take snapshot every 10 observations
                         if i % 10 == 0 {
                             let snapshot_result = {
-                                let graph_guard = graph_clone.lock().unwrap();
+                                let graph_guard = lock_test_mutex(
+                                    &graph_clone,
+                                    "adversary graph snapshot read mutex",
+                                );
                                 graph_guard
                                     .snapshot(format!("concurrent_snapshot_{}_{}", snapshot_id, i))
                             };
 
                             {
-                                let mut results = snapshot_results_clone.lock().unwrap();
+                                let mut results = lock_test_mutex(
+                                    &snapshot_results_clone,
+                                    "adversary graph snapshot results mutex",
+                                );
                                 push_bounded(
                                     &mut *results,
                                     (snapshot_id, i, snapshot_result.posteriors.len()),
@@ -2242,7 +2261,10 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             handle.join().expect("Snapshot thread should complete");
         }
 
-        let snapshot_results_final = snapshot_results.lock().unwrap();
+        let snapshot_results_final = lock_test_mutex(
+            &snapshot_results,
+            "adversary graph final snapshot results mutex",
+        );
         assert!(
             snapshot_results_final.len() >= 100,
             "Should have generated multiple snapshots"
@@ -2279,12 +2301,17 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                         .unwrap();
 
                         let result = {
-                            let mut graph_guard = graph_clone.lock().unwrap();
+                            let mut graph_guard =
+                                lock_test_mutex(&graph_clone, "adversary graph memory test mutex");
                             graph_guard.ingest(&observation)
                         };
 
                         if result.is_err() {
-                            *error_count_clone.lock().unwrap() += 1;
+                            let mut error_count = lock_test_mutex(
+                                &error_count_clone,
+                                "adversary graph memory error count mutex",
+                            );
+                            *error_count += 1;
                         }
                     }
                 })
@@ -2296,14 +2323,20 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             handle.join().expect("Memory test thread should complete");
         }
 
-        let final_error_count = *memory_error_count.lock().unwrap();
+        let final_error_count = *lock_test_mutex(
+            &memory_error_count,
+            "adversary graph final error count mutex",
+        );
         assert!(
             final_error_count < 100,
             "Should have minimal errors under concurrent load: {}",
             final_error_count
         );
 
-        let final_memory_graph = memory_test_graph.lock().unwrap();
+        let final_memory_graph = lock_test_mutex(
+            &memory_test_graph,
+            "adversary graph final memory graph mutex",
+        );
         let final_posteriors = final_memory_graph.posteriors();
 
         // Verify final state consistency
