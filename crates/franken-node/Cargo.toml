@@ -214,6 +214,11 @@ name = "remote_cap_enforcement"
 path = "tests/remote_cap_enforcement.rs"
 
 [[test]]
+name = "remote_cap_jcq1z_real_enforcement"
+path = "tests/remote_cap_jcq1z_real_enforcement.rs"
+required-features = ["remote-ops"]
+
+[[test]]
 name = "remote_cap_replay_token_set_loom"
 path = "tests/remote_cap_replay_token_set_loom.rs"
 
