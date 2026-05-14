@@ -1723,6 +1723,7 @@ mod tests {
 #[cfg(test)]
 mod impossible_default_negative_path_tests {
     use super::*;
+    use crate::lock_utils::try_lock;
 
     use ed25519_dalek::{Signer, SigningKey};
 
@@ -2623,24 +2624,23 @@ mod impossible_default_negative_path_tests {
                                 let mut signed_token = token;
                                 sign_token(&mut signed_token, &sk_clone);
 
-                                enforcer_clone
-                                    .lock()
-                                    .unwrap()
+                                try_lock(&enforcer_clone)
+                                    .expect("capability enforcer mutex should lock")
                                     .grant_capability(signed_token)
                                     .map_err(|e| format!("{:?}", e))
                             }
-                            "attempt" => enforcer_clone
-                                .lock()
-                                .unwrap()
+                            "attempt" => try_lock(&enforcer_clone)
+                                .expect("capability enforcer mutex should lock")
                                 .attempt_operation(capability, timestamp)
                                 .map_err(|e| format!("{:?}", e)),
-                            "revoke" => enforcer_clone
-                                .lock()
-                                .unwrap()
+                            "revoke" => try_lock(&enforcer_clone)
+                                .expect("capability enforcer mutex should lock")
                                 .revoke_capability(capability, timestamp)
                                 .map_err(|e| format!("{:?}", e)),
                             "status_check" => {
-                                let status = enforcer_clone.lock().unwrap().status(capability);
+                                let _status = try_lock(&enforcer_clone)
+                                    .expect("capability enforcer mutex should lock")
+                                    .status(capability);
                                 // Status check always succeeds
                                 Ok(())
                             }
@@ -2649,11 +2649,13 @@ mod impossible_default_negative_path_tests {
 
                         match result {
                             Ok(()) => {
-                                let mut count = success_count_clone.lock().unwrap();
+                                let mut count = try_lock(&success_count_clone)
+                                    .expect("success counter mutex should lock");
                                 *count = count.saturating_add(1);
                             }
                             Err(_) => {
-                                let mut count = error_count_clone.lock().unwrap();
+                                let mut count = try_lock(&error_count_clone)
+                                    .expect("error counter mutex should lock");
                                 *count = count.saturating_add(1);
                             }
                         }
@@ -2669,14 +2671,14 @@ mod impossible_default_negative_path_tests {
             handle.join().expect("thread should not panic");
         }
 
-        let final_success = *success_count.lock().unwrap();
-        let final_errors = *error_count.lock().unwrap();
+        let final_success = *try_lock(&success_count).expect("success counter mutex should lock");
+        let final_errors = *try_lock(&error_count).expect("error counter mutex should lock");
 
         // Should handle concurrent operations without panicking
         assert!(final_success + final_errors > 0);
 
         // Enforcer state should be consistent after concurrent access
-        let enforcer_lock = enforcer.lock().unwrap();
+        let enforcer_lock = try_lock(&enforcer).expect("capability enforcer mutex should lock");
         let final_metrics = enforcer_lock.metrics();
 
         // Metrics should be consistent
