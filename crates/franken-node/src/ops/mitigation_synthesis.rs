@@ -767,6 +767,8 @@ pub fn build_trace(
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
 
     fn fixture_decisions() -> Vec<LabDecision> {
@@ -1149,10 +1151,11 @@ mod tests {
             }
             other => unreachable!("expected zero-delta rejection, got {other:?}"),
         }
-        assert!(!lab
-            .events()
-            .iter()
-            .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED));
+        assert!(
+            !lab.events()
+                .iter()
+                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
+        );
     }
 
     #[test]
@@ -1173,10 +1176,11 @@ mod tests {
         let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
 
         assert!(matches!(err, LabError::RollbackMissing { .. }));
-        assert!(!lab
-            .events()
-            .iter()
-            .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED));
+        assert!(
+            !lab.events()
+                .iter()
+                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
+        );
     }
 
     #[test]
@@ -1200,10 +1204,11 @@ mod tests {
             }
             other => unreachable!("expected harmful mitigation rejection, got {other:?}"),
         }
-        assert!(!lab
-            .events()
-            .iter()
-            .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED));
+        assert!(
+            !lab.events()
+                .iter()
+                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
+        );
     }
 
     #[test]
@@ -1266,10 +1271,11 @@ mod tests {
             }
             other => unreachable!("expected mitigation mismatch rejection, got {other:?}"),
         }
-        assert!(!lab
-            .events()
-            .iter()
-            .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED));
+        assert!(
+            !lab.events()
+                .iter()
+                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
+        );
     }
 
     #[test]
@@ -1316,10 +1322,11 @@ mod tests {
         let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
 
         assert!(matches!(err, LabError::RollbackMissing { .. }));
-        assert!(!lab
-            .events()
-            .iter()
-            .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED));
+        assert!(
+            !lab.events()
+                .iter()
+                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
+        );
     }
 
     #[test]
@@ -1826,12 +1833,14 @@ mod tests {
                 let operations = [
                     // Load trace operations
                     || {
-                        let mut l = lab_clone.lock().unwrap();
+                        let mut l = try_lock(&lab_clone, "mitigation lab concurrent trace load")
+                            .expect("lab mutex should lock for trace load");
                         let _ = l.load_trace(&trace_clone);
                     },
                     // Synthesis operations
                     || {
-                        let mut l = lab_clone.lock().unwrap();
+                        let mut l = try_lock(&lab_clone, "mitigation lab concurrent synthesis")
+                            .expect("lab mutex should lock for synthesis");
                         let mut diff = BTreeMap::new();
                         diff.insert(format!("param-{thread_id}"), thread_id.to_string());
                         let _ = l.synthesize_mitigation(
@@ -1842,7 +1851,9 @@ mod tests {
                     },
                     // Replay operations
                     || {
-                        let mut l = lab_clone.lock().unwrap();
+                        let mut l =
+                            try_lock(&lab_clone, "mitigation lab concurrent baseline replay")
+                                .expect("lab mutex should lock for baseline replay");
                         let _ = l.replay_baseline(&trace_clone);
                     },
                 ];
@@ -1862,7 +1873,8 @@ mod tests {
         }
 
         // Verify final state consistency
-        let final_lab = lab.lock().unwrap();
+        let final_lab = try_lock(&lab, "mitigation lab concurrent final verification")
+            .expect("lab mutex should lock for final verification");
         assert!(final_lab.events().len() <= MAX_LAB_EVENTS);
 
         // Verify events are well-formed
