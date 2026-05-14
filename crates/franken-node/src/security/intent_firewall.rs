@@ -2505,6 +2505,7 @@ mod tests {
 
     #[test]
     fn test_security_concurrent_firewall_access_safety() {
+        use crate::lock_utils::try_lock;
         use std::sync::{Arc, Mutex};
         use std::thread;
 
@@ -2519,18 +2520,21 @@ mod tests {
 
                 if i % 4 == 0 {
                     // Register extensions
-                    let mut fw = fw_clone.lock().unwrap();
+                    let mut fw = try_lock(&fw_clone, "intent firewall concurrent registration")
+                        .expect("intent firewall mutex should not be poisoned");
                     fw.register_extension(&format!("ext-{}", i));
                     results.push("registered".to_string());
                 } else if i % 4 == 1 {
                     // Process requests
-                    let fw = fw_clone.lock().unwrap();
+                    let fw = try_lock(&fw_clone, "intent firewall concurrent request processing")
+                        .expect("intent firewall mutex should not be poisoned");
                     let effect = make_effect(&format!("effect-{}", i), "ext-001");
                     let _ = fw.process_request(effect);
                     results.push("processed".to_string());
                 } else if i % 4 == 2 {
                     // Update policy
-                    let mut fw = fw_clone.lock().unwrap();
+                    let mut fw = try_lock(&fw_clone, "intent firewall concurrent policy update")
+                        .expect("intent firewall mutex should not be poisoned");
                     let rule = TrafficPolicyRule {
                         intent: IntentClassification::DataFetch,
                         verdict: FirewallVerdict::Allow,
@@ -2542,7 +2546,8 @@ mod tests {
                     results.push("updated".to_string());
                 } else {
                     // Read state
-                    let fw = fw_clone.lock().unwrap();
+                    let fw = try_lock(&fw_clone, "intent firewall concurrent state read")
+                        .expect("intent firewall mutex should not be poisoned");
                     let _ = fw.get_policy_summary();
                     results.push("read".to_string());
                 }
@@ -2560,7 +2565,8 @@ mod tests {
         }
 
         // Verify firewall state remains consistent
-        let final_fw = firewall.lock().unwrap();
+        let final_fw = try_lock(&firewall, "intent firewall final consistency check")
+            .expect("intent firewall mutex should not be poisoned");
         let summary = final_fw.get_policy_summary();
         assert!(
             summary.contains("policy_id"),
