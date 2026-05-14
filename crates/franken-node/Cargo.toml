@@ -709,6 +709,14 @@ name = "dgis_quarantine_containment"
 path = "../../tests/security/dgis_quarantine_containment.rs"
 
 [[test]]
+name = "dgis_fragility_spof"
+path = "../../tests/security/dgis_fragility_spof.rs"
+
+[[test]]
+name = "dgis_graph_ingestion"
+path = "../../tests/security/dgis_graph_ingestion.rs"
+
+[[test]]
 name = "bayesian_risk_quarantine"
 path = "tests/bayesian_risk_quarantine.rs"
 
@@ -983,6 +991,16 @@ path = "tests/evolution_risk_scorer_integration.rs"
 [[test]]
 name = "bpet_feature_extraction"
 path = "../../tests/conformance/bpet_feature_extraction.rs"
+
+# bd-ye4m.1 sub-task 4: BPET adversarial evolution integration suite
+[[test]]
+name = "bpet_adversarial_evolution_suite"
+path = "../../tests/security/bpet_adversarial_evolution_suite.rs"
+
+# bd-1q38.1 sub-task 4: integration test for DGIS adversarial contagion simulator
+[[test]]
+name = "dgis_contagion_simulator"
+path = "../../tests/security/dgis_contagion_simulator.rs"
 
 [[bench]]
 name = "cuckoo_revocation_bench"
