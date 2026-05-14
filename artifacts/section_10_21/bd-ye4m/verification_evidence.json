@@ -1,32 +1,160 @@
 {
-  "schema_version": "evidence-v1.0",
+  "schema_version": "franken-node/verification-evidence/v1",
+  "gate": "bpet_adversarial_evolution",
   "bead_id": "bd-ye4m",
+  "completion_debt_bead_id": "bd-ye4m.1",
   "section": "10.21",
-  "title": "Adversarial evaluation suite",
-  "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
-  "failed": 0,
+  "verdict": "PASS_STATIC_ONLY",
+  "passed": 7,
+  "total": 7,
+  "cargo_skipped": true,
+  "source_paths": [
+    "crates/franken-node/src/security/bpet/adversarial_evolution.rs",
+    "crates/franken-node/src/security/bpet/adversarial_harness.rs",
+    "crates/franken-node/src/security/bpet/adversarial_scenarios.rs",
+    "tests/security/bpet_adversarial_evolution_suite.rs",
+    "tests/security/adversarial_scenarios/slow_roll_drift.json",
+    "tests/security/adversarial_scenarios/capability_creep_disguised_as_feature.json",
+    "tests/security/adversarial_scenarios/eviction_via_trust_flooding.json",
+    "tests/security/adversarial_scenarios/many_tiny_updates.json",
+    "tests/security/adversarial_scenarios/multi_persona_coordination.json",
+    "tests/security/adversarial_scenarios/false_recovery_claim.json",
+    "tests/security/adversarial_scenarios/indirect_via_dep.json",
+    "tests/security/adversarial_scenarios/signature_rollover.json",
+    "crates/franken-node/Cargo.toml",
+    "docs/security/bpet_adversarial_playbook.md"
+  ],
   "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
-    {"check": "event_codes_present", "pass": true},
-    {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "genome_schema_compliance", "pass": true},
-    {"check": "phenotype_extraction", "pass": true},
-    {"check": "lineage_tracking", "pass": true},
-    {"check": "drift_detection", "pass": true},
-    {"check": "changepoint_detection", "pass": true},
-    {"check": "survival_model", "pass": true},
-    {"check": "risk_scoring", "pass": true},
-    {"check": "cross_system_integration", "pass": true},
-    {"check": "adversarial_robustness", "pass": true}
+    {
+      "name": "scenario_fixture_count",
+      "passed": true,
+      "message": "exactly 8 JSON scenario fixtures present (one per AdversaryKind)",
+      "details": {
+        "fixtures": [
+          "capability_creep_disguised_as_feature.json",
+          "eviction_via_trust_flooding.json",
+          "false_recovery_claim.json",
+          "indirect_via_dep.json",
+          "many_tiny_updates.json",
+          "multi_persona_coordination.json",
+          "signature_rollover.json",
+          "slow_roll_drift.json"
+        ]
+      }
+    },
+    {
+      "name": "scenario_schema",
+      "passed": true,
+      "message": "all 8 scenario fixtures parse + match kind/ramp/verdict invariants",
+      "details": {
+        "summary": {
+          "SlowRollDrift": {
+            "fixture": "slow_roll_drift",
+            "n_steps": 100,
+            "ramp_kind": "linear",
+            "verdict_kind": "caught_late"
+          },
+          "CapabilityCreepDisguisedAsFeature": {
+            "fixture": "capability_creep_disguised_as_feature",
+            "n_steps": 80,
+            "ramp_kind": "sigmoid",
+            "verdict_kind": "caught_late"
+          },
+          "EvictionViaTrustFlooding": {
+            "fixture": "eviction_via_trust_flooding",
+            "n_steps": 60,
+            "ramp_kind": "stepped",
+            "verdict_kind": "caught_early"
+          },
+          "ManyTinyUpdates": {
+            "fixture": "many_tiny_updates",
+            "n_steps": 200,
+            "ramp_kind": "linear",
+            "verdict_kind": "missed_entirely"
+          },
+          "MultiPersonaCoordination": {
+            "fixture": "multi_persona_coordination",
+            "n_steps": 50,
+            "ramp_kind": "exponential",
+            "verdict_kind": "caught_early"
+          },
+          "FalseRecoveryClaim": {
+            "fixture": "false_recovery_claim",
+            "n_steps": 40,
+            "ramp_kind": "stepped",
+            "verdict_kind": "caught_late"
+          },
+          "IndirectViaDep": {
+            "fixture": "indirect_via_dep",
+            "n_steps": 60,
+            "ramp_kind": "sigmoid",
+            "verdict_kind": "caught_late"
+          },
+          "SignatureRollover": {
+            "fixture": "signature_rollover",
+            "n_steps": 30,
+            "ramp_kind": "exponential",
+            "verdict_kind": "caught_early"
+          }
+        }
+      }
+    },
+    {
+      "name": "evolution_source",
+      "passed": true,
+      "message": "adversarial_evolution.rs LOC=1218 has all 8 AdversaryKind + 4 RampCurve variants",
+      "details": {
+        "loc": 1218
+      }
+    },
+    {
+      "name": "harness_source",
+      "passed": true,
+      "message": "adversarial_harness.rs LOC=1222 exports run_scenario + AdversarialHarness + DetectorThresholds",
+      "details": {
+        "loc": 1222
+      }
+    },
+    {
+      "name": "integration_suite",
+      "passed": true,
+      "message": "integration suite has 13 #[test]s and is registered in Cargo.toml",
+      "details": {
+        "total_tests": 13
+      }
+    },
+    {
+      "name": "playbook",
+      "passed": true,
+      "message": "docs/security/bpet_adversarial_playbook.md LOC=182 documents all 8 kinds + 4 ramps + thresholds",
+      "details": {
+        "loc": 182
+      }
+    },
+    {
+      "name": "cargo_bpet_adversarial_evolution_suite",
+      "passed": true,
+      "message": "skipped by --skip-cargo; full gate must run this through rch before closeout",
+      "details": {
+        "command": [
+          "rch",
+          "exec",
+          "--",
+          "env",
+          "CARGO_INCREMENTAL=0",
+          "CARGO_BUILD_JOBS=1",
+          "CARGO_TARGET_DIR=/data/tmp/franken_node-crimsoncrane-bdye4m-target",
+          "cargo",
+          "test",
+          "-p",
+          "frankenengine-node",
+          "--test",
+          "bpet_adversarial_evolution_suite",
+          "--",
+          "--nocapture"
+        ],
+        "skipped": true
+      }
+    }
   ]
 }

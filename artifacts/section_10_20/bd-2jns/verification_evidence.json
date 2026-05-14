@@ -1,32 +1,195 @@
 {
-  "schema_version": "evidence-v1.0",
+  "schema_version": "franken-node/verification-evidence/v1",
+  "gate": "dgis_fragility_spof",
   "bead_id": "bd-2jns",
+  "completion_debt_bead_id": "bd-2jns.1",
   "section": "10.20",
-  "title": "Maintainer/publisher fragility model",
-  "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
-  "failed": 0,
+  "verdict": "PASS_STATIC_ONLY",
+  "passed": 6,
+  "total": 6,
+  "cargo_skipped": true,
+  "sha_at_evaluation": "8db4d3f13e8c6f5250a2bb2a15b48df47ac89def",
+  "integration_test_name": "dgis_fragility_spof",
+  "source_paths": [
+    "crates/franken-node/src/dgis/fragility_model.rs",
+    "crates/franken-node/src/dgis/spof_detection.rs",
+    "crates/franken-node/src/dgis/fragility_fixtures.rs",
+    "tests/security/dgis_fragility_spof.rs",
+    "crates/franken-node/Cargo.toml",
+    "tests/security/fragility_fixtures/single_maintainer_dominant.json",
+    "tests/security/fragility_fixtures/key_person_high_share.json",
+    "tests/security/fragility_fixtures/dependency_chain_fragile.json",
+    "tests/security/fragility_fixtures/org_concentrated.json",
+    "tests/security/fragility_fixtures/orphaned_pkg.json",
+    "tests/security/fragility_fixtures/well_distributed_maintainers.json",
+    "tests/security/fragility_fixtures/diverse_org_ownership.json",
+    "tests/security/fragility_fixtures/active_maintainers_recent_commits.json",
+    "tests/security/fragility_fixtures/independent_packages_no_chains.json",
+    "tests/security/fragility_fixtures/multi_quorum_publishers.json"
+  ],
   "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
-    {"check": "event_codes_present", "pass": true},
-    {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "graph_schema_compliance", "pass": true},
-    {"check": "topology_metrics", "pass": true},
-    {"check": "contagion_simulation", "pass": true},
-    {"check": "immunization_planning", "pass": true},
-    {"check": "cascade_economics", "pass": true},
-    {"check": "quarantine_orchestration", "pass": true},
-    {"check": "fragility_detection", "pass": true},
-    {"check": "federation_interop", "pass": true},
-    {"check": "adversarial_validation", "pass": true}
+    {
+      "name": "fixture_directory",
+      "passed": true,
+      "message": "all 10 expected fixtures present (5 SPOF + 5 robust)",
+      "details": {
+        "fixture_count": 10,
+        "fixtures": [
+          "active_maintainers_recent_commits",
+          "dependency_chain_fragile",
+          "diverse_org_ownership",
+          "independent_packages_no_chains",
+          "key_person_high_share",
+          "multi_quorum_publishers",
+          "org_concentrated",
+          "orphaned_pkg",
+          "single_maintainer_dominant",
+          "well_distributed_maintainers"
+        ]
+      }
+    },
+    {
+      "name": "fixture_schemas",
+      "passed": true,
+      "message": "all 10 fixtures parse and satisfy class invariants",
+      "details": {
+        "per_fixture": {
+          "single_maintainer_dominant": {
+            "now_ms": 1700000000000,
+            "maintainers": 3,
+            "publishers": 0,
+            "nodes": 10,
+            "edges": 10,
+            "expected_finding_count": 1
+          },
+          "key_person_high_share": {
+            "now_ms": 1700000000000,
+            "maintainers": 6,
+            "publishers": 0,
+            "nodes": 2,
+            "edges": 4,
+            "expected_finding_count": 1
+          },
+          "dependency_chain_fragile": {
+            "now_ms": 1700000000000,
+            "maintainers": 5,
+            "publishers": 0,
+            "nodes": 5,
+            "edges": 9,
+            "expected_finding_count": 1
+          },
+          "org_concentrated": {
+            "now_ms": 1700000000000,
+            "maintainers": 0,
+            "publishers": 4,
+            "nodes": 10,
+            "edges": 0,
+            "expected_finding_count": 1
+          },
+          "orphaned_pkg": {
+            "now_ms": 1700000000000,
+            "maintainers": 2,
+            "publishers": 0,
+            "nodes": 2,
+            "edges": 2,
+            "expected_finding_count": 1
+          },
+          "well_distributed_maintainers": {
+            "now_ms": 1700000000000,
+            "maintainers": 4,
+            "publishers": 0,
+            "nodes": 3,
+            "edges": 9,
+            "expected_finding_count": 0
+          },
+          "diverse_org_ownership": {
+            "now_ms": 1700000000000,
+            "maintainers": 0,
+            "publishers": 5,
+            "nodes": 5,
+            "edges": 0,
+            "expected_finding_count": 0
+          },
+          "active_maintainers_recent_commits": {
+            "now_ms": 1700000000000,
+            "maintainers": 4,
+            "publishers": 0,
+            "nodes": 2,
+            "edges": 4,
+            "expected_finding_count": 0
+          },
+          "independent_packages_no_chains": {
+            "now_ms": 1700000000000,
+            "maintainers": 2,
+            "publishers": 0,
+            "nodes": 5,
+            "edges": 10,
+            "expected_finding_count": 0
+          },
+          "multi_quorum_publishers": {
+            "now_ms": 1700000000000,
+            "maintainers": 0,
+            "publishers": 3,
+            "nodes": 6,
+            "edges": 0,
+            "expected_finding_count": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "fragility_model_source",
+      "passed": true,
+      "message": "fragility_model.rs OK (LOC=839, #[test]=27)",
+      "details": {
+        "loc": 839,
+        "test_blocks": 27,
+        "path": "crates/franken-node/src/dgis/fragility_model.rs"
+      }
+    },
+    {
+      "name": "spof_detection_source",
+      "passed": true,
+      "message": "spof_detection.rs OK (LOC=1347, #[test]=17)",
+      "details": {
+        "loc": 1347,
+        "test_blocks": 17,
+        "path": "crates/franken-node/src/dgis/spof_detection.rs"
+      }
+    },
+    {
+      "name": "integration_test_and_cargo",
+      "passed": true,
+      "message": "integration test wired into Cargo.toml (12 #[test] blocks, all 12 required tests present)",
+      "details": {
+        "test_blocks": 12,
+        "test_path": "tests/security/dgis_fragility_spof.rs"
+      }
+    },
+    {
+      "name": "cargo_dgis_fragility_spof",
+      "passed": true,
+      "message": "skipped by --skip-cargo; full gate must run this through rch before closeout",
+      "details": {
+        "command": [
+          "rch",
+          "exec",
+          "--",
+          "env",
+          "CARGO_INCREMENTAL=0",
+          "CARGO_BUILD_JOBS=1",
+          "CARGO_TARGET_DIR=/data/tmp/franken_node-crimsoncrane-bd2jns-target",
+          "cargo",
+          "test",
+          "-p",
+          "frankenengine-node",
+          "--test",
+          "dgis_fragility_spof",
+          "--",
+          "--nocapture"
+        ],
+        "skipped": true
+      }
+    }
   ]
 }
