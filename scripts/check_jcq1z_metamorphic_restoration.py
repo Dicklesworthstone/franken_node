@@ -27,6 +27,7 @@ PARENT_BEAD = "bd-jcq1z"
 COMPLETION_BEAD = "bd-jcq1z.1"
 RESTORATION_BEAD = "bd-jcq1z.2"
 RESTORATION_TITLE_FRAGMENT = "Restore and port bd-jcq1z quarantined real-service/metamorphic tests"
+ACTIONABLE_STATUSES = {"open", "in_progress", "deferred", "blocked"}
 
 LEGACY_TEST_FILES = (
     "crates/franken-node/tests/api_session_auth_real_service_integration.rs",
@@ -37,6 +38,41 @@ LEGACY_TEST_FILES = (
     "crates/franken-node/tests/integration_vef_receipt_chain_real_service.rs",
     "crates/franken-node/tests/vef_receipt_real_service_integration.rs",
 )
+
+REPLACEMENT_BEADS = (
+    {
+        "id": "bd-jcq1z.2.1",
+        "title_fragment": "Port session-auth real-service integration coverage",
+        "legacy_files": (
+            "crates/franken-node/tests/api_session_auth_real_service_integration.rs",
+            "crates/franken-node/tests/integration_api_session_auth_real_service.rs",
+        ),
+    },
+    {
+        "id": "bd-jcq1z.2.2",
+        "title_fragment": "Port connector lifecycle and stress integration coverage",
+        "legacy_files": (
+            "crates/franken-node/tests/connector_lifecycle_real_service_integration.rs",
+            "crates/franken-node/tests/integration_connector_lifecycle_stress.rs",
+        ),
+    },
+    {
+        "id": "bd-jcq1z.2.3",
+        "title_fragment": "Port remote capability real-enforcement coverage",
+        "legacy_files": (
+            "crates/franken-node/tests/integration_remote_capability_real_enforcement.rs",
+        ),
+    },
+    {
+        "id": "bd-jcq1z.2.4",
+        "title_fragment": "Port VEF receipt-chain real-service coverage",
+        "legacy_files": (
+            "crates/franken-node/tests/integration_vef_receipt_chain_real_service.rs",
+            "crates/franken-node/tests/vef_receipt_real_service_integration.rs",
+        ),
+    },
+)
+
 
 def _read(path: Path) -> str:
     try:
@@ -65,6 +101,15 @@ def _cargo_registers_path(cargo_toml: str, rel_path: str) -> bool:
     return f'path = "{crate_path}"' in cargo_toml
 
 
+def _dependency_ids(bead: dict[str, object]) -> set[str]:
+    deps = bead.get("dependencies", [])
+    return {
+        str(dep.get("depends_on_id"))
+        for dep in deps
+        if isinstance(dep, dict)
+    }
+
+
 def load_beads(root: Path = ROOT) -> list[dict[str, object]]:
     beads: list[dict[str, object]] = []
     for line in _read(root / ".beads/issues.jsonl").splitlines():
@@ -77,6 +122,62 @@ def load_beads(root: Path = ROOT) -> list[dict[str, object]]:
         if isinstance(payload, dict):
             beads.append(payload)
     return beads
+
+
+def check_replacement_beads(
+    beads: dict[str, dict[str, object]],
+    *,
+    required: bool,
+) -> list[dict[str, object]]:
+    checks: list[dict[str, object]] = []
+    covered_files: set[str] = set()
+
+    for spec in REPLACEMENT_BEADS:
+        bead_id = str(spec["id"])
+        legacy_files = tuple(str(path) for path in spec["legacy_files"])
+        covered_files.update(legacy_files)
+        bead = beads.get(bead_id)
+        checks.append(_check(
+            f"replacement bead exists: {bead_id}",
+            bead is not None or not required,
+            bead_id if bead is not None else "missing",
+        ))
+        if bead is None:
+            continue
+
+        title = str(bead.get("title", ""))
+        status = str(bead.get("status", ""))
+        description = str(bead.get("description", ""))
+        parent_ids = _dependency_ids(bead)
+        checks.append(_check(
+            f"replacement bead tracks scope: {bead_id}",
+            str(spec["title_fragment"]) in title,
+            title,
+        ))
+        checks.append(_check(
+            f"replacement bead remains actionable: {bead_id}",
+            status in ACTIONABLE_STATUSES,
+            status,
+        ))
+        checks.append(_check(
+            f"replacement bead depends on restoration split: {bead_id}",
+            RESTORATION_BEAD in parent_ids,
+            f"parents={sorted(parent_ids)}",
+        ))
+        for rel_path in legacy_files:
+            checks.append(_check(
+                f"replacement bead covers legacy file: {bead_id}: {rel_path}",
+                rel_path in description,
+                rel_path,
+            ))
+
+    expected_files = set(LEGACY_TEST_FILES)
+    checks.append(_check(
+        "replacement split covers all legacy files",
+        covered_files == expected_files,
+        f"covered={len(covered_files)} expected={len(expected_files)}",
+    ))
+    return checks
 
 
 def check_follow_up_bead(root: Path = ROOT) -> list[dict[str, object]]:
@@ -94,27 +195,26 @@ def check_follow_up_bead(root: Path = ROOT) -> list[dict[str, object]]:
 
     title = str(bead.get("title", ""))
     status = str(bead.get("status", ""))
-    deps = bead.get("dependencies", [])
-    parent_ids = {
-        str(dep.get("depends_on_id"))
-        for dep in deps
-        if isinstance(dep, dict)
-    }
+    parent_ids = _dependency_ids(bead)
+    replacement_checks = check_replacement_beads(beads, required=status == "closed")
+    replacement_split_valid = all(bool(check["pass"]) for check in replacement_checks)
     checks.append(_check(
         "follow-up bead tracks restoration",
         RESTORATION_TITLE_FRAGMENT in title,
         title,
     ))
     checks.append(_check(
-        "follow-up bead remains actionable",
-        status in {"open", "in_progress", "deferred", "blocked"},
-        status,
+        "follow-up bead remains actionable or was split into replacement beads",
+        status in ACTIONABLE_STATUSES or (status == "closed" and replacement_split_valid),
+        f"status={status}",
     ))
     checks.append(_check(
         "follow-up bead depends on original",
         PARENT_BEAD in parent_ids,
         f"parents={sorted(parent_ids)}",
     ))
+    if status == "closed":
+        checks.extend(replacement_checks)
     return checks
 
 

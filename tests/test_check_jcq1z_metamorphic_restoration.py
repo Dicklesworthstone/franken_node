@@ -41,21 +41,51 @@ fn historical_source_only_fixture() {}
     _write(
         root,
         ".beads/issues.jsonl",
-        json.dumps(
-            {
-                "id": mod.RESTORATION_BEAD,
-                "title": f"[follow-up] {mod.RESTORATION_TITLE_FRAGMENT}",
-                "status": "open",
-                "dependencies": [
-                    {
-                        "issue_id": mod.RESTORATION_BEAD,
-                        "depends_on_id": mod.PARENT_BEAD,
-                        "type": "parent-child",
-                    }
-                ],
-            }
-        )
+        json.dumps(_restoration_bead("open"))
         + "\n",
+    )
+
+
+def _restoration_bead(status: str) -> dict[str, object]:
+    return {
+        "id": mod.RESTORATION_BEAD,
+        "title": f"[follow-up] {mod.RESTORATION_TITLE_FRAGMENT}",
+        "status": status,
+        "dependencies": [
+            {
+                "issue_id": mod.RESTORATION_BEAD,
+                "depends_on_id": mod.PARENT_BEAD,
+                "type": "parent-child",
+            }
+        ],
+    }
+
+
+def _replacement_bead(spec: dict[str, object]) -> dict[str, object]:
+    legacy_files = tuple(str(path) for path in spec["legacy_files"])
+    return {
+        "id": spec["id"],
+        "title": f"[bd-jcq1z split] {spec['title_fragment']}",
+        "description": (
+            "Replacement split with rch proof required; source-only drafts are "
+            f"not cited as passing coverage. Covers: {' '.join(legacy_files)}"
+        ),
+        "status": "open",
+        "dependencies": [
+            {
+                "issue_id": spec["id"],
+                "depends_on_id": mod.RESTORATION_BEAD,
+                "type": "parent-child",
+            }
+        ],
+    }
+
+
+def _write_beads(root: Path, beads: list[dict[str, object]]) -> None:
+    _write(
+        root,
+        ".beads/issues.jsonl",
+        "".join(json.dumps(bead) + "\n" for bead in beads),
     )
 
 
@@ -138,6 +168,39 @@ path = "{crate_path}"
             f"legacy test excluded from UBS live-code scan: {mod.LEGACY_TEST_FILES[-1]}",
             failing_ids,
         )
+
+    def test_closed_follow_up_with_replacement_split_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _minimal_root(root)
+            _write_beads(
+                root,
+                [_restoration_bead("closed")]
+                + [_replacement_bead(spec) for spec in mod.REPLACEMENT_BEADS],
+            )
+
+            result = mod.run_checks(root)
+
+        self.assertEqual(result["verdict"], "PASS", result)
+
+    def test_closed_follow_up_missing_replacement_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _minimal_root(root)
+            _write_beads(
+                root,
+                [_restoration_bead("closed")]
+                + [_replacement_bead(spec) for spec in mod.REPLACEMENT_BEADS[:-1]],
+            )
+
+            result = mod.run_checks(root)
+
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any(
+            check["check_id"] == "replacement bead exists: bd-jcq1z.2.4"
+            and not check["pass"]
+            for check in result["checks"]
+        ))
 
 
 if __name__ == "__main__":
