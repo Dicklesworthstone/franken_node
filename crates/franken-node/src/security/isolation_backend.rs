@@ -3088,11 +3088,21 @@ mod tests {
 
                     match execution_result {
                         Ok(_) => {
-                            let mut count = success_count.lock().unwrap();
+                            let mut count = crate::lock_utils::try_lock(
+                                success_count.as_ref(),
+                                "isolation backend success counter",
+                            )
+                            .expect(
+                                "isolation backend success counter mutex should not be poisoned",
+                            );
                             *count = count.saturating_add(1);
                         }
                         Err(_) => {
-                            let mut count = error_count.lock().unwrap();
+                            let mut count = crate::lock_utils::try_lock(
+                                error_count.as_ref(),
+                                "isolation backend error counter",
+                            )
+                            .expect("isolation backend error counter mutex should not be poisoned");
                             *count = count.saturating_add(1);
                         }
                     }
@@ -3105,8 +3115,16 @@ mod tests {
             handle.join().expect("thread should not panic");
         }
 
-        let final_success = *success_count.lock().unwrap();
-        let final_errors = *error_count.lock().unwrap();
+        let final_success = *crate::lock_utils::try_lock(
+            success_count.as_ref(),
+            "isolation backend final success counter",
+        )
+        .expect("isolation backend final success counter mutex should not be poisoned");
+        let final_errors = *crate::lock_utils::try_lock(
+            error_count.as_ref(),
+            "isolation backend final error counter",
+        )
+        .expect("isolation backend final error counter mutex should not be poisoned");
 
         // Should handle concurrent executions gracefully
         assert_eq!(final_success + final_errors, 10);

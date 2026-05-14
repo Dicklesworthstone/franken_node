@@ -3120,7 +3120,11 @@ mod tests {
 
             let handle = thread::spawn(move || {
                 for iteration in 0..10 {
-                    let mut scheduler_guard = scheduler_clone.lock().unwrap();
+                    let mut scheduler_guard = crate::lock_utils::try_lock(
+                        scheduler_clone.as_ref(),
+                        "lane scheduler concurrent operations",
+                    )
+                    .expect("lane scheduler concurrent mutex should not be poisoned");
 
                     // Alternate between operations
                     match iteration % 3 {
@@ -3166,7 +3170,9 @@ mod tests {
         }
 
         // Verify scheduler state remains consistent after concurrent access
-        let final_scheduler = shared_scheduler.lock().unwrap();
+        let final_scheduler =
+            crate::lock_utils::try_lock(shared_scheduler.as_ref(), "lane scheduler final state")
+                .expect("lane scheduler final mutex should not be poisoned");
         let audit_log = final_scheduler.audit_log();
 
         // All audit records should be well-formed
@@ -3464,7 +3470,11 @@ mod tests {
                     let timestamp = 14000 + thread_id * 1000 + iteration;
 
                     let telemetry = {
-                        let scheduler_guard = scheduler_clone.lock().unwrap();
+                        let scheduler_guard = crate::lock_utils::try_lock(
+                            scheduler_clone.as_ref(),
+                            "lane scheduler telemetry snapshot",
+                        )
+                        .expect("lane scheduler telemetry mutex should not be poisoned");
                         scheduler_guard.telemetry_snapshot(timestamp)
                     };
 
@@ -3473,10 +3483,12 @@ mod tests {
                         && telemetry.schema_version == SCHEMA_VERSION
                         && !telemetry.counters.is_empty();
 
-                    results_clone
-                        .lock()
-                        .unwrap()
-                        .push((thread_id, iteration, is_valid));
+                    crate::lock_utils::try_lock(
+                        results_clone.as_ref(),
+                        "lane scheduler telemetry results",
+                    )
+                    .expect("lane scheduler telemetry results mutex should not be poisoned")
+                    .push((thread_id, iteration, is_valid));
                     thread::yield_now();
                 }
             });
@@ -3489,7 +3501,11 @@ mod tests {
         }
 
         // All telemetry snapshots should be valid
-        let final_results = telemetry_results.lock().unwrap();
+        let final_results = crate::lock_utils::try_lock(
+            telemetry_results.as_ref(),
+            "lane scheduler final telemetry results",
+        )
+        .expect("lane scheduler final telemetry results mutex should not be poisoned");
         for &(thread_id, iteration, is_valid) in final_results.iter() {
             assert!(
                 is_valid,

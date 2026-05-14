@@ -3910,7 +3910,9 @@ mod tests {
 
         // Setup initial crash state for race conditions
         {
-            let mut det = detector.lock().unwrap();
+            let mut det =
+                crate::lock_utils::try_lock(detector.as_ref(), "crash loop race setup detector")
+                    .expect("crash loop race setup detector mutex should not be poisoned");
             for i in 0..8 {
                 det.record_crash(
                     CrashEvent {
@@ -4255,7 +4257,9 @@ mod tests {
                     }
 
                     // Store results for analysis
-                    results_clone.lock().unwrap().extend(thread_results);
+                    crate::lock_utils::try_lock(results_clone.as_ref(), "crash loop race results")
+                        .expect("crash loop race results mutex should not be poisoned")
+                        .extend(thread_results);
                 });
 
                 handles.push(handle);
@@ -4267,7 +4271,9 @@ mod tests {
             }
 
             // Analyze race condition results
-            let results = race_results.lock().unwrap();
+            let results =
+                crate::lock_utils::try_lock(race_results.as_ref(), "crash loop final race results")
+                    .expect("crash loop final race results mutex should not be poisoned");
             let scenario_results: Vec<_> = results
                 .iter()
                 .filter(|(_, _, op, _)| op.contains(race_name))
@@ -4281,7 +4287,11 @@ mod tests {
 
             // Verify system consistency after race conditions
             let final_state = {
-                let det = detector.lock().unwrap();
+                let det = crate::lock_utils::try_lock(
+                    detector.as_ref(),
+                    "crash loop race final detector",
+                )
+                .expect("crash loop race final detector mutex should not be poisoned");
                 (
                     det.crashes_in_window_for(race_connector, 70000),
                     det.in_cooldown_for(race_connector, 70000),
@@ -4319,12 +4329,18 @@ mod tests {
         };
 
         {
-            let mut det = detector.lock().unwrap();
+            let mut det =
+                crate::lock_utils::try_lock(detector.as_ref(), "crash loop recovery detector")
+                    .expect("crash loop recovery detector mutex should not be poisoned");
             det.record_crash(recovery_event, 80000, "post_race_recovery".to_string());
         }
 
         let recovery_count = {
-            let det = detector.lock().unwrap();
+            let det = crate::lock_utils::try_lock(
+                detector.as_ref(),
+                "crash loop recovery final detector",
+            )
+            .expect("crash loop recovery final detector mutex should not be poisoned");
             det.crashes_in_window_for("post_race_recovery", 80000)
         };
 
