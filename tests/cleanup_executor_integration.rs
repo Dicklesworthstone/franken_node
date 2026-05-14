@@ -3,17 +3,21 @@
 //! Tests the complete cleanup workflow with real temp directories,
 //! audit receipts, and protection rules.
 
-use frankenengine_node::ops::cleanup_executor::{
-    CleanupExecutor, CleanupMode, CleanupOutcome, CleanupProtectionRules,
-    FilesystemDeletionAdapter, MockDeletionAdapter,
-};
 use frankenengine_node::ops::workspace_pressure_policy::{
     CleanupCandidate, WorkspacePressureInputs, WorkspacePressurePolicy,
 };
 use frankenengine_node::storage::cleanup_receipts::{CleanupReceiptsStorage, ReceiptSearchFilter};
+use frankenengine_node::{
+    lock_utils,
+    ops::cleanup_executor::{
+        CleanupExecutor, CleanupMode, CleanupOutcome, CleanupProtectionRules,
+        FilesystemDeletionAdapter, MockDeletionAdapter,
+    },
+};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::MutexGuard;
 use tempfile::TempDir;
 
 /// Create test cleanup candidate.
@@ -37,6 +41,14 @@ fn test_cleanup_rules() -> CleanupProtectionRules {
         min_age_seconds: 0,
         ..CleanupProtectionRules::default()
     }
+}
+
+fn lock_deletion_requests(adapter: &MockDeletionAdapter) -> MutexGuard<'_, Vec<PathBuf>> {
+    lock_utils::try_lock(
+        adapter.deletion_requests.as_ref(),
+        "cleanup executor deletion request test mutex",
+    )
+    .expect("cleanup executor deletion request test mutex should not be poisoned")
 }
 
 /// Create temporary test files for cleanup testing.
@@ -100,7 +112,7 @@ fn test_cleanup_executor_dry_run() {
     assert!(test_files[0].exists());
 
     // Verify mock adapter wasn't called for dry-run
-    let deletion_requests = mock_adapter.deletion_requests.lock().unwrap();
+    let deletion_requests = lock_deletion_requests(&mock_adapter);
     assert!(deletion_requests.is_empty());
 
     // Verify receipt shows simulated success
@@ -254,8 +266,8 @@ fn test_cleanup_integration_with_workspace_pressure_policy() {
     // Create workspace pressure policy to generate cleanup candidates
     let policy = WorkspacePressurePolicy::with_balanced_defaults();
     let inputs = WorkspacePressureInputs {
-        free_disk_bytes: 500_000_000,    // 500MB - pressure situation
-        target_dir_bytes: 8_000_000_000, // 8GB
+        free_disk_bytes: 400_000_000,     // Below balanced cleanup threshold
+        target_dir_bytes: 12_000_000_000, // Above balanced target-dir threshold
         active_build_count: 3,
         rch_available_slots: Some(2),
         memory_pressure: 0.7,

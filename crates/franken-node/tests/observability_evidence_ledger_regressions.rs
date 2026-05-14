@@ -1,7 +1,8 @@
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use ed25519_dalek::SigningKey;
+use frankenengine_node::lock_utils;
 use frankenengine_node::observability::durability_violation::{
     CausalEvent, CausalEventType, FailedArtifact, ProofContext, ViolationContext, generate_bundle,
 };
@@ -31,6 +32,14 @@ const EXPECTED_MAX_PROOF_REFS: usize = 256;
 #[derive(Clone)]
 struct CaptureWriter {
     buffer: Arc<Mutex<Vec<u8>>>,
+}
+
+fn lock_capture_buffer(buffer: &Arc<Mutex<Vec<u8>>>) -> MutexGuard<'_, Vec<u8>> {
+    lock_utils::try_lock(
+        buffer.as_ref(),
+        "observability evidence ledger capture buffer",
+    )
+    .expect("observability evidence ledger capture buffer should not be poisoned")
 }
 
 impl Write for CaptureWriter {
@@ -203,7 +212,7 @@ fn observability_ledger_uses_server_computed_size_for_snapshot_and_spill() {
         ))
         .expect("small payload should spill despite misleading size_bytes");
 
-    let captured = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+    let captured = String::from_utf8(lock_capture_buffer(&buffer).clone()).unwrap();
     let spilled: EvidenceEntry = serde_json::from_str(captured.trim()).unwrap();
     let spilled_snapshot = spill.snapshot();
     let retained = &spilled_snapshot.entries[0].1;
