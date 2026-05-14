@@ -9,9 +9,10 @@
 // - Serialization robustness
 
 use super::evidence_ledger::*;
+use crate::lock_utils::try_lock;
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::thread;
-use std::io::{self, Write};
 
 /// Test integer overflow protection in counters and IDs
 #[test]
@@ -593,7 +594,11 @@ struct CountingWriter {
 
 impl Write for CountingWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut writes = self.writes.lock().unwrap();
+        let mut writes = try_lock(
+            self.writes.as_ref(),
+            "evidence ledger spill counting writer",
+        )
+        .expect("spill counting writer mutex should lock");
         *writes = (*writes).saturating_add(1);
         Ok(buf.len())
     }
@@ -615,7 +620,9 @@ fn test_lab_spill_zero_capacity_rejects_before_write() {
     let result = spill.append(test_entry("spill-zero-cap", 1));
 
     assert!(matches!(result, Err(LedgerError::ZeroEntryCapacity)));
-    assert_eq!(*writes.lock().unwrap(), 0);
+    let write_count = *try_lock(writes.as_ref(), "zero-capacity spill write counter")
+        .expect("zero-capacity spill write counter should lock");
+    assert_eq!(write_count, 0);
     assert!(spill.is_empty());
 }
 
@@ -644,7 +651,9 @@ fn test_lab_spill_oversized_entry_rejects_before_write() {
     let result = spill.append(oversized);
 
     assert!(matches!(result, Err(LedgerError::EntryTooLarge { .. })));
-    assert_eq!(*writes.lock().unwrap(), 0);
+    let write_count = *try_lock(writes.as_ref(), "oversized spill write counter")
+        .expect("oversized spill write counter should lock");
+    assert_eq!(write_count, 0);
     assert!(spill.is_empty());
     assert_eq!(spill.metrics().total_appended, 0);
 }
@@ -935,11 +944,19 @@ fn negative_concurrent_memory_pressure_race_conditions() {
 
                 match append_result {
                     Ok(_) => {
-                        let mut count = success_count_clone.lock().unwrap();
+                        let mut count = try_lock(
+                            success_count_clone.as_ref(),
+                            "evidence ledger concurrent success counter",
+                        )
+                        .expect("success counter mutex should lock");
                         *count = count.saturating_add(1);
                     },
                     Err(_) => {
-                        let mut count = error_count_clone.lock().unwrap();
+                        let mut count = try_lock(
+                            error_count_clone.as_ref(),
+                            "evidence ledger concurrent error counter",
+                        )
+                        .expect("error counter mutex should lock");
                         *count = count.saturating_add(1);
                     }
                 }
@@ -962,8 +979,13 @@ fn negative_concurrent_memory_pressure_race_conditions() {
         handle.join().expect("Stress thread should complete without panic");
     }
 
-    let total_success = *success_count.lock().unwrap();
-    let total_errors = *error_count.lock().unwrap();
+    let total_success = *try_lock(
+        success_count.as_ref(),
+        "evidence ledger final success counter",
+    )
+    .expect("final success counter mutex should lock");
+    let total_errors = *try_lock(error_count.as_ref(), "evidence ledger final error counter")
+        .expect("final error counter mutex should lock");
 
     // Should handle concurrent operations without data corruption
     assert_eq!(total_success + total_errors, (num_stress_threads * operations_per_thread) as u64);
@@ -1192,7 +1214,11 @@ fn negative_spill_mode_edge_cases_write_failure_scenarios() {
 
     impl Write for IntermittentFailWriter {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            let mut count = self.call_count.lock().unwrap();
+            let mut count = try_lock(
+                self.call_count.as_ref(),
+                "evidence ledger intermittent writer call counter",
+            )
+            .expect("intermittent writer call counter mutex should lock");
             let should_fail = self.fail_pattern.get(*count).unwrap_or(&false);
             *count += 1;
 
