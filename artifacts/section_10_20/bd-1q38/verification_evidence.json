@@ -1,32 +1,135 @@
 {
-  "schema_version": "evidence-v1.0",
+  "schema_version": "franken-node/verification-evidence/v1",
+  "gate": "dgis_contagion_simulator",
   "bead_id": "bd-1q38",
+  "completion_debt_bead_id": "bd-1q38.1",
   "section": "10.20",
-  "title": "Adversarial contagion simulator",
   "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
-  "failed": 0,
+  "passed": 6,
+  "total": 6,
+  "cargo_skipped": false,
+  "source_paths": [
+    "crates/franken-node/src/dgis/contagion_graph.rs",
+    "crates/franken-node/src/dgis/contagion_simulator.rs",
+    "crates/franken-node/src/dgis/contagion_profiles.rs",
+    "tests/security/dgis_contagion_simulator.rs",
+    "tests/security/contagion_profiles/xz_style.json",
+    "tests/security/contagion_profiles/dependency_confusion.json",
+    "tests/security/contagion_profiles/typosquat.json",
+    "crates/franken-node/Cargo.toml"
+  ],
   "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
-    {"check": "event_codes_present", "pass": true},
-    {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "graph_schema_compliance", "pass": true},
-    {"check": "topology_metrics", "pass": true},
-    {"check": "contagion_simulation", "pass": true},
-    {"check": "immunization_planning", "pass": true},
-    {"check": "cascade_economics", "pass": true},
-    {"check": "quarantine_orchestration", "pass": true},
-    {"check": "fragility_detection", "pass": true},
-    {"check": "federation_interop", "pass": true},
-    {"check": "adversarial_validation", "pass": true}
+    {
+      "name": "paths_exist",
+      "passed": true,
+      "message": "all bd-1q38 implementation, fixture, test, and evidence paths exist"
+    },
+    {
+      "name": "cargo_registration",
+      "passed": true,
+      "message": "dgis_contagion_simulator integration test is registered in Cargo.toml"
+    },
+    {
+      "name": "rust_symbols",
+      "passed": true,
+      "message": "all 18 contagion symbols and hardening markers are present"
+    },
+    {
+      "name": "integration_tests",
+      "passed": true,
+      "message": "all 8 required integration tests are present",
+      "details": {
+        "total_tests": 8
+      }
+    },
+    {
+      "name": "profile_fixtures",
+      "passed": true,
+      "message": "three adversarial campaign profile fixtures load and expose exact non-trivial invariants",
+      "details": {
+        "profiles": {
+          "xz_style": {
+            "nodes": 20,
+            "edges": 18,
+            "initial_infected": 1,
+            "termination_reason": "Converged",
+            "min_infected_count": 18,
+            "max_infected_count": 19,
+            "terminated_by_step": 50
+          },
+          "dependency_confusion": {
+            "nodes": 15,
+            "edges": 12,
+            "initial_infected": 1,
+            "termination_reason": "Converged",
+            "min_infected_count": 8,
+            "max_infected_count": 10,
+            "terminated_by_step": 20
+          },
+          "typosquat": {
+            "nodes": 30,
+            "edges": 16,
+            "initial_infected": 5,
+            "termination_reason": "Converged",
+            "min_infected_count": 9,
+            "max_infected_count": 11,
+            "terminated_by_step": 30
+          }
+        },
+        "aggregate": {
+          "profile_count": 3,
+          "total_nodes": 65,
+          "total_edges": 46,
+          "total_initial_infected": 7,
+          "total_expected_min_infected": 35,
+          "total_expected_max_infected": 40,
+          "edge_kinds": {
+            "DependencyImport": 35,
+            "MaintainerOverlap": 2,
+            "NamespaceShadow": 9
+          }
+        },
+        "fixture_paths": [
+          "tests/security/contagion_profiles/xz_style.json",
+          "tests/security/contagion_profiles/dependency_confusion.json",
+          "tests/security/contagion_profiles/typosquat.json"
+        ]
+      }
+    },
+    {
+      "name": "cargo_dgis_contagion_simulator",
+      "passed": true,
+      "message": "rch cargo test --test dgis_contagion_simulator passed",
+      "details": {
+        "command": [
+          "rch",
+          "exec",
+          "--",
+          "env",
+          "CARGO_INCREMENTAL=0",
+          "CARGO_BUILD_JOBS=1",
+          "CARGO_TARGET_DIR=/data/tmp/franken_node-snowybeaver-bd1q38-target",
+          "cargo",
+          "test",
+          "-p",
+          "frankenengine-node",
+          "--test",
+          "dgis_contagion_simulator",
+          "--",
+          "--nocapture"
+        ],
+        "returncode": 0,
+        "rch_job_id": 29840908367167890,
+        "worker_id": "vmi1152480",
+        "completed_at_utc": "2026-05-14T08:12:32.062133Z",
+        "remote_duration_ms": 1352431,
+        "observed_success_markers": [
+          "8 passed",
+          "test result: ok",
+          "dgis_contagion_simulator"
+        ],
+        "test_result": "8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+      }
+    }
   ]
 }
