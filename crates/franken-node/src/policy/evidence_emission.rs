@@ -1611,8 +1611,12 @@ mod tests {
         );
 
         // Verify final state consistency
-        let final_checker = checker.lock().unwrap();
-        let final_ledger = ledger.lock().unwrap();
+        let final_checker =
+            crate::lock_utils::try_lock(checker.as_ref(), "evidence emission final checker")
+                .expect("evidence emission final checker mutex should not be poisoned");
+        let final_ledger =
+            crate::lock_utils::try_lock(ledger.as_ref(), "evidence emission final ledger")
+                .expect("evidence emission final ledger mutex should not be poisoned");
 
         assert_eq!(
             final_checker.executed_count() as usize,
@@ -2360,8 +2364,18 @@ mod tests {
 
                     // Attempt concurrent evidence submission
                     let outcome = {
-                        let mut checker_guard = checker_clone.lock().unwrap();
-                        let mut ledger_guard = ledger_clone.lock().unwrap();
+                        let mut checker_guard = crate::lock_utils::try_lock(
+                            checker_clone.as_ref(),
+                            "evidence emission concurrent checker",
+                        )
+                        .expect(
+                            "evidence emission concurrent checker mutex should not be poisoned",
+                        );
+                        let mut ledger_guard = crate::lock_utils::try_lock(
+                            ledger_clone.as_ref(),
+                            "evidence emission concurrent ledger",
+                        )
+                        .expect("evidence emission concurrent ledger mutex should not be poisoned");
                         checker_guard.verify_and_execute(
                             action,
                             &action_id,
@@ -2384,8 +2398,16 @@ mod tests {
         }
 
         // Verify state consistency after concurrent operations
-        let final_checker = checker.lock().unwrap();
-        let final_ledger = ledger.lock().unwrap();
+        let final_checker = crate::lock_utils::try_lock(
+            checker.as_ref(),
+            "evidence emission concurrent final checker",
+        )
+        .expect("evidence emission concurrent final checker mutex should not be poisoned");
+        let final_ledger = crate::lock_utils::try_lock(
+            ledger.as_ref(),
+            "evidence emission concurrent final ledger",
+        )
+        .expect("evidence emission concurrent final ledger mutex should not be poisoned");
 
         let total_executed = final_checker.executed_count();
         let total_rejected = final_checker.rejected_count();

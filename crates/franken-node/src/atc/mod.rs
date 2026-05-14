@@ -2631,7 +2631,11 @@ mod atc_extreme_adversarial_negative_tests {
                 }
 
                 // Merge results back
-                let mut shared = results.lock().unwrap();
+                let mut shared = crate::lock_utils::try_lock(
+                    results.as_ref(),
+                    "atc surface fingerprint concurrent results",
+                )
+                .expect("atc surface fingerprint results mutex should not be poisoned");
                 shared.extend(local_results);
             });
 
@@ -2643,7 +2647,11 @@ mod atc_extreme_adversarial_negative_tests {
             handle.join().expect("Thread should complete successfully");
         }
 
-        let final_results = shared_results.lock().unwrap();
+        let final_results = crate::lock_utils::try_lock(
+            shared_results.as_ref(),
+            "atc surface fingerprint final results",
+        )
+        .expect("atc surface fingerprint final results mutex should not be poisoned");
 
         // Verify all fingerprints are valid
         for (thread_id, iteration, fingerprint) in final_results.iter() {
@@ -5806,7 +5814,12 @@ mod atc_extreme_adversarial_negative_tests {
                 }
 
                 // Store results for analysis
-                results_clone.lock().unwrap().extend(thread_results);
+                crate::lock_utils::try_lock(
+                    results_clone.as_ref(),
+                    "atc concurrent fingerprint analysis results",
+                )
+                .expect("atc concurrent fingerprint results mutex should not be poisoned")
+                .extend(thread_results);
             });
 
             push_bounded(&mut handles, handle, 100);
@@ -5818,7 +5831,9 @@ mod atc_extreme_adversarial_negative_tests {
         }
 
         // Analyze concurrent results
-        let final_results = results.lock().unwrap();
+        let final_results =
+            crate::lock_utils::try_lock(results.as_ref(), "atc concurrent final results")
+                .expect("atc concurrent final results mutex should not be poisoned");
         let mut unique_fingerprints = std::collections::HashSet::new();
         let mut format_violations = 0;
         let mut determinism_violations = 0;

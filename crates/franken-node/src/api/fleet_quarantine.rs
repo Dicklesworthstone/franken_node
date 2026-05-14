@@ -4788,7 +4788,9 @@ mod tests {
             "unexpected error: {err:?}"
         );
 
-        let guard = owner.inner.lock().expect("owner lock");
+        let guard =
+            crate::lock_utils::try_lock(&owner.inner, "fleet quarantine broken transport owner")
+                .expect("fleet quarantine broken transport owner mutex should not be poisoned");
         assert_eq!(guard.incident_count(), 0);
         assert!(guard.zones().is_empty());
         assert!(guard.events().is_empty());
@@ -6359,7 +6361,9 @@ mod tests {
 
         let mgr = Arc::new(std::sync::Mutex::new(FleetControlManager::new()));
         {
-            let mut guard = mgr.lock().unwrap();
+            let mut guard =
+                crate::lock_utils::try_lock(mgr.as_ref(), "fleet quarantine activation manager")
+                    .expect("fleet quarantine activation manager mutex should not be poisoned");
             guard.activate();
         }
 
@@ -6385,7 +6389,11 @@ mod tests {
                 let mut results = Vec::new();
                 for j in 0..10 {
                     let extension_id = format!("ext-{}-{}", i, j);
-                    let mut guard = mgr_clone.lock().unwrap();
+                    let mut guard = crate::lock_utils::try_lock(
+                        mgr_clone.as_ref(),
+                        "fleet quarantine concurrent manager",
+                    )
+                    .expect("fleet quarantine concurrent manager mutex should not be poisoned");
                     let result =
                         guard.quarantine(&extension_id, &scope, &admin_identity(), &test_trace());
                     results.push(result);
@@ -6421,7 +6429,8 @@ mod tests {
         }
 
         // Verify final state is consistent
-        let guard = mgr.lock().unwrap();
+        let guard = crate::lock_utils::try_lock(mgr.as_ref(), "fleet quarantine final manager")
+            .expect("fleet quarantine final manager mutex should not be poisoned");
         assert!(
             guard.zones().len() <= 4,
             "Zone count should not exceed thread count"
