@@ -61,7 +61,7 @@ def _restoration_bead(status: str) -> dict[str, object]:
     }
 
 
-def _replacement_bead(spec: dict[str, object]) -> dict[str, object]:
+def _replacement_bead(spec: dict[str, object], status: str = "open") -> dict[str, object]:
     legacy_files = tuple(str(path) for path in spec["legacy_files"])
     return {
         "id": spec["id"],
@@ -70,7 +70,7 @@ def _replacement_bead(spec: dict[str, object]) -> dict[str, object]:
             "Replacement split with rch proof required; source-only drafts are "
             f"not cited as passing coverage. Covers: {' '.join(legacy_files)}"
         ),
-        "status": "open",
+        "status": status,
         "dependencies": [
             {
                 "issue_id": spec["id"],
@@ -178,6 +178,21 @@ path = "{crate_path}"
                 [_restoration_bead("closed")]
                 + [_replacement_bead(spec) for spec in mod.REPLACEMENT_BEADS],
             )
+
+            result = mod.run_checks(root)
+
+        self.assertEqual(result["verdict"], "PASS", result)
+
+    def test_completed_replacement_bead_still_satisfies_parent_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _minimal_root(root)
+            replacement_beads = []
+            for index, spec in enumerate(mod.REPLACEMENT_BEADS):
+                replacement_beads.append(
+                    _replacement_bead(spec, status="closed" if index == 0 else "open")
+                )
+            _write_beads(root, [_restoration_bead("closed")] + replacement_beads)
 
             result = mod.run_checks(root)
 

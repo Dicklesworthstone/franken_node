@@ -569,6 +569,11 @@ path = "tests/session_auth_key_roles.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "session_auth_jcq1z_real_service"
+path = "tests/session_auth_jcq1z_real_service.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "proof_generator_timeout_race"
 path = "tests/proof_generator_timeout_race.rs"
 

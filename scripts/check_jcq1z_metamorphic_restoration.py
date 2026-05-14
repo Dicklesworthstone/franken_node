@@ -155,8 +155,8 @@ def check_replacement_beads(
             title,
         ))
         checks.append(_check(
-            f"replacement bead remains actionable: {bead_id}",
-            status in ACTIONABLE_STATUSES,
+            f"replacement bead remains actionable or completed: {bead_id}",
+            status in ACTIONABLE_STATUSES or status == "closed",
             status,
         ))
         checks.append(_check(
