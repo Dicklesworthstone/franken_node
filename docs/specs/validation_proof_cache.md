@@ -154,6 +154,8 @@ operator tooling without letting cache growth silently endanger the workspace.
 | `path` | String | Yes | Cache-relative entry path or diagnostic path |
 | `bead_id` | String | Yes | Bead proven by the entry |
 | `cache_key_hex` | SHA-256 hex | Yes | Cache key digest when available |
+| `receipt_path` | String | Yes | Validation broker receipt path charged to the entry |
+| `safety_class` | String | Yes | Resource-governor safety class, or `untracked` when no inventory row matched |
 | `bytes` | Integer | Yes | Bytes charged against quota |
 | `active_bead` | Boolean | Yes | Whether the entry belongs to an active bead |
 | `reason_code` | String | Yes | Stable keep/remove/reject reason |
@@ -164,7 +166,11 @@ The GC report splits entries into `kept_entries`, `removed_entries`, and
 `rejected_entries`. `removed_entries` are well-formed entries selected for
 stale or quota removal. `rejected_entries` are not safe to trust because the
 entry is malformed, corrupted, missing its receipt artifact, or no longer
-matches the current git/input/dirty-state validation scope.
+matches the current git/input/dirty-state validation scope. When the resource
+artifact inventory is available, pinned artifacts, protected safety classes,
+and active bead entries are retained fail-closed before stale or quota removal,
+and ownership mismatches are rejected with
+`ERR_VPC_ARTIFACT_INVENTORY_MISMATCH`.
 
 ## Planner, Readiness, and Closeout Integration
 

@@ -55,6 +55,10 @@ use frankenengine_node::ops::validation_readiness::{
     build_validation_readiness_report, build_validation_swarm_performance_evidence,
     render_validation_handoff_markdown, render_validation_readiness_human,
 };
+use frankenengine_node::runtime::resource_governor::{
+    ResourceArtifactInventory, ResourceArtifactInventoryEntry, ResourceArtifactKind,
+    ResourceArtifactOpenFileStatus, ResourceArtifactPin, ResourceArtifactSafetyClass,
+};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -399,6 +403,26 @@ fn quota_policy() -> ValidationProofCacheQuotaPolicy {
         expected_input_digests: Vec::new(),
         expected_dirty_state_policy: Some(DirtyStatePolicy::CleanRequired),
     }
+}
+
+fn artifact_entry_for_cache_entry(
+    entry: &frankenengine_node::ops::validation_proof_cache::ValidationProofCacheEntry,
+    safety_class: ResourceArtifactSafetyClass,
+) -> ResourceArtifactInventoryEntry {
+    let mut artifact = ResourceArtifactInventoryEntry::new(
+        entry.storage.path.clone(),
+        "/data/projects/franken_node",
+        ResourceArtifactKind::CacheEntry,
+        safety_class,
+        Some(entry.storage.bytes),
+    )
+    .with_open_file_status(ResourceArtifactOpenFileStatus::NotOpen);
+    artifact.bead_id = Some(entry.bead_id.clone());
+    artifact
+}
+
+fn artifact_inventory(entries: Vec<ResourceArtifactInventoryEntry>) -> ResourceArtifactInventory {
+    ResourceArtifactInventory::try_new(entries).expect("artifact inventory")
 }
 
 fn populated_store(
@@ -3172,6 +3196,11 @@ fn gc_report_removes_entries_past_max_age() {
         report.removed_entries[0].reason_code,
         error_codes::ERR_VPC_STALE_ENTRY
     );
+    assert_eq!(
+        report.removed_entries[0].receipt_path,
+        entry.receipt_ref.path
+    );
+    assert_eq!(report.removed_entries[0].safety_class, "untracked");
     assert!(report.kept_entries.is_empty());
 }
 
@@ -3201,6 +3230,10 @@ fn gc_report_rejects_missing_receipt_artifacts() {
     assert_eq!(
         report.rejected_entries[0].reason_code,
         error_codes::ERR_VPC_MALFORMED_ENTRY
+    );
+    assert_eq!(
+        report.rejected_entries[0].receipt_path,
+        entry.receipt_ref.path
     );
 }
 
@@ -3233,6 +3266,7 @@ fn gc_report_quarantines_corrupted_entries() {
         report.rejected_entries[0].reason_code,
         error_codes::ERR_VPC_CORRUPTED_ENTRY
     );
+    assert_eq!(report.rejected_entries[0].safety_class, "untracked");
 }
 
 #[test]
@@ -3283,6 +3317,149 @@ fn gc_quota_eviction_preserves_active_beads_when_possible() {
     assert!(removed_ids.contains(&old.entry_id.as_str()));
     assert!(active_entry_path.exists());
     assert!(active_receipt_path.exists());
+}
+
+#[test]
+fn gc_report_keeps_pinned_inventory_artifacts_with_stable_diagnostics() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = ValidationProofCacheStore::new(dir.path());
+    let entry = insert_entry_for(
+        &store,
+        dir.path(),
+        "bd-pinned",
+        "pinned",
+        ts(3),
+        ts(50),
+        |_| {},
+    );
+    let pinned_artifact = artifact_entry_for_cache_entry(
+        &entry,
+        ResourceArtifactSafetyClass::PinnedGeneratedArtifact,
+    )
+    .with_pin(ResourceArtifactPin {
+        reason: "active validation proof closeout".to_string(),
+        owner_agent: Some("SnowyBeaver".to_string()),
+        bead_id: Some(entry.bead_id.clone()),
+        expires_at: None,
+    });
+    let inventory = artifact_inventory(vec![pinned_artifact]);
+    let mut policy = quota_policy();
+    policy.max_entries = 0;
+    policy.max_total_bytes = 0;
+
+    let report = store
+        .plan_garbage_collection_with_artifact_inventory(&policy, ts(4), 1_000, &inventory)
+        .expect("gc report");
+
+    assert_eq!(report.kept_entries.len(), 1);
+    assert_eq!(report.kept_entries[0].entry_id, entry.entry_id);
+    assert_eq!(report.kept_entries[0].receipt_path, entry.receipt_ref.path);
+    assert_eq!(
+        report.kept_entries[0].safety_class,
+        "pinned-generated-artifact"
+    );
+    assert_eq!(
+        report.kept_entries[0].reason_code,
+        "VPC_KEEP_PINNED_ARTIFACT"
+    );
+    assert!(!report.kept_entries[0].active_bead);
+    assert!(report.removed_entries.is_empty());
+    assert!(report.rejected_entries.is_empty());
+}
+
+#[test]
+fn gc_report_keeps_active_and_protected_artifacts_fail_closed() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = ValidationProofCacheStore::new(dir.path());
+    let active = insert_entry_for(
+        &store,
+        dir.path(),
+        "bd-active",
+        "active-protected",
+        ts(1),
+        ts(20),
+        |_| {},
+    );
+    let protected = insert_entry_for(
+        &store,
+        dir.path(),
+        "bd-protected",
+        "protected",
+        ts(1),
+        ts(2),
+        |_| {},
+    );
+    let inventory = artifact_inventory(vec![artifact_entry_for_cache_entry(
+        &protected,
+        ResourceArtifactSafetyClass::SourceNeverDelete,
+    )]);
+    let mut policy = quota_policy();
+    policy.max_entries = 0;
+    policy.max_total_bytes = 0;
+    policy.active_beads = vec![active.bead_id.clone()];
+
+    let report = store
+        .plan_garbage_collection_with_artifact_inventory(&policy, ts(4), 1_000, &inventory)
+        .expect("gc report");
+    let active_row = report
+        .kept_entries
+        .iter()
+        .find(|row| row.entry_id == active.entry_id)
+        .expect("active entry kept");
+    let protected_row = report
+        .kept_entries
+        .iter()
+        .find(|row| row.entry_id == protected.entry_id)
+        .expect("protected entry kept");
+
+    assert_eq!(active_row.reason_code, "VPC_KEEP_ACTIVE_BEAD");
+    assert!(active_row.active_bead);
+    assert_eq!(protected_row.reason_code, "VPC_KEEP_PROTECTED_ARTIFACT");
+    assert_eq!(protected_row.safety_class, "source-never-delete");
+    assert!(
+        report
+            .removed_entries
+            .iter()
+            .all(|row| { row.entry_id != active.entry_id && row.entry_id != protected.entry_id })
+    );
+}
+
+#[test]
+fn gc_report_rejects_artifact_inventory_bead_mismatch() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = ValidationProofCacheStore::new(dir.path());
+    let entry = insert_entry_for(
+        &store,
+        dir.path(),
+        "bd-owner",
+        "owner",
+        ts(3),
+        ts(50),
+        |_| {},
+    );
+    let mut artifact =
+        artifact_entry_for_cache_entry(&entry, ResourceArtifactSafetyClass::GeneratedEvidence);
+    artifact.bead_id = Some("bd-other".to_string());
+    let inventory = artifact_inventory(vec![artifact]);
+    let policy = quota_policy();
+
+    let report = store
+        .plan_garbage_collection_with_artifact_inventory(&policy, ts(4), 1_000, &inventory)
+        .expect("gc report");
+
+    assert_eq!(report.rejected_entries.len(), 1);
+    assert_eq!(report.rejected_entries[0].entry_id, entry.entry_id);
+    assert_eq!(
+        report.rejected_entries[0].reason_code,
+        error_codes::ERR_VPC_ARTIFACT_INVENTORY_MISMATCH
+    );
+    assert_eq!(report.rejected_entries[0].event_code, "VPC-007");
+    assert_eq!(
+        report.rejected_entries[0].safety_class,
+        "generated-evidence"
+    );
+    assert!(report.kept_entries.is_empty());
+    assert!(report.removed_entries.is_empty());
 }
 
 #[test]

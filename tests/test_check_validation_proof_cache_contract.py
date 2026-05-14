@@ -36,6 +36,7 @@ class ValidationProofCacheContractTests(unittest.TestCase):
         self.valid_key = self.fixtures["valid_cache_keys"][0]
         self.valid_entry = self.fixtures["valid_entries"][0]
         self.valid_decision = self.fixtures["valid_decisions"][0]
+        self.valid_gc_report = self.fixtures["valid_gc_reports"][0]
         self.validation_time = mod._parse_rfc3339(self.fixtures["validation_time"])
 
     def test_run_all_passes(self) -> None:
@@ -68,6 +69,13 @@ class ValidationProofCacheContractTests(unittest.TestCase):
             now=self.validation_time,
         )
         self.assertEqual(errors, [])
+
+    def test_valid_gc_report_validates(self) -> None:
+        errors = mod.validate_gc_report(self.valid_gc_report)
+        self.assertEqual(errors, [])
+        kept_entry = self.valid_gc_report["kept_entries"][0]
+        for field in ["receipt_path", "safety_class"]:
+            self.assertIn(field, kept_entry)
 
     def test_invalid_entry_cases_emit_expected_errors(self) -> None:
         for case in self.fixtures["invalid_entries"]:

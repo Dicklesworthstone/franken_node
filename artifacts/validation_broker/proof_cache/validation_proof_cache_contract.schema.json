@@ -109,6 +109,19 @@
     "rejected_entries",
     "disk_pressure"
   ],
+  "required_gc_entry_fields": [
+    "entry_id",
+    "path",
+    "bead_id",
+    "cache_key_hex",
+    "receipt_path",
+    "safety_class",
+    "bytes",
+    "active_bead",
+    "reason_code",
+    "event_code",
+    "message"
+  ],
   "schemas": {
     "DigestRef": {
       "type": "object",
@@ -181,6 +194,22 @@
         "receipt_ref",
         "required_action",
         "diagnostics"
+      ]
+    },
+    "ValidationProofCacheGcEntry": {
+      "type": "object",
+      "required": [
+        "entry_id",
+        "path",
+        "bead_id",
+        "cache_key_hex",
+        "receipt_path",
+        "safety_class",
+        "bytes",
+        "active_bead",
+        "reason_code",
+        "event_code",
+        "message"
       ]
     },
     "ValidationProofCacheGcReport": {

@@ -7,6 +7,9 @@
 use crate::ops::validation_broker::{
     self, CommandDigest, InputDigest, ValidationBrokerRequest, ValidationReceipt,
 };
+use crate::runtime::resource_governor::{
+    ResourceArtifactInventory, ResourceArtifactInventoryEntry, ResourceArtifactSafetyClass,
+};
 use crate::security::constant_time;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -37,6 +40,7 @@ pub mod error_codes {
     pub const ERR_VPC_QUOTA_BLOCKED: &str = "ERR_VPC_QUOTA_BLOCKED";
     pub const ERR_VPC_CORRUPTED_ENTRY: &str = "ERR_VPC_CORRUPTED_ENTRY";
     pub const ERR_VPC_DUPLICATE_ENTRY: &str = "ERR_VPC_DUPLICATE_ENTRY";
+    pub const ERR_VPC_ARTIFACT_INVENTORY_MISMATCH: &str = "ERR_VPC_ARTIFACT_INVENTORY_MISMATCH";
 }
 
 pub mod event_codes {
@@ -493,6 +497,8 @@ pub struct ValidationProofCacheGcEntry {
     pub path: String,
     pub bead_id: String,
     pub cache_key_hex: String,
+    pub receipt_path: String,
+    pub safety_class: String,
     pub bytes: u64,
     pub active_bead: bool,
     pub reason_code: String,
@@ -517,6 +523,7 @@ struct ValidationProofCacheGcCandidate {
     path: String,
     bytes: u64,
     active_bead: bool,
+    safety_class: String,
 }
 
 #[derive(Debug, Clone)]
@@ -738,7 +745,24 @@ impl ValidationProofCacheStore {
         now: DateTime<Utc>,
         available_bytes: u64,
     ) -> Result<ValidationProofCacheGcReport, ValidationProofCacheError> {
+        let inventory = ResourceArtifactInventory::default();
+        self.plan_garbage_collection_with_artifact_inventory(
+            policy,
+            now,
+            available_bytes,
+            &inventory,
+        )
+    }
+
+    pub fn plan_garbage_collection_with_artifact_inventory(
+        &self,
+        policy: &ValidationProofCacheQuotaPolicy,
+        now: DateTime<Utc>,
+        available_bytes: u64,
+        artifact_inventory: &ResourceArtifactInventory,
+    ) -> Result<ValidationProofCacheGcReport, ValidationProofCacheError> {
         let mut candidates = Vec::new();
+        let mut kept_entries = Vec::new();
         let mut removed_entries = Vec::new();
         let mut rejected_entries = Vec::new();
 
@@ -757,6 +781,8 @@ impl ValidationProofCacheStore {
                     relative_path,
                     "",
                     "",
+                    "",
+                    "untracked",
                     file_bytes,
                     false,
                     error_codes::ERR_VPC_MALFORMED_ENTRY,
@@ -774,6 +800,14 @@ impl ValidationProofCacheStore {
                 .active_beads
                 .iter()
                 .any(|bead| string_eq(bead, &entry.bead_id));
+            let artifact = artifact_inventory_entry_for_cache_entry(
+                artifact_inventory,
+                &entry,
+                &relative_path,
+            );
+            let safety_class = artifact
+                .map(|entry| artifact_safety_class_label(entry.safety_class).to_string())
+                .unwrap_or_else(|| "untracked".to_string());
 
             if !string_eq(&entry.schema_version, ENTRY_SCHEMA_VERSION) {
                 rejected_entries.push(gc_entry_from_entry(
@@ -781,6 +815,7 @@ impl ValidationProofCacheStore {
                     relative_path,
                     stored_bytes,
                     active_bead,
+                    safety_class,
                     error_codes::ERR_VPC_INVALID_SCHEMA_VERSION,
                     event_codes::CORRUPTED_REJECTED,
                     "unsupported proof cache entry schema version",
@@ -793,6 +828,7 @@ impl ValidationProofCacheStore {
                     relative_path,
                     stored_bytes,
                     active_bead,
+                    safety_class,
                     error_codes::ERR_VPC_BAD_CACHE_KEY,
                     event_codes::CORRUPTED_REJECTED,
                     "proof cache key does not verify",
@@ -805,6 +841,7 @@ impl ValidationProofCacheStore {
                     relative_path,
                     stored_bytes,
                     active_bead,
+                    safety_class,
                     error_codes::ERR_VPC_CORRUPTED_ENTRY,
                     event_codes::CORRUPTED_REJECTED,
                     "proof cache entry is invalidated or corrupted",
@@ -829,18 +866,83 @@ impl ValidationProofCacheStore {
                     relative_path,
                     stored_bytes,
                     active_bead,
+                    safety_class,
                     error.code(),
                     event_codes::CORRUPTED_REJECTED,
                     "proof cache receipt artifact is missing or outside the cache root",
                 ));
                 continue;
             }
+
+            if let Some(artifact) = artifact
+                && artifact_inventory_mismatch(&entry, artifact)
+            {
+                rejected_entries.push(gc_entry_from_entry(
+                    &entry,
+                    relative_path,
+                    stored_bytes,
+                    active_bead,
+                    safety_class,
+                    error_codes::ERR_VPC_ARTIFACT_INVENTORY_MISMATCH,
+                    event_codes::POLICY_REJECTED,
+                    "proof cache entry conflicts with generated artifact inventory ownership",
+                ));
+                continue;
+            }
+
+            if active_bead {
+                kept_entries.push(gc_entry_from_entry(
+                    &entry,
+                    relative_path,
+                    stored_bytes,
+                    active_bead,
+                    safety_class,
+                    "VPC_KEEP_ACTIVE_BEAD",
+                    event_codes::HIT_ACCEPTED,
+                    "proof cache entry belongs to an active bead and is not disposable",
+                ));
+                continue;
+            }
+
+            if let Some(artifact) = artifact
+                && artifact.pin.is_some()
+            {
+                kept_entries.push(gc_entry_from_entry(
+                    &entry,
+                    relative_path,
+                    stored_bytes,
+                    active_bead,
+                    safety_class,
+                    "VPC_KEEP_PINNED_ARTIFACT",
+                    event_codes::HIT_ACCEPTED,
+                    "proof cache entry is pinned by artifact inventory and is not disposable",
+                ));
+                continue;
+            }
+
+            if let Some(artifact) = artifact
+                && artifact.safety_class.is_protected()
+            {
+                kept_entries.push(gc_entry_from_entry(
+                    &entry,
+                    relative_path,
+                    stored_bytes,
+                    active_bead,
+                    safety_class,
+                    "VPC_KEEP_PROTECTED_ARTIFACT",
+                    event_codes::HIT_ACCEPTED,
+                    "proof cache entry is protected by artifact inventory safety class",
+                ));
+                continue;
+            }
+
             if entry.freshness_expires_at < now || entry_is_older_than_policy(&entry, policy, now) {
                 removed_entries.push(gc_entry_from_entry(
                     &entry,
                     relative_path,
                     stored_bytes,
                     active_bead,
+                    safety_class,
                     error_codes::ERR_VPC_STALE_ENTRY,
                     event_codes::STALE_REJECTED,
                     "proof cache entry exceeded freshness or max-age policy",
@@ -855,6 +957,7 @@ impl ValidationProofCacheStore {
                     relative_path,
                     stored_bytes,
                     active_bead,
+                    safety_class,
                     error_codes::ERR_VPC_STALE_ENTRY,
                     event_codes::STALE_REJECTED,
                     "proof cache entry git commit is not in the expected validation scope",
@@ -872,6 +975,7 @@ impl ValidationProofCacheStore {
                     relative_path,
                     stored_bytes,
                     active_bead,
+                    safety_class,
                     error_codes::ERR_VPC_INPUT_DIGEST_MISMATCH,
                     event_codes::COMMAND_OR_INPUT_REJECTED,
                     "proof cache entry input digest set drifted from the expected validation scope",
@@ -889,6 +993,7 @@ impl ValidationProofCacheStore {
                     relative_path,
                     stored_bytes,
                     active_bead,
+                    safety_class,
                     error_codes::ERR_VPC_DIRTY_STATE_MISMATCH,
                     event_codes::POLICY_REJECTED,
                     "proof cache entry dirty-state policy drifted from the expected validation scope",
@@ -900,6 +1005,7 @@ impl ValidationProofCacheStore {
                 path: relative_path,
                 bytes: stored_bytes,
                 active_bead,
+                safety_class,
             });
         }
 
@@ -917,8 +1023,9 @@ impl ValidationProofCacheStore {
                 .then_with(|| left.entry.entry_id.cmp(&right.entry.entry_id))
         });
 
-        let mut kept_entries = Vec::new();
-        let mut kept_bytes = 0_u64;
+        let mut kept_bytes = kept_entries
+            .iter()
+            .fold(0_u64, |total, entry| total.saturating_add(entry.bytes));
         for candidate in candidates {
             if kept_entries.len() < policy.max_entries
                 && kept_bytes.saturating_add(candidate.bytes) <= policy.max_total_bytes
@@ -929,6 +1036,7 @@ impl ValidationProofCacheStore {
                     candidate.path,
                     candidate.bytes,
                     candidate.active_bead,
+                    candidate.safety_class,
                     "VPC_KEEP_FRESH",
                     event_codes::HIT_ACCEPTED,
                     "proof cache entry is fresh and within quota",
@@ -939,6 +1047,7 @@ impl ValidationProofCacheStore {
                     candidate.path,
                     candidate.bytes,
                     candidate.active_bead,
+                    candidate.safety_class,
                     error_codes::ERR_VPC_QUOTA_BLOCKED,
                     event_codes::QUOTA_REJECTED,
                     "proof cache entry is outside the quota-retained set",
@@ -1076,12 +1185,65 @@ fn entry_is_older_than_policy(
         && now.signed_duration_since(entry.created_at).num_seconds() > policy.max_age_seconds
 }
 
+fn artifact_inventory_entry_for_cache_entry<'a>(
+    inventory: &'a ResourceArtifactInventory,
+    entry: &ValidationProofCacheEntry,
+    relative_entry_path: &str,
+) -> Option<&'a ResourceArtifactInventoryEntry> {
+    inventory.entries.iter().find(|artifact| {
+        artifact_path_matches(&artifact.path, relative_entry_path)
+            || artifact_path_matches(&artifact.path, &entry.storage.path)
+            || artifact_path_matches(&artifact.path, &entry.receipt_ref.path)
+    })
+}
+
+fn artifact_path_matches(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let left_path = Path::new(left);
+    let right_path = Path::new(right);
+    left_path.ends_with(right_path) || right_path.ends_with(left_path)
+}
+
+fn artifact_inventory_mismatch(
+    entry: &ValidationProofCacheEntry,
+    artifact: &ResourceArtifactInventoryEntry,
+) -> bool {
+    artifact
+        .bead_id
+        .as_deref()
+        .is_some_and(|bead_id| !string_eq(bead_id, &entry.bead_id))
+        || artifact
+            .pin
+            .as_ref()
+            .and_then(|pin| pin.bead_id.as_deref())
+            .is_some_and(|bead_id| !string_eq(bead_id, &entry.bead_id))
+}
+
+fn artifact_safety_class_label(safety_class: ResourceArtifactSafetyClass) -> &'static str {
+    match safety_class {
+        ResourceArtifactSafetyClass::SourceNeverDelete => "source-never-delete",
+        ResourceArtifactSafetyClass::UserDataNeverDelete => "user-data-never-delete",
+        ResourceArtifactSafetyClass::LogsSessionHistoryNeverDelete => {
+            "logs-session-history-never-delete"
+        }
+        ResourceArtifactSafetyClass::BeadsMailNeverDelete => "beads-mail-never-delete",
+        ResourceArtifactSafetyClass::PinnedGeneratedArtifact => "pinned-generated-artifact",
+        ResourceArtifactSafetyClass::GeneratedEvidence => "generated-evidence",
+        ResourceArtifactSafetyClass::RebuildableBuildOutput => "rebuildable-build-output",
+        ResourceArtifactSafetyClass::DisposableTempOutput => "disposable-temp-output",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn gc_entry_from_parts(
     entry_id: impl Into<String>,
     path: impl Into<String>,
     bead_id: impl Into<String>,
     cache_key_hex: impl Into<String>,
+    receipt_path: impl Into<String>,
+    safety_class: impl Into<String>,
     bytes: u64,
     active_bead: bool,
     reason_code: impl Into<String>,
@@ -1093,6 +1255,8 @@ fn gc_entry_from_parts(
         path: path.into(),
         bead_id: bead_id.into(),
         cache_key_hex: cache_key_hex.into(),
+        receipt_path: receipt_path.into(),
+        safety_class: safety_class.into(),
         bytes,
         active_bead,
         reason_code: reason_code.into(),
@@ -1101,11 +1265,13 @@ fn gc_entry_from_parts(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gc_entry_from_entry(
     entry: &ValidationProofCacheEntry,
     path: impl Into<String>,
     bytes: u64,
     active_bead: bool,
+    safety_class: impl Into<String>,
     reason_code: impl Into<String>,
     event_code: impl Into<String>,
     message: impl Into<String>,
@@ -1115,6 +1281,8 @@ fn gc_entry_from_entry(
         path,
         entry.bead_id.clone(),
         entry.cache_key.hex.clone(),
+        entry.receipt_ref.path.clone(),
+        safety_class,
         bytes,
         active_bead,
         reason_code,

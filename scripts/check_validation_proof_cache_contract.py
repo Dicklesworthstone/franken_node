@@ -40,6 +40,7 @@ REQUIRED_SPEC_MARKERS = [
     "ValidationProofCacheEntry",
     "ValidationProofCacheDecision",
     "ValidationProofCacheGcReport",
+    "ValidationProofCacheGcEntry",
     "INV-VPC-KEY-DETERMINISTIC",
     "INV-VPC-RECEIPT-DIGEST",
     "INV-VPC-COMMAND-DIGEST",
@@ -54,6 +55,7 @@ REQUIRED_SPEC_MARKERS = [
     "ERR_VPC_COMMAND_DIGEST_MISMATCH",
     "ERR_VPC_INPUT_DIGEST_MISMATCH",
     "ERR_VPC_DIRTY_STATE_MISMATCH",
+    "ERR_VPC_ARTIFACT_INVENTORY_MISMATCH",
     "VPC-001",
     "VPC-010",
 ]
@@ -119,6 +121,20 @@ GC_REPORT_REQUIRED_FIELDS = [
     "disk_pressure",
 ]
 
+GC_ENTRY_REQUIRED_FIELDS = [
+    "entry_id",
+    "path",
+    "bead_id",
+    "cache_key_hex",
+    "receipt_path",
+    "safety_class",
+    "bytes",
+    "active_bead",
+    "reason_code",
+    "event_code",
+    "message",
+]
+
 DECISION_KINDS = {
     "hit",
     "miss",
@@ -169,6 +185,18 @@ EVENT_CODES = {
     "VPC-008",
     "VPC-009",
     "VPC-010",
+}
+
+GC_ENTRY_SAFETY_CLASSES = {
+    "source-never-delete",
+    "user-data-never-delete",
+    "logs-session-history-never-delete",
+    "beads-mail-never-delete",
+    "pinned-generated-artifact",
+    "generated-evidence",
+    "rebuildable-build-output",
+    "disposable-temp-output",
+    "untracked",
 }
 
 
@@ -531,6 +559,63 @@ def validate_cache_decision(
     return sorted(set(errors))
 
 
+def validate_gc_entry(entry: Any) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(entry, dict):
+        return ["ERR_VPC_MALFORMED_ENTRY"]
+
+    for field in GC_ENTRY_REQUIRED_FIELDS:
+        if field not in entry:
+            errors.append("ERR_VPC_MALFORMED_ENTRY")
+            break
+
+    for field in ["entry_id", "path", "bead_id", "receipt_path", "reason_code", "message"]:
+        if not isinstance(entry.get(field), str) or not entry.get(field):
+            errors.append("ERR_VPC_MALFORMED_ENTRY")
+            break
+
+    cache_key_hex = entry.get("cache_key_hex")
+    if cache_key_hex and not _is_sha256_hex(cache_key_hex):
+        errors.append("ERR_VPC_BAD_CACHE_KEY")
+    if entry.get("safety_class") not in GC_ENTRY_SAFETY_CLASSES:
+        errors.append("ERR_VPC_MALFORMED_ENTRY")
+    if not isinstance(entry.get("bytes"), int) or entry.get("bytes", -1) < 0:
+        errors.append("ERR_VPC_MALFORMED_ENTRY")
+    if not isinstance(entry.get("active_bead"), bool):
+        errors.append("ERR_VPC_MALFORMED_ENTRY")
+    if entry.get("event_code") not in EVENT_CODES:
+        errors.append("ERR_VPC_MALFORMED_ENTRY")
+
+    return sorted(set(errors))
+
+
+def validate_gc_report(report: Any) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(report, dict):
+        return ["ERR_VPC_MALFORMED_ENTRY"]
+
+    for field in GC_REPORT_REQUIRED_FIELDS:
+        if field not in report:
+            errors.append("ERR_VPC_MALFORMED_ENTRY")
+            break
+    if report.get("schema_version") != GC_REPORT_SCHEMA_VERSION:
+        errors.append("ERR_VPC_INVALID_SCHEMA_VERSION")
+
+    generated_at = _parse_rfc3339(report.get("generated_at"))
+    if generated_at is None:
+        errors.append("ERR_VPC_MALFORMED_ENTRY")
+
+    for bucket in ["kept_entries", "removed_entries", "rejected_entries"]:
+        entries = report.get(bucket)
+        if not isinstance(entries, list):
+            errors.append("ERR_VPC_MALFORMED_ENTRY")
+            continue
+        for entry in entries:
+            errors.extend(validate_gc_entry(entry))
+
+    return sorted(set(errors))
+
+
 def _load_contract_files() -> tuple[Any, Any]:
     schema = _load_json(SCHEMA_FILE) if SCHEMA_FILE.exists() else None
     fixtures = _load_json(FIXTURES_FILE) if FIXTURES_FILE.exists() else None
@@ -582,6 +667,10 @@ def _check_schema(schema: Any) -> list[dict[str, Any]]:
             "required_gc_report_fields_complete",
             set(schema.get("required_gc_report_fields", [])) == set(GC_REPORT_REQUIRED_FIELDS),
         ),
+        _check(
+            "required_gc_entry_fields_complete",
+            set(schema.get("required_gc_entry_fields", [])) == set(GC_ENTRY_REQUIRED_FIELDS),
+        ),
         _check("key_schema_required_complete", _schema_has_required(schema, "ValidationProofCacheKey", KEY_REQUIRED_FIELDS)),
         _check(
             "entry_schema_required_complete",
@@ -594,6 +683,10 @@ def _check_schema(schema: Any) -> list[dict[str, Any]]:
         _check(
             "gc_report_schema_required_complete",
             _schema_has_required(schema, "ValidationProofCacheGcReport", GC_REPORT_REQUIRED_FIELDS),
+        ),
+        _check(
+            "gc_entry_schema_required_complete",
+            _schema_has_required(schema, "ValidationProofCacheGcEntry", GC_ENTRY_REQUIRED_FIELDS),
         ),
     ]
 
@@ -656,6 +749,12 @@ def _check_fixtures(fixtures: Any) -> list[dict[str, Any]]:
                 f"expected={sorted(expected)} actual={sorted(errors)}",
             )
         )
+
+    valid_gc_reports = fixtures.get("valid_gc_reports", [])
+    checks.append(_check("valid_gc_reports_present", isinstance(valid_gc_reports, list) and len(valid_gc_reports) >= 1))
+    for index, report in enumerate(valid_gc_reports if isinstance(valid_gc_reports, list) else []):
+        errors = validate_gc_report(report)
+        checks.append(_check(f"valid_gc_report:{index}", errors == [], ",".join(errors)))
 
     decision_examples = fixtures.get("decision_examples", [])
     example_decisions = {example.get("decision") for example in decision_examples if isinstance(example, dict)}
