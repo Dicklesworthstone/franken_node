@@ -1,32 +1,41 @@
 {
-  "schema_version": "evidence-v1.0",
-  "bead_id": "bd-cclm",
+  "schema_version": "evidence-v1.1",
+  "bead_id": "bd-cclm.1",
+  "parent_bead_id": "bd-cclm",
   "section": "10.20",
-  "title": "Adversarial validation suite",
+  "title": "Adversarial validation suite concrete artifacts",
   "verdict": "PASS",
-  "total": 20,
-  "passed": 20,
+  "total": 10,
+  "passed": 10,
   "failed": 0,
+  "implementation": {
+    "test_file": "tests/security/dgis_adversarial_suite.rs",
+    "cargo_registration": "crates/franken-node/Cargo.toml",
+    "playbook": "docs/security/dgis_attack_playbook.md",
+    "results_artifact": "artifacts/10.20/dgis_adversarial_results.json",
+    "gate_script": "scripts/check_section_10_20_gate.py"
+  },
+  "campaign_coverage": [
+    "graph_poisoning",
+    "edge_obfuscation",
+    "fake_low_risk_pivot",
+    "delayed_activation"
+  ],
+  "validation": {
+    "rustfmt": "rustfmt --edition 2024 --check --config skip_children=true tests/security/dgis_adversarial_suite.rs",
+    "json": "python3 -m json.tool artifacts/10.20/dgis_adversarial_results.json >/dev/null && python3 -m json.tool artifacts/section_10_20/bd-cclm/verification_evidence.json >/dev/null",
+    "focused_test": "rch exec -- cargo test -p frankenengine-node --test dgis_adversarial_suite --no-default-features -- --nocapture (vmi1152480, 5 passed, 0 failed)"
+  },
   "checks": [
-    {"check": "rust_module_exists", "pass": true},
-    {"check": "schema_version", "pass": true},
-    {"check": "event_codes_present", "pass": true},
-    {"check": "error_codes_present", "pass": true},
-    {"check": "invariant_markers", "pass": true},
-    {"check": "btreemap_usage", "pass": true},
-    {"check": "serde_derives", "pass": true},
-    {"check": "unit_tests_ge_20", "pass": true},
-    {"check": "fail_closed_semantics", "pass": true},
-    {"check": "audit_trail", "pass": true},
-    {"check": "deterministic_ordering", "pass": true},
-    {"check": "graph_schema_compliance", "pass": true},
-    {"check": "topology_metrics", "pass": true},
-    {"check": "contagion_simulation", "pass": true},
-    {"check": "immunization_planning", "pass": true},
-    {"check": "cascade_economics", "pass": true},
-    {"check": "quarantine_orchestration", "pass": true},
-    {"check": "fragility_detection", "pass": true},
-    {"check": "federation_interop", "pass": true},
-    {"check": "adversarial_validation", "pass": true}
+    {"check": "graph_poisoning_rejects_non_finite_edge_weights", "pass": true, "detail": "GraphError::NonFiniteWeight and GraphError::UnknownTarget"},
+    {"check": "edge_obfuscation_shadow_edge_is_bounded", "pass": true, "detail": "final infected nodes bounded to 1"},
+    {"check": "fake_low_risk_pivot_uses_aggregate_exposure", "pass": true, "detail": "aggregate weak edges escalate pivot while critical service stays bounded"},
+    {"check": "delayed_activation_accumulation_is_caught", "pass": true, "detail": "dormant payload caught at step 3"},
+    {"check": "campaign_verdicts_are_deterministic_and_replayable", "pass": true, "detail": "two replay runs produce identical BTreeMap verdicts"},
+    {"check": "playbook_exists", "pass": true, "detail": "docs/security/dgis_attack_playbook.md"},
+    {"check": "results_artifact_exists", "pass": true, "detail": "artifacts/10.20/dgis_adversarial_results.json"},
+    {"check": "cargo_target_registered", "pass": true, "detail": "dgis_adversarial_suite [[test]]"},
+    {"check": "section_gate_key_artifact_registered", "pass": true, "detail": "dgis_adversarial_results"},
+    {"check": "thin_artifact_set_replaced", "pass": true, "detail": "old generic 20/20 evidence replaced with concrete file paths and campaign results"}
   ]
 }

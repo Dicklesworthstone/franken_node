@@ -724,6 +724,11 @@ path = "../../tests/security/dgis_fragility_spof.rs"
 name = "dgis_graph_ingestion"
 path = "../../tests/security/dgis_graph_ingestion.rs"
 
+# bd-cclm.1: DGIS adversarial validation suite artifacts
+[[test]]
+name = "dgis_adversarial_suite"
+path = "../../tests/security/dgis_adversarial_suite.rs"
+
 [[test]]
 name = "bayesian_risk_quarantine"
 path = "tests/bayesian_risk_quarantine.rs"

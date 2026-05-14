@@ -1,0 +1,58 @@
+{
+  "schema_version": "dgis-adversarial-results-v1",
+  "bead_id": "bd-cclm.1",
+  "parent_bead_id": "bd-cclm",
+  "generated_at": "2026-05-14T13:12:17Z",
+  "verdict": "PASS",
+  "test_target": "dgis_adversarial_suite",
+  "test_file": "tests/security/dgis_adversarial_suite.rs",
+  "playbook": "docs/security/dgis_attack_playbook.md",
+  "campaigns": [
+    {
+      "name": "graph_poisoning_non_finite_edge",
+      "attack_class": "graph_poisoning",
+      "stable_class": "DGIS-ADV-GRAPH-POISONING-REJECTED",
+      "expected_behavior": "reject NaN, infinite, and dangling graph inputs before simulation",
+      "actual_behavior": "ContagionEdge::new returns GraphError::NonFiniteWeight; ContagionGraph::add_edge returns GraphError::UnknownTarget",
+      "damage_bound_infected_nodes": 0,
+      "remediation_hint": "keep graph admission fail-closed before simulator entry"
+    },
+    {
+      "name": "edge_obfuscation_shadow_package",
+      "attack_class": "edge_obfuscation",
+      "stable_class": "DGIS-ADV-EDGE-OBFUSCATION-BOUNDED",
+      "expected_behavior": "namespace-shadow edge below threshold does not activate the payload chain",
+      "actual_final_infected_nodes": 1,
+      "actual_termination_reason": "Converged",
+      "actual_terminated_at_step": 2,
+      "damage_bound_infected_nodes": 1,
+      "remediation_hint": "quarantine namespace-shadow edges below activation threshold"
+    },
+    {
+      "name": "fake_low_risk_pivot_aggregate_exposure",
+      "attack_class": "fake_low_risk_pivot",
+      "stable_class": "DGIS-ADV-FAKE-LOW-RISK-PIVOT-ESCALATED",
+      "expected_behavior": "two weak independent edges aggregate into a pivot escalation while the critical service remains bounded",
+      "actual_final_infected_nodes": 3,
+      "actual_termination_reason": "Converged",
+      "actual_terminated_at_step": 3,
+      "damage_bound_infected_nodes": 3,
+      "remediation_hint": "aggregate weak independent edges before assigning low-risk status"
+    },
+    {
+      "name": "delayed_activation_accumulation",
+      "attack_class": "delayed_activation",
+      "stable_class": "DGIS-ADV-DELAYED-ACTIVATION-CAUGHT",
+      "expected_behavior": "retained exposure memory catches dormant-to-active activation by step 3",
+      "actual_final_infected_nodes": 2,
+      "actual_termination_reason": "FullSpread",
+      "actual_terminated_at_step": 3,
+      "damage_bound_infected_nodes": 2,
+      "remediation_hint": "retain exposure memory for dormant-to-active activation chains"
+    }
+  ],
+  "determinism": {
+    "replayed_twice": true,
+    "verdicts_byte_identical": true
+  }
+}

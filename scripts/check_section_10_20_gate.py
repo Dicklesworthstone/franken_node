@@ -71,6 +71,7 @@ KEY_ARTIFACTS = [
     ("dgis_migration_health_report", "artifacts/10.20/dgis_migration_health_report.json"),
     ("dgis_operator_recommendation_log", "artifacts/10.20/dgis_operator_recommendation_log.jsonl"),
     ("dgis_release_gate_report", "artifacts/10.20/dgis_release_gate_report.json"),
+    ("dgis_adversarial_results", "artifacts/10.20/dgis_adversarial_results.json"),
 ]
 
 RESULTS: list[dict[str, Any]] = []
