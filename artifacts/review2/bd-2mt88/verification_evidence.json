@@ -1,0 +1,39 @@
+{
+  "bead_id": "bd-2mt88.1",
+  "parent_bead_id": "bd-2mt88",
+  "generated_at": "2026-05-14T02:00:05Z",
+  "verdict": "PASS",
+  "checks_passed": 15,
+  "checks_total": 15,
+  "scope": {
+    "origin_commit": "f3aa5372e45353c3698689527a9f1d01d864228e",
+    "origin_commit_subject": "security(bd-mfpkq): tighten test-support feature gates to prevent production attack surface exposure",
+    "migration_doc": "docs/policy/api_test_support_migration.md",
+    "gate_script": "scripts/check_api_test_support_migration.py",
+    "gate_tests": "tests/test_check_api_test_support_migration.py"
+  },
+  "current_api_test_support_inventory": {
+    "direct_test_support_refs_under_api": [
+      {
+        "file": "crates/franken-node/src/api/fleet_quarantine.rs",
+        "line": 3136,
+        "symbol": "StatusRequest",
+        "risk": "read-only status request payload"
+      }
+    ],
+    "middleware_direct_test_support_refs": 0,
+    "api_mod_direct_test_support_refs": 0
+  },
+  "validations": [
+    {
+      "command": "python3 scripts/check_api_test_support_migration.py --json",
+      "exit_code": 0,
+      "result": "15/15 checks PASS"
+    },
+    {
+      "command": "python3 -m pytest tests/test_check_api_test_support_migration.py",
+      "exit_code": 0,
+      "result": "21 passed in 1.38s"
+    }
+  ]
+}
