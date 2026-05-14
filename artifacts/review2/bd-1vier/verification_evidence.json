@@ -1,0 +1,53 @@
+{
+  "bead_id": "bd-1vier.1",
+  "parent_bead_id": "bd-1vier",
+  "generated_at": "2026-05-14T02:10:13Z",
+  "verdict": "PASS",
+  "checks_passed": 14,
+  "checks_total": 14,
+  "scope": {
+    "cargo_target": "replay_bundle_golden_artifacts",
+    "cargo_manifest": "crates/franken-node/Cargo.toml",
+    "test_file": "crates/franken-node/tests/replay_bundle_golden_artifacts.rs",
+    "golden_file": "crates/franken-node/tests/golden/replay_bundle/canonical_small_fixture.golden",
+    "gate_script": "scripts/check_replay_bundle_golden_artifacts.py",
+    "gate_tests": "tests/test_check_replay_bundle_golden_artifacts.py"
+  },
+  "source_evidence": [
+    {
+      "file": "crates/franken-node/Cargo.toml",
+      "lines": "388-390",
+      "evidence": "registered [[test]] target replay_bundle_golden_artifacts"
+    },
+    {
+      "file": "crates/franken-node/tests/replay_bundle_golden_artifacts.rs",
+      "lines": "11-96",
+      "evidence": "includes checked-in canonical_small_fixture.golden and compares scrubbed actual canonical JSON against it"
+    },
+    {
+      "file": "crates/franken-node/tests/golden/replay_bundle/canonical_small_fixture.golden",
+      "evidence": "tracked non-empty replay bundle golden fixture"
+    }
+  ],
+  "validations": [
+    {
+      "command": "python3 scripts/check_replay_bundle_golden_artifacts.py --json",
+      "exit_code": 0,
+      "result": "14/14 checks PASS"
+    },
+    {
+      "command": "python3 -m pytest tests/test_check_replay_bundle_golden_artifacts.py",
+      "exit_code": 0,
+      "result": "20 passed in 1.51s"
+    },
+    {
+      "command": "rustfmt --edition 2024 --check crates/franken-node/tests/replay_bundle_golden_artifacts.rs",
+      "exit_code": 0,
+      "result": "PASS"
+    }
+  ],
+  "cargo_validation": {
+    "attempted": false,
+    "reason": "Skipped because the AGENTS contention preflight was red: pgrep -af 'cargo|rustc' | wc -l returned 21 and RCH queue already had active franken_node builds."
+  }
+}
