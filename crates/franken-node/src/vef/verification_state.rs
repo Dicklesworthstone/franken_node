@@ -1546,6 +1546,7 @@ mod tests {
     /// Negative test: Concurrent state manipulation race conditions
     #[test]
     fn negative_concurrent_state_manipulation_races() {
+        use crate::lock_utils::try_lock;
         use std::sync::{Arc, Mutex};
         use std::thread;
 
@@ -1553,7 +1554,8 @@ mod tests {
 
         // Initialize entities for concurrent testing
         {
-            let mut mgr_guard = mgr.lock().unwrap();
+            let mut mgr_guard = try_lock(&mgr, "verification state concurrent setup")
+                .expect("verification state manager mutex should not be poisoned");
             for i in 0..5 {
                 let entity_id = format!("concurrent-entity-{}", i);
                 let proof = ProofStatus {
@@ -1593,7 +1595,9 @@ mod tests {
                     };
 
                     let result = {
-                        let mut mgr_guard = mgr_clone.lock().unwrap();
+                        let mut mgr_guard =
+                            try_lock(&mgr_clone, "verification state transition request")
+                                .expect("verification state manager mutex should not be poisoned");
                         mgr_guard.request_transition(&transition_request)
                     };
 
@@ -1608,7 +1612,9 @@ mod tests {
                     };
 
                     let auth_result = {
-                        let mut mgr_guard = mgr_clone.lock().unwrap();
+                        let mut mgr_guard =
+                            try_lock(&mgr_clone, "verification state action authorization")
+                                .expect("verification state manager mutex should not be poisoned");
                         mgr_guard.authorize_action(&action_request)
                     };
 
@@ -1641,7 +1647,8 @@ mod tests {
         }
 
         // Verify state consistency after concurrent operations
-        let final_mgr = mgr.lock().unwrap();
+        let final_mgr = try_lock(&mgr, "verification state final consistency check")
+            .expect("verification state manager mutex should not be poisoned");
 
         // All entities should still exist and be in consistent states
         for i in 0..5 {
