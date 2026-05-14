@@ -1811,6 +1811,7 @@ mod tests {
     #[test]
     fn trust_complexity_concurrent_gate_safety() {
         // Test concurrent trust complexity gate operations for race conditions
+        use crate::lock_utils::try_lock;
         use std::sync::{Arc, Mutex};
         use std::thread;
 
@@ -1825,7 +1826,8 @@ mod tests {
                 let operations = [
                     // Record decision operations
                     || {
-                        let mut g = gate_clone.lock().unwrap();
+                        let mut g = try_lock(&gate_clone, "trust complexity record decision")
+                            .expect("trust complexity gate mutex should not be poisoned");
                         let decision = TrustDecision {
                             context: TrustDecisionContext {
                                 decision_id: format!("concurrent-{thread_id}"),
@@ -1852,7 +1854,8 @@ mod tests {
                     },
                     // Replay verification operations
                     || {
-                        let mut g = gate_clone.lock().unwrap();
+                        let mut g = try_lock(&gate_clone, "trust complexity replay verification")
+                            .expect("trust complexity gate mutex should not be poisoned");
                         let context = TrustDecisionContext {
                             decision_id: format!("concurrent-{thread_id}"),
                             endpoint_group: format!("endpoint-{thread_id}"),
@@ -1866,7 +1869,8 @@ mod tests {
                     },
                     // Degraded mode operations
                     || {
-                        let mut g = gate_clone.lock().unwrap();
+                        let mut g = try_lock(&gate_clone, "trust complexity degraded mode")
+                            .expect("trust complexity gate mutex should not be poisoned");
                         if thread_id % 3 == 0 {
                             g.enter_degraded_mode(
                                 "concurrent test",
@@ -1896,7 +1900,8 @@ mod tests {
         }
 
         // Verify final state consistency
-        let final_gate = gate.lock().unwrap();
+        let final_gate = try_lock(&gate, "trust complexity final consistency check")
+            .expect("trust complexity gate mutex should not be poisoned");
         assert!(final_gate.decisions().len() <= 10); // At most 10 decisions added
         assert!(final_gate.replay_results().len() <= 10); // At most 10 replays
         assert!(final_gate.events().len() <= MAX_EVENTS);
