@@ -3,6 +3,8 @@
 //! This module provides a single point of control for wall clock access,
 //! enabling deterministic testing and handling of clock skew/NTP failures.
 
+#[cfg(test)]
+use crate::lock_utils::try_lock;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 #[cfg(test)]
@@ -45,13 +47,15 @@ impl TestClock {
 
     /// Advance the clock by the given duration.
     pub fn advance(&self, duration: chrono::Duration) {
-        let mut time = self.current_time.lock().unwrap();
+        let mut time = try_lock(&self.current_time, "test clock advance")
+            .expect("test clock mutex should lock for advance");
         *time = *time + duration;
     }
 
     /// Set the clock to a specific time.
     pub fn set_time(&self, time: DateTime<Utc>) {
-        let mut current = self.current_time.lock().unwrap();
+        let mut current = try_lock(&self.current_time, "test clock set_time")
+            .expect("test clock mutex should lock for set_time");
         *current = time;
     }
 }
@@ -59,7 +63,8 @@ impl TestClock {
 #[cfg(test)]
 impl Clock for TestClock {
     fn now(&self) -> DateTime<Utc> {
-        *self.current_time.lock().unwrap()
+        *try_lock(&self.current_time, "test clock now")
+            .expect("test clock mutex should lock for now")
     }
 }
 
