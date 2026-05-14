@@ -9,11 +9,12 @@
 //! This differs from the existing remote capability test by emphasizing
 //! the Perfect E2E testing patterns rather than concurrent/timing behavior.
 
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Mutex, MutexGuard, Once, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use frankenengine_node::lock_utils;
 use frankenengine_node::security::remote_cap::{
     CapabilityGate, CapabilityProvider, RemoteOperation, RemoteScope,
 };
@@ -36,6 +37,11 @@ fn test_count() -> &'static Mutex<u32> {
 
 fn node_env_override() -> &'static Mutex<Option<String>> {
     NODE_ENV_OVERRIDE.get_or_init(|| Mutex::new(None))
+}
+
+fn lock_test_count() -> MutexGuard<'static, u32> {
+    lock_utils::try_lock(test_count(), "security perfect e2e test counter")
+        .expect("security perfect e2e test counter should not be poisoned")
 }
 
 fn set_node_env_override_for_tests(value: Option<&str>) {
@@ -68,7 +74,7 @@ impl TestLogger {
             );
         });
 
-        let mut count = test_count().lock().unwrap();
+        let mut count = lock_test_count();
         *count += 1;
         let test_id = *count;
 
