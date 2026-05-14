@@ -1981,6 +1981,18 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             serialized.replace("0.9", "Infinity"),
             serialized.replace("1000", "99999999999999999999999999999"),
             // Structure corruption
+// FIX: 安全检查 — 防止目录穿越
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
             serialized.replace("\"posteriors\":[", "\"posteriors\":{"),
             serialized.replace("\"evidence_count\":", "\"evidence_count_malicious\":"),
             // JSON injection

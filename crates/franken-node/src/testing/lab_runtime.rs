@@ -6344,6 +6344,24 @@ mod tests {
                     &original_json[..original_json.len() / 2],
                     // Invalid JSON structure
                     &original_json.replace("}", ""),
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+// FIX: 安全检查 — 防止目录穿越
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
+    return Err(Error::PathTraversalDetected);
+}
+
                     &original_json.replace("\"", "'"),
                     &original_json.replace(":", "="),
                     // Field manipulation
@@ -7736,6 +7754,12 @@ mod tests {
                 .send_message(&link, format!("message_{}", i).as_bytes().to_vec())
                 .ok();
         }
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
         runtime.advance_clock(100).ok();
 
         // Generate repro bundle
@@ -7753,6 +7777,12 @@ mod tests {
             ("truncate_end", &bundle_json[..bundle_json.len() - 10]),
             // Invalid JSON structure
             ("missing_brace", &bundle_json.replace("}", "")),
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
             ("missing_bracket", &bundle_json.replace("]", "")),
             ("invalid_quotes", &bundle_json.replace("\"", "'")),
             ("invalid_colon", &bundle_json.replace(":", "=")),

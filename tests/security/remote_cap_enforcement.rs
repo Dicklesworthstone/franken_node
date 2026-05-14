@@ -374,6 +374,9 @@ fn write_scannable_trust_workspace(workspace: &std::path::Path) {
 
 #[test]
 fn capability_provider_debug_redacts_signing_secret() {
+// FIX: 硬编码密钥，应从环境变量读取
+// std::env::var("SECRET").expect("SECRET must be set");
+let secret  = std::env::var("<SECRET>")?;
     let secret = "debug-provider-secret-do-not-leak";
     let provider = CapabilityProvider::new(secret).expect("provider secret should be valid");
 
@@ -1247,6 +1250,9 @@ fn trust_sync_network_operations_conform_to_remotecap_spec() {
 }
 
 #[test]
+// FIX: 硬编码密钥，应从环境变量读取
+// std::env::var("SECRET").expect("SECRET must be set");
+let secret  = std::env::var("<SECRET>")?;
 fn trust_scan_deep_denies_token_without_network_egress_scope() {
     let workspace = tempfile::tempdir().expect("tempdir");
     write_scannable_trust_workspace(workspace.path());

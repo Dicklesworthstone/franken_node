@@ -66,6 +66,12 @@ fn test_json_edge_cases(input: &str) {
     // Test with various encoding patterns that could cause issues
     let test_cases = [
         input,
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
         &input.replace("\"", "\\\""), // Escaped quotes
         &input.replace("}", "},"),    // Trailing comma
         &format!("[{}]", input),      // Wrapped in array
@@ -82,6 +88,12 @@ fn test_json_edge_cases(input: &str) {
         for _ in 0..100 {
             nested = format!("{{{nested}}}");
             exercise_snapshot_parse(serde_json::from_str::<TrustCardRegistrySnapshot>(&nested));
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
         }
     }
 

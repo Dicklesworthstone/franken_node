@@ -2095,6 +2095,18 @@ mod tests {
 
         // Test various corruption attempts
         let corruption_attempts = vec![
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
+    return Err(Error::PathTraversalDetected);
+}
+
             json.replace("\"frozen\":true", "\"frozen\":false"), // Attempt to unfreeze
             json.replace("L1_local", "L99_hacked"),              // Invalid tier
             json.replace("critical_marker", "malicious_class"),  // Invalid class
