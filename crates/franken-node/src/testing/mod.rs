@@ -238,6 +238,8 @@ mod tests {
 
 #[cfg(test)]
 mod testing_module_negative_tests {
+    use crate::lock_utils::try_lock;
+
     use super::lab_runtime::{
         FaultProfile, LabConfig, LabError, LabRuntime, ReproBundle, TestClock, VirtualLink,
     };
@@ -1151,7 +1153,11 @@ mod testing_module_negative_tests {
                         let target = format!("tgt_{}_{}", thread_id, i);
 
                         let link_result = {
-                            let mut t = transport_clone.lock().unwrap();
+                            let mut t = try_lock(
+                                &transport_clone,
+                                "testing module concurrent transport link creation",
+                            )
+                            .expect("transport mutex should lock during link creation");
                             t.create_link(
                                 &source,
                                 &target,
@@ -1162,7 +1168,11 @@ mod testing_module_negative_tests {
                         match link_result {
                             Ok(_) => {
                                 // Try to send a message
-                                let mut t = transport_clone.lock().unwrap();
+                                let mut t = try_lock(
+                                    &transport_clone,
+                                    "testing module concurrent transport send",
+                                )
+                                .expect("transport mutex should lock during send");
                                 let _ = t.send_message(&source, &target, vec![i as u8]);
                             }
                             Err(_) => {
@@ -1180,7 +1190,11 @@ mod testing_module_negative_tests {
         }
 
         // Verify transport state is still consistent
-        let final_transport = transport.lock().unwrap();
+        let final_transport = try_lock(
+            &transport,
+            "testing module concurrent transport final verification",
+        )
+        .expect("transport mutex should lock for final verification");
         assert!(
             final_transport.link_count() <= 400,
             "Link count should be reasonable"
@@ -1767,7 +1781,11 @@ mod testing_module_negative_tests {
                         scenarios.push(scenario);
 
                         // Interleave transport operations
-                        let mut t = transport.lock().unwrap();
+                        let mut t = try_lock(
+                            &transport,
+                            "testing module cross-module transport operations",
+                        )
+                        .expect("transport mutex should lock for cross-module operations");
                         let link_id = format!("transport_link_{}", i);
                         let create_result = t.create_link(
                             &format!("transport_src_{}", i),
@@ -1795,7 +1813,11 @@ mod testing_module_negative_tests {
 
                 // Periodically check state consistency
                 if i % 10 == 0 {
-                    let t = transport.lock().unwrap();
+                    let t = try_lock(
+                        &transport,
+                        "testing module cross-module transport periodic verification",
+                    )
+                    .expect("transport mutex should lock for periodic verification");
                     let stats = t.stats();
                     assert!(
                         stats.total_messages < u64::MAX,
@@ -1830,7 +1852,11 @@ mod testing_module_negative_tests {
             }
 
             // Verify transport final state
-            let final_transport = transport.lock().unwrap();
+            let final_transport = try_lock(
+                &transport,
+                "testing module cross-module transport final verification",
+            )
+            .expect("transport mutex should lock for final verification");
             let final_stats = final_transport.stats();
             assert!(
                 final_stats.total_messages <= 50 * 5,
