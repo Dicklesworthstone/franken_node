@@ -687,7 +687,9 @@ mod tests {
         }
 
         // Verify guardrail set remains functional after concurrent access
-        let final_monitor = monitor_set.lock().unwrap();
+        let final_monitor =
+            crate::lock_utils::try_lock(monitor_set.as_ref(), "policy final monitor set")
+                .expect("policy final monitor set lock should not be poisoned");
         let test_state = policy_state();
         let final_verdict = final_monitor.check_all(&test_state);
 
@@ -1475,7 +1477,11 @@ mod tests {
 
             // Add guardrails to the monitor set
             {
-                let mut ms = monitor_set.lock().unwrap();
+                let mut ms = crate::lock_utils::try_lock(
+                    monitor_set.as_ref(),
+                    "policy concurrent setup monitor set",
+                )
+                .expect("policy setup monitor set lock should not be poisoned");
                 ms.add_memory_budget_guardrail(MemoryBudgetGuardrail::new(0.8, 0.6));
                 ms.add_durability_loss_guardrail(DurabilityLossGuardrail::new(0.95));
             }

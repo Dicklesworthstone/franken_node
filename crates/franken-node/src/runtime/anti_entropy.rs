@@ -3711,7 +3711,12 @@ mod tests {
                         cancelled.store(true, std::sync::atomic::Ordering::Release);
                     }
 
-                    let mut local_state = state_clone.lock().unwrap().clone();
+                    let mut local_state = crate::lock_utils::try_lock(
+                        state_clone.as_ref(),
+                        "anti-entropy concurrent state clone",
+                    )
+                    .expect("anti-entropy state lock should not be poisoned")
+                    .clone();
                     let result = reconciler_clone.apply_delta(&mut local_state, delta, &cancelled);
 
                     // Return result and whether cancellation was requested
@@ -3753,7 +3758,9 @@ mod tests {
             }
 
             // Final state should be consistent regardless of cancellations
-            let final_state = state.lock().unwrap();
+            let final_state =
+                crate::lock_utils::try_lock(state.as_ref(), "anti-entropy final state")
+                    .expect("anti-entropy final state lock should not be poisoned");
             let digest = final_state.compute_state_digest();
             assert!(!digest.is_empty(), "Final state digest should be valid");
         }

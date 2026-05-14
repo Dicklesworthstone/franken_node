@@ -4851,7 +4851,12 @@ mod tests {
                     }
 
                     // Store results for analysis
-                    results_clone.lock().unwrap().extend(thread_results);
+                    crate::lock_utils::try_lock(
+                        results_clone.as_ref(),
+                        "engine dispatcher race results",
+                    )
+                    .expect("engine dispatcher race results lock should not be poisoned")
+                    .extend(thread_results);
                 });
 
                 handles.push(handle);
@@ -4863,7 +4868,11 @@ mod tests {
             }
 
             // Analyze race condition results
-            let results = race_results.lock().unwrap();
+            let results = crate::lock_utils::try_lock(
+                race_results.as_ref(),
+                "engine dispatcher final race results",
+            )
+            .expect("engine dispatcher final race results lock should not be poisoned");
             let scenario_results: Vec<_> = results
                 .iter()
                 .filter(|(_, _, op, _)| {

@@ -1841,7 +1841,12 @@ mod correctness_envelope_additional_negative_path_tests {
                     let len_result = env_clone.len();
                     let manifest_result = env_clone.to_manifest_json();
 
-                    results_clone.lock().unwrap().push((
+                    crate::lock_utils::try_lock(
+                        results_clone.as_ref(),
+                        "correctness envelope concurrent results",
+                    )
+                    .expect("correctness envelope results lock should not be poisoned")
+                    .push((
                         i,
                         check_result.is_ok(),
                         lookup_result.is_some(),
@@ -1857,7 +1862,9 @@ mod correctness_envelope_additional_negative_path_tests {
             handle.join().unwrap();
         }
 
-        let results = results.lock().unwrap();
+        let results =
+            crate::lock_utils::try_lock(results.as_ref(), "correctness envelope final results")
+                .expect("correctness envelope final results lock should not be poisoned");
         assert_eq!(results.len(), 50);
 
         // Verify consistency across all concurrent operations

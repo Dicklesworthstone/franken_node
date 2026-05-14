@@ -1401,7 +1401,9 @@ mod tests {
         }
 
         // Verify validator state integrity after concurrent access
-        let final_validator = validator.lock().unwrap();
+        let final_validator =
+            crate::lock_utils::try_lock(validator.as_ref(), "observability final validator")
+                .expect("observability validator lock should not be poisoned");
         let validated_count = final_validator.validated_count();
         let rejected_count = final_validator.rejected_count();
 
@@ -1419,7 +1421,9 @@ mod tests {
 
         // Test validator functionality after concurrent stress
         drop(final_validator);
-        let mut recovery_validator = validator.lock().unwrap();
+        let mut recovery_validator =
+            crate::lock_utils::try_lock(validator.as_ref(), "observability recovery validator")
+                .expect("observability recovery validator lock should not be poisoned");
         let recovery_entry = obs_entry("recovery-test", DecisionKind::Admit);
         let recovery_witnesses =
             obs_single_witness_set(obs_witness("recovery-witness", WitnessKind::Telemetry, 250));
