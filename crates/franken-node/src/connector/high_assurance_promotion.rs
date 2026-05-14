@@ -1312,7 +1312,11 @@ mod tests {
                 };
 
                 for op_id in 0..100 {
-                    let mut gate = gate_clone.lock().unwrap();
+                    let mut gate = crate::lock_utils::try_lock(
+                        gate_clone.as_ref(),
+                        "high assurance promotion concurrent gate",
+                    )
+                    .expect("high assurance promotion gate lock should not be poisoned");
 
                     // Concurrent evaluations
                     let artifact_id = format!("thread_{}_artifact_{}", thread_id, op_id);
@@ -1339,7 +1343,9 @@ mod tests {
         }
 
         // Verify final state consistency
-        let final_gate = gate.lock().unwrap();
+        let final_gate =
+            crate::lock_utils::try_lock(gate.as_ref(), "high assurance promotion final gate")
+                .expect("high assurance promotion final gate lock should not be poisoned");
         let total_approvals = final_gate.approvals();
         let total_denials = final_gate.denials();
         let total_mode_changes = final_gate.mode_changes();

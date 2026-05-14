@@ -2413,7 +2413,11 @@ mod tests {
 
                 // Increment counter atomically
                 {
-                    let mut counter = counter_clone.lock().unwrap();
+                    let mut counter = crate::lock_utils::try_lock(
+                        counter_clone.as_ref(),
+                        "activation pipeline concurrent counter",
+                    )
+                    .expect("activation pipeline concurrent counter lock should not be poisoned");
                     *counter += 1;
                 }
 
@@ -2452,7 +2456,11 @@ mod tests {
         }
 
         // Verify counter was incremented correctly
-        let final_counter = activation_counter.lock().unwrap();
+        let final_counter = crate::lock_utils::try_lock(
+            activation_counter.as_ref(),
+            "activation pipeline final counter",
+        )
+        .expect("activation pipeline final counter lock should not be poisoned");
         assert_eq!(
             *final_counter, 10,
             "All threads should have incremented counter"

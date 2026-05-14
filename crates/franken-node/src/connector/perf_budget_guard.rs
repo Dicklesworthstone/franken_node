@@ -2208,7 +2208,11 @@ mod tests {
                     let result = within_budget_result(hot_path);
 
                     // Acquire lock and evaluate
-                    let mut locked_gate = gate_clone.lock().unwrap();
+                    let mut locked_gate = crate::lock_utils::try_lock(
+                        gate_clone.as_ref(),
+                        "performance budget concurrent gate",
+                    )
+                    .expect("performance budget gate lock should not be poisoned");
                     let decision = locked_gate.evaluate(result);
                     assert!(
                         decision.is_pass(),
@@ -2237,7 +2241,9 @@ mod tests {
         }
 
         // Verify final state
-        let final_gate = gate.lock().unwrap();
+        let final_gate =
+            crate::lock_utils::try_lock(gate.as_ref(), "performance budget final gate")
+                .expect("performance budget final gate lock should not be poisoned");
         let final_summary = final_gate.summary();
         assert_eq!(
             final_summary.total, 800,

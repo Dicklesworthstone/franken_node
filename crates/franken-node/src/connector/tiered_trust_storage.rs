@@ -1605,7 +1605,11 @@ mod tests {
                         epoch_id: (thread_id * 1000 + op_id) as u64,
                     };
 
-                    let mut storage = storage_clone.lock().unwrap();
+                    let mut storage = crate::lock_utils::try_lock(
+                        storage_clone.as_ref(),
+                        "tiered trust storage concurrent access",
+                    )
+                    .expect("tiered trust storage lock should not be poisoned");
                     let stored_id = storage.store(Tier::L1Local, artifact.clone());
 
                     // Immediate retrieval
@@ -1627,7 +1631,9 @@ mod tests {
         }
 
         // Verify final state consistency
-        let storage = storage.lock().unwrap();
+        let storage =
+            crate::lock_utils::try_lock(storage.as_ref(), "tiered trust storage final state")
+                .expect("tiered trust storage final state lock should not be poisoned");
         assert_eq!(storage.tier_count(Tier::L1Local), 800); // 8 threads * 100 ops
 
         // Verify authority map remains immutable

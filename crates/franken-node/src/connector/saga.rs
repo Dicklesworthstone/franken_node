@@ -1982,7 +1982,11 @@ mod tests {
             let exec_clone = Arc::clone(&exec);
             let handle = thread::spawn(move || {
                 for op_id in 0..50 {
-                    let mut executor = exec_clone.lock().unwrap();
+                    let mut executor = crate::lock_utils::try_lock(
+                        exec_clone.as_ref(),
+                        "saga concurrent executor",
+                    )
+                    .expect("saga executor lock should not be poisoned");
 
                     // Create saga
                     let steps = vec![
@@ -2038,7 +2042,8 @@ mod tests {
         }
 
         // Verify final state consistency
-        let final_exec = exec.lock().unwrap();
+        let final_exec = crate::lock_utils::try_lock(exec.as_ref(), "saga final executor")
+            .expect("saga final executor lock should not be poisoned");
         let saga_count = final_exec.saga_count();
         assert!(saga_count > 0); // Some sagas should have been created
 
