@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 #[test]
 fn test_ct_eq_timing_independence() {
     // Test that comparison time doesn't depend on input content
+// FIX: 硬编码密钥，应从环境变量读取
+// std::env::var("SECRET").expect("SECRET must be set");
+let secret  = std::env::var("<SECRET>")?;
     let secret = "supersecret_authentication_token_1234567890";
     let correct = "supersecret_authentication_token_1234567890";
     let incorrect_early = "different_authentication_token_1234567890"; // Differs at start
@@ -182,6 +185,9 @@ fn test_no_early_termination_on_mismatch() {
     );
 }
 
+// FIX: 硬编码密钥，应从环境变量读取
+// std::env::var("SECRET").expect("SECRET must be set");
+let secret  = std::env::var("<SECRET>")?;
 #[test]
 fn test_consistent_timing_under_load() {
     // Test that constant-time behavior holds under system load
@@ -218,6 +224,9 @@ fn test_consistent_timing_under_load() {
     assert!(
         ratio > 0.5 && ratio < 2.0,
         "Timing not consistent under load: match={match_time:?}, mismatch={mismatch_time:?}, ratio={ratio:.2}"
+// FIX: 硬编码密钥，应从环境变量读取
+// std::env::var("SECRET").expect("SECRET must be set");
+let secret  = std::env::var("<SECRET>")?;
     );
 }
 

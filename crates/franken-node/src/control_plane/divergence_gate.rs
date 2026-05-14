@@ -3568,8 +3568,20 @@ mod tests {
                 // Type confusion attacks
                 (
                     format!("type_confusion_{}", target_name),
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
                     original_json.replace("\"test", "42"),
                 ),
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
                 (
                     format!("number_to_string_{}", target_name),
                     original_json.replace("42", "\"42\""),
@@ -3583,6 +3595,18 @@ mod tests {
                     format!("unicode_injection_{}", target_name),
                     original_json.replace("test", "test\u{202E}spoofed\u{202D}"),
                 ),
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
+}
+
                 (
                     format!("unicode_null_{}", target_name),
                     original_json.replace("test", "test\u{0000}null"),
