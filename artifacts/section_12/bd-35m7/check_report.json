@@ -5,9 +5,9 @@
   "overall_pass": true,
   "verdict": "PASS",
   "summary": {
-    "passing": 42,
+    "passing": 60,
     "failing": 0,
-    "total": 42
+    "total": 60
   },
   "checks": [
     {
@@ -72,6 +72,96 @@
     },
     {
       "check": "contract: term Scenario E",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "rust: trajectory runtime contract path exists",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/security/trajectory_gaming.rs"
+    },
+    {
+      "check": "rust: trajectory runtime contract symbol CamouflageHint",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "rust: trajectory runtime contract symbol ingest_verifier_hints",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "rust: trajectory runtime contract symbol export_for_verifier",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "rust: in-process camouflage detector path exists",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/security/bpet/camouflage_detector.rs"
+    },
+    {
+      "check": "rust: in-process camouflage detector symbol detect_camouflage",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "rust: in-process camouflage detector symbol DetectorConfig",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "rust: camouflage fixture harness path exists",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/security/bpet/camouflage_fixtures.rs"
+    },
+    {
+      "check": "rust: camouflage fixture harness symbol load_camouflage_fixture",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "rust: camouflage fixture harness symbol evaluate_camouflage_fixture",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "rust: trust-card camouflage mark path exists",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/supply_chain/trust_card.rs"
+    },
+    {
+      "check": "rust: trust-card camouflage mark symbol mark_camouflage_suspected",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "rust: trust-card camouflage mark symbol TRUST_CARD_CAMOUFLAGE_SUSPECTED",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "rust: trust-card camouflage integration test path exists",
+      "pass": true,
+      "detail": "exists: crates/franken-node/tests/trust_card_authoritative_state_real_inputs.rs"
+    },
+    {
+      "check": "rust: trust-card camouflage integration test symbol authoritative_registry_marks_camouflage_hints_on_signed_card",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "rust: camouflage detector integration test path exists",
+      "pass": true,
+      "detail": "exists: tests/security/camouflage_detector.rs"
+    },
+    {
+      "check": "rust: camouflage detector integration test symbol evaluate_camouflage_fixture",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "rust: camouflage detector integration test symbol fixture_phase_shift_clear_emits_phase_shift_hint",
       "pass": true,
       "detail": "present"
     },

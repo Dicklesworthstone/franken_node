@@ -40,6 +40,42 @@ REQUIRED_CONTRACT_TERMS = [
     "Scenario D",
     "Scenario E",
 ]
+RUST_INTEGRATION_SYMBOLS = [
+    (
+        "trajectory runtime contract",
+        ROOT / "crates" / "franken-node" / "src" / "security" / "trajectory_gaming.rs",
+        ["CamouflageHint", "ingest_verifier_hints", "export_for_verifier"],
+    ),
+    (
+        "in-process camouflage detector",
+        ROOT / "crates" / "franken-node" / "src" / "security" / "bpet" / "camouflage_detector.rs",
+        ["detect_camouflage", "DetectorConfig"],
+    ),
+    (
+        "camouflage fixture harness",
+        ROOT / "crates" / "franken-node" / "src" / "security" / "bpet" / "camouflage_fixtures.rs",
+        ["load_camouflage_fixture", "evaluate_camouflage_fixture"],
+    ),
+    (
+        "trust-card camouflage mark",
+        ROOT / "crates" / "franken-node" / "src" / "supply_chain" / "trust_card.rs",
+        ["mark_camouflage_suspected", "TRUST_CARD_CAMOUFLAGE_SUSPECTED"],
+    ),
+    (
+        "trust-card camouflage integration test",
+        ROOT
+        / "crates"
+        / "franken-node"
+        / "tests"
+        / "trust_card_authoritative_state_real_inputs.rs",
+        ["authoritative_registry_marks_camouflage_hints_on_signed_card"],
+    ),
+    (
+        "camouflage detector integration test",
+        ROOT / "tests" / "security" / "camouflage_detector.rs",
+        ["evaluate_camouflage_fixture", "fixture_phase_shift_clear_emits_phase_shift_hint"],
+    ),
+]
 
 
 def _read_text(path: Path) -> str:
@@ -75,6 +111,35 @@ def check_contract() -> list[dict]:
             "pass": present,
             "detail": "present" if present else "MISSING",
         })
+    return checks
+
+
+def check_rust_integration() -> list[dict]:
+    checks = []
+    for label, path, symbols in RUST_INTEGRATION_SYMBOLS:
+        exists = path.exists()
+        checks.append({
+            "check": f"rust: {label} path exists",
+            "pass": exists,
+            "detail": f"exists: {path.relative_to(ROOT)}" if exists else f"MISSING: {path}",
+        })
+        if not exists:
+            for symbol in symbols:
+                checks.append({
+                    "check": f"rust: {label} symbol {symbol}",
+                    "pass": False,
+                    "detail": "MISSING file",
+                })
+            continue
+
+        text = _read_text(path)
+        for symbol in symbols:
+            present = symbol in text
+            checks.append({
+                "check": f"rust: {label} symbol {symbol}",
+                "pass": present,
+                "detail": "present" if present else f"MISSING: {symbol}",
+            })
     return checks
 
 
@@ -366,6 +431,7 @@ def run_checks() -> dict:
     checks.append(check_file(CONTRACT, "contract doc"))
     checks.append(check_file(REPORT, "trajectory-gaming camouflage report"))
     checks.extend(check_contract())
+    checks.extend(check_rust_integration())
     data, load_checks = load_report()
     checks.extend(load_checks)
     checks.extend(check_report(data))

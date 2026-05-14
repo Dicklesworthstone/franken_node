@@ -41,6 +41,26 @@ class TestContractChecks(unittest.TestCase):
             self.assertTrue(check["pass"], f"Failed: {check['check']} -> {check['detail']}")
 
 
+class TestRustIntegrationChecks(unittest.TestCase):
+    def test_rust_integration_paths_and_symbols_pass(self):
+        checks = mod.check_rust_integration()
+        self.assertGreaterEqual(len(checks), 10)
+        for check in checks:
+            self.assertTrue(check["pass"], f"Failed: {check['check']} -> {check['detail']}")
+
+    def test_trust_card_camouflage_mark_is_checked(self):
+        checks = mod.check_rust_integration()
+        names = {check["check"] for check in checks}
+        self.assertIn(
+            "rust: trust-card camouflage mark symbol mark_camouflage_suspected",
+            names,
+        )
+        self.assertIn(
+            "rust: trust-card camouflage mark symbol TRUST_CARD_CAMOUFLAGE_SUSPECTED",
+            names,
+        )
+
+
 class TestReportLoad(unittest.TestCase):
     def test_load_report_success(self):
         data, checks = mod.load_report()

@@ -2,13 +2,19 @@
   "bead_id": "bd-35m7",
   "section": "12",
   "title": "Risk control: trajectory-gaming camouflage",
-  "timestamp": "2026-02-21T00:00:00Z",
+  "timestamp": "2026-05-14T00:00:00Z",
   "verdict": "PASS",
   "files": {
     "contract": "docs/specs/section_12/bd-35m7_contract.md",
     "risk_report": "artifacts/12/trajectory_gaming_camouflage_report.json",
     "verification_script": "scripts/check_trajectory_gaming_camouflage.py",
     "python_tests": "tests/test_check_trajectory_gaming_camouflage.py",
+    "rust_runtime_contract": "crates/franken-node/src/security/trajectory_gaming.rs",
+    "rust_detector": "crates/franken-node/src/security/bpet/camouflage_detector.rs",
+    "rust_fixture_harness": "crates/franken-node/src/security/bpet/camouflage_fixtures.rs",
+    "rust_trust_card_pipeline": "crates/franken-node/src/supply_chain/trust_card.rs",
+    "rust_trust_card_integration_test": "crates/franken-node/tests/trust_card_authoritative_state_real_inputs.rs",
+    "rust_detector_integration_test": "tests/security/camouflage_detector.rs",
     "check_report": "artifacts/section_12/bd-35m7/check_report.json",
     "check_self_test": "artifacts/section_12/bd-35m7/check_self_test.json",
     "unit_tests_output": "artifacts/section_12/bd-35m7/unit_tests.txt"
@@ -21,14 +27,15 @@
     "motif_randomization_unique": true,
     "hybrid_behavioral_gaming_caught": true,
     "corpus_update_interval_days": 37,
-    "python_verification_checks": 42,
-    "python_unit_tests": 20,
+    "python_verification_checks": 60,
+    "python_unit_tests": 24,
+    "rust_integration_checks": 18,
     "event_codes": 5
   },
   "checks_summary": {
-    "passing": 42,
+    "passing": 60,
     "failing": 0,
-    "total": 42
+    "total": 60
   },
   "commands": [
     {

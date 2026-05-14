@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 
+use frankenengine_node::security::trajectory_gaming::{CamouflageHint, CamouflageKind};
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
     DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
-    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, SnapshotSourceContext, TrustCard,
-    TrustCardInput, TrustCardMutation, TrustCardRegistry, TrustCardRegistrySnapshot,
-    compute_card_hash,
+    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, SnapshotSourceContext,
+    TRUST_CARD_CAMOUFLAGE_SUSPECTED, TrustCard, TrustCardInput, TrustCardMutation,
+    TrustCardRegistry, TrustCardRegistrySnapshot, compute_card_hash,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
@@ -138,6 +139,79 @@ fn authoritative_registry_round_trips_without_fixture_helper() {
         reloaded.provenance_summary.source_uri,
         "https://github.com/operator/auth-guard"
     );
+}
+
+#[test]
+fn authoritative_registry_marks_camouflage_hints_on_signed_card() {
+    let mut registry = TrustCardRegistry::default();
+    let created = registry
+        .create(
+            real_trust_card_input(),
+            1_776_792_600,
+            "trace-camouflage-seed",
+        )
+        .expect("create real trust card");
+    let hints = vec![CamouflageHint {
+        kind: CamouflageKind::DistributionMismatch,
+        severity: 0.93,
+        evidence: BTreeMap::from([("distribution_delta".to_string(), 0.93)]),
+        sample_indices: vec![7, 8, 9],
+    }];
+
+    let marked = registry
+        .mark_camouflage_suspected(
+            "npm:@operator/auth-guard",
+            &hints,
+            vec![VerifiedEvidenceRef {
+                evidence_id: "trajectory-camouflage-detector-20260514".to_string(),
+                evidence_type: EvidenceType::AuditReport,
+                verified_at_epoch: 1_778_768_400,
+                verification_receipt_hash:
+                    "52c4b30c3a1e9a8ef4bbf3160f8f944a52ff604fdc7f502a8c97f9e71f6f3bb8".to_string(),
+            }],
+            1_778_768_400,
+            "trace-camouflage-mark",
+        )
+        .expect("mark camouflage");
+
+    assert_eq!(marked.trust_card_version, created.trust_card_version + 1);
+    assert_eq!(
+        marked.previous_version_hash.as_deref(),
+        Some(created.card_hash.as_str())
+    );
+    assert_eq!(
+        marked.user_facing_risk_assessment.level,
+        RiskLevel::Critical
+    );
+    assert!(
+        marked
+            .user_facing_risk_assessment
+            .summary
+            .contains("suspected trajectory camouflage")
+    );
+    assert!(
+        marked.audit_history.iter().any(|record| {
+            record.event_code == TRUST_CARD_CAMOUFLAGE_SUSPECTED
+                && record.detail.contains("distribution_mismatch")
+        }),
+        "camouflage mark must be operator-auditable"
+    );
+    assert!(
+        registry
+            .telemetry()
+            .iter()
+            .any(|event| event.event_code == TRUST_CARD_CAMOUFLAGE_SUSPECTED)
+    );
+
+    let fetched = registry
+        .read(
+            "npm:@operator/auth-guard",
+            1_778_768_401,
+            "trace-camouflage-read",
+        )
+        .expect("read marked card")
+        .expect("marked card exists");
+    assert_eq!(fetched.card_hash, marked.card_hash);
 }
 
 #[test]

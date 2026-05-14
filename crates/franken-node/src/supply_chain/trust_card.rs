@@ -9,7 +9,7 @@
 mod fuzz_smoke_tests;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions, TryLockError},
     io::Write,
     path::{Path, PathBuf},
@@ -28,6 +28,7 @@ use tempfile::NamedTempFile;
 use super::certification::{DerivationMetadata, VerifiedEvidenceRef};
 use crate::push_bounded;
 use crate::security::constant_time;
+use crate::security::trajectory_gaming::CamouflageHint;
 
 /// Source context for trust card registry snapshot validation.
 /// Determines the validation strategy based on input source trust level.
@@ -44,6 +45,8 @@ pub enum SnapshotSourceContext {
 const MAX_TELEMETRY: usize = 4096;
 const MAX_CARD_VERSIONS: usize = 512;
 const MAX_AUDIT_HISTORY: usize = 256;
+const MAX_TRUST_CARD_CAMOUFLAGE_HINTS: usize = 64;
+const TRUST_CARD_CAMOUFLAGE_CRITICAL_SEVERITY: f64 = 0.90;
 
 /// Maximum extension ID length to prevent memory exhaustion DoS attacks.
 const MAX_EXTENSION_ID_LEN: usize = 256;
@@ -67,6 +70,75 @@ fn ensure_evidence_refs_present(refs: &[VerifiedEvidenceRef]) -> Result<(), Trus
         return Err(TrustCardError::EvidenceMissing);
     }
     Ok(())
+}
+
+fn validate_camouflage_hints(hints: &[CamouflageHint]) -> Result<f64, TrustCardError> {
+    if hints.is_empty() {
+        return Err(TrustCardError::InvalidInput {
+            reason: "camouflage_hints cannot be empty".to_string(),
+        });
+    }
+    if hints.len() > MAX_TRUST_CARD_CAMOUFLAGE_HINTS {
+        return Err(TrustCardError::InvalidInput {
+            reason: format!(
+                "camouflage_hints length {} exceeds maximum {}",
+                hints.len(),
+                MAX_TRUST_CARD_CAMOUFLAGE_HINTS
+            ),
+        });
+    }
+
+    if hints
+        .iter()
+        .any(|hint| !hint.severity.is_finite() || !(0.0..=1.0).contains(&hint.severity))
+    {
+        return Err(TrustCardError::InvalidInput {
+            reason: "camouflage_hints severity must be finite and between 0.0 and 1.0".to_string(),
+        });
+    }
+    if hints
+        .iter()
+        .flat_map(|hint| hint.evidence.values())
+        .any(|value| !value.is_finite())
+    {
+        return Err(TrustCardError::InvalidInput {
+            reason: "camouflage_hints evidence values must be finite".to_string(),
+        });
+    }
+
+    Ok(hints
+        .iter()
+        .map(|hint| hint.severity)
+        .fold(0.0_f64, f64::max))
+}
+
+fn camouflage_kind_summary(hints: &[CamouflageHint]) -> String {
+    let mut kinds = BTreeSet::new();
+    for hint in hints {
+        kinds.insert(hint.kind.as_str());
+    }
+    kinds.into_iter().collect::<Vec<_>>().join(",")
+}
+
+fn camouflage_risk_level(max_severity: f64) -> RiskLevel {
+    if max_severity >= TRUST_CARD_CAMOUFLAGE_CRITICAL_SEVERITY {
+        RiskLevel::Critical
+    } else {
+        RiskLevel::High
+    }
+}
+
+fn camouflage_risk_summary(current: &str, kinds: &str, max_severity: f64) -> String {
+    let marker =
+        format!("suspected trajectory camouflage ({kinds}; max_severity={max_severity:.3})");
+    let current = current.trim();
+    if current.is_empty() {
+        marker
+    } else if current.contains("suspected trajectory camouflage") {
+        current.to_string()
+    } else {
+        format!("{}; {}", current.trim_end_matches('.'), marker)
+    }
 }
 
 fn card_matches_filter(card: &TrustCard, filter: &TrustCardListFilter) -> bool {
@@ -133,6 +205,7 @@ pub const TRUST_CARD_CACHE_MISS: &str = "TRUST_CARD_CACHE_MISS";
 pub const TRUST_CARD_STALE_REFRESH: &str = "TRUST_CARD_STALE_REFRESH";
 pub const TRUST_CARD_FORCE_REFRESH: &str = "TRUST_CARD_FORCE_REFRESH";
 pub const TRUST_CARD_DIFF_COMPUTED: &str = "TRUST_CARD_DIFF_COMPUTED";
+pub const TRUST_CARD_CAMOUFLAGE_SUSPECTED: &str = "TRUST_CARD_CAMOUFLAGE_SUSPECTED";
 
 const DEFAULT_CACHE_TTL_SECS: u64 = crate::config::timeouts::TRUST_CARD_CACHE_TTL_SECS;
 const DEFAULT_REGISTRY_KEY: &[u8] = b"franken-node-trust-card-registry-key-v1";
@@ -1340,6 +1413,116 @@ impl TrustCardRegistry {
                 card: next.clone(),
                 cached_at_secs: now_secs,
             },
+        );
+        self.emit(
+            TRUST_CARD_UPDATED,
+            Some(extension_id.to_string()),
+            trace_id,
+            now_secs,
+            "updated trust card version",
+        );
+        Ok(next)
+    }
+
+    /// Mark the latest trust card with suspected trajectory-gaming camouflage.
+    ///
+    /// # Parameters
+    /// - `extension_id`: extension whose latest trust card should be marked.
+    /// - `hints`: detector output from the trajectory-gaming camouflage detector.
+    /// - `evidence_refs`: verified evidence binding this mark to detector/verifier output.
+    /// - `now_secs`: unix timestamp used for derivation evidence and audit history.
+    /// - `trace_id`: operator-visible correlation ID recorded in telemetry.
+    ///
+    /// # Returns
+    /// The newly created replacement `TrustCard` version.
+    ///
+    /// # Errors
+    /// Returns `TrustCardError` if the extension is missing, hints are empty or
+    /// non-finite, required evidence is missing, or signing fails.
+    pub fn mark_camouflage_suspected(
+        &mut self,
+        extension_id: &str,
+        hints: &[CamouflageHint],
+        evidence_refs: Vec<VerifiedEvidenceRef>,
+        now_secs: u64,
+        trace_id: &str,
+    ) -> Result<TrustCard, TrustCardError> {
+        let max_severity = validate_camouflage_hints(hints)?;
+        ensure_evidence_refs_present(&evidence_refs)?;
+
+        let latest = self
+            .latest_verified_card(extension_id)?
+            .cloned()
+            .ok_or_else(|| TrustCardError::NotFound(extension_id.to_string()))?;
+
+        let kinds = camouflage_kind_summary(hints);
+        let detail = format!(
+            "suspected trajectory camouflage kinds={kinds} max_severity={max_severity:.3} hints={}",
+            hints.len()
+        );
+        let derivation_hash = compute_trust_card_derivation_hash(&evidence_refs, now_secs);
+
+        let mut next = latest.clone();
+        next.trust_card_version = next_trust_card_version(latest.trust_card_version, extension_id)?;
+        next.previous_version_hash = Some(latest.card_hash.clone());
+        next.derivation_evidence = Some(DerivationMetadata {
+            evidence_refs,
+            derived_at_epoch: now_secs,
+            derivation_chain_hash: derivation_hash,
+        });
+        next.user_facing_risk_assessment.level = next
+            .user_facing_risk_assessment
+            .level
+            .max(camouflage_risk_level(max_severity));
+        next.user_facing_risk_assessment.summary = camouflage_risk_summary(
+            &latest.user_facing_risk_assessment.summary,
+            &kinds,
+            max_severity,
+        );
+
+        push_bounded(
+            &mut next.audit_history,
+            AuditRecord {
+                timestamp: timestamp_from_secs(now_secs),
+                event_code: TRUST_CARD_CAMOUFLAGE_SUSPECTED.to_string(),
+                detail: detail.clone(),
+                trace_id: trace_id.to_string(),
+            },
+            MAX_AUDIT_HISTORY,
+        );
+        push_bounded(
+            &mut next.audit_history,
+            AuditRecord {
+                timestamp: timestamp_from_secs(now_secs),
+                event_code: TRUST_CARD_UPDATED.to_string(),
+                detail: "trust card updated".to_string(),
+                trace_id: trace_id.to_string(),
+            },
+            MAX_AUDIT_HISTORY,
+        );
+
+        sign_card_in_place(&mut next, &self.registry_key)?;
+        self.advance_snapshot_sequence_for_mutation();
+        push_bounded(
+            self.cards_by_extension
+                .entry(extension_id.to_string())
+                .or_default(),
+            next.clone(),
+            MAX_CARD_VERSIONS,
+        );
+        self.cache_by_extension.insert(
+            extension_id.to_string(),
+            CachedCard {
+                card: next.clone(),
+                cached_at_secs: now_secs,
+            },
+        );
+        self.emit(
+            TRUST_CARD_CAMOUFLAGE_SUSPECTED,
+            Some(extension_id.to_string()),
+            trace_id,
+            now_secs,
+            &detail,
         );
         self.emit(
             TRUST_CARD_UPDATED,
@@ -2833,14 +3016,16 @@ mod tests {
         AuditRecord, BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
         DEFAULT_REGISTRY_KEY, DependencyTrustStatus, DerivationMetadata, ExtensionIdentity,
         ProvenanceSummary, PublisherIdentity, ReputationTrend, RevocationStatus, RiskAssessment,
-        RiskLevel, SnapshotSourceContext, TRUST_CARD_CREATED, TRUST_CARD_QUERIED, TrustCard,
-        TrustCardComparison, TrustCardDiffEntry, TrustCardError, TrustCardInput, TrustCardMutation,
-        TrustCardRegistry, VerifiedEvidenceRef, canonicalize_value,
-        compute_trust_card_derivation_hash, render_comparison_human, render_trust_card_human,
-        sign_card_in_place, to_canonical_json, update_card_hash, validate_trust_card_structure,
-        verify_card_signature,
+        RiskLevel, SnapshotSourceContext, TRUST_CARD_CAMOUFLAGE_SUSPECTED, TRUST_CARD_CREATED,
+        TRUST_CARD_QUERIED, TrustCard, TrustCardComparison, TrustCardDiffEntry, TrustCardError,
+        TrustCardInput, TrustCardMutation, TrustCardRegistry, VerifiedEvidenceRef,
+        canonicalize_value, compute_trust_card_derivation_hash, render_comparison_human,
+        render_trust_card_human, sign_card_in_place, to_canonical_json, update_card_hash,
+        validate_trust_card_structure, verify_card_signature,
     };
+    use crate::security::trajectory_gaming::{CamouflageHint, CamouflageKind};
     use base64::Engine as _;
+    use std::collections::BTreeMap;
 
     fn test_evidence_refs() -> Vec<VerifiedEvidenceRef> {
         use super::super::certification::EvidenceType;
@@ -3034,6 +3219,79 @@ mod tests {
             second.previous_version_hash.as_deref(),
             Some(first.card_hash.as_str())
         );
+    }
+
+    #[test]
+    fn camouflage_hints_mark_trust_card_risk_and_audit() {
+        let mut registry = TrustCardRegistry::default();
+        let first = registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
+        let hints = vec![CamouflageHint {
+            kind: CamouflageKind::PhaseShift,
+            severity: 0.82,
+            evidence: BTreeMap::from([("phase_shift_score".to_string(), 0.82)]),
+            sample_indices: vec![3, 4, 5],
+        }];
+
+        let second = registry
+            .mark_camouflage_suspected(
+                "npm:@acme/plugin",
+                &hints,
+                test_evidence_refs(),
+                1_030,
+                "trace-camouflage",
+            )
+            .expect("camouflage mark");
+
+        assert_eq!(second.trust_card_version, 2);
+        assert_eq!(
+            second.previous_version_hash.as_deref(),
+            Some(first.card_hash.as_str())
+        );
+        assert_eq!(second.user_facing_risk_assessment.level, RiskLevel::High);
+        assert!(
+            second
+                .user_facing_risk_assessment
+                .summary
+                .contains("suspected trajectory camouflage")
+        );
+        let camouflage_record = second
+            .audit_history
+            .iter()
+            .find(|record| record.event_code == TRUST_CARD_CAMOUFLAGE_SUSPECTED)
+            .expect("camouflage audit record");
+        assert!(camouflage_record.detail.contains("phase_shift"));
+        assert!(
+            registry
+                .telemetry()
+                .iter()
+                .any(|event| event.event_code == TRUST_CARD_CAMOUFLAGE_SUSPECTED)
+        );
+        verify_card_signature(&second, DEFAULT_REGISTRY_KEY).expect("signature valid");
+    }
+
+    #[test]
+    fn camouflage_hints_reject_non_finite_severity() {
+        let mut registry = TrustCardRegistry::default();
+        let hints = vec![CamouflageHint {
+            kind: CamouflageKind::Dropout,
+            severity: f64::NAN,
+            evidence: BTreeMap::new(),
+            sample_indices: Vec::new(),
+        }];
+
+        let err = registry
+            .mark_camouflage_suspected(
+                "npm:@acme/plugin",
+                &hints,
+                Vec::new(),
+                1_030,
+                "trace-camouflage",
+            )
+            .expect_err("non-finite severity should fail closed");
+
+        assert!(matches!(err, TrustCardError::InvalidInput { .. }));
     }
 
     #[test]

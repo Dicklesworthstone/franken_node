@@ -11,6 +11,10 @@
 - Machine-readable report: `artifacts/12/trajectory_gaming_camouflage_report.json`
 - Verifier: `scripts/check_trajectory_gaming_camouflage.py`
 - Unit tests: `tests/test_check_trajectory_gaming_camouflage.py`
+- Rust runtime contract: `crates/franken-node/src/security/trajectory_gaming.rs`
+- Rust detector and fixtures: `crates/franken-node/src/security/bpet/camouflage_detector.rs`, `crates/franken-node/src/security/bpet/camouflage_fixtures.rs`
+- Rust trust-card pipeline mark: `crates/franken-node/src/supply_chain/trust_card.rs`
+- Rust trust-card integration test: `crates/franken-node/tests/trust_card_authoritative_state_real_inputs.rs`
 
 ## Acceptance Results
 
@@ -19,6 +23,8 @@
 - Hybrid fusion blocks behavioral-channel gaming when provenance/code signals fail.
 - Motif randomization enforces distinct feature subsets on repeated trajectory evaluations.
 - Adaptive-adversary resilience gate enforces `>=80%` recall over 10 rounds (`84.3%` min).
+- Trust cards expose `mark_camouflage_suspected` and `TRUST_CARD_CAMOUFLAGE_SUSPECTED` so detector hints mark the signed card version, risk summary, audit history, and telemetry.
+- Verification now covers `60` checks, including `18` Rust integration path/symbol checks and `24` Python unit tests.
 
 ## Scenario Coverage
 
