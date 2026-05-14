@@ -3,7 +3,7 @@
   "description": "Combined phase shift on net.egress and 50% dropout on fs.write.",
   "config": {
     "phase_shift_threshold": 0.3,
-    "dropout_threshold": 0.3,
+    "dropout_threshold": 0.2,
     "distribution_kl_threshold": 100.0,
     "creep_slope_threshold": 10.0,
     "min_samples_for_detection": 8,

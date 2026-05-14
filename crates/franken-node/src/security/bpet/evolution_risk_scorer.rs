@@ -489,7 +489,11 @@ struct DeterministicPrng {
 impl DeterministicPrng {
     fn new(seed: u64) -> Self {
         // Avoid the all-zeros fixed point.
-        let state = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
+        let state = if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        };
         Self {
             state,
             cached_normal: None,
@@ -574,10 +578,7 @@ mod tests {
     #[test]
     fn policy_rejects_non_sum_to_one_weights() {
         let bad = WeightingPolicy::try_new(0.5, 0.5, 0.5, 0.5);
-        assert!(matches!(
-            bad,
-            Err(ScorerError::WeightsDoNotSumToOne { .. })
-        ));
+        assert!(matches!(bad, Err(ScorerError::WeightsDoNotSumToOne { .. })));
     }
 
     #[test]
@@ -633,7 +634,10 @@ mod tests {
         let p = WeightingPolicy::policy_v1();
         let (score, _) = compute_risk_score(&fv, &p).unwrap();
         let expected = 0.35 * 0.6 + 0.25 * 0.4 + 0.30 * 0.5 + 0.10 * 0.2;
-        assert!((score - expected).abs() < 1e-12, "score={score} expected={expected}");
+        assert!(
+            (score - expected).abs() < 1e-12,
+            "score={score} expected={expected}"
+        );
     }
 
     #[test]
@@ -674,7 +678,10 @@ mod tests {
         let high = compute_risk_score(&features(0.90, 0.3, 0.3, 0.3), &p)
             .unwrap()
             .0;
-        assert!(high > low, "expected monotonic in drift: low={low} high={high}");
+        assert!(
+            high > low,
+            "expected monotonic in drift: low={low} high={high}"
+        );
     }
 
     #[test]

@@ -65,9 +65,7 @@ use super::adversarial_evolution::{
     AdversarialError, AdversaryKind, AdversaryScenario, EvolutionStep, EvolutionTrace, RampCurve,
     append_step, validate_scenario,
 };
-use super::drift_features::{
-    DriftEngine, DriftError, DriftFeatures, DriftWindow, PhenotypeSample,
-};
+use super::drift_features::{DriftEngine, DriftError, DriftFeatures, DriftWindow, PhenotypeSample};
 use super::evolution_risk_scorer::{
     FeatureVector, ScorerError, WeightingPolicy, compute_risk_score,
 };
@@ -460,13 +458,9 @@ pub fn run_scenario(
     baseline: &PhenotypeSample,
 ) -> Result<EvolutionResult> {
     validate_scenario(scenario)?;
-    let baseline_capability = baseline
-        .fields
-        .get(CAPABILITY_FIELD)
-        .copied()
-        .ok_or(AdversarialHarnessError::BaselineMissingField(
-            CAPABILITY_FIELD,
-        ))?;
+    let baseline_capability = baseline.fields.get(CAPABILITY_FIELD).copied().ok_or(
+        AdversarialHarnessError::BaselineMissingField(CAPABILITY_FIELD),
+    )?;
     if !baseline_capability.is_finite() {
         return Err(AdversarialHarnessError::BaselineMissingField(
             CAPABILITY_FIELD,
@@ -494,17 +488,17 @@ pub fn run_scenario(
             break; // defensive bound; the loop already caps at n_steps.
         }
         let t = scenario.ramp_curve.value_at(step_idx, n_steps);
-        let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+        let t = if t.is_finite() {
+            t.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
         // Declared phenotype: the adversary publishes a slow, declared
         // capability ramp scaled by `t`.
         let declared_capability =
             clamp_finite(baseline_capability + t * (1.0 - baseline_capability));
-        let declared = build_state(
-            declared_capability,
-            baseline_velocity,
-            baseline_response,
-        );
+        let declared = build_state(declared_capability, baseline_velocity, baseline_response);
 
         // Observed phenotype: synthesized from adversary kind + ramp.
         let (observed_capability, observed_velocity, observed_response, observed_drift) =
@@ -518,11 +512,7 @@ pub fn run_scenario(
                 baseline_response,
             );
 
-        let observed = build_state(
-            observed_capability,
-            observed_velocity,
-            observed_response,
-        );
+        let observed = build_state(observed_capability, observed_velocity, observed_response);
 
         // Push observed sample into the rolling drift window.
         let mut fields: BTreeMap<String, f64> = BTreeMap::new();
@@ -543,21 +533,17 @@ pub fn run_scenario(
 
         // Project drift features onto the 4-D risk feature vector.
         let computed_features = project_features(&drift_features, observed_drift, scenario.kind);
-        let computed_features =
-            FeatureVector::try_new(
-                computed_features.drift,
-                computed_features.regime_shift,
-                computed_features.hazard,
-                computed_features.provenance,
-            )?;
+        let computed_features = FeatureVector::try_new(
+            computed_features.drift,
+            computed_features.regime_shift,
+            computed_features.hazard,
+            computed_features.provenance,
+        )?;
 
         let risk_score = harness.risk_scorer.score(&computed_features)?;
 
-        let verdict = classify_verdict(
-            &computed_features,
-            risk_score,
-            &harness.detector_thresholds,
-        );
+        let verdict =
+            classify_verdict(&computed_features, risk_score, &harness.detector_thresholds);
 
         if verdict.is_flagged() && first_detection_at.is_none() {
             first_detection_at = Some(step_idx);
@@ -584,8 +570,7 @@ pub fn run_scenario(
     }
 
     trace.ended_at = Some(i64::from(n_steps).saturating_add(1));
-    trace.detected_at = first_detection_at
-        .map(|s| i64::from(s).saturating_add(1));
+    trace.detected_at = first_detection_at.map(|s| i64::from(s).saturating_add(1));
 
     let final_verdict = classify_scenario(first_detection_at, n_steps);
 
@@ -613,7 +598,11 @@ fn finite_field_or_zero(sample: &PhenotypeSample, key: &str) -> f64 {
 }
 
 fn clamp_finite(v: f64) -> f64 {
-    if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 fn build_state(capability: f64, velocity: f64, response: f64) -> BTreeMap<String, f64> {
@@ -639,7 +628,11 @@ fn synthesize_observed(
     baseline_velocity: f64,
     baseline_response: f64,
 ) -> (f64, f64, f64, f64) {
-    let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+    let t = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     match kind {
         AdversaryKind::SlowRollDrift => {
             // Hidden capability is the declared ramp + 5% baseline bonus.
@@ -683,7 +676,12 @@ fn synthesize_observed(
             } else {
                 baseline_capability + t * (1.0 - baseline_capability) + 0.20 * t
             };
-            (cap, vel, baseline_response, if in_first_half { 0.10 } else { 0.20 })
+            (
+                cap,
+                vel,
+                baseline_response,
+                if in_first_half { 0.10 } else { 0.20 },
+            )
         }
         AdversaryKind::FalseRecoveryClaim => {
             // Mid-scenario the adversary fakes a recovery — observed dips
@@ -696,18 +694,18 @@ fn synthesize_observed(
             } else {
                 baseline_capability + t * (1.0 - baseline_capability) + 0.15 * t
             };
-            (cap, baseline_velocity, baseline_response, if in_recovery { 0.0 } else { 0.15 * t })
+            (
+                cap,
+                baseline_velocity,
+                baseline_response,
+                if in_recovery { 0.0 } else { 0.15 * t },
+            )
         }
         AdversaryKind::IndirectViaDep => {
             // Capability stays flat; response time deteriorates as the
             // dependency drifts.
             let response = (baseline_response + 0.40 * t).min(1.0);
-            (
-                baseline_capability,
-                baseline_velocity,
-                response,
-                0.40 * t,
-            )
+            (baseline_capability, baseline_velocity, response, 0.40 * t)
         }
         AdversaryKind::SignatureRollover => {
             // Sharp regime change at 75% progress — the rolled key
@@ -720,7 +718,12 @@ fn synthesize_observed(
             } else {
                 baseline_capability + 0.05 * t
             };
-            (cap, baseline_velocity, baseline_response, if post { 0.60 } else { 0.05 })
+            (
+                cap,
+                baseline_velocity,
+                baseline_response,
+                if post { 0.60 } else { 0.05 },
+            )
         }
     }
 }
@@ -745,11 +748,7 @@ fn project_features(
         .copied()
         .unwrap_or(0.0)
         .abs();
-    let velocity_entropy = features
-        .entropy
-        .get(VELOCITY_FIELD)
-        .copied()
-        .unwrap_or(0.0);
+    let velocity_entropy = features.entropy.get(VELOCITY_FIELD).copied().unwrap_or(0.0);
     let novelty = features.novelty_score;
     let creep = features.capability_creep_gradient.abs();
 
@@ -908,7 +907,10 @@ mod tests {
         let result = run_scenario(&mut harness, &scenario, &baseline_sample()).unwrap();
         assert!(result.first_detection_at.is_some());
         // Creep should not be missed entirely.
-        assert!(!matches!(result.final_verdict, ScenarioVerdict::MissedEntirely));
+        assert!(!matches!(
+            result.final_verdict,
+            ScenarioVerdict::MissedEntirely
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -949,7 +951,10 @@ mod tests {
         for window in result.outcomes.windows(2) {
             let a = window[0].observed_drift;
             let b = window[1].observed_drift;
-            assert!(b + 1e-12 >= a, "expected monotone observed drift, a={a} b={b}");
+            assert!(
+                b + 1e-12 >= a,
+                "expected monotone observed drift, a={a} b={b}"
+            );
         }
     }
 
@@ -1002,12 +1007,10 @@ mod tests {
         // S-curve: low slope at the extremes, high slope near the middle.
         let n = result.outcomes.len();
         let mid = n / 2;
-        let mid_delta = (result.outcomes[mid].observed_drift
-            - result.outcomes[mid - 1].observed_drift)
-            .abs();
-        let edge_delta = (result.outcomes[1].observed_drift
-            - result.outcomes[0].observed_drift)
-            .abs();
+        let mid_delta =
+            (result.outcomes[mid].observed_drift - result.outcomes[mid - 1].observed_drift).abs();
+        let edge_delta =
+            (result.outcomes[1].observed_drift - result.outcomes[0].observed_drift).abs();
         assert!(
             mid_delta + 1e-9 >= edge_delta,
             "sigmoid mid slope {mid_delta} should be >= edge slope {edge_delta}"
@@ -1107,7 +1110,11 @@ mod tests {
             .unwrap();
             let mut harness = build_harness();
             let result = run_scenario(&mut harness, &scenario, &baseline_sample()).unwrap();
-            assert_eq!(result.outcomes.len(), n as usize, "outcomes length mismatch for n={n}");
+            assert_eq!(
+                result.outcomes.len(),
+                n as usize,
+                "outcomes length mismatch for n={n}"
+            );
             assert!(
                 result.outcomes.len() <= scenario.n_steps as usize,
                 "bounded growth must hold for n={n}"

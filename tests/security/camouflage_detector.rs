@@ -8,35 +8,25 @@
 //!
 //! Real types only: no mocks, no stubs, no hand-rolled detector replacement.
 
+use std::path::{Path, PathBuf};
+
 use frankenengine_node::security::bpet::camouflage_fixtures::{
     CamouflageFixture, evaluate_camouflage_fixture, load_camouflage_fixture,
 };
 
-const FIXTURE_DIR: &str = "tests/security/camouflage_fixtures";
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root")
+}
 
 fn load(name: &str) -> CamouflageFixture {
-    // Resolve relative to the workspace root (where `cargo test` runs).
-    let candidates = [
-        format!("{}/{}.json", FIXTURE_DIR, name),
-        format!("../../{}/{}.json", FIXTURE_DIR, name),
-        format!("../../../{}/{}.json", FIXTURE_DIR, name),
-    ];
-    let mut last_err: Option<String> = None;
-    for path in &candidates {
-        match std::fs::read_to_string(path) {
-            Ok(json) => {
-                return load_camouflage_fixture(&json)
-                    .unwrap_or_else(|e| panic!("fixture `{name}` at {path} failed to parse: {e}"));
-            }
-            Err(e) => last_err = Some(format!("{path}: {e}")),
-        }
-    }
-    panic!(
-        "fixture `{name}` not found relative to CWD={:?}; tried: {:?}; last_err={:?}",
-        std::env::current_dir(),
-        candidates,
-        last_err
-    );
+    let path = repo_root().join(format!("tests/security/camouflage_fixtures/{name}.json"));
+    let json = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read fixture {}: {e}", path.display()));
+    load_camouflage_fixture(&json)
+        .unwrap_or_else(|e| panic!("fixture `{name}` at {} failed to parse: {e}", path.display()))
 }
 
 fn assert_passes(fixture_name: &str) {

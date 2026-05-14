@@ -1076,15 +1076,17 @@ mod tests {
             window.push(sample(i * 10, &[("capability_x", 1.0)]));
         }
         let g = compute_capability_creep_gradient(&window);
-        assert!(g.abs() < 1e-9, "flat capability series should have ~0 creep, got {g}");
+        assert!(
+            g.abs() < 1e-9,
+            "flat capability series should have ~0 creep, got {g}"
+        );
     }
 
     // 14. recompute_window replays historical samples deterministically.
     #[test]
     fn recompute_window_replays_history_deterministically() {
-        let history: Vec<PhenotypeSample> = (0..20)
-            .map(|i| sample(i * 5, &[("a", i as f64)]))
-            .collect();
+        let history: Vec<PhenotypeSample> =
+            (0..20).map(|i| sample(i * 5, &[("a", i as f64)])).collect();
         let engine = DriftEngine::new();
         let f1 = engine
             .recompute_window(&history, WindowSpec::new(10, 50))

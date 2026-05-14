@@ -26,9 +26,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::security::trajectory_gaming::{
-    CamouflageHint, CamouflageKind, TrajectorySeries,
-};
+use crate::security::trajectory_gaming::{CamouflageHint, CamouflageKind, TrajectorySeries};
 
 /// Hard upper bound on the number of hints a single detection pass may emit.
 pub const MAX_CAMOUFLAGE_HINTS_PER_SERIES: usize = 256;
@@ -432,8 +430,7 @@ pub fn detect_distribution_mismatch(
                 u32::try_from(n).unwrap_or(u32::MAX) as f64,
             );
             evidence.insert(format!("field_hash::{k}"), 1.0);
-            let severity =
-                clamp_unit(kl / (config.distribution_kl_threshold * 4.0).max(1e-9));
+            let severity = clamp_unit(kl / (config.distribution_kl_threshold * 4.0).max(1e-9));
             // Reference every sample index since this divergence is series-wide.
             let mut indices: Vec<usize> = (0..n).collect();
             indices.truncate(MAX_WINDOW_SIZE);
@@ -614,9 +611,7 @@ fn clamp_unit(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::security::trajectory_gaming::{
-        TrajectorySample, TrajectorySeries, append_sample,
-    };
+    use crate::security::trajectory_gaming::{TrajectorySample, TrajectorySeries, append_sample};
 
     fn cap(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
         let mut m = BTreeMap::new();
@@ -626,7 +621,9 @@ mod tests {
         m
     }
 
-    fn build_series(samples: &[(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)]) -> TrajectorySeries {
+    fn build_series(
+        samples: &[(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)],
+    ) -> TrajectorySeries {
         let mut s = TrajectorySeries::new(0, i64::MAX).expect("valid window");
         for (ts, obs, decl) in samples {
             let sample =
@@ -815,15 +812,16 @@ mod tests {
         };
         let hints = detect_gradual_creep(&series, &config).unwrap();
         assert!(
-            hints
-                .iter()
-                .any(|h| h.kind == CamouflageKind::GradualCreep),
+            hints.iter().any(|h| h.kind == CamouflageKind::GradualCreep),
             "expected GradualCreep hint, got {hints:?}"
         );
         let h = &hints[0];
         let slope = h.evidence.get("slope").copied().unwrap();
         assert!(slope.is_finite());
-        assert!(slope.abs() > 0.01, "slope below detection threshold: {slope}");
+        assert!(
+            slope.abs() > 0.01,
+            "slope below detection threshold: {slope}"
+        );
     }
 
     #[test]
@@ -845,7 +843,10 @@ mod tests {
             ..DetectorConfig::default()
         };
         let hints = detect_gradual_creep(&series, &config).unwrap();
-        assert!(hints.is_empty(), "flat ratio should not flag, got {hints:?}");
+        assert!(
+            hints.is_empty(),
+            "flat ratio should not flag, got {hints:?}"
+        );
     }
 
     #[test]
@@ -904,13 +905,7 @@ mod tests {
         }
         assert_eq!(hints.len(), MAX_CAMOUFLAGE_HINTS_PER_SERIES);
         // FIFO eviction: oldest entries dropped first; final entry retained.
-        let last_idx = hints
-            .last()
-            .unwrap()
-            .evidence
-            .get("idx")
-            .copied()
-            .unwrap();
+        let last_idx = hints.last().unwrap().evidence.get("idx").copied().unwrap();
         assert!(
             (last_idx - ((MAX_CAMOUFLAGE_HINTS_PER_SERIES + 49) as f64)).abs() < 1e-9,
             "last hint idx = {last_idx}"
@@ -974,13 +969,19 @@ mod tests {
         let q = [0.1, 0.2, 0.3, 0.4];
         let kl = kl_divergence(&p, &q);
         assert!(kl.is_finite());
-        assert!(kl < 1e-6, "KL of identical distributions should be ~0, got {kl}");
+        assert!(
+            kl < 1e-6,
+            "KL of identical distributions should be ~0, got {kl}"
+        );
     }
 
     #[test]
     fn linreg_slope_recovers_known_slope() {
         let y: Vec<f64> = (0..20).map(|i| 1.0 + 0.5 * (i as f64)).collect();
         let slope = linreg_slope(&y);
-        assert!((slope - 0.5).abs() < 1e-9, "expected slope 0.5, got {slope}");
+        assert!(
+            (slope - 0.5).abs() < 1e-9,
+            "expected slope 0.5, got {slope}"
+        );
     }
 }

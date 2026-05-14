@@ -342,7 +342,11 @@ impl RampCurve {
                 plateau_idx.min(max_idx) / denom
             }
         };
-        if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
+        if v.is_finite() {
+            v.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 }
 
@@ -493,11 +497,7 @@ pub fn validate_step(s: &EvolutionStep) -> Result<()> {
     if s.observed_state.len() != s.declared_state.len() {
         return Err(AdversarialError::StateKeyShapeMismatch);
     }
-    for (obs_key, declared_key) in s
-        .observed_state
-        .keys()
-        .zip(s.declared_state.keys())
-    {
+    for (obs_key, declared_key) in s.observed_state.keys().zip(s.declared_state.keys()) {
         if obs_key != declared_key {
             return Err(AdversarialError::StateKeyShapeMismatch);
         }
@@ -835,7 +835,10 @@ mod tests {
             target_capability: "network.outbound".to_string(),
             ramp_curve: RampCurve::Linear,
         };
-        assert_eq!(validate_scenario(&scenario), Err(AdversarialError::ZeroSteps));
+        assert_eq!(
+            validate_scenario(&scenario),
+            Err(AdversarialError::ZeroSteps)
+        );
     }
 
     #[test]
@@ -1018,7 +1021,8 @@ mod tests {
         // Remove a key in observed, add a different-name key with same
         // arity in declared so lengths match but keys diverge.
         step.observed_state.remove("commit.velocity");
-        step.observed_state.insert("renamed.velocity".to_string(), 1.5);
+        step.observed_state
+            .insert("renamed.velocity".to_string(), 1.5);
         assert_eq!(
             validate_step(&step),
             Err(AdversarialError::StateKeyShapeMismatch)
@@ -1036,7 +1040,10 @@ mod tests {
         append_step(&mut trace, sample_step(1, 200, "scn-mono", 0.2)).unwrap();
         let err = append_step(&mut trace, sample_step(2, 150, "scn-mono", 0.3))
             .expect_err("non-monotonic must be rejected");
-        assert!(matches!(err, AdversarialError::NonMonotonicTimestamp { .. }));
+        assert!(matches!(
+            err,
+            AdversarialError::NonMonotonicTimestamp { .. }
+        ));
         // Equal timestamps are accepted (multiple events in the same ms).
         append_step(&mut trace, sample_step(2, 200, "scn-mono", 0.3)).unwrap();
         assert_eq!(trace.steps.len(), 3);
@@ -1148,7 +1155,10 @@ mod tests {
         .unwrap();
         let enc_a = canonical_encoding(&a);
         let enc_b = canonical_encoding(&b);
-        assert_ne!(enc_a, enc_b, "length-prefix must prevent boundary collisions");
+        assert_ne!(
+            enc_a, enc_b,
+            "length-prefix must prevent boundary collisions"
+        );
         assert_ne!(canonical_hash(&a), canonical_hash(&b));
 
         // RampCurve discriminant collision probe: two encodings that share
@@ -1202,9 +1212,6 @@ mod tests {
             AdversaryKind::SignatureRollover.as_str(),
             "signature_rollover"
         );
-        assert_eq!(
-            AdversaryKind::ManyTinyUpdates.as_str(),
-            "many_tiny_updates"
-        );
+        assert_eq!(AdversaryKind::ManyTinyUpdates.as_str(), "many_tiny_updates");
     }
 }

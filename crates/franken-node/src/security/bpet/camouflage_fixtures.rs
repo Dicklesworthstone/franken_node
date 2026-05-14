@@ -29,7 +29,7 @@ use crate::security::bpet::camouflage_detector::{
     DetectorConfig, DetectorError, MAX_CAMOUFLAGE_HINTS_PER_SERIES, detect_camouflage,
 };
 use crate::security::trajectory_gaming::{
-    CamouflageHint, CamouflageKind, TrajectorySample, TrajectorySeries, append_sample,
+    CamouflageKind, TrajectorySample, TrajectorySeries, append_sample,
 };
 
 /// Upper bound on the per-kind bucket count stored in
@@ -549,7 +549,7 @@ pub fn fixture_multi_kind() -> CamouflageFixture {
         description: "Combined phase shift on net.egress and 50% dropout on fs.write.".to_string(),
         config: DetectorConfig {
             phase_shift_threshold: 0.3,
-            dropout_threshold: 0.3,
+            dropout_threshold: 0.2,
             distribution_kl_threshold: 100.0,
             creep_slope_threshold: 10.0,
             min_samples_for_detection: 8,
