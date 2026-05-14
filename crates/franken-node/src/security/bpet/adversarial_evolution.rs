@@ -189,7 +189,7 @@ pub type Result<T> = std::result::Result<T, AdversarialError>;
 ///   dependency rather than the package under test.
 /// - [`AdversaryKind::SignatureRollover`] — abuses a maintainer key roll to
 ///   relaunder a previously-flagged trajectory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdversaryKind {
     SlowRollDrift,

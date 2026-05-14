@@ -577,7 +577,9 @@ pub fn synthesize_org_concentrated() -> FragilityFixture {
 /// In-code clone of `orphaned_pkg.json`.
 pub fn synthesize_orphaned_pkg() -> FragilityFixture {
     let stale_commit = NOW_SECS - 500 * 86_400; // 500 days old
-    let recent_commit = NOW_SECS - 1 * 86_400; // 1 day old
+    // Use the same canonical "recent" timestamp the JSON fixture ships with so
+    // the on-disk and in-code fixtures are byte-equivalent.
+    let recent_commit = RECENT_COMMIT_SECS;
     let mut maintainers = BTreeMap::new();
     maintainers.insert(
         "sleepy".into(),
@@ -821,7 +823,16 @@ pub fn synthesize_multi_quorum_publishers() -> FragilityFixture {
         publishers,
         nodes,
         edges: vec![],
-        config_overrides: None,
+        // ~33% per org slightly exceeds the production default org-concentration
+        // threshold of 0.30, so the fixture explicitly lifts the bar to 0.40
+        // to model "no single org dominates beyond a healthy 1/3 share".
+        config_overrides: Some(SpofDetectorConfig {
+            single_maintainer_threshold: 100,
+            key_person_threshold: 0.99,
+            max_chain_length: 4,
+            org_concentration_threshold: 0.40,
+            orphan_threshold_days: 365,
+        }),
         expected_findings: vec![],
     }
 }

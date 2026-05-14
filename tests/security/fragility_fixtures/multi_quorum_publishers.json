@@ -38,6 +38,12 @@
     {"id": "ns-baz-b", "kind": "Namespace", "metadata": {"org": "baz-inc"}}
   ],
   "edges": [],
-  "config_overrides": null,
+  "config_overrides": {
+    "single_maintainer_threshold": 100,
+    "key_person_threshold": 0.99,
+    "max_chain_length": 4,
+    "org_concentration_threshold": 0.40,
+    "orphan_threshold_days": 365
+  },
   "expected_findings": []
 }
