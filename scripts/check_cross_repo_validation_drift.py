@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import copy
 from datetime import datetime, timezone
+import hashlib
 import hmac
 import json
 from pathlib import Path
@@ -268,6 +269,23 @@ def _list_of_bounded_paths(value: Any, max_items: int = MAX_LIST_ITEMS) -> bool:
     return isinstance(value, list) and len(value) <= max_items and all(_bounded_path(item) for item in value)
 
 
+def _sorted_unique_strings(value: Any) -> bool:
+    return isinstance(value, list) and value == sorted(value) and len(value) == len(set(value))
+
+
+def _expected_command_material(command: Any) -> str | None:
+    if not isinstance(command, dict):
+        return None
+    program = command.get("program")
+    argv = command.get("argv")
+    cwd = command.get("cwd")
+    if not isinstance(program, str) or not isinstance(argv, list) or not isinstance(cwd, str):
+        return None
+    if not all(isinstance(part, str) for part in argv):
+        return None
+    return f"program={program} argv={' '.join(argv)} cwd={cwd}"
+
+
 def _canonical_command(snapshot: dict[str, Any]) -> str:
     existing = _get_path(snapshot, "recommended_action.exact_command")
     if isinstance(existing, str) and existing.strip():
@@ -404,20 +422,33 @@ def validate_snapshot(snapshot: Any, *, expected_bead_id: str | None = None) -> 
             errors.append("ERR_CRVD_BAD_COMMAND")
         if not isinstance(command.get("remote_required"), bool):
             errors.append("ERR_CRVD_BAD_COMMAND")
+        if command.get("remote_required"):
+            if command.get("program") != "rch" or not isinstance(argv, list) or not argv or argv[0] != "exec":
+                errors.append("ERR_CRVD_REMOTE_REQUIRED_LOCAL_FALLBACK")
 
     digest = snapshot.get("command_digest")
     if not isinstance(digest, dict):
         errors.append("ERR_CRVD_BAD_COMMAND_DIGEST")
     else:
         algorithm = digest.get("algorithm")
+        canonical_material = digest.get("canonical_material")
         if (
             not isinstance(algorithm, str)
             or not hmac.compare_digest(algorithm, "sha256")
             or not _is_sha256_hex(digest.get("hex"))
         ):
             errors.append("ERR_CRVD_BAD_COMMAND_DIGEST")
-        if not _bounded_string(digest.get("canonical_material")):
+        if not _bounded_string(canonical_material):
             errors.append("ERR_CRVD_BAD_COMMAND_DIGEST")
+        expected_material = _expected_command_material(command)
+        if isinstance(canonical_material, str) and isinstance(expected_material, str):
+            if not hmac.compare_digest(canonical_material, expected_material):
+                errors.append("ERR_CRVD_COMMAND_DIGEST_MISMATCH")
+        digest_hex = digest.get("hex")
+        if _is_sha256_hex(digest_hex) and isinstance(canonical_material, str):
+            computed = hashlib.sha256(canonical_material.encode("utf-8")).hexdigest()
+            if not hmac.compare_digest(computed, digest_hex):
+                errors.append("ERR_CRVD_COMMAND_DIGEST_MISMATCH")
 
     cargo_pressure = snapshot.get("cargo_pressure")
     cargo_count = None
@@ -454,9 +485,13 @@ def validate_snapshot(snapshot: Any, *, expected_bead_id: str | None = None) -> 
         dirty_files = sibling_repo.get("dirty_files")
         if not _list_of_bounded_paths(dirty_files, MAX_DIRTY_FILES):
             errors.append("ERR_CRVD_UNBOUNDED_LIST")
+        elif not _sorted_unique_strings(dirty_files):
+            errors.append("ERR_CRVD_UNSORTED_LIST")
         relevant_paths = sibling_repo.get("relevant_paths")
         if not _list_of_bounded_paths(relevant_paths, MAX_LIST_ITEMS):
             errors.append("ERR_CRVD_BAD_SIBLING_REPO")
+        elif not _sorted_unique_strings(relevant_paths):
+            errors.append("ERR_CRVD_UNSORTED_LIST")
         lock = sibling_repo.get("beads_lock")
         if not isinstance(lock, dict):
             errors.append("ERR_CRVD_BAD_BEADS_LOCK")
@@ -483,8 +518,12 @@ def validate_snapshot(snapshot: Any, *, expected_bead_id: str | None = None) -> 
                 errors.append("ERR_CRVD_BAD_SYMBOL_PROBES")
             if not _list_of_bounded_paths(probe.get("searched_paths"), MAX_LIST_ITEMS):
                 errors.append("ERR_CRVD_BAD_SYMBOL_PROBES")
+            elif not _sorted_unique_strings(probe.get("searched_paths")):
+                errors.append("ERR_CRVD_UNSORTED_LIST")
             if not _list_of_bounded_paths(referenced_paths, MAX_LIST_ITEMS):
                 errors.append("ERR_CRVD_BAD_SYMBOL_PROBES")
+            elif not _sorted_unique_strings(referenced_paths):
+                errors.append("ERR_CRVD_UNSORTED_LIST")
             if status == "absent_from_call_sites" and referenced_paths:
                 errors.append("ERR_CRVD_SYMBOL_STATE_MISMATCH")
             if status == "missing_referenced" and not referenced_paths:
@@ -620,6 +659,11 @@ def run_all() -> dict[str, Any]:
     }
     absent_symbol_seen = False
     dirty_relevant_seen = False
+    dirty_unrelated_seen = False
+    missing_referenced_seen = False
+    beads_lock_timeout_seen = False
+    agent_mail_corrupt_seen = False
+    cargo_pressure_seen = False
     for index, snapshot in enumerate(valid_snapshots):
         errors = validate_snapshot(snapshot)
         checks.append(_check(
@@ -630,16 +674,34 @@ def run_all() -> dict[str, Any]:
         code = _get_path(snapshot, "classification.code")
         if code in coverage:
             coverage[code] = True
-        if _get_path(snapshot, "sibling_repo.dirty_state") == "dirty_relevant":
+        dirty_state = _get_path(snapshot, "sibling_repo.dirty_state")
+        if dirty_state == "dirty_relevant":
             dirty_relevant_seen = True
+        if dirty_state == "dirty_unrelated":
+            dirty_unrelated_seen = True
+        if _get_path(snapshot, "sibling_repo.beads_lock.status") in {"timeout", "stale_file"}:
+            beads_lock_timeout_seen = True
+        if _get_path(snapshot, "agent_mail.status") == "red_corrupt":
+            agent_mail_corrupt_seen = True
+        cargo_count = _get_path(snapshot, "cargo_pressure.process_count")
+        cargo_threshold = _get_path(snapshot, "cargo_pressure.threshold")
+        if isinstance(cargo_count, int) and isinstance(cargo_threshold, int) and cargo_count > cargo_threshold:
+            cargo_pressure_seen = True
         for probe in snapshot.get("symbol_probes", []) if isinstance(snapshot, dict) else []:
             if isinstance(probe, dict) and probe.get("status") == "absent_from_call_sites":
                 absent_symbol_seen = True
+            if isinstance(probe, dict) and probe.get("status") == "missing_referenced":
+                missing_referenced_seen = True
 
     for code, seen in coverage.items():
         checks.append(_check(f"coverage.{code}", seen))
     checks.append(_check("coverage.dirty_relevant_fixture", dirty_relevant_seen))
+    checks.append(_check("coverage.dirty_unrelated_fixture", dirty_unrelated_seen))
     checks.append(_check("coverage.absent_symbol_fixture", absent_symbol_seen))
+    checks.append(_check("coverage.missing_referenced_symbol_fixture", missing_referenced_seen))
+    checks.append(_check("coverage.beads_lock_timeout_fixture", beads_lock_timeout_seen))
+    checks.append(_check("coverage.agent_mail_corrupt_fixture", agent_mail_corrupt_seen))
+    checks.append(_check("coverage.cargo_pressure_fixture", cargo_pressure_seen))
 
     invalid_snapshots = fixtures.get("invalid_snapshots", [])
     checks.append(_check(

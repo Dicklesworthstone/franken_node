@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import runpy
 import subprocess
@@ -75,6 +76,13 @@ class CrossRepoValidationDriftTests(unittest.TestCase):
         self.assertEqual(derived["code"], "CRVD_BLOCKED_SIBLING_DIRTY_RELEVANT")
         self.assertEqual(derived["action"], "record_beads_blocker")
 
+    def test_valid_command_digests_match_canonical_material(self) -> None:
+        for snapshot in self.fixtures["valid_snapshots"]:
+            with self.subTest(snapshot=snapshot["snapshot_id"]):
+                material = snapshot["command_digest"]["canonical_material"]
+                expected = hashlib.sha256(material.encode("utf-8")).hexdigest()
+                self.assertEqual(snapshot["command_digest"]["hex"], expected)
+
     def test_invalid_fixture_cases_emit_expected_errors(self) -> None:
         for case in self.fixtures["invalid_snapshots"]:
             with self.subTest(case=case["case"]):
@@ -127,6 +135,47 @@ class CrossRepoValidationDriftTests(unittest.TestCase):
         )
         errors = mod.validate_snapshot(snapshot)
         self.assertIn("ERR_CRVD_SYMBOL_STATE_MISMATCH", errors)
+
+    def test_command_digest_mismatch_fails_closed(self) -> None:
+        snapshot = mod.apply_fixture_patch(
+            self.valid_snapshot,
+            {"set": {"command_digest.hex": "0" * 64}},
+        )
+        errors = mod.validate_snapshot(snapshot)
+        self.assertIn("ERR_CRVD_COMMAND_DIGEST_MISMATCH", errors)
+
+    def test_remote_required_local_fallback_fails_closed(self) -> None:
+        snapshot = mod.apply_fixture_patch(
+            self.valid_snapshot,
+            {
+                "set": {
+                    "validation_command.program": "cargo",
+                    "validation_command.argv": ["cargo", "clippy"],
+                    "validation_command.remote_required": True,
+                }
+            },
+        )
+        errors = mod.validate_snapshot(snapshot)
+        self.assertIn("ERR_CRVD_REMOTE_REQUIRED_LOCAL_FALLBACK", errors)
+
+    def test_handoff_path_inputs_must_be_sorted(self) -> None:
+        snapshot = mod.apply_fixture_patch(
+            self.valid_snapshot,
+            {"set": {"sibling_repo.dirty_files": ["z-last.rs", "a-first.rs"]}},
+        )
+        errors = mod.validate_snapshot(snapshot)
+        self.assertIn("ERR_CRVD_UNSORTED_LIST", errors)
+
+    def test_too_many_symbol_probes_fail_closed(self) -> None:
+        base_probe = copy.deepcopy(self.valid_snapshot["symbol_probes"][0])
+        probes = []
+        for index in range(mod.MAX_SYMBOL_PROBES + 1):
+            probe = copy.deepcopy(base_probe)
+            probe["symbol"] = f"Symbol{index:02}"
+            probes.append(probe)
+        snapshot = mod.apply_fixture_patch(self.valid_snapshot, {"set": {"symbol_probes": probes}})
+        errors = mod.validate_snapshot(snapshot)
+        self.assertIn("ERR_CRVD_BAD_SYMBOL_PROBES", errors)
 
     def test_patch_helper_supports_list_paths(self) -> None:
         snapshot = mod.apply_fixture_patch(

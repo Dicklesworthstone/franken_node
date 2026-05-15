@@ -36,7 +36,7 @@
       },
       "command_digest": {
         "algorithm": "sha256",
-        "hex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "hex": "f0be17b966c4b9b4228e45d6f0886dce1370f4ab5d40a0c6b83245e2b4398bc5",
         "canonical_material": "program=rch argv=exec -- env CARGO_BUILD_JOBS=1 cargo clippy -p frankenengine-node --no-default-features --test validation_proof_cache -- -D warnings cwd=/data/projects/franken_node"
       },
       "cargo_pressure": {
@@ -52,8 +52,8 @@
         "dirty_state": "clean",
         "dirty_files": [],
         "relevant_paths": [
-          "crates/fsqlite-core/src/connection.rs",
-          "crates/fsqlite-btree/src/cursor.rs"
+          "crates/fsqlite-btree/src/cursor.rs",
+          "crates/fsqlite-core/src/connection.rs"
         ],
         "beads_lock": {
           "status": "ok",
@@ -124,7 +124,7 @@
       },
       "command_digest": {
         "algorithm": "sha256",
-        "hex": "2222222222222222222222222222222222222222222222222222222222222222",
+        "hex": "8009c8b1585687291ec8cfb053390a22df12a8b1b2934268b15af48252d6c8de",
         "canonical_material": "program=rch argv=exec -- env CARGO_BUILD_JOBS=1 cargo clippy -q -p frankenengine-node --no-default-features --test validation_proof_cache -- -D warnings cwd=/data/projects/franken_node"
       },
       "cargo_pressure": {
@@ -171,8 +171,8 @@
           "symbol": "PagerCommitProfileSnapshot",
           "status": "absent_from_call_sites",
           "searched_paths": [
-            "crates/fsqlite-pager/src/lib.rs",
-            "crates/fsqlite-core/src/connection.rs"
+            "crates/fsqlite-core/src/connection.rs",
+            "crates/fsqlite-pager/src/lib.rs"
           ],
           "referenced_paths": []
         }
@@ -220,7 +220,7 @@
       },
       "command_digest": {
         "algorithm": "sha256",
-        "hex": "3333333333333333333333333333333333333333333333333333333333333333",
+        "hex": "201d586b1e7231e308b6a5cf006c7f2efb32d8ad2ac326cf591796713bd8ac9f",
         "canonical_material": "program=rch argv=exec -- cargo clippy cwd=/data/projects/franken_node"
       },
       "cargo_pressure": {
@@ -248,8 +248,8 @@
           "symbol": "FunctionRegistry::window_accepts_arg_count",
           "status": "missing_referenced",
           "searched_paths": [
-            "crates/fsqlite-func/src/lib.rs",
-            "crates/fsqlite-core/src/connection.rs"
+            "crates/fsqlite-core/src/connection.rs",
+            "crates/fsqlite-func/src/lib.rs"
           ],
           "referenced_paths": [
             "crates/fsqlite-core/src/connection.rs"
@@ -296,7 +296,7 @@
       },
       "command_digest": {
         "algorithm": "sha256",
-        "hex": "4444444444444444444444444444444444444444444444444444444444444444",
+        "hex": "e112b79054f538cb55949b3dc12be9b1b965ff4898f298e31b4617507494ea15",
         "canonical_material": "program=rch argv=exec -- cargo test cwd=/data/projects/franken_node"
       },
       "cargo_pressure": {
@@ -372,7 +372,7 @@
       },
       "command_digest": {
         "algorithm": "sha256",
-        "hex": "5555555555555555555555555555555555555555555555555555555555555555",
+        "hex": "d38f95438a8c319a2e20ffad37168d26758c806e5afd8ca521ca6d8375b6ca93",
         "canonical_material": "program=rch argv=exec -- cargo fmt --check cwd=/data/projects/franken_node"
       },
       "cargo_pressure": {
@@ -449,7 +449,7 @@
       },
       "command_digest": {
         "algorithm": "sha256",
-        "hex": "6666666666666666666666666666666666666666666666666666666666666666",
+        "hex": "201d586b1e7231e308b6a5cf006c7f2efb32d8ad2ac326cf591796713bd8ac9f",
         "canonical_material": "program=rch argv=exec -- cargo clippy cwd=/data/projects/franken_node"
       },
       "cargo_pressure": {
@@ -526,7 +526,7 @@
       },
       "command_digest": {
         "algorithm": "sha256",
-        "hex": "7777777777777777777777777777777777777777777777777777777777777777",
+        "hex": "92821bedb73e4c993e084883c404a71a7c38a3a19d22305e00d671a336800765",
         "canonical_material": "program=rch argv=exec -- cargo clippy -p frankenengine-node cwd=/data/projects/franken_node"
       },
       "cargo_pressure": {
@@ -554,8 +554,8 @@
           "symbol": "PagerCommitProfileSnapshot",
           "status": "absent_from_call_sites",
           "searched_paths": [
-            "crates/fsqlite-pager/src/lib.rs",
-            "crates/fsqlite-core/src/connection.rs"
+            "crates/fsqlite-core/src/connection.rs",
+            "crates/fsqlite-pager/src/lib.rs"
           ],
           "referenced_paths": []
         }
@@ -594,6 +594,85 @@
       "patch": {
         "set": {
           "command_digest.hex": "not-a-digest"
+        }
+      }
+    },
+    {
+      "case": "command_digest_mismatch",
+      "expected_error": "ERR_CRVD_COMMAND_DIGEST_MISMATCH",
+      "patch": {
+        "set": {
+          "command_digest.hex": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    },
+    {
+      "case": "unsorted_dirty_files",
+      "expected_error": "ERR_CRVD_UNSORTED_LIST",
+      "patch": {
+        "set": {
+          "sibling_repo.dirty_state": "dirty_relevant",
+          "sibling_repo.dirty_files": [
+            "z-last.rs",
+            "a-first.rs"
+          ]
+        }
+      }
+    },
+    {
+      "case": "too_many_symbol_probes",
+      "expected_error": "ERR_CRVD_BAD_SYMBOL_PROBES",
+      "patch": {
+        "set": {
+          "symbol_probes": [
+            "probe-00",
+            "probe-01",
+            "probe-02",
+            "probe-03",
+            "probe-04",
+            "probe-05",
+            "probe-06",
+            "probe-07",
+            "probe-08",
+            "probe-09",
+            "probe-10",
+            "probe-11",
+            "probe-12",
+            "probe-13",
+            "probe-14",
+            "probe-15",
+            "probe-16",
+            "probe-17",
+            "probe-18",
+            "probe-19",
+            "probe-20",
+            "probe-21",
+            "probe-22",
+            "probe-23",
+            "probe-24",
+            "probe-25",
+            "probe-26",
+            "probe-27",
+            "probe-28",
+            "probe-29",
+            "probe-30",
+            "probe-31",
+            "probe-32"
+          ]
+        }
+      }
+    },
+    {
+      "case": "remote_required_local_fallback",
+      "expected_error": "ERR_CRVD_REMOTE_REQUIRED_LOCAL_FALLBACK",
+      "patch": {
+        "set": {
+          "validation_command.program": "cargo",
+          "validation_command.argv": [
+            "cargo",
+            "clippy"
+          ],
+          "validation_command.remote_required": true
         }
       }
     },
