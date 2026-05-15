@@ -4,11 +4,39 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_transport_fault_gate.py"
+
+
+def run_checker(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def decode_json(payload: str) -> dict:
+    try:
+        decoded = json.JSONDecoder().decode(payload)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(f"checker did not emit valid JSON: {exc}: {payload}") from exc
+    if not isinstance(decoded, dict):
+        raise AssertionError("checker JSON output was not an object")
+    return decoded
+
+
+def checker_json(*args: str) -> dict:
+    result = run_checker(*args, "--json")
+    if result.returncode != 0:
+        raise AssertionError(f"checker failed: {result.stdout}{result.stderr}")
+    return decode_json(result.stdout)
 
 
 def _load_checker():
@@ -23,25 +51,12 @@ class TestSelfTest(TestCase):
     """Verify the self-test mode of the checker script."""
 
     def test_self_test_passes(self):
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--self-test", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        self.assertEqual(result.returncode, 0, f"self-test failed: {result.stdout}")
-        data = json.loads(result.stdout)
+        data = checker_json("--self-test")
         self.assertTrue(data["all_passed"])
         self.assertGreater(data["total"], 0)
 
     def test_self_test_check_counts(self):
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--self-test", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        data = json.loads(result.stdout)
+        data = checker_json("--self-test")
         self.assertGreaterEqual(data["total"], 14)
         self.assertEqual(data["passed"], data["total"])
 
@@ -50,13 +65,7 @@ class TestJsonOutput(TestCase):
     """Verify JSON output format of the checker."""
 
     def test_json_mode_output(self):
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        data = json.loads(result.stdout)
+        data = checker_json()
         self.assertIn("bead_id", data)
         self.assertEqual(data["bead_id"], "bd-3u6o")
         self.assertEqual(data["section"], "10.15")
@@ -67,13 +76,7 @@ class TestJsonOutput(TestCase):
         self.assertIsInstance(data["checks"], list)
 
     def test_all_checks_have_required_fields(self):
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        data = json.loads(result.stdout)
+        data = checker_json()
         for check in data["checks"]:
             self.assertIn("name", check)
             self.assertIn("passed", check)
@@ -150,18 +153,74 @@ class TestCheckerModule(TestCase):
         self.assertIn("passed", result)
         self.assertIn("total", result)
 
+    def test_comment_only_impl_markers_fail_closed(self):
+        commented_tests = "\n".join(
+            f"// #[test]\n// fn commented_transport_test_{idx}() {{}}" for idx in range(18)
+        )
+        comment_only_impl = "\n".join(
+            [
+                "// use crate::remote::virtual_transport_faults",
+                *(f"// {marker}" for marker in self.mod.REQUIRED_TYPES),
+                *(f"// {code}" for code in self.mod.REQUIRED_EVENT_CODES),
+                *(f"// {code}" for code in self.mod.REQUIRED_ERROR_CODES),
+                *(f"// {inv}" for inv in self.mod.REQUIRED_INVARIANTS),
+                *(f"// {proto}" for proto in self.mod.REQUIRED_PROTOCOLS),
+                *(f"// {mode}" for mode in self.mod.REQUIRED_FAULT_MODES),
+                *(f"// {fn_sig}" for fn_sig in self.mod.REQUIRED_FUNCTIONS),
+                '// "tfg-v1.0" "bd-3u6o" "10.15"',
+                "// Serialize, Deserialize",
+                "/*",
+                commented_tests,
+                "*/",
+            ]
+        )
+
+        original_impl = self.mod.IMPL_FILE
+        original_mod = self.mod.MOD_FILE
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp = Path(tmpdir)
+                impl_path = tmp / "transport_fault_gate.rs"
+                mod_path = tmp / "mod.rs"
+                impl_path.write_text(comment_only_impl, encoding="utf-8")
+                mod_path.write_text("pub mod transport_fault_gate;\n", encoding="utf-8")
+
+                self.mod.IMPL_FILE = impl_path
+                self.mod.MOD_FILE = mod_path
+                result = self.mod.run_checks()
+        finally:
+            self.mod.IMPL_FILE = original_impl
+            self.mod.MOD_FILE = original_mod
+
+        checks = {check["name"]: check["passed"] for check in result["checks"]}
+        self.assertTrue(checks["file_exists:impl_file"])
+        self.assertTrue(checks["module_wired"])
+        expected_failures = [
+            "upstream_import",
+            "schema_version",
+            "bead_id",
+            "bead_section",
+            "rust_unit_tests",
+            "serde_derives",
+        ]
+        expected_failures.extend(f"type:{marker}" for marker in self.mod.REQUIRED_TYPES)
+        expected_failures.extend(f"event_code:{code}" for code in self.mod.REQUIRED_EVENT_CODES)
+        expected_failures.extend(f"error_code:{code}" for code in self.mod.REQUIRED_ERROR_CODES)
+        expected_failures.extend(f"invariant_impl:{inv}" for inv in self.mod.REQUIRED_INVARIANTS)
+        expected_failures.extend(f"protocol:{proto}" for proto in self.mod.REQUIRED_PROTOCOLS)
+        expected_failures.extend(f"fault_mode:{mode}" for mode in self.mod.REQUIRED_FAULT_MODES)
+        expected_failures.extend(f"function:{fn_sig}" for fn_sig in self.mod.REQUIRED_FUNCTIONS)
+
+        for check_name in expected_failures:
+            self.assertIn(check_name, checks)
+            self.assertFalse(checks[check_name], check_name)
+
 
 class TestVerificationPasses(TestCase):
     """Verify that the checker reports all checks passing."""
 
     def test_all_checks_pass(self):
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        data = json.loads(result.stdout)
+        data = checker_json()
         failed = [c for c in data["checks"] if not c["passed"]]
         self.assertEqual(
             len(failed),
@@ -170,13 +229,7 @@ class TestVerificationPasses(TestCase):
         )
 
     def test_sufficient_rust_tests(self):
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        data = json.loads(result.stdout)
+        data = checker_json()
         self.assertGreaterEqual(
             data.get("rust_test_count", 0),
             18,
@@ -184,13 +237,7 @@ class TestVerificationPasses(TestCase):
         )
 
     def test_verdict_is_pass(self):
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        data = json.loads(result.stdout)
+        data = checker_json()
         self.assertEqual(data["verdict"], "PASS")
 
 
