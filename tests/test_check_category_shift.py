@@ -5,6 +5,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -41,50 +42,67 @@ class TestConstants(unittest.TestCase):
         self.assertGreaterEqual(len(mod.REQUIRED_POLICY_SECTIONS), 8)
 
 
-class TestSimulatePipeline(unittest.TestCase):
+class TestFixtureReportAnalysis(unittest.TestCase):
     def test_five_dimensions(self):
-        result = mod.simulate_pipeline()
+        result = mod.analyze_fixture_report()
         self.assertEqual(result["dimensions_count"], 5)
 
     def test_claims_count(self):
-        result = mod.simulate_pipeline()
+        result = mod.analyze_fixture_report()
         self.assertEqual(result["claims_count"], 5)
 
     def test_all_claims_verified(self):
-        result = mod.simulate_pipeline()
+        result = mod.analyze_fixture_report()
         self.assertTrue(result["all_claims_verified"])
 
-    def test_all_claims_have_reproduce_scripts(self):
-        result = mod.simulate_pipeline()
-        self.assertTrue(result["all_claims_have_scripts"])
+    def test_all_claim_dimensions_declared(self):
+        result = mod.analyze_fixture_report()
+        self.assertTrue(result["claim_dimensions_declared"])
 
     def test_thresholds_count(self):
-        result = mod.simulate_pipeline()
+        result = mod.analyze_fixture_report()
         self.assertEqual(result["thresholds_count"], 3)
 
     def test_all_thresholds_met(self):
-        result = mod.simulate_pipeline()
+        result = mod.analyze_fixture_report()
         self.assertTrue(result["all_thresholds_met"])
 
     def test_bet_status_count(self):
-        result = mod.simulate_pipeline()
+        result = mod.analyze_fixture_report()
         self.assertGreaterEqual(result["bet_status_count"], 3)
 
     def test_manifest_count(self):
-        result = mod.simulate_pipeline()
+        result = mod.analyze_fixture_report()
         self.assertGreaterEqual(result["manifest_count"], 5)
 
-    def test_idempotency(self):
-        result = mod.simulate_pipeline()
-        self.assertTrue(result["idempotent"])
+    def test_manifest_hashes_are_valid(self):
+        result = mod.analyze_fixture_report()
+        self.assertTrue(result["manifest_entries_have_hashes"])
+
+    def test_report_hash_matches_payload(self):
+        result = mod.analyze_fixture_report()
+        self.assertTrue(result["report_hash_matches"])
 
     def test_json_format_supported(self):
-        result = mod.simulate_pipeline()
+        result = mod.analyze_fixture_report()
         self.assertTrue(result["has_json_format"])
 
     def test_markdown_format_supported(self):
-        result = mod.simulate_pipeline()
+        result = mod.analyze_fixture_report()
         self.assertTrue(result["has_markdown_format"])
+
+    def test_missing_report_fails_closed(self):
+        result = mod.analyze_fixture_report(report_path=ROOT / "no" / "report.json")
+        self.assertFalse(result["valid_report"])
+        self.assertFalse(result["has_json_format"])
+
+    def test_invalid_report_fails_closed(self):
+        with patch.object(
+            mod, "_read_json_file", return_value=(None, "invalid JSON: broken")
+        ):
+            result = mod.analyze_fixture_report()
+        self.assertFalse(result["valid_report"])
+        self.assertIn("invalid JSON", result["detail"])
 
 
 class TestRunAll(unittest.TestCase):
@@ -123,7 +141,8 @@ class TestRunAll(unittest.TestCase):
 class TestSelfTest(unittest.TestCase):
     def test_passes(self):
         ok, checks = mod.self_test()
-        self.assertTrue(ok, f"self_test failed with {sum(1 for c in checks if not c['pass'])} failures")
+        failure_count = sum(1 for c in checks if not c["pass"])
+        self.assertTrue(ok, f"self_test failed with {failure_count} failures")
 
 
 class TestJsonOutput(unittest.TestCase):
@@ -134,7 +153,16 @@ class TestJsonOutput(unittest.TestCase):
 
     def test_all_fields(self):
         result = mod.run_all()
-        for key in ["bead_id", "title", "section", "verdict", "total", "passed", "failed", "checks"]:
+        for key in [
+            "bead_id",
+            "title",
+            "section",
+            "verdict",
+            "total",
+            "passed",
+            "failed",
+            "checks",
+        ]:
             self.assertIn(key, result)
 
 
@@ -154,25 +182,10 @@ class TestHelpers(unittest.TestCase):
         keys = list(result.keys())
         self.assertEqual(keys, ["a", "b"])
 
-    def test_build_claim_structure(self):
-        claim = mod._build_claim(
-            "CSR-TEST-001", "test_dim", "test summary",
-            99.0, "percent", "artifacts/test.json", '{"key":"value"}',
-            10_000_000 - 1000, 10_000_000, 30 * 24 * 3600,
-        )
-        self.assertEqual(claim["claim_id"], "CSR-TEST-001")
-        self.assertEqual(claim["dimension"], "test_dim")
-        self.assertEqual(claim["outcome"], "verified")
-        self.assertIn("sha256sum", claim["reproduce_script"])
-
-    def test_build_claim_stale(self):
-        claim = mod._build_claim(
-            "CSR-TEST-002", "test_dim", "stale claim",
-            50.0, "percent", "artifacts/stale.json", '{"old":true}',
-            10_000_000 - (31 * 24 * 3600), 10_000_000, 30 * 24 * 3600,
-        )
-        self.assertEqual(claim["outcome"], "stale")
-        self.assertEqual(claim["evidence"]["freshness"], "stale")
+    def test_expected_report_hash_matches_fixture(self):
+        report, detail = mod._read_json_file(mod.FIXTURE_REPORT_JSON)
+        self.assertEqual(detail, "valid JSON object")
+        self.assertEqual(report["report_hash"], mod._expected_report_hash(report))
 
     def test_report_fixture_checks_pass(self):
         checks = mod.report_fixture_checks()

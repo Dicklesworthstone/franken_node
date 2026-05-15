@@ -42,4 +42,4 @@ franken_node migration runs 4.1x faster than manual migration
 | `artifacts/adoption/verifier_stats.json` | `4e94bf0a9fbe1254...` | fresh |
 | `artifacts/economics/trust_economics.json` | `5e94bf0a9fbe1254...` | fresh |
 
-**Report Hash:** `9b08a1a9f5c4ac764dc796918078acb20e921f05f3b2a54dd99a44dffdd6f5aa`
+**Report Hash:** `d0dc5bae32c462460b2aac809079a05ff94125f0d15023a5ce37a8f78cf24569`

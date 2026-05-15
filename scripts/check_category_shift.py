@@ -273,7 +273,7 @@ def report_fixture_checks() -> list[dict[str, Any]]:
     return checks
 
 
-# ── Simulation ───────────────────────────────────────────────────────────────
+# ── Fixture report analysis ──────────────────────────────────────────────────
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -288,178 +288,104 @@ def _canonical(value: Any) -> Any:
     return value
 
 
-def _build_claim(claim_id: str, dimension: str, summary: str, value: float,
-                 unit: str, artifact_path: str, content: str,
-                 generated_at: int, now: int, freshness_window: int) -> dict[str, Any]:
-    """Build a claim dict with evidence and verification."""
-    sha256 = _sha256_hex(content.encode("utf-8"))
-    age = now - generated_at
-    freshness = "fresh" if age <= freshness_window else "stale"
-    outcome = "verified" if freshness == "fresh" else "stale"
-
-    reproduce_script = (
-        f"#!/usr/bin/env bash\n"
-        f"set -euo pipefail\n"
-        f"ARTIFACT=\"{artifact_path}\"\n"
-        f"EXPECTED_HASH=\"{sha256}\"\n"
-        f"ACTUAL_HASH=$(sha256sum \"$ARTIFACT\" | cut -d' ' -f1)\n"
-        f"[ \"$ACTUAL_HASH\" = \"$EXPECTED_HASH\" ] && echo 'OK: {claim_id} verified' && exit 0\n"
-        f"echo 'ERROR: hash mismatch' && exit 1\n"
+def _expected_report_hash(report: dict[str, Any]) -> str:
+    report_for_hash = dict(report)
+    report_for_hash["report_hash"] = ""
+    canonical = json.dumps(
+        _canonical(report_for_hash), separators=(",", ":"), ensure_ascii=True
     )
-
-    return {
-        "claim_id": claim_id,
-        "dimension": dimension,
-        "summary": summary,
-        "value": value,
-        "unit": unit,
-        "evidence": {
-            "artifact_path": artifact_path,
-            "sha256_hash": sha256,
-            "generated_at_secs": generated_at,
-            "freshness": freshness,
-        },
-        "outcome": outcome,
-        "reproduce_script": reproduce_script,
-    }
+    return _sha256_hex(canonical.encode("utf-8"))
 
 
-def simulate_pipeline() -> dict[str, Any]:
-    """Simulate the category-shift reporting pipeline in Python."""
-    now = 10_000_000
-    freshness_window = 30 * 24 * 3600  # 30 days
+def analyze_fixture_report(
+    report_path: Path | None = None,
+    markdown_path: Path | None = None,
+) -> dict[str, Any]:
+    """Analyze the checked-in report fixture instead of synthesizing evidence."""
+    report_path = report_path or FIXTURE_REPORT_JSON
+    markdown_path = markdown_path or FIXTURE_REPORT_MD
+    report, detail = _read_json_file(report_path)
 
-    claims = []
-
-    # Dimension 1: Benchmark comparisons
-    claims.append(_build_claim(
-        "CSR-CLAIM-001", "benchmark_comparisons",
-        "franken_node achieves 96.2% Node.js API compatibility",
-        96.2, "percent",
-        "artifacts/benchmarks/compat_results.json",
-        '{"throughput_ops_per_sec":150000,"latency_p99_ms":2.1}',
-        now - 86400, now, freshness_window,
-    ))
-
-    # Dimension 2: Security posture
-    claims.append(_build_claim(
-        "CSR-CLAIM-002", "security_posture",
-        "franken_node achieves 12.5x compromise surface reduction",
-        12.5, "factor",
-        "artifacts/security/adversarial_results.json",
-        '{"attacks_neutralized":47,"coverage_percent":98.5}',
-        now - 172800, now, freshness_window,
-    ))
-
-    # Dimension 3: Migration velocity
-    claims.append(_build_claim(
-        "CSR-CLAIM-003", "migration_velocity",
-        "franken_node migration runs 4.1x faster than manual migration",
-        4.1, "factor",
-        "artifacts/migration/demo_results.json",
-        '{"success_rate":0.97,"median_time_hours":1.2}',
-        now - 259200, now, freshness_window,
-    ))
-
-    # Dimension 4: Adoption trends
-    claims.append(_build_claim(
-        "CSR-CLAIM-004", "adoption_trends",
-        "142 verifiers registered with 8934 attestations",
-        142.0, "count",
-        "artifacts/adoption/verifier_stats.json",
-        '{"verifier_count":142,"attestation_volume":8934}',
-        now - 43200, now, freshness_window,
-    ))
-
-    # Dimension 5: Economic impact
-    claims.append(_build_claim(
-        "CSR-CLAIM-005", "economic_impact",
-        "4.2x cost-benefit ratio with -87% attacker ROI",
-        4.2, "ratio",
-        "artifacts/economics/trust_economics.json",
-        '{"cost_benefit_ratio":4.2,"attacker_roi_delta":-0.87}',
-        now - 86400, now, freshness_window,
-    ))
-
-    # Evaluate thresholds
-    compat_value = 96.2
-    migration_value = 4.1
-    compromise_value = 12.5
-
-    def threshold_status(actual: float, target: float) -> str:
-        if actual > target * 1.1:
-            return "exceeded"
-        elif actual >= target:
-            return "met"
-        return "not_met"
-
-    thresholds = [
-        {"name": "compatibility", "target": 95.0, "actual": compat_value,
-         "unit": "%", "status": threshold_status(compat_value, 95.0)},
-        {"name": "migration_velocity", "target": 3.0, "actual": migration_value,
-         "unit": "x", "status": threshold_status(migration_value, 3.0)},
-        {"name": "compromise_reduction", "target": 10.0, "actual": compromise_value,
-         "unit": "x", "status": threshold_status(compromise_value, 10.0)},
-    ]
-
-    bet_status = [
-        {"initiative_id": "moonshot-compat", "title": "95% API Compatibility",
-         "status": "on_track", "progress_percent": 96, "blockers": [],
-         "projected_completion": "2026-Q2"},
-        {"initiative_id": "moonshot-migration", "title": "3x Migration Velocity",
-         "status": "completed", "progress_percent": 100, "blockers": [],
-         "projected_completion": "2026-Q1"},
-        {"initiative_id": "moonshot-security", "title": "10x Compromise Reduction",
-         "status": "on_track", "progress_percent": 85, "blockers": [],
-         "projected_completion": "2026-Q2"},
-    ]
-
-    manifest = [
-        {
-            "artifact_path": c["evidence"]["artifact_path"],
-            "sha256_hash": c["evidence"]["sha256_hash"],
-            "generated_at_secs": c["evidence"]["generated_at_secs"],
-            "freshness": c["evidence"]["freshness"],
+    if report is None:
+        return {
+            "valid_report": False,
+            "detail": detail,
+            "claims_count": 0,
+            "dimensions_count": 0,
+            "all_claims_verified": False,
+            "all_claim_ids_present": False,
+            "claim_dimensions_declared": False,
+            "thresholds_count": 0,
+            "all_thresholds_met": False,
+            "bet_status_count": 0,
+            "manifest_count": 0,
+            "manifest_entries_have_hashes": False,
+            "all_manifest_entries_fresh": False,
+            "report_hash_matches": False,
+            "has_json_format": False,
+            "has_markdown_format": markdown_path.is_file(),
+            "markdown_mentions_manifest": False,
         }
-        for c in claims
-    ]
-    manifest.sort(key=lambda e: e["artifact_path"])
 
-    # Compute report hash
-    report_for_hash = {
-        "version": 1,
-        "generated_at_secs": now,
-        "generated_at_iso": f"{now}Z",
-        "dimensions": {"count": 5},
-        "thresholds": thresholds,
-        "bet_status": bet_status,
-        "manifest": manifest,
-        "claims": claims,
-        "report_hash": "",
-    }
-    canonical = json.dumps(_canonical(report_for_hash), separators=(",", ":"), ensure_ascii=True)
-    report_hash = _sha256_hex(canonical.encode("utf-8"))
+    claims = report.get("claims", [])
+    dimensions = report.get("dimensions", {})
+    thresholds = report.get("thresholds", [])
+    bet_status = report.get("bet_status", [])
+    manifest_entries = report.get("manifest", [])
+    report_hash = report.get("report_hash", "")
+    expected_claim_ids = {f"CSR-CLAIM-{idx:03d}" for idx in range(1, 6)}
+    claim_ids = {claim.get("claim_id") for claim in claims if isinstance(claim, dict)}
+    dimension_keys = set(dimensions) if isinstance(dimensions, dict) else set()
 
-    # Idempotency check: compute again
-    report_hash_2 = _sha256_hex(canonical.encode("utf-8"))
+    if markdown_path.is_file():
+        markdown = markdown_path.read_text(encoding="utf-8")
+    else:
+        markdown = ""
 
     return {
-        "claims_count": len(claims),
-        "dimensions_count": 5,
-        "all_claims_verified": all(c["outcome"] == "verified" for c in claims),
-        "all_claims_have_scripts": all(
-            "sha256sum" in c["reproduce_script"] for c in claims
+        "valid_report": True,
+        "detail": "valid JSON object",
+        "claims_count": len(claims) if isinstance(claims, list) else 0,
+        "dimensions_count": len(dimensions) if isinstance(dimensions, dict) else 0,
+        "all_claims_verified": isinstance(claims, list)
+        and all(
+            isinstance(claim, dict) and claim.get("outcome") == "verified"
+            for claim in claims
         ),
-        "thresholds_count": len(thresholds),
-        "all_thresholds_met": all(
-            t["status"] in ("met", "exceeded") for t in thresholds
+        "all_claim_ids_present": expected_claim_ids.issubset(claim_ids),
+        "claim_dimensions_declared": isinstance(claims, list)
+        and all(
+            isinstance(claim, dict) and claim.get("dimension") in dimension_keys
+            for claim in claims
         ),
-        "bet_status_count": len(bet_status),
-        "manifest_count": len(manifest),
-        "idempotent": report_hash == report_hash_2,
-        "report_hash": report_hash,
+        "thresholds_count": len(thresholds) if isinstance(thresholds, list) else 0,
+        "all_thresholds_met": isinstance(thresholds, list)
+        and all(
+            isinstance(threshold, dict)
+            and threshold.get("status") in ("met", "exceeded")
+            for threshold in thresholds
+        ),
+        "bet_status_count": len(bet_status) if isinstance(bet_status, list) else 0,
+        "manifest_count": len(manifest_entries) if isinstance(manifest_entries, list) else 0,
+        "manifest_entries_have_hashes": isinstance(manifest_entries, list)
+        and all(
+            isinstance(entry, dict)
+            and re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256_hash", "")))
+            for entry in manifest_entries
+        ),
+        "all_manifest_entries_fresh": isinstance(manifest_entries, list)
+        and all(
+            isinstance(entry, dict) and entry.get("freshness") == "fresh"
+            for entry in manifest_entries
+        ),
+        "report_hash_matches": isinstance(report_hash, str)
+        and report_hash == _expected_report_hash(report),
         "has_json_format": True,
-        "has_markdown_format": True,
+        "has_markdown_format": markdown_path.is_file()
+        and expected_claim_ids.issubset(
+            {claim_id for claim_id in expected_claim_ids if claim_id in markdown}
+        ),
+        "markdown_mentions_manifest": "## Artifact Manifest" in markdown,
     }
 
 
@@ -534,18 +460,24 @@ def run_all() -> dict[str, Any]:
     # cfg(test) module present
     _file_contains(IMPL, "#[cfg(test)]", "impl")
 
-    # Simulation checks
-    sim = simulate_pipeline()
-    _check("simulation: 5 dimensions collected", sim["dimensions_count"] == 5)
-    _check("simulation: all claims verified", sim["all_claims_verified"])
-    _check("simulation: all claims have reproduce scripts", sim["all_claims_have_scripts"])
-    _check("simulation: 3 thresholds evaluated", sim["thresholds_count"] == 3)
-    _check("simulation: all thresholds met or exceeded", sim["all_thresholds_met"])
-    _check("simulation: bet status entries present", sim["bet_status_count"] >= 3)
-    _check("simulation: manifest has entries", sim["manifest_count"] >= 5)
-    _check("simulation: idempotent hash", sim["idempotent"])
-    _check("simulation: JSON format supported", sim["has_json_format"])
-    _check("simulation: Markdown format supported", sim["has_markdown_format"])
+    # Fixture-backed report checks
+    fixture_report = analyze_fixture_report()
+    _check("fixture analysis: JSON report loaded", fixture_report["valid_report"], fixture_report["detail"])
+    _check("fixture analysis: 5 dimensions collected", fixture_report["dimensions_count"] == 5)
+    _check("fixture analysis: 5 claims present", fixture_report["claims_count"] == 5)
+    _check("fixture analysis: deterministic claim ids", fixture_report["all_claim_ids_present"])
+    _check("fixture analysis: claim dimensions declared", fixture_report["claim_dimensions_declared"])
+    _check("fixture analysis: all claims verified", fixture_report["all_claims_verified"])
+    _check("fixture analysis: 3 thresholds evaluated", fixture_report["thresholds_count"] == 3)
+    _check("fixture analysis: all thresholds met or exceeded", fixture_report["all_thresholds_met"])
+    _check("fixture analysis: bet status entries present", fixture_report["bet_status_count"] >= 3)
+    _check("fixture analysis: manifest has entries", fixture_report["manifest_count"] >= 5)
+    _check("fixture analysis: manifest hashes are valid", fixture_report["manifest_entries_have_hashes"])
+    _check("fixture analysis: manifest entries are fresh", fixture_report["all_manifest_entries_fresh"])
+    _check("fixture analysis: report hash matches payload", fixture_report["report_hash_matches"])
+    _check("fixture analysis: JSON format supported", fixture_report["has_json_format"])
+    _check("fixture analysis: Markdown format supported", fixture_report["has_markdown_format"])
+    _check("fixture analysis: Markdown manifest present", fixture_report["markdown_mentions_manifest"])
 
     # Category threshold values in spec
     _file_contains(SPEC, ">= 95%", "spec_threshold")
