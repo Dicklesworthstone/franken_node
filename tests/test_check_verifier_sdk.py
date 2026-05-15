@@ -4,6 +4,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -67,6 +68,98 @@ class TestAllChecksPass(unittest.TestCase):
             self.assertTrue(c["passed"], f"Check failed: {c['check']}: {c['detail']}")
 
 
+class TestCommentOnlyRustRegression(unittest.TestCase):
+    """Commented Rust markers must not satisfy implementation checks."""
+
+    def test_comment_only_rust_markers_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            impl_file = tmp_path / "verifier_sdk.rs"
+            mod_file = tmp_path / "mod.rs"
+
+            markers = (
+                mod.REQUIRED_EVENT_CODES
+                + mod.REQUIRED_ERROR_CODES
+                + mod.REQUIRED_INVARIANTS
+                + mod.CORE_OPERATIONS
+                + ["pub struct " + name for name in mod.REQUIRED_TYPES]
+                + [
+                    "pub verdict:",
+                    "Verdict",
+                    "pub self_contained:",
+                    "ReleaseValidation",
+                    "IncidentValidation",
+                    "ComplianceAudit",
+                    "INV-VER-OFFLINE-CAPABLE",
+                    "OFFLINE",
+                    "fn append_transparency_log",
+                    "pub merkle_proof:",
+                    "ver-v1.0",
+                    "BTreeMap",
+                    "Serialize",
+                    "Deserialize",
+                    "pub fn verify_migration_artifact(",
+                    "canonical_migration_artifact_payload(artifact)?",
+                    "verify_ed25519_signature_hex(signer_public_key, &signature_payload, sig).is_ok()",
+                    "let ch_ok = is_sha256_hex(ch);",
+                ]
+            )
+
+            impl_file.write_text(
+                "\n".join(f"// {marker}" for marker in markers)
+                + "\n/*\n"
+                + "\n".join("#[test]" for _ in range(25))
+                + "\n*/\n",
+                encoding="utf-8",
+            )
+            mod_file.write_text("// pub mod verifier_sdk;\n", encoding="utf-8")
+
+            original_impl = mod.IMPL_FILE
+            original_mod = mod.MOD_FILE
+            mod.IMPL_FILE = impl_file
+            mod.MOD_FILE = mod_file
+            try:
+                checks = mod._checks()
+            finally:
+                mod.IMPL_FILE = original_impl
+                mod.MOD_FILE = original_mod
+
+        by_name = {check["check"]: check for check in checks}
+        self.assertTrue(by_name["Rust module exists"]["passed"])
+        self.assertFalse(by_name["Wired into connector/mod.rs"]["passed"])
+
+        rust_marker_prefixes = (
+            "Event code ",
+            "Error code ",
+            "Invariant ",
+            "Core operation ",
+            "Type ",
+            "Replacement-critical guard ",
+        )
+        rust_marker_names = [
+            check["check"]
+            for check in checks
+            if check["check"].startswith(rust_marker_prefixes)
+            or check["check"]
+            in {
+                "VerificationResult has verdict field",
+                "EvidenceBundle has self_contained field",
+                "ValidationWorkflow::ReleaseValidation",
+                "ValidationWorkflow::IncidentValidation",
+                "ValidationWorkflow::ComplianceAudit",
+                "Offline capability documented",
+                "Transparency log append function",
+                "TransparencyLogEntry has merkle_proof",
+                "Schema version ver-v1.0",
+                "BTreeMap usage for determinism",
+                "Serialize/Deserialize derives",
+            }
+            or check["check"].startswith("Rust unit tests")
+        ]
+        self.assertTrue(rust_marker_names)
+        self.assertTrue(all(not by_name[name]["passed"] for name in rust_marker_names))
+
+
 class TestMinimumCheckCount(unittest.TestCase):
     """Test that there is a minimum number of checks."""
 
@@ -96,10 +189,12 @@ class TestJsonCliOutput(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), "--json"],
             capture_output=True,
+            check=False,
             text=True,
             timeout=30,
         )
-        parsed = json.loads(proc.stdout)
+        self.assertEqual(proc.returncode, 0, f"json CLI failed:\n{proc.stdout}\n{proc.stderr}")
+        parsed = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(parsed["bead_id"], "bd-3c2")
         self.assertIn("verdict", parsed)
         self.assertIn("checks", parsed)
@@ -112,6 +207,7 @@ class TestSelfTestCliExit(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), "--self-test"],
             capture_output=True,
+            check=False,
             text=True,
             timeout=30,
         )

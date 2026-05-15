@@ -9,12 +9,13 @@ Usage:
 
 import json
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 # -- File paths ----------------------------------------------------------------
@@ -118,6 +119,92 @@ def _read(path: Path) -> str:
     return ""
 
 
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = _rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = _rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
 def _check(name: str, ok: bool, detail: str = "") -> dict:
     return {"check": name, "passed": ok, "detail": detail or ("ok" if ok else "FAIL")}
 
@@ -131,6 +218,7 @@ def _source_window(source: str, anchor: str, span: int) -> str:
 
 def _replacement_critical_guard_checks(source: str) -> list[dict]:
     checks = []
+    source = _strip_rust_comments(source)
     for guard in REPLACEMENT_CRITICAL_GUARDS:
         window = _source_window(source, guard["anchor"], guard["span"])
         if not window:
@@ -164,8 +252,8 @@ def _replacement_critical_guard_checks(source: str) -> list[dict]:
 def _checks() -> list:
     """Return list of {check, passed, detail} dicts."""
     checks = []
-    src = _read(IMPL_FILE)
-    mod_src = _read(MOD_FILE)
+    src = _read_rust_source(IMPL_FILE)
+    mod_src = _read_rust_source(MOD_FILE)
 
     # 1. Rust module exists
     checks.append(_check(
@@ -206,7 +294,7 @@ def _checks() -> list:
     evidence_pass = False
     if EVIDENCE_FILE.exists():
         try:
-            ev = json.loads(EVIDENCE_FILE.read_text(encoding="utf-8"))
+            ev = json.JSONDecoder().decode(EVIDENCE_FILE.read_text(encoding="utf-8"))
             evidence_pass = ev.get("verdict") == "PASS"
         except (json.JSONDecodeError, OSError):
             pass
@@ -329,7 +417,7 @@ def _checks() -> list:
     # 22. JSON schema parseable and has expected defs
     if SCHEMA_FILE.exists():
         try:
-            schema = json.loads(SCHEMA_FILE.read_text(encoding="utf-8"))
+            schema = json.JSONDecoder().decode(SCHEMA_FILE.read_text(encoding="utf-8"))
             defs = schema.get("$defs", {})
             for def_name in ["Claim", "Evidence", "VerificationResult", "ReplayResult", "TransparencyLogEntry"]:
                 checks.append(_check(
@@ -430,7 +518,7 @@ def run_all() -> dict:
 
 
 def main():
-    logger = configure_test_logging("check_verifier_sdk")
+    configure_test_logging("check_verifier_sdk")
     if "--self-test" in sys.argv:
         result = self_test()
         for c in result["checks"]:
