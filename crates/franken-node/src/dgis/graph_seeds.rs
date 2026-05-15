@@ -788,6 +788,8 @@ mod tests {
     use super::*;
     use crate::dgis::graph_ingestion::{EdgeKind, NodeKind};
 
+    type TestResult = Result<(), String>;
+
     /// Sanity: the in-code synthesised seed satisfies every hardening
     /// invariant. This is the canonical guard that the hand-written
     /// observation table in `realistic_npm_topology` doesn't drift past
@@ -943,7 +945,7 @@ mod tests {
     /// `MAX_SEED_OBSERVATIONS` entries must be rejected by
     /// `load_seed_from_json`.
     #[test]
-    fn load_seed_from_json_rejects_bounded_growth_violation() {
+    fn load_seed_from_json_rejects_bounded_growth_violation() -> TestResult {
         // Build a minimal valid observation JSON snippet and repeat it past
         // the cap. We embed `MAX_SEED_OBSERVATIONS + 1` copies; each is
         // identical (the pipeline would dedup them in real ingestion, but
@@ -965,8 +967,9 @@ mod tests {
                 assert_eq!(observed, MAX_SEED_OBSERVATIONS + 1);
                 assert_eq!(max, MAX_SEED_OBSERVATIONS);
             }
-            other => panic!("expected TooManyObservations, got {other:?}"),
+            other => return Err(format!("expected TooManyObservations, got {other:?}")),
         }
+        Ok(())
     }
 
     /// Serde round-trip gate: the in-code seed survives a JSON round-trip
@@ -1007,7 +1010,7 @@ mod tests {
     /// Fail-closed gate: a seed with an inverted window must be rejected by
     /// `validate` (and therefore by `load_seed_from_json`).
     #[test]
-    fn validate_rejects_inverted_window() {
+    fn validate_rejects_inverted_window() -> TestResult {
         let mut seed = realistic_npm_topology();
         seed.window_start_ms = 100;
         seed.window_end_ms = 50;
@@ -1019,8 +1022,9 @@ mod tests {
                 assert_eq!(window_start_ms, 100);
                 assert_eq!(window_end_ms, 50);
             }
-            other => panic!("expected InvertedWindow, got {other:?}"),
+            other => return Err(format!("expected InvertedWindow, got {other:?}")),
         }
+        Ok(())
     }
 
     /// Edge-kind coverage: the seed must yield BOTH MaintainedBy and
