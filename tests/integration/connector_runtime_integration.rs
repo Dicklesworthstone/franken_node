@@ -36,6 +36,8 @@ use frankenengine_node::runtime::lane_scheduler::{
 use frankenengine_node::runtime::obligation_channel::{ObligationChannel, ObligationStatus};
 use serde::{Deserialize, Serialize};
 
+type TestResult = Result<(), String>;
+
 // ── Harness ─────────────────────────────────────────────────────────────────
 
 /// Minimal task message carried over the obligation channel.
@@ -137,7 +139,7 @@ fn test_registration_allocates_lane() {
 
 /// Each task class lands on the correct scheduler lane per `default_policy`.
 #[test]
-fn test_scheduler_assigns_to_correct_lane() {
+fn test_scheduler_assigns_to_correct_lane() -> TestResult {
     tracing::info!("test_scheduler_assigns_to_correct_lane: enter");
     let (_manager, mut scheduler, _channel) = build_harness();
 
@@ -159,11 +161,12 @@ fn test_scheduler_assigns_to_correct_lane() {
     for (i, (tc, expected_lane)) in cases.iter().enumerate() {
         let a = scheduler
             .assign_task(tc, now_ms(i as u64), "trace-map")
-            .unwrap_or_else(|e| panic!("assign {:?} -> {:?}: {:?}", tc, expected_lane, e));
+            .map_err(|e| format!("assign {tc:?} -> {expected_lane:?}: {e:?}"))?;
         assert_eq!(a.lane, *expected_lane, "wrong lane for {:?}", tc);
         tracing::debug!(task_class = %tc, lane = ?expected_lane, "assigned");
     }
     tracing::info!("test_scheduler_assigns_to_correct_lane: exit");
+    Ok(())
 }
 
 /// Obligations sent on the channel can be retrieved and remain in `Created`
@@ -219,7 +222,7 @@ fn test_completion_closes_obligation() {
 /// Filling a lane to its `concurrency_cap` produces a `CapExceeded` error and
 /// the task is queued (queued_task_id is populated).
 #[test]
-fn test_capacity_pressure_propagates() {
+fn test_capacity_pressure_propagates() -> TestResult {
     tracing::info!("test_capacity_pressure_propagates: enter");
     let (_manager, mut scheduler, _channel) = build_harness();
 
@@ -248,15 +251,16 @@ fn test_capacity_pressure_propagates() {
             assert_eq!(current, 2);
             assert!(queued_task_id.is_some(), "must surface queued task id");
         }
-        other => panic!("expected CapExceeded, got {:?}", other),
+        other => return Err(format!("expected CapExceeded, got {other:?}")),
     }
     tracing::info!("test_capacity_pressure_propagates: exit");
+    Ok(())
 }
 
 /// Illegal lifecycle transitions return a stable `IllegalTransition` error
 /// without mutating connector state.
 #[test]
-fn test_invalid_state_transition_rejected() {
+fn test_invalid_state_transition_rejected() -> TestResult {
     tracing::info!("test_invalid_state_transition_rejected: enter");
     let (manager, _scheduler, _channel) = build_harness();
 
@@ -274,7 +278,7 @@ fn test_invalid_state_transition_rejected() {
             assert_eq!(to, ConnectorState::Active);
             assert!(permitted.contains(&ConnectorState::Verified));
         }
-        other => panic!("expected IllegalTransition, got {:?}", other),
+        other => return Err(format!("expected IllegalTransition, got {other:?}")),
     }
     // State must be unchanged.
     assert_eq!(
@@ -282,6 +286,7 @@ fn test_invalid_state_transition_rejected() {
         Some(ConnectorState::Discovered)
     );
     tracing::info!("test_invalid_state_transition_rejected: exit");
+    Ok(())
 }
 
 /// `sweep_timeouts` flips past-deadline obligations to `TimedOut` and reports
