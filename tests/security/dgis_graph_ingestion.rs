@@ -38,6 +38,8 @@ use frankenengine_node::dgis::graph_seeds::{
     seed_expected_invariants,
 };
 
+type TestResult = Result<(), String>;
+
 /// Resolve the on-disk JSON seed fixture relative to the franken-node crate
 /// manifest. The fixture lives at `<repo>/tests/security/graph_seeds/realistic_npm_topology.json`,
 /// which is two directories up from `crates/franken-node/`.
@@ -49,11 +51,12 @@ fn fixture_path() -> PathBuf {
 
 /// Helper: load the realistic-npm seed straight from the on-disk JSON
 /// fixture, exercising the full `load_seed_from_json` validation path.
-fn load_seed_from_path() -> GraphSeed {
+fn load_seed_from_path() -> Result<GraphSeed, String> {
     let path = fixture_path();
     let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read fixture at {}: {e}", path.display()));
-    load_seed_from_json(&raw).expect("on-disk fixture must validate")
+        .map_err(|e| format!("read fixture at {}: {e}", path.display()))?;
+    load_seed_from_json(&raw)
+        .map_err(|e| format!("on-disk fixture must validate at {}: {e:?}", path.display()))
 }
 
 /// Helper: synthesise the seed in-code and run the full
@@ -66,9 +69,10 @@ fn build_graph_from_in_code() -> WindowedGraph {
 // -- 1. on-disk fixture loads -------------------------------------------------
 
 #[test]
-fn test_realistic_npm_topology_loads_from_json() {
-    let seed = load_seed_from_path();
-    seed.validate().expect("fixture must satisfy validate()");
+fn test_realistic_npm_topology_loads_from_json() -> TestResult {
+    let seed = load_seed_from_path()?;
+    seed.validate()
+        .map_err(|e| format!("fixture must satisfy validate(): {e:?}"))?;
     assert_eq!(seed.name, "realistic_npm_topology");
     assert!(
         seed.observations.len() >= 50,
@@ -78,13 +82,14 @@ fn test_realistic_npm_topology_loads_from_json() {
     // Window bounds are exactly as the fixture declares (30-day window in ms).
     assert_eq!(seed.window_start_ms, 0);
     assert_eq!(seed.window_end_ms, 2_592_000_000);
+    Ok(())
 }
 
 // -- 2. in-code seed matches on-disk JSON byte-equivalently -------------------
 
 #[test]
-fn test_realistic_npm_topology_in_code_matches_json() {
-    let on_disk = load_seed_from_path();
+fn test_realistic_npm_topology_in_code_matches_json() -> TestResult {
+    let on_disk = load_seed_from_path()?;
     let in_code = realistic_npm_topology();
 
     // The two seeds must be structurally equal as GraphSeed values.
@@ -113,6 +118,7 @@ fn test_realistic_npm_topology_in_code_matches_json() {
             "observation {i} hash drifted between JSON and in-code"
         );
     }
+    Ok(())
 }
 
 // -- 3. node count matches seed invariants ------------------------------------
@@ -239,7 +245,7 @@ fn test_pipeline_dedups_duplicate_observation() {
 // -- 6. bounded growth rejects overflow ---------------------------------------
 
 #[test]
-fn test_pipeline_bounded_growth_rejects_overflow() {
+fn test_pipeline_bounded_growth_rejects_overflow() -> TestResult {
     // Cap at 2 unique observations; the third unique observation must be
     // rejected without mutating pipeline state.
     let mut pipe = IngestionPipeline::with_caps(2, 1024, 1000);
@@ -256,20 +262,24 @@ fn test_pipeline_bounded_growth_rejects_overflow() {
     let pre_edges = pipe.edge_accumulator.len();
 
     let err = ingest(&mut pipe, mk(3, "c")).expect_err("third must be rejected");
-    match err {
-        IngestError::TooManyMaintainers { max, .. } => {
-            // Sub-task 2 reuses TooManyMaintainers for the observation-cap
-            // condition; locking that in here so a future change to a
-            // dedicated variant trips the test rather than silently passing.
-            assert_eq!(max, 2);
+    let max = match err {
+        IngestError::TooManyMaintainers { max, .. } => max,
+        other => {
+            return Err(format!(
+                "expected TooManyMaintainers (cap-reuse), got {other:?}"
+            ));
         }
-        other => panic!("expected TooManyMaintainers (cap-reuse), got {other:?}"),
-    }
+    };
+    // Sub-task 2 reuses TooManyMaintainers for the observation-cap
+    // condition; locking that in here so a future change to a
+    // dedicated variant trips the test rather than silently passing.
+    assert_eq!(max, 2);
 
     // Pipeline state must be byte-identical to pre-call state.
     assert_eq!(pipe.total_observations, pre_total);
     assert_eq!(pipe.observed_hashes.len(), pre_hash_count);
     assert_eq!(pipe.edge_accumulator.len(), pre_edges);
+    Ok(())
 }
 
 // -- 7. time-decay weights favour newer observations --------------------------
