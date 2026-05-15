@@ -8,6 +8,7 @@ Usage:
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -176,6 +177,89 @@ def _read(path: Path) -> str:
     return ""
 
 
+def _strip_rust_comments(src: str) -> str:
+    without_block_comments = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
+    return re.sub(r"//.*", "", without_block_comments)
+
+
+def _rust_code(path: Path) -> str:
+    return _strip_rust_comments(_read(path))
+
+
+def _impl_code() -> str:
+    return _rust_code(IMPL_FILE)
+
+
+def _mod_code() -> str:
+    return _rust_code(MOD_FILE)
+
+
+def _rust_module_decl_present(src: str, module_name: str) -> bool:
+    return bool(re.search(rf"\bpub\s+mod\s+{re.escape(module_name)}\s*;", src))
+
+
+def _rust_item_present(src: str, item_kind: str, name: str, *, public: bool = False) -> bool:
+    visibility = r"pub\s+" if public else r"(?:pub\s+)?"
+    return bool(re.search(rf"\b{visibility}{item_kind}\s+{re.escape(name)}\b", src))
+
+
+def _rust_fn_present(src: str, name: str, *, public: bool | None = None) -> bool:
+    if public:
+        visibility = r"pub\s+"
+    elif public is None:
+        visibility = r"(?:pub\s+)?"
+    else:
+        visibility = r""
+    return bool(re.search(rf"\b{visibility}fn\s+{re.escape(name)}\s*\(", src))
+
+
+def _rust_pub_const_str_value_present(src: str, value: str) -> bool:
+    return bool(
+        re.search(
+            rf"\bpub\s+const\s+\w+\s*:\s*&str\s*=\s*\"{re.escape(value)}\"\s*;",
+            src,
+        )
+    )
+
+
+def _rust_enum_body(src: str, enum_name: str) -> str:
+    match = re.search(rf"\bpub\s+enum\s+{re.escape(enum_name)}\s*\{{(?P<body>.*?)\n\}}", src, re.DOTALL)
+    return match.group("body") if match else ""
+
+
+def _rust_enum_variant_present(src: str, enum_name: str, variant: str) -> bool:
+    return bool(re.search(rf"\b{re.escape(variant)}\b", _rust_enum_body(src, enum_name)))
+
+
+def _rust_struct_body(src: str, struct_name: str) -> str:
+    match = re.search(rf"\bpub\s+struct\s+{re.escape(struct_name)}\s*\{{(?P<body>.*?)\n\}}", src, re.DOTALL)
+    return match.group("body") if match else ""
+
+
+def _rust_pub_struct_field_present(src: str, struct_name: str, field: str) -> bool:
+    return bool(re.search(rf"\bpub\s+{re.escape(field)}\s*:", _rust_struct_body(src, struct_name)))
+
+
+def _rust_test_count(src: str) -> int:
+    return len(re.findall(r"#\s*\[\s*test\s*\]", src))
+
+
+def _rust_test_fn_present(src: str, name_or_prefix: str) -> bool:
+    return bool(re.search(rf"#\s*\[\s*test\s*\]\s*fn\s+{re.escape(name_or_prefix)}\w*\s*\(", src))
+
+
+def _required_type_present(src: str, type_decl: str) -> bool:
+    parts = type_decl.split()
+    if len(parts) == 3 and parts[0] == "pub" and parts[1] in {"struct", "enum"}:
+        return _rust_item_present(src, parts[1], parts[2], public=True)
+    return type_decl in src
+
+
+def _required_function_present(src: str, fn_decl: str) -> bool:
+    name = fn_decl.strip().removeprefix("pub ").removeprefix("fn ").split("(", 1)[0].strip()
+    return _rust_fn_present(src, name)
+
+
 def _check(name: str, ok: bool, detail: str = "") -> dict[str, Any]:
     entry = {"check": name, "pass": ok, "detail": detail or ("ok" if ok else "FAIL")}
     ALL_CHECKS.append(entry)
@@ -186,7 +270,7 @@ def _check(name: str, ok: bool, detail: str = "") -> dict[str, Any]:
 
 def check_file_existence() -> None:
     _check("implementation exists", IMPL_FILE.exists(), _safe_rel(IMPL_FILE))
-    _check("module wired in mod.rs", "pub mod vef_degraded_mode;" in _read(MOD_FILE), _safe_rel(MOD_FILE))
+    _check("module wired in mod.rs", _rust_module_decl_present(_mod_code(), "vef_degraded_mode"), _safe_rel(MOD_FILE))
     _check("spec document exists", SPEC_FILE.exists(), _safe_rel(SPEC_FILE))
     _check("policy document exists", POLICY_FILE.exists(), _safe_rel(POLICY_FILE))
     _check("evidence artifact exists", EVIDENCE_FILE.exists(), _safe_rel(EVIDENCE_FILE))
@@ -194,37 +278,37 @@ def check_file_existence() -> None:
 
 
 def check_types() -> None:
-    src = _read(IMPL_FILE)
+    src = _impl_code()
     for t in REQUIRED_TYPES:
-        _check(f"type: {t}", t in src)
+        _check(f"type: {t}", _required_type_present(src, t))
 
 
 def check_event_codes() -> None:
-    src = _read(IMPL_FILE)
+    src = _impl_code()
     for code in REQUIRED_EVENT_CODES:
-        _check(f"event code: {code}", code in src)
+        _check(f"event code: {code}", _rust_pub_const_str_value_present(src, code))
 
 
 def check_modes() -> None:
-    src = _read(IMPL_FILE)
+    src = _impl_code()
     for mode in REQUIRED_MODES:
-        _check(f"mode variant: {mode}", mode in src)
+        _check(f"mode variant: {mode}", _rust_enum_variant_present(src, "VefMode", mode))
 
 
 def check_functions() -> None:
-    src = _read(IMPL_FILE)
+    src = _impl_code()
     for fn_name in REQUIRED_FUNCTIONS:
-        _check(f"function: {fn_name}", fn_name in src)
+        _check(f"function: {fn_name}", _required_function_present(src, fn_name))
 
 
 def check_metrics() -> None:
-    src = _read(IMPL_FILE)
+    src = _impl_code()
     for metric in REQUIRED_METRICS:
-        _check(f"metric field: {metric}", metric in src)
+        _check(f"metric field: {metric}", _rust_pub_struct_field_present(src, "ProofLagMetrics", metric))
 
 
 def check_slo_defaults() -> None:
-    src = _read(IMPL_FILE)
+    src = _impl_code()
     # Restricted: 300, 100, 0.10
     _check("restricted SLO proof_lag default 300", "300" in src and "restricted_slo" in src)
     # Quarantine: 900, 500, 0.30
@@ -264,8 +348,8 @@ def check_policy_content() -> None:
 
 
 def check_tests() -> None:
-    src = _read(IMPL_FILE)
-    test_count = src.count("#[test]")
+    src = _impl_code()
+    test_count = _rust_test_count(src)
     _check(f"Rust unit tests >= 20 ({test_count})", test_count >= 20, f"{test_count} tests")
 
     test_categories = [
@@ -290,38 +374,48 @@ def check_tests() -> None:
         ("no silent transitions", "no_silent_transitions"),
     ]
     for name, pattern in test_categories:
-        _check(f"test: {name}", pattern in src)
+        _check(f"test: {name}", _rust_test_fn_present(src, pattern))
 
 
 def check_determinism_invariant() -> None:
-    src = _read(IMPL_FILE)
-    _check("INV: deterministic (comment)", "INV-VEF-DM-DETERMINISTIC" in src)
+    src = _impl_code()
+    _check(
+        "INV: deterministic function/test coverage",
+        _rust_fn_present(src, "target_mode_for_metrics", public=True)
+        and _rust_test_fn_present(src, "deterministic_identical_metric_sequences"),
+    )
     _check("INV: pure function target_mode", "pure function" in src.lower() or "target_mode_for_metrics" in src)
 
 
 def check_action_evaluation() -> None:
-    src = _read(IMPL_FILE)
-    _check("action: HighRisk variant", "HighRisk" in src)
-    _check("action: LowRisk variant", "LowRisk" in src)
-    _check("action: HealthCheck variant", "HealthCheck" in src)
-    _check("action: VefActionDecision result", "VefActionDecision" in src)
+    src = _impl_code()
+    _check("action: HighRisk variant", _rust_enum_variant_present(src, "ActionRisk", "HighRisk"))
+    _check("action: LowRisk variant", _rust_enum_variant_present(src, "ActionRisk", "LowRisk"))
+    _check("action: HealthCheck variant", _rust_enum_variant_present(src, "ActionRisk", "HealthCheck"))
+    _check("action: VefActionDecision result", _rust_item_present(src, "struct", "VefActionDecision", public=True))
 
 
 def check_recovery_receipt_fields() -> None:
-    src = _read(IMPL_FILE)
-    _check("receipt: degraded_mode_duration_secs", "degraded_mode_duration_secs" in src)
-    _check("receipt: actions_affected", "actions_affected" in src)
-    _check("receipt: recovery_trigger", "recovery_trigger" in src)
-    _check("receipt: pipeline_health_at_recovery", "pipeline_health_at_recovery" in src)
-    _check("receipt: from_mode", "from_mode" in src)
-    _check("receipt: to_mode", "to_mode" in src)
-    _check("receipt: correlation_id", "correlation_id" in src)
+    src = _impl_code()
+    _check(
+        "receipt: degraded_mode_duration_secs",
+        _rust_pub_struct_field_present(src, "VefRecoveryReceipt", "degraded_mode_duration_secs"),
+    )
+    _check("receipt: actions_affected", _rust_pub_struct_field_present(src, "VefRecoveryReceipt", "actions_affected"))
+    _check("receipt: recovery_trigger", _rust_pub_struct_field_present(src, "VefRecoveryReceipt", "recovery_trigger"))
+    _check(
+        "receipt: pipeline_health_at_recovery",
+        _rust_pub_struct_field_present(src, "VefRecoveryReceipt", "pipeline_health_at_recovery"),
+    )
+    _check("receipt: from_mode", _rust_pub_struct_field_present(src, "VefRecoveryReceipt", "from_mode"))
+    _check("receipt: to_mode", _rust_pub_struct_field_present(src, "VefRecoveryReceipt", "to_mode"))
+    _check("receipt: correlation_id", _rust_pub_struct_field_present(src, "VefRecoveryReceipt", "correlation_id"))
 
 
 def _missing_patterns(path: Path, patterns: list[str]) -> list[str]:
     if not path.is_file():
         return patterns
-    content = path.read_text(encoding="utf-8")
+    content = _rust_code(path) if path.suffix == ".rs" else _read(path)
     return [pattern for pattern in patterns if pattern not in content]
 
 
