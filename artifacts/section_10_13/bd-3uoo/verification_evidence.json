@@ -20,7 +20,7 @@
       "id": "GATE-EVIDENCE",
       "description": "Per-bead verification evidence",
       "status": "PASS",
-      "details": "35 PASS + 10 structural PARTIAL/46 beads"
+      "details": "35 PASS + 11 structural PARTIAL/46 beads"
     },
     {
       "id": "GATE-MODULES",

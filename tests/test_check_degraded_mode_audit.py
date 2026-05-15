@@ -1,5 +1,7 @@
 """Unit tests for check_degraded_mode_audit.py verification logic."""
 
+import contextlib
+import io
 import json
 import os
 import unittest
@@ -8,6 +10,51 @@ from unittest import mock
 from scripts import check_degraded_mode_audit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class TestDegradedModeCheckerCli(unittest.TestCase):
+
+    def test_help_does_not_run_rust_tests(self):
+        stdout = io.StringIO()
+        with mock.patch.object(
+            check_degraded_mode_audit.subprocess,
+            "run",
+            side_effect=AssertionError("unexpected rust test"),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                with contextlib.redirect_stdout(stdout):
+                    check_degraded_mode_audit.main(["--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("--json", stdout.getvalue())
+        self.assertIn("--skip-rust", stdout.getvalue())
+
+    def test_json_mode_is_structural_without_rust_or_artifact_write(self):
+        stdout = io.StringIO()
+        with mock.patch.object(
+            check_degraded_mode_audit.subprocess,
+            "run",
+            side_effect=AssertionError("unexpected rust test"),
+        ):
+            with mock.patch.object(
+                check_degraded_mode_audit,
+                "write_evidence",
+                side_effect=AssertionError("unexpected evidence write"),
+            ):
+                with contextlib.redirect_stdout(stdout):
+                    exit_code = check_degraded_mode_audit.main(["--json"])
+
+        self.assertEqual(exit_code, 1)
+        evidence = json.loads(stdout.getvalue())
+        self.assertEqual(evidence["mode"], "structural")
+        self.assertEqual(evidence["verdict"], "PARTIAL")
+        test_check = next(check for check in evidence["checks"] if check["id"] == "DM-TESTS")
+        self.assertEqual(test_check["status"], "SKIP")
+        self.assertEqual(evidence["summary"]["skipped_checks"], 1)
+
+    def test_skip_rust_alias_sets_structural_mode(self):
+        args = check_degraded_mode_audit.parse_args(["--skip-rust"])
+        self.assertTrue(args.structural_only)
 
 
 class TestDegradedModeFixtures(unittest.TestCase):
