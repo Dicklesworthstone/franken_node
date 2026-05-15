@@ -4,6 +4,7 @@
 //! HKDF-SHA256. This enforces epoch and domain separation by construction.
 
 use crate::control_plane::control_epoch::ControlEpoch;
+use hex::FromHex;
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -34,7 +35,7 @@ impl RootSecret {
     }
 
     pub fn from_hex(hex: &str) -> Result<Self, AuthError> {
-        let bytes = hex::decode(hex).map_err(|e| AuthError::InvalidHex {
+        let bytes = Vec::<u8>::from_hex(hex).map_err(|e| AuthError::InvalidHex {
             reason: e.to_string(),
         })?;
         if bytes.len() != DERIVED_KEY_LEN {
@@ -117,7 +118,7 @@ impl Eq for Signature {}
 impl Signature {
     #[allow(dead_code)]
     pub fn from_hex(hex: &str) -> Result<Self, AuthError> {
-        let bytes = hex::decode(hex).map_err(|e| AuthError::InvalidHex {
+        let bytes = Vec::<u8>::from_hex(hex).map_err(|e| AuthError::InvalidHex {
             reason: e.to_string(),
         })?;
         if bytes.len() != SIGNATURE_LEN {
@@ -310,6 +311,8 @@ pub fn verify_epoch_signature(
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
 
     fn root_secret() -> RootSecret {
@@ -1203,7 +1206,11 @@ mod tests {
                 let key = derive_epoch_key(&*secret_clone, ControlEpoch::new(1), "marker");
                 let fingerprint = key.fingerprint();
 
-                let mut results = results_clone.lock().unwrap();
+                let mut results = try_lock(
+                    &results_clone,
+                    "epoch scoped keys concurrent derivation results",
+                )
+                .expect("epoch scoped keys derivation results mutex should not be poisoned");
                 results.push((i, fingerprint, key.to_hex()));
             });
 
@@ -1215,7 +1222,8 @@ mod tests {
             handle.join().unwrap();
         }
 
-        let results = results.lock().unwrap();
+        let results = try_lock(&results, "epoch scoped keys final derivation results")
+            .expect("epoch scoped keys final derivation mutex should not be poisoned");
         assert_eq!(results.len(), 50);
 
         // All derivations should produce identical results (deterministic)
@@ -1245,7 +1253,11 @@ mod tests {
                     sign_epoch_artifact(&artifact, ControlEpoch::new(1), "marker", &*secret_clone)
                         .unwrap();
 
-                let mut results = results_clone.lock().unwrap();
+                let mut results = try_lock(
+                    &results_clone,
+                    "epoch scoped keys concurrent signing results",
+                )
+                .expect("epoch scoped keys signing results mutex should not be poisoned");
                 results.push((i, artifact, sig));
             });
 
@@ -1256,7 +1268,8 @@ mod tests {
             handle.join().unwrap();
         }
 
-        let sign_results = sign_results.lock().unwrap();
+        let sign_results = try_lock(&sign_results, "epoch scoped keys final signing results")
+            .expect("epoch scoped keys final signing mutex should not be poisoned");
         assert_eq!(sign_results.len(), 30);
 
         // Verify all signatures are valid and different
@@ -1509,7 +1522,14 @@ mod tests {
                         .map(|(a, b)| a ^ b)
                         .collect();
 
-                    let all_same = xor_result.windows(2).all(|w| w[0] == w[1]);
+                    let all_same = xor_result.first().is_some_and(|first| {
+                        xor_result.iter().skip(1).all(|byte| {
+                            crate::security::constant_time::ct_eq_bytes(
+                                std::slice::from_ref(first),
+                                std::slice::from_ref(byte),
+                            )
+                        })
+                    });
                     assert!(
                         !all_same,
                         "MR violated: trivial XOR pattern between epochs {} and {}",
