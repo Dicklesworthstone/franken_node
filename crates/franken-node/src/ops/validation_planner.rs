@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
+use crate::ops::rch_adapter::DEFAULT_MAX_ACTIVE_CARGO_PROCESSES;
 use crate::push_bounded;
 
 pub const VALIDATION_PLANNER_SCHEMA_VERSION: &str = "franken-node/validation-planner/plan/v1";
@@ -808,9 +809,11 @@ impl ValidationShardRchQueueState {
         }
     }
 
-    const fn is_saturated(&self) -> bool {
+    fn is_saturated(&self) -> bool {
         self.rch_available
-            && (self.workers_available == 0 || self.queued_builds > self.workers_available)
+            && (self.workers_available == 0
+                || self.queued_builds > self.workers_available
+                || usize::from(self.active_builds) > DEFAULT_MAX_ACTIVE_CARGO_PROCESSES)
     }
 }
 

@@ -1,3 +1,4 @@
+use frankenengine_node::ops::rch_adapter::DEFAULT_MAX_ACTIVE_CARGO_PROCESSES;
 use frankenengine_node::ops::validation_planner::{
     BUILD_GRAPH_WATCHER_SCHEMA_VERSION, GateStrength, MultiRepoBuildGraphWatchInput,
     PlannedCommandKind, PlannerDependencyContext, PlannerInput,
@@ -421,6 +422,48 @@ fn validation_shard_planner_waits_when_rch_queue_is_saturated() {
             .blocked_by
             .iter()
             .any(|blocker| blocker.contains("queued_builds=9"))
+    );
+}
+
+#[test]
+fn validation_shard_planner_waits_when_active_cargo_pressure_is_high() {
+    const ACTIVE_BUILDS_OVER_THRESHOLD: u16 = 3;
+    assert!(usize::from(ACTIVE_BUILDS_OVER_THRESHOLD) > DEFAULT_MAX_ACTIVE_CARGO_PROCESSES);
+
+    let plan = plan_for(
+        "bd-shard-active-cargo-pressure",
+        &["crates/franken-node/tests/validation_planner.rs"],
+        &["validation"],
+        "Active cargo pressure should defer proof launch even with available workers.",
+    );
+
+    let shards = plan_validation_shards(&ValidationShardPlannerInput::new(plan).with_rch_queue(
+        ValidationShardRchQueueState {
+            rch_available: true,
+            workers_available: 8,
+            queued_builds: 0,
+            active_builds: ACTIVE_BUILDS_OVER_THRESHOLD,
+            oldest_queued_age_secs: 0,
+        },
+    ));
+
+    let rch_shard = shards
+        .shards
+        .iter()
+        .find(|shard| shard.reason_code == validation_shard_reason_codes::RCH_QUEUE_SATURATED)
+        .expect("active cargo pressure should produce waiting shard");
+    assert_eq!(rch_shard.status, ValidationShardStatus::Waiting);
+    assert!(
+        rch_shard
+            .blocked_by
+            .iter()
+            .any(|blocker| blocker.contains("active_builds=3"))
+    );
+    assert!(
+        rch_shard
+            .blocked_by
+            .iter()
+            .any(|blocker| blocker.contains("workers_available=8 queued_builds=0"))
     );
 }
 
