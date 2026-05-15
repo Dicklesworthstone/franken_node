@@ -147,16 +147,19 @@ class TestJsonOutput(TestCase):
     def test_json_serializable(self):
         result = mod.run_checks()
         serialized = json.dumps(result)
-        parsed = json.loads(serialized)
+        parsed = json.JSONDecoder().decode(serialized)
         self.assertEqual(parsed["bead_id"], "bd-2808")
 
     def test_cli_json(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_repro_bundle_export.py"), "--json"],
-            capture_output=True, text=True,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
         )
         self.assertEqual(result.returncode, 0)
-        data = json.loads(result.stdout)
+        data = json.JSONDecoder().decode(result.stdout)
         self.assertEqual(data["verdict"], "PASS")
 
 
@@ -166,6 +169,74 @@ class TestSummaryIntegrity(TestCase):
         s = result["summary"]
         self.assertEqual(s["failing"], 0)
         self.assertEqual(s["passing"], s["total"])
+
+
+class TestCommentOnlyRegression(TestCase):
+    def test_comment_only_source_markers_fail_closed(self):
+        commented_impl = "\n".join(
+            [
+                *(f"// {marker}" for marker in mod.REQUIRED_TYPES),
+                *(f"// {marker}" for marker in mod.REQUIRED_METHODS),
+                *(f"// {marker}" for marker in mod.EVENT_CODES),
+                *(f"// {marker}" for marker in mod.INVARIANTS),
+                *(f"// {marker}" for marker in mod.REQUIRED_TESTS),
+                *(f"// {marker}" for marker in mod.REQUIRED_BUNDLE_FIELDS),
+                "// SCHEMA_VERSION schema_version",
+                "// MAX_EVENTS EVT_REPRO_EXPORTED",
+                "/*",
+                *("// #[test]\n// fn commented_test() {}" for _ in range(15)),
+                "*/",
+            ]
+        )
+        commented_helper = "\n".join(f"// {marker}" for marker in mod.HELPER_PATTERNS)
+
+        original_impl = mod.IMPL
+        original_helper = mod.EVIDENCE_REF_HELPER
+        original_mod = mod.MOD_RS
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            impl_path = tmp / "lab_runtime.rs"
+            helper_path = tmp / "repro_bundle_export.rs"
+            mod_path = tmp / "mod.rs"
+            impl_path.write_text(commented_impl, encoding="utf-8")
+            helper_path.write_text(commented_helper, encoding="utf-8")
+            mod_path.write_text("// pub mod repro_bundle_export;\n", encoding="utf-8")
+
+            try:
+                mod.IMPL = impl_path
+                mod.EVIDENCE_REF_HELPER = helper_path
+                mod.MOD_RS = mod_path
+                result = mod.run_checks()
+            finally:
+                mod.IMPL = original_impl
+                mod.EVIDENCE_REF_HELPER = original_helper
+                mod.MOD_RS = original_mod
+
+        checks = {check["check"]: check["pass"] for check in result["checks"]}
+        self.assertTrue(checks["file: lab runtime implementation"])
+        self.assertTrue(checks["file: EvidenceRef portability helper"])
+        self.assertTrue(checks["file: schema artifact"])
+        self.assertTrue(checks["schema_field: schema_version"])
+        self.assertEqual(result["test_count"], 0)
+
+        expected_failures = [
+            "EvidenceRef helper registered in tools/mod.rs",
+            "lab runtime unit test count",
+            "schema version constant",
+            "bounded repro events",
+        ]
+        expected_failures.extend(f"type: {marker}" for marker in mod.REQUIRED_TYPES)
+        expected_failures.extend(f"method: {marker}" for marker in mod.REQUIRED_METHODS)
+        expected_failures.extend(f"event_code: {marker}" for marker in mod.EVENT_CODES)
+        expected_failures.extend(f"invariant: {marker}" for marker in mod.INVARIANTS)
+        expected_failures.extend(f"test: {marker}" for marker in mod.REQUIRED_TESTS)
+        expected_failures.extend(f"bundle_field: {marker}" for marker in mod.REQUIRED_BUNDLE_FIELDS)
+        expected_failures.extend(
+            f"evidence_ref_helper: {marker}" for marker in mod.HELPER_PATTERNS
+        )
+        for check_name in expected_failures:
+            self.assertIn(check_name, checks)
+            self.assertFalse(checks[check_name], check_name)
 
 
 if __name__ == "__main__":

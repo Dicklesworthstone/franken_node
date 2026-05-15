@@ -10,6 +10,7 @@ import json
 import re
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging  # noqa: E402
@@ -114,13 +115,13 @@ def check_file(path, label):
             "detail": f"exists: {rel}" if ok else f"MISSING: {rel}"}
 
 
-def check_content(path, patterns, category):
+def check_content(path, patterns, category, *, strip_comments=True):
     results = []
     if not path.is_file():
         for p in patterns:
             results.append({"check": f"{category}: {p}", "pass": False, "detail": "file missing"})
         return results
-    content = path.read_text()
+    content = read_rust_source(path) if strip_comments else read_text(path)
     for p in patterns:
         found = p in content
         results.append({"check": f"{category}: {p}", "pass": found,
@@ -128,10 +129,117 @@ def check_content(path, patterns, category):
     return results
 
 
+def read_text(path):
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def read_rust_source(path):
+    return strip_rust_comments(read_text(path))
+
+
+def strip_rust_comments(text):
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+
+        raw_start = rust_raw_string_start(text, i)
+        if raw_start is not None:
+            body_start, hashes = raw_start
+            end = rust_raw_string_end(text, body_start + 1, hashes)
+            if end is None:
+                out.append(text[i:])
+                break
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if ch == '"':
+            end = rust_quoted_literal_end(text, i, ch)
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if text.startswith("//", i):
+            newline = text.find("\n", i + 2)
+            if newline == -1:
+                break
+            out.append("\n")
+            i = newline + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = rust_block_comment_end(text, i + 2)
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def rust_raw_string_start(text, index):
+    n = len(text)
+    if text.startswith("br", index):
+        cursor = index + 2
+    elif text.startswith("r", index):
+        cursor = index + 1
+    else:
+        return None
+
+    hashes = 0
+    while cursor < n and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+    if cursor < n and text[cursor] == '"':
+        return cursor, hashes
+    return None
+
+
+def rust_raw_string_end(text, index, hashes):
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, index)
+    if end == -1:
+        return None
+    return end + len(terminator)
+
+
+def rust_quoted_literal_end(text, index, quote):
+    i = index + 1
+    n = len(text)
+    escaped = False
+    while i < n:
+        ch = text[i]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == quote:
+            return i + 1
+        i += 1
+    return n
+
+
+def rust_block_comment_end(text, index):
+    depth = 1
+    i = index
+    n = len(text)
+    while i < n and depth:
+        if text.startswith("/*", i):
+            depth += 1
+            i += 2
+        elif text.startswith("*/", i):
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
+
+
 def check_module_registered():
     if not MOD_RS.is_file():
         return {"check": "module registered in mod.rs", "pass": False, "detail": "mod.rs missing"}
-    content = MOD_RS.read_text()
+    content = read_rust_source(MOD_RS)
     found = "repro_bundle_export" in content
     return {"check": "EvidenceRef helper registered in tools/mod.rs", "pass": found,
             "detail": "found" if found else "NOT FOUND"}
@@ -140,7 +248,7 @@ def check_module_registered():
 def check_test_count():
     if not IMPL.is_file():
         return {"check": "unit test count", "pass": False, "detail": "file missing"}
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     count = len(re.findall(r"#\[test\]", content))
     return {"check": "lab runtime unit test count", "pass": count >= 15,
             "detail": f"{count} tests (minimum 15)"}
@@ -149,7 +257,7 @@ def check_test_count():
 def check_schema_version():
     if not IMPL.is_file():
         return {"check": "schema version constant", "pass": False, "detail": "file missing"}
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     found = "SCHEMA_VERSION" in content and "schema_version" in content
     return {"check": "schema version constant", "pass": found,
             "detail": "found" if found else "NOT FOUND"}
@@ -158,7 +266,7 @@ def check_schema_version():
 def check_event_bound():
     if not IMPL.is_file():
         return {"check": "bounded repro events", "pass": False, "detail": "file missing"}
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     found = "MAX_EVENTS" in content and "EVT_REPRO_EXPORTED" in content
     return {"check": "bounded repro events", "pass": found,
             "detail": "found" if found else "NOT FOUND"}
@@ -213,12 +321,12 @@ def run_checks():
     checks.extend(check_content(IMPL, REQUIRED_TESTS, "test"))
     checks.extend(check_content(IMPL, REQUIRED_BUNDLE_FIELDS, "bundle_field"))
     checks.extend(check_content(EVIDENCE_REF_HELPER, HELPER_PATTERNS, "evidence_ref_helper"))
-    checks.extend(check_content(SCHEMA, REQUIRED_SCHEMA_FIELDS, "schema_field"))
+    checks.extend(check_content(SCHEMA, REQUIRED_SCHEMA_FIELDS, "schema_field", strip_comments=False))
     checks.extend(check_path_truth())
 
     passed = sum(1 for c in checks if c["pass"])
     total = len(checks)
-    test_count = len(re.findall(r"#\[test\]", IMPL.read_text())) if IMPL.is_file() else 0
+    test_count = len(re.findall(r"#\[test\]", read_rust_source(IMPL))) if IMPL.is_file() else 0
     return {
         "bead_id": "bd-2808",
         "title": "Deterministic repro bundle export for control-plane failures",
