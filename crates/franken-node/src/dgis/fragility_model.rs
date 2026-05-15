@@ -636,24 +636,26 @@ mod tests {
     }
 
     #[test]
-    fn concentrated_downloads_rejects_out_of_range() {
+    fn concentrated_downloads_rejects_out_of_range() -> Result<(), String> {
         let err = concentrated_downloads_factor(1.5).expect_err("share > 1.0 must be rejected");
         match err {
             FragilityError::ShareOutOfRange { field, .. } => assert_eq!(field, "share"),
-            other => panic!("expected ShareOutOfRange, got {:?}", other),
+            other => return Err(format!("expected ShareOutOfRange, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
-    fn concentrated_downloads_accepts_valid_share() {
+    fn concentrated_downloads_accepts_valid_share() -> Result<(), String> {
         let factor = concentrated_downloads_factor(0.42).expect("valid share");
         match factor {
             FragilityFactor::ConcentratedDownloads { share } => {
                 assert!(share.is_finite());
                 assert!((0.0..=1.0).contains(&share));
             }
-            other => panic!("expected ConcentratedDownloads, got {:?}", other),
+            other => return Err(format!("expected ConcentratedDownloads, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
@@ -681,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn clock_skew_rejected_for_maintainer() {
+    fn clock_skew_rejected_for_maintainer() -> Result<(), String> {
         let mut profile = sample_maintainer();
         profile.active_since = 2_000_000_000;
         let err = assess_maintainer(&profile, 1_000_000_000).expect_err("clock skew rejects");
@@ -690,8 +692,9 @@ mod tests {
                 assert_eq!(now, 1_000_000_000);
                 assert_eq!(active_since, 2_000_000_000);
             }
-            other => panic!("expected ClockSkew, got {:?}", other),
+            other => return Err(format!("expected ClockSkew, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
@@ -732,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn max_factor_tracks_highest_severity() {
+    fn max_factor_tracks_highest_severity() -> Result<(), String> {
         // Build a profile that triggers both NoKeyRecovery (rank 3) and
         // StaleMaintainer (rank 2). The max factor must be NoKeyRecovery.
         let now = 1_800_000_000_i64;
@@ -748,8 +751,13 @@ mod tests {
         let score = assess_maintainer(&profile, now).expect("assess");
         match score.max_factor {
             Some(FragilityFactor::NoKeyRecovery) => {}
-            other => panic!("expected NoKeyRecovery as max factor, got {:?}", other),
+            other => {
+                return Err(format!(
+                    "expected NoKeyRecovery as max factor, got {other:?}"
+                ));
+            }
         }
+        Ok(())
     }
 
     #[test]
