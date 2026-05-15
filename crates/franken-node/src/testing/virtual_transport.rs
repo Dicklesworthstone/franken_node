@@ -752,6 +752,7 @@ impl Default for VirtualTransportLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lock_utils::try_lock;
 
     // -- Test 1: schema version
     #[test]
@@ -3924,7 +3925,7 @@ mod additional_comprehensive_negative_tests {
 
         // Pre-create link for all threads to use
         {
-            let mut vt_lock = vt.lock().unwrap();
+            let mut vt_lock = try_lock(&vt, "pre-create shared virtual transport link");
             let config = LinkFaultConfig {
                 drop_probability: 0.1,
                 reorder_depth: 5,
@@ -3949,7 +3950,8 @@ mod additional_comprehensive_negative_tests {
                     for j in 0..10 {
                         let payload = format!("thread-{}-msg-{}", i, j).into_bytes();
 
-                        let mut vt_lock = vt.lock().unwrap();
+                        let mut vt_lock =
+                            try_lock(&vt, "send concurrent virtual transport message");
                         let result = vt_lock.send_message("shared-link", &payload);
 
                         // Should handle concurrent access safely
@@ -3967,7 +3969,7 @@ mod additional_comprehensive_negative_tests {
         }
 
         // Verify final state is consistent
-        let vt_lock = vt.lock().unwrap();
+        let vt_lock = try_lock(&vt, "inspect final virtual transport state");
         assert!(vt_lock.link_exists("shared-link"));
         let events = vt_lock.get_event_log();
         assert!(events.len() > 0);
