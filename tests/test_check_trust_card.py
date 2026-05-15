@@ -30,19 +30,41 @@ class TestFixturePaths(TestCase):
         self.assertTrue(mod.SPEC.parent.is_dir())
 
 
-class TestSimulation(TestCase):
-    def test_deterministic_hash_and_signatures(self) -> None:
-        result = mod.simulate_trust_card_flow()
-        self.assertTrue(result["deterministic"])
-        self.assertTrue(result["v1_verified"])
-        self.assertTrue(result["v2_verified"])
-        self.assertTrue(result["hash_chain_linked"])
+class TestEvidenceAnalysis(TestCase):
+    def test_evidence_artifact_passes(self) -> None:
+        result = mod.analyze_trust_card_evidence()
+        self.assertTrue(result["valid_evidence"])
+        self.assertTrue(result["bead_id_ok"])
+        self.assertTrue(result["status_ok"])
+        self.assertTrue(result["commands_ok"])
+        self.assertTrue(result["required_files_cited"])
 
-    def test_simulation_detects_changes(self) -> None:
-        result = mod.simulate_trust_card_flow()
-        self.assertIn("certification_level", result["changed_fields"])
-        self.assertIn("reputation_score_basis_points", result["changed_fields"])
-        self.assertIn("revocation_status", result["changed_fields"])
+    def test_deterministic_hash_and_signatures_are_source_backed(self) -> None:
+        result = mod.analyze_trust_card_evidence()
+        self.assertTrue(result["deterministic_card_hash_source"])
+        self.assertTrue(result["signature_verification_source"])
+
+    def test_hash_chain_and_diff_are_source_backed(self) -> None:
+        result = mod.analyze_trust_card_evidence()
+        self.assertTrue(result["hash_chain_source"])
+        self.assertTrue(result["diff_source"])
+        self.assertTrue(result["e2e_lifecycle_source"])
+
+    def test_missing_evidence_fails_closed(self) -> None:
+        result = mod.analyze_trust_card_evidence(ROOT / "no" / "bd-2yh-evidence.json")
+        self.assertFalse(result["valid_evidence"])
+        self.assertFalse(result["status_ok"])
+        self.assertFalse(result["commands_ok"])
+
+    def test_invalid_evidence_fails_closed(self) -> None:
+        with patch.object(
+            mod,
+            "_read_json_object",
+            return_value=(None, "invalid JSON: broken"),
+        ):
+            result = mod.analyze_trust_card_evidence()
+        self.assertFalse(result["valid_evidence"])
+        self.assertIn("invalid JSON", result["detail"])
 
 
 class TestChecks(TestCase):

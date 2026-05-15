@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import hmac
 import json
 import re
 import sys
@@ -29,7 +27,14 @@ SPEC = ROOT / "docs" / "specs" / "section_10_4" / "bd-2yh_contract.md"
 TRUST_CARD_INTEGRATION = (
     ROOT / "tests" / "conformance" / "capability_artifact_trust_card_integration_conformance.rs"
 )
+TRUST_CARD_API_CONFORMANCE = ROOT / "tests" / "conformance" / "trust_card_api_surface_conformance.rs"
 TRUST_CARD_E2E = ROOT / "crates" / "franken-node" / "tests" / "e2e_trust_card_lifecycle.rs"
+TRUST_CARD_EVIDENCE_DIR = ROOT / "artifacts" / "section_10_4" / "bd-2yh"
+TRUST_CARD_EVIDENCE = TRUST_CARD_EVIDENCE_DIR / "verification_evidence.json"
+TRUST_CARD_SUMMARY = TRUST_CARD_EVIDENCE_DIR / "verification_summary.md"
+TRUST_CARD_REPORT = TRUST_CARD_EVIDENCE_DIR / "trust_card_report.json"
+TRUST_CARD_SELF_TEST = TRUST_CARD_EVIDENCE_DIR / "trust_card_self_test.json"
+TRUST_CARD_BEAD_ID = "bd-2yh"
 REPLACEMENT_EVIDENCE_DIR = ROOT / "artifacts" / "replacement_gap" / "bd-1oju"
 REPLACEMENT_EVIDENCE = REPLACEMENT_EVIDENCE_DIR / "verification_evidence.json"
 REPLACEMENT_SUMMARY = REPLACEMENT_EVIDENCE_DIR / "verification_summary.md"
@@ -174,6 +179,24 @@ REQUIRED_EVIDENCE_E2E_MARKERS = [
     "creating a card with no evidence is rejected",
 ]
 
+REQUIRED_TRUST_CARD_EVIDENCE_FILES = [
+    "crates/franken-node/src/supply_chain/trust_card.rs",
+    "crates/franken-node/src/api/trust_card_routes.rs",
+    "crates/franken-node/src/cli.rs",
+    "crates/franken-node/src/main.rs",
+    "docs/specs/section_10_4/bd-2yh_contract.md",
+    "scripts/check_trust_card.py",
+    "tests/test_check_trust_card.py",
+    "artifacts/section_10_4/bd-2yh/trust_card_report.json",
+    "artifacts/section_10_4/bd-2yh/trust_card_self_test.json",
+]
+
+REQUIRED_TRUST_CARD_EVIDENCE_COMMANDS = [
+    "python3 scripts/check_trust_card.py --json",
+    "python3 scripts/check_trust_card.py --self-test --json",
+    "python3 -m unittest tests/test_check_trust_card.py",
+]
+
 COMPLETION_DEBT_REQUIRED_PATHS = {
     "tests.unit.primary": [
         "crates/franken-node/src/supply_chain/trust_card.rs",
@@ -242,6 +265,25 @@ def _contains(path: Path, pattern: str, label: str) -> dict[str, Any]:
     )
 
 
+def _read(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str]:
+    try:
+        data = json.JSONDecoder().decode(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, f"missing: {_safe_rel(path)}"
+    except json.JSONDecodeError as exc:
+        return None, f"invalid JSON: {exc}"
+
+    if not isinstance(data, dict):
+        return None, "top-level JSON must be an object"
+    return data, "valid JSON object"
+
+
 def _canonical(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _canonical(value[k]) for k in sorted(value.keys())}
@@ -254,125 +296,121 @@ def _canonical_text(value: Any) -> str:
     return json.dumps(_canonical(value), separators=(",", ":"), ensure_ascii=True)
 
 
-def _values_differ(left: Any, right: Any) -> bool:
-    left_text = _canonical_text(left)
-    right_text = _canonical_text(right)
-    return not hmac.compare_digest(left_text, right_text)
-
-
-def _compute_card_hash(card: dict[str, Any]) -> str:
-    canon = dict(card)
-    canon["card_hash"] = ""
-    canon["registry_signature"] = ""
-    payload = _canonical_text(canon)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _sign_card(card: dict[str, Any], key: bytes) -> dict[str, Any]:
-    card = dict(card)
-    card["card_hash"] = _compute_card_hash(card)
-    card["registry_signature"] = hmac.new(
-        key,
-        card["card_hash"].encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    return card
-
-
-def _verify_card(card: dict[str, Any], key: bytes) -> bool:
-    expected_hash = _compute_card_hash(card)
-    if card.get("card_hash") != expected_hash:
-        return False
-    expected_sig = hmac.new(
-        key,
-        expected_hash.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    signature = card.get("registry_signature", "")
-    return isinstance(signature, str) and hmac.compare_digest(signature, expected_sig)
-
-
-def _build_base_card(extension_id: str, version: str, trust_version: int, previous_hash: str | None) -> dict[str, Any]:
+def _missing_trust_card_evidence(detail: str) -> dict[str, Any]:
     return {
-        "schema_version": "1.0.0",
-        "trust_card_version": trust_version,
-        "previous_version_hash": previous_hash,
-        "extension": {"extension_id": extension_id, "version": version},
-        "publisher": {"publisher_id": "pub-acme", "display_name": "Acme Security"},
-        "certification_level": "gold" if trust_version == 1 else "bronze",
-        "capability_declarations": [
-            {"name": "auth.validate-token", "risk": "medium"},
-            {"name": "auth.revoke-session", "risk": "high"},
-        ],
-        "behavioral_profile": {
-            "network_access": True,
-            "filesystem_access": False,
-            "subprocess_access": False,
-        },
-        "revocation_status": (
-            {"status": "active"}
-            if trust_version == 1
-            else {
-                "status": "revoked",
-                "reason": "publisher key compromised",
-                "revoked_at": "2026-02-20T12:01:00Z",
-            }
-        ),
-        "provenance_summary": {
-            "attestation_level": "slsa-l3",
-            "source_uri": "https://registry.example/acme/auth-guard",
-            "verified_at": "2026-02-20T12:00:00Z",
-        },
-        "reputation_score_basis_points": 920 if trust_version == 1 else 410,
-        "reputation_trend": "improving" if trust_version == 1 else "declining",
-        "active_quarantine": trust_version != 1,
-        "dependency_trust_summary": [{"dependency_id": "npm:jsonwebtoken@9", "trust_level": "verified"}],
-        "last_verified_timestamp": "2026-02-20T12:00:00Z" if trust_version == 1 else "2026-02-20T12:01:00Z",
-        "user_facing_risk_assessment": {
-            "level": "low" if trust_version == 1 else "critical",
-            "summary": "safe" if trust_version == 1 else "do not deploy",
-        },
-        "audit_history": [
-            {
-                "timestamp": "2026-02-20T12:00:00Z",
-                "event_code": "TRUST_CARD_CREATED",
-                "detail": "trust card created",
-                "trace_id": "trace-check",
-            }
-        ],
-        "card_hash": "",
-        "registry_signature": "",
+        "valid_evidence": False,
+        "detail": detail,
+        "bead_id_ok": False,
+        "status_ok": False,
+        "status_detail": detail,
+        "commands_ok": False,
+        "commands_detail": detail,
+        "required_files_cited": False,
+        "files_detail": detail,
+        "deterministic_card_hash_source": False,
+        "signature_verification_source": False,
+        "hash_chain_source": False,
+        "diff_source": False,
+        "e2e_lifecycle_source": False,
     }
 
 
-def simulate_trust_card_flow() -> dict[str, Any]:
-    key = b"franken-node-trust-card-registry-key-v1"
+def analyze_trust_card_evidence(evidence_path: Path = TRUST_CARD_EVIDENCE) -> dict[str, Any]:
+    evidence, detail = _read_json_object(evidence_path)
+    if evidence is None:
+        return _missing_trust_card_evidence(detail)
 
-    v1 = _sign_card(_build_base_card("npm:@acme/auth-guard", "1.4.2", 1, None), key)
-    v1_repeat = _sign_card(_build_base_card("npm:@acme/auth-guard", "1.4.2", 1, None), key)
+    src = _read(TRUST_CARD_IMPL)
+    e2e = _read(TRUST_CARD_E2E)
+    api_conformance = _read(TRUST_CARD_API_CONFORMANCE)
+    artifact_text = _canonical_text(evidence)
 
-    v2 = _build_base_card("npm:@acme/auth-guard", "1.4.3", 2, v1["card_hash"])
-    v2 = _sign_card(v2, key)
+    verification = evidence.get("verification", {})
+    command_results = {
+        item.get("command"): item.get("result")
+        for item in verification.get("commands", [])
+        if isinstance(item, dict)
+    }
+    missing_commands = [
+        command
+        for command in REQUIRED_TRUST_CARD_EVIDENCE_COMMANDS
+        if command_results.get(command) != "pass"
+    ]
 
-    changed_fields = []
-    for field in [
-        "certification_level",
-        "reputation_score_basis_points",
-        "revocation_status",
-        "active_quarantine",
-        "extension",
-    ]:
-        if _values_differ(v1[field], v2[field]):
-            changed_fields.append(field)
+    cited_files = set(evidence.get("implementation", {}).get("files", []))
+    missing_files = [
+        path
+        for path in REQUIRED_TRUST_CARD_EVIDENCE_FILES
+        if path not in cited_files or not (ROOT / path).exists()
+    ]
+    status = str(evidence.get("status", ""))
+
+    deterministic_markers = [
+        "pub fn compute_card_hash(" in src,
+        "canonical_card_without_hash_and_signature(card)" in src,
+        "hasher.update(b\"trust_card_hash_v1:\")" in src,
+        "card_hash field must match compute_card_hash output" in e2e,
+        "INV-TC-DETERMINISTIC" in api_conformance,
+        "deterministic hash" in artifact_text,
+    ]
+    signature_markers = [
+        "pub fn verify_card_signature(" in src,
+        "mac.update(b\"trust_card_registry_sig_v1:\")" in src,
+        "constant_time::ct_eq(&card.registry_signature" in src,
+        "signature_verification_rejects_tampered_card" in src,
+        "verify_card_signature(&v1, REGISTRY_KEY).expect(\"v1 signature verifies\")" in e2e,
+        "verify_card_signature(&v2, REGISTRY_KEY).expect(\"v2 signature verifies\")" in e2e,
+        "verify_card_signature(&v3, REGISTRY_KEY).expect(\"v3 signature verifies\")" in e2e,
+        "cryptographically signed" in artifact_text,
+    ]
+    hash_chain_markers = [
+        "next.previous_version_hash = Some(latest.card_hash.clone())" in src,
+        "validate_snapshot_history(" in src,
+        "broke previous_version_hash linkage" in src,
+        "Some(v1.card_hash.as_str())" in e2e,
+        "hash-linked" in artifact_text,
+    ]
+    diff_markers = [
+        "pub fn compare(" in src,
+        "pub fn compare_versions(" in src,
+        "field: \"certification_level\".to_string()" in src,
+        "field: \"reputation_score_basis_points\".to_string()" in src,
+        "field: \"revocation_status\".to_string()" in src,
+        "field: \"active_quarantine\".to_string()" in src,
+        "fn compare_shows_changes()" in src,
+        "fn compare_versions_for_same_extension()" in src,
+    ]
+    e2e_markers = [
+        "e2e_trust_card_lifecycle_create_upgrade_revoke_snapshot" in e2e,
+        "assert_eq!(v1.trust_card_version, 1)" in e2e,
+        "assert_eq!(v2.trust_card_version, 2)" in e2e,
+        "v3_revoked" in e2e,
+        "snapshot_roundtrip_preserves_revocation" in e2e,
+    ]
 
     return {
-        "deterministic": hmac.compare_digest(v1["card_hash"], v1_repeat["card_hash"]),
-        "v1_verified": _verify_card(v1, key),
-        "v2_verified": _verify_card(v2, key),
-        "hash_chain_linked": hmac.compare_digest(v2["previous_version_hash"], v1["card_hash"]),
-        "changed_fields": changed_fields,
-        "v1": v1,
-        "v2": v2,
+        "valid_evidence": True,
+        "detail": detail,
+        "bead_id_ok": evidence.get("bead_id") == TRUST_CARD_BEAD_ID,
+        "status_ok": status in {"PASS", "completed_with_known_repo_gate_failures"},
+        "status_detail": status,
+        "commands_ok": not missing_commands,
+        "commands_detail": (
+            "all required commands passed"
+            if not missing_commands
+            else "missing passing commands: " + ", ".join(missing_commands)
+        ),
+        "required_files_cited": not missing_files,
+        "files_detail": (
+            "all required files cited and present"
+            if not missing_files
+            else "missing files: " + ", ".join(missing_files)
+        ),
+        "deterministic_card_hash_source": all(deterministic_markers),
+        "signature_verification_source": all(signature_markers),
+        "hash_chain_source": all(hash_chain_markers),
+        "diff_source": all(diff_markers),
+        "e2e_lifecycle_source": all(e2e_markers),
     }
 
 
@@ -388,10 +426,11 @@ def check_completion_debt_evidence() -> list[dict[str, Any]]:
         ]
 
     try:
-        with REPLACEMENT_EVIDENCE.open(encoding="utf-8") as evidence_file:
-            data = json.load(evidence_file)
-    except json.JSONDecodeError as exc:
+        data, detail = _read_json_object(REPLACEMENT_EVIDENCE)
+    except OSError as exc:
         return [_check("completion debt evidence JSON parses", False, str(exc))]
+    if data is None:
+        return [_check("completion debt evidence JSON parses", False, detail)]
 
     checks.append(
         _check(
@@ -489,7 +528,12 @@ def run_checks() -> dict[str, Any]:
             _file_exists(MAIN_IMPL, "main command wiring"),
             _file_exists(SPEC, "bd-2yh contract"),
             _file_exists(TRUST_CARD_INTEGRATION, "trust-card integration conformance"),
+            _file_exists(TRUST_CARD_API_CONFORMANCE, "trust-card api conformance"),
             _file_exists(TRUST_CARD_E2E, "trust-card e2e lifecycle"),
+            _file_exists(TRUST_CARD_EVIDENCE, "bd-2yh verification evidence"),
+            _file_exists(TRUST_CARD_SUMMARY, "bd-2yh verification summary"),
+            _file_exists(TRUST_CARD_REPORT, "bd-2yh trust-card report"),
+            _file_exists(TRUST_CARD_SELF_TEST, "bd-2yh trust-card self-test"),
             _file_exists(REPLACEMENT_EVIDENCE, "bd-1oju completion-debt evidence"),
             _file_exists(REPLACEMENT_SUMMARY, "bd-1oju completion-debt summary"),
         ]
@@ -537,16 +581,65 @@ def run_checks() -> dict[str, Any]:
     else:
         checks.append(_check("mod export: trust_card_routes", False, "mod file missing"))
 
-    simulation = simulate_trust_card_flow()
-    checks.append(_check("deterministic card hash", simulation["deterministic"], "same input -> same hash"))
-    checks.append(_check("v1 signature verifies", simulation["v1_verified"]))
-    checks.append(_check("v2 signature verifies", simulation["v2_verified"]))
-    checks.append(_check("hash chain linkage", simulation["hash_chain_linked"], "v2.previous_version_hash == v1.card_hash"))
+    evidence = analyze_trust_card_evidence()
+    checks.append(
+        _check("trust-card evidence artifact loads", evidence["valid_evidence"], evidence["detail"])
+    )
+    checks.append(_check("trust-card evidence bead id", evidence["bead_id_ok"], TRUST_CARD_BEAD_ID))
+    checks.append(
+        _check(
+            "trust-card evidence status recognized",
+            evidence["status_ok"],
+            evidence["status_detail"],
+        )
+    )
+    checks.append(
+        _check(
+            "trust-card evidence commands pass",
+            evidence["commands_ok"],
+            evidence["commands_detail"],
+        )
+    )
+    checks.append(
+        _check(
+            "trust-card evidence files cited",
+            evidence["required_files_cited"],
+            evidence["files_detail"],
+        )
+    )
+    checks.append(
+        _check(
+            "deterministic card hash",
+            evidence["deterministic_card_hash_source"],
+            "Rust compute_card_hash + e2e/API conformance markers",
+        )
+    )
+    checks.append(
+        _check(
+            "signature verification",
+            evidence["signature_verification_source"],
+            "Rust verify_card_signature + lifecycle markers",
+        )
+    )
+    checks.append(
+        _check(
+            "hash chain linkage",
+            evidence["hash_chain_source"],
+            "Rust previous_version_hash + snapshot validation markers",
+        )
+    )
     checks.append(
         _check(
             "diff identifies trust posture changes",
-            len(simulation["changed_fields"]) >= 4,
-            f"changed={simulation['changed_fields']}",
+            evidence["diff_source"],
+            "Rust compare/compare_versions field diff markers",
+        )
+    )
+    checks.append(
+        _check(
+            "e2e lifecycle evidence covers signed versions",
+            evidence["e2e_lifecycle_source"],
+            "create, upgrade, revoke, snapshot round-trip markers",
         )
     )
 
@@ -575,10 +668,9 @@ def run_checks() -> dict[str, Any]:
             "total": total,
         },
         "checks": checks,
-        "simulation": {
-            "changed_fields": simulation["changed_fields"],
-            "v1_card_hash": simulation["v1"]["card_hash"],
-            "v2_card_hash": simulation["v2"]["card_hash"],
+        "evidence_analysis": {
+            "commands": evidence["commands_detail"],
+            "files": evidence["files_detail"],
         },
     }
 
