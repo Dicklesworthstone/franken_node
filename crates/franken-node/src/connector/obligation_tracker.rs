@@ -21,6 +21,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_OBLIGATIONS};
+
 /// Schema version for the obligation tracker.
 pub const SCHEMA_VERSION: &str = "obl-v1.0";
 
@@ -29,8 +31,6 @@ pub const DEFAULT_LEAK_TIMEOUT_SECS: u64 = 30;
 
 /// Default per-flow budget for concurrent reservations. INV-OBL-BUDGET-BOUND
 pub const DEFAULT_FLOW_BUDGET: usize = 256;
-
-use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_OBLIGATIONS};
 
 /// Maximum scan results before oldest are evicted.
 const MAX_SCAN_RESULTS: usize = 1024;
@@ -1093,6 +1093,7 @@ fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lock_utils::try_lock;
 
     fn make_tracker() -> ObligationTracker {
         ObligationTracker::with_leak_timeout(5)
@@ -2687,27 +2688,34 @@ pub mod conformance {
                     };
 
                     // Rapid reserve/commit/rollback cycles
-                    let reserve_result = tracker_clone.lock().unwrap().reserve(
-                        flow,
-                        format!("thread-{}-op-{}", thread_id, operation).into_bytes(),
-                        1000 + operation as u64,
-                        &format!("concurrent-{}-{}", thread_id, operation),
-                    );
+                    let reserve_result =
+                        try_lock(&tracker_clone, "reserve obligation concurrently")
+                            .expect("obligation tracker mutex should not be poisoned")
+                            .reserve(
+                                flow,
+                                format!("thread-{}-op-{}", thread_id, operation).into_bytes(),
+                                1000 + operation as u64,
+                                &format!("concurrent-{}-{}", thread_id, operation),
+                            );
 
                     if let Ok(id) = reserve_result {
                         // Randomly commit or rollback
                         let action_result = if operation % 2 == 0 {
-                            tracker_clone.lock().unwrap().commit(
-                                &id,
-                                1100 + operation as u64,
-                                &format!("concurrent-commit-{}-{}", thread_id, operation),
-                            )
+                            try_lock(&tracker_clone, "commit obligation concurrently")
+                                .expect("obligation tracker mutex should not be poisoned")
+                                .commit(
+                                    &id,
+                                    1100 + operation as u64,
+                                    &format!("concurrent-commit-{}-{}", thread_id, operation),
+                                )
                         } else {
-                            tracker_clone.lock().unwrap().rollback(
-                                &id,
-                                1100 + operation as u64,
-                                &format!("concurrent-rollback-{}-{}", thread_id, operation),
-                            )
+                            try_lock(&tracker_clone, "rollback obligation concurrently")
+                                .expect("obligation tracker mutex should not be poisoned")
+                                .rollback(
+                                    &id,
+                                    1100 + operation as u64,
+                                    &format!("concurrent-rollback-{}-{}", thread_id, operation),
+                                )
                         };
                         results.push((id, action_result.is_ok()));
                     }
@@ -2724,7 +2732,8 @@ pub mod conformance {
         }
 
         // Verify tracker state is consistent after concurrent access
-        let final_tracker = tracker.lock().unwrap();
+        let final_tracker = try_lock(&tracker, "inspect obligation tracker final state")
+            .expect("obligation tracker mutex should not be poisoned");
         let status = final_tracker.get_status();
 
         // All operations should have completed successfully or failed cleanly
