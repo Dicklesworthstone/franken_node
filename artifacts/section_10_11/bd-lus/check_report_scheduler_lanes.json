@@ -79,12 +79,12 @@
     {
       "check": "lane_test_count",
       "passed": true,
-      "detail": "10 tests (>=10)"
+      "detail": "45 tests (>=10)"
     },
     {
       "check": "bulkhead_test_count",
       "passed": true,
-      "detail": "10 tests (>=8)"
+      "detail": "37 tests (>=8)"
     },
     {
       "check": "mixed_workload_integration_test",

@@ -7,10 +7,11 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 LANE_ROUTER = os.path.join(ROOT, "crates", "franken-node", "src", "runtime", "lane_router.rs")
 BULKHEAD = os.path.join(ROOT, "crates", "franken-node", "src", "runtime", "bulkhead.rs")
@@ -23,8 +24,39 @@ SECTION = "10.11"
 
 
 def _read(path: str) -> str:
-    with open(path, encoding="utf-8") as f:
-        return f.read()
+    return Path(path).read_text(encoding="utf-8")
+
+
+def _strip_rust_comments(src: str) -> str:
+    without_block_comments = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
+    return re.sub(r"//.*", "", without_block_comments)
+
+
+def _rust_const_string_present(src: str, name: str, value: str | None = None) -> bool:
+    expected_value = value or name
+    return bool(
+        re.search(
+            rf"\bpub\s+const\s+{re.escape(name)}\s*:\s*&str\s*=\s*\"{re.escape(expected_value)}\"\s*;",
+            src,
+        )
+    )
+
+
+def _rust_item_present(src: str, item_kind: str, name: str) -> bool:
+    return bool(re.search(rf"\bpub\s+{item_kind}\s+{re.escape(name)}\b", src))
+
+
+def _rust_pub_fn_present(src: str, name: str) -> bool:
+    return bool(re.search(rf"\bpub\s+fn\s+{re.escape(name)}\s*\(", src))
+
+
+def _rust_enum_body(src: str, enum_name: str) -> str:
+    match = re.search(rf"\bpub\s+enum\s+{re.escape(enum_name)}\s*\{{(?P<body>.*?)\n\}}", src, re.DOTALL)
+    return match.group("body") if match else ""
+
+
+def _rust_enum_variant_present(src: str, enum_name: str, variant: str) -> bool:
+    return bool(re.search(rf"\b{re.escape(variant)}\b", _rust_enum_body(src, enum_name)))
 
 
 def _checks() -> list[dict[str, Any]]:
@@ -42,6 +74,9 @@ def _checks() -> list[dict[str, Any]]:
     lane_src = _read(LANE_ROUTER) if os.path.isfile(LANE_ROUTER) else ""
     bulk_src = _read(BULKHEAD) if os.path.isfile(BULKHEAD) else ""
     config_src = _read(CONFIG) if os.path.isfile(CONFIG) else ""
+    lane_code = _strip_rust_comments(lane_src)
+    bulk_code = _strip_rust_comments(bulk_src)
+    config_code = _strip_rust_comments(config_src)
 
     lane_event_markers = [
         "LANE_ASSIGNED",
@@ -49,7 +84,7 @@ def _checks() -> list[dict[str, Any]]:
         "BULKHEAD_OVERLOAD",
         "LANE_CONFIG_RELOAD",
     ]
-    missing_events = [m for m in lane_event_markers if m not in lane_src]
+    missing_events = [m for m in lane_event_markers if not _rust_const_string_present(lane_code, m)]
     ok(
         "lane_event_codes",
         len(missing_events) == 0,
@@ -65,7 +100,18 @@ def _checks() -> list[dict[str, Any]]:
         "RouterMetricsSnapshot",
         "LaneRouterError",
     ]
-    missing_types = [t for t in lane_types if t not in lane_src]
+    lane_type_kinds = {
+        "ProductLane": "enum",
+        "LaneRouterConfig": "struct",
+        "LaneRouter": "struct",
+        "LaneMetrics": "struct",
+        "RouterMetricsSnapshot": "struct",
+        "LaneRouterError": "enum",
+    }
+    missing_types = [
+        t for t in lane_types
+        if not _rust_item_present(lane_code, lane_type_kinds[t], t)
+    ]
     ok(
         "lane_core_types",
         len(missing_types) == 0,
@@ -74,7 +120,10 @@ def _checks() -> list[dict[str, Any]]:
     )
 
     taxonomy = ["Cancel", "Timed", "Realtime", "Background"]
-    missing_taxonomy = [lane for lane in taxonomy if lane not in lane_src]
+    missing_taxonomy = [
+        lane for lane in taxonomy
+        if not _rust_enum_variant_present(lane_code, "ProductLane", lane)
+    ]
     ok(
         "lane_taxonomy",
         len(missing_taxonomy) == 0,
@@ -83,7 +132,10 @@ def _checks() -> list[dict[str, Any]]:
     )
 
     overflow_markers = ["Reject", "EnqueueWithTimeout", "ShedOldest"]
-    missing_overflow = [o for o in overflow_markers if o not in lane_src]
+    missing_overflow = [
+        o for o in overflow_markers
+        if not _rust_enum_variant_present(config_code, "LaneOverflowPolicy", o)
+    ]
     ok(
         "overflow_policies",
         len(missing_overflow) == 0,
@@ -92,7 +144,7 @@ def _checks() -> list[dict[str, Any]]:
     )
 
     ops = ["assign_operation", "complete_operation", "reload_config", "metrics_snapshot"]
-    missing_ops = [op for op in ops if op not in lane_src]
+    missing_ops = [op for op in ops if not _rust_pub_fn_present(lane_code, op)]
     ok(
         "lane_operations",
         len(missing_ops) == 0,
@@ -102,7 +154,8 @@ def _checks() -> list[dict[str, Any]]:
 
     ok(
         "unknown_lane_defaults_background",
-        "LANE_DEFAULTED_BACKGROUND" in lane_src and "unknown_lane_default_count" in lane_src,
+        _rust_const_string_present(lane_code, "LANE_DEFAULTED_BACKGROUND")
+        and "unknown_lane_default_count" in lane_code,
         "default-to-background warning path present",
     )
 
@@ -115,7 +168,7 @@ def _checks() -> list[dict[str, Any]]:
         "total_in_flight",
         "bulkhead_rejections",
     ]
-    missing_metrics = [m for m in metric_markers if m not in lane_src]
+    missing_metrics = [m for m in metric_markers if m not in lane_code]
     ok(
         "metrics_contract",
         len(missing_metrics) == 0,
@@ -132,7 +185,16 @@ def _checks() -> list[dict[str, Any]]:
         "release",
         "reload_limits",
     ]
-    missing_bulk = [m for m in bulkhead_markers if m not in bulk_src]
+    bulkhead_marker_checks = {
+        "GlobalBulkhead": _rust_item_present(bulk_code, "struct", "GlobalBulkhead"),
+        "BulkheadPermit": _rust_item_present(bulk_code, "struct", "BulkheadPermit"),
+        "BulkheadError": _rust_item_present(bulk_code, "enum", "BulkheadError"),
+        "BULKHEAD_OVERLOAD": _rust_const_string_present(bulk_code, "BULKHEAD_OVERLOAD"),
+        "try_acquire": _rust_pub_fn_present(bulk_code, "try_acquire"),
+        "release": _rust_pub_fn_present(bulk_code, "release"),
+        "reload_limits": _rust_pub_fn_present(bulk_code, "reload_limits"),
+    }
+    missing_bulk = [m for m in bulkhead_markers if not bulkhead_marker_checks[m]]
     ok(
         "bulkhead_surface",
         len(missing_bulk) == 0,
@@ -149,7 +211,16 @@ def _checks() -> list[dict[str, Any]]:
         "FRANKEN_NODE_RUNTIME_REMOTE_MAX_IN_FLIGHT",
         "FRANKEN_NODE_RUNTIME_BULKHEAD_RETRY_AFTER_MS",
     ]
-    missing_cfg = [m for m in config_markers if m not in config_src]
+    config_marker_checks = {
+        "pub struct RuntimeConfig": _rust_item_present(config_code, "struct", "RuntimeConfig"),
+        "pub struct RuntimeLaneConfig": _rust_item_present(config_code, "struct", "RuntimeLaneConfig"),
+        "pub enum LaneOverflowPolicy": _rust_item_present(config_code, "enum", "LaneOverflowPolicy"),
+        "remote_max_in_flight": "remote_max_in_flight" in config_code,
+        "bulkhead_retry_after_ms": "bulkhead_retry_after_ms" in config_code,
+        "FRANKEN_NODE_RUNTIME_REMOTE_MAX_IN_FLIGHT": "FRANKEN_NODE_RUNTIME_REMOTE_MAX_IN_FLIGHT" in config_code,
+        "FRANKEN_NODE_RUNTIME_BULKHEAD_RETRY_AFTER_MS": "FRANKEN_NODE_RUNTIME_BULKHEAD_RETRY_AFTER_MS" in config_code,
+    }
+    missing_cfg = [m for m in config_markers if not config_marker_checks[m]]
     ok(
         "runtime_config_contract",
         len(missing_cfg) == 0,
@@ -166,7 +237,12 @@ def _checks() -> list[dict[str, Any]]:
     # Mixed workload integration scenario should be explicitly present.
     ok(
         "mixed_workload_integration_test",
-        "integration_mixed_100_operations_respects_global_cap" in lane_src,
+        bool(
+            re.search(
+                r"#\[test\]\s*fn\s+integration_mixed_100_operations_respects_global_cap\s*\(",
+                lane_code,
+            )
+        ),
         "100-op integration simulation present",
     )
 
@@ -186,14 +262,16 @@ def _checks() -> list[dict[str, Any]]:
 
 def self_test() -> bool:
     checks = _checks()
-    assert len(checks) >= 16, f"expected >=16 checks, got {len(checks)}"
-    assert all("check" in c and "passed" in c for c in checks)
+    if len(checks) < 16:
+        raise AssertionError(f"expected >=16 checks, got {len(checks)}")
+    if not all("check" in c and "passed" in c for c in checks):
+        raise AssertionError("all checks must include check and passed keys")
     print(f"self_test: {len(checks)} checks validated", file=sys.stderr)
     return True
 
 
 def main() -> int:
-    logger = configure_test_logging("check_scheduler_lanes")
+    configure_test_logging("check_scheduler_lanes")
     if "--self-test" in sys.argv:
         self_test()
         return 0

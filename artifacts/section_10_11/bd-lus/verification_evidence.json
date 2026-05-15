@@ -2,7 +2,7 @@
   "bead_id": "bd-lus",
   "section": "10.11",
   "title": "Product scheduler lane + global bulkhead integration",
-  "generated_at": "2026-02-22T02:29:51Z",
+  "generated_at": "2026-05-15T13:55:10Z",
   "status": "completed_with_baseline_workspace_failures",
   "checks": [
     {
@@ -28,17 +28,21 @@
       "command": "python3 scripts/check_scheduler_lanes.py --self-test",
       "exit_code": 0,
       "status": "PASS",
-      "output_path": "artifacts/section_10_11/bd-lus/check_scheduler_lanes_self_test.log"
+      "output_path": "artifacts/section_10_11/bd-lus/check_scheduler_lanes_self_test.exit"
     },
     {
       "name": "pytest_gate_tests",
       "command": "pytest -q tests/test_check_scheduler_lanes.py",
       "exit_code": 0,
       "status": "PASS",
-      "output_path": "artifacts/section_10_11/bd-lus/pytest_check_scheduler_lanes.log",
+      "output_path": "artifacts/section_10_11/bd-lus/pytest_check_scheduler_lanes.exit",
       "summary": {
-        "tests_passed": 8,
-        "tests_total": 8
+        "tests_passed": 10,
+        "tests_total": 10,
+        "regression_coverage": [
+          "comment-only lane router markers fail closed",
+          "comment-only runtime config markers fail closed"
+        ]
       }
     },
     {
@@ -46,7 +50,7 @@
       "command": "rch exec -- cargo check --all-targets",
       "exit_code": 101,
       "status": "FAIL_BASELINE",
-      "output_path": "artifacts/section_10_11/bd-lus/rch_cargo_check_all_targets.log",
+      "output_path": "artifacts/section_10_11/bd-lus/rch_cargo_check_all_targets.exit",
       "note": "Pre-existing workspace compile debt outside bd-lus scope."
     },
     {
@@ -54,7 +58,7 @@
       "command": "rch exec -- cargo clippy --all-targets -- -D warnings",
       "exit_code": 101,
       "status": "FAIL_BASELINE",
-      "output_path": "artifacts/section_10_11/bd-lus/rch_cargo_clippy_all_targets.log",
+      "output_path": "artifacts/section_10_11/bd-lus/rch_cargo_clippy_all_targets.exit",
       "note": "Pre-existing workspace lint/compile debt outside bd-lus scope."
     },
     {
@@ -62,7 +66,7 @@
       "command": "rch exec -- cargo fmt --check",
       "exit_code": 1,
       "status": "FAIL_BASELINE",
-      "output_path": "artifacts/section_10_11/bd-lus/rch_cargo_fmt_check.log",
+      "output_path": "artifacts/section_10_11/bd-lus/rch_cargo_fmt_check.exit",
       "note": "Pre-existing workspace formatting drift outside bd-lus scope."
     }
   ],
