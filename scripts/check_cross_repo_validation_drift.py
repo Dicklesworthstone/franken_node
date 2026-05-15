@@ -34,6 +34,7 @@ SCHEMA_CATALOG_VERSION = "franken-node/cross-repo-validation-drift/schema-catalo
 FIXTURE_SCHEMA_VERSION = "franken-node/cross-repo-validation-drift/fixtures/v1"
 HANDOFF_SCHEMA_VERSION = "franken-node/cross-repo-validation-drift/handoff/v1"
 WATCHLIST_SCHEMA_VERSION = "franken-node/cross-repo-validation-drift/reproof-watchlist/v1"
+READINESS_SCHEMA_VERSION = "franken-node/cross-repo-validation-drift/readiness/v1"
 
 SCHEMA_FILE = (
     ROOT
@@ -119,6 +120,8 @@ MAX_PATH_BYTES = 240
 MAX_HANDOFF_JSON_BYTES = 8192
 MAX_HANDOFF_MARKDOWN_BYTES = 4096
 MAX_WATCHLIST_JSON_BYTES = 16384
+MAX_READINESS_JSON_BYTES = 16384
+MAX_READINESS_HUMAN_BYTES = 4096
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 BEAD_RE = re.compile(r"^bd-[A-Za-z0-9.]+$")
 SNAPSHOT_ID_RE = re.compile(r"^crvd-[a-z0-9-]+$")
@@ -721,6 +724,120 @@ def validate_reproof_watchlist(watchlist: Any) -> list[str]:
     return list(dict.fromkeys(errors))
 
 
+def _safe_repo_display(path_value: Any) -> str:
+    if not isinstance(path_value, str) or not path_value:
+        return "<unknown>"
+    path = Path(path_value)
+    return path.name or path_value
+
+
+def render_readiness_human(report: dict[str, Any]) -> str:
+    items = report.get("items", [])
+    if not items:
+        return "cross-repo validation readiness: clear (no sibling dependencies)"
+    lines = [f"cross-repo validation readiness: {report.get('status')}"]
+    for item in items:
+        digest = str(item.get("deferred_command_digest", ""))
+        lines.append(
+            f"- {item.get('bead_id')}: {item.get('classification_code')} "
+            f"repo={item.get('sibling_repo')} dirty_relevant={item.get('dirty_relevant_file_count')} "
+            f"beads_lock={item.get('beads_lock_status')} mail={item.get('agent_mail_status')} "
+            f"cmd=sha256:{digest[:12]} next={item.get('next_action_text')}"
+        )
+    return "\n".join(lines)
+
+
+def build_readiness_report(
+    snapshots: list[dict[str, Any]],
+    examples: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    watchlist = build_reproof_watchlist(snapshots, examples)
+    watchlist_by_snapshot = {
+        (entry.get("bead_id"), entry.get("snapshot_id")): entry
+        for entry in watchlist.get("entries", [])
+        if isinstance(entry, dict)
+    }
+    items: list[dict[str, Any]] = []
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            continue
+        bead_id = snapshot.get("bead_id")
+        snapshot_id = snapshot.get("snapshot_id")
+        watch_entry = watchlist_by_snapshot.get((bead_id, snapshot_id), {})
+        dirty_files = _sorted_path_values(_get_path(snapshot, "sibling_repo.dirty_files"), MAX_DIRTY_FILES)
+        dirty_state = _get_path(snapshot, "sibling_repo.dirty_state")
+        dirty_relevant_count = len(dirty_files) if dirty_state == "dirty_relevant" else 0
+        item = {
+            "bead_id": bead_id,
+            "snapshot_id": snapshot_id,
+            "classification_code": _get_path(snapshot, "classification.code"),
+            "sibling_repo": _safe_repo_display(_get_path(snapshot, "sibling_repo.path")),
+            "dirty_relevant_file_count": dirty_relevant_count,
+            "beads_lock_status": _get_path(snapshot, "sibling_repo.beads_lock.status"),
+            "agent_mail_status": _get_path(snapshot, "agent_mail.status"),
+            "deferred_command_digest": watch_entry.get("command_digest") or _get_path(snapshot, "command_digest.hex"),
+            "next_action_text": _get_path(snapshot, "classification.operator_message"),
+            "watchlist_status": watch_entry.get("status"),
+        }
+        items.append(item)
+    items.sort(key=lambda item: (str(item.get("bead_id")), str(item.get("snapshot_id"))))
+    status = "clear"
+    if items:
+        status = "ready"
+        if any(item.get("classification_code") != "CRVD_SAFE_TO_RUN" for item in items):
+            status = "blocked"
+    report: dict[str, Any] = {
+        "schema_version": READINESS_SCHEMA_VERSION,
+        "status": status,
+        "items": items,
+    }
+    report["human"] = render_readiness_human(report)
+    return report
+
+
+def validate_readiness_report(report: Any) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(report, dict):
+        return ["ERR_CRVD_BAD_READINESS"]
+    if report.get("schema_version") != READINESS_SCHEMA_VERSION:
+        errors.append("ERR_CRVD_BAD_READINESS")
+    if report.get("status") not in {"clear", "ready", "blocked"}:
+        errors.append("ERR_CRVD_BAD_READINESS")
+    items = report.get("items")
+    if not isinstance(items, list) or len(items) > MAX_LIST_ITEMS:
+        errors.append("ERR_CRVD_BAD_READINESS")
+        items = []
+    for item in items:
+        if not isinstance(item, dict):
+            errors.append("ERR_CRVD_BAD_READINESS")
+            continue
+        for field in [
+            "bead_id",
+            "snapshot_id",
+            "classification_code",
+            "sibling_repo",
+            "beads_lock_status",
+            "agent_mail_status",
+            "next_action_text",
+            "watchlist_status",
+        ]:
+            if not _bounded_string(item.get(field)):
+                errors.append("ERR_CRVD_BAD_READINESS")
+        if not isinstance(item.get("dirty_relevant_file_count"), int):
+            errors.append("ERR_CRVD_BAD_READINESS")
+        if not _is_sha256_hex(item.get("deferred_command_digest")):
+            errors.append("ERR_CRVD_BAD_READINESS")
+    human = report.get("human")
+    if not _bounded_string(human, MAX_READINESS_HUMAN_BYTES):
+        errors.append("ERR_CRVD_BAD_READINESS")
+    elif items and not all(str(item.get("bead_id")) in human for item in items):
+        errors.append("ERR_CRVD_BAD_READINESS")
+    encoded = json.dumps(report, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > MAX_READINESS_JSON_BYTES:
+        errors.append("ERR_CRVD_BAD_READINESS")
+    return list(dict.fromkeys(errors))
+
+
 def validate_snapshot(snapshot: Any, *, expected_bead_id: str | None = None) -> list[str]:
     errors: list[str] = []
     if not isinstance(snapshot, dict):
@@ -1114,6 +1231,13 @@ def run_all() -> dict[str, Any]:
         bd_pq2l4.get("status") == "excluded"
         and bd_pq2l4.get("reason") == "product_failure_not_infrastructure_retry",
     ))
+    readiness = build_readiness_report(valid_snapshots, _watchlist_examples(fixtures))
+    readiness_errors = validate_readiness_report(readiness)
+    checks.append(_check("readiness.report_passes", readiness_errors == [], ",".join(readiness_errors)))
+    checks.append(_check(
+        "readiness.no_sibling_dependency_clear",
+        validate_readiness_report(build_readiness_report([], _watchlist_examples(fixtures))) == [],
+    ))
 
     passed = sum(1 for check in checks if check["passed"])
     total = len(checks)
@@ -1136,6 +1260,7 @@ def main() -> int:
     parser.add_argument("--self-test", action="store_true", help="run self-test checks")
     parser.add_argument("--handoff", metavar="SNAPSHOT_ID", help="emit a fixture handoff payload")
     parser.add_argument("--watchlist", action="store_true", help="emit dry-run reproof watchlist")
+    parser.add_argument("--readiness", action="store_true", help="emit cross-repo readiness report")
     parser.add_argument(
         "--handoff-format",
         choices=["json", "markdown"],
@@ -1168,6 +1293,26 @@ def main() -> int:
                     f"{entry['status']} {entry['bead_id']} "
                     f"{entry['classification_code']} {entry['reason']}"
                 )
+        return 0
+
+    if args.readiness:
+        fixtures = _load_json(FIXTURES_FILE)
+        report = build_readiness_report(_fixture_cases(fixtures), _watchlist_examples(fixtures))
+        errors = validate_readiness_report(report)
+        if errors:
+            result = {
+                "bead_id": BEAD_ID,
+                "title": TITLE,
+                "schema_version": READINESS_SCHEMA_VERSION,
+                "verdict": "FAIL",
+                "errors": errors,
+            }
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 1
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            print(report["human"])
         return 0
 
     if args.handoff:
