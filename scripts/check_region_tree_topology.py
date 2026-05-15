@@ -12,9 +12,10 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 SRC = os.path.join(ROOT, "crates", "franken-node", "src", "runtime", "region_tree.rs")
 MOD = os.path.join(ROOT, "crates", "franken-node", "src", "runtime", "mod.rs")
 SPEC = os.path.join(ROOT, "docs", "specs", "section_10_15", "bd-2tdi_contract.md")
@@ -30,23 +31,123 @@ def check(name: str, passed: bool, detail: str = "") -> bool:
 
 def read(path: str) -> str:
     try:
-        with open(path, "r") as f:
-            return f.read()
+        return Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
         return ""
+
+
+def strip_rust_comments(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+
+        raw_start = rust_raw_string_start(text, i)
+        if raw_start is not None:
+            body_start, hashes = raw_start
+            end = rust_raw_string_end(text, body_start + 1, hashes)
+            if end is None:
+                out.append(text[i:])
+                break
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if ch == '"':
+            end = rust_quoted_literal_end(text, i, ch)
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if text.startswith("//", i):
+            newline = text.find("\n", i + 2)
+            if newline == -1:
+                break
+            out.append("\n")
+            i = newline + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = rust_block_comment_end(text, i + 2)
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def rust_raw_string_start(text: str, index: int) -> tuple[int, int] | None:
+    n = len(text)
+    if text.startswith("br", index):
+        cursor = index + 2
+    elif text.startswith("r", index):
+        cursor = index + 1
+    else:
+        return None
+
+    hashes = 0
+    while cursor < n and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+    if cursor < n and text[cursor] == '"':
+        return cursor, hashes
+    return None
+
+
+def rust_raw_string_end(text: str, index: int, hashes: int) -> int | None:
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, index)
+    if end == -1:
+        return None
+    return end + len(terminator)
+
+
+def rust_quoted_literal_end(text: str, index: int, quote: str) -> int:
+    i = index + 1
+    n = len(text)
+    escaped = False
+    while i < n:
+        ch = text[i]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == quote:
+            return i + 1
+        i += 1
+    return n
+
+
+def rust_block_comment_end(text: str, index: int) -> int:
+    depth = 1
+    i = index
+    n = len(text)
+    while i < n and depth:
+        if text.startswith("/*", i):
+            depth += 1
+            i += 2
+        elif text.startswith("*/", i):
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
 
 
 def run_checks() -> bool:
     global results
     results = []
 
-    src = read(SRC)
-    mod_src = read(MOD)
+    src_raw = read(SRC)
+    mod_raw = read(MOD)
+    src = strip_rust_comments(src_raw)
+    mod_src = strip_rust_comments(mod_raw)
     spec = read(SPEC)
     trace = read(TRACE)
 
     # --- Source existence ---
-    check("source_exists", bool(src), SRC)
+    check("source_exists", bool(src_raw), SRC)
 
     # --- Module wiring ---
     check("mod_wired", "pub mod region_tree;" in mod_src,
@@ -107,14 +208,16 @@ def run_checks() -> bool:
     # --- Quiescence trace artifact ---
     check("trace_exists", bool(trace), TRACE)
     if trace:
-        lines = [l for l in trace.strip().splitlines() if l.strip()]
+        lines = [line for line in trace.strip().splitlines() if line.strip()]
+        parsed_lines = []
         valid_jsonl = True
         for line in lines:
             try:
-                obj = json.loads(line)
+                obj = json.JSONDecoder().decode(line)
                 if "region_id" not in obj or "action" not in obj:
                     valid_jsonl = False
                     break
+                parsed_lines.append(obj)
             except json.JSONDecodeError:
                 valid_jsonl = False
                 break
@@ -122,8 +225,7 @@ def run_checks() -> bool:
               f"{len(lines)} lines, all valid JSONL with region_id and action")
         # Check trace has open/close/drain events
         actions = set()
-        for line in lines:
-            obj = json.loads(line)
+        for obj in parsed_lines:
             actions.add(obj.get("action", ""))
         check("trace_has_lifecycle_actions",
               "open" in actions and "close" in actions and "drain" in actions,
@@ -164,7 +266,7 @@ def self_test() -> bool:
 
 
 def main():
-    logger = configure_test_logging("check_region_tree_topology")
+    configure_test_logging("check_region_tree_topology")
     if "--self-test" in sys.argv:
         ok = self_test()
         sys.exit(0 if ok else 1)
