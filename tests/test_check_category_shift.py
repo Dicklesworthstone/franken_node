@@ -3,6 +3,7 @@
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -210,6 +211,65 @@ class TestFileChecks(unittest.TestCase):
         result = mod.run_all()
         policy_check = next(c for c in result["checks"] if "reporting policy" in c["check"])
         self.assertTrue(policy_check["pass"])
+
+
+class TestCommentOnlyRegression(unittest.TestCase):
+    def test_comment_only_source_markers_fail_closed(self):
+        commented_impl = "\n".join(
+            [
+                *(f"// {marker}" for marker in mod.REQUIRED_STRUCTS),
+                *(f"// {marker}" for marker in mod.REQUIRED_ENUMS),
+                *(f"// {marker}" for marker in mod.REQUIRED_EVENT_CODES),
+                *(f"// {marker}" for marker in mod.REQUIRED_ERROR_CODES),
+                *(f"// {marker}" for marker in mod.REQUIRED_INVARIANTS),
+                *(f"// {marker}" for marker in mod.REQUIRED_FUNCTIONS),
+                *(f"// {marker}" for marker in mod.REQUIRED_THRESHOLDS),
+                "// #[cfg(test)]",
+                "/*",
+                *("// #[test]\n// fn commented_test() {}" for _ in range(25)),
+                "*/",
+            ]
+        )
+
+        original_impl = mod.IMPL
+        original_mod = mod.MOD_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            impl_path = tmp / "category_shift.rs"
+            mod_path = tmp / "mod.rs"
+            impl_path.write_text(commented_impl, encoding="utf-8")
+            mod_path.write_text("// pub mod category_shift;\n", encoding="utf-8")
+
+            try:
+                mod.IMPL = impl_path
+                mod.MOD_FILE = mod_path
+                result = mod.run_all()
+            finally:
+                mod.IMPL = original_impl
+                mod.MOD_FILE = original_mod
+
+        checks = {check["check"]: check["pass"] for check in result["checks"]}
+        self.assertTrue(checks["file: category_shift implementation"])
+        self.assertTrue(checks["file: supply_chain module"])
+        self.assertTrue(checks["file: bd-15t contract spec"])
+        self.assertTrue(checks["file: category shift reporting policy"])
+        self.assertTrue(checks["fixture analysis: JSON report loaded"])
+
+        expected_failures = [
+            "mod export: category_shift",
+            "rust unit test count",
+            "impl: #[cfg(test)]",
+        ]
+        expected_failures.extend(f"impl: {marker}" for marker in mod.REQUIRED_STRUCTS)
+        expected_failures.extend(f"impl: {marker}" for marker in mod.REQUIRED_ENUMS)
+        expected_failures.extend(f"event_code: {marker}" for marker in mod.REQUIRED_EVENT_CODES)
+        expected_failures.extend(f"error_code: {marker}" for marker in mod.REQUIRED_ERROR_CODES)
+        expected_failures.extend(f"invariant: {marker}" for marker in mod.REQUIRED_INVARIANTS)
+        expected_failures.extend(f"function: {marker}" for marker in mod.REQUIRED_FUNCTIONS)
+        expected_failures.extend(f"threshold: {marker}" for marker in mod.REQUIRED_THRESHOLDS)
+        for check_name in expected_failures:
+            self.assertIn(check_name, checks)
+            self.assertFalse(checks[check_name], check_name)
 
 
 if __name__ == "__main__":
