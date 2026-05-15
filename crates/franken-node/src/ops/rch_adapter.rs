@@ -20,6 +20,8 @@ pub const RCH_ADAPTER_SCHEMA_VERSION: &str = "franken-node/rch-adapter/outcome/v
 pub const RCH_ATTESTED_PROOF_RECEIPT_SCHEMA_VERSION: &str =
     "franken-node/rch-attested-proof-receipt/v1";
 pub const RCH_PROOF_ATTESTATION_SCHEMA_VERSION: &str = "franken-node/rch-proof-attestation/v1";
+pub const RCH_QUEUE_SNAPSHOT_CLASSIFICATION_SCHEMA_VERSION: &str =
+    "franken-node/rch-queue-snapshot-classification/v1";
 pub const DEFAULT_MAX_ACTIVE_CARGO_PROCESSES: usize = 2;
 const RCH_COMMAND_DIGEST_DOMAIN: &str = "franken-node/rch-command-digest/v1";
 const RCH_ATTESTATION_DIGEST_DOMAIN: &str = "franken-node/rch-attestation-digest/v1";
@@ -118,6 +120,111 @@ pub enum RchExecutionMode {
     LocalFallback,
     Unavailable,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RchQueueSnapshotClass {
+    FreshRunning,
+    ProgressStale,
+    QueueSaturated,
+    WorkerUnreachable,
+    SiblingApiDrift,
+    ArtifactRetrievalFailed,
+    LocalFallbackForbidden,
+    UnknownFailClosed,
+}
+
+impl RchQueueSnapshotClass {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FreshRunning => "fresh_running",
+            Self::ProgressStale => "progress_stale",
+            Self::QueueSaturated => "queue_saturated",
+            Self::WorkerUnreachable => "worker_unreachable",
+            Self::SiblingApiDrift => "sibling_api_drift",
+            Self::ArtifactRetrievalFailed => "artifact_retrieval_failed",
+            Self::LocalFallbackForbidden => "local_fallback_forbidden",
+            Self::UnknownFailClosed => "unknown_fail_closed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RchQueueSnapshotPolicy {
+    pub max_queue_depth: u16,
+    pub max_oldest_queued_age_seconds: u64,
+    pub min_heartbeat_stale_seconds: u64,
+    pub min_progress_stale_seconds: u64,
+}
+
+impl Default for RchQueueSnapshotPolicy {
+    fn default() -> Self {
+        Self {
+            max_queue_depth: 8,
+            max_oldest_queued_age_seconds: 600,
+            min_heartbeat_stale_seconds: 300,
+            min_progress_stale_seconds: 300,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RchQueueSnapshotInput {
+    pub command_digest: String,
+    pub worker_id: Option<String>,
+    pub target_dir: Option<String>,
+    pub package: Option<String>,
+    pub test_target: Option<String>,
+    pub queue_depth: u16,
+    pub oldest_queued_age_seconds: Option<u64>,
+    pub heartbeat_age_seconds: Option<u64>,
+    pub progress_age_seconds: Option<u64>,
+    pub worker_reachable: Option<bool>,
+    pub remote_required: bool,
+    pub local_fallback_observed: bool,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+}
+
+impl RchQueueSnapshotInput {
+    #[must_use]
+    pub fn for_command(command_digest: impl Into<String>) -> Self {
+        Self {
+            command_digest: command_digest.into(),
+            worker_id: None,
+            target_dir: None,
+            package: None,
+            test_target: None,
+            queue_depth: 0,
+            oldest_queued_age_seconds: None,
+            heartbeat_age_seconds: None,
+            progress_age_seconds: None,
+            worker_reachable: Some(true),
+            remote_required: true,
+            local_fallback_observed: false,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RchQueueSnapshotClassification {
+    pub schema_version: String,
+    pub command_digest: String,
+    pub class: RchQueueSnapshotClass,
+    pub reason_code: String,
+    pub retryable: bool,
+    pub product_failure: bool,
+    pub infrastructure_failure: bool,
+    pub worker_id: Option<String>,
+    pub target_dir: Option<String>,
+    pub package: Option<String>,
+    pub test_target: Option<String>,
+    pub evidence_snippet: String,
+    pub recommended_action: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -790,6 +897,156 @@ pub fn classify_rch_output(
     }
 }
 
+#[must_use]
+pub fn classify_rch_queue_snapshot(
+    input: &RchQueueSnapshotInput,
+    policy: &RchQueueSnapshotPolicy,
+) -> RchQueueSnapshotClassification {
+    let evidence = snapshot_evidence(input);
+    let normalized = evidence.to_ascii_lowercase();
+
+    let (class, reason_code, retryable, product_failure, infrastructure_failure, action) = if input
+        .command_digest
+        .trim()
+        .is_empty()
+    {
+        (
+            RchQueueSnapshotClass::UnknownFailClosed,
+            "RCH-SNAPSHOT-MISSING-COMMAND-DIGEST",
+            false,
+            false,
+            false,
+            "Inspect the snapshot source; command identity is required before relying on it.",
+        )
+    } else if input.remote_required && input.local_fallback_observed {
+        (
+            RchQueueSnapshotClass::LocalFallbackForbidden,
+            "RCH-SNAPSHOT-LOCAL-FALLBACK-FORBIDDEN",
+            true,
+            false,
+            true,
+            "Rerun through RCH only; do not treat local fallback output as proof.",
+        )
+    } else if contains_any(
+        &normalized,
+        &[
+            "no space left on device",
+            "artifact retrieval failed",
+            "failed to retrieve artifact",
+            "could not copy artifact",
+            "target/debug",
+        ],
+    ) {
+        (
+            RchQueueSnapshotClass::ArtifactRetrievalFailed,
+            "RCH-SNAPSHOT-ARTIFACT-RETRIEVAL",
+            true,
+            false,
+            true,
+            "Fix or redirect the artifact/target directory path before retrying the proof.",
+        )
+    } else if contains_any(
+        &normalized,
+        &[
+            "frankensqlite",
+            "franken_engine",
+            "sibling api drift",
+            "path dependency",
+            "unresolved import",
+        ],
+    ) {
+        (
+            RchQueueSnapshotClass::SiblingApiDrift,
+            "RCH-SNAPSHOT-SIBLING-API-DRIFT",
+            false,
+            true,
+            false,
+            "Track the sibling dependency drift as the blocker instead of rerunning identical proof work.",
+        )
+    } else if input.worker_reachable == Some(false)
+        || input
+            .heartbeat_age_seconds
+            .is_some_and(|age| age >= policy.min_heartbeat_stale_seconds)
+        || contains_any(
+            &normalized,
+            &[
+                "worker unreachable",
+                "connection refused",
+                "ssh command timed out",
+                "worker heartbeat stale",
+            ],
+        )
+    {
+        (
+            RchQueueSnapshotClass::WorkerUnreachable,
+            "RCH-SNAPSHOT-WORKER-UNREACHABLE",
+            true,
+            false,
+            true,
+            "Select a healthy worker or wait for RCH recovery before retrying the proof.",
+        )
+    } else if input.queue_depth >= policy.max_queue_depth
+        || input
+            .oldest_queued_age_seconds
+            .is_some_and(|age| age > policy.max_oldest_queued_age_seconds)
+    {
+        (
+            RchQueueSnapshotClass::QueueSaturated,
+            "RCH-SNAPSHOT-QUEUE-SATURATED",
+            true,
+            false,
+            true,
+            "Queue or defer the proof; keep working on source-only tasks until capacity returns.",
+        )
+    } else if input
+        .progress_age_seconds
+        .is_some_and(|age| age >= policy.min_progress_stale_seconds)
+    {
+        (
+            RchQueueSnapshotClass::ProgressStale,
+            "RCH-SNAPSHOT-PROGRESS-STALE",
+            true,
+            false,
+            true,
+            "Do not launch duplicates; wait, inspect, or cancel only the stale proof job.",
+        )
+    } else if input.heartbeat_age_seconds.is_some() || input.progress_age_seconds.is_some() {
+        (
+            RchQueueSnapshotClass::FreshRunning,
+            "RCH-SNAPSHOT-FRESH-RUNNING",
+            true,
+            false,
+            false,
+            "Wait for the active proof verdict instead of starting duplicate validation.",
+        )
+    } else {
+        (
+            RchQueueSnapshotClass::UnknownFailClosed,
+            "RCH-SNAPSHOT-UNKNOWN",
+            false,
+            false,
+            false,
+            "Gather a fresher RCH status or queue snapshot before relying on this result.",
+        )
+    };
+
+    RchQueueSnapshotClassification {
+        schema_version: RCH_QUEUE_SNAPSHOT_CLASSIFICATION_SCHEMA_VERSION.to_string(),
+        command_digest: input.command_digest.clone(),
+        class,
+        reason_code: reason_code.to_string(),
+        retryable,
+        product_failure,
+        infrastructure_failure,
+        worker_id: input.worker_id.clone(),
+        target_dir: input.target_dir.clone(),
+        package: input.package.clone(),
+        test_target: input.test_target.clone(),
+        evidence_snippet: redact_snapshot_evidence(&evidence),
+        recommended_action: action.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClassifiedOutcome {
     outcome: RchOutcomeClass,
@@ -999,6 +1256,47 @@ fn worker_id_from_output(output: &str) -> Option<String> {
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn snapshot_evidence(input: &RchQueueSnapshotInput) -> String {
+    let mut evidence = String::new();
+    if let Some(worker_id) = &input.worker_id {
+        push_len_prefixed_field(&mut evidence, "worker_id", worker_id);
+    }
+    if let Some(target_dir) = &input.target_dir {
+        push_len_prefixed_field(&mut evidence, "target_dir", target_dir);
+    }
+    if let Some(package) = &input.package {
+        push_len_prefixed_field(&mut evidence, "package", package);
+    }
+    if let Some(test_target) = &input.test_target {
+        push_len_prefixed_field(&mut evidence, "test_target", test_target);
+    }
+    push_len_prefixed_field(&mut evidence, "stdout_tail", &input.stdout_tail);
+    push_len_prefixed_field(&mut evidence, "stderr_tail", &input.stderr_tail);
+    bounded_snippet(&evidence)
+}
+
+fn redact_snapshot_evidence(evidence: &str) -> String {
+    evidence
+        .split_whitespace()
+        .map(|token| {
+            let key_part = token
+                .split_once('=')
+                .map_or(token, |(key, _value)| key)
+                .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_');
+            let key = key_part
+                .rsplit(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                .next()
+                .unwrap_or(key_part);
+            if is_sensitive_env_key(key) {
+                format!("{key}=<redacted>")
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn digest_fields(domain: &str, fields: &[(&str, &str)]) -> DigestRef {

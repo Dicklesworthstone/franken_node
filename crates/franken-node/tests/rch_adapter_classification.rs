@@ -1,8 +1,10 @@
 use frankenengine_node::ops::rch_adapter::{
     RchAdapterError, RchAdapterOutcome, RchAttestedProofReceipt, RchCommandOutput,
     RchCommandPolicy, RchExecutionMode, RchInvocation, RchOutcomeClass, RchProcessSnapshot,
-    RchProofAttestationInput, RchTimeoutClass, RchToolchainFingerprintInput, RchValidationAction,
-    build_rch_attested_proof_receipt, classify_rch_output, validate_allowed_rch_command,
+    RchProofAttestationInput, RchQueueSnapshotClass, RchQueueSnapshotInput, RchQueueSnapshotPolicy,
+    RchTimeoutClass, RchToolchainFingerprintInput, RchValidationAction,
+    build_rch_attested_proof_receipt, classify_rch_output, classify_rch_queue_snapshot,
+    validate_allowed_rch_command,
 };
 use frankenengine_node::ops::validation_broker::InputDigest;
 use serde_json::Value;
@@ -25,6 +27,15 @@ fn command_output(exit_code: i32, stdout: &str, stderr: &str) -> RchCommandOutpu
         stderr: stderr.to_string(),
         duration_ms: 42_000,
     }
+}
+
+fn queue_snapshot(command_digest: &str) -> RchQueueSnapshotInput {
+    let mut input = RchQueueSnapshotInput::for_command(command_digest);
+    input.worker_id = Some("vmi1293453".to_string());
+    input.target_dir = Some("/data/tmp/franken_node-rch-adapter-target".to_string());
+    input.package = Some("frankenengine-node".to_string());
+    input.test_target = Some("rch_adapter_classification".to_string());
+    input
 }
 
 fn successful_attestation_invocation() -> RchInvocation {
@@ -414,4 +425,138 @@ fn checked_in_fixture_catalog_matches_adapter_classification() {
                 .expect("fixture green")
         );
     }
+}
+
+#[test]
+fn queue_snapshot_catalog_covers_required_real_world_classes() {
+    let policy = RchQueueSnapshotPolicy::default();
+    let cases = [
+        {
+            let mut input = queue_snapshot("fresh-running");
+            input.heartbeat_age_seconds = Some(2);
+            input.progress_age_seconds = Some(3);
+            (
+                input,
+                RchQueueSnapshotClass::FreshRunning,
+                false,
+                false,
+                "RCH-SNAPSHOT-FRESH-RUNNING",
+            )
+        },
+        {
+            let mut input = queue_snapshot("progress-stale");
+            input.heartbeat_age_seconds = Some(1);
+            input.progress_age_seconds = Some(900);
+            (
+                input,
+                RchQueueSnapshotClass::ProgressStale,
+                false,
+                true,
+                "RCH-SNAPSHOT-PROGRESS-STALE",
+            )
+        },
+        {
+            let mut input = queue_snapshot("queue-saturated");
+            input.queue_depth = policy.max_queue_depth;
+            input.heartbeat_age_seconds = Some(1);
+            input.progress_age_seconds = Some(1);
+            (
+                input,
+                RchQueueSnapshotClass::QueueSaturated,
+                false,
+                true,
+                "RCH-SNAPSHOT-QUEUE-SATURATED",
+            )
+        },
+        {
+            let mut input = queue_snapshot("sibling-drift");
+            input.stderr_tail =
+                "frankensqlite path dependency unresolved import TableLeafDeleteRun".to_string();
+            (
+                input,
+                RchQueueSnapshotClass::SiblingApiDrift,
+                true,
+                false,
+                "RCH-SNAPSHOT-SIBLING-API-DRIFT",
+            )
+        },
+        {
+            let mut input = queue_snapshot("artifact-retrieval");
+            input.stderr_tail =
+                "artifact retrieval failed: No space left on device while copying target/debug"
+                    .to_string();
+            (
+                input,
+                RchQueueSnapshotClass::ArtifactRetrievalFailed,
+                false,
+                true,
+                "RCH-SNAPSHOT-ARTIFACT-RETRIEVAL",
+            )
+        },
+        {
+            let mut input = queue_snapshot("local-fallback");
+            input.local_fallback_observed = true;
+            input.stdout_tail = "[RCH] local fallback".to_string();
+            (
+                input,
+                RchQueueSnapshotClass::LocalFallbackForbidden,
+                false,
+                true,
+                "RCH-SNAPSHOT-LOCAL-FALLBACK-FORBIDDEN",
+            )
+        },
+    ];
+
+    for (input, class, product_failure, infrastructure_failure, reason_code) in cases {
+        let classified = classify_rch_queue_snapshot(&input, &policy);
+        assert_eq!(classified.class, class);
+        assert_eq!(classified.product_failure, product_failure);
+        assert_eq!(classified.infrastructure_failure, infrastructure_failure);
+        assert_eq!(classified.reason_code, reason_code);
+        assert_eq!(
+            classified.schema_version,
+            "franken-node/rch-queue-snapshot-classification/v1"
+        );
+        assert_eq!(classified.worker_id, input.worker_id);
+        assert!(!classified.recommended_action.is_empty());
+    }
+}
+
+#[test]
+fn queue_snapshot_worker_unreachable_and_missing_identity_fail_closed() {
+    let policy = RchQueueSnapshotPolicy::default();
+    let mut unreachable = queue_snapshot("worker-unreachable");
+    unreachable.worker_reachable = Some(false);
+    unreachable.stderr_tail = "worker unreachable over ssh".to_string();
+
+    let classified = classify_rch_queue_snapshot(&unreachable, &policy);
+    assert_eq!(classified.class, RchQueueSnapshotClass::WorkerUnreachable);
+    assert!(classified.retryable);
+    assert!(!classified.product_failure);
+
+    let missing_identity = classify_rch_queue_snapshot(
+        &RchQueueSnapshotInput::for_command("   "),
+        &RchQueueSnapshotPolicy::default(),
+    );
+    assert_eq!(
+        missing_identity.class,
+        RchQueueSnapshotClass::UnknownFailClosed
+    );
+    assert_eq!(
+        missing_identity.reason_code,
+        "RCH-SNAPSHOT-MISSING-COMMAND-DIGEST"
+    );
+    assert!(!missing_identity.retryable);
+}
+
+#[test]
+fn queue_snapshot_redacts_sensitive_evidence_values() {
+    let policy = RchQueueSnapshotPolicy::default();
+    let mut input = queue_snapshot("secret-redaction");
+    input.stdout_tail = "API_TOKEN=super-secret-value regular=value".to_string();
+
+    let classified = classify_rch_queue_snapshot(&input, &policy);
+    assert!(classified.evidence_snippet.contains("API_TOKEN=<redacted>"));
+    assert!(!classified.evidence_snippet.contains("super-secret-value"));
+    assert!(classified.evidence_snippet.contains("regular=value"));
 }
