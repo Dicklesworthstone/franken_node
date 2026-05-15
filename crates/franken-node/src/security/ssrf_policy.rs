@@ -893,6 +893,8 @@ impl std::error::Error for SsrfError {}
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
     use std::net::Ipv4Addr;
 
@@ -1974,7 +1976,8 @@ mod tests {
                 let operations = [
                     // Mix of allowlist additions and SSRF checks
                     || {
-                        let mut p = policy_clone.lock().unwrap();
+                        let mut p = try_lock(&policy_clone, "ssrf policy concurrent allowlist add")
+                            .expect("ssrf policy allowlist mutex should not be poisoned");
                         let _ = p.add_allowlist(
                             &format!("host-{thread_id}"),
                             Some(8080_u16.saturating_add(thread_id as u16)),
@@ -1984,7 +1987,8 @@ mod tests {
                         );
                     },
                     || {
-                        let mut p = policy_clone.lock().unwrap();
+                        let mut p = try_lock(&policy_clone, "ssrf policy concurrent check")
+                            .expect("ssrf policy check mutex should not be poisoned");
                         let _ = p.check_ssrf(
                             "8.8.8.8",
                             443,
@@ -1994,7 +1998,8 @@ mod tests {
                         );
                     },
                     || {
-                        let p = policy_clone.lock().unwrap();
+                        let p = try_lock(&policy_clone, "ssrf policy concurrent validate")
+                            .expect("ssrf policy validate mutex should not be poisoned");
                         let _ = p.validate();
                     },
                 ];
@@ -2014,7 +2019,8 @@ mod tests {
         }
 
         // Verify final state consistency
-        let final_policy = policy.lock().unwrap();
+        let final_policy = try_lock(&policy, "ssrf policy final consistency")
+            .expect("ssrf policy final mutex should not be poisoned");
         assert!(final_policy.validate().is_ok());
         assert!(final_policy.allowlist.len() <= 10); // At most 10 entries added
         assert!(final_policy.audit_log.len() >= 10); // At least 10 check operations
