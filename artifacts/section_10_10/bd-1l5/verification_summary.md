@@ -1,14 +1,14 @@
 # bd-1l5: Canonical Product Trust Object IDs with Domain Separation
 
-**Section:** 10.10 | **Verdict:** PASS | **Date:** 2026-02-21
+**Section:** 10.10 | **Verdict:** PASS | **Date:** 2026-05-15
 
 ## Metrics
 
 | Category | Pass | Total |
 |----------|------|-------|
-| Python verification checks | 96 | 96 |
-| Rust unit tests | 52 | 52 |
-| Simulation checks | 9 | 9 |
+| Python verification checks | 108 | 108 |
+| Rust unit tests | 80 | 80 |
+| Evidence analysis checks | 21 | 21 |
 
 ## Implementation
 
@@ -32,7 +32,7 @@
 - `short_form()` — `<prefix><first_8_hex>` for logging
 - `sha256_digest(data)` — compute SHA-256 hex digest
 - `canonical_bytes(data)` — deterministic serialization
-- `demo_trust_object_ids()` — demonstrate all 12 derivation combinations
+- `derive_trust_object_id_events(inputs)` — derive auditable ID events from caller-supplied trust objects
 
 ### Domain Prefixes (6)
 | Prefix | Domain | Description |
@@ -63,6 +63,6 @@
 ## Verification Commands
 
 ```bash
-python3 scripts/check_trust_object_ids.py --json    # 96/96 PASS
-python3 -m pytest tests/test_check_trust_object_ids.py  # Python unit tests
+python3 scripts/check_trust_object_ids.py --json    # 108/108 PASS
+python3 -m unittest tests/test_check_trust_object_ids.py  # Python unit tests
 ```

@@ -2,7 +2,7 @@
   "bead_id": "bd-1l5",
   "section": "10.10",
   "title": "Canonical product trust object IDs with domain separation",
-  "timestamp": "2026-02-21T01:25:00Z",
+  "timestamp": "2026-05-15T13:24:56Z",
   "verdict": "PASS",
   "files": {
     "spec": "docs/specs/section_10_10/bd-1l5_contract.md",
@@ -11,10 +11,10 @@
     "python_tests": "tests/test_check_trust_object_ids.py"
   },
   "metrics": {
-    "python_checks_total": 96,
-    "python_checks_passing": 96,
+    "python_checks_total": 108,
+    "python_checks_passing": 108,
     "python_checks_failing": 0,
-    "rust_unit_tests": 52,
+    "rust_unit_tests": 80,
     "structs_verified": 7,
     "event_codes_verified": 2,
     "error_codes_verified": 4,
@@ -23,7 +23,7 @@
     "domain_prefixes_verified": 6,
     "derivation_modes_verified": 2,
     "spec_sections_verified": 9,
-    "simulation_checks": 9,
+    "evidence_analysis_checks": 21,
     "acceptance_criteria_verified": 7
   },
   "acceptance_criteria": {

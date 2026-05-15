@@ -3,12 +3,21 @@
 import json
 import sys
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import check_trust_object_ids as mod
+import check_trust_object_ids as mod  # noqa: E402
+
+
+def _json_round_trip(value):
+    encoded = json.dumps(value)
+    try:
+        return json.JSONDecoder().decode(encoded)
+    except json.JSONDecodeError as exc:
+        raise AssertionError("JSON round-trip failed") from exc
 
 
 class TestConstants(unittest.TestCase):
@@ -37,42 +46,55 @@ class TestConstants(unittest.TestCase):
         self.assertGreaterEqual(len(mod.REQUIRED_SPEC_SECTIONS), 9)
 
 
-class TestSimulation(unittest.TestCase):
-    def test_deterministic(self):
-        result = mod.simulate_trust_object_ids()
-        self.assertTrue(result["deterministic"])
+class TestEvidenceAnalysis(unittest.TestCase):
+    def _valid_evidence(self):
+        data = mod._load_json(mod.EVIDENCE_FILE)
+        self.assertIsInstance(data, dict)
+        return deepcopy(data)
 
-    def test_different_inputs(self):
-        result = mod.simulate_trust_object_ids()
-        self.assertTrue(result["different_inputs_different"])
+    def test_valid_evidence_passes(self):
+        checks = mod.analyze_trust_object_evidence(self._valid_evidence())
+        self.assertTrue(all(c["pass"] for c in checks), self._failing(checks))
 
-    def test_cross_domain_unique(self):
-        result = mod.simulate_trust_object_ids()
-        self.assertTrue(result["cross_domain_unique"])
+    def test_empty_evidence_fails_closed(self):
+        checks = mod.analyze_trust_object_evidence({})
+        self.assertFalse(all(c["pass"] for c in checks))
+        self.assertTrue(any(c["check"] == "evidence verdict PASS" and not c["pass"] for c in checks))
 
-    def test_short_form_length(self):
-        result = mod.simulate_trust_object_ids()
-        self.assertEqual(result["short_form_length"], 8)
+    def test_bad_verdict_fails_closed(self):
+        data = self._valid_evidence()
+        data["verdict"] = "FAIL"
+        checks = mod.analyze_trust_object_evidence(data)
+        self.assertFalse(all(c["pass"] for c in checks))
+        self.assertTrue(any(c["check"] == "evidence verdict PASS" and not c["pass"] for c in checks))
 
-    def test_context_addressed(self):
-        result = mod.simulate_trust_object_ids()
-        self.assertTrue(result["context_addressed_works"])
+    def test_missing_acceptance_marker_fails_closed(self):
+        data = self._valid_evidence()
+        data["acceptance_criteria"]["AC1_domain_prefixes"] = "PASS"
+        checks = mod.analyze_trust_object_evidence(data)
+        self.assertFalse(all(c["pass"] for c in checks))
+        self.assertTrue(any(
+            c["check"] == "evidence acceptance AC1_domain_prefixes" and not c["pass"]
+            for c in checks
+        ))
 
-    def test_digest_256_bits(self):
-        result = mod.simulate_trust_object_ids()
-        self.assertTrue(result["digest_length_256_bits"])
+    def test_underreported_rust_tests_fail_closed(self):
+        data = self._valid_evidence()
+        data["metrics"]["rust_unit_tests"] = 0
+        checks = mod.analyze_trust_object_evidence(data)
+        self.assertFalse(all(c["pass"] for c in checks))
+        self.assertTrue(any(c["check"] == "evidence Rust unit test count" and not c["pass"] for c in checks))
 
-    def test_hex_digest(self):
-        result = mod.simulate_trust_object_ids()
-        self.assertTrue(result["digest_is_hex"])
+    def test_malformed_numeric_metric_fails_closed(self):
+        data = self._valid_evidence()
+        data["metrics"]["functions_verified"] = "many"
+        checks = mod.analyze_trust_object_evidence(data)
+        self.assertFalse(all(c["pass"] for c in checks))
+        self.assertTrue(any(c["check"] == "evidence function coverage" and not c["pass"] for c in checks))
 
-    def test_domain_prefix_count(self):
-        result = mod.simulate_trust_object_ids()
-        self.assertEqual(result["domain_prefix_count"], 6)
-
-    def test_derivation_mode_count(self):
-        result = mod.simulate_trust_object_ids()
-        self.assertEqual(result["derivation_mode_count"], 2)
+    def _failing(self, checks):
+        failures = [c for c in checks if not c["pass"]]
+        return "\n".join(f"  FAIL: {c['check']}: {c['detail']}" for c in failures[:10])
 
 
 class TestRunChecks(unittest.TestCase):
@@ -117,7 +139,7 @@ class TestSelfTest(unittest.TestCase):
 class TestJsonOutput(unittest.TestCase):
     def test_serializable(self):
         result = mod.run_checks()
-        parsed = json.loads(json.dumps(result))
+        parsed = _json_round_trip(result)
         self.assertEqual(parsed["bead_id"], "bd-1l5")
 
     def test_all_fields(self):
@@ -127,19 +149,19 @@ class TestJsonOutput(unittest.TestCase):
 
 
 class TestHelpers(unittest.TestCase):
-    def test_sha256_deterministic(self):
-        h1 = mod._sha256_hex(b"test data")
-        h2 = mod._sha256_hex(b"test data")
-        self.assertEqual(h1, h2)
+    def test_load_json_valid_artifact(self):
+        data = mod._load_json(mod.EVIDENCE_FILE)
+        self.assertIsInstance(data, dict)
+        self.assertEqual(data["bead_id"], "bd-1l5")
 
-    def test_sha256_distinct(self):
-        h1 = mod._sha256_hex(b"data-a")
-        h2 = mod._sha256_hex(b"data-b")
-        self.assertNotEqual(h1, h2)
+    def test_load_json_missing_file(self):
+        self.assertIsNone(mod._load_json(Path("/nonexistent/bd-1l5-evidence.json")))
 
-    def test_sha256_length(self):
-        h = mod._sha256_hex(b"test")
-        self.assertEqual(len(h), 64)
+    def test_pass_text_rejects_non_string(self):
+        self.assertEqual(mod._pass_text({"not": "text"}), "")
+
+    def test_metric_int_rejects_non_numeric(self):
+        self.assertEqual(mod._metric_int({"rust_unit_tests": "many"}, "rust_unit_tests"), 0)
 
 
 class TestFileChecks(unittest.TestCase):

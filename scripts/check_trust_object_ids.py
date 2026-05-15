@@ -7,14 +7,12 @@ Usage:
     python3 scripts/check_trust_object_ids.py --self-test # internal consistency
 """
 
-import hashlib
 import json
 import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 # ── File paths ─────────────────────────────────────────────────────────────
@@ -64,7 +62,7 @@ REQUIRED_FUNCTIONS = [
     "short_form",
     "sha256_digest",
     "canonical_bytes",
-    "demo_trust_object_ids",
+    "derive_trust_object_id_events",
     "is_valid_prefix",
     "domain_count",
     "from_prefix",
@@ -96,12 +94,18 @@ REQUIRED_SPEC_SECTIONS = [
     "Acceptance Criteria",
 ]
 
+REQUIRED_EVIDENCE_ACCEPTANCE = {
+    "AC1_domain_prefixes": ["PASS", "ext:", "tcard:", "rcpt:", "pchk:", "migr:", "vclaim:"],
+    "AC2_derivation_modes": ["PASS", "content", "context"],
+    "AC3_parse_validate": ["PASS", "parse", "validate"],
+    "AC4_cross_domain": ["PASS", "cross-domain"],
+    "AC5_representations": ["PASS", "short", "full"],
+    "AC6_deterministic": ["PASS", "same inputs"],
+    "AC7_sha256": ["PASS", "SHA-256", "256"],
+}
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
-
-def _sha256_hex(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
 
 def _read(path: Path) -> str:
     if path.exists():
@@ -109,8 +113,33 @@ def _read(path: Path) -> str:
     return ""
 
 
+def _load_json(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.JSONDecoder().decode(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    if isinstance(data, dict):
+        return data
+    return None
+
+
 def _check(name: str, ok: bool, detail: str = "") -> dict:
     return {"check": name, "pass": ok, "detail": detail or ("ok" if ok else "FAIL")}
+
+
+def _pass_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def _metric_int(metrics: dict, key: str) -> int:
+    try:
+        return int(metrics.get(key, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 # ── Check groups ───────────────────────────────────────────────────────────
@@ -262,7 +291,7 @@ def check_tests() -> list:
         ("error code tests", "test_error_codes"),
         ("serde roundtrip tests", "test_trust_object_id_serde"),
         ("send+sync tests", "test_types_send_sync"),
-        ("demo function test", "test_demo_trust_object_ids"),
+        ("event derivation tests", "test_derive_trust_object_id_events_uses_caller_inputs"),
         ("registry tests", "test_registry_new"),
         ("determinism tests", "test_content_addressed_deterministic"),
     ]
@@ -315,50 +344,91 @@ def check_acceptance_criteria() -> list:
     return checks
 
 
-def simulate_trust_object_ids() -> dict:
-    """Simulate trust object ID derivation and validation."""
-    results = {}
+def analyze_trust_object_evidence(data: dict | None = None) -> list:
+    """Verify bd-1l5 against checked evidence, not locally derived values."""
+    checks = []
+    evidence = data if data is not None else _load_json(EVIDENCE_FILE)
+    if evidence is None:
+        return [_check("evidence artifact readable", False, f"missing/invalid: {EVIDENCE_FILE}")]
 
-    # Content-addressed: same input → same digest
-    d1 = _sha256_hex(b"test-data")
-    d2 = _sha256_hex(b"test-data")
-    results["deterministic"] = d1 == d2
+    checks.append(_check("evidence bead id bd-1l5", evidence.get("bead_id") == "bd-1l5"))
+    checks.append(_check("evidence section 10.10", evidence.get("section") == "10.10"))
+    checks.append(_check("evidence verdict PASS", str(evidence.get("verdict", "")).upper() == "PASS"))
 
-    # Different inputs → different digests
-    d3 = _sha256_hex(b"other-data")
-    results["different_inputs_different"] = d1 != d3
+    files = evidence.get("files", {})
+    if not isinstance(files, dict):
+        files = {}
+    checks.append(_check(
+        "evidence references implementation",
+        files.get("implementation") == "crates/franken-node/src/connector/trust_object_id.rs",
+    ))
+    checks.append(_check(
+        "evidence references verifier tests",
+        files.get("python_tests") == "tests/test_check_trust_object_ids.py",
+    ))
 
-    # Cross-domain: same data + different prefix → different full IDs
-    prefixes = [p for _, p in DOMAIN_PREFIXES]
-    full_ids = set()
-    for prefix in prefixes:
-        full_id = f"{prefix}sha256:{d1}"
-        full_ids.add(full_id)
-    results["cross_domain_unique"] = len(full_ids) == 6
+    metrics = evidence.get("metrics", {})
+    if not isinstance(metrics, dict):
+        metrics = {}
+    checks.append(_check(
+        "evidence Rust unit test count",
+        _metric_int(metrics, "rust_unit_tests") >= 45,
+        f"{metrics.get('rust_unit_tests', 0)} Rust tests",
+    ))
+    checks.append(_check(
+        "evidence struct coverage",
+        metrics.get("structs_verified") == len(REQUIRED_STRUCTS),
+        f"{metrics.get('structs_verified')} / {len(REQUIRED_STRUCTS)}",
+    ))
+    checks.append(_check(
+        "evidence event code coverage",
+        metrics.get("event_codes_verified") == len(REQUIRED_EVENT_CODES),
+        f"{metrics.get('event_codes_verified')} / {len(REQUIRED_EVENT_CODES)}",
+    ))
+    checks.append(_check(
+        "evidence error code coverage",
+        metrics.get("error_codes_verified") == len(REQUIRED_ERROR_CODES),
+        f"{metrics.get('error_codes_verified')} / {len(REQUIRED_ERROR_CODES)}",
+    ))
+    checks.append(_check(
+        "evidence invariant coverage",
+        metrics.get("invariants_verified") == len(REQUIRED_INVARIANTS),
+        f"{metrics.get('invariants_verified')} / {len(REQUIRED_INVARIANTS)}",
+    ))
+    checks.append(_check(
+        "evidence function coverage",
+        _metric_int(metrics, "functions_verified") >= len(REQUIRED_FUNCTIONS),
+        f"{metrics.get('functions_verified')} / {len(REQUIRED_FUNCTIONS)}",
+    ))
+    checks.append(_check(
+        "evidence domain prefix coverage",
+        metrics.get("domain_prefixes_verified") == len(DOMAIN_PREFIXES),
+        f"{metrics.get('domain_prefixes_verified')} / {len(DOMAIN_PREFIXES)}",
+    ))
+    checks.append(_check(
+        "evidence derivation mode coverage",
+        metrics.get("derivation_modes_verified") == len(DERIVATION_MODES),
+        f"{metrics.get('derivation_modes_verified')} / {len(DERIVATION_MODES)}",
+    ))
+    checks.append(_check(
+        "evidence acceptance coverage",
+        metrics.get("acceptance_criteria_verified") == len(REQUIRED_EVIDENCE_ACCEPTANCE),
+        f"{metrics.get('acceptance_criteria_verified')} / {len(REQUIRED_EVIDENCE_ACCEPTANCE)}",
+    ))
 
-    # Short form: first 8 hex chars
-    short = d1[:8]
-    results["short_form_length"] = len(short)
+    acceptance = evidence.get("acceptance_criteria", {})
+    if not isinstance(acceptance, dict):
+        acceptance = {}
+    for criterion, required_tokens in REQUIRED_EVIDENCE_ACCEPTANCE.items():
+        text = _pass_text(acceptance.get(criterion))
+        present = [token for token in required_tokens if token in text]
+        checks.append(_check(
+            f"evidence acceptance {criterion}",
+            len(present) == len(required_tokens),
+            f"{len(present)}/{len(required_tokens)} required markers",
+        ))
 
-    # Context-addressed uses epoch + sequence
-    import struct
-    ctx_input = struct.pack(">QQ", 42, 7) + b"checkpoint-data"
-    ctx_digest = _sha256_hex(ctx_input)
-    results["context_addressed_works"] = len(ctx_digest) == 64
-
-    # Digest is 64 hex chars (256 bits)
-    results["digest_length_256_bits"] = len(d1) == 64
-
-    # All hex chars
-    results["digest_is_hex"] = all(c in "0123456789abcdef" for c in d1)
-
-    # 6 domain prefixes
-    results["domain_prefix_count"] = len(DOMAIN_PREFIXES)
-
-    # 2 derivation modes
-    results["derivation_mode_count"] = len(DERIVATION_MODES)
-
-    return results
+    return checks
 
 
 # ── Main check runner ──────────────────────────────────────────────────────
@@ -380,17 +450,7 @@ def run_checks() -> dict:
     checks.extend(check_send_sync())
     checks.extend(check_acceptance_criteria())
 
-    # Simulation checks
-    sim = simulate_trust_object_ids()
-    checks.append(_check("sim: deterministic derivation", sim["deterministic"]))
-    checks.append(_check("sim: different inputs differ", sim["different_inputs_different"]))
-    checks.append(_check("sim: cross-domain unique", sim["cross_domain_unique"]))
-    checks.append(_check("sim: short form 8 chars", sim["short_form_length"] == 8))
-    checks.append(_check("sim: context-addressed works", sim["context_addressed_works"]))
-    checks.append(_check("sim: 256-bit digest", sim["digest_length_256_bits"]))
-    checks.append(_check("sim: hex digest", sim["digest_is_hex"]))
-    checks.append(_check("sim: 6 domain prefixes", sim["domain_prefix_count"] == 6))
-    checks.append(_check("sim: 2 derivation modes", sim["derivation_mode_count"] == 2))
+    checks.extend(analyze_trust_object_evidence())
 
     passed = sum(1 for c in checks if c["pass"])
     failed = sum(1 for c in checks if not c["pass"])
@@ -424,10 +484,9 @@ def self_test() -> tuple:
     checks.append(_check("DERIVATION_MODES count", len(DERIVATION_MODES) == 2))
     checks.append(_check("REQUIRED_SPEC_SECTIONS count", len(REQUIRED_SPEC_SECTIONS) >= 9))
 
-    # Verify simulation
-    sim = simulate_trust_object_ids()
-    checks.append(_check("simulation returns dict", isinstance(sim, dict)))
-    checks.append(_check("simulation has deterministic key", "deterministic" in sim))
+    evidence_checks = analyze_trust_object_evidence()
+    checks.append(_check("evidence analysis returns checks", isinstance(evidence_checks, list)))
+    checks.append(_check("evidence analysis passes", all(c["pass"] for c in evidence_checks)))
 
     # Verify run_checks structure
     result = run_checks()
@@ -436,13 +495,6 @@ def self_test() -> tuple:
     checks.append(_check("run_checks has verdict", result.get("verdict") in ("PASS", "FAIL")))
     checks.append(_check("run_checks has checks list", isinstance(result.get("checks"), list)))
 
-    # Verify sha256 helper
-    h1 = _sha256_hex(b"test")
-    h2 = _sha256_hex(b"test")
-    checks.append(_check("sha256 deterministic", h1 == h2))
-    h3 = _sha256_hex(b"other")
-    checks.append(_check("sha256 distinct", h1 != h3))
-
     ok = all(c["pass"] for c in checks)
     return (ok, checks)
 
@@ -450,7 +502,7 @@ def self_test() -> tuple:
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 def main():
-    logger = configure_test_logging("check_trust_object_ids")
+    configure_test_logging("check_trust_object_ids")
     if "--self-test" in sys.argv:
         ok, checks = self_test()
         passed = sum(1 for c in checks if c["pass"])

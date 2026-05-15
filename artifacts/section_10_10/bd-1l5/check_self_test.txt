@@ -6,13 +6,11 @@
   [PASS] DOMAIN_PREFIXES count
   [PASS] DERIVATION_MODES count
   [PASS] REQUIRED_SPEC_SECTIONS count
-  [PASS] simulation returns dict
-  [PASS] simulation has deterministic key
+  [PASS] evidence analysis returns checks
+  [PASS] evidence analysis passes
   [PASS] run_checks has bead_id
   [PASS] run_checks has section
   [PASS] run_checks has verdict
   [PASS] run_checks has checks list
-  [PASS] sha256 deterministic
-  [PASS] sha256 distinct
 
-self-test: 16/16 PASS
+self-test: 14/14 PASS

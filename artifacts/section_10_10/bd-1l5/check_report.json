@@ -3,8 +3,8 @@
   "title": "Canonical product trust object IDs with domain separation",
   "section": "10.10",
   "verdict": "PASS",
-  "total": 96,
-  "passed": 96,
+  "total": 108,
+  "passed": 108,
   "failed": 0,
   "checks": [
     {
@@ -153,7 +153,7 @@
       "detail": "ok"
     },
     {
-      "check": "function demo_trust_object_ids",
+      "check": "function derive_trust_object_id_events",
       "pass": true,
       "detail": "ok"
     },
@@ -338,9 +338,9 @@
       "detail": "ok"
     },
     {
-      "check": "Rust unit tests present (52)",
+      "check": "Rust unit tests present (80)",
       "pass": true,
-      "detail": "52 tests found"
+      "detail": "80 tests found"
     },
     {
       "check": "test: domain prefix tests",
@@ -388,7 +388,7 @@
       "detail": "ok"
     },
     {
-      "check": "test: demo function test",
+      "check": "test: event derivation tests",
       "pass": true,
       "detail": "ok"
     },
@@ -443,49 +443,109 @@
       "detail": "ok"
     },
     {
-      "check": "sim: deterministic derivation",
+      "check": "evidence bead id bd-1l5",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: different inputs differ",
+      "check": "evidence section 10.10",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: cross-domain unique",
+      "check": "evidence verdict PASS",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: short form 8 chars",
+      "check": "evidence references implementation",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: context-addressed works",
+      "check": "evidence references verifier tests",
       "pass": true,
       "detail": "ok"
     },
     {
-      "check": "sim: 256-bit digest",
+      "check": "evidence Rust unit test count",
       "pass": true,
-      "detail": "ok"
+      "detail": "80 Rust tests"
     },
     {
-      "check": "sim: hex digest",
+      "check": "evidence struct coverage",
       "pass": true,
-      "detail": "ok"
+      "detail": "7 / 7"
     },
     {
-      "check": "sim: 6 domain prefixes",
+      "check": "evidence event code coverage",
       "pass": true,
-      "detail": "ok"
+      "detail": "2 / 2"
     },
     {
-      "check": "sim: 2 derivation modes",
+      "check": "evidence error code coverage",
       "pass": true,
-      "detail": "ok"
+      "detail": "4 / 4"
+    },
+    {
+      "check": "evidence invariant coverage",
+      "pass": true,
+      "detail": "4 / 4"
+    },
+    {
+      "check": "evidence function coverage",
+      "pass": true,
+      "detail": "12 / 12"
+    },
+    {
+      "check": "evidence domain prefix coverage",
+      "pass": true,
+      "detail": "6 / 6"
+    },
+    {
+      "check": "evidence derivation mode coverage",
+      "pass": true,
+      "detail": "2 / 2"
+    },
+    {
+      "check": "evidence acceptance coverage",
+      "pass": true,
+      "detail": "7 / 7"
+    },
+    {
+      "check": "evidence acceptance AC1_domain_prefixes",
+      "pass": true,
+      "detail": "7/7 required markers"
+    },
+    {
+      "check": "evidence acceptance AC2_derivation_modes",
+      "pass": true,
+      "detail": "3/3 required markers"
+    },
+    {
+      "check": "evidence acceptance AC3_parse_validate",
+      "pass": true,
+      "detail": "3/3 required markers"
+    },
+    {
+      "check": "evidence acceptance AC4_cross_domain",
+      "pass": true,
+      "detail": "2/2 required markers"
+    },
+    {
+      "check": "evidence acceptance AC5_representations",
+      "pass": true,
+      "detail": "3/3 required markers"
+    },
+    {
+      "check": "evidence acceptance AC6_deterministic",
+      "pass": true,
+      "detail": "2/2 required markers"
+    },
+    {
+      "check": "evidence acceptance AC7_sha256",
+      "pass": true,
+      "detail": "3/3 required markers"
     }
   ]
 }
