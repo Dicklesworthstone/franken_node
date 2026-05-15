@@ -6,6 +6,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -82,8 +83,12 @@ class TestJsonOutput(unittest.TestCase):
         out = subprocess.check_output(
             [sys.executable, str(ROOT / "scripts" / "check_cancellable_task_protocol.py"), "--json"],
             text=True,
+            timeout=30,
         )
-        data = json.loads(out)
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError as exc:
+            self.fail(f"checker did not emit valid JSON: {exc}: {out}")
         self.assertEqual(data["bead_id"], "bd-7om")
         self.assertTrue(data["overall_pass"])
         self.assertEqual(data["verdict"], "PASS")
@@ -148,6 +153,78 @@ class TestMissingSource(unittest.TestCase):
             mod.SRC = original
 
 
+class TestCommentOnlySource(unittest.TestCase):
+    """Comment-only protocol markers must not satisfy implementation checks."""
+
+    def test_comment_only_source_markers_fail_closed(self):
+        original_src = mod.SRC
+        original_mod = mod.MOD
+        commented_tests = "\n".join(
+            f"// #[test]\n// fn commented_protocol_test_{idx}() {{}}" for idx in range(15)
+        )
+        comment_only_src = f"""
+// trait CancellableTask
+// struct CancellationRuntime
+// enum DrainResult
+// struct FinalizeRecord
+// struct ObligationClosureProof
+// fn on_cancel
+// fn on_drain_complete
+// fn on_finalize
+// fn register_task
+// fn cancel_task
+// cxt-v1.0 Serialize Deserialize #[cfg(test)]
+/*
+FN-CX-001 FN-CX-002 FN-CX-003 FN-CX-004 FN-CX-005
+FN-CX-006 FN-CX-007 FN-CX-008 FN-CX-009 FN-CX-010
+ERR_CXT_INVALID_PHASE ERR_CXT_DRAIN_TIMEOUT ERR_CXT_CLOSURE_INCOMPLETE
+ERR_CXT_TASK_NOT_FOUND ERR_CXT_ALREADY_FINALIZED ERR_CXT_DUPLICATE_TASK
+INV-CXT-THREE-PHASE INV-CXT-DRAIN-BOUNDED INV-CXT-FINALIZE-RECORD
+INV-CXT-CLOSURE-COMPLETE INV-CXT-LANE-RELEASE INV-CXT-NESTED-PROPAGATION
+{commented_tests}
+*/
+"""
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_root = Path(temp_dir)
+                src_path = temp_root / "cancellable_task.rs"
+                mod_path = temp_root / "mod.rs"
+                src_path.write_text(comment_only_src, encoding="utf-8")
+                mod_path.write_text("pub mod cancellable_task;\n", encoding="utf-8")
+
+                mod.SRC = src_path
+                mod.MOD = mod_path
+                checks = {c["check"]: c["passed"] for c in mod._checks()}
+
+                self.assertTrue(checks["source file exists"])
+                self.assertTrue(checks["module wired in runtime/mod.rs"])
+                expected_failures = [
+                    "CancellableTask trait",
+                    "CancellationRuntime struct",
+                    "DrainResult enum",
+                    "FinalizeRecord struct",
+                    "ObligationClosureProof struct",
+                    "on_cancel method",
+                    "on_drain_complete method",
+                    "on_finalize method",
+                    "register_task function",
+                    "cancel_task function",
+                    "event codes (0/10)",
+                    "error codes (0/6)",
+                    "invariant constants (0/6)",
+                    "schema version cxt-v1.0",
+                    "Serialize/Deserialize derives",
+                    "unit tests >= 15 (0)",
+                    "#[cfg(test)] module",
+                ]
+                for check_name in expected_failures:
+                    self.assertIn(check_name, checks)
+                    self.assertFalse(checks[check_name], check_name)
+        finally:
+            mod.SRC = original_src
+            mod.MOD = original_mod
+
+
 class TestMissingSpec(unittest.TestCase):
     """When spec contract is missing, the relevant check should fail."""
 
@@ -168,21 +245,21 @@ class TestCliInterface(unittest.TestCase):
     def test_exit_code_zero(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_cancellable_task_protocol.py")],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_human_output_contains_pass(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_cancellable_task_protocol.py")],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=30,
         )
         self.assertIn("PASS", result.stdout)
 
     def test_self_test_cli(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_cancellable_task_protocol.py"), "--self-test"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("self_test passed", result.stdout)

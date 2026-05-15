@@ -12,10 +12,10 @@ import json
 import re
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 SRC = ROOT / "crates" / "franken-node" / "src" / "runtime" / "cancellable_task.rs"
@@ -69,10 +69,109 @@ def _read(p: Path) -> str:
     return p.read_text()
 
 
+def _strip_rust_comments(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+
+        raw_start = _rust_raw_string_start(text, i)
+        if raw_start is not None:
+            body_start, hashes = raw_start
+            end = _rust_raw_string_end(text, body_start + 1, hashes)
+            if end is None:
+                out.append(text[i:])
+                break
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if ch == '"':
+            end = _rust_quoted_literal_end(text, i, ch)
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if text.startswith("//", i):
+            newline = text.find("\n", i + 2)
+            if newline == -1:
+                break
+            out.append("\n")
+            i = newline + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _rust_raw_string_start(text: str, index: int) -> tuple[int, int] | None:
+    n = len(text)
+    if text.startswith("br", index):
+        cursor = index + 2
+    elif text.startswith("r", index):
+        cursor = index + 1
+    else:
+        return None
+
+    hashes = 0
+    while cursor < n and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+    if cursor < n and text[cursor] == '"':
+        return cursor, hashes
+    return None
+
+
+def _rust_raw_string_end(text: str, index: int, hashes: int) -> int | None:
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, index)
+    if end == -1:
+        return None
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, index: int, quote: str) -> int:
+    i = index + 1
+    n = len(text)
+    escaped = False
+    while i < n:
+        ch = text[i]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == quote:
+            return i + 1
+        i += 1
+    return n
+
+
+def _rust_block_comment_end(text: str, index: int) -> int:
+    depth = 1
+    i = index
+    n = len(text)
+    while i < n and depth:
+        if text.startswith("/*", i):
+            depth += 1
+            i += 2
+        elif text.startswith("*/", i):
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
+
+
 def _checks() -> list:
     results = []
-    src = _read(SRC)
-    mod_src = _read(MOD)
+    src = _strip_rust_comments(_read(SRC))
+    mod_src = _strip_rust_comments(_read(MOD))
 
     # --- File existence ---
     results.append(_check("source file exists", SRC.exists(), _safe_rel(SRC)))
@@ -178,7 +277,7 @@ def run_checks() -> dict:
 
 
 def main():
-    logger = configure_test_logging("check_cancellable_task_protocol")
+    configure_test_logging("check_cancellable_task_protocol")
     if "--self-test" in sys.argv:
         result = self_test()
         if result["verdict"] == "PASS":
