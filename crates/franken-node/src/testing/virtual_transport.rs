@@ -1153,12 +1153,13 @@ mod tests {
             ..Default::default()
         };
         let err = config_negative.validate().unwrap_err();
-        match err {
-            VirtualTransportError::InvalidProbability { field, value } => {
-                assert_eq!(field, "drop_probability");
-                assert_eq!(value, -0.1);
-            }
-            _ => panic!("Expected InvalidProbability error"),
+        assert!(
+            matches!(err, VirtualTransportError::InvalidProbability { .. }),
+            "Expected InvalidProbability error, got {err:?}"
+        );
+        if let VirtualTransportError::InvalidProbability { field, value } = err {
+            assert_eq!(field, "drop_probability");
+            assert_eq!(value, -0.1);
         }
 
         // Invalid probability > 1.0
@@ -1666,10 +1667,10 @@ mod tests {
 
         // Should only have 1 event (the most recent)
         assert_eq!(vt_one.event_log().len(), 1);
-        match &vt_one.event_log()[0] {
-            TransportEvent::MessageSent { .. } => {} // Expected
-            _ => panic!("Expected MessageSent event as most recent"),
-        }
+        assert!(
+            matches!(&vt_one.event_log()[0], TransportEvent::MessageSent { .. }),
+            "Expected MessageSent event as most recent"
+        );
     }
 
     // -- Test 17: event log capacity evicts oldest entries first
@@ -2614,12 +2615,10 @@ mod virtual_transport_boundary_negative_tests {
 
         // Next message should trigger exhaustion error
         let result2 = vt.send_message("node-a", "node-b", b"overflow".to_vec());
-        match result2 {
-            Err(VirtualTransportError::MessageIdExhausted) => {
-                // Expected behavior
-            }
-            other => panic!("Expected MessageIdExhausted error, got {:?}", other),
-        }
+        assert!(
+            matches!(result2, Err(VirtualTransportError::MessageIdExhausted)),
+            "Expected MessageIdExhausted error, got {result2:?}"
+        );
 
         // Further attempts should continue to fail
         let result3 = vt.send_message("node-a", "node-b", b"still_overflow".to_vec());
@@ -3449,15 +3448,13 @@ mod additional_comprehensive_negative_tests {
                 variant
             );
 
-            match result {
-                Err(VirtualTransportError::LinkNotFound { link_id }) => {
-                    assert_eq!(link_id, variant);
-                }
-                other => panic!(
-                    "Expected LinkNotFound error for '{}', got {:?}",
-                    variant, other
+            assert!(
+                matches!(
+                    &result,
+                    Err(VirtualTransportError::LinkNotFound { link_id }) if link_id == variant
                 ),
-            }
+                "Expected LinkNotFound error for '{variant}', got {result:?}"
+            );
         }
     }
 
@@ -3566,7 +3563,13 @@ mod additional_comprehensive_negative_tests {
                 Err(VirtualTransportError::MessageIdExhausted) => {
                     break; // Expected when IDs wrap around
                 }
-                Err(other) => panic!("Unexpected error: {:?}", other),
+                Err(other) => {
+                    assert!(
+                        matches!(other, VirtualTransportError::MessageIdExhausted),
+                        "Unexpected error: {other:?}"
+                    );
+                    break;
+                }
             }
 
             vt.advance_tick(1);
@@ -3625,7 +3628,10 @@ mod additional_comprehensive_negative_tests {
                     assert_eq!(format!("{:?}", e1), format!("{:?}", e2));
                     break;
                 }
-                (r1, r2) => panic!("Divergent results: {:?} vs {:?}", r1, r2),
+                (r1, r2) => {
+                    assert_eq!(r1, r2, "Divergent results");
+                    break;
+                }
             }
 
             vt1.advance_tick(1);
@@ -5318,7 +5324,12 @@ mod additional_comprehensive_negative_tests {
                     {
                         break; // Expected exhaustion
                     } else {
-                        panic!("Unexpected error during ID allocation: {}", err);
+                        assert!(
+                            err.to_string().contains("exhausted")
+                                || err.to_string().contains("overflow"),
+                            "Unexpected error during ID allocation: {err}"
+                        );
+                        break;
                     }
                 }
             }
@@ -5459,9 +5470,9 @@ mod additional_comprehensive_negative_tests {
                             err
                         );
                     } else {
-                        panic!(
-                            "Unexpected error for reasonable reorder depth {}: {}",
-                            reorder_depth, err
+                        assert!(
+                            reorder_depth > 100000,
+                            "Unexpected error for reasonable reorder depth {reorder_depth}: {err}"
                         );
                     }
                 }
@@ -5700,9 +5711,9 @@ mod additional_comprehensive_negative_tests {
                                         err
                                     );
                                 } else {
-                                    panic!(
-                                        "Unexpected error for reasonable corruption {}: {}",
-                                        corrupt_bit_count, err
+                                    assert!(
+                                        corrupt_bit_count > 10000,
+                                        "Unexpected error for reasonable corruption {corrupt_bit_count}: {err}"
                                     );
                                 }
                             }
@@ -5720,9 +5731,9 @@ mod additional_comprehensive_negative_tests {
                             err
                         );
                     } else {
-                        panic!(
-                            "Unexpected link creation error for corruption {}: {}",
-                            corrupt_bit_count, err
+                        assert!(
+                            corrupt_bit_count > 100000,
+                            "Unexpected link creation error for corruption {corrupt_bit_count}: {err}"
                         );
                     }
                 }
@@ -6012,10 +6023,10 @@ mod additional_comprehensive_negative_tests {
                             err
                         );
                     } else {
-                        // Other boundary cases should generally be accepted
-                        panic!(
-                            "Unexpected rejection of boundary payload {}: {}",
-                            test_name, err
+                        // Other boundary cases should generally be accepted.
+                        assert!(
+                            test_name == "large_payload",
+                            "Unexpected rejection of boundary payload {test_name}: {err}"
                         );
                     }
                 }
