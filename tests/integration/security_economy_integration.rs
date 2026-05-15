@@ -166,9 +166,10 @@ fn register_basic_verifier(
 /// authoritative for total inflow. Cross-checks: balance never exceeds
 /// deposited, slashed_total never exceeds deposited, sums are finite u64.
 fn assert_stake_conservation(ledger: &StakingLedger, publisher_id: &str, ctx: &str) {
+    let missing_account = format!("[{ctx}] missing account for {publisher_id}");
     let account = ledger
         .get_account(publisher_id)
-        .unwrap_or_else(|| panic!("[{ctx}] missing account for {publisher_id}"));
+        .expect(missing_account.as_str());
     debug!(
         publisher_id,
         balance = account.balance,
@@ -259,10 +260,9 @@ fn test_trust_aggregator_scores_verifier() {
     let trace_labels = ["t1", "t2", "t3", "t4", "t5"];
     let mut scores = Vec::new();
     for label in trace_labels {
-        let dim = if label == "t3" {
-            VerificationDimension::Compatibility
-        } else {
-            VerificationDimension::Conformance
+        let dim = match label {
+            "t3" => VerificationDimension::Compatibility,
+            _ => VerificationDimension::Conformance,
         };
         let sub = signed_submission(&verifier_id, &key, dim, label);
         scores.push(sub.claim.score);
@@ -702,7 +702,12 @@ fn test_rewards_finalized_on_epoch_boundary() {
     let row = scoreboard
         .entries
         .iter()
-        .find(|e| e.verifier_id == verifier_id)
+        .find(|e| {
+            matches!(
+                e.verifier_id.as_str().cmp(verifier_id.as_str()),
+                std::cmp::Ordering::Equal
+            )
+        })
         .expect("entry for verifier");
     assert!(row.attestation_count >= 3);
     assert!(row.dimensions_covered.len() >= 3);
