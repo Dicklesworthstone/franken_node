@@ -43,6 +43,8 @@ use frankenengine_node::security::bpet::adversarial_scenarios::{
     synthesize_slow_roll_drift,
 };
 
+type TestResult = Result<(), String>;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -62,14 +64,14 @@ fn fixtures_dir() -> PathBuf {
 }
 
 /// Load `<fixtures_dir>/<name>.json` via the real
-/// [`load_scenario_fixture`] surface. Panics on I/O or validation failure
-/// so test names cite the offending fixture.
-fn load_scenario_from_path(name: &str) -> AdversarialScenarioFixture {
+/// [`load_scenario_fixture`] surface with explicit fixture context on
+/// I/O and validation failures.
+fn load_scenario_from_path(name: &str) -> Result<AdversarialScenarioFixture, String> {
     let path = fixtures_dir().join(format!("{name}.json"));
     let json = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read fixture `{}` ({}): {e}", name, path.display()));
+        .map_err(|e| format!("read fixture `{}` ({}): {e}", name, path.display()))?;
     load_scenario_fixture(&json)
-        .unwrap_or_else(|e| panic!("load fixture `{}` ({}): {e:?}", name, path.display()))
+        .map_err(|e| format!("load fixture `{}` ({}): {e:?}", name, path.display()))
 }
 
 /// Assert the verdict-kind axis matches.
@@ -92,9 +94,12 @@ fn verdict_kind_aligned(expected: &ExpectedVerdict, actual: &ScenarioVerdict) ->
 /// Run the fixture, assert `passed`, kind-match, and (when bounded) the
 /// at-step lies within the inclusive `[lower, upper]` window. Returns the
 /// captured [`ScenarioVerdictMatch`] so callers can inspect diagnostics.
-fn run_and_assert(name: &str, fixture: &AdversarialScenarioFixture) -> ScenarioVerdictMatch {
+fn run_and_assert(
+    name: &str,
+    fixture: &AdversarialScenarioFixture,
+) -> Result<ScenarioVerdictMatch, String> {
     let m = evaluate_scenario_fixture(fixture)
-        .unwrap_or_else(|e| panic!("evaluate fixture `{name}`: {e:?}"));
+        .map_err(|e| format!("evaluate fixture `{name}`: {e:?}"))?;
 
     assert!(
         verdict_kind_aligned(&fixture.expected_verdict, &m.actual_verdict),
@@ -123,7 +128,7 @@ fn run_and_assert(name: &str, fixture: &AdversarialScenarioFixture) -> ScenarioV
     // Cross-check at-step bound semantics directly against the structured
     // verdict so a regression that loses the bounds inside
     // ScenarioVerdictMatch.passed still trips this test.
-    match (&fixture.expected_verdict, m.actual_verdict) {
+    match (&fixture.expected_verdict, &m.actual_verdict) {
         (
             ExpectedVerdict::CaughtEarly {
                 at_step_lower,
@@ -132,10 +137,10 @@ fn run_and_assert(name: &str, fixture: &AdversarialScenarioFixture) -> ScenarioV
             ScenarioVerdict::CaughtEarly { at_step },
         ) => {
             assert!(
-                at_step >= *at_step_lower && at_step <= *at_step_upper,
+                *at_step >= *at_step_lower && *at_step <= *at_step_upper,
                 "fixture `{name}` caught_early at_step={at_step} outside [{at_step_lower}, {at_step_upper}]",
             );
-            assert_eq!(m.actual_first_detection_at, Some(at_step));
+            assert_eq!(m.actual_first_detection_at, Some(*at_step));
         }
         (
             ExpectedVerdict::CaughtLate {
@@ -148,11 +153,11 @@ fn run_and_assert(name: &str, fixture: &AdversarialScenarioFixture) -> ScenarioV
             },
         ) => {
             assert!(
-                at_step >= *at_step_lower && at_step <= *at_step_upper,
+                *at_step >= *at_step_lower && *at_step <= *at_step_upper,
                 "fixture `{name}` caught_late at_step={at_step} outside [{at_step_lower}, {at_step_upper}]",
             );
-            assert_eq!(total_steps, fixture.scenario.n_steps);
-            assert_eq!(m.actual_first_detection_at, Some(at_step));
+            assert_eq!(*total_steps, fixture.scenario.n_steps);
+            assert_eq!(m.actual_first_detection_at, Some(*at_step));
         }
         (ExpectedVerdict::MissedEntirely, ScenarioVerdict::MissedEntirely) => {
             assert!(
@@ -161,10 +166,14 @@ fn run_and_assert(name: &str, fixture: &AdversarialScenarioFixture) -> ScenarioV
                 m.actual_first_detection_at,
             );
         }
-        _ => unreachable!("kind alignment was just asserted above"),
+        (expected, actual) => {
+            return Err(format!(
+                "fixture `{name}` verdict-kind mismatch after alignment: expected {expected:?}, actual {actual:?}"
+            ));
+        }
     }
 
-    m
+    Ok(m)
 }
 
 // ---------------------------------------------------------------------------
@@ -172,19 +181,20 @@ fn run_and_assert(name: &str, fixture: &AdversarialScenarioFixture) -> ScenarioV
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_slow_roll_drift_caught_late_within_bounds() {
-    let fixture = load_scenario_from_path("slow_roll_drift");
+fn test_slow_roll_drift_caught_late_within_bounds() -> TestResult {
+    let fixture = load_scenario_from_path("slow_roll_drift")?;
     assert_eq!(fixture.scenario.kind, AdversaryKind::SlowRollDrift);
     assert!(matches!(
         fixture.expected_verdict,
         ExpectedVerdict::CaughtLate { .. }
     ));
-    run_and_assert("slow_roll_drift", &fixture);
+    run_and_assert("slow_roll_drift", &fixture)?;
+    Ok(())
 }
 
 #[test]
-fn test_capability_creep_disguised_as_feature_caught_late_within_bounds() {
-    let fixture = load_scenario_from_path("capability_creep_disguised_as_feature");
+fn test_capability_creep_disguised_as_feature_caught_late_within_bounds() -> TestResult {
+    let fixture = load_scenario_from_path("capability_creep_disguised_as_feature")?;
     assert_eq!(
         fixture.scenario.kind,
         AdversaryKind::CapabilityCreepDisguisedAsFeature
@@ -193,12 +203,13 @@ fn test_capability_creep_disguised_as_feature_caught_late_within_bounds() {
         fixture.expected_verdict,
         ExpectedVerdict::CaughtLate { .. }
     ));
-    run_and_assert("capability_creep_disguised_as_feature", &fixture);
+    run_and_assert("capability_creep_disguised_as_feature", &fixture)?;
+    Ok(())
 }
 
 #[test]
-fn test_eviction_via_trust_flooding_caught_early_within_bounds() {
-    let fixture = load_scenario_from_path("eviction_via_trust_flooding");
+fn test_eviction_via_trust_flooding_caught_early_within_bounds() -> TestResult {
+    let fixture = load_scenario_from_path("eviction_via_trust_flooding")?;
     assert_eq!(
         fixture.scenario.kind,
         AdversaryKind::EvictionViaTrustFlooding
@@ -207,25 +218,27 @@ fn test_eviction_via_trust_flooding_caught_early_within_bounds() {
         fixture.expected_verdict,
         ExpectedVerdict::CaughtEarly { .. }
     ));
-    run_and_assert("eviction_via_trust_flooding", &fixture);
+    run_and_assert("eviction_via_trust_flooding", &fixture)?;
+    Ok(())
 }
 
 #[test]
-fn test_many_tiny_updates_missed_entirely() {
-    let fixture = load_scenario_from_path("many_tiny_updates");
+fn test_many_tiny_updates_missed_entirely() -> TestResult {
+    let fixture = load_scenario_from_path("many_tiny_updates")?;
     assert_eq!(fixture.scenario.kind, AdversaryKind::ManyTinyUpdates);
     assert!(matches!(
         fixture.expected_verdict,
         ExpectedVerdict::MissedEntirely
     ));
-    let m = run_and_assert("many_tiny_updates", &fixture);
+    let m = run_and_assert("many_tiny_updates", &fixture)?;
     assert_eq!(m.actual_verdict, ScenarioVerdict::MissedEntirely);
     assert!(m.actual_first_detection_at.is_none());
+    Ok(())
 }
 
 #[test]
-fn test_multi_persona_coordination_caught_early_within_bounds() {
-    let fixture = load_scenario_from_path("multi_persona_coordination");
+fn test_multi_persona_coordination_caught_early_within_bounds() -> TestResult {
+    let fixture = load_scenario_from_path("multi_persona_coordination")?;
     assert_eq!(
         fixture.scenario.kind,
         AdversaryKind::MultiPersonaCoordination
@@ -234,40 +247,44 @@ fn test_multi_persona_coordination_caught_early_within_bounds() {
         fixture.expected_verdict,
         ExpectedVerdict::CaughtEarly { .. }
     ));
-    run_and_assert("multi_persona_coordination", &fixture);
+    run_and_assert("multi_persona_coordination", &fixture)?;
+    Ok(())
 }
 
 #[test]
-fn test_false_recovery_claim_caught_late_within_bounds() {
-    let fixture = load_scenario_from_path("false_recovery_claim");
+fn test_false_recovery_claim_caught_late_within_bounds() -> TestResult {
+    let fixture = load_scenario_from_path("false_recovery_claim")?;
     assert_eq!(fixture.scenario.kind, AdversaryKind::FalseRecoveryClaim);
     assert!(matches!(
         fixture.expected_verdict,
         ExpectedVerdict::CaughtLate { .. }
     ));
-    run_and_assert("false_recovery_claim", &fixture);
+    run_and_assert("false_recovery_claim", &fixture)?;
+    Ok(())
 }
 
 #[test]
-fn test_indirect_via_dep_caught_late_within_bounds() {
-    let fixture = load_scenario_from_path("indirect_via_dep");
+fn test_indirect_via_dep_caught_late_within_bounds() -> TestResult {
+    let fixture = load_scenario_from_path("indirect_via_dep")?;
     assert_eq!(fixture.scenario.kind, AdversaryKind::IndirectViaDep);
     assert!(matches!(
         fixture.expected_verdict,
         ExpectedVerdict::CaughtLate { .. }
     ));
-    run_and_assert("indirect_via_dep", &fixture);
+    run_and_assert("indirect_via_dep", &fixture)?;
+    Ok(())
 }
 
 #[test]
-fn test_signature_rollover_caught_early_within_bounds() {
-    let fixture = load_scenario_from_path("signature_rollover");
+fn test_signature_rollover_caught_early_within_bounds() -> TestResult {
+    let fixture = load_scenario_from_path("signature_rollover")?;
     assert_eq!(fixture.scenario.kind, AdversaryKind::SignatureRollover);
     assert!(matches!(
         fixture.expected_verdict,
         ExpectedVerdict::CaughtEarly { .. }
     ));
-    run_and_assert("signature_rollover", &fixture);
+    run_and_assert("signature_rollover", &fixture)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +292,7 @@ fn test_signature_rollover_caught_early_within_bounds() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_in_code_synthesizers_match_json_fixtures() {
+fn test_in_code_synthesizers_match_json_fixtures() -> TestResult {
     // Map kind -> on-disk fixture name. Every variant must be present.
     let pairs: [(AdversaryKind, &str, AdversarialScenarioFixture); 8] = [
         (
@@ -321,7 +338,7 @@ fn test_in_code_synthesizers_match_json_fixtures() {
     ];
 
     for (kind, name, synthesized) in pairs {
-        let loaded = load_scenario_from_path(name);
+        let loaded = load_scenario_from_path(name)?;
         assert_eq!(
             synthesized.scenario.kind, kind,
             "synthesizer for `{name}` reports wrong kind",
@@ -335,10 +352,11 @@ fn test_in_code_synthesizers_match_json_fixtures() {
             "JSON fixture `{name}` diverges from in-code synthesizer",
         );
     }
+    Ok(())
 }
 
 #[test]
-fn test_run_scenario_deterministic_across_two_runs() {
+fn test_run_scenario_deterministic_across_two_runs() -> TestResult {
     // For each canonical fixture, two independent harness instances must
     // produce a byte-identical EvolutionResult. This locks the harness as
     // a pure function of (scenario, baseline, thresholds).
@@ -346,12 +364,12 @@ fn test_run_scenario_deterministic_across_two_runs() {
         let mut harness_a =
             AdversarialHarness::new(fixture.thresholds).expect("harness a constructs");
         let result_a = run_scenario(&mut harness_a, &fixture.scenario, &fixture.baseline)
-            .unwrap_or_else(|e| panic!("run_scenario A `{}`: {e:?}", fixture.name));
+            .map_err(|e| format!("run_scenario A `{}`: {e:?}", fixture.name))?;
 
         let mut harness_b =
             AdversarialHarness::new(fixture.thresholds).expect("harness b constructs");
         let result_b = run_scenario(&mut harness_b, &fixture.scenario, &fixture.baseline)
-            .unwrap_or_else(|e| panic!("run_scenario B `{}`: {e:?}", fixture.name));
+            .map_err(|e| format!("run_scenario B `{}`: {e:?}", fixture.name))?;
 
         assert_eq!(
             result_a, result_b,
@@ -361,15 +379,16 @@ fn test_run_scenario_deterministic_across_two_runs() {
 
         // Determinism must also hold for the higher-level evaluator path.
         let m_a = evaluate_scenario_fixture(&fixture)
-            .unwrap_or_else(|e| panic!("evaluate A `{}`: {e:?}", fixture.name));
+            .map_err(|e| format!("evaluate A `{}`: {e:?}", fixture.name))?;
         let m_b = evaluate_scenario_fixture(&fixture)
-            .unwrap_or_else(|e| panic!("evaluate B `{}`: {e:?}", fixture.name));
+            .map_err(|e| format!("evaluate B `{}`: {e:?}", fixture.name))?;
         assert_eq!(
             m_a, m_b,
             "fixture `{}` evaluator output non-deterministic",
             fixture.name,
         );
     }
+    Ok(())
 }
 
 #[test]
@@ -427,7 +446,7 @@ fn test_invalid_at_step_bounds_rejected_at_load() {
 }
 
 #[test]
-fn test_all_eight_adversary_kinds_have_corresponding_scenario() {
+fn test_all_eight_adversary_kinds_have_corresponding_scenario() -> TestResult {
     // Every variant from the AdversaryKind enum must have a JSON fixture
     // on disk. We enumerate the variants statically so missing kinds break
     // the build (`AdversaryKind` is non-exhaustive at the match arm).
@@ -454,14 +473,15 @@ fn test_all_eight_adversary_kinds_have_corresponding_scenario() {
     // verification gate (sub-task 5) will exercise.
     let dir = fixtures_dir();
     let entries =
-        fs::read_dir(&dir).unwrap_or_else(|e| panic!("read fixture dir `{}`: {e}", dir.display()));
+        fs::read_dir(&dir).map_err(|e| format!("read fixture dir `{}`: {e}", dir.display()))?;
 
     let mut observed: BTreeSet<AdversaryKind> = BTreeSet::new();
     let mut observed_files: BTreeSet<String> = BTreeSet::new();
     for entry in entries {
-        let entry = entry.expect("dir entry");
+        let entry =
+            entry.map_err(|e| format!("read fixture dir entry `{}`: {e}", dir.display()))?;
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+        if !matches!(path.extension().and_then(|s| s.to_str()), Some("json")) {
             continue;
         }
         let name = path
@@ -469,7 +489,7 @@ fn test_all_eight_adversary_kinds_have_corresponding_scenario() {
             .and_then(|s| s.to_str())
             .expect("fixture file stem")
             .to_string();
-        let fixture = load_scenario_from_path(&name);
+        let fixture = load_scenario_from_path(&name)?;
 
         // `name` field must match the on-disk basename — guards against a
         // mis-shelved fixture impersonating a different kind.
@@ -505,4 +525,5 @@ fn test_all_eight_adversary_kinds_have_corresponding_scenario() {
         observed_files.len(),
         observed_files,
     );
+    Ok(())
 }
