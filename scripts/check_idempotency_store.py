@@ -6,6 +6,7 @@ Usage:
     python3 scripts/check_idempotency_store.py --json      # machine-readable
     python3 scripts/check_idempotency_store.py --self-test  # internal consistency
 """
+# ruff: noqa: E402
 
 import hashlib
 import json
@@ -77,13 +78,20 @@ def _read(path: Path) -> str:
     return ""
 
 
+def _read_json(path: Path) -> tuple[dict | None, str]:
+    try:
+        data = json.JSONDecoder().decode(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, "missing"
+    except json.JSONDecodeError as exc:
+        return None, f"invalid JSON: {exc}"
+    if not isinstance(data, dict):
+        return None, "top-level JSON must be an object"
+    return data, "valid JSON object"
+
+
 def _check(name: str, ok: bool, detail: str = "") -> dict:
     return {"check": name, "pass": ok, "detail": detail or ("ok" if ok else "FAIL")}
-
-
-def _is_expired(now_secs: int, created_at_secs: int, ttl_secs: int) -> bool:
-    """Mirror DedupeEntry::is_expired(): now >= created_at + ttl."""
-    return now_secs >= (created_at_secs + ttl_secs)
 
 
 def _content_hash_block() -> str:
@@ -262,41 +270,61 @@ def check_dedupe_result_variants() -> list:
     return checks
 
 
-# ── Simulation ─────────────────────────────────────────────────────────────
+# ── Evidence analysis ──────────────────────────────────────────────────────
 
-def simulate_dedupe_store() -> dict:
-    results = {}
+def analyze_dedupe_store_evidence(evidence_path: Path = EVIDENCE_FILE) -> dict:
+    evidence, detail = _read_json(evidence_path)
+    src = _read(IMPL_FILE)
 
-    # hash_payload determinism
-    h1 = _sha256_hex(b"payload-a")
-    h2 = _sha256_hex(b"payload-a")
-    results["hash_deterministic"] = h1 == h2
+    if evidence is None:
+        return {
+            "valid_evidence": False,
+            "detail": detail,
+            "verdict_ok": False,
+            "rust_test_count": 0,
+            "python_test_count": 0,
+            "event_codes_match": False,
+            "invariants_covered": False,
+            "core_variants_covered": False,
+            "ttl_expiration_verified": False,
+            "conflict_detection_verified": False,
+            "content_hash_determinism_verified": False,
+            "schema_version_matches": False,
+            "default_ttl_matches": False,
+            "hash_payload_test_present": False,
+            "ttl_boundary_test_present": False,
+            "ttl_live_window_test_present": False,
+        }
 
-    # different payloads -> different hashes
-    h3 = _sha256_hex(b"payload-b")
-    results["hash_differs"] = h1 != h3
+    capabilities = evidence.get("capabilities_verified", {})
+    dedupe_results = set(capabilities.get("dedupe_results", []))
+    invariants = set(evidence.get("invariants_verified", []))
 
-    # TTL expiry logic mirrors DedupeEntry::is_expired(): now >= created_at + ttl
-    created_at = 1000
-    ttl = 100
-    expiry_cutoff = created_at + ttl
-    now = 1101
-    results["ttl_boundary_expired"] = _is_expired(expiry_cutoff, created_at, ttl)
-    results["ttl_expired"] = _is_expired(now, created_at, ttl)
-
-    # Strictly before the cutoff should remain live.
-    results["ttl_not_expired"] = not _is_expired(expiry_cutoff - 1, created_at, ttl)
-
-    # 7 event codes
-    results["event_code_count"] = len(REQUIRED_EVENT_CODES)
-
-    # 5 invariants
-    results["invariant_count"] = len(REQUIRED_INVARIANTS)
-
-    # 5 core types
-    results["core_type_count"] = len(REQUIRED_CORE_TYPES)
-
-    return results
+    return {
+        "valid_evidence": True,
+        "detail": detail,
+        "verdict_ok": evidence.get("verdict") == "PASS",
+        "rust_test_count": int(evidence.get("rust_test_count", 0)),
+        "python_test_count": int(evidence.get("python_test_count", 0)),
+        "event_codes_match": evidence.get("event_codes_defined") == len(REQUIRED_EVENT_CODES),
+        "invariants_covered": set(REQUIRED_INVARIANTS).issubset(invariants),
+        "core_variants_covered": {"New", "Duplicate", "Conflict", "InFlight"}.issubset(
+            dedupe_results
+        ),
+        "ttl_expiration_verified": bool(capabilities.get("ttl_expiration")),
+        "conflict_detection_verified": bool(capabilities.get("conflict_detection")),
+        "content_hash_determinism_verified": bool(
+            capabilities.get("content_hash_determinism")
+        ),
+        "schema_version_matches": evidence.get("schema_version") == "ids-v1.0",
+        "default_ttl_matches": evidence.get("default_ttl_secs") == 604_800,
+        "hash_payload_test_present": "fn test_hash_payload_deterministic()" in src,
+        "ttl_boundary_test_present": "fn entry_expired_at_exact_ttl_boundary()" in src
+        and "entry.is_expired(1100)" in src
+        and "entry.is_expired(1099)" in src,
+        "ttl_live_window_test_present": "fn test_sweep_leaves_unexpired()" in src
+        and "sweep_expired(1101" in src,
+    }
 
 
 # ── Main check runner ──────────────────────────────────────────────────────
@@ -320,15 +348,22 @@ def _checks() -> list:
     checks.extend(check_schema_version())
     checks.extend(check_dedupe_result_variants())
 
-    sim = simulate_dedupe_store()
-    checks.append(_check("sim: hash deterministic", sim["hash_deterministic"]))
-    checks.append(_check("sim: hash differs for different payloads", sim["hash_differs"]))
-    checks.append(_check("sim: TTL boundary expires correctly", sim["ttl_boundary_expired"]))
-    checks.append(_check("sim: TTL expired correctly", sim["ttl_expired"]))
-    checks.append(_check("sim: TTL not expired within window", sim["ttl_not_expired"]))
-    checks.append(_check("sim: 7 event codes", sim["event_code_count"] == 7))
-    checks.append(_check("sim: 5 invariants", sim["invariant_count"] == 5))
-    checks.append(_check("sim: 5 core types", sim["core_type_count"] == 5))
+    evidence = analyze_dedupe_store_evidence()
+    checks.append(_check("evidence: verification artifact loads", evidence["valid_evidence"], evidence["detail"]))
+    checks.append(_check("evidence: pass verdict", evidence["verdict_ok"]))
+    checks.append(_check("evidence: rust tests recorded", evidence["rust_test_count"] >= 20))
+    checks.append(_check("evidence: python tests recorded", evidence["python_test_count"] >= 28))
+    checks.append(_check("evidence: 7 event codes recorded", evidence["event_codes_match"]))
+    checks.append(_check("evidence: 5 invariants covered", evidence["invariants_covered"]))
+    checks.append(_check("evidence: dedupe result variants covered", evidence["core_variants_covered"]))
+    checks.append(_check("evidence: TTL expiration verified", evidence["ttl_expiration_verified"]))
+    checks.append(_check("evidence: conflict detection verified", evidence["conflict_detection_verified"]))
+    checks.append(_check("evidence: content hash determinism verified", evidence["content_hash_determinism_verified"]))
+    checks.append(_check("evidence: schema version matches", evidence["schema_version_matches"]))
+    checks.append(_check("evidence: default TTL matches", evidence["default_ttl_matches"]))
+    checks.append(_check("source test: hash payload deterministic", evidence["hash_payload_test_present"]))
+    checks.append(_check("source test: exact TTL boundary", evidence["ttl_boundary_test_present"]))
+    checks.append(_check("source test: unexpired sweep window", evidence["ttl_live_window_test_present"]))
 
     return checks
 
@@ -361,11 +396,11 @@ def self_test() -> tuple:
     checks.append(_check("REQUIRED_CORE_TYPES count", len(REQUIRED_CORE_TYPES) == 5))
     checks.append(_check("REQUIRED_OPERATIONS count", len(REQUIRED_OPERATIONS) >= 8))
 
-    sim = simulate_dedupe_store()
-    checks.append(_check("simulation returns dict", isinstance(sim, dict)))
-    checks.append(_check("simulation hash_deterministic", sim["hash_deterministic"]))
-    checks.append(_check("simulation ttl_boundary_expired", sim["ttl_boundary_expired"]))
-    checks.append(_check("simulation ttl_expired", sim["ttl_expired"]))
+    evidence = analyze_dedupe_store_evidence()
+    checks.append(_check("evidence analysis returns dict", isinstance(evidence, dict)))
+    checks.append(_check("evidence analysis pass verdict", evidence["verdict_ok"]))
+    checks.append(_check("evidence analysis TTL boundary test", evidence["ttl_boundary_test_present"]))
+    checks.append(_check("evidence analysis hash payload test", evidence["hash_payload_test_present"]))
 
     result = run_checks()
     checks.append(_check("run_checks has bead_id", result.get("bead_id") == "bd-206h"))
@@ -381,7 +416,7 @@ def self_test() -> tuple:
 
 
 def main():
-    logger = configure_test_logging("check_idempotency_store")
+    configure_test_logging("check_idempotency_store")
     if "--self-test" in sys.argv:
         ok, checks = self_test()
         passed = sum(1 for c in checks if c["pass"])

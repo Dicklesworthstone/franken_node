@@ -1,9 +1,11 @@
 """Unit tests for scripts/check_idempotency_store.py (bd-206h)."""
+# ruff: noqa: E402
 
 import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -25,38 +27,49 @@ class TestConstants(unittest.TestCase):
         self.assertGreaterEqual(len(mod.REQUIRED_OPERATIONS), 8)
 
 
-class TestSimulation(unittest.TestCase):
+class TestEvidenceAnalysis(unittest.TestCase):
     def test_hash_deterministic(self):
-        result = mod.simulate_dedupe_store()
-        self.assertTrue(result["hash_deterministic"])
+        result = mod.analyze_dedupe_store_evidence()
+        self.assertTrue(result["hash_payload_test_present"])
 
-    def test_hash_differs(self):
-        result = mod.simulate_dedupe_store()
-        self.assertTrue(result["hash_differs"])
+    def test_content_hash_determinism_verified(self):
+        result = mod.analyze_dedupe_store_evidence()
+        self.assertTrue(result["content_hash_determinism_verified"])
 
     def test_ttl_expired(self):
-        result = mod.simulate_dedupe_store()
-        self.assertTrue(result["ttl_expired"])
+        result = mod.analyze_dedupe_store_evidence()
+        self.assertTrue(result["ttl_expiration_verified"])
 
     def test_ttl_boundary_expired(self):
-        result = mod.simulate_dedupe_store()
-        self.assertTrue(result["ttl_boundary_expired"])
+        result = mod.analyze_dedupe_store_evidence()
+        self.assertTrue(result["ttl_boundary_test_present"])
 
     def test_ttl_not_expired(self):
-        result = mod.simulate_dedupe_store()
-        self.assertTrue(result["ttl_not_expired"])
+        result = mod.analyze_dedupe_store_evidence()
+        self.assertTrue(result["ttl_live_window_test_present"])
 
     def test_event_code_count(self):
-        result = mod.simulate_dedupe_store()
-        self.assertEqual(result["event_code_count"], 7)
+        result = mod.analyze_dedupe_store_evidence()
+        self.assertTrue(result["event_codes_match"])
 
     def test_invariant_count(self):
-        result = mod.simulate_dedupe_store()
-        self.assertEqual(result["invariant_count"], 5)
+        result = mod.analyze_dedupe_store_evidence()
+        self.assertTrue(result["invariants_covered"])
 
     def test_core_type_count(self):
-        result = mod.simulate_dedupe_store()
-        self.assertEqual(result["core_type_count"], 5)
+        result = mod.analyze_dedupe_store_evidence()
+        self.assertTrue(result["core_variants_covered"])
+
+    def test_missing_evidence_fails_closed(self):
+        result = mod.analyze_dedupe_store_evidence(ROOT / "no" / "evidence.json")
+        self.assertFalse(result["valid_evidence"])
+        self.assertFalse(result["verdict_ok"])
+
+    def test_invalid_evidence_fails_closed(self):
+        with patch.object(mod, "_read_json", return_value=(None, "invalid JSON: broken")):
+            result = mod.analyze_dedupe_store_evidence()
+        self.assertFalse(result["valid_evidence"])
+        self.assertIn("invalid JSON", result["detail"])
 
 
 class TestRunChecks(unittest.TestCase):
@@ -100,12 +113,21 @@ class TestSelfTest(unittest.TestCase):
 class TestJsonOutput(unittest.TestCase):
     def test_serializable(self):
         result = mod.run_checks()
-        parsed = json.loads(json.dumps(result))
+        parsed = json.JSONDecoder().decode(json.dumps(result))
         self.assertEqual(parsed["bead_id"], "bd-206h")
 
     def test_all_fields(self):
         result = mod.run_checks()
-        for key in ["bead_id", "title", "section", "verdict", "total", "passed", "failed", "checks"]:
+        for key in [
+            "bead_id",
+            "title",
+            "section",
+            "verdict",
+            "total",
+            "passed",
+            "failed",
+            "checks",
+        ]:
             self.assertIn(key, result)
 
 
