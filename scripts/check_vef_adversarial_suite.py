@@ -63,6 +63,109 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 
+def _strip_rust_comments(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+
+        raw_start = _rust_raw_string_start(text, i)
+        if raw_start is not None:
+            body_start, hashes = raw_start
+            end = _rust_raw_string_end(text, body_start + 1, hashes)
+            if end is None:
+                out.append(text[i:])
+                break
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if ch == '"':
+            end = _rust_quoted_literal_end(text, i, ch)
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if text.startswith("//", i):
+            newline = text.find("\n", i + 2)
+            if newline == -1:
+                break
+            out.append("\n")
+            i = newline + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _rust_raw_string_start(text: str, index: int) -> tuple[int, int] | None:
+    n = len(text)
+    if text.startswith("br", index):
+        cursor = index + 2
+    elif text.startswith("r", index):
+        cursor = index + 1
+    else:
+        return None
+
+    hashes = 0
+    while cursor < n and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+    if cursor < n and text[cursor] == '"':
+        return cursor, hashes
+    return None
+
+
+def _rust_raw_string_end(text: str, index: int, hashes: int) -> int | None:
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, index)
+    if end == -1:
+        return None
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, index: int, quote: str) -> int:
+    i = index + 1
+    n = len(text)
+    escaped = False
+    while i < n:
+        ch = text[i]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == quote:
+            return i + 1
+        i += 1
+    return n
+
+
+def _rust_block_comment_end(text: str, index: int) -> int:
+    depth = 1
+    i = index
+    n = len(text)
+    while i < n and depth:
+        if text.startswith("/*", i):
+            depth += 1
+            i += 2
+        elif text.startswith("*/", i):
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
+
+
+def _compact_marker_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
 def _safe_rel(path: Path) -> str:
     return str(path.relative_to(ROOT)) if str(path).startswith(str(ROOT)) else str(path)
 
@@ -129,12 +232,15 @@ def check_suite_content() -> None:
         return
 
     _check("suite_readable", True, _safe_rel(_suite_path()))
+    suite_code = _strip_rust_comments(src)
+    suite_lower = suite_code.lower()
+    suite_compact = _compact_marker_text(suite_code)
 
     for symbol in REQUIRED_SUITE_SYMBOLS:
-        _check(f"suite_symbol_{symbol}", symbol in src.lower(), symbol)
+        _check(f"suite_symbol_{symbol}", symbol in suite_lower, symbol)
 
-    has_expect_err = "expect_err" in src
-    has_matches_err = "matches!(" in src and "Err(" in src
+    has_expect_err = "expect_err" in suite_code
+    has_matches_err = "matches!(" in suite_code and "Err(" in suite_code
     _check(
         "suite_symbol_error_assertion",
         has_expect_err or has_matches_err,
@@ -144,23 +250,23 @@ def check_suite_content() -> None:
     for attack_class in REQUIRED_ATTACK_CLASSES:
         _check(
             f"suite_attack_class_{attack_class}",
-            attack_class in src.lower(),
+            _compact_marker_text(attack_class) in suite_compact,
             attack_class,
         )
 
     for code in REQUIRED_EVENT_CODES:
-        _check(f"suite_event_code_{code}", code in src, code)
+        _check(f"suite_event_code_{code}", code in suite_code, code)
 
     for code in REQUIRED_ERROR_CODES:
-        _check(f"suite_error_code_{code}", code in src, code)
+        _check(f"suite_error_code_{code}", code in suite_code, code)
 
-    test_count = src.count("#[test]")
+    test_count = suite_code.count("#[test]")
     _check("suite_minimum_test_count", test_count >= 12, f"{test_count} tests")
 
-    deterministic_loop = bool(re.search(r"\b100\b", src))
+    deterministic_loop = bool(re.search(r"\b100\b", suite_code))
     _check("suite_has_determinism_loop_hint", deterministic_loop, "contains 100x loop marker")
 
-    has_false_positive_guard = "false positive" in src.lower() or "legitimate" in src.lower()
+    has_false_positive_guard = "false positive" in suite_lower or "legitimate" in suite_lower
     _check(
         "suite_mentions_false_positive_guard",
         has_false_positive_guard,
