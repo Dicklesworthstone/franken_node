@@ -44,6 +44,37 @@ class CrossRepoValidationDriftTests(unittest.TestCase):
             with self.subTest(snapshot=snapshot["snapshot_id"]):
                 self.assertEqual(mod.validate_snapshot(snapshot), [])
 
+    def test_derive_classification_matches_valid_fixtures(self) -> None:
+        seen_codes = set()
+        for snapshot in self.fixtures["valid_snapshots"]:
+            with self.subTest(snapshot=snapshot["snapshot_id"]):
+                derived = mod.derive_classification(snapshot)
+                self.assertEqual(derived["code"], snapshot["classification"]["code"])
+                self.assertEqual(derived["action"], snapshot["recommended_action"]["action"])
+                seen_codes.add(derived["code"])
+        self.assertEqual(
+            seen_codes,
+            {
+                "CRVD_SAFE_TO_RUN",
+                "CRVD_BLOCKED_CARGO_PRESSURE",
+                "CRVD_BLOCKED_SIBLING_DIRTY_RELEVANT",
+                "CRVD_BLOCKED_SIBLING_API_DRIFT",
+                "CRVD_BLOCKED_SIBLING_BEADS_LOCK",
+                "CRVD_BLOCKED_AGENT_MAIL_CORRUPT",
+                "CRVD_NEEDS_RCH_REPROOF",
+            },
+        )
+
+    def test_bd_famte_shape_prioritizes_dirty_sibling_over_mail_and_cargo(self) -> None:
+        famte = next(
+            snapshot
+            for snapshot in self.fixtures["valid_snapshots"]
+            if snapshot["snapshot_id"] == "crvd-dirty-relevant-absent-symbols"
+        )
+        derived = mod.derive_classification(famte)
+        self.assertEqual(derived["code"], "CRVD_BLOCKED_SIBLING_DIRTY_RELEVANT")
+        self.assertEqual(derived["action"], "record_beads_blocker")
+
     def test_invalid_fixture_cases_emit_expected_errors(self) -> None:
         for case in self.fixtures["invalid_snapshots"]:
             with self.subTest(case=case["case"]):

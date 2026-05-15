@@ -268,6 +268,91 @@ def _list_of_bounded_paths(value: Any, max_items: int = MAX_LIST_ITEMS) -> bool:
     return isinstance(value, list) and len(value) <= max_items and all(_bounded_path(item) for item in value)
 
 
+def _canonical_command(snapshot: dict[str, Any]) -> str:
+    existing = _get_path(snapshot, "recommended_action.exact_command")
+    if isinstance(existing, str) and existing.strip():
+        return existing
+    command = snapshot.get("validation_command")
+    if not isinstance(command, dict):
+        return "rch exec -- <validation-command>"
+    argv = command.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(part, str) for part in argv):
+        return "rch exec -- <validation-command>"
+    return " ".join(argv)
+
+
+def derive_classification(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Derive the fail-closed cross-repo validation decision for a snapshot."""
+    command = _canonical_command(snapshot)
+    cargo_count = _get_path(snapshot, "cargo_pressure.process_count")
+    cargo_threshold = _get_path(snapshot, "cargo_pressure.threshold")
+    dirty_state = _get_path(snapshot, "sibling_repo.dirty_state")
+    lock_status = _get_path(snapshot, "sibling_repo.beads_lock.status")
+    mail_status = _get_path(snapshot, "agent_mail.status")
+    symbol_probes = snapshot.get("symbol_probes", [])
+
+    if any(
+        isinstance(probe, dict) and probe.get("status") == "missing_referenced"
+        for probe in (symbol_probes if isinstance(symbol_probes, list) else [])
+    ):
+        return {
+            "code": "CRVD_BLOCKED_SIBLING_API_DRIFT",
+            "action": "inspect_sibling_api_drift",
+            "exact_command": "rg -n '<missing-symbol>' <sibling-repo>",
+            "operator_message": "Repair or coordinate sibling API drift before rerunning validation.",
+        }
+
+    if dirty_state == "dirty_relevant":
+        return {
+            "code": "CRVD_BLOCKED_SIBLING_DIRTY_RELEVANT",
+            "action": "record_beads_blocker",
+            "exact_command": "br comments add <bead-id> --message <bounded cross-repo drift summary>",
+            "operator_message": "Relevant sibling files are dirty; record a Beads handoff before rerunning validation.",
+        }
+
+    if lock_status in {"timeout", "stale_file", "unavailable"}:
+        return {
+            "code": "CRVD_BLOCKED_SIBLING_BEADS_LOCK",
+            "action": "coordinate_sibling_owner",
+            "exact_command": "br list --status=in_progress --json",
+            "operator_message": "Sibling Beads ownership is unavailable; coordinate before editing or validating.",
+        }
+
+    if isinstance(cargo_count, int) and isinstance(cargo_threshold, int) and cargo_count > cargo_threshold:
+        return {
+            "code": "CRVD_BLOCKED_CARGO_PRESSURE",
+            "action": "wait_for_cargo_pressure",
+            "exact_command": "pgrep -af 'cargo|rustc' | wc -l",
+            "operator_message": "Cargo pressure is above threshold; wait before launching RCH validation.",
+        }
+
+    if mail_status == "red_corrupt":
+        return {
+            "code": "CRVD_BLOCKED_AGENT_MAIL_CORRUPT",
+            "action": "source_only_handoff",
+            "exact_command": "br comments add <id> --message <handoff>",
+            "operator_message": "Agent Mail is corrupt; use Beads-visible ownership and durable comments.",
+        }
+
+    if any(
+        isinstance(probe, dict) and probe.get("status") == "absent_from_call_sites"
+        for probe in (symbol_probes if isinstance(symbol_probes, list) else [])
+    ):
+        return {
+            "code": "CRVD_NEEDS_RCH_REPROOF",
+            "action": "run_rch_validation",
+            "exact_command": command,
+            "operator_message": "Sibling symbols are absent from call sites; rerun the deferred RCH proof.",
+        }
+
+    return {
+        "code": "CRVD_SAFE_TO_RUN",
+        "action": "run_rch_validation",
+        "exact_command": command,
+        "operator_message": "Cross-repo validation preflight is safe to run through rch.",
+    }
+
+
 def validate_snapshot(snapshot: Any, *, expected_bead_id: str | None = None) -> list[str]:
     errors: list[str] = []
     if not isinstance(snapshot, dict):
@@ -457,6 +542,11 @@ def validate_snapshot(snapshot: Any, *, expected_bead_id: str | None = None) -> 
     if classification_code == "CRVD_SAFE_TO_RUN" and action != "run_rch_validation":
         errors.append("ERR_CRVD_SAFE_WITHOUT_RUN_ACTION")
 
+    if not errors:
+        derived = derive_classification(snapshot)
+        if classification_code != derived["code"] or action != derived["action"]:
+            errors.append("ERR_CRVD_CLASSIFICATION_DERIVATION_MISMATCH")
+
     return list(dict.fromkeys(errors))
 
 
@@ -521,10 +611,12 @@ def run_all() -> dict[str, Any]:
 
     coverage = {
         "CRVD_SAFE_TO_RUN": False,
+        "CRVD_BLOCKED_CARGO_PRESSURE": False,
         "CRVD_BLOCKED_SIBLING_DIRTY_RELEVANT": False,
         "CRVD_BLOCKED_SIBLING_API_DRIFT": False,
         "CRVD_BLOCKED_SIBLING_BEADS_LOCK": False,
         "CRVD_BLOCKED_AGENT_MAIL_CORRUPT": False,
+        "CRVD_NEEDS_RCH_REPROOF": False,
     }
     absent_symbol_seen = False
     dirty_relevant_seen = False

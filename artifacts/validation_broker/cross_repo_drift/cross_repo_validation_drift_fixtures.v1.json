@@ -424,6 +424,158 @@
         "action": "source_only_handoff",
         "exact_command": "br comments add <id> --message <handoff>"
       }
+    },
+    {
+      "schema_version": "franken-node/cross-repo-validation-drift/snapshot/v1",
+      "snapshot_id": "crvd-cargo-pressure",
+      "bead_id": "bd-cargo1",
+      "thread_id": "bd-cargo1",
+      "generated_at": "2026-05-15T09:55:00Z",
+      "producer": {
+        "agent_name": "SnowyBeaver",
+        "tool": "cross_repo_validation_drift",
+        "source_only": true
+      },
+      "validation_command": {
+        "program": "rch",
+        "argv": [
+          "exec",
+          "--",
+          "cargo",
+          "clippy"
+        ],
+        "cwd": "/data/projects/franken_node",
+        "remote_required": true
+      },
+      "command_digest": {
+        "algorithm": "sha256",
+        "hex": "6666666666666666666666666666666666666666666666666666666666666666",
+        "canonical_material": "program=rch argv=exec -- cargo clippy cwd=/data/projects/franken_node"
+      },
+      "cargo_pressure": {
+        "process_count": 15,
+        "threshold": 2,
+        "sampled_at": "2026-05-15T09:55:00Z"
+      },
+      "sibling_repo": {
+        "name": "frankensqlite",
+        "path": "/data/projects/frankensqlite",
+        "branch": "main",
+        "head": "0c016144",
+        "dirty_state": "clean",
+        "dirty_files": [],
+        "relevant_paths": [
+          "crates/fsqlite-core/src/connection.rs"
+        ],
+        "beads_lock": {
+          "status": "ok",
+          "detail": "br readable"
+        }
+      },
+      "symbol_probes": [
+        {
+          "symbol": "TableLeafDeleteRun",
+          "status": "present",
+          "searched_paths": [
+            "crates/fsqlite-btree/src/cursor.rs"
+          ],
+          "referenced_paths": [
+            "crates/fsqlite-core/src/connection.rs"
+          ]
+        }
+      ],
+      "agent_mail": {
+        "status": "green",
+        "detail": "health_check green"
+      },
+      "classification": {
+        "code": "CRVD_BLOCKED_CARGO_PRESSURE",
+        "reasons": [
+          "cargo pressure above threshold"
+        ],
+        "operator_message": "Cargo pressure is above threshold; wait before launching RCH validation."
+      },
+      "recommended_action": {
+        "action": "wait_for_cargo_pressure",
+        "exact_command": "pgrep -af 'cargo|rustc' | wc -l"
+      }
+    },
+    {
+      "schema_version": "franken-node/cross-repo-validation-drift/snapshot/v1",
+      "snapshot_id": "crvd-needs-rch-reproof",
+      "bead_id": "bd-reproof1",
+      "thread_id": "bd-reproof1",
+      "generated_at": "2026-05-15T09:56:00Z",
+      "producer": {
+        "agent_name": "SnowyBeaver",
+        "tool": "cross_repo_validation_drift",
+        "source_only": true
+      },
+      "validation_command": {
+        "program": "rch",
+        "argv": [
+          "exec",
+          "--",
+          "cargo",
+          "clippy",
+          "-p",
+          "frankenengine-node"
+        ],
+        "cwd": "/data/projects/franken_node",
+        "remote_required": true
+      },
+      "command_digest": {
+        "algorithm": "sha256",
+        "hex": "7777777777777777777777777777777777777777777777777777777777777777",
+        "canonical_material": "program=rch argv=exec -- cargo clippy -p frankenengine-node cwd=/data/projects/franken_node"
+      },
+      "cargo_pressure": {
+        "process_count": 0,
+        "threshold": 2,
+        "sampled_at": "2026-05-15T09:56:00Z"
+      },
+      "sibling_repo": {
+        "name": "frankensqlite",
+        "path": "/data/projects/frankensqlite",
+        "branch": "main",
+        "head": "0c016144",
+        "dirty_state": "clean",
+        "dirty_files": [],
+        "relevant_paths": [
+          "crates/fsqlite-core/src/connection.rs"
+        ],
+        "beads_lock": {
+          "status": "ok",
+          "detail": "br readable"
+        }
+      },
+      "symbol_probes": [
+        {
+          "symbol": "PagerCommitProfileSnapshot",
+          "status": "absent_from_call_sites",
+          "searched_paths": [
+            "crates/fsqlite-pager/src/lib.rs",
+            "crates/fsqlite-core/src/connection.rs"
+          ],
+          "referenced_paths": []
+        }
+      ],
+      "agent_mail": {
+        "status": "green",
+        "detail": "health_check green"
+      },
+      "classification": {
+        "code": "CRVD_NEEDS_RCH_REPROOF",
+        "reasons": [
+          "missing symbols absent from call sites",
+          "sibling clean"
+        ],
+        "operator_message": "Sibling symbols are absent from call sites; rerun the deferred RCH proof."
+      },
+      "recommended_action": {
+        "action": "run_rch_validation",
+        "exact_command": "rch exec -- cargo clippy -p frankenengine-node"
+      }
     }
   ],
   "invalid_snapshots": [
