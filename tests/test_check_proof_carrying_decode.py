@@ -19,6 +19,16 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 
+def decode_json_object(payload):
+    try:
+        decoded = json.JSONDecoder().decode(payload)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(f"expected valid JSON: {exc}: {payload}") from exc
+    if not isinstance(decoded, dict):
+        raise AssertionError("expected a JSON object")
+    return decoded
+
+
 class TestCheckFileHelper(TestCase):
     def test_file_exists(self):
         result = mod.check_file(mod.IMPL, "self")
@@ -104,6 +114,59 @@ class TestRunChecks(TestCase):
         result = mod.run_checks()
         self.assertGreaterEqual(result["test_count"], 25)
 
+    def test_comment_only_source_markers_fail_closed(self):
+        commented_tests = "\n".join(
+            f"// #[test]\n// fn {test_name}() {{}}" for test_name in mod.REQUIRED_TESTS
+        )
+        comment_only_impl = "\n".join(
+            [
+                *(f"// {marker}" for marker in mod.REQUIRED_TYPES),
+                *(f"// {marker}" for marker in mod.REQUIRED_METHODS),
+                *(f"// {code}" for code in mod.EVENT_CODES),
+                *(f"// {invariant}" for invariant in mod.INVARIANTS),
+                "// Serialize Deserialize Sha256",
+                "/*",
+                commented_tests,
+                "*/",
+            ]
+        )
+
+        original_impl = mod.IMPL
+        original_mod = mod.MOD_RS
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            impl_path = tmp / "proof_carrying_decode.rs"
+            mod_path = tmp / "mod.rs"
+            impl_path.write_text(comment_only_impl, encoding="utf-8")
+            mod_path.write_text("pub mod proof_carrying_decode;\n", encoding="utf-8")
+
+            try:
+                mod.IMPL = impl_path
+                mod.MOD_RS = mod_path
+                result = mod.run_checks()
+            finally:
+                mod.IMPL = original_impl
+                mod.MOD_RS = original_mod
+
+        checks = {check["check"]: check["pass"] for check in result["checks"]}
+        self.assertTrue(checks["file: implementation"])
+        self.assertTrue(checks["module registered in mod.rs"])
+        self.assertFalse(checks["unit test count"])
+        self.assertFalse(checks["Serialize/Deserialize derives"])
+        self.assertFalse(checks["SHA-256 hashing"])
+        self.assertEqual(result["test_count"], 0)
+        for invariant in mod.INVARIANTS:
+            self.assertTrue(checks[f"invariant: {invariant}"], invariant)
+
+        expected_failures = []
+        expected_failures.extend(f"type: {marker}" for marker in mod.REQUIRED_TYPES)
+        expected_failures.extend(f"method: {marker}" for marker in mod.REQUIRED_METHODS)
+        expected_failures.extend(f"event_code: {code}" for code in mod.EVENT_CODES)
+        expected_failures.extend(f"test: {test_name}" for test_name in mod.REQUIRED_TESTS)
+        for check_name in expected_failures:
+            self.assertIn(check_name, checks)
+            self.assertFalse(checks[check_name], check_name)
+
 
 class TestSelfTest(TestCase):
     def test_self_test_passes(self):
@@ -132,16 +195,16 @@ class TestJsonOutput(TestCase):
     def test_json_serializable(self):
         result = mod.run_checks()
         serialized = json.dumps(result)
-        parsed = json.loads(serialized)
+        parsed = decode_json_object(serialized)
         self.assertEqual(parsed["bead_id"], "bd-20uo")
 
     def test_cli_json(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_proof_carrying_decode.py"), "--json"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=30, check=False,
         )
         self.assertEqual(result.returncode, 0)
-        data = json.loads(result.stdout)
+        data = decode_json_object(result.stdout)
         self.assertEqual(data["verdict"], "PASS")
 
 
