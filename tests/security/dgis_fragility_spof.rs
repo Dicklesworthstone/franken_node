@@ -25,7 +25,7 @@
 //!   [`frankenengine_node::dgis::graph_ingestion`], and
 //!   [`frankenengine_node::dgis::spof_detection`].
 //! * All filesystem reads go through [`std::fs::read_to_string`] with a
-//!   canonical fixture directory and an explicit panic on missing files --
+//!   canonical fixture directory and explicit error context on missing files --
 //!   no `unwrap()` shortcuts that would hide IO errors silently.
 //! * The deterministic-replay assertion compares full [`FixtureVerdict`]
 //!   values (which derive `PartialEq`) rather than hashing, so any
@@ -43,6 +43,8 @@ use frankenengine_node::dgis::fragility_fixtures::{
     synthesize_single_maintainer_dominant, synthesize_well_distributed_maintainers,
 };
 
+type TestResult = Result<(), String>;
+
 /// Absolute-path-derived fixture directory.
 ///
 /// Cargo sets `CARGO_MANIFEST_DIR` to the crate root (`crates/franken-node/`),
@@ -50,9 +52,9 @@ use frankenengine_node::dgis::fragility_fixtures::{
 /// `tests/security/fragility_fixtures/`. We do NOT call `canonicalize()` so
 /// that symlinks in the workspace layout (e.g. agent worktrees) keep
 /// resolving to the correct file.
-fn fixture_dir() -> PathBuf {
+fn fixture_dir() -> Result<PathBuf, String> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR is set by cargo for integration tests");
+        .map_err(|e| format!("CARGO_MANIFEST_DIR is unavailable: {e}"))?;
     let mut p = PathBuf::from(manifest_dir);
     // crates/franken-node -> workspace root
     p.pop();
@@ -60,19 +62,26 @@ fn fixture_dir() -> PathBuf {
     p.push("tests");
     p.push("security");
     p.push("fragility_fixtures");
-    p
+    Ok(p)
 }
 
 /// Load a fixture by stem name (e.g. `"single_maintainer_dominant"`).
 ///
-/// Panics with a descriptive message if the JSON file is missing or fails
-/// schema validation -- the test driver is meant to fail loudly here.
-fn load_fixture_from_path(name: &str) -> FragilityFixture {
-    let mut path = fixture_dir();
+/// Returns a descriptive error if the JSON file is missing or fails schema
+/// validation.
+fn load_fixture_from_path(name: &str) -> Result<FragilityFixture, String> {
+    let mut path = fixture_dir()?;
     path.push(format!("{}.json", name));
-    let json =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {:?}: {}", path, e));
-    load_fixture_from_json(&json).unwrap_or_else(|e| panic!("parse fixture {:?}: {:?}", path, e))
+    let json = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read fixture {}: {e}", path.display()))?;
+    load_fixture_from_json(&json).map_err(|e| format!("parse fixture {}: {e:?}", path.display()))
+}
+
+fn evaluate_fixture_named(
+    name: &str,
+    fixture: &FragilityFixture,
+) -> Result<FixtureVerdict, String> {
+    evaluate_fixture(fixture).map_err(|e| format!("evaluate {name}: {e:?}"))
 }
 
 /// Convenience: collect the expected kinds declared by a fixture (so a SPOF
@@ -128,88 +137,93 @@ fn assert_robust(verdict: &FixtureVerdict) {
 // ===========================================================================
 
 #[test]
-fn test_single_maintainer_dominant_fixture_detects_spof() {
-    let fixture = load_fixture_from_path("single_maintainer_dominant");
+fn test_single_maintainer_dominant_fixture_detects_spof() -> TestResult {
+    let fixture = load_fixture_from_path("single_maintainer_dominant")?;
     let kinds = expected_kinds(&fixture);
     assert!(
         kinds.contains(&SpofKindLabel::SingleMaintainer),
         "fixture must declare SingleMaintainer in expected_findings"
     );
-    let verdict = evaluate_fixture(&fixture).expect("evaluate single_maintainer_dominant");
+    let verdict = evaluate_fixture_named("single_maintainer_dominant", &fixture)?;
     assert!(
         verdict.passed,
         "expected verdict to pass; divergences: {:?}",
         verdict.divergences
     );
     assert_label_present(&verdict, SpofKindLabel::SingleMaintainer);
+    Ok(())
 }
 
 #[test]
-fn test_key_person_high_share_fixture_detects_spof() {
-    let fixture = load_fixture_from_path("key_person_high_share");
+fn test_key_person_high_share_fixture_detects_spof() -> TestResult {
+    let fixture = load_fixture_from_path("key_person_high_share")?;
     let kinds = expected_kinds(&fixture);
     assert!(
         kinds.contains(&SpofKindLabel::KeyPerson),
         "fixture must declare KeyPerson in expected_findings"
     );
-    let verdict = evaluate_fixture(&fixture).expect("evaluate key_person_high_share");
+    let verdict = evaluate_fixture_named("key_person_high_share", &fixture)?;
     assert!(
         verdict.passed,
         "expected verdict to pass; divergences: {:?}",
         verdict.divergences
     );
     assert_label_present(&verdict, SpofKindLabel::KeyPerson);
+    Ok(())
 }
 
 #[test]
-fn test_dependency_chain_fragile_fixture_detects_spof() {
-    let fixture = load_fixture_from_path("dependency_chain_fragile");
+fn test_dependency_chain_fragile_fixture_detects_spof() -> TestResult {
+    let fixture = load_fixture_from_path("dependency_chain_fragile")?;
     let kinds = expected_kinds(&fixture);
     assert!(
         kinds.contains(&SpofKindLabel::DependencyChain),
         "fixture must declare DependencyChain in expected_findings"
     );
-    let verdict = evaluate_fixture(&fixture).expect("evaluate dependency_chain_fragile");
+    let verdict = evaluate_fixture_named("dependency_chain_fragile", &fixture)?;
     assert!(
         verdict.passed,
         "expected verdict to pass; divergences: {:?}",
         verdict.divergences
     );
     assert_label_present(&verdict, SpofKindLabel::DependencyChain);
+    Ok(())
 }
 
 #[test]
-fn test_org_concentrated_fixture_detects_spof() {
-    let fixture = load_fixture_from_path("org_concentrated");
+fn test_org_concentrated_fixture_detects_spof() -> TestResult {
+    let fixture = load_fixture_from_path("org_concentrated")?;
     let kinds = expected_kinds(&fixture);
     assert!(
         kinds.contains(&SpofKindLabel::OrgConcentration),
         "fixture must declare OrgConcentration in expected_findings"
     );
-    let verdict = evaluate_fixture(&fixture).expect("evaluate org_concentrated");
+    let verdict = evaluate_fixture_named("org_concentrated", &fixture)?;
     assert!(
         verdict.passed,
         "expected verdict to pass; divergences: {:?}",
         verdict.divergences
     );
     assert_label_present(&verdict, SpofKindLabel::OrgConcentration);
+    Ok(())
 }
 
 #[test]
-fn test_orphaned_pkg_fixture_detects_spof() {
-    let fixture = load_fixture_from_path("orphaned_pkg");
+fn test_orphaned_pkg_fixture_detects_spof() -> TestResult {
+    let fixture = load_fixture_from_path("orphaned_pkg")?;
     let kinds = expected_kinds(&fixture);
     assert!(
         kinds.contains(&SpofKindLabel::OrphanedPackage),
         "fixture must declare OrphanedPackage in expected_findings"
     );
-    let verdict = evaluate_fixture(&fixture).expect("evaluate orphaned_pkg");
+    let verdict = evaluate_fixture_named("orphaned_pkg", &fixture)?;
     assert!(
         verdict.passed,
         "expected verdict to pass; divergences: {:?}",
         verdict.divergences
     );
     assert_label_present(&verdict, SpofKindLabel::OrphanedPackage);
+    Ok(())
 }
 
 // ===========================================================================
@@ -217,58 +231,63 @@ fn test_orphaned_pkg_fixture_detects_spof() {
 // ===========================================================================
 
 #[test]
-fn test_well_distributed_maintainers_is_robust() {
-    let fixture = load_fixture_from_path("well_distributed_maintainers");
+fn test_well_distributed_maintainers_is_robust() -> TestResult {
+    let fixture = load_fixture_from_path("well_distributed_maintainers")?;
     assert!(
         fixture.expected_findings.is_empty(),
         "robust fixture must declare empty expected_findings"
     );
-    let verdict = evaluate_fixture(&fixture).expect("evaluate well_distributed_maintainers");
+    let verdict = evaluate_fixture_named("well_distributed_maintainers", &fixture)?;
     assert_robust(&verdict);
+    Ok(())
 }
 
 #[test]
-fn test_diverse_org_ownership_is_robust() {
-    let fixture = load_fixture_from_path("diverse_org_ownership");
+fn test_diverse_org_ownership_is_robust() -> TestResult {
+    let fixture = load_fixture_from_path("diverse_org_ownership")?;
     assert!(
         fixture.expected_findings.is_empty(),
         "robust fixture must declare empty expected_findings"
     );
-    let verdict = evaluate_fixture(&fixture).expect("evaluate diverse_org_ownership");
+    let verdict = evaluate_fixture_named("diverse_org_ownership", &fixture)?;
     assert_robust(&verdict);
+    Ok(())
 }
 
 #[test]
-fn test_active_maintainers_recent_commits_is_robust() {
-    let fixture = load_fixture_from_path("active_maintainers_recent_commits");
+fn test_active_maintainers_recent_commits_is_robust() -> TestResult {
+    let fixture = load_fixture_from_path("active_maintainers_recent_commits")?;
     assert!(
         fixture.expected_findings.is_empty(),
         "robust fixture must declare empty expected_findings"
     );
-    let verdict = evaluate_fixture(&fixture).expect("evaluate active_maintainers_recent_commits");
+    let verdict = evaluate_fixture_named("active_maintainers_recent_commits", &fixture)?;
     assert_robust(&verdict);
+    Ok(())
 }
 
 #[test]
-fn test_independent_packages_no_chains_is_robust() {
-    let fixture = load_fixture_from_path("independent_packages_no_chains");
+fn test_independent_packages_no_chains_is_robust() -> TestResult {
+    let fixture = load_fixture_from_path("independent_packages_no_chains")?;
     assert!(
         fixture.expected_findings.is_empty(),
         "robust fixture must declare empty expected_findings"
     );
-    let verdict = evaluate_fixture(&fixture).expect("evaluate independent_packages_no_chains");
+    let verdict = evaluate_fixture_named("independent_packages_no_chains", &fixture)?;
     assert_robust(&verdict);
+    Ok(())
 }
 
 #[test]
-fn test_multi_quorum_publishers_is_robust() {
-    let fixture = load_fixture_from_path("multi_quorum_publishers");
+fn test_multi_quorum_publishers_is_robust() -> TestResult {
+    let fixture = load_fixture_from_path("multi_quorum_publishers")?;
     assert!(
         fixture.expected_findings.is_empty(),
         "robust fixture must declare empty expected_findings"
     );
-    let verdict = evaluate_fixture(&fixture).expect("evaluate multi_quorum_publishers");
+    let verdict = evaluate_fixture_named("multi_quorum_publishers", &fixture)?;
     assert_robust(&verdict);
+    Ok(())
 }
 
 // ===========================================================================
@@ -280,7 +299,7 @@ fn test_multi_quorum_publishers_is_robust() {
 /// `synthesize_*` unit tests in `fragility_fixtures.rs` accurately model the
 /// on-disk suite.
 #[test]
-fn test_in_code_synthesizers_match_json_fixtures() {
+fn test_in_code_synthesizers_match_json_fixtures() -> TestResult {
     let pairs: Vec<(&'static str, FragilityFixture)> = vec![
         (
             "single_maintainer_dominant",
@@ -313,7 +332,7 @@ fn test_in_code_synthesizers_match_json_fixtures() {
     ];
 
     for (name, in_code) in pairs {
-        let on_disk = load_fixture_from_path(name);
+        let on_disk = load_fixture_from_path(name)?;
 
         assert_eq!(
             on_disk.name, in_code.name,
@@ -356,6 +375,7 @@ fn test_in_code_synthesizers_match_json_fixtures() {
             name
         );
     }
+    Ok(())
 }
 
 // ===========================================================================
@@ -363,13 +383,13 @@ fn test_in_code_synthesizers_match_json_fixtures() {
 // ===========================================================================
 
 #[test]
-fn test_detect_spofs_deterministic_across_two_runs() {
+fn test_detect_spofs_deterministic_across_two_runs() -> TestResult {
     // Use a SPOF fixture so there are non-trivial findings to compare. The
     // robust fixtures would also pass trivially with two empty reports.
-    let fixture = load_fixture_from_path("dependency_chain_fragile");
+    let fixture = load_fixture_from_path("dependency_chain_fragile")?;
 
-    let first = evaluate_fixture(&fixture).expect("first evaluate");
-    let second = evaluate_fixture(&fixture).expect("second evaluate");
+    let first = evaluate_fixture(&fixture).map_err(|e| format!("first evaluate: {e:?}"))?;
+    let second = evaluate_fixture(&fixture).map_err(|e| format!("second evaluate: {e:?}"))?;
 
     // FixtureVerdict derives PartialEq + Eq, so the comparison is total.
     assert_eq!(
@@ -390,4 +410,5 @@ fn test_detect_spofs_deterministic_across_two_runs() {
         first_counts, second_counts,
         "actual_finding_counts map drift between runs"
     );
+    Ok(())
 }
