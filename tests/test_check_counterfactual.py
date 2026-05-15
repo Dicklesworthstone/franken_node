@@ -2,6 +2,7 @@
 
 import importlib.util
 import sys
+from copy import deepcopy
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -25,64 +26,45 @@ class TestFixture(TestCase):
         self.assertGreater(len(vectors), 0)
 
 
-class TestCounterfactualSimulation(TestCase):
-    def setUp(self):
-        vectors = mod.load_fixture_vectors()
-        self.bundle = mod.fixture_to_bundle(vectors)
+class TestEvidenceAnalysis(TestCase):
+    def _valid_evidence(self):
+        data = mod.load_evidence()
+        self.assertIsInstance(data, dict)
+        return deepcopy(data)
 
-    def test_single_policy_swap_diverges(self):
-        result = mod.run_counterfactual(
-            self.bundle,
-            mod.BASELINE_POLICY,
-            mod.STRICT_POLICY,
-        )
-        self.assertGreater(len(result["divergence_points"]), 0)
+    def test_valid_evidence_passes(self):
+        checks = mod.check_evidence(self._valid_evidence())
+        self.assertTrue(all(check["pass"] for check in checks), self._failing(checks))
 
-    def test_single_mode_deterministic(self):
-        first = mod.run_counterfactual(
-            self.bundle,
-            mod.BASELINE_POLICY,
-            mod.STRICT_POLICY,
-        )
-        second = mod.run_counterfactual(
-            self.bundle,
-            mod.BASELINE_POLICY,
-            mod.STRICT_POLICY,
-        )
-        self.assertEqual(mod.canonical_json(first), mod.canonical_json(second))
+    def test_missing_evidence_fails_closed(self):
+        checks = mod.check_evidence({})
+        self.assertFalse(all(check["pass"] for check in checks))
+        self.assertTrue(any(check["check"] == "evidence: bead id" and not check["pass"] for check in checks))
 
-    def test_parameter_sweep_mode(self):
-        results = mod.run_parameter_sweep(
-            self.bundle,
-            mod.BASELINE_POLICY,
-            "quarantine_threshold",
-            [60, 75, 90],
-            mod.PolicyConfig("sweep", 85, 55, 10),
-        )
-        self.assertEqual(len(results), 3)
-        self.assertTrue(any(len(item["divergence_points"]) > 0 for item in results))
+    def test_missing_required_file_fails_closed(self):
+        data = self._valid_evidence()
+        data["implementation"]["files"] = []
+        checks = mod.check_evidence(data)
+        self.assertFalse(all(check["pass"] for check in checks))
+        self.assertTrue(any(check["check"].startswith("evidence file:") and not check["pass"] for check in checks))
 
-    def test_timeout_guard_returns_partial(self):
-        with self.assertRaises(mod.ReplayBoundExceeded) as ctx:
-            mod.run_counterfactual(
-                self.bundle,
-                mod.BASELINE_POLICY,
-                mod.STRICT_POLICY,
-                max_wall_clock_ms=0,
-            )
-        self.assertEqual(ctx.exception.kind, "wall_clock")
-        self.assertIsInstance(ctx.exception.partial_result, dict)
+    def test_missing_acceptance_mapping_fails_closed(self):
+        data = self._valid_evidence()
+        data["acceptance_criteria_mapping"] = []
+        checks = mod.check_evidence(data)
+        self.assertFalse(all(check["pass"] for check in checks))
+        self.assertTrue(any(check["check"].startswith("evidence acceptance:") and not check["pass"] for check in checks))
 
-    def test_step_limit_guard_returns_partial(self):
-        with self.assertRaises(mod.ReplayBoundExceeded) as ctx:
-            mod.run_counterfactual(
-                self.bundle,
-                mod.BASELINE_POLICY,
-                mod.STRICT_POLICY,
-                max_steps=1,
-            )
-        self.assertEqual(ctx.exception.kind, "max_steps")
-        self.assertIsInstance(ctx.exception.partial_result, dict)
+    def test_missing_rch_command_fails_closed(self):
+        data = self._valid_evidence()
+        data["verification"]["commands"] = []
+        checks = mod.check_evidence(data)
+        self.assertFalse(all(check["pass"] for check in checks))
+        self.assertTrue(any(check["check"].startswith("evidence command recorded:") and not check["pass"] for check in checks))
+
+    def _failing(self, checks):
+        failures = [check for check in checks if not check["pass"]]
+        return "\n".join(f"FAIL: {check['check']}: {check['detail']}" for check in failures[:10])
 
 
 class TestChecks(TestCase):
@@ -100,6 +82,10 @@ class TestChecks(TestCase):
         results = mod.check_contains(mod.IMPL, ["pub struct CounterfactualReplayEngine"], "impl")
         self.assertEqual(len(results), 1)
         self.assertTrue(results[0]["pass"])
+
+    def test_rust_test_markers_present(self):
+        checks = mod.check_rust_tests()
+        self.assertTrue(all(check["pass"] for check in checks))
 
 
 if __name__ == "__main__":

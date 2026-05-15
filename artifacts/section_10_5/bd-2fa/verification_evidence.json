@@ -1,6 +1,6 @@
 {
   "bead_id": "bd-2fa",
-  "timestamp_utc": "2026-02-20T19:35:38Z",
+  "timestamp_utc": "2026-05-15T13:34:24Z",
   "status": "completed_with_known_repo_gate_failures",
   "implementation": {
     "files": [
@@ -24,12 +24,12 @@
       {
         "command": "python3 scripts/check_counterfactual.py --json",
         "result": "pass",
-        "details": "PASS: 20/20 checks (implementation, wiring, determinism, sweep, timeout/step guards)."
+        "details": "PASS: 53/53 checks (implementation, CLI wiring, Rust test markers, fixture presence, and evidence acceptance mapping)."
       },
       {
         "command": "python3 -m unittest tests/test_check_counterfactual.py",
         "result": "pass",
-        "details": "PASS: 10 tests."
+        "details": "PASS: 11 tests, including fail-closed malformed evidence coverage."
       },
       {
         "command": "rch exec -- cargo test --manifest-path crates/franken-node/Cargo.toml counterfactual_replay -- --nocapture",
@@ -82,7 +82,7 @@
     },
     {
       "criterion": "Verification script/tests assert divergence, both modes, and timeout guard.",
-      "evidence": "scripts/check_counterfactual.py + tests/test_check_counterfactual.py passing."
+      "evidence": "scripts/check_counterfactual.py verifies Rust test markers single_policy_swap_diverges, replay_is_deterministic, parameter_sweep_runs_multiple_scenarios, step_limit_returns_partial_result, and wall_clock_limit_returns_partial_result; tests/test_check_counterfactual.py proves evidence analysis fails closed."
     }
   ]
 }

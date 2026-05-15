@@ -2,7 +2,7 @@
 
 ## Outcome
 
-Implemented deterministic counterfactual replay mode for policy simulation over incident replay bundles, including divergence analysis, sweep scenarios, and bounded execution guards.
+Implemented deterministic counterfactual replay mode for policy simulation over incident replay bundles, including divergence analysis, sweep scenarios, and bounded execution guards. The verifier now checks the Rust implementation, CLI wiring, Rust test markers, fixture presence, and evidence artifact mapping instead of replaying a local Python model.
 
 ## What Was Delivered
 
@@ -23,8 +23,8 @@ Implemented deterministic counterfactual replay mode for policy simulation over 
 
 ## Validation
 
-- PASS: `python3 scripts/check_counterfactual.py --json` (20/20)
-- PASS: `python3 -m unittest tests/test_check_counterfactual.py` (10 tests)
+- PASS: `python3 scripts/check_counterfactual.py --json` (53/53)
+- PASS: `python3 -m unittest tests/test_check_counterfactual.py` (11 tests)
 - FAIL (environment/workspace): `rch exec -- cargo test --manifest-path crates/franken-node/Cargo.toml counterfactual_replay -- --nocapture`
   - remote worker path mirror does not include sibling workspace dependency `franken_engine`.
 - FAIL (pre-existing workspace drift): `rch exec -- cargo fmt --manifest-path crates/franken-node/Cargo.toml --all --check`

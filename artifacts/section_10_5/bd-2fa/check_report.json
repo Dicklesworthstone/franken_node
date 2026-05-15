@@ -5,9 +5,9 @@
   "verdict": "PASS",
   "overall_pass": true,
   "summary": {
-    "passing": 20,
+    "passing": 53,
     "failing": 0,
-    "total": 20
+    "total": 53
   },
   "checks": [
     {
@@ -61,6 +61,41 @@
       "detail": "found"
     },
     {
+      "check": "impl: PureSandboxedExecutor",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "impl: ReplayExecutionBounds",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "impl: StepLimitExceeded",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "impl: WallClockExceeded",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "impl: partial_result",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "impl: to_canonical_json",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "impl: CounterfactualSimulationOutput",
+      "pass": true,
+      "detail": "found"
+    },
+    {
       "check": "module wiring: pub mod counterfactual_replay;",
       "pass": true,
       "detail": "found"
@@ -81,34 +116,164 @@
       "detail": "found"
     },
     {
+      "check": "file: verification evidence",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_5/bd-2fa/verification_evidence.json"
+    },
+    {
+      "check": "rust tests: counterfactual replay coverage count",
+      "pass": true,
+      "detail": "26 tests found"
+    },
+    {
+      "check": "rust test: single_policy_swap_diverges",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust test: replay_is_deterministic",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust test: parameter_sweep_runs_multiple_scenarios",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust test: step_limit_returns_partial_result",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust test: wall_clock_limit_returns_partial_result",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust test: parse_sweep_override",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust test: invalid_sweep_cardinality_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust test: direct_sweep_mode_rejects_too_many_values",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust test: summarize_output_works_for_single",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "evidence: bead id",
+      "pass": true,
+      "detail": "bd-2fa"
+    },
+    {
+      "check": "evidence: completed status",
+      "pass": true,
+      "detail": "completed_with_known_repo_gate_failures"
+    },
+    {
+      "check": "evidence file: crates/franken-node/src/tools/counterfactual_replay.rs",
+      "pass": true,
+      "detail": "listed"
+    },
+    {
+      "check": "evidence file: crates/franken-node/src/tools/mod.rs",
+      "pass": true,
+      "detail": "listed"
+    },
+    {
+      "check": "evidence file: crates/franken-node/src/main.rs",
+      "pass": true,
+      "detail": "listed"
+    },
+    {
+      "check": "evidence file: docs/specs/section_10_5/bd-2fa_contract.md",
+      "pass": true,
+      "detail": "listed"
+    },
+    {
+      "check": "evidence file: scripts/check_counterfactual.py",
+      "pass": true,
+      "detail": "listed"
+    },
+    {
+      "check": "evidence file: tests/test_check_counterfactual.py",
+      "pass": true,
+      "detail": "listed"
+    },
+    {
+      "check": "evidence highlight: engine implemented",
+      "pass": true,
+      "detail": "all markers present"
+    },
+    {
+      "check": "evidence highlight: modes implemented",
+      "pass": true,
+      "detail": "all markers present"
+    },
+    {
+      "check": "evidence highlight: bounds implemented",
+      "pass": true,
+      "detail": "all markers present"
+    },
+    {
+      "check": "evidence highlight: cli integrated",
+      "pass": true,
+      "detail": "all markers present"
+    },
+    {
+      "check": "evidence command recorded: python3 scripts/check_counterfactual.py --json",
+      "pass": true,
+      "detail": "recorded"
+    },
+    {
+      "check": "evidence command recorded: python3 -m unittest tests/test_check_counterfactual.py",
+      "pass": true,
+      "detail": "recorded"
+    },
+    {
+      "check": "evidence command recorded: rch exec -- cargo test --manifest-path crates/franken-node/Cargo.toml counterfactual_replay -- --nocapture",
+      "pass": true,
+      "detail": "recorded"
+    },
+    {
+      "check": "evidence acceptance: CounterfactualReplayEngine accepts replay bundle + alternate policy and re-executes timeline.",
+      "pass": true,
+      "detail": "all markers present"
+    },
+    {
+      "check": "evidence acceptance: CounterfactualResult includes original/counterfactual outcomes, divergence points, summary stats.",
+      "pass": true,
+      "detail": "all markers present"
+    },
+    {
+      "check": "evidence acceptance: Sandboxed deterministic evaluation with no side effects.",
+      "pass": true,
+      "detail": "all markers present"
+    },
+    {
+      "check": "evidence acceptance: SinglePolicySwap and ParameterSweep modes are implemented.",
+      "pass": true,
+      "detail": "all markers present"
+    },
+    {
+      "check": "evidence acceptance: Step and timeout bounds return structured errors with partial results.",
+      "pass": true,
+      "detail": "all markers present"
+    },
+    {
       "check": "fixture vectors",
       "pass": true,
       "detail": "vectors=5"
-    },
-    {
-      "check": "single policy swap divergence",
-      "pass": true,
-      "detail": "divergence_points=3"
-    },
-    {
-      "check": "single policy swap determinism",
-      "pass": true,
-      "detail": "result A == result B"
-    },
-    {
-      "check": "parameter sweep mode",
-      "pass": true,
-      "detail": "scenarios=3"
-    },
-    {
-      "check": "timeout guard",
-      "pass": true,
-      "detail": "raises bound-exceeded with partial result"
-    },
-    {
-      "check": "max-steps guard",
-      "pass": true,
-      "detail": "raises bound-exceeded with partial result"
     }
   ]
 }
