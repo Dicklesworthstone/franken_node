@@ -51,6 +51,8 @@ use frankenengine_node::policy::evidence_emission::{
     ActionId, EvidenceConformanceChecker, PolicyAction, PolicyActionOutcome, build_evidence_entry,
 };
 
+type TestResult = Result<(), String>;
+
 // --- shared test helpers ----------------------------------------------------
 
 static TRACING_INIT: Once = Once::new();
@@ -410,7 +412,7 @@ fn test_multi_decision_hash_chain_consistent() {
 /// Re-appending an identical (timestamp_ms, signature) pair MUST be rejected
 /// with `LedgerError::ReplayAttack`.
 #[test]
-fn test_replay_attack_rejected() {
+fn test_replay_attack_rejected() -> TestResult {
     init_tracing();
     info!("ENTER test_replay_attack_rejected");
 
@@ -448,13 +450,14 @@ fn test_replay_attack_rejected() {
                 "expected replay/append-fail message, got {error}"
             );
         }
-        other => panic!("expected Rejected outcome, got {other:?}"),
+        other => return Err(format!("expected Rejected outcome, got {other:?}")),
     }
     // Ledger state must NOT advance on a rejected append.
     assert_eq!(ledger.len(), 1, "replay must not advance ledger");
     assert_eq!(ledger.total_appended(), 1);
 
     info!("EXIT test_replay_attack_rejected");
+    Ok(())
 }
 
 /// Capacity-bounded ledger evicts oldest entries FIFO; the remaining entries
