@@ -614,7 +614,7 @@ mod tests {
 
     // 7. max_payload_bytes is enforced fail-closed.
     #[test]
-    fn max_payload_bytes_enforced() {
+    fn max_payload_bytes_enforced() -> Result<(), String> {
         let mut policy = ExtractionPolicy::permissive_for_tests();
         policy.max_payload_bytes = 4; // absurdly tight
         let err =
@@ -623,13 +623,14 @@ mod tests {
             ExtractionError::PayloadTooLarge { code, .. } => {
                 assert_eq!(code, event_codes::PAYLOAD_TOO_LARGE);
             }
-            other => panic!("expected PayloadTooLarge, got {other:?}"),
+            other => return Err(format!("expected PayloadTooLarge, got {other:?}")),
         }
+        Ok(())
     }
 
     // 8. Kind filtering — disallowed kind is rejected even if event is well-formed.
     #[test]
-    fn kind_filtering_rejects_disallowed() {
+    fn kind_filtering_rejects_disallowed() -> Result<(), String> {
         let mut policy = ExtractionPolicy::permissive_for_tests();
         policy.allowed_kinds.remove(&SignalKind::AnomalyObservation);
         let err =
@@ -639,13 +640,14 @@ mod tests {
                 assert_eq!(kind, SignalKind::AnomalyObservation);
                 assert_eq!(code, event_codes::KIND_FILTERED);
             }
-            other => panic!("expected KindFiltered, got {other:?}"),
+            other => return Err(format!("expected KindFiltered, got {other:?}")),
         }
+        Ok(())
     }
 
     // 9. Unknown kind discriminant rejected.
     #[test]
-    fn unknown_kind_rejected() {
+    fn unknown_kind_rejected() -> Result<(), String> {
         let policy = ExtractionPolicy::permissive_for_tests();
         let mut ev = sample_event("anomaly_observation");
         ev["event_type"] = json!("never_heard_of_it");
@@ -654,13 +656,14 @@ mod tests {
             ExtractionError::UnknownKind { code, .. } => {
                 assert_eq!(code, event_codes::UNKNOWN_KIND);
             }
-            other => panic!("expected UnknownKind, got {other:?}"),
+            other => return Err(format!("expected UnknownKind, got {other:?}")),
         }
+        Ok(())
     }
 
     // 10. Missing required field — trace_id absent.
     #[test]
-    fn missing_field_rejected() {
+    fn missing_field_rejected() -> Result<(), String> {
         let policy = ExtractionPolicy::permissive_for_tests();
         let mut ev = sample_event("anomaly_observation");
         ev.as_object_mut().unwrap().remove("trace_id");
@@ -670,13 +673,14 @@ mod tests {
                 assert_eq!(field, "trace_id");
                 assert_eq!(code, event_codes::MISSING_FIELD);
             }
-            other => panic!("expected MissingField, got {other:?}"),
+            other => return Err(format!("expected MissingField, got {other:?}")),
         }
+        Ok(())
     }
 
     // 11. Malformed top-level (not an object).
     #[test]
-    fn malformed_top_level_rejected() {
+    fn malformed_top_level_rejected() -> Result<(), String> {
         let policy = ExtractionPolicy::permissive_for_tests();
         let ev = json!([1, 2, 3]);
         let err = extract_signal(&ev, &policy).expect_err("must reject");
@@ -684,8 +688,9 @@ mod tests {
             ExtractionError::Malformed { code, .. } => {
                 assert_eq!(code, event_codes::MALFORMED_EVENT);
             }
-            other => panic!("expected Malformed, got {other:?}"),
+            other => return Err(format!("expected Malformed, got {other:?}")),
         }
+        Ok(())
     }
 
     // 12. Replay auditability — trace_id is echoed unchanged, and the audit
