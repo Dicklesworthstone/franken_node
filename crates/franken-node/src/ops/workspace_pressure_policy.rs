@@ -41,11 +41,36 @@ pub const OPERATOR_WHAT_IF_SCHEMA_VERSION: &str = "franken-node/operator-what-if
 pub const WORKSPACE_HARDWARE_ADMISSION_SCHEMA_VERSION: &str =
     "franken-node/workspace-hardware-admission/v1";
 
+/// Schema version for deterministic target-dir lease plans.
+pub const TARGET_DIR_LEASE_PLAN_SCHEMA_VERSION: &str = "franken-node/target-dir-lease-plan/v1";
+
 /// Maximum structured log entries emitted by one what-if simulation.
 const MAX_OPERATOR_WHAT_IF_LOGS: usize = 32;
 
 /// Maximum cleanup actions returned by one what-if simulation.
 const MAX_OPERATOR_WHAT_IF_CLEANUP_ACTIONS: usize = 64;
+
+/// Maximum target-dir roots or reservation hints accepted by one lease plan.
+pub const MAX_TARGET_DIR_LEASE_CANDIDATES: usize = 64;
+
+/// Default lease expiry hint for validation target directories.
+pub const DEFAULT_TARGET_DIR_LEASE_TTL_MS: u64 = 3_600_000;
+
+pub mod target_dir_lease_reason_codes {
+    pub const SELECT_OFF_REPO_RCH: &str = "TDL_SELECT_OFF_REPO_RCH";
+    pub const SELECT_LOCAL_SOURCE: &str = "TDL_SELECT_LOCAL_SOURCE";
+    pub const SELECT_TEMP_ISOLATED: &str = "TDL_SELECT_TEMP_ISOLATED";
+    pub const REJECT_REPO_LOCAL_HEAVY: &str = "TDL_REJECT_REPO_LOCAL_HEAVY";
+    pub const REJECT_FULL_ROOT: &str = "TDL_REJECT_FULL_ROOT";
+    pub const REJECT_STALE_ROOT: &str = "TDL_REJECT_STALE_ROOT";
+    pub const REJECT_UNSTABLE_OWNER: &str = "TDL_REJECT_UNSTABLE_OWNER";
+    pub const FAIL_STALE_TOPOLOGY: &str = "TDL_FAIL_STALE_TOPOLOGY";
+    pub const FAIL_INVALID_MEMORY: &str = "TDL_FAIL_INVALID_MEMORY";
+    pub const FAIL_UNSAFE_PATH: &str = "TDL_FAIL_UNSAFE_PATH";
+    pub const FAIL_NO_ROOTS: &str = "TDL_FAIL_NO_ROOTS";
+    pub const FAIL_NO_ELIGIBLE_ROOT: &str = "TDL_FAIL_NO_ELIGIBLE_ROOT";
+    pub const FAIL_TOO_MANY_ITEMS: &str = "TDL_FAIL_TOO_MANY_ITEMS";
+}
 
 /// Workspace cost classification for different types of work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -189,6 +214,159 @@ pub struct WorkspaceHardwarePlacementDecision {
     pub approved_dispatch_notes: Vec<String>,
     pub diagnostics: Vec<String>,
     pub fail_closed: bool,
+}
+
+/// Command family requesting an isolated validation target directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetDirLeaseCommandFamily {
+    Cargo,
+    RchCargo,
+    Rustfmt,
+    Ubs,
+    PythonGate,
+    SourceOnly,
+    Other,
+}
+
+impl TargetDirLeaseCommandFamily {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cargo => "cargo",
+            Self::RchCargo => "rch_cargo",
+            Self::Rustfmt => "rustfmt",
+            Self::Ubs => "ubs",
+            Self::PythonGate => "python_gate",
+            Self::SourceOnly => "source_only",
+            Self::Other => "other",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_heavy(self) -> bool {
+        matches!(self, Self::Cargo | Self::RchCargo)
+    }
+}
+
+/// Expected artifact class for the target-dir lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetDirLeaseArtifactClass {
+    BuildOutput,
+    TestArtifacts,
+    Evidence,
+    TempOutput,
+    Cache,
+}
+
+/// Candidate root class for lease planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetDirLeaseRootKind {
+    OffRepo,
+    RchWorker,
+    Temp,
+    RepoLocal,
+    Unknown,
+}
+
+/// Safety class attached to a lease candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetDirLeaseSafetyClass {
+    PreferredIsolated,
+    AcceptableShared,
+    RequiresExplicitApproval,
+    Rejected,
+}
+
+/// Expected cleanup owner. This is advisory only and never deletes files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetDirLeaseCleanupOwner {
+    Agent,
+    RchWorker,
+    Operator,
+    None,
+}
+
+/// Observed or configured target-dir root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetDirLeaseRoot {
+    pub path: String,
+    pub kind: TargetDirLeaseRootKind,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub numa_node: Option<u32>,
+    pub stable_owner: bool,
+    pub existing_lease_count: u32,
+    pub stale: bool,
+}
+
+/// Active reservation/lease hint used to avoid piling work onto one root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetDirLeaseReservationHint {
+    pub path: String,
+    pub holder: String,
+    pub expires_at_ms: Option<u64>,
+}
+
+/// Input for deterministic target-dir lease planning.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TargetDirLeasePlanInput {
+    pub plan_id: String,
+    pub workspace_root: String,
+    pub bead_id: String,
+    pub command_family: TargetDirLeaseCommandFamily,
+    pub expected_artifact_class: TargetDirLeaseArtifactClass,
+    pub roots: Vec<TargetDirLeaseRoot>,
+    pub topology: Option<WorkspaceHardwareTopologySnapshot>,
+    pub memory_pressure: f32,
+    pub active_reservation_hints: Vec<TargetDirLeaseReservationHint>,
+    pub rch_required: bool,
+    pub lease_ttl_ms: u64,
+}
+
+/// One ranked target-dir lease candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetDirLeaseCandidate {
+    pub path: String,
+    pub root_path: String,
+    pub root_kind: TargetDirLeaseRootKind,
+    pub safety_class: TargetDirLeaseSafetyClass,
+    pub expected_cleanup_owner: TargetDirLeaseCleanupOwner,
+    pub expires_after_ms: u64,
+    pub reason_code: String,
+    pub fail_closed: bool,
+    pub score: i64,
+    pub free_bytes: u64,
+    pub numa_node: Option<u32>,
+    pub requires_approval: bool,
+    pub diagnostics: Vec<String>,
+}
+
+/// Cleanup advice emitted by the planner. It is never an executable delete command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetDirLeaseCleanupRecommendation {
+    pub path: String,
+    pub reason: String,
+    pub requires_approval: bool,
+}
+
+/// Deterministic target-dir lease plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetDirLeasePlan {
+    pub schema_version: String,
+    pub plan_id: String,
+    pub bead_id: String,
+    pub selected_path: Option<String>,
+    pub selected_reason_code: String,
+    pub candidates: Vec<TargetDirLeaseCandidate>,
+    pub cleanup_recommendations: Vec<TargetDirLeaseCleanupRecommendation>,
+    pub diagnostics: Vec<String>,
+    pub fail_closed: bool,
+    pub human_summary: String,
 }
 
 /// RCH queue state visible to an operator simulation.
@@ -873,6 +1051,158 @@ impl WorkspacePressurePolicy {
             approved_dispatch_notes,
             diagnostics: limit_diagnostics(diagnostics),
             fail_closed,
+        }
+    }
+
+    /// Plan an isolated target directory for validation work without mutating the filesystem.
+    pub fn plan_target_dir_lease(&self, input: TargetDirLeasePlanInput) -> TargetDirLeasePlan {
+        let mut diagnostics = Vec::new();
+        let mut cleanup_recommendations = Vec::new();
+        let minimum_free_bytes = self.thresholds.min_free_disk_bytes;
+
+        if input.roots.len() > MAX_TARGET_DIR_LEASE_CANDIDATES
+            || input.active_reservation_hints.len() > MAX_TARGET_DIR_LEASE_CANDIDATES
+        {
+            return fail_closed_target_dir_lease_plan(
+                input.plan_id,
+                input.bead_id,
+                target_dir_lease_reason_codes::FAIL_TOO_MANY_ITEMS,
+                "target-dir lease input exceeded bounded candidate limits".to_string(),
+            );
+        }
+
+        if !input.memory_pressure.is_finite() {
+            return fail_closed_target_dir_lease_plan(
+                input.plan_id,
+                input.bead_id,
+                target_dir_lease_reason_codes::FAIL_INVALID_MEMORY,
+                "target-dir lease memory pressure was not finite".to_string(),
+            );
+        }
+
+        if input
+            .topology
+            .as_ref()
+            .is_some_and(|topology| topology.stale)
+        {
+            return fail_closed_target_dir_lease_plan(
+                input.plan_id,
+                input.bead_id,
+                target_dir_lease_reason_codes::FAIL_STALE_TOPOLOGY,
+                "target-dir lease topology snapshot was stale".to_string(),
+            );
+        }
+
+        if target_dir_lease_path_is_unsafe(&input.workspace_root) {
+            return fail_closed_target_dir_lease_plan(
+                input.plan_id,
+                input.bead_id,
+                target_dir_lease_reason_codes::FAIL_UNSAFE_PATH,
+                "target-dir lease workspace root was unsafe".to_string(),
+            );
+        }
+
+        if input.roots.is_empty() {
+            return fail_closed_target_dir_lease_plan(
+                input.plan_id,
+                input.bead_id,
+                target_dir_lease_reason_codes::FAIL_NO_ROOTS,
+                "target-dir lease plan had no candidate roots".to_string(),
+            );
+        }
+
+        for hint in &input.active_reservation_hints {
+            if target_dir_lease_path_is_unsafe(&hint.path) || hint.holder.trim().is_empty() {
+                return fail_closed_target_dir_lease_plan(
+                    input.plan_id,
+                    input.bead_id,
+                    target_dir_lease_reason_codes::FAIL_UNSAFE_PATH,
+                    "target-dir lease reservation hint was unsafe".to_string(),
+                );
+            }
+        }
+
+        if input
+            .topology
+            .as_ref()
+            .and_then(|topology| topology.numa_nodes)
+            .unwrap_or(0)
+            == 0
+        {
+            push_bounded(
+                &mut diagnostics,
+                "NUMA topology unavailable; target-dir ranking uses disk and lease signals only"
+                    .to_string(),
+                MAX_DIAGNOSTIC_REASONS,
+            );
+        }
+
+        let mut candidates = Vec::with_capacity(input.roots.len());
+        for root in &input.roots {
+            if target_dir_lease_path_is_unsafe(&root.path) {
+                return fail_closed_target_dir_lease_plan(
+                    input.plan_id,
+                    input.bead_id,
+                    target_dir_lease_reason_codes::FAIL_UNSAFE_PATH,
+                    format!("target-dir lease root was unsafe: {}", root.path),
+                );
+            }
+
+            candidates.push(build_target_dir_lease_candidate(
+                &input,
+                root,
+                minimum_free_bytes,
+                target_dir_reservation_count_for_root(root, &input.active_reservation_hints),
+                &mut cleanup_recommendations,
+            ));
+        }
+
+        candidates.sort_by(|left, right| {
+            left.fail_closed
+                .cmp(&right.fail_closed)
+                .then_with(|| right.score.cmp(&left.score))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+
+        let selected_path = candidates
+            .iter()
+            .find(|candidate| !candidate.fail_closed)
+            .map(|candidate| candidate.path.clone());
+        let selected_reason_code = candidates
+            .iter()
+            .find(|candidate| !candidate.fail_closed)
+            .map(|candidate| candidate.reason_code.clone())
+            .unwrap_or_else(|| target_dir_lease_reason_codes::FAIL_NO_ELIGIBLE_ROOT.to_string());
+        let fail_closed = selected_path.is_none();
+
+        if fail_closed {
+            push_bounded(
+                &mut diagnostics,
+                "no eligible target-dir lease root remained after policy filtering".to_string(),
+                MAX_DIAGNOSTIC_REASONS,
+            );
+        }
+
+        let human_summary = render_target_dir_lease_plan_human_parts(
+            &input.bead_id,
+            selected_path.as_deref(),
+            &selected_reason_code,
+            candidates.len(),
+            cleanup_recommendations.len(),
+            fail_closed,
+        );
+
+        TargetDirLeasePlan {
+            schema_version: TARGET_DIR_LEASE_PLAN_SCHEMA_VERSION.to_string(),
+            plan_id: input.plan_id,
+            bead_id: input.bead_id,
+            selected_path,
+            selected_reason_code,
+            candidates,
+            cleanup_recommendations,
+            diagnostics: limit_diagnostics(diagnostics),
+            fail_closed,
+            human_summary,
         }
     }
 
@@ -1792,6 +2122,345 @@ fn hardware_bridge_dispatch_note(
     }
 }
 
+fn fail_closed_target_dir_lease_plan(
+    plan_id: String,
+    bead_id: String,
+    reason_code: &'static str,
+    diagnostic: String,
+) -> TargetDirLeasePlan {
+    TargetDirLeasePlan {
+        schema_version: TARGET_DIR_LEASE_PLAN_SCHEMA_VERSION.to_string(),
+        plan_id,
+        bead_id: bead_id.clone(),
+        selected_path: None,
+        selected_reason_code: reason_code.to_string(),
+        candidates: Vec::new(),
+        cleanup_recommendations: Vec::new(),
+        diagnostics: vec![diagnostic],
+        fail_closed: true,
+        human_summary: render_target_dir_lease_plan_human_parts(
+            &bead_id,
+            None,
+            reason_code,
+            0,
+            0,
+            true,
+        ),
+    }
+}
+
+fn build_target_dir_lease_candidate(
+    input: &TargetDirLeasePlanInput,
+    root: &TargetDirLeaseRoot,
+    minimum_free_bytes: u64,
+    reservation_count: u32,
+    cleanup_recommendations: &mut Vec<TargetDirLeaseCleanupRecommendation>,
+) -> TargetDirLeaseCandidate {
+    let mut diagnostics = Vec::new();
+    let required_free_bytes = target_dir_lease_required_free_bytes(input, minimum_free_bytes);
+    let heavy = input.command_family.is_heavy() || input.rch_required;
+    let path = target_dir_lease_candidate_path(
+        &root.path,
+        &input.bead_id,
+        input.command_family,
+        input.expected_artifact_class,
+    );
+    let expected_cleanup_owner = target_dir_lease_cleanup_owner(root.kind);
+    let expires_after_ms = input.lease_ttl_ms.max(DEFAULT_TARGET_DIR_LEASE_TTL_MS);
+
+    let mut safety_class = match root.kind {
+        TargetDirLeaseRootKind::OffRepo | TargetDirLeaseRootKind::RchWorker => {
+            TargetDirLeaseSafetyClass::PreferredIsolated
+        }
+        TargetDirLeaseRootKind::Temp => TargetDirLeaseSafetyClass::AcceptableShared,
+        TargetDirLeaseRootKind::RepoLocal | TargetDirLeaseRootKind::Unknown => {
+            TargetDirLeaseSafetyClass::RequiresExplicitApproval
+        }
+    };
+    let mut reason_code = match root.kind {
+        TargetDirLeaseRootKind::OffRepo | TargetDirLeaseRootKind::RchWorker => {
+            target_dir_lease_reason_codes::SELECT_OFF_REPO_RCH
+        }
+        TargetDirLeaseRootKind::Temp => target_dir_lease_reason_codes::SELECT_TEMP_ISOLATED,
+        TargetDirLeaseRootKind::RepoLocal | TargetDirLeaseRootKind::Unknown => {
+            target_dir_lease_reason_codes::SELECT_LOCAL_SOURCE
+        }
+    };
+    let mut fail_closed = false;
+    let mut requires_approval = false;
+
+    if root.stale {
+        safety_class = TargetDirLeaseSafetyClass::Rejected;
+        reason_code = target_dir_lease_reason_codes::REJECT_STALE_ROOT;
+        fail_closed = true;
+        requires_approval = true;
+        push_bounded(
+            &mut diagnostics,
+            "root observation is stale".to_string(),
+            MAX_DIAGNOSTIC_REASONS,
+        );
+    } else if root.free_bytes < required_free_bytes {
+        safety_class = TargetDirLeaseSafetyClass::Rejected;
+        reason_code = target_dir_lease_reason_codes::REJECT_FULL_ROOT;
+        fail_closed = true;
+        requires_approval = true;
+        push_bounded(
+            &mut diagnostics,
+            format!(
+                "root free bytes {} below required {}",
+                root.free_bytes, required_free_bytes
+            ),
+            MAX_DIAGNOSTIC_REASONS,
+        );
+    } else if heavy && root.kind == TargetDirLeaseRootKind::RepoLocal {
+        safety_class = TargetDirLeaseSafetyClass::Rejected;
+        reason_code = target_dir_lease_reason_codes::REJECT_REPO_LOCAL_HEAVY;
+        fail_closed = true;
+        requires_approval = true;
+        push_bounded(
+            &mut diagnostics,
+            "repo-local target dir rejected for heavy cargo/RCH-required work".to_string(),
+            MAX_DIAGNOSTIC_REASONS,
+        );
+    } else if !root.stable_owner {
+        safety_class = TargetDirLeaseSafetyClass::RequiresExplicitApproval;
+        reason_code = target_dir_lease_reason_codes::REJECT_UNSTABLE_OWNER;
+        fail_closed = true;
+        requires_approval = true;
+        push_bounded(
+            &mut diagnostics,
+            "root ownership is unstable".to_string(),
+            MAX_DIAGNOSTIC_REASONS,
+        );
+    }
+
+    if fail_closed {
+        cleanup_recommendations.push(TargetDirLeaseCleanupRecommendation {
+            path: root.path.clone(),
+            reason: format!(
+                "candidate rejected with {reason_code}; cleanup or lease recovery requires operator approval"
+            ),
+            requires_approval: true,
+        });
+    }
+
+    let score = target_dir_lease_score(input, root, reservation_count, fail_closed);
+
+    TargetDirLeaseCandidate {
+        path,
+        root_path: root.path.clone(),
+        root_kind: root.kind,
+        safety_class,
+        expected_cleanup_owner,
+        expires_after_ms,
+        reason_code: reason_code.to_string(),
+        fail_closed,
+        score,
+        free_bytes: root.free_bytes,
+        numa_node: root.numa_node,
+        requires_approval,
+        diagnostics: limit_diagnostics(diagnostics),
+    }
+}
+
+fn target_dir_lease_required_free_bytes(
+    input: &TargetDirLeasePlanInput,
+    minimum_free_bytes: u64,
+) -> u64 {
+    let artifact_floor = match (input.command_family, input.expected_artifact_class) {
+        (TargetDirLeaseCommandFamily::Cargo | TargetDirLeaseCommandFamily::RchCargo, _) => {
+            8 * 1024 * 1024 * 1024
+        }
+        (_, TargetDirLeaseArtifactClass::BuildOutput | TargetDirLeaseArtifactClass::Cache) => {
+            2 * 1024 * 1024 * 1024
+        }
+        (_, TargetDirLeaseArtifactClass::TestArtifacts) => 1024 * 1024 * 1024,
+        _ => 512 * 1024 * 1024,
+    };
+    artifact_floor.max(minimum_free_bytes)
+}
+
+fn target_dir_lease_score(
+    input: &TargetDirLeasePlanInput,
+    root: &TargetDirLeaseRoot,
+    reservation_count: u32,
+    fail_closed: bool,
+) -> i64 {
+    if fail_closed {
+        return -1_000_000;
+    }
+
+    let root_score = match root.kind {
+        TargetDirLeaseRootKind::OffRepo => 50_000,
+        TargetDirLeaseRootKind::RchWorker => 48_000,
+        TargetDirLeaseRootKind::Temp => 30_000,
+        TargetDirLeaseRootKind::RepoLocal => 10_000,
+        TargetDirLeaseRootKind::Unknown => 1_000,
+    };
+    let free_gib = i64::try_from(root.free_bytes / (1024 * 1024 * 1024)).unwrap_or(i64::MAX);
+    let free_score = free_gib.min(512).saturating_mul(25);
+    let lease_penalty =
+        i64::from(root.existing_lease_count.saturating_add(reservation_count)).saturating_mul(250);
+    let memory_penalty = target_dir_lease_memory_penalty(input.memory_pressure);
+    let numa_bonus = target_dir_lease_numa_bonus(input, root);
+    let owner_bonus = if root.stable_owner { 2_000 } else { 0 };
+
+    i64::from(root_score)
+        .saturating_add(free_score)
+        .saturating_add(numa_bonus)
+        .saturating_add(owner_bonus)
+        .saturating_sub(lease_penalty)
+        .saturating_sub(memory_penalty)
+}
+
+fn target_dir_lease_memory_penalty(memory_pressure: f32) -> i64 {
+    if memory_pressure >= 0.95 {
+        10_000
+    } else if memory_pressure >= 0.9 {
+        5_000
+    } else if memory_pressure >= 0.8 {
+        2_000
+    } else {
+        0
+    }
+}
+
+fn target_dir_lease_numa_bonus(input: &TargetDirLeasePlanInput, root: &TargetDirLeaseRoot) -> i64 {
+    let Some(node) = root.numa_node else {
+        return 0;
+    };
+    let Some(node_count) = input
+        .topology
+        .as_ref()
+        .and_then(|topology| topology.numa_nodes)
+    else {
+        return 0;
+    };
+    if node < node_count { 1_500 } else { -1_500 }
+}
+
+fn target_dir_reservation_count_for_root(
+    root: &TargetDirLeaseRoot,
+    hints: &[TargetDirLeaseReservationHint],
+) -> u32 {
+    let root_prefix = root.path.trim_end_matches('/');
+    let count = hints
+        .iter()
+        .filter(|hint| {
+            hint.path == root.path
+                || hint
+                    .path
+                    .strip_prefix(root_prefix)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+        .count();
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+fn target_dir_lease_candidate_path(
+    root_path: &str,
+    bead_id: &str,
+    command_family: TargetDirLeaseCommandFamily,
+    artifact_class: TargetDirLeaseArtifactClass,
+) -> String {
+    let root = root_path.trim_end_matches('/');
+    let root = if root.is_empty() { "/" } else { root };
+    let leaf = format!(
+        "franken-node-{}-{}-{}",
+        sanitize_lease_component(bead_id),
+        command_family.as_str(),
+        target_dir_lease_artifact_class_slug(artifact_class)
+    );
+    if root == "/" {
+        format!("/{leaf}")
+    } else {
+        format!("{root}/{leaf}")
+    }
+}
+
+fn target_dir_lease_artifact_class_slug(
+    artifact_class: TargetDirLeaseArtifactClass,
+) -> &'static str {
+    match artifact_class {
+        TargetDirLeaseArtifactClass::BuildOutput => "build-output",
+        TargetDirLeaseArtifactClass::TestArtifacts => "test-artifacts",
+        TargetDirLeaseArtifactClass::Evidence => "evidence",
+        TargetDirLeaseArtifactClass::TempOutput => "temp-output",
+        TargetDirLeaseArtifactClass::Cache => "cache",
+    }
+}
+
+fn target_dir_lease_cleanup_owner(root_kind: TargetDirLeaseRootKind) -> TargetDirLeaseCleanupOwner {
+    match root_kind {
+        TargetDirLeaseRootKind::OffRepo | TargetDirLeaseRootKind::Temp => {
+            TargetDirLeaseCleanupOwner::Agent
+        }
+        TargetDirLeaseRootKind::RchWorker => TargetDirLeaseCleanupOwner::RchWorker,
+        TargetDirLeaseRootKind::RepoLocal | TargetDirLeaseRootKind::Unknown => {
+            TargetDirLeaseCleanupOwner::Operator
+        }
+    }
+}
+
+fn target_dir_lease_path_is_unsafe(path: &str) -> bool {
+    path.trim().is_empty()
+        || path.contains('\0')
+        || Path::new(path)
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn sanitize_lease_component(value: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_separator = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if !last_was_separator {
+            out.push('-');
+            last_was_separator = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn render_target_dir_lease_plan_human_parts(
+    bead_id: &str,
+    selected_path: Option<&str>,
+    reason_code: &str,
+    candidate_count: usize,
+    cleanup_count: usize,
+    fail_closed: bool,
+) -> String {
+    format!(
+        "target_dir_lease bead={} selected={} reason_code={} candidates={} cleanup_recommendations={} fail_closed={}",
+        bead_id,
+        selected_path.unwrap_or("none"),
+        reason_code,
+        candidate_count,
+        cleanup_count,
+        fail_closed
+    )
+}
+
+#[must_use]
+pub fn render_target_dir_lease_plan_human(plan: &TargetDirLeasePlan) -> String {
+    render_target_dir_lease_plan_human_parts(
+        &plan.bead_id,
+        plan.selected_path.as_deref(),
+        &plan.selected_reason_code,
+        plan.candidates.len(),
+        plan.cleanup_recommendations.len(),
+        plan.fail_closed,
+    )
+}
+
 /// Estimate size of temporary artifacts for cleanup analysis.
 fn estimate_temp_artifacts_size() -> std::io::Result<u64> {
     let mut total: u64 = 0;
@@ -2692,6 +3361,181 @@ mod tests {
         assert_eq!(decision.action, OperatorWhatIfAction::RefuseLocalFallback);
         assert_eq!(decision.reason_code, "HWP_BRIDGE_INVALID_PRESSURE_INPUT");
         assert!(decision.fail_closed);
+    }
+
+    fn lease_root(
+        path: &str,
+        kind: TargetDirLeaseRootKind,
+        free_bytes: u64,
+        numa_node: Option<u32>,
+    ) -> TargetDirLeaseRoot {
+        TargetDirLeaseRoot {
+            path: path.to_string(),
+            kind,
+            total_bytes: 512 * 1024 * 1024 * 1024,
+            free_bytes,
+            numa_node,
+            stable_owner: true,
+            existing_lease_count: 0,
+            stale: false,
+        }
+    }
+
+    fn lease_input(roots: Vec<TargetDirLeaseRoot>) -> TargetDirLeasePlanInput {
+        TargetDirLeasePlanInput {
+            plan_id: "target-dir-plan-bd-c9hho-2".to_string(),
+            workspace_root: "/data/projects/franken_node".to_string(),
+            bead_id: "bd-c9hho.2".to_string(),
+            command_family: TargetDirLeaseCommandFamily::RchCargo,
+            expected_artifact_class: TargetDirLeaseArtifactClass::BuildOutput,
+            roots,
+            topology: Some(bridge_topology(96, 256 * 1024 * 1024 * 1024, Some(4))),
+            memory_pressure: 0.35,
+            active_reservation_hints: Vec::new(),
+            rch_required: true,
+            lease_ttl_ms: DEFAULT_TARGET_DIR_LEASE_TTL_MS,
+        }
+    }
+
+    #[test]
+    fn target_dir_lease_prefers_off_repo_root_for_rch_work() {
+        let policy = WorkspacePressurePolicy::with_balanced_defaults();
+        let plan = policy.plan_target_dir_lease(lease_input(vec![
+            lease_root(
+                "/data/projects/franken_node/target",
+                TargetDirLeaseRootKind::RepoLocal,
+                200 * 1024 * 1024 * 1024,
+                Some(0),
+            ),
+            lease_root(
+                "/data/tmp/franken-node-targets",
+                TargetDirLeaseRootKind::OffRepo,
+                64 * 1024 * 1024 * 1024,
+                Some(1),
+            ),
+        ]));
+
+        assert_eq!(plan.schema_version, TARGET_DIR_LEASE_PLAN_SCHEMA_VERSION);
+        assert_eq!(
+            plan.selected_reason_code,
+            target_dir_lease_reason_codes::SELECT_OFF_REPO_RCH
+        );
+        assert!(
+            plan.selected_path
+                .as_deref()
+                .is_some_and(|path| path.starts_with("/data/tmp/franken-node-targets/"))
+        );
+        assert!(!plan.fail_closed);
+        assert!(plan.candidates.iter().any(|candidate| candidate.reason_code
+            == target_dir_lease_reason_codes::REJECT_REPO_LOCAL_HEAVY
+            && candidate.requires_approval));
+    }
+
+    #[test]
+    fn target_dir_lease_rejects_unsafe_paths() {
+        let policy = WorkspacePressurePolicy::with_balanced_defaults();
+        let traversal = policy.plan_target_dir_lease(lease_input(vec![lease_root(
+            "/data/tmp/../target",
+            TargetDirLeaseRootKind::OffRepo,
+            64 * 1024 * 1024 * 1024,
+            Some(0),
+        )]));
+        assert!(traversal.fail_closed);
+        assert_eq!(
+            traversal.selected_reason_code,
+            target_dir_lease_reason_codes::FAIL_UNSAFE_PATH
+        );
+
+        let nul = policy.plan_target_dir_lease(lease_input(vec![lease_root(
+            "/data/tmp/franken\0target",
+            TargetDirLeaseRootKind::OffRepo,
+            64 * 1024 * 1024 * 1024,
+            Some(0),
+        )]));
+        assert!(nul.fail_closed);
+        assert_eq!(
+            nul.selected_reason_code,
+            target_dir_lease_reason_codes::FAIL_UNSAFE_PATH
+        );
+    }
+
+    #[test]
+    fn target_dir_lease_fail_closes_stale_topology_and_full_roots() {
+        let policy = WorkspacePressurePolicy::with_balanced_defaults();
+        let mut stale_topology = bridge_topology(96, 256 * 1024 * 1024 * 1024, Some(4));
+        stale_topology.stale = true;
+        let mut input = lease_input(vec![lease_root(
+            "/data/tmp/franken-node-targets",
+            TargetDirLeaseRootKind::OffRepo,
+            64 * 1024 * 1024 * 1024,
+            Some(0),
+        )]);
+        input.topology = Some(stale_topology);
+
+        let stale = policy.plan_target_dir_lease(input);
+        assert!(stale.fail_closed);
+        assert_eq!(
+            stale.selected_reason_code,
+            target_dir_lease_reason_codes::FAIL_STALE_TOPOLOGY
+        );
+
+        let full = policy.plan_target_dir_lease(lease_input(vec![lease_root(
+            "/data/tmp/full",
+            TargetDirLeaseRootKind::OffRepo,
+            1024 * 1024,
+            Some(0),
+        )]));
+        assert!(full.fail_closed);
+        assert_eq!(
+            full.selected_reason_code,
+            target_dir_lease_reason_codes::FAIL_NO_ELIGIBLE_ROOT
+        );
+        assert!(
+            full.cleanup_recommendations
+                .iter()
+                .all(|recommendation| recommendation.requires_approval)
+        );
+
+        let mut invalid_memory = lease_input(vec![lease_root(
+            "/data/tmp/franken-node-targets",
+            TargetDirLeaseRootKind::OffRepo,
+            64 * 1024 * 1024 * 1024,
+            Some(0),
+        )]);
+        invalid_memory.memory_pressure = f32::NAN;
+        let invalid = policy.plan_target_dir_lease(invalid_memory);
+        assert!(invalid.fail_closed);
+        assert_eq!(
+            invalid.selected_reason_code,
+            target_dir_lease_reason_codes::FAIL_INVALID_MEMORY
+        );
+    }
+
+    #[test]
+    fn target_dir_lease_missing_numa_degrades_without_blocking_source_only() {
+        let policy = WorkspacePressurePolicy::with_balanced_defaults();
+        let mut input = lease_input(vec![lease_root(
+            "/data/tmp/source-targets",
+            TargetDirLeaseRootKind::Temp,
+            16 * 1024 * 1024 * 1024,
+            None,
+        )]);
+        input.command_family = TargetDirLeaseCommandFamily::SourceOnly;
+        input.expected_artifact_class = TargetDirLeaseArtifactClass::Evidence;
+        input.rch_required = false;
+        input.topology = Some(bridge_topology(96, 256 * 1024 * 1024 * 1024, None));
+
+        let plan = policy.plan_target_dir_lease(input);
+        assert!(!plan.fail_closed);
+        assert_eq!(
+            plan.selected_reason_code,
+            target_dir_lease_reason_codes::SELECT_TEMP_ISOLATED
+        );
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("NUMA topology unavailable"))
+        );
     }
 
     #[test]

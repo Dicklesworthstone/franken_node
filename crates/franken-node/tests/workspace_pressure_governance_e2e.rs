@@ -6,8 +6,12 @@ use frankenengine_node::ops::workspace_pressure_policy::{
     AgentCommandValidationOutcome, MAX_AGENT_COMMAND_LEDGER_ENTRIES,
     OPERATOR_WHAT_IF_SCHEMA_VERSION, OperatorWhatIfAction, OperatorWhatIfArtifact,
     OperatorWhatIfArtifactSafetyClass, OperatorWhatIfInput, OperatorWhatIfRchQueueState,
-    PolicyDecision, WorkCostClass, WorkspacePressureInputs, WorkspacePressurePolicy,
-    count_active_reservations_in_dir, render_agent_command_ledger_human,
+    PolicyDecision, TARGET_DIR_LEASE_PLAN_SCHEMA_VERSION, TargetDirLeaseArtifactClass,
+    TargetDirLeaseCommandFamily, TargetDirLeasePlanInput, TargetDirLeaseRoot,
+    TargetDirLeaseRootKind, WorkCostClass, WorkspaceHardwareTopologySnapshot,
+    WorkspacePressureInputs, WorkspacePressurePolicy, count_active_reservations_in_dir,
+    render_agent_command_ledger_human, render_target_dir_lease_plan_human,
+    target_dir_lease_reason_codes,
 };
 use frankenengine_node::runtime::resource_governor::{
     ResourceArtifactInventory, ResourceArtifactInventoryEntry, ResourceArtifactKind,
@@ -329,6 +333,100 @@ fn workspace_pressure_policy_decision_golden_matches_real_policy() -> std::io::R
          rerun this test with UPDATE_GOLDENS=1 only after reviewing the diff"
     );
     Ok(())
+}
+
+#[test]
+fn target_dir_lease_plan_golden_ranks_roots_without_cleanup_commands() {
+    let policy = WorkspacePressurePolicy::with_balanced_defaults();
+    let input = TargetDirLeasePlanInput {
+        plan_id: "bd-c9hho.2-golden".to_string(),
+        workspace_root: REPO_KEY.to_string(),
+        bead_id: "bd-c9hho.2".to_string(),
+        command_family: TargetDirLeaseCommandFamily::RchCargo,
+        expected_artifact_class: TargetDirLeaseArtifactClass::BuildOutput,
+        roots: vec![
+            TargetDirLeaseRoot {
+                path: "/data/projects/franken_node/target".to_string(),
+                kind: TargetDirLeaseRootKind::RepoLocal,
+                total_bytes: 512 * 1024 * 1024 * 1024,
+                free_bytes: 300 * 1024 * 1024 * 1024,
+                numa_node: Some(0),
+                stable_owner: true,
+                existing_lease_count: 0,
+                stale: false,
+            },
+            TargetDirLeaseRoot {
+                path: "/data/tmp/franken-node-targets-a".to_string(),
+                kind: TargetDirLeaseRootKind::OffRepo,
+                total_bytes: 512 * 1024 * 1024 * 1024,
+                free_bytes: 80 * 1024 * 1024 * 1024,
+                numa_node: Some(1),
+                stable_owner: true,
+                existing_lease_count: 2,
+                stale: false,
+            },
+            TargetDirLeaseRoot {
+                path: "/data/tmp/franken-node-targets-b".to_string(),
+                kind: TargetDirLeaseRootKind::OffRepo,
+                total_bytes: 512 * 1024 * 1024 * 1024,
+                free_bytes: 96 * 1024 * 1024 * 1024,
+                numa_node: Some(2),
+                stable_owner: true,
+                existing_lease_count: 0,
+                stale: false,
+            },
+        ],
+        topology: Some(WorkspaceHardwareTopologySnapshot {
+            snapshot_id: "topology-96c-256g".to_string(),
+            cpu_cores: 96,
+            memory_bytes: 256 * 1024 * 1024 * 1024,
+            numa_nodes: Some(4),
+            stale: false,
+        }),
+        memory_pressure: 0.42,
+        active_reservation_hints: Vec::new(),
+        rch_required: true,
+        lease_ttl_ms: 3_600_000,
+    };
+
+    let plan = policy.plan_target_dir_lease(input);
+    let rendered = serde_json::to_value(&plan).expect("target-dir lease plan serializes");
+
+    assert_eq!(
+        rendered["schema_version"],
+        TARGET_DIR_LEASE_PLAN_SCHEMA_VERSION
+    );
+    assert_eq!(
+        rendered["selected_reason_code"],
+        target_dir_lease_reason_codes::SELECT_OFF_REPO_RCH
+    );
+    assert_eq!(
+        plan.selected_path.as_deref(),
+        Some("/data/tmp/franken-node-targets-b/franken-node-bd-c9hho-2-rch_cargo-build-output")
+    );
+    assert!(!plan.fail_closed);
+    assert_eq!(plan.candidates.len(), 3);
+    assert!(plan.diagnostics.len() <= MAX_POLICY_DIAGNOSTIC_REASONS_WITH_TRUNCATION);
+    assert!(
+        plan.candidates
+            .iter()
+            .all(|candidate| candidate.diagnostics.len()
+                <= MAX_POLICY_DIAGNOSTIC_REASONS_WITH_TRUNCATION)
+    );
+    assert!(plan.candidates.iter().any(|candidate| candidate.reason_code
+        == target_dir_lease_reason_codes::REJECT_REPO_LOCAL_HEAVY
+        && candidate.requires_approval));
+    assert!(
+        plan.cleanup_recommendations
+            .iter()
+            .all(|recommendation| recommendation.requires_approval)
+    );
+
+    let human = render_target_dir_lease_plan_human(&plan);
+    assert!(human.contains("target_dir_lease"));
+    assert!(human.contains("bd-c9hho.2"));
+    assert!(!human.contains("rm -rf"));
+    assert!(!human.contains("git clean"));
 }
 
 proptest::proptest! {
