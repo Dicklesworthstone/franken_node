@@ -8,6 +8,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_vef_proof_verifier.py"
@@ -84,7 +85,7 @@ class TestCli(unittest.TestCase):
             capture_output=True, text=True, timeout=30, check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        parsed = json.loads(proc.stdout)
+        parsed = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(parsed["bead_id"], "bd-1o4v")
         self.assertEqual(parsed["mode"], "self-test")
 
@@ -93,9 +94,95 @@ class TestCli(unittest.TestCase):
             [sys.executable, str(SCRIPT), "--json"],
             capture_output=True, text=True, timeout=30, check=False,
         )
-        parsed = json.loads(proc.stdout)
+        parsed = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(parsed["bead_id"], "bd-1o4v")
         self.assertIn("checks", parsed)
+
+
+class TestCommentOnlyRegressions(unittest.TestCase):
+    def test_comment_only_impl_markers_fail_closed(self) -> None:
+        comment_only_impl = "\n".join(
+            [
+                "// pub enum TrustDecision { Allow, Deny(String), Degrade(u8) }",
+                "// pub struct PolicyPredicate { pub action_class: String }",
+                "// pub struct ComplianceProof { pub trace_id: String }",
+                "// pub struct VerificationRequest { pub trace_id: String }",
+                "// pub struct PredicateEvidence { pub reason: String }",
+                "// pub struct VerificationReport { pub report_digest: String, pub trace_id: String }",
+                "// pub struct VerifierEvent { pub trace_id: String }",
+                "// pub struct VerifierError { pub code: String }",
+                "// pub struct VerificationGateConfig { pub max_proof_age_millis: u64, pub degrade_threshold: u8, pub enforce_policy_version: bool }",
+                "// pub struct ProofVerifier {}",
+                "// pub struct VerificationGate {}",
+                "// pub struct DecisionSummary { pub allow_count: usize }",
+                "// pub fn validate_proof(",
+                "// pub fn register_predicate(",
+                "// pub fn remove_predicate(",
+                "// pub fn verify(",
+                "// pub fn verify_batch(",
+                "// pub fn decision_summary(",
+                "// pub fn events(",
+                "// pub fn reports(",
+                "// pub fn predicates(",
+                '// pub const PROOF_VERIFIER_SCHEMA_VERSION: &str = "vef-proof-verifier-v1";',
+                '// pub const INV_PVF_DETERMINISTIC: &str = "INV-PVF-DETERMINISTIC";',
+                '// pub const INV_PVF_DENY_LOGGED: &str = "INV-PVF-DENY-LOGGED";',
+                '// pub const INV_PVF_EVIDENCE_COMPLETE: &str = "INV-PVF-EVIDENCE-COMPLETE";',
+                '// pub const PVF_001_REQUEST_RECEIVED: &str = "PVF-001";',
+                '// pub const PVF_002_PROOF_VALIDATED: &str = "PVF-002";',
+                '// pub const PVF_003_DECISION_EMITTED: &str = "PVF-003";',
+                '// pub const PVF_004_DENY_LOGGED: &str = "PVF-004";',
+                '// pub const PVF_005_DEGRADE_LOGGED: &str = "PVF-005";',
+                '// pub const PVF_006_REPORT_FINALIZED: &str = "PVF-006";',
+                '// pub const ERR_PVF_PROOF_EXPIRED: &str = "ERR-PVF-PROOF-EXPIRED";',
+                '// pub const ERR_PVF_POLICY_MISSING: &str = "ERR-PVF-POLICY-MISSING";',
+                '// pub const ERR_PVF_INVALID_FORMAT: &str = "ERR-PVF-INVALID-FORMAT";',
+                '// pub const ERR_PVF_INTERNAL: &str = "ERR-PVF-INTERNAL";',
+                "// BTreeMap Sha256 Serialize Deserialize trace_id report_digest compute_report_digest",
+                "// expiry freshness action_class confidence witness policy_version expired",
+            ]
+            + ["// #[test]\n// fn comment_only_test_marker() {}" for _ in range(20)]
+        )
+
+        def fake_read(path: Path) -> str:
+            if path == mod.IMPL_FILE:
+                return comment_only_impl
+            return ""
+
+        mod.RESULTS.clear()
+        with patch.object(mod, "_read", side_effect=fake_read):
+            mod.check_impl_symbols()
+            mod.check_trust_decisions()
+            mod.check_event_codes()
+            mod.check_error_codes()
+            mod.check_config_fields()
+            mod.check_contract_properties()
+            mod.check_unit_tests()
+
+        checks = {check["check"]: check for check in mod.RESULTS}
+        self.assertFalse(checks["impl_symbol_TrustDecision"]["pass"])
+        self.assertFalse(checks["decision_Allow"]["pass"])
+        self.assertFalse(checks["event_PVF-001"]["pass"])
+        self.assertFalse(checks["error_ERR-PVF-PROOF-EXPIRED"]["pass"])
+        self.assertFalse(checks["config_max_proof_age_millis"]["pass"])
+        self.assertFalse(checks["contract_deterministic"]["pass"])
+        self.assertFalse(checks["contract_decision_summary"]["pass"])
+        self.assertFalse(checks["impl_minimum_unit_tests"]["pass"])
+
+    def test_comment_only_mod_wiring_fails_closed(self) -> None:
+        original_read = mod._read
+
+        def fake_read(path: Path) -> str:
+            if path == mod.MOD_FILE:
+                return "// pub mod proof_verifier;"
+            return original_read(path)
+
+        mod.RESULTS.clear()
+        with patch.object(mod, "_read", side_effect=fake_read):
+            mod.check_mod_wiring()
+
+        checks = {check["check"]: check for check in mod.RESULTS}
+        self.assertFalse(checks["mod_wires_proof_verifier"]["pass"])
 
 
 class TestConstants(unittest.TestCase):

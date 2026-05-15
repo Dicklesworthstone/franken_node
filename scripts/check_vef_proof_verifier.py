@@ -17,13 +17,13 @@ import argparse
 import json
 import re
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 BEAD_ID = "bd-1o4v"
 SECTION = "10.18"
@@ -97,6 +97,77 @@ CONFIG_FIELDS = [
 RESULTS: list[dict[str, Any]] = []
 
 
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def _strip_rust_comments(src: str) -> str:
+    without_block_comments = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
+    return re.sub(r"//.*", "", without_block_comments)
+
+
+def _impl_code() -> str:
+    return _strip_rust_comments(_read(IMPL_FILE))
+
+
+def _mod_code() -> str:
+    return _strip_rust_comments(_read(MOD_FILE))
+
+
+def _rust_module_decl_present(src: str, module_name: str) -> bool:
+    return bool(re.search(rf"\bpub\s+mod\s+{re.escape(module_name)}\s*;", src))
+
+
+def _rust_pub_item_present(src: str, item_kind: str, name: str) -> bool:
+    return bool(re.search(rf"\bpub\s+{item_kind}\s+{re.escape(name)}\b", src))
+
+
+def _rust_pub_fn_present(src: str, name: str) -> bool:
+    return bool(re.search(rf"\bpub\s+fn\s+{re.escape(name)}\s*\(", src))
+
+
+def _rust_pub_const_str_value_present(src: str, value: str) -> bool:
+    return bool(
+        re.search(
+            rf"\bpub\s+const\s+\w+\s*:\s*&str\s*=\s*\"{re.escape(value)}\"\s*;",
+            src,
+        )
+    )
+
+
+def _rust_enum_body(src: str, enum_name: str) -> str:
+    match = re.search(rf"\bpub\s+enum\s+{re.escape(enum_name)}\s*\{{(?P<body>.*?)\n\}}", src, re.DOTALL)
+    return match.group("body") if match else ""
+
+
+def _rust_enum_variant_present(src: str, enum_name: str, variant: str) -> bool:
+    return bool(re.search(rf"\b{re.escape(variant)}\b", _rust_enum_body(src, enum_name)))
+
+
+def _rust_struct_body(src: str, struct_name: str) -> str:
+    match = re.search(rf"\bpub\s+struct\s+{re.escape(struct_name)}\s*\{{(?P<body>.*?)\n\}}", src, re.DOTALL)
+    return match.group("body") if match else ""
+
+
+def _rust_pub_struct_field_present(src: str, struct_name: str, field: str) -> bool:
+    return bool(re.search(rf"\bpub\s+{re.escape(field)}\s*:", _rust_struct_body(src, struct_name)))
+
+
+def _rust_test_count(src: str) -> int:
+    return len(re.findall(r"#\s*\[\s*test\s*\]", src))
+
+
+def _required_symbol_present(src: str, symbol: str) -> bool:
+    parts = symbol.split()
+    if len(parts) < 3 or parts[0] != "pub":
+        return symbol in src
+    if parts[1] in {"struct", "enum"}:
+        return _rust_pub_item_present(src, parts[1], parts[2])
+    if parts[1] == "fn":
+        return _rust_pub_fn_present(src, parts[2])
+    return symbol in src
+
+
 def _check(name: str, passed: bool, detail: str = "") -> dict[str, Any]:
     entry = {
         "check": name,
@@ -105,10 +176,6 @@ def _check(name: str, passed: bool, detail: str = "") -> dict[str, Any]:
     }
     RESULTS.append(entry)
     return entry
-
-
-def _read_impl() -> str:
-    return IMPL_FILE.read_text() if IMPL_FILE.is_file() else ""
 
 
 def check_file_presence() -> None:
@@ -120,67 +187,69 @@ def check_mod_wiring() -> None:
     if not MOD_FILE.is_file():
         _check("mod_wires_proof_verifier", False, "mod.rs missing")
         return
-    mod_text = MOD_FILE.read_text()
-    _check("mod_wires_proof_verifier", "pub mod proof_verifier;" in mod_text, "pub mod proof_verifier;")
+    _check("mod_wires_proof_verifier", _rust_module_decl_present(_mod_code(), "proof_verifier"), "pub mod proof_verifier;")
 
 
 def check_impl_symbols() -> None:
-    src = _read_impl()
+    src = _impl_code()
     for sym in REQUIRED_SYMBOLS:
         label = sym.split()[-1]
-        _check(f"impl_symbol_{label}", sym in src, sym)
+        _check(f"impl_symbol_{label}", _required_symbol_present(src, sym), sym)
 
 
 def check_trust_decisions() -> None:
-    src = _read_impl()
+    src = _impl_code()
     for variant in TRUST_DECISION_VARIANTS:
-        _check(f"decision_{variant}", variant in src, variant)
+        _check(f"decision_{variant}", _rust_enum_variant_present(src, "TrustDecision", variant), variant)
 
 
 def check_event_codes() -> None:
-    src = _read_impl()
+    src = _impl_code()
     for code in EVENT_CODES:
-        _check(f"event_{code}", code in src, code)
+        _check(f"event_{code}", _rust_pub_const_str_value_present(src, code), code)
 
 
 def check_error_codes() -> None:
-    src = _read_impl()
+    src = _impl_code()
     for code in ERROR_CODES:
-        _check(f"error_{code}", code in src, code)
+        _check(f"error_{code}", _rust_pub_const_str_value_present(src, code), code)
 
 
 def check_config_fields() -> None:
-    src = _read_impl()
+    src = _impl_code()
     for field in CONFIG_FIELDS:
-        found = re.search(rf"pub\s+{field}\s*:", src) is not None
-        _check(f"config_{field}", found, field)
+        _check(f"config_{field}", _rust_pub_struct_field_present(src, "VerificationGateConfig", field), field)
 
 
 def check_contract_properties() -> None:
-    src = _read_impl()
+    src = _impl_code()
 
     _check("contract_deterministic",
-           "INV-PVF-DETERMINISTIC" in src or "deterministic" in src.lower(),
+           _rust_pub_const_str_value_present(src, "INV-PVF-DETERMINISTIC")
+           or "deterministic" in src.lower(),
            "deterministic invariant")
 
     _check("contract_deny_logged",
-           "INV-PVF-DENY-LOGGED" in src or "PVF-004" in src,
+           _rust_pub_const_str_value_present(src, "INV-PVF-DENY-LOGGED")
+           or _rust_pub_const_str_value_present(src, "PVF-004"),
            "deny decisions logged")
 
     _check("contract_evidence_complete",
-           "INV-PVF-EVIDENCE-COMPLETE" in src or "PredicateEvidence" in src,
+           _rust_pub_const_str_value_present(src, "INV-PVF-EVIDENCE-COMPLETE")
+           or _rust_pub_item_present(src, "struct", "PredicateEvidence"),
            "evidence completeness")
 
     _check("contract_fail_closed",
-           "Deny" in src and "expired" in src.lower(),
+           _rust_enum_variant_present(src, "TrustDecision", "Deny") and "expired" in src.lower(),
            "fail-closed on expired proofs")
 
     _check("contract_batch_verify",
-           "verify_batch" in src,
+           _rust_pub_fn_present(src, "verify_batch"),
            "batch verification support")
 
     _check("contract_decision_summary",
-           "DecisionSummary" in src and "allow_count" in src,
+           _rust_pub_item_present(src, "struct", "DecisionSummary")
+           and _rust_pub_struct_field_present(src, "DecisionSummary", "allow_count"),
            "decision summary statistics")
 
     _check("contract_report_digest",
@@ -213,8 +282,8 @@ def check_contract_properties() -> None:
 
 
 def check_unit_tests() -> None:
-    src = _read_impl()
-    test_count = src.count("#[test]")
+    src = _impl_code()
+    test_count = _rust_test_count(src)
     _check("impl_minimum_unit_tests", test_count >= 20, f"{test_count} tests")
 
 
@@ -224,11 +293,12 @@ def check_evidence() -> None:
         return
     _check("evidence_exists", True, str(EVIDENCE_FILE.relative_to(ROOT)))
     try:
-        data = json.loads(EVIDENCE_FILE.read_text())
+        data = json.JSONDecoder().decode(EVIDENCE_FILE.read_text(encoding="utf-8"))
         _check("evidence_parseable", True, "valid JSON")
         _check("evidence_bead_id", data.get("bead_id") == BEAD_ID, str(data.get("bead_id")))
         verdict = data.get("verdict", data.get("overall_pass"))
-        _check("evidence_verdict", bool(verdict == "PASS" or verdict is True), str(verdict))
+        verdict_passed = verdict == "PASS" or (isinstance(verdict, bool) and verdict)
+        _check("evidence_verdict", verdict_passed, str(verdict))
     except (json.JSONDecodeError, OSError):
         _check("evidence_parseable", False, "parse error")
 
@@ -238,7 +308,7 @@ def check_summary() -> None:
         _check("summary_exists", False, str(SUMMARY_FILE.relative_to(ROOT)))
         return
     _check("summary_exists", True, str(SUMMARY_FILE.relative_to(ROOT)))
-    text = SUMMARY_FILE.read_text()
+    text = SUMMARY_FILE.read_text(encoding="utf-8")
     _check("summary_mentions_bead", BEAD_ID in text, BEAD_ID)
     _check("summary_mentions_pass", "PASS" in text.upper(), "PASS")
 
@@ -310,7 +380,7 @@ def self_test() -> dict[str, Any]:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_vef_proof_verifier")
+    configure_test_logging("check_vef_proof_verifier")
     parser = argparse.ArgumentParser(description=f"Verification checker for {BEAD_ID}")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--self-test", action="store_true")
