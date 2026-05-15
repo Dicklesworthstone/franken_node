@@ -951,6 +951,8 @@ pub fn finalize_window(pipeline: &IngestionPipeline) -> Result<WindowedGraph, In
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), String>;
+
     fn sample_obs() -> ManifestObservation {
         let mut deps = BTreeMap::new();
         deps.insert("serde".to_string(), "1.0.0".to_string());
@@ -1056,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_growth_rejects_too_many_maintainers() {
+    fn bounded_growth_rejects_too_many_maintainers() -> TestResult {
         let mut maintainers = Vec::with_capacity(MAX_MAINTAINERS_PER_PACKAGE + 1);
         for i in 0..=MAX_MAINTAINERS_PER_PACKAGE {
             maintainers.push(format!("m{i}"));
@@ -1069,8 +1071,9 @@ mod tests {
                 assert_eq!(observed, MAX_MAINTAINERS_PER_PACKAGE + 1);
                 assert_eq!(max, MAX_MAINTAINERS_PER_PACKAGE);
             }
-            other => panic!("expected TooManyMaintainers, got {other:?}"),
+            other => return Err(format!("expected TooManyMaintainers, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
@@ -1086,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_growth_rejects_too_many_dependencies() {
+    fn bounded_growth_rejects_too_many_dependencies() -> TestResult {
         let mut deps = BTreeMap::new();
         for i in 0..=MAX_DEPS_PER_PACKAGE {
             deps.insert(format!("d{i:05}"), "0.0.1".to_string());
@@ -1098,8 +1101,9 @@ mod tests {
                 assert_eq!(observed, MAX_DEPS_PER_PACKAGE + 1);
                 assert_eq!(max, MAX_DEPS_PER_PACKAGE);
             }
-            other => panic!("expected TooManyDependencies, got {other:?}"),
+            other => return Err(format!("expected TooManyDependencies, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
@@ -1142,17 +1146,18 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_nul_byte_in_identifier() {
+    fn validate_rejects_nul_byte_in_identifier() -> TestResult {
         let bad =
             ManifestObservation::new(0, "src", "pkg\0evil", "1.0", vec![], BTreeMap::new(), None);
         match bad {
             Err(IngestError::IdentContainsNul { field }) => assert_eq!(field, "package_name"),
-            other => panic!("expected IdentContainsNul, got {other:?}"),
+            other => return Err(format!("expected IdentContainsNul, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
-    fn validate_rejects_overlong_identifier() {
+    fn validate_rejects_overlong_identifier() -> TestResult {
         let long = "a".repeat(MAX_IDENT_LEN + 1);
         let bad = ManifestObservation::new(0, "src", long, "1.0", vec![], BTreeMap::new(), None);
         match bad {
@@ -1160,8 +1165,9 @@ mod tests {
                 assert_eq!(field, "package_name");
                 assert_eq!(observed, MAX_IDENT_LEN + 1);
             }
-            other => panic!("expected IdentTooLong, got {other:?}"),
+            other => return Err(format!("expected IdentTooLong, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
@@ -1318,7 +1324,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_growth_rejects_too_many_observations() {
+    fn bounded_growth_rejects_too_many_observations() -> TestResult {
         // Cap at 2: third unique observation must be rejected.
         let mut pipe = IngestionPipeline::with_caps(2, 1024, DEFAULT_DECAY_HALF_LIFE_MS);
         ingest(&mut pipe, obs_with(1, "a", "1", &[], &[])).expect("obs1");
@@ -1326,22 +1332,32 @@ mod tests {
         let err = ingest(&mut pipe, obs_with(3, "c", "1", &[], &[])).unwrap_err();
         match err {
             IngestError::TooManyMaintainers { max, .. } => assert_eq!(max, 2),
-            other => panic!("expected TooManyMaintainers cap-reuse, got {other:?}"),
+            other => {
+                return Err(format!(
+                    "expected TooManyMaintainers cap-reuse, got {other:?}"
+                ));
+            }
         }
         // Pipeline state must be unchanged by the rejected call.
         assert_eq!(pipe.total_observations, 2);
+        Ok(())
     }
 
     #[test]
-    fn bounded_growth_rejects_too_many_edges() {
+    fn bounded_growth_rejects_too_many_edges() -> TestResult {
         // Cap edges at 1; one observation with 2 maintainers will overflow.
         let mut pipe = IngestionPipeline::with_caps(1024, 1, DEFAULT_DECAY_HALF_LIFE_MS);
         let obs = obs_with(1, "alpha", "1", &["alice", "bob"], &[]);
         let err = ingest(&mut pipe, obs).unwrap_err();
         match err {
             IngestError::TooManyDependencies { max, .. } => assert_eq!(max, 1),
-            other => panic!("expected TooManyDependencies cap-reuse, got {other:?}"),
+            other => {
+                return Err(format!(
+                    "expected TooManyDependencies cap-reuse, got {other:?}"
+                ));
+            }
         }
+        Ok(())
     }
 
     #[test]
