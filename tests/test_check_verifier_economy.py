@@ -6,6 +6,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -243,6 +244,64 @@ class TestListChecks(unittest.TestCase):
             self.assertTrue(r["pass"], f"Failed: {r['check']}: {r['detail']}")
 
 
+class TestCommentOnlyRustRegression(unittest.TestCase):
+    def test_comment_only_rust_markers_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            impl = tmp_path / "mod.rs"
+            lib_rs = tmp_path / "lib.rs"
+            main_rs = tmp_path / "main.rs"
+
+            markers = (
+                mod.REQUIRED_RUST_TYPES
+                + mod.REQUIRED_RUST_METHODS
+                + mod.EVENT_CODES
+                + mod.INVARIANTS
+                + mod.ERROR_CODES
+                + mod.CAPSULE_REASON_CODES
+                + mod.REQUIRED_RUST_TESTS
+            )
+            guard_markers = []
+            for guard in mod.REPLACEMENT_CRITICAL_GUARDS:
+                guard_markers.append(guard["anchor"])
+                guard_markers.extend(guard["required"])
+
+            impl.write_text(
+                "\n".join(f"// {marker}" for marker in markers + guard_markers)
+                + "\n/*\n"
+                + "\n".join("#[test]" for _ in range(60))
+                + "\n*/\n",
+                encoding="utf-8",
+            )
+            lib_rs.write_text("// pub mod verifier_economy;\n", encoding="utf-8")
+            main_rs.write_text("// \"verifier_economy\"\n", encoding="utf-8")
+
+            with (
+                patch.object(mod, "RUST_IMPL", impl),
+                patch.object(mod, "LIB_RS", lib_rs),
+                patch.object(mod, "MAIN_RS", main_rs),
+            ):
+                self.assertTrue(mod.check_rust_impl_exists()["pass"])
+                self.assertFalse(mod.check_module_registered()["pass"])
+                self.assertFalse(mod.check_rust_test_count()["pass"])
+
+                list_results = []
+                for check in [
+                    mod.check_rust_types,
+                    mod.check_rust_methods,
+                    mod.check_rust_event_codes,
+                    mod.check_rust_invariant_constants,
+                    mod.check_rust_error_codes,
+                    mod.check_rust_capsule_reason_codes,
+                    mod.check_rust_tests,
+                    mod.check_replacement_critical_guards,
+                ]:
+                    list_results.extend(check())
+
+            self.assertTrue(list_results)
+            self.assertTrue(all(not result["pass"] for result in list_results))
+
+
 class TestReplacementCriticalGuardRegression(unittest.TestCase):
     def test_detects_signature_presence_shortcut(self):
         source = mod.RUST_IMPL.read_text(encoding="utf-8")
@@ -372,7 +431,7 @@ class TestConstants(unittest.TestCase):
 class TestJsonOutput(unittest.TestCase):
     def test_json_serializable(self):
         result = mod.run_all()
-        parsed = json.loads(json.dumps(result))
+        parsed = json.JSONDecoder().decode(json.dumps(result))
         self.assertEqual(parsed["bead_id"], "bd-m8p")
 
     def test_json_flag_via_subprocess(self):
@@ -383,7 +442,7 @@ class TestJsonOutput(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(proc.returncode, 0, f"stderr: {proc.stderr}")
-        data = json.loads(proc.stdout)
+        data = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(data["bead_id"], "bd-m8p")
         self.assertEqual(data["verdict"], "PASS")
 

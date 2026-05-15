@@ -12,13 +12,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 SPEC = ROOT / "docs" / "specs" / "section_10_9" / "bd-m8p_contract.md"
@@ -258,6 +259,97 @@ def _safe_rel(path: Path) -> str:
     return str(path)
 
 
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read_text(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = _rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] in {'"', "'"}:
+            end = _rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    quote = text[start]
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == quote:
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
 def _file_exists(path: Path, label: str) -> dict[str, Any]:
     exists = path.is_file()
     rel = _safe_rel(path)
@@ -271,7 +363,7 @@ def _file_exists(path: Path, label: str) -> dict[str, Any]:
 def _file_contains(path: Path, keyword: str, label: str) -> dict[str, Any]:
     if not path.is_file():
         return _check(f"{label}: '{keyword}'", False, "file missing")
-    content = path.read_text(encoding="utf-8")
+    content = _read_text(path)
     found = keyword in content
     return _check(
         f"{label}: '{keyword}'",
@@ -286,7 +378,7 @@ def _file_contains_all(path: Path, keywords: list[str], category: str) -> list[d
         for kw in keywords:
             results.append(_check(f"{category}: '{kw}'", False, "file missing"))
         return results
-    content = path.read_text(encoding="utf-8")
+    content = _read_rust_source(path)
     for kw in keywords:
         found = kw in content
         results.append(_check(f"{category}: '{kw}'", found, "found" if found else "not found"))
@@ -373,8 +465,8 @@ def check_rust_impl_exists() -> dict[str, Any]:
 
 def check_module_registered() -> dict[str, Any]:
     """C04: Module registered in main.rs."""
-    lib_src = LIB_RS.read_text(encoding="utf-8") if LIB_RS.is_file() else ""
-    main_src = MAIN_RS.read_text(encoding="utf-8") if MAIN_RS.is_file() else ""
+    lib_src = _read_rust_source(LIB_RS)
+    main_src = _read_rust_source(MAIN_RS)
     registered = "pub mod verifier_economy;" in lib_src or '"verifier_economy"' in main_src
     detail = "registered in lib.rs" if "pub mod verifier_economy;" in lib_src else "registered in main.rs verifier list"
     return _check("module_registration", registered, detail if registered else "verifier_economy not wired into lib.rs or main.rs")
@@ -384,7 +476,7 @@ def check_spec_event_codes() -> dict[str, Any]:
     """C05: Spec defines all event codes VEP-001 through VEP-008."""
     if not SPEC.is_file():
         return _check("spec_event_codes", False, "spec file missing")
-    content = SPEC.read_text(encoding="utf-8")
+    content = _read_text(SPEC)
     missing = [c for c in EVENT_CODES if c not in content]
     passed = len(missing) == 0
     detail = f"all {len(EVENT_CODES)} event codes present" if passed else f"missing: {missing}"
@@ -395,7 +487,7 @@ def check_spec_invariants() -> dict[str, Any]:
     """C06: Spec defines all four INV-VEP invariants."""
     if not SPEC.is_file():
         return _check("spec_invariants", False, "spec file missing")
-    content = SPEC.read_text(encoding="utf-8")
+    content = _read_text(SPEC)
     missing = [inv for inv in INVARIANTS if inv not in content]
     passed = len(missing) == 0
     detail = f"all {len(INVARIANTS)} invariants present" if passed else f"missing: {missing}"
@@ -406,7 +498,7 @@ def check_spec_error_codes() -> dict[str, Any]:
     """C07: Spec defines all error codes."""
     if not SPEC.is_file():
         return _check("spec_error_codes", False, "spec file missing")
-    content = SPEC.read_text(encoding="utf-8")
+    content = _read_text(SPEC)
     missing = [c for c in ERROR_CODES if c not in content]
     passed = len(missing) == 0
     detail = f"all {len(ERROR_CODES)} error codes present" if passed else f"missing: {missing}"
@@ -447,7 +539,7 @@ def check_policy_event_codes() -> dict[str, Any]:
     """C14: Policy references all event codes."""
     if not POLICY.is_file():
         return _check("policy_event_codes", False, "policy file missing")
-    content = POLICY.read_text(encoding="utf-8")
+    content = _read_text(POLICY)
     missing = [c for c in EVENT_CODES if c not in content]
     passed = len(missing) == 0
     detail = f"all {len(EVENT_CODES)} event codes in policy" if passed else f"missing: {missing}"
@@ -458,7 +550,7 @@ def check_policy_invariants() -> dict[str, Any]:
     """C15: Policy references all invariants."""
     if not POLICY.is_file():
         return _check("policy_invariants", False, "policy file missing")
-    content = POLICY.read_text(encoding="utf-8")
+    content = _read_text(POLICY)
     missing = [inv for inv in INVARIANTS if inv not in content]
     passed = len(missing) == 0
     detail = f"all {len(INVARIANTS)} invariants in policy" if passed else f"missing: {missing}"
@@ -469,7 +561,7 @@ def check_policy_reputation_tiers() -> dict[str, Any]:
     """C16: Policy defines all reputation tiers."""
     if not POLICY.is_file():
         return _check("policy_reputation_tiers", False, "policy file missing")
-    content = POLICY.read_text(encoding="utf-8")
+    content = _read_text(POLICY)
     missing = [t for t in REPUTATION_TIERS if t not in content]
     passed = len(missing) == 0
     detail = f"all {len(REPUTATION_TIERS)} reputation tiers in policy" if passed else f"missing: {missing}"
@@ -540,7 +632,7 @@ def check_rust_test_count() -> dict[str, Any]:
     """C28: Rust implementation has at least 50 tests."""
     if not RUST_IMPL.is_file():
         return _check("rust_test_count", False, "impl file missing")
-    content = RUST_IMPL.read_text(encoding="utf-8")
+    content = _read_rust_source(RUST_IMPL)
     import re
     count = len(re.findall(r"#\[test\]", content))
     passed = count >= 50
@@ -562,7 +654,7 @@ def check_replacement_critical_guards() -> list[dict[str, Any]]:
                 f"missing: {_safe_rel(RUST_IMPL)}",
             )
         ]
-    return _replacement_critical_guard_checks(RUST_IMPL.read_text(encoding="utf-8"))
+    return _replacement_critical_guard_checks(_read_rust_source(RUST_IMPL))
 
 
 # ---------------------------------------------------------------------------
@@ -691,7 +783,7 @@ def self_test() -> bool:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_verifier_economy")
+    configure_test_logging("check_verifier_economy")
     parser = argparse.ArgumentParser(
         description="Verify bd-m8p: Verifier economy portal and attestation publishing flow"
     )
