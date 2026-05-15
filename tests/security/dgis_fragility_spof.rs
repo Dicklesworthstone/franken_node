@@ -35,12 +35,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use frankenengine_node::dgis::fragility_fixtures::{
-    evaluate_fixture, load_fixture_from_json, synthesize_active_maintainers_recent_commits,
+    ExpectedFinding, FixtureVerdict, FragilityFixture, SpofKindLabel, evaluate_fixture,
+    load_fixture_from_json, synthesize_active_maintainers_recent_commits,
     synthesize_dependency_chain_fragile, synthesize_diverse_org_ownership,
     synthesize_independent_packages_no_chains, synthesize_key_person_high_share,
     synthesize_multi_quorum_publishers, synthesize_org_concentrated, synthesize_orphaned_pkg,
     synthesize_single_maintainer_dominant, synthesize_well_distributed_maintainers,
-    ExpectedFinding, FixtureVerdict, FragilityFixture, SpofKindLabel,
 };
 
 /// Absolute-path-derived fixture directory.
@@ -70,10 +70,9 @@ fn fixture_dir() -> PathBuf {
 fn load_fixture_from_path(name: &str) -> FragilityFixture {
     let mut path = fixture_dir();
     path.push(format!("{}.json", name));
-    let json = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read fixture {:?}: {}", path, e));
-    load_fixture_from_json(&json)
-        .unwrap_or_else(|e| panic!("parse fixture {:?}: {:?}", path, e))
+    let json =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {:?}: {}", path, e));
+    load_fixture_from_json(&json).unwrap_or_else(|e| panic!("parse fixture {:?}: {:?}", path, e))
 }
 
 /// Convenience: collect the expected kinds declared by a fixture (so a SPOF

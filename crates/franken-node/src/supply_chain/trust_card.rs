@@ -3167,8 +3167,8 @@ mod tests {
     use super::{
         AuditRecord, BehavioralProfile, CamouflageHintRecord, CapabilityDeclaration,
         CapabilityRisk, CertificationLevel, DEFAULT_REGISTRY_KEY, DependencyTrustStatus,
-        DerivationMetadata, ExtensionIdentity, MAX_CAMOUFLAGE_HINTS_ON_CARD,
-        MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS, MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES, ProvenanceSummary,
+        DerivationMetadata, ExtensionIdentity, MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS,
+        MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES, MAX_CAMOUFLAGE_HINTS_ON_CARD, ProvenanceSummary,
         PublisherIdentity, ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel,
         SnapshotSourceContext, TRUST_CARD_CAMOUFLAGE_SUSPECTED, TRUST_CARD_CREATED,
         TRUST_CARD_QUERIED, TrustCard, TrustCardComparison, TrustCardDiffEntry, TrustCardError,
@@ -3627,7 +3627,10 @@ mod tests {
             record.sample_indices.len(),
             MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES
         );
-        assert_eq!(record.evidence_keys.len(), MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS);
+        assert_eq!(
+            record.evidence_keys.len(),
+            MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS
+        );
     }
 
     #[test]

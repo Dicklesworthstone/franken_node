@@ -181,8 +181,8 @@ pub struct ScenarioVerdictMatch {
 pub fn load_scenario_fixture(
     json: &str,
 ) -> std::result::Result<AdversarialScenarioFixture, AdversarialError> {
-    let fixture: AdversarialScenarioFixture = serde_json::from_str(json)
-        .map_err(|_| AdversarialError::NonFiniteDivergence(f64::NAN))?;
+    let fixture: AdversarialScenarioFixture =
+        serde_json::from_str(json).map_err(|_| AdversarialError::NonFiniteDivergence(f64::NAN))?;
     fixture.validate()?;
     Ok(fixture)
 }
@@ -424,11 +424,10 @@ pub fn synthesize_false_recovery_claim() -> AdversarialScenarioFixture {
     .expect("false_recovery_claim scenario must validate");
     AdversarialScenarioFixture {
         name: "false_recovery_claim".to_string(),
-        description:
-            "False-recovery-claim: a stepped ramp couples a fake mid-campaign recovery \
+        description: "False-recovery-claim: a stepped ramp couples a fake mid-campaign recovery \
              announcement with a resumed escalation. Detector should still catch the escalation \
              in the late half despite the dip."
-                .to_string(),
+            .to_string(),
         scenario,
         baseline: baseline_sample(0.05, 0.20, 0.10),
         thresholds: thresholds(0.40, 0.50, 0.40, 0.50, 0.40),
@@ -593,7 +592,11 @@ mod tests {
             let json = serde_json::to_string(&fixture).expect("encode fixture");
             let back: AdversarialScenarioFixture =
                 serde_json::from_str(&json).expect("decode fixture");
-            assert_eq!(back, fixture, "fixture `{}` round-trip mismatch", fixture.name);
+            assert_eq!(
+                back, fixture,
+                "fixture `{}` round-trip mismatch",
+                fixture.name
+            );
             assert!(back.validate().is_ok());
             // Loader path must also accept the canonical encoding.
             let loaded = load_scenario_fixture(&json).expect("load fixture");
@@ -624,10 +627,8 @@ mod tests {
 
     #[test]
     fn all_eight_kind_variants_covered_by_synthesizers() {
-        let kinds: Vec<AdversaryKind> = all_synthesizers()
-            .iter()
-            .map(|f| f.scenario.kind)
-            .collect();
+        let kinds: Vec<AdversaryKind> =
+            all_synthesizers().iter().map(|f| f.scenario.kind).collect();
         // Sanity: 8 distinct kinds = the AdversaryKind enum's full cardinality.
         let expected = [
             AdversaryKind::SlowRollDrift,

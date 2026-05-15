@@ -220,13 +220,23 @@ pub struct AtcLocalSignal {
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ExtractionError {
     #[error("missing required field: {field} (code={code})")]
-    MissingField { field: &'static str, code: &'static str },
+    MissingField {
+        field: &'static str,
+        code: &'static str,
+    },
     #[error("unknown signal kind: {kind:?} (code={code})")]
     UnknownKind { kind: String, code: &'static str },
     #[error("signal kind {kind:?} is not in policy allowed_kinds (code={code})")]
-    KindFiltered { kind: SignalKind, code: &'static str },
+    KindFiltered {
+        kind: SignalKind,
+        code: &'static str,
+    },
     #[error("redacted payload size {size} exceeds max_payload_bytes {limit} (code={code})")]
-    PayloadTooLarge { size: usize, limit: usize, code: &'static str },
+    PayloadTooLarge {
+        size: usize,
+        limit: usize,
+        code: &'static str,
+    },
     #[error("malformed raw event: {reason} (code={code})")]
     Malformed { reason: String, code: &'static str },
     #[error("field name or value out of bounds: {detail} (code={code})")]
@@ -274,17 +284,20 @@ pub fn extract_signal(
     raw_event: &serde_json::Value,
     policy: &ExtractionPolicy,
 ) -> Result<AtcLocalSignal> {
-    let obj = raw_event.as_object().ok_or_else(|| ExtractionError::Malformed {
-        reason: "raw event is not a JSON object".to_string(),
-        code: event_codes::MALFORMED_EVENT,
-    })?;
+    let obj = raw_event
+        .as_object()
+        .ok_or_else(|| ExtractionError::Malformed {
+            reason: "raw event is not a JSON object".to_string(),
+            code: event_codes::MALFORMED_EVENT,
+        })?;
 
     // ---- required scalars ------------------------------------------------
     let event_type_str = require_str(obj, "event_type")?;
-    let kind = SignalKind::from_str(event_type_str).ok_or_else(|| ExtractionError::UnknownKind {
-        kind: event_type_str.to_string(),
-        code: event_codes::UNKNOWN_KIND,
-    })?;
+    let kind =
+        SignalKind::from_str(event_type_str).ok_or_else(|| ExtractionError::UnknownKind {
+            kind: event_type_str.to_string(),
+            code: event_codes::UNKNOWN_KIND,
+        })?;
 
     if !policy.allowed_kinds.contains(&kind) {
         return Err(ExtractionError::KindFiltered {
@@ -296,13 +309,13 @@ pub fn extract_signal(
     let trace_id = require_str(obj, "trace_id")?.to_string();
     bounds_check_value("trace_id", &trace_id)?;
 
-    let source_epoch = obj
-        .get("source_epoch")
-        .and_then(|v| v.as_u64())
-        .ok_or(ExtractionError::MissingField {
-            field: "source_epoch",
-            code: event_codes::MISSING_FIELD,
-        })?;
+    let source_epoch =
+        obj.get("source_epoch")
+            .and_then(|v| v.as_u64())
+            .ok_or(ExtractionError::MissingField {
+                field: "source_epoch",
+                code: event_codes::MISSING_FIELD,
+            })?;
 
     let contributor_pubkey_hex = require_str(obj, "contributor_pubkey_hex")?.to_string();
     bounds_check_value("contributor_pubkey_hex", &contributor_pubkey_hex)?;
@@ -313,10 +326,12 @@ pub fn extract_signal(
     let mut redacted_payload: BTreeMap<String, String> = BTreeMap::new();
 
     if let Some(payload_val) = obj.get("payload") {
-        let payload_obj = payload_val.as_object().ok_or_else(|| ExtractionError::Malformed {
-            reason: "payload is present but not a JSON object".to_string(),
-            code: event_codes::MALFORMED_EVENT,
-        })?;
+        let payload_obj = payload_val
+            .as_object()
+            .ok_or_else(|| ExtractionError::Malformed {
+                reason: "payload is present but not a JSON object".to_string(),
+                code: event_codes::MALFORMED_EVENT,
+            })?;
 
         for (k, v) in payload_obj {
             if k.len() > MAX_FIELD_NAME_BYTES {
@@ -335,9 +350,7 @@ pub fn extract_signal(
             bounds_check_value(k, &stringified)?;
             if redacted_payload.len() >= MAX_REDACTED_FIELDS {
                 return Err(ExtractionError::OutOfBounds {
-                    detail: format!(
-                        "redacted payload field count exceeded {MAX_REDACTED_FIELDS}"
-                    ),
+                    detail: format!("redacted payload field count exceeded {MAX_REDACTED_FIELDS}"),
                     code: event_codes::FIELD_OUT_OF_BOUNDS,
                 });
             }
@@ -449,7 +462,11 @@ fn require_str<'a>(
 fn bounds_check_value(name: &str, v: &str) -> Result<()> {
     if v.len() > MAX_VALUE_BYTES {
         return Err(ExtractionError::OutOfBounds {
-            detail: format!("value for {name:?} has {} bytes > {}", v.len(), MAX_VALUE_BYTES),
+            detail: format!(
+                "value for {name:?} has {} bytes > {}",
+                v.len(),
+                MAX_VALUE_BYTES
+            ),
             code: event_codes::FIELD_OUT_OF_BOUNDS,
         });
     }
@@ -600,8 +617,8 @@ mod tests {
     fn max_payload_bytes_enforced() {
         let mut policy = ExtractionPolicy::permissive_for_tests();
         policy.max_payload_bytes = 4; // absurdly tight
-        let err = extract_signal(&sample_event("anomaly_observation"), &policy)
-            .expect_err("must reject");
+        let err =
+            extract_signal(&sample_event("anomaly_observation"), &policy).expect_err("must reject");
         match err {
             ExtractionError::PayloadTooLarge { code, .. } => {
                 assert_eq!(code, event_codes::PAYLOAD_TOO_LARGE);
@@ -615,8 +632,8 @@ mod tests {
     fn kind_filtering_rejects_disallowed() {
         let mut policy = ExtractionPolicy::permissive_for_tests();
         policy.allowed_kinds.remove(&SignalKind::AnomalyObservation);
-        let err = extract_signal(&sample_event("anomaly_observation"), &policy)
-            .expect_err("must reject");
+        let err =
+            extract_signal(&sample_event("anomaly_observation"), &policy).expect_err("must reject");
         match err {
             ExtractionError::KindFiltered { kind, code } => {
                 assert_eq!(kind, SignalKind::AnomalyObservation);
@@ -682,7 +699,10 @@ mod tests {
         assert_eq!(sig.trace_id, "trace-abc-123");
         assert_eq!(log.entries().len(), 1);
         assert_eq!(log.entries()[0].signal_id, sig.signal_id);
-        assert_eq!(log.entries()[0].event_code.as_str(), event_codes::SIGNAL_EXTRACTED);
+        assert_eq!(
+            log.entries()[0].event_code.as_str(),
+            event_codes::SIGNAL_EXTRACTED
+        );
     }
 
     // 13. Bonus: round-trip serde of the output signal preserves bytes.

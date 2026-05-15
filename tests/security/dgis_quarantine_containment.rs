@@ -1,7 +1,8 @@
 use frankenengine_node::security::dgis::barrier_primitives::{
-    event_codes, Barrier, BarrierAction, BarrierConfig, BarrierEngine, BarrierError, BarrierPlan,
-    BarrierType, CompositionFirewallConfig, ProgressionCriteria, RiskLevel, RolloutPhase,
+    Barrier, BarrierAction, BarrierConfig, BarrierEngine, BarrierError, BarrierPlan, BarrierType,
+    CompositionFirewallConfig, ProgressionCriteria, RiskLevel, RolloutPhase,
     SandboxEscalationConfig, SandboxTier, StagedRolloutFenceConfig, VerifiedForkPinConfig,
+    event_codes,
 };
 use std::collections::BTreeMap;
 
@@ -87,9 +88,11 @@ fn quarantine_containment_plan_blocks_all_high_risk_escape_paths() {
 
     assert_eq!(receipts.len(), 4);
     assert_eq!(engine.active_barrier_count(), 4);
-    assert!(receipts
-        .iter()
-        .all(|receipt| receipt.details["source_plan_id"] == "dgis-quarantine-plan-001"));
+    assert!(
+        receipts
+            .iter()
+            .all(|receipt| receipt.details["source_plan_id"] == "dgis-quarantine-plan-001")
+    );
 
     let sandbox_err = engine
         .check_sandbox_escalation(

@@ -29,15 +29,11 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use frankenengine_node::connector::lifecycle::{
-    ConnectorState, LifecycleError, transition,
-};
+use frankenengine_node::connector::lifecycle::{ConnectorState, LifecycleError, transition};
 use frankenengine_node::runtime::lane_scheduler::{
     LaneScheduler, SchedulerLane, TaskClass, default_policy, task_classes,
 };
-use frankenengine_node::runtime::obligation_channel::{
-    ObligationChannel, ObligationStatus,
-};
+use frankenengine_node::runtime::obligation_channel::{ObligationChannel, ObligationStatus};
 use serde::{Deserialize, Serialize};
 
 // ── Harness ─────────────────────────────────────────────────────────────────
@@ -72,7 +68,11 @@ impl ConnectorLifecycleManager {
     }
 
     fn get_state(&self, connector_id: &str) -> Option<ConnectorState> {
-        self.states.lock().expect("states lock").get(connector_id).copied()
+        self.states
+            .lock()
+            .expect("states lock")
+            .get(connector_id)
+            .copied()
     }
 
     fn transition_to(
@@ -104,8 +104,7 @@ fn build_harness() -> (
     ObligationChannel<TaskMsg>,
 ) {
     let manager = ConnectorLifecycleManager::new();
-    let scheduler = LaneScheduler::new(default_policy())
-        .expect("default policy must validate");
+    let scheduler = LaneScheduler::new(default_policy()).expect("default policy must validate");
     let channel = ObligationChannel::<TaskMsg>::new("conn-runtime");
     (manager, scheduler, channel)
 }
@@ -124,14 +123,13 @@ fn test_registration_allocates_lane() {
     let (manager, mut scheduler, _channel) = build_harness();
 
     manager.register("conn-a");
-    assert_eq!(manager.get_state("conn-a"), Some(ConnectorState::Discovered));
+    assert_eq!(
+        manager.get_state("conn-a"),
+        Some(ConnectorState::Discovered)
+    );
 
     let assignment = scheduler
-        .assign_task(
-            &task_classes::epoch_transition(),
-            now_ms(1),
-            "trace-reg",
-        )
+        .assign_task(&task_classes::epoch_transition(), now_ms(1), "trace-reg")
         .expect("registration-class assignment must succeed");
     assert_eq!(assignment.lane, SchedulerLane::ControlCritical);
     tracing::info!("test_registration_allocates_lane: exit");
@@ -144,9 +142,18 @@ fn test_scheduler_assigns_to_correct_lane() {
     let (_manager, mut scheduler, _channel) = build_harness();
 
     let cases: &[(TaskClass, SchedulerLane)] = &[
-        (task_classes::epoch_transition(), SchedulerLane::ControlCritical),
-        (task_classes::remote_computation(), SchedulerLane::RemoteEffect),
-        (task_classes::garbage_collection(), SchedulerLane::Maintenance),
+        (
+            task_classes::epoch_transition(),
+            SchedulerLane::ControlCritical,
+        ),
+        (
+            task_classes::remote_computation(),
+            SchedulerLane::RemoteEffect,
+        ),
+        (
+            task_classes::garbage_collection(),
+            SchedulerLane::Maintenance,
+        ),
         (task_classes::telemetry_export(), SchedulerLane::Background),
     ];
     for (i, (tc, expected_lane)) in cases.iter().enumerate() {
@@ -230,7 +237,12 @@ fn test_capacity_pressure_propagates() {
 
     use frankenengine_node::runtime::lane_scheduler::LaneSchedulerError;
     match err {
-        LaneSchedulerError::CapExceeded { lane, cap, current, queued_task_id } => {
+        LaneSchedulerError::CapExceeded {
+            lane,
+            cap,
+            current,
+            queued_task_id,
+        } => {
             assert_eq!(lane, SchedulerLane::Background);
             assert_eq!(cap, 2);
             assert_eq!(current, 2);
@@ -253,7 +265,11 @@ fn test_invalid_state_transition_rejected() {
         .transition_to("conn-d", ConnectorState::Active)
         .expect_err("Discovered -> Active must be illegal");
     match err {
-        LifecycleError::IllegalTransition { from, to, permitted } => {
+        LifecycleError::IllegalTransition {
+            from,
+            to,
+            permitted,
+        } => {
             assert_eq!(from, ConnectorState::Discovered);
             assert_eq!(to, ConnectorState::Active);
             assert!(permitted.contains(&ConnectorState::Verified));
@@ -261,7 +277,10 @@ fn test_invalid_state_transition_rejected() {
         other => panic!("expected IllegalTransition, got {:?}", other),
     }
     // State must be unchanged.
-    assert_eq!(manager.get_state("conn-d"), Some(ConnectorState::Discovered));
+    assert_eq!(
+        manager.get_state("conn-d"),
+        Some(ConnectorState::Discovered)
+    );
     tracing::info!("test_invalid_state_transition_rejected: exit");
 }
 
@@ -272,8 +291,7 @@ fn test_obligation_timeout_sweeps() {
     tracing::info!("test_obligation_timeout_sweeps: enter");
     let (_manager, _scheduler, _channel) = build_harness();
     // Use a tight deadline so the sweep is unambiguous.
-    let mut tight: ObligationChannel<TaskMsg> =
-        ObligationChannel::with_deadline("conn-tight", 50);
+    let mut tight: ObligationChannel<TaskMsg> = ObligationChannel::with_deadline("conn-tight", 50);
 
     let id1 = tight
         .send(
@@ -306,7 +324,10 @@ fn test_obligation_timeout_sweeps() {
         tight.get_obligation(&id1).unwrap().status,
         ObligationStatus::TimedOut
     );
-    tracing::info!(timed_count = timed.len(), "test_obligation_timeout_sweeps: exit");
+    tracing::info!(
+        timed_count = timed.len(),
+        "test_obligation_timeout_sweeps: exit"
+    );
 }
 
 /// Cancelling an obligation before resolution drives it to a terminal
@@ -379,7 +400,10 @@ fn test_failure_recovery_replays_obligation() {
     manager
         .transition_to("conn-g", ConnectorState::Discovered)
         .expect("Failed -> Discovered permitted");
-    assert_eq!(manager.get_state("conn-g"), Some(ConnectorState::Discovered));
+    assert_eq!(
+        manager.get_state("conn-g"),
+        Some(ConnectorState::Discovered)
+    );
 
     let replay = channel
         .send(
@@ -410,18 +434,10 @@ fn test_concurrent_registrations_distinct_lanes() {
     manager.register("conn-h2");
 
     let a = scheduler
-        .assign_task(
-            &task_classes::epoch_transition(),
-            now_ms(0),
-            "trace-h1",
-        )
+        .assign_task(&task_classes::epoch_transition(), now_ms(0), "trace-h1")
         .unwrap();
     let b = scheduler
-        .assign_task(
-            &task_classes::garbage_collection(),
-            now_ms(1),
-            "trace-h2",
-        )
+        .assign_task(&task_classes::garbage_collection(), now_ms(1), "trace-h2")
         .unwrap();
     assert_eq!(a.lane, SchedulerLane::ControlCritical);
     assert_eq!(b.lane, SchedulerLane::Maintenance);
@@ -492,7 +508,10 @@ fn test_full_lifecycle_happy_path() {
         let new_state = manager.transition_to(connector_id, target).unwrap();
         assert_eq!(new_state, target);
     }
-    assert_eq!(manager.get_state(connector_id), Some(ConnectorState::Active));
+    assert_eq!(
+        manager.get_state(connector_id),
+        Some(ConnectorState::Active)
+    );
 
     // 3) Scheduler assigns work for the active connector.
     let assignment = scheduler

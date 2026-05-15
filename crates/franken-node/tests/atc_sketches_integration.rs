@@ -248,10 +248,7 @@ fn many_participant_merge_respects_budget() {
     let per_size = global.serialized_size() as u64;
     // Provision the bandwidth budget for exactly n_participants sketches.
     let bandwidth_cap = per_size.saturating_mul(n_participants as u64);
-    let mut tracker = BudgetTracker::new(
-        bandwidth_cap,
-        (n_participants as u64).saturating_mul(50),
-    );
+    let mut tracker = BudgetTracker::new(bandwidth_cap, (n_participants as u64).saturating_mul(50));
     for p in 0..n_participants {
         tracker.charge_bandwidth(per_size).unwrap();
         tracker.charge_compute(10).unwrap();
@@ -270,8 +267,14 @@ fn many_participant_merge_respects_budget() {
 
 #[test]
 fn confidence_pct_is_in_range() {
-    let high = ErrorBound { eps: 0.01, delta: 1e-9 };
-    let low = ErrorBound { eps: 0.01, delta: 0.999 };
+    let high = ErrorBound {
+        eps: 0.01,
+        delta: 1e-9,
+    };
+    let low = ErrorBound {
+        eps: 0.01,
+        delta: 0.999,
+    };
     assert!(high.confidence_pct() > low.confidence_pct());
     assert!((0.0..=100.0).contains(&high.confidence_pct()));
     assert!((0.0..=100.0).contains(&low.confidence_pct()));

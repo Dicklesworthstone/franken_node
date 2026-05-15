@@ -504,7 +504,10 @@ mod tests {
         assert_eq!(rt.get("sample_count").unwrap().as_u64().unwrap(), 2);
         let samples = rt.get("samples").unwrap().as_array().unwrap();
         assert_eq!(samples.len(), 2);
-        assert_eq!(samples[0].get("ts").unwrap().as_i64().unwrap(), 1_700_000_010);
+        assert_eq!(
+            samples[0].get("ts").unwrap().as_i64().unwrap(),
+            1_700_000_010
+        );
     }
 
     #[test]
@@ -551,7 +554,10 @@ mod tests {
         for (i, v) in cases.iter().enumerate() {
             let err = ingest_verifier_hints(v).expect_err(&format!("case {i} should fail"));
             assert!(
-                matches!(err, TrajectoryGamingError::MissingField { field: "severity" }),
+                matches!(
+                    err,
+                    TrajectoryGamingError::MissingField { field: "severity" }
+                ),
                 "case {i}: unexpected error {err:?}"
             );
         }
@@ -614,9 +620,12 @@ mod tests {
         // Oldest surviving sample's ts must be >= push_count - MAX (eviction
         // is oldest-first FIFO).
         let oldest_ts = series.samples[0].ts;
-        let expected_min = i64::try_from(push_count.saturating_sub(MAX_TRAJECTORY_SAMPLES))
-            .unwrap_or(i64::MAX);
-        assert!(oldest_ts >= expected_min, "FIFO eviction failed: oldest_ts={oldest_ts} expected>={expected_min}");
+        let expected_min =
+            i64::try_from(push_count.saturating_sub(MAX_TRAJECTORY_SAMPLES)).unwrap_or(i64::MAX);
+        assert!(
+            oldest_ts >= expected_min,
+            "FIFO eviction failed: oldest_ts={oldest_ts} expected>={expected_min}"
+        );
     }
 
     #[test]
@@ -672,7 +681,10 @@ mod tests {
         let parsed: CamouflageHint = serde_json::from_str(&s).expect("deser");
         assert_eq!(parsed, original);
         // CamouflageKind serialises in snake_case
-        assert!(s.contains("\"distribution_mismatch\""), "kind not snake_case: {s}");
+        assert!(
+            s.contains("\"distribution_mismatch\""),
+            "kind not snake_case: {s}"
+        );
     }
 
     #[test]
@@ -716,7 +728,10 @@ mod tests {
         let err = TrajectorySeries::new(1_000, 500).unwrap_err();
         assert!(matches!(
             err,
-            TrajectoryGamingError::InvalidWindow { start: 1_000, end: 500 }
+            TrajectoryGamingError::InvalidWindow {
+                start: 1_000,
+                end: 500
+            }
         ));
     }
 }

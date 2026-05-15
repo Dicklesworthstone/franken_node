@@ -72,11 +72,7 @@ fn make_snapshot(version: &str, schema: &str) -> StateSnapshot {
 
 fn make_components(seed: &str) -> Vec<BundleComponent> {
     vec![
-        BundleComponent::new(
-            "binary_ref",
-            1,
-            format!("binary-{}", seed).into_bytes(),
-        ),
+        BundleComponent::new("binary_ref", 1, format!("binary-{}", seed).into_bytes()),
         BundleComponent::new(
             "config_diff",
             2,
@@ -97,7 +93,10 @@ fn make_components(seed: &str) -> Vec<BundleComponent> {
 #[test]
 fn test_gate_passes_for_available_data() {
     init_tracing();
-    tracing::info!(test = "test_gate_passes_for_available_data", phase = "enter");
+    tracing::info!(
+        test = "test_gate_passes_for_available_data",
+        phase = "enter"
+    );
 
     let payload = b"payload-pass-01";
     let hash = content_hash(payload);
@@ -156,7 +155,10 @@ fn test_gate_rejects_unavailable_data() {
 #[test]
 fn test_gate_rejects_malformed_identifiers() {
     init_tracing();
-    tracing::info!(test = "test_gate_rejects_malformed_identifiers", phase = "enter");
+    tracing::info!(
+        test = "test_gate_rejects_malformed_identifiers",
+        phase = "enter"
+    );
 
     let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
 
@@ -184,7 +186,10 @@ fn test_gate_rejects_malformed_identifiers() {
     tracing::debug!(receipt_count = receipts.len(), "post-rejection receipts");
     assert_eq!(receipts.iter().filter(|r| !r.passed).count(), 2);
 
-    tracing::info!(test = "test_gate_rejects_malformed_identifiers", phase = "exit");
+    tracing::info!(
+        test = "test_gate_rejects_malformed_identifiers",
+        phase = "exit"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +236,11 @@ fn test_artifact_validates_post_state() {
     let result = validate_artifact(&artifact);
     tracing::debug!(valid = result.valid, error_count = result.errors.len());
 
-    assert!(result.valid, "reference artifact must validate: {:?}", result.errors);
+    assert!(
+        result.valid,
+        "reference artifact must validate: {:?}",
+        result.errors
+    );
     assert!(result.errors.is_empty());
     assert!(verify_artifact_signatures(&artifact));
     // Schema version must round-trip.
@@ -335,7 +344,10 @@ fn test_successful_migration_commits() {
 #[test]
 fn test_failed_migration_triggers_rollback() {
     init_tracing();
-    tracing::info!(test = "test_failed_migration_triggers_rollback", phase = "enter");
+    tracing::info!(
+        test = "test_failed_migration_triggers_rollback",
+        phase = "enter"
+    );
 
     let mut store = BundleStore::new();
     let pre = make_snapshot("1.0.0", "schema-1");
@@ -365,13 +377,19 @@ fn test_failed_migration_triggers_rollback() {
     assert_eq!(store.current_state(), Some(&pre));
     assert!(!result.actions.is_empty());
 
-    tracing::info!(test = "test_failed_migration_triggers_rollback", phase = "exit");
+    tracing::info!(
+        test = "test_failed_migration_triggers_rollback",
+        phase = "exit"
+    );
 }
 
 #[test]
 fn test_rollback_bundle_restores_snapshot() {
     init_tracing();
-    tracing::info!(test = "test_rollback_bundle_restores_snapshot", phase = "enter");
+    tracing::info!(
+        test = "test_rollback_bundle_restores_snapshot",
+        phase = "enter"
+    );
 
     let mut store = BundleStore::new();
     let pre = make_snapshot("2.0.0", "schema-old");
@@ -401,7 +419,10 @@ fn test_rollback_bundle_restores_snapshot() {
     assert_eq!(restored.schema_version, pre.schema_version);
     assert!(restored.diff(&pre).is_empty(), "snapshot fully restored");
 
-    tracing::info!(test = "test_rollback_bundle_restores_snapshot", phase = "exit");
+    tracing::info!(
+        test = "test_rollback_bundle_restores_snapshot",
+        phase = "exit"
+    );
 }
 
 #[test]
@@ -432,8 +453,15 @@ fn test_rollback_restore_health_check() {
     );
     tracing::debug!(health_results = result.health_results.len());
 
-    assert!(result.success, "all health checks should pass for matching snapshot");
-    let kinds: Vec<_> = result.health_results.iter().map(|h| h.kind.clone()).collect();
+    assert!(
+        result.success,
+        "all health checks should pass for matching snapshot"
+    );
+    let kinds: Vec<_> = result
+        .health_results
+        .iter()
+        .map(|h| h.kind.clone())
+        .collect();
     assert!(kinds.contains(&HealthCheckKind::BinaryVersion));
     assert!(kinds.contains(&HealthCheckKind::ConfigSchema));
     assert!(kinds.contains(&HealthCheckKind::StateIntegrity));
@@ -446,7 +474,10 @@ fn test_rollback_restore_health_check() {
 #[test]
 fn test_rollback_rejects_version_mismatch() {
     init_tracing();
-    tracing::info!(test = "test_rollback_rejects_version_mismatch", phase = "enter");
+    tracing::info!(
+        test = "test_rollback_rejects_version_mismatch",
+        phase = "enter"
+    );
 
     let mut store = BundleStore::new();
     let pre = make_snapshot("4.0.0", "schema-4");
@@ -477,7 +508,10 @@ fn test_rollback_rejects_version_mismatch() {
         Some(RollbackBundleError::VersionMismatch { .. })
     ));
 
-    tracing::info!(test = "test_rollback_rejects_version_mismatch", phase = "exit");
+    tracing::info!(
+        test = "test_rollback_rejects_version_mismatch",
+        phase = "exit"
+    );
 }
 
 // ---------------------------------------------------------------------------

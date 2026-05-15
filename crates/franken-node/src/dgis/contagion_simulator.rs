@@ -317,9 +317,7 @@ pub fn simulate(
     config.validate()?;
     // Validate graph shape first so a malformed graph never produces a
     // partially-populated trace.
-    graph
-        .validate()
-        .map_err(|_| SimulatorError::UnknownNode)?;
+    graph.validate().map_err(|_| SimulatorError::UnknownNode)?;
     if initial_infected.is_empty() {
         return Err(SimulatorError::EmptyInitialInfected);
     }
@@ -716,7 +714,11 @@ mod tests {
         let trace = simulate(&g, &[id("n0")], &cfg).unwrap();
         for snapshot in &trace.states_per_step {
             for (_, v) in snapshot.exposure_level().iter() {
-                assert!(v.is_finite(), "non-finite exposure at step {}", snapshot.step());
+                assert!(
+                    v.is_finite(),
+                    "non-finite exposure at step {}",
+                    snapshot.step()
+                );
             }
         }
     }

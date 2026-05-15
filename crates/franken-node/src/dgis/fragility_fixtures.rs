@@ -43,7 +43,7 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 use crate::dgis::fragility_model::{FragilityError, MaintainerProfile, PublisherProfile};
 use crate::dgis::graph_ingestion::{GraphEdge, GraphNode};
 use crate::dgis::spof_detection::{
-    detect_spofs, SpofDetectorConfig, SpofError, SpofKind, SpofReport,
+    SpofDetectorConfig, SpofError, SpofKind, SpofReport, detect_spofs,
 };
 use crate::push_bounded;
 
@@ -196,12 +196,11 @@ pub struct FixtureVerdict {
 /// nested invariants. Returns a typed [`FragilityError`] on any failure so
 /// callers can fail closed without `unwrap`.
 pub fn load_fixture_from_json(json: &str) -> std::result::Result<FragilityFixture, FragilityError> {
-    let fixture: FragilityFixture = serde_json::from_str(json).map_err(|e| {
-        FragilityError::ShareOutOfRange {
+    let fixture: FragilityFixture =
+        serde_json::from_str(json).map_err(|e| FragilityError::ShareOutOfRange {
             field: "fixture_json",
             value: format!("deserialise failed: {}", e),
-        }
-    })?;
+        })?;
     fixture.validate()?;
     Ok(fixture)
 }
@@ -379,7 +378,9 @@ fn mk_depends(from: &str, to: &str) -> GraphEdge {
 
 /// In-code clone of `single_maintainer_dominant.json`.
 pub fn synthesize_single_maintainer_dominant() -> FragilityFixture {
-    let pkgs = ["pkg-a", "pkg-b", "pkg-c", "pkg-d", "pkg-e", "pkg-f", "pkg-g", "pkg-h"];
+    let pkgs = [
+        "pkg-a", "pkg-b", "pkg-c", "pkg-d", "pkg-e", "pkg-f", "pkg-g", "pkg-h",
+    ];
     let mut maintainers = BTreeMap::new();
     maintainers.insert(
         "alice".into(),
@@ -424,7 +425,14 @@ pub fn synthesize_key_person_high_share() -> FragilityFixture {
     let mut maintainers = BTreeMap::new();
     maintainers.insert(
         "whale".into(),
-        mk_maintainer("whale", &["wpkg-1", "wpkg-2"], 600_000, 5, true, Some(NOW_SECS)),
+        mk_maintainer(
+            "whale",
+            &["wpkg-1", "wpkg-2"],
+            600_000,
+            5,
+            true,
+            Some(NOW_SECS),
+        ),
     );
     maintainers.insert(
         "minnow1".into(),
@@ -583,7 +591,14 @@ pub fn synthesize_orphaned_pkg() -> FragilityFixture {
     let mut maintainers = BTreeMap::new();
     maintainers.insert(
         "sleepy".into(),
-        mk_maintainer("sleepy", &["lonely-pkg"], 1_000, 5, true, Some(stale_commit)),
+        mk_maintainer(
+            "sleepy",
+            &["lonely-pkg"],
+            1_000,
+            5,
+            true,
+            Some(stale_commit),
+        ),
     );
     maintainers.insert(
         "active".into(),
@@ -846,7 +861,11 @@ mod tests {
     use super::*;
 
     fn assert_label_present(verdict: &FixtureVerdict, label: SpofKindLabel) {
-        let n = verdict.actual_finding_counts.get(&label).copied().unwrap_or(0);
+        let n = verdict
+            .actual_finding_counts
+            .get(&label)
+            .copied()
+            .unwrap_or(0);
         assert!(
             n >= 1,
             "expected at least one {} finding, got counts={:?}",
@@ -860,7 +879,8 @@ mod tests {
         for (other, n) in &verdict.actual_finding_counts {
             if *other != label {
                 assert_eq!(
-                    *n, 0,
+                    *n,
+                    0,
                     "expected zero {} findings but got {}",
                     other.slug(),
                     n
@@ -1001,7 +1021,10 @@ mod tests {
         let err = load_fixture_from_json(bad_json).expect_err("must reject unknown label");
         match err {
             FragilityError::ShareOutOfRange { field, .. } => assert_eq!(field, "fixture_json"),
-            other => panic!("expected ShareOutOfRange wrapping serde error, got {:?}", other),
+            other => panic!(
+                "expected ShareOutOfRange wrapping serde error, got {:?}",
+                other
+            ),
         }
     }
 

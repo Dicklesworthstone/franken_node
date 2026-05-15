@@ -343,7 +343,9 @@ pub fn detect_spofs(
 
 /// Index `MaintainedBy` edges by (maintainer -> Vec<package>) and the
 /// inverse (package -> Vec<maintainer>).
-fn index_maintained_by(edges: &[GraphEdge]) -> (BTreeMap<String, Vec<NodeId>>, BTreeMap<NodeId, Vec<String>>) {
+fn index_maintained_by(
+    edges: &[GraphEdge],
+) -> (BTreeMap<String, Vec<NodeId>>, BTreeMap<NodeId, Vec<String>>) {
     let mut by_maintainer: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
     let mut by_package: BTreeMap<NodeId, Vec<String>> = BTreeMap::new();
     for e in edges.iter().filter(|e| e.kind == EdgeKind::MaintainedBy) {
@@ -399,8 +401,7 @@ fn find_single_maintainer_spofs(
             .cloned()
             .collect();
 
-        let count_u32 =
-            u32::try_from(sole_packages.len()).unwrap_or(u32::MAX);
+        let count_u32 = u32::try_from(sole_packages.len()).unwrap_or(u32::MAX);
         if count_u32 < config.single_maintainer_threshold {
             continue;
         }
@@ -808,7 +809,14 @@ mod tests {
         let mut maintainers = BTreeMap::new();
         maintainers.insert(
             "alice".to_string(),
-            mk_maintainer("alice", &["a", "b", "c", "d"], 10, 1, false, Some(1_700_000_000)),
+            mk_maintainer(
+                "alice",
+                &["a", "b", "c", "d"],
+                10,
+                1,
+                false,
+                Some(1_700_000_000),
+            ),
         );
         let nodes = vec![mk_pkg("a"), mk_pkg("b"), mk_pkg("c"), mk_pkg("d")];
         let edges = vec![
@@ -830,7 +838,11 @@ mod tests {
             .spofs
             .iter()
             .any(|f| matches!(f.kind, SpofKind::SingleMaintainer { downstream_count } if downstream_count == 4));
-        assert!(any_sm, "expected SingleMaintainer with downstream_count=4, got {:?}", report.spofs);
+        assert!(
+            any_sm,
+            "expected SingleMaintainer with downstream_count=4, got {:?}",
+            report.spofs
+        );
     }
 
     #[test]
@@ -865,7 +877,11 @@ mod tests {
             .spofs
             .iter()
             .any(|f| matches!(f.kind, SpofKind::SingleMaintainer { .. }));
-        assert!(!any_sm, "no single-maintainer SPOFs expected, got {:?}", report.spofs);
+        assert!(
+            !any_sm,
+            "no single-maintainer SPOFs expected, got {:?}",
+            report.spofs
+        );
     }
 
     #[test]
@@ -898,7 +914,11 @@ mod tests {
             SpofKind::KeyPerson { share_of_downloads } => Some(*share_of_downloads),
             _ => None,
         });
-        assert!(kp.is_some(), "expected KeyPerson SPOF, got {:?}", report.spofs);
+        assert!(
+            kp.is_some(),
+            "expected KeyPerson SPOF, got {:?}",
+            report.spofs
+        );
         let share = kp.unwrap();
         assert!(share.is_finite() && (0.0..=1.0).contains(&share));
         assert!(share > 0.9);
@@ -967,14 +987,23 @@ mod tests {
         )
         .expect("detect");
         let chain = report.spofs.iter().find_map(|f| match &f.kind {
-            SpofKind::DependencyChain { chain_length, chain } => {
-                Some((*chain_length, chain.clone()))
-            }
+            SpofKind::DependencyChain {
+                chain_length,
+                chain,
+            } => Some((*chain_length, chain.clone())),
             _ => None,
         });
         let (len, ch) = chain.expect("expected DependencyChain SPOF");
         assert_eq!(len, 4);
-        assert_eq!(ch, vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()]);
+        assert_eq!(
+            ch,
+            vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1149,7 +1178,11 @@ mod tests {
         .expect("detect");
         assert!(!report.spofs.is_empty());
         for f in &report.spofs {
-            assert!(f.severity.is_finite(), "severity non-finite: {}", f.severity);
+            assert!(
+                f.severity.is_finite(),
+                "severity non-finite: {}",
+                f.severity
+            );
             assert!(
                 (0.0..=1.0).contains(&f.severity),
                 "severity out of unit interval: {}",
@@ -1272,7 +1305,10 @@ mod tests {
     #[test]
     fn spof_kind_labels_are_stable() {
         assert_eq!(
-            SpofKind::SingleMaintainer { downstream_count: 1 }.label(),
+            SpofKind::SingleMaintainer {
+                downstream_count: 1
+            }
+            .label(),
             "single_maintainer"
         );
         assert_eq!(
@@ -1310,7 +1346,9 @@ mod tests {
     #[test]
     fn finding_constructor_rejects_non_finite_severity() {
         let err = SpofFinding::new(
-            SpofKind::SingleMaintainer { downstream_count: 1 },
+            SpofKind::SingleMaintainer {
+                downstream_count: 1,
+            },
             f64::NAN,
             vec![],
             "x".into(),
@@ -1324,7 +1362,9 @@ mod tests {
     #[test]
     fn finding_constructor_clamps_out_of_range_severity() {
         let f = SpofFinding::new(
-            SpofKind::SingleMaintainer { downstream_count: 1 },
+            SpofKind::SingleMaintainer {
+                downstream_count: 1,
+            },
             5.0,
             vec![],
             "x".into(),
@@ -1334,7 +1374,9 @@ mod tests {
         .expect("ok");
         assert_eq!(f.severity, 1.0);
         let f = SpofFinding::new(
-            SpofKind::SingleMaintainer { downstream_count: 1 },
+            SpofKind::SingleMaintainer {
+                downstream_count: 1,
+            },
             -2.0,
             vec![],
             "x".into(),

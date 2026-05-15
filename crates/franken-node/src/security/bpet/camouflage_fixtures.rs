@@ -134,8 +134,10 @@ pub fn load_camouflage_fixture(json: &str) -> Result<CamouflageFixture, Detector
 
     let config = parse_config(obj.get("config").ok_or(DetectorError::InvalidConfig)?)?;
     let series = parse_series(obj.get("series").ok_or(DetectorError::InvalidConfig)?)?;
-    let expected_hints =
-        parse_expected_hints(obj.get("expected_hints").ok_or(DetectorError::InvalidConfig)?)?;
+    let expected_hints = parse_expected_hints(
+        obj.get("expected_hints")
+            .ok_or(DetectorError::InvalidConfig)?,
+    )?;
 
     Ok(CamouflageFixture {
         name,
@@ -182,8 +184,8 @@ fn parse_series(v: &Value) -> Result<TrajectorySeries, DetectorError> {
         .get("window_end")
         .and_then(Value::as_i64)
         .ok_or(DetectorError::InvalidConfig)?;
-    let mut series =
-        TrajectorySeries::new(window_start, window_end).map_err(|_| DetectorError::InvalidConfig)?;
+    let mut series = TrajectorySeries::new(window_start, window_end)
+        .map_err(|_| DetectorError::InvalidConfig)?;
     let samples = obj
         .get("samples")
         .and_then(Value::as_array)
@@ -328,9 +330,9 @@ pub fn evaluate_camouflage_fixture(
         if !expected.expected_sample_indices_contains.is_empty() {
             let target_kind = label_to_kind(expected.kind);
             for &required in &expected.expected_sample_indices_contains {
-                let found = hints.iter().any(|h| {
-                    h.kind == target_kind && h.sample_indices.contains(&required)
-                });
+                let found = hints
+                    .iter()
+                    .any(|h| h.kind == target_kind && h.sample_indices.contains(&required));
                 if !found {
                     divergences.push(format!(
                         "kind {:?}: required sample_index {} not present in any emitted hint",
@@ -399,7 +401,9 @@ fn cap(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
     m
 }
 
-fn build_series(samples: Vec<(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)>) -> TrajectorySeries {
+fn build_series(
+    samples: Vec<(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)>,
+) -> TrajectorySeries {
     let mut s = TrajectorySeries::new(0, 100_000).expect("valid window");
     for (ts, obs, decl) in samples {
         let sample = TrajectorySample::new(ts, obs, decl).expect("finite values");
@@ -624,11 +628,7 @@ pub fn fixture_noisy_but_aligned() -> CamouflageFixture {
     let mut rows = Vec::new();
     for i in 0..20i64 {
         let v = if i % 2 == 0 { 0.25 } else { 0.35 };
-        rows.push((
-            i,
-            cap(&[("net.egress", v)]),
-            cap(&[("net.egress", 0.30)]),
-        ));
+        rows.push((i, cap(&[("net.egress", v)]), cap(&[("net.egress", 0.30)])));
     }
     CamouflageFixture {
         name: "noisy_but_aligned".to_string(),
@@ -650,24 +650,15 @@ pub fn fixture_partial_observation() -> CamouflageFixture {
     let mut rows = Vec::new();
     for i in 0..20i64 {
         if i % 3 == 0 {
-            rows.push((
-                i,
-                cap(&[("net.egress", 0.0)]),
-                cap(&[("net.egress", 0.0)]),
-            ));
+            rows.push((i, cap(&[("net.egress", 0.0)]), cap(&[("net.egress", 0.0)])));
         } else {
-            rows.push((
-                i,
-                cap(&[("net.egress", 0.3)]),
-                cap(&[("net.egress", 0.3)]),
-            ));
+            rows.push((i, cap(&[("net.egress", 0.3)]), cap(&[("net.egress", 0.3)])));
         }
     }
     CamouflageFixture {
         name: "partial_observation".to_string(),
-        description:
-            "Capability dormant on some samples but declared 0 there too; not a dropout."
-                .to_string(),
+        description: "Capability dormant on some samples but declared 0 there too; not a dropout."
+            .to_string(),
         config: DetectorConfig {
             phase_shift_threshold: 0.4,
             dropout_threshold: 0.2,
@@ -700,8 +691,9 @@ pub fn fixture_small_excursion() -> CamouflageFixture {
     }
     CamouflageFixture {
         name: "small_excursion".to_string(),
-        description: "Single 1-sample dropout in a 20-sample series; below window dropout threshold."
-            .to_string(),
+        description:
+            "Single 1-sample dropout in a 20-sample series; below window dropout threshold."
+                .to_string(),
         config: DetectorConfig {
             phase_shift_threshold: 0.3,
             dropout_threshold: 0.5,
@@ -850,7 +842,11 @@ mod tests {
         assert_eq!(parsed.name, f.name);
         assert_eq!(parsed.series.samples.len(), f.series.samples.len());
         let verdict = evaluate_camouflage_fixture(&parsed).expect("eval ok");
-        assert!(verdict.passed, "round-tripped fixture failed: {:?}", verdict);
+        assert!(
+            verdict.passed,
+            "round-tripped fixture failed: {:?}",
+            verdict
+        );
     }
 
     #[test]
@@ -877,9 +873,11 @@ mod tests {
         }];
         let verdict = evaluate_camouflage_fixture(&f).expect("eval ok");
         assert!(!verdict.passed);
-        assert!(verdict
-            .divergences
-            .iter()
-            .any(|d| d.contains("< min_count")));
+        assert!(
+            verdict
+                .divergences
+                .iter()
+                .any(|d| d.contains("< min_count"))
+        );
     }
 }

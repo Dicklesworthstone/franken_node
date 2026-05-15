@@ -90,7 +90,10 @@ pub enum IngestError {
     /// `dependencies.len()` exceeded [`MAX_DEPS_PER_PACKAGE`].
     TooManyDependencies { observed: usize, max: usize },
     /// A single identifier exceeded [`MAX_IDENT_LEN`].
-    IdentTooLong { field: &'static str, observed: usize },
+    IdentTooLong {
+        field: &'static str,
+        observed: usize,
+    },
     /// `signature_hex` exceeded [`MAX_SIG_HEX_LEN`].
     SignatureHexTooLong { observed: usize },
     /// Edge weight was NaN or +/-Infinity.
@@ -278,9 +281,7 @@ impl NodeKind {
 /// MUST NOT rely on that for canonical output -- it sorts by [`wire_tag`]
 /// explicitly to make the canonical order independent of variant
 /// declaration order.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum EdgeKind {
     Depends,
     MaintainedBy,
@@ -800,9 +801,7 @@ pub fn ingest(
     let pkg_id = package_node_id(&observation.package_name, &observation.version);
     let mut new_nodes: Vec<GraphNode> = Vec::new();
     if !pipeline.nodes.contains_key(&pkg_id) {
-        pipeline
-            .nodes
-            .insert(pkg_id.clone(), NodeKind::Package);
+        pipeline.nodes.insert(pkg_id.clone(), NodeKind::Package);
         new_nodes.push(GraphNode::new(pkg_id.clone(), NodeKind::Package));
     }
     let mut maintainer_ids: Vec<NodeId> = Vec::with_capacity(observation.maintainers.len());
@@ -931,12 +930,11 @@ pub fn finalize_window(pipeline: &IngestionPipeline) -> Result<WindowedGraph, In
     // If no observations were absorbed window bounds are still the sentinel
     // values; surface them as a clamped empty window so downstream callers
     // don't see i64::MAX/MIN sneak into telemetry.
-    let (window_start, window_end) =
-        if pipeline.observed_hashes.is_empty() {
-            (0, 0)
-        } else {
-            (pipeline.window_start, pipeline.window_end)
-        };
+    let (window_start, window_end) = if pipeline.observed_hashes.is_empty() {
+        (0, 0)
+    } else {
+        (pipeline.window_start, pipeline.window_end)
+    };
 
     Ok(WindowedGraph {
         nodes,
@@ -1004,7 +1002,10 @@ mod tests {
         let obs = sample_obs();
         let a = canonical_observation_bytes(&obs);
         let b = canonical_observation_bytes(&obs);
-        assert_eq!(a, b, "same input must produce byte-identical canonical bytes");
+        assert_eq!(
+            a, b,
+            "same input must produce byte-identical canonical bytes"
+        );
         assert!(
             a.starts_with(CANONICAL_DOMAIN),
             "canonical bytes must start with domain separator"
@@ -1016,26 +1017,10 @@ mod tests {
         // Two observations whose concatenated unprefixed encodings would be
         // identical: "ab" + "cd" vs "abc" + "d". With length-prefixing they
         // MUST produce different canonical bytes (and hashes).
-        let obs1 = ManifestObservation::new(
-            0,
-            "src",
-            "ab",
-            "cd",
-            vec![],
-            BTreeMap::new(),
-            None,
-        )
-        .unwrap();
-        let obs2 = ManifestObservation::new(
-            0,
-            "src",
-            "abc",
-            "d",
-            vec![],
-            BTreeMap::new(),
-            None,
-        )
-        .unwrap();
+        let obs1 =
+            ManifestObservation::new(0, "src", "ab", "cd", vec![], BTreeMap::new(), None).unwrap();
+        let obs2 =
+            ManifestObservation::new(0, "src", "abc", "d", vec![], BTreeMap::new(), None).unwrap();
         let a = canonical_observation_bytes(&obs1);
         let b = canonical_observation_bytes(&obs2);
         assert_ne!(a, b, "length-prefix must defeat boundary collision");
@@ -1057,16 +1042,9 @@ mod tests {
     fn observation_hash_changes_with_signature_flag() {
         // Signature presence must be reflected in the canonical encoding so
         // signed and unsigned observations of the same package never collide.
-        let unsigned = ManifestObservation::new(
-            1,
-            "src",
-            "pkg",
-            "1.0",
-            vec![],
-            BTreeMap::new(),
-            None,
-        )
-        .unwrap();
+        let unsigned =
+            ManifestObservation::new(1, "src", "pkg", "1.0", vec![], BTreeMap::new(), None)
+                .unwrap();
         let mut signed = unsigned.clone();
         signed.signature_hex = Some(String::new()); // empty-string signature still flips the flag
         signed.validate().unwrap();
@@ -1083,16 +1061,9 @@ mod tests {
         for i in 0..=MAX_MAINTAINERS_PER_PACKAGE {
             maintainers.push(format!("m{i}"));
         }
-        let err = ManifestObservation::new(
-            0,
-            "src",
-            "pkg",
-            "1.0",
-            maintainers,
-            BTreeMap::new(),
-            None,
-        )
-        .unwrap_err();
+        let err =
+            ManifestObservation::new(0, "src", "pkg", "1.0", maintainers, BTreeMap::new(), None)
+                .unwrap_err();
         match err {
             IngestError::TooManyMaintainers { observed, max } => {
                 assert_eq!(observed, MAX_MAINTAINERS_PER_PACKAGE + 1);
@@ -1108,16 +1079,9 @@ mod tests {
         let maintainers: Vec<String> = (0..MAX_MAINTAINERS_PER_PACKAGE)
             .map(|i| format!("m{i}"))
             .collect();
-        let obs = ManifestObservation::new(
-            0,
-            "src",
-            "pkg",
-            "1.0",
-            maintainers,
-            BTreeMap::new(),
-            None,
-        )
-        .expect("at-cap is accepted");
+        let obs =
+            ManifestObservation::new(0, "src", "pkg", "1.0", maintainers, BTreeMap::new(), None)
+                .expect("at-cap is accepted");
         assert_eq!(obs.maintainers.len(), MAX_MAINTAINERS_PER_PACKAGE);
     }
 
@@ -1128,16 +1092,7 @@ mod tests {
             deps.insert(format!("d{i:05}"), "0.0.1".to_string());
         }
         assert_eq!(deps.len(), MAX_DEPS_PER_PACKAGE + 1);
-        let err = ManifestObservation::new(
-            0,
-            "src",
-            "pkg",
-            "1.0",
-            vec![],
-            deps,
-            None,
-        )
-        .unwrap_err();
+        let err = ManifestObservation::new(0, "src", "pkg", "1.0", vec![], deps, None).unwrap_err();
         match err {
             IngestError::TooManyDependencies { observed, max } => {
                 assert_eq!(observed, MAX_DEPS_PER_PACKAGE + 1);
@@ -1172,16 +1127,8 @@ mod tests {
     #[test]
     fn empty_observation_is_handled() {
         // Minimal observation: empty maintainers, empty deps, no signature.
-        let obs = ManifestObservation::new(
-            0,
-            "",
-            "",
-            "",
-            vec![],
-            BTreeMap::new(),
-            None,
-        )
-        .expect("empty observation is valid");
+        let obs = ManifestObservation::new(0, "", "", "", vec![], BTreeMap::new(), None)
+            .expect("empty observation is valid");
         let bytes = canonical_observation_bytes(&obs);
         // Must still contain the domain separator + structural framing.
         assert!(bytes.starts_with(CANONICAL_DOMAIN));
@@ -1196,15 +1143,8 @@ mod tests {
 
     #[test]
     fn validate_rejects_nul_byte_in_identifier() {
-        let bad = ManifestObservation::new(
-            0,
-            "src",
-            "pkg\0evil",
-            "1.0",
-            vec![],
-            BTreeMap::new(),
-            None,
-        );
+        let bad =
+            ManifestObservation::new(0, "src", "pkg\0evil", "1.0", vec![], BTreeMap::new(), None);
         match bad {
             Err(IngestError::IdentContainsNul { field }) => assert_eq!(field, "package_name"),
             other => panic!("expected IdentContainsNul, got {other:?}"),
@@ -1214,15 +1154,7 @@ mod tests {
     #[test]
     fn validate_rejects_overlong_identifier() {
         let long = "a".repeat(MAX_IDENT_LEN + 1);
-        let bad = ManifestObservation::new(
-            0,
-            "src",
-            long,
-            "1.0",
-            vec![],
-            BTreeMap::new(),
-            None,
-        );
+        let bad = ManifestObservation::new(0, "src", long, "1.0", vec![], BTreeMap::new(), None);
         match bad {
             Err(IngestError::IdentTooLong { field, observed }) => {
                 assert_eq!(field, "package_name");
@@ -1244,26 +1176,8 @@ mod tests {
         deps_b.insert("a".to_string(), "1".to_string());
         deps_b.insert("z".to_string(), "1".to_string());
 
-        let obs_a = ManifestObservation::new(
-            0,
-            "src",
-            "pkg",
-            "1",
-            vec![],
-            deps_a,
-            None,
-        )
-        .unwrap();
-        let obs_b = ManifestObservation::new(
-            0,
-            "src",
-            "pkg",
-            "1",
-            vec![],
-            deps_b,
-            None,
-        )
-        .unwrap();
+        let obs_a = ManifestObservation::new(0, "src", "pkg", "1", vec![], deps_a, None).unwrap();
+        let obs_b = ManifestObservation::new(0, "src", "pkg", "1", vec![], deps_b, None).unwrap();
         assert_eq!(
             canonical_observation_bytes(&obs_a),
             canonical_observation_bytes(&obs_b)
@@ -1313,7 +1227,13 @@ mod tests {
     #[test]
     fn dedup_by_hash_skips_duplicate_observation() {
         let mut pipe = IngestionPipeline::new();
-        let obs = obs_with(1_700_000_000, "alpha", "1.0.0", &["alice"], &[("serde", "1")]);
+        let obs = obs_with(
+            1_700_000_000,
+            "alpha",
+            "1.0.0",
+            &["alice"],
+            &[("serde", "1")],
+        );
         let first = ingest(&mut pipe, obs.clone()).expect("first ingest");
         assert!(!first.deduplicated);
         assert!(!first.new_nodes.is_empty());
@@ -1330,13 +1250,7 @@ mod tests {
     #[test]
     fn ingest_emits_package_to_maintainer_edges() {
         let mut pipe = IngestionPipeline::new();
-        let obs = obs_with(
-            1_700_000_000,
-            "alpha",
-            "1.0.0",
-            &["alice", "bob"],
-            &[],
-        );
+        let obs = obs_with(1_700_000_000, "alpha", "1.0.0", &["alice", "bob"], &[]);
         let delta = ingest(&mut pipe, obs).expect("ingest");
         let want_pkg = package_node_id("alpha", "1.0.0");
         let want_alice = maintainer_node_id("alice");
@@ -1348,11 +1262,29 @@ mod tests {
             .filter(|e| e.kind == EdgeKind::MaintainedBy)
             .collect();
         assert_eq!(mb_edges.len(), 2);
-        assert!(mb_edges.iter().any(|e| e.from == want_pkg && e.to == want_alice));
-        assert!(mb_edges.iter().any(|e| e.from == want_pkg && e.to == want_bob));
+        assert!(
+            mb_edges
+                .iter()
+                .any(|e| e.from == want_pkg && e.to == want_alice)
+        );
+        assert!(
+            mb_edges
+                .iter()
+                .any(|e| e.from == want_pkg && e.to == want_bob)
+        );
         // Each maintainer must have spawned a node.
-        assert!(delta.new_nodes.iter().any(|n| n.id == want_alice && n.kind == NodeKind::Maintainer));
-        assert!(delta.new_nodes.iter().any(|n| n.id == want_bob && n.kind == NodeKind::Maintainer));
+        assert!(
+            delta
+                .new_nodes
+                .iter()
+                .any(|n| n.id == want_alice && n.kind == NodeKind::Maintainer)
+        );
+        assert!(
+            delta
+                .new_nodes
+                .iter()
+                .any(|n| n.id == want_bob && n.kind == NodeKind::Maintainer)
+        );
     }
 
     #[test]
@@ -1373,8 +1305,16 @@ mod tests {
             .collect();
         assert_eq!(dep_edges.len(), 2);
         let want_pkg = package_node_id("alpha", "1.0.0");
-        assert!(dep_edges.iter().any(|e| e.from == want_pkg && e.to == dependency_node_id("serde")));
-        assert!(dep_edges.iter().any(|e| e.from == want_pkg && e.to == dependency_node_id("tokio")));
+        assert!(
+            dep_edges
+                .iter()
+                .any(|e| e.from == want_pkg && e.to == dependency_node_id("serde"))
+        );
+        assert!(
+            dep_edges
+                .iter()
+                .any(|e| e.from == want_pkg && e.to == dependency_node_id("tokio"))
+        );
     }
 
     #[test]
@@ -1409,7 +1349,13 @@ mod tests {
         let observations = vec![
             obs_with(1_700_000_000, "alpha", "1.0", &["alice"], &[("serde", "1")]),
             obs_with(1_700_000_100, "beta", "2.0", &["bob"], &[("alpha", "1.0")]),
-            obs_with(1_700_000_200, "gamma", "3.0", &["alice", "carol"], &[("beta", "2.0")]),
+            obs_with(
+                1_700_000_200,
+                "gamma",
+                "3.0",
+                &["alice", "carol"],
+                &[("beta", "2.0")],
+            ),
         ];
 
         let mut pipe_a = IngestionPipeline::new();
@@ -1475,7 +1421,10 @@ mod tests {
 
         // Future-dated observations clamp to delta=0, also yielding 1.0.
         let w_future = time_decay_weight(2000, 1234, 1000).expect("finite");
-        assert!((w_future - 1.0).abs() < 1e-12, "expected 1.0, got {w_future}");
+        assert!(
+            (w_future - 1.0).abs() < 1e-12,
+            "expected 1.0, got {w_future}"
+        );
     }
 
     #[test]

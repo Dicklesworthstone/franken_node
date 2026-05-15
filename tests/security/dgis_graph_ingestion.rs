@@ -245,16 +245,8 @@ fn test_pipeline_bounded_growth_rejects_overflow() {
     let mut pipe = IngestionPipeline::with_caps(2, 1024, 1000);
 
     let mk = |ts: i64, name: &str| -> ManifestObservation {
-        ManifestObservation::new(
-            ts,
-            "cargo-lock",
-            name,
-            "1.0",
-            vec![],
-            BTreeMap::new(),
-            None,
-        )
-        .expect("valid")
+        ManifestObservation::new(ts, "cargo-lock", name, "1.0", vec![], BTreeMap::new(), None)
+            .expect("valid")
     };
 
     ingest(&mut pipe, mk(1, "a")).expect("obs1");
@@ -498,11 +490,7 @@ fn test_dep_chain_of_length_3_present_in_topology() {
             .and_then(|s| s.split('@').next())
             .unwrap_or(&edge.from)
             .to_string();
-        let to_name = edge
-            .to
-            .strip_prefix("dep:")
-            .unwrap_or(&edge.to)
-            .to_string();
+        let to_name = edge.to.strip_prefix("dep:").unwrap_or(&edge.to).to_string();
         adj.entry(from_name).or_default().insert(to_name);
     }
 
@@ -618,4 +606,3 @@ fn test_finalize_window_emits_canonical_btreemap_iteration_order() {
         "same-order replay must be byte-identical"
     );
 }
-

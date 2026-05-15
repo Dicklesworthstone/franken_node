@@ -907,10 +907,8 @@ mod tests {
         let mut global = CountMinSketch::new(4, 256).unwrap();
         let per_size = global.serialized_size() as u64;
         let bandwidth_cap = per_size.saturating_mul(n_participants as u64);
-        let mut tracker = BudgetTracker::new(
-            bandwidth_cap,
-            (n_participants as u64).saturating_mul(50),
-        );
+        let mut tracker =
+            BudgetTracker::new(bandwidth_cap, (n_participants as u64).saturating_mul(50));
         for p in 0..n_participants {
             tracker.charge_bandwidth(per_size).unwrap();
             tracker.charge_compute(10).unwrap();
@@ -953,8 +951,14 @@ mod tests {
     #[test]
     fn error_bound_confidence_pct_in_range() {
         // delta=1 → confidence 0; delta near 0 → confidence near 100.
-        let high = ErrorBound { eps: 0.01, delta: 1e-9 };
-        let low = ErrorBound { eps: 0.01, delta: 0.999 };
+        let high = ErrorBound {
+            eps: 0.01,
+            delta: 1e-9,
+        };
+        let low = ErrorBound {
+            eps: 0.01,
+            delta: 0.999,
+        };
         let conf_high = high.confidence_pct();
         let conf_low = low.confidence_pct();
         assert!(conf_high > conf_low);

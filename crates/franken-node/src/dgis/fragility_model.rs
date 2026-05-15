@@ -103,10 +103,7 @@ pub enum FragilityError {
     NonFiniteValue { field: &'static str },
     /// A floating-point share was outside the [0.0, 1.0] interval.
     #[error("share value out of range in field '{field}': value={value}")]
-    ShareOutOfRange {
-        field: &'static str,
-        value: String,
-    },
+    ShareOutOfRange { field: &'static str, value: String },
     /// `now` predates `active_since` for a maintainer, which is unsupported.
     #[error("clock skew: now ({now}) precedes active_since ({active_since})")]
     ClockSkew { now: i64, active_since: i64 },
@@ -790,7 +787,10 @@ mod tests {
     fn fragility_factor_labels_are_stable() {
         // Stability check: if these labels change, downstream telemetry
         // dashboards and log alert rules will break.
-        assert_eq!(FragilityFactor::SingleMaintainer.label(), "single_maintainer");
+        assert_eq!(
+            FragilityFactor::SingleMaintainer.label(),
+            "single_maintainer"
+        );
         assert_eq!(FragilityFactor::NoKeyRecovery.label(), "no_key_recovery");
         assert_eq!(
             FragilityFactor::StaleMaintainer { staleness_days: 1 }.label(),

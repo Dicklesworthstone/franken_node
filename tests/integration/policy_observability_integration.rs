@@ -48,8 +48,7 @@ use frankenengine_node::policy::compat_gates::{
     ShimRegistryEntry, ShimRiskCategory,
 };
 use frankenengine_node::policy::evidence_emission::{
-    ActionId, EvidenceConformanceChecker, PolicyAction, PolicyActionOutcome,
-    build_evidence_entry,
+    ActionId, EvidenceConformanceChecker, PolicyAction, PolicyActionOutcome, build_evidence_entry,
 };
 
 // --- shared test helpers ----------------------------------------------------
@@ -74,11 +73,7 @@ fn signing_key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
 }
 
-fn make_shim(
-    id: &str,
-    band: CompatibilityBand,
-    risk: ShimRiskCategory,
-) -> ShimRegistryEntry {
+fn make_shim(id: &str, band: CompatibilityBand, risk: ShimRiskCategory) -> ShimRegistryEntry {
     ShimRegistryEntry {
         shim_id: id.to_string(),
         description: format!("Integration shim {id}"),
@@ -179,7 +174,10 @@ fn test_compat_gate_pass_emits_evidence() {
     debug!(decision = %result.decision, "gate decision");
     // bd-2wz matrix: HighValue + Balanced -> Warn -> Audit
     assert_eq!(result.decision, GateDecision::Audit);
-    assert!(result.receipt_id.is_some(), "audit decision must carry receipt");
+    assert!(
+        result.receipt_id.is_some(),
+        "audit decision must carry receipt"
+    );
 
     // Wire the gate's decision into the observability pipeline.
     let key = signing_key(0x10);
@@ -203,7 +201,10 @@ fn test_compat_gate_pass_emits_evidence() {
         &mut ledger,
     );
     debug!(?outcome, "evidence conformance outcome");
-    assert!(outcome.is_executed(), "evidence-conformant action must execute");
+    assert!(
+        outcome.is_executed(),
+        "evidence-conformant action must execute"
+    );
     assert_eq!(ledger.len(), 1);
     assert_eq!(checker.executed_count(), 1);
 
@@ -248,12 +249,8 @@ fn test_compat_gate_fail_emits_evidence() {
         &key,
         json!({"package_id": "pkg-unknown", "decision": "deny"}),
     );
-    let outcome = checker.verify_and_execute(
-        PolicyAction::Abort,
-        &action_id,
-        Some(&entry),
-        &mut ledger,
-    );
+    let outcome =
+        checker.verify_and_execute(PolicyAction::Abort, &action_id, Some(&entry), &mut ledger);
     assert!(outcome.is_executed());
     assert_eq!(ledger.len(), 1);
 
@@ -281,12 +278,8 @@ fn test_evidence_ledger_stores_decision() {
         &key,
         json!({"detail": "store"}),
     );
-    let outcome = checker.verify_and_execute(
-        PolicyAction::Commit,
-        &action_id,
-        Some(&entry),
-        &mut ledger,
-    );
+    let outcome =
+        checker.verify_and_execute(PolicyAction::Commit, &action_id, Some(&entry), &mut ledger);
     assert!(outcome.is_executed());
 
     let snap = ledger.snapshot();
@@ -597,7 +590,10 @@ fn test_decision_kind_mismatch_rejected() {
         &mut ledger,
     );
     assert!(outcome.is_rejected(), "linkage mismatch must reject");
-    assert!(ledger.is_empty(), "rejected action must not append to ledger");
+    assert!(
+        ledger.is_empty(),
+        "rejected action must not append to ledger"
+    );
     assert_eq!(checker.executed_count(), 0);
     assert_eq!(checker.rejected_count(), 1);
 
@@ -649,7 +645,11 @@ fn test_audit_log_and_ledger_counts_match() {
     let packages = [
         ("pkg-edge", PolicyAction::Commit, DecisionKind::Admit),
         ("pkg-hv", PolicyAction::Quarantine, DecisionKind::Quarantine),
-        ("pkg-unknown", PolicyAction::Quarantine, DecisionKind::Quarantine),
+        (
+            "pkg-unknown",
+            PolicyAction::Quarantine,
+            DecisionKind::Quarantine,
+        ),
         ("pkg-core", PolicyAction::Abort, DecisionKind::Deny),
     ];
     for (i, (pkg, action, _kind)) in packages.iter().enumerate() {
@@ -672,8 +672,16 @@ fn test_audit_log_and_ledger_counts_match() {
     }
 
     let audit = eval.audit_log_for_scope("scope-count");
-    debug!(audit_entries = audit.len(), ledger_entries = ledger.len(), "totals");
-    assert_eq!(audit.len(), packages.len(), "one audit record per evaluation");
+    debug!(
+        audit_entries = audit.len(),
+        ledger_entries = ledger.len(),
+        "totals"
+    );
+    assert_eq!(
+        audit.len(),
+        packages.len(),
+        "one audit record per evaluation"
+    );
     assert_eq!(ledger.len(), packages.len(), "one ledger entry per action");
     assert_eq!(eval.evaluation_count(), packages.len());
     assert_eq!(checker.executed_count(), packages.len() as u64);

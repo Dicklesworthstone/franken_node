@@ -25,8 +25,12 @@ fn load(name: &str) -> CamouflageFixture {
     let path = repo_root().join(format!("tests/security/camouflage_fixtures/{name}.json"));
     let json = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read fixture {}: {e}", path.display()));
-    load_camouflage_fixture(&json)
-        .unwrap_or_else(|e| panic!("fixture `{name}` at {} failed to parse: {e}", path.display()))
+    load_camouflage_fixture(&json).unwrap_or_else(|e| {
+        panic!(
+            "fixture `{name}` at {} failed to parse: {e}",
+            path.display()
+        )
+    })
 }
 
 fn assert_passes(fixture_name: &str) {

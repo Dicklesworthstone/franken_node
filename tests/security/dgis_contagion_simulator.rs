@@ -24,16 +24,14 @@
 use std::fs;
 use std::path::PathBuf;
 
-use frankenengine_node::dgis::contagion_graph::{
-    ContagionEdge, ContagionGraph, EdgeKind, NodeId,
-};
+use frankenengine_node::dgis::contagion_graph::{ContagionEdge, ContagionGraph, EdgeKind, NodeId};
 use frankenengine_node::dgis::contagion_profiles::{
-    build_graph_from_spec, evaluate_profile, load_profile_from_json, ContagionProfile,
-    ProfileEdgeSpec, ProfileError, ProfileGraphSpec, ProfileSimulatorConfig,
-    WireEdgeKind, WireTerminationReason, ExpectedOutcome,
+    ContagionProfile, ExpectedOutcome, ProfileEdgeSpec, ProfileError, ProfileGraphSpec,
+    ProfileSimulatorConfig, WireEdgeKind, WireTerminationReason, build_graph_from_spec,
+    evaluate_profile, load_profile_from_json,
 };
 use frankenengine_node::dgis::contagion_simulator::{
-    detect_termination, simulate, InfectionState, SimulatorConfig, TerminationReason,
+    InfectionState, SimulatorConfig, TerminationReason, detect_termination, simulate,
 };
 
 /// Resolve the absolute path to a profile fixture from the per-crate
@@ -60,8 +58,7 @@ fn load_profile(name: &str) -> ContagionProfile {
     let path = profile_path(name);
     let json = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()));
-    load_profile_from_json(&json)
-        .unwrap_or_else(|e| panic!("load profile {name}: {e:?}"))
+    load_profile_from_json(&json).unwrap_or_else(|e| panic!("load profile {name}: {e:?}"))
 }
 
 #[test]
@@ -144,7 +141,10 @@ fn test_all_profiles_deterministic_across_two_runs() {
             .unwrap_or_else(|e| panic!("{name}: first simulate failed {e:?}"));
         let t2 = simulate(&graph, &profile.initial_infected, &cfg)
             .unwrap_or_else(|e| panic!("{name}: second simulate failed {e:?}"));
-        assert_eq!(t1, t2, "{name}: two simulations must produce identical traces");
+        assert_eq!(
+            t1, t2,
+            "{name}: two simulations must produce identical traces"
+        );
         // Trace length invariant: states_per_step.len() == terminated_at + 1.
         assert_eq!(
             t1.states_per_step.len(),
@@ -284,8 +284,7 @@ fn test_full_spread_termination_reached() {
             terminated_by_step: 4,
         },
     };
-    let verdict =
-        evaluate_profile(&profile).expect("dense profile evaluation must succeed");
+    let verdict = evaluate_profile(&profile).expect("dense profile evaluation must succeed");
     assert!(
         verdict.passed,
         "dense profile must pass; divergences={:?}",
@@ -331,8 +330,8 @@ fn test_no_spread_termination_when_no_edges() {
         decay_factor: 0.5,
         seed: 0,
     };
-    let trace = simulate(&g, &["n0".to_string()], &cfg)
-        .expect("simulate on isolated graph must succeed");
+    let trace =
+        simulate(&g, &["n0".to_string()], &cfg).expect("simulate on isolated graph must succeed");
     assert_eq!(trace.termination_reason, TerminationReason::Converged);
     let last = trace
         .states_per_step
@@ -352,7 +351,10 @@ fn test_no_spread_termination_when_no_edges() {
     // report any out-edges, confirming the "0 edges" invariant the
     // simulator relied on above. Use real types only (no mocks).
     for node in g.nodes() {
-        assert!(g.neighbors(node).is_empty(), "node {node} unexpectedly had edges");
+        assert!(
+            g.neighbors(node).is_empty(),
+            "node {node} unexpectedly had edges"
+        );
         // The ContagionEdge type is reachable in this scope to satisfy
         // the "use REAL types from contagion_*" contract; we materialise
         // (but do not insert) one to ensure the import is not dead-code

@@ -241,8 +241,8 @@ impl From<GraphError> for ProfileError {
 /// nodes) live in [`build_graph_from_spec`] so a caller that only wants to
 /// inspect metadata can stop here.
 pub fn load_profile_from_json(json: &str) -> Result<ContagionProfile, ProfileError> {
-    let profile: ContagionProfile = serde_json::from_str(json)
-        .map_err(|e| ProfileError::ParseError(format!("{e}")))?;
+    let profile: ContagionProfile =
+        serde_json::from_str(json).map_err(|e| ProfileError::ParseError(format!("{e}")))?;
 
     if profile.graph.nodes.is_empty() {
         return Err(ProfileError::EmptyProfile);
@@ -267,9 +267,7 @@ pub fn load_profile_from_json(json: &str) -> Result<ContagionProfile, ProfileErr
         }
     }
 
-    if !profile.config.infection_threshold.is_finite()
-        || !profile.config.decay_factor.is_finite()
-    {
+    if !profile.config.infection_threshold.is_finite() || !profile.config.decay_factor.is_finite() {
         return Err(ProfileError::InvalidWeight);
     }
 
@@ -355,8 +353,7 @@ pub fn evaluate_profile(profile: &ContagionProfile) -> Result<ProfileVerdict, Pr
     let actual_termination_reason = trace.termination_reason;
     let actual_infected_count = last_state.infected_count();
     let actual_terminated_at = trace.terminated_at;
-    let expected_termination_reason: TerminationReason =
-        profile.expected.termination_reason.into();
+    let expected_termination_reason: TerminationReason = profile.expected.termination_reason.into();
 
     let mut divergences: Vec<String> = Vec::new();
     if actual_termination_reason != expected_termination_reason {
@@ -435,9 +432,8 @@ mod tests {
 
     const XZ_STYLE_JSON: &str =
         include_str!("../../../../tests/security/contagion_profiles/xz_style.json");
-    const DEP_CONFUSION_JSON: &str = include_str!(
-        "../../../../tests/security/contagion_profiles/dependency_confusion.json"
-    );
+    const DEP_CONFUSION_JSON: &str =
+        include_str!("../../../../tests/security/contagion_profiles/dependency_confusion.json");
     const TYPOSQUAT_JSON: &str =
         include_str!("../../../../tests/security/contagion_profiles/typosquat.json");
 
@@ -457,7 +453,10 @@ mod tests {
             "xz_style verdict diverged: {:?}",
             verdict.divergences
         );
-        assert_eq!(verdict.actual_termination_reason, TerminationReason::Converged);
+        assert_eq!(
+            verdict.actual_termination_reason,
+            TerminationReason::Converged
+        );
         assert!(verdict.actual_infected_count >= profile.expected.min_infected_count);
         assert!(verdict.actual_infected_count <= profile.expected.max_infected_count);
         assert!(verdict.actual_terminated_at <= profile.expected.terminated_by_step);
@@ -474,7 +473,10 @@ mod tests {
             "dependency_confusion verdict diverged: {:?}",
             verdict.divergences
         );
-        assert_eq!(verdict.actual_termination_reason, TerminationReason::Converged);
+        assert_eq!(
+            verdict.actual_termination_reason,
+            TerminationReason::Converged
+        );
         // Internal scope is the 8 internal:* packages plus the typosquat seed.
         assert!(verdict.actual_infected_count >= profile.expected.min_infected_count);
         assert!(verdict.actual_infected_count <= profile.expected.max_infected_count);
@@ -492,7 +494,10 @@ mod tests {
             "typosquat verdict diverged: {:?}",
             verdict.divergences
         );
-        assert_eq!(verdict.actual_termination_reason, TerminationReason::Converged);
+        assert_eq!(
+            verdict.actual_termination_reason,
+            TerminationReason::Converged
+        );
         assert!(verdict.actual_infected_count >= profile.expected.min_infected_count);
         assert!(verdict.actual_infected_count <= profile.expected.max_infected_count);
     }
@@ -513,7 +518,11 @@ mod tests {
         for json in [XZ_STYLE_JSON, DEP_CONFUSION_JSON, TYPOSQUAT_JSON] {
             let profile = must_load(json);
             let g = build_graph_from_spec(&profile.graph).expect("build graph");
-            assert!(g.validate().is_ok(), "graph for {} failed validate", profile.name);
+            assert!(
+                g.validate().is_ok(),
+                "graph for {} failed validate",
+                profile.name
+            );
             assert_eq!(g.seed(), profile.graph.seed);
             assert_eq!(g.nodes().len(), profile.graph.nodes.len());
         }
@@ -531,7 +540,10 @@ mod tests {
         // Serde's default JSON parser rejects bare NaN tokens, so this comes
         // back as ParseError — that's still a "loader rejected" outcome.
         let err = load_profile_from_json(bad).expect_err("NaN weight must not load");
-        assert!(matches!(err, ProfileError::ParseError(_) | ProfileError::InvalidWeight));
+        assert!(matches!(
+            err,
+            ProfileError::ParseError(_) | ProfileError::InvalidWeight
+        ));
     }
 
     #[test]

@@ -273,7 +273,11 @@ fn test_trust_aggregator_scores_verifier() {
 
     let agg = TrustAggregator::new(0.2);
     let result = agg.trimmed_mean(&scores).expect("trimmed mean ok");
-    debug!(value = result.value, count = result.signal_count, "trust score");
+    debug!(
+        value = result.value,
+        count = result.signal_count,
+        "trust score"
+    );
     assert!(result.value.is_finite());
     assert!((0.0..=1.0).contains(&result.value));
     assert!(result.signal_count > 0);
@@ -387,7 +391,11 @@ fn test_selective_reporting_triggers_slashing() {
     let event = ledger
         .slash(stake_id, evidence, 1_700_000_600)
         .expect("slash ok");
-    debug!(slash_id = event.slash_id, amount = event.slash_amount, "slashed");
+    debug!(
+        slash_id = event.slash_id,
+        amount = event.slash_amount,
+        "slashed"
+    );
     assert!(event.slash_amount > 0);
     assert_eq!(
         ledger.get_stake(stake_id).map(|r| r.state),
@@ -574,7 +582,12 @@ fn test_appeal_window_extends_slashing_deadline() {
     );
     let event = ledger.slash(stake, evidence, 1_700_000_600).unwrap();
     let appeal = ledger
-        .file_appeal(stake, event.slash_id, "evidence collection error", 1_700_000_700)
+        .file_appeal(
+            stake,
+            event.slash_id,
+            "evidence collection error",
+            1_700_000_700,
+        )
         .expect("appeal accepted");
     debug!(appeal_id = appeal.appeal_id, "appeal filed");
     let appeals = ledger.appeals_for_stake(stake);

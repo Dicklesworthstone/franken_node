@@ -21,8 +21,8 @@
 #![cfg(feature = "advanced-features")]
 
 use frankenengine_node::federation::atc_signal_extractor::{
-    AtcLocalSignal, ExtractionAuditLog, ExtractionError, ExtractionPolicy, SignalKind,
-    event_codes, extract_signal,
+    AtcLocalSignal, ExtractionAuditLog, ExtractionError, ExtractionPolicy, SignalKind, event_codes,
+    extract_signal,
 };
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -96,8 +96,11 @@ fn public_extract_output_is_replay_auditable() {
     // signal_id and payload_hash. The trace_id is echoed unchanged so an
     // auditor can re-derive both deterministic IDs from the source bytes.
     let policy = redacting_policy();
-    let raw =
-        sample_event("revocation_hint", "trace-pub-003-replay-audit-correlation-id", 99);
+    let raw = sample_event(
+        "revocation_hint",
+        "trace-pub-003-replay-audit-correlation-id",
+        99,
+    );
     let a = extract_signal(&raw, &policy).unwrap();
     let b = extract_signal(&raw, &policy).unwrap();
     assert_eq!(a.signal_id, b.signal_id);
@@ -152,10 +155,10 @@ fn fixture_samples_extract_to_distinct_signals() {
         if line.trim().is_empty() {
             continue;
         }
-        let v: serde_json::Value = serde_json::from_str(line)
-            .unwrap_or_else(|e| panic!("parse line {lineno}: {e}"));
-        let sig = extract_signal(&v, &policy)
-            .unwrap_or_else(|e| panic!("extract line {lineno}: {e:?}"));
+        let v: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("parse line {lineno}: {e}"));
+        let sig =
+            extract_signal(&v, &policy).unwrap_or_else(|e| panic!("extract line {lineno}: {e:?}"));
         // Every sample must redact secret_token.
         assert!(!sig.redacted_payload.contains_key("secret_token"));
         log.record_ok(&sig);
@@ -168,7 +171,10 @@ fn fixture_samples_extract_to_distinct_signals() {
 
     assert_eq!(signals.len(), 5, "expected 5 fixture samples");
     assert_eq!(log.entries().len(), 5);
-    assert_eq!(log.entries()[0].event_code.as_str(), event_codes::SIGNAL_EXTRACTED);
+    assert_eq!(
+        log.entries()[0].event_code.as_str(),
+        event_codes::SIGNAL_EXTRACTED
+    );
 }
 
 #[test]

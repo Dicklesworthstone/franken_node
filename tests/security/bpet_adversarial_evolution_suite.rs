@@ -30,17 +30,15 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use frankenengine_node::security::bpet::adversarial_evolution::{
-    AdversarialError, AdversaryKind,
-};
+use frankenengine_node::security::bpet::adversarial_evolution::{AdversarialError, AdversaryKind};
 use frankenengine_node::security::bpet::adversarial_harness::{
     AdversarialHarness, AdversarialHarnessError, ScenarioVerdict, run_scenario,
 };
 use frankenengine_node::security::bpet::adversarial_scenarios::{
     AdversarialScenarioFixture, ExpectedVerdict, ScenarioVerdictMatch, all_synthesizers,
-    evaluate_scenario_fixture, load_scenario_fixture, synthesize_capability_creep_disguised_as_feature,
-    synthesize_eviction_via_trust_flooding, synthesize_false_recovery_claim,
-    synthesize_indirect_via_dep, synthesize_many_tiny_updates,
+    evaluate_scenario_fixture, load_scenario_fixture,
+    synthesize_capability_creep_disguised_as_feature, synthesize_eviction_via_trust_flooding,
+    synthesize_false_recovery_claim, synthesize_indirect_via_dep, synthesize_many_tiny_updates,
     synthesize_multi_persona_coordination, synthesize_signature_rollover,
     synthesize_slow_roll_drift,
 };
@@ -78,9 +76,16 @@ fn load_scenario_from_path(name: &str) -> AdversarialScenarioFixture {
 fn verdict_kind_aligned(expected: &ExpectedVerdict, actual: &ScenarioVerdict) -> bool {
     matches!(
         (expected, actual),
-        (ExpectedVerdict::CaughtEarly { .. }, ScenarioVerdict::CaughtEarly { .. })
-            | (ExpectedVerdict::CaughtLate { .. }, ScenarioVerdict::CaughtLate { .. })
-            | (ExpectedVerdict::MissedEntirely, ScenarioVerdict::MissedEntirely)
+        (
+            ExpectedVerdict::CaughtEarly { .. },
+            ScenarioVerdict::CaughtEarly { .. }
+        ) | (
+            ExpectedVerdict::CaughtLate { .. },
+            ScenarioVerdict::CaughtLate { .. }
+        ) | (
+            ExpectedVerdict::MissedEntirely,
+            ScenarioVerdict::MissedEntirely
+        )
     )
 }
 
@@ -109,7 +114,11 @@ fn run_and_assert(name: &str, fixture: &AdversarialScenarioFixture) -> ScenarioV
         m.actual_first_detection_at,
         m.divergences,
     );
-    assert!(m.divergences.is_empty(), "fixture `{name}` divergences: {:?}", m.divergences);
+    assert!(
+        m.divergences.is_empty(),
+        "fixture `{name}` divergences: {:?}",
+        m.divergences
+    );
 
     // Cross-check at-step bound semantics directly against the structured
     // verdict so a regression that loses the bounds inside
@@ -133,7 +142,10 @@ fn run_and_assert(name: &str, fixture: &AdversarialScenarioFixture) -> ScenarioV
                 at_step_lower,
                 at_step_upper,
             },
-            ScenarioVerdict::CaughtLate { at_step, total_steps },
+            ScenarioVerdict::CaughtLate {
+                at_step,
+                total_steps,
+            },
         ) => {
             assert!(
                 at_step >= *at_step_lower && at_step <= *at_step_upper,
@@ -331,13 +343,13 @@ fn test_run_scenario_deterministic_across_two_runs() {
     // produce a byte-identical EvolutionResult. This locks the harness as
     // a pure function of (scenario, baseline, thresholds).
     for fixture in all_synthesizers() {
-        let mut harness_a = AdversarialHarness::new(fixture.thresholds)
-            .expect("harness a constructs");
+        let mut harness_a =
+            AdversarialHarness::new(fixture.thresholds).expect("harness a constructs");
         let result_a = run_scenario(&mut harness_a, &fixture.scenario, &fixture.baseline)
             .unwrap_or_else(|e| panic!("run_scenario A `{}`: {e:?}", fixture.name));
 
-        let mut harness_b = AdversarialHarness::new(fixture.thresholds)
-            .expect("harness b constructs");
+        let mut harness_b =
+            AdversarialHarness::new(fixture.thresholds).expect("harness b constructs");
         let result_b = run_scenario(&mut harness_b, &fixture.scenario, &fixture.baseline)
             .unwrap_or_else(|e| panic!("run_scenario B `{}`: {e:?}", fixture.name));
 
@@ -382,8 +394,8 @@ fn test_invalid_at_step_bounds_rejected_at_load() {
     // load_scenario_fixture() path — round-trip via JSON to mirror an
     // on-disk corruption.
     let json = serde_json::to_string(&fixture).expect("serialize malformed fixture");
-    let err = load_scenario_fixture(&json)
-        .expect_err("loader must reject malformed at-step bounds");
+    let err =
+        load_scenario_fixture(&json).expect_err("loader must reject malformed at-step bounds");
     assert!(
         matches!(err, AdversarialError::TooManySteps { .. }),
         "loader returned wrong variant: {err:?}",
@@ -431,14 +443,18 @@ fn test_all_eight_adversary_kinds_have_corresponding_scenario() {
     ]
     .into_iter()
     .collect();
-    assert_eq!(required.len(), 8, "AdversaryKind variant count drifted from 8");
+    assert_eq!(
+        required.len(),
+        8,
+        "AdversaryKind variant count drifted from 8"
+    );
 
     // Walk the on-disk fixture directory and collect the kinds reported by
     // each loaded fixture. Filesystem walk uses the same loader path the
     // verification gate (sub-task 5) will exercise.
     let dir = fixtures_dir();
-    let entries = fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("read fixture dir `{}`: {e}", dir.display()));
+    let entries =
+        fs::read_dir(&dir).unwrap_or_else(|e| panic!("read fixture dir `{}`: {e}", dir.display()));
 
     let mut observed: BTreeSet<AdversaryKind> = BTreeSet::new();
     let mut observed_files: BTreeSet<String> = BTreeSet::new();
@@ -475,7 +491,8 @@ fn test_all_eight_adversary_kinds_have_corresponding_scenario() {
     }
 
     assert_eq!(
-        observed, required,
+        observed,
+        required,
         "fixture directory `{}` does not cover all AdversaryKind variants. Missing: {:?}; extras: {:?}",
         dir.display(),
         required.difference(&observed).collect::<Vec<_>>(),
