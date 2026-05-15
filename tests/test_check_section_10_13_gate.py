@@ -4,6 +4,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from unittest import mock
 from pathlib import Path
 
 
@@ -94,6 +95,27 @@ def test_self_test_passes():
     assert ok is True
     assert len(checks) >= 4
     assert all(c["pass"] for c in checks)
+
+
+# ---------------------------------------------------------------------------
+# RCH command construction
+# ---------------------------------------------------------------------------
+
+def test_rust_test_command_uses_one_rch_wrapper_when_rch_found():
+    with mock.patch.object(mod.shutil, "which", return_value="/usr/local/bin/rch"):
+        cmd = mod._rust_test_command()
+
+    assert cmd[:4] == ["/usr/local/bin/rch", "exec", "--", "cargo"]
+    assert cmd.count("exec") == 1
+    assert cmd.count("--") == 2
+    assert "rch" not in cmd[1:]
+
+
+def test_rust_test_command_uses_rch_name_when_path_lookup_fails():
+    with mock.patch.object(mod.shutil, "which", return_value=None):
+        cmd = mod._rust_test_command()
+
+    assert cmd[:4] == ["rch", "exec", "--", "cargo"]
 
 
 # ---------------------------------------------------------------------------

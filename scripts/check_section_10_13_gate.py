@@ -48,15 +48,29 @@ def _check(check_id: str, description: str, passed: bool, details: str | None = 
     return passed
 
 
+def _rust_test_command() -> list[str]:
+    return [
+        shutil.which("rch") or "rch",
+        "exec",
+        "--",
+        "cargo",
+        "test",
+        "-p",
+        "frankenengine-node",
+        "--",
+        "connector::",
+    ]
+
+
 def _run_rust_tests() -> bool:
     """GATE-RUST-UNIT: Run connector Rust unit tests via rch if available."""
-    cmd = ["rch", "exec", "--", "cargo", "test", "-p", "frankenengine-node", "--", "connector::"]
-    rch = shutil.which("rch")
-    if rch:
-        cmd = [rch, "exec", "--"] + cmd
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=3600, cwd=os.path.join(ROOT, "crates/franken-node"),
+            _rust_test_command(),
+            capture_output=True,
+            text=True,
+            timeout=3600,
+            cwd=os.path.join(ROOT, "crates/franken-node"),
         )
         test_output = result.stdout + result.stderr
         # Match both "ok" and "FAILED" result lines to capture total passing
