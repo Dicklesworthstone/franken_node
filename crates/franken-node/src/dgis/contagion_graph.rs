@@ -359,25 +359,32 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_nan_weight() {
+    fn validate_rejects_nan_weight() -> Result<(), String> {
         let mut g = ContagionGraph::new(7);
         g.add_node("a".to_string());
         g.add_node("b".to_string());
         // Bypass the constructor to inject a NaN and ensure validate() catches it.
-        let bucket = g.edges.get_mut("a").unwrap();
+        let bucket = g
+            .edges
+            .get_mut("a")
+            .ok_or_else(|| "expected node `a` bucket".to_string())?;
         bucket.push(ContagionEdge {
             target: "b".to_string(),
             weight: f64::NAN,
             edge_kind: EdgeKind::DependencyImport,
         });
         assert_eq!(g.validate(), Err(GraphError::NonFiniteWeight));
+        Ok(())
     }
 
     #[test]
-    fn validate_rejects_unknown_target() {
+    fn validate_rejects_unknown_target() -> Result<(), String> {
         let mut g = ContagionGraph::new(7);
         g.add_node("a".to_string());
-        let bucket = g.edges.get_mut("a").unwrap();
+        let bucket = g
+            .edges
+            .get_mut("a")
+            .ok_or_else(|| "expected node `a` bucket".to_string())?;
         bucket.push(ContagionEdge {
             target: "ghost".to_string(),
             weight: 0.5,
@@ -385,8 +392,9 @@ mod tests {
         });
         match g.validate() {
             Err(GraphError::UnknownTarget(t)) => assert_eq!(t, "ghost"),
-            other => panic!("expected UnknownTarget, got {:?}", other),
+            other => return Err(format!("expected UnknownTarget, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
