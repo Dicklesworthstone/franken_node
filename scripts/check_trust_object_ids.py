@@ -113,6 +113,92 @@ def _read(path: Path) -> str:
     return ""
 
 
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = _rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = _rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
 def _load_json(path: Path) -> dict | None:
     if not path.is_file():
         return None
@@ -170,7 +256,7 @@ def check_file_existence() -> list:
 
 
 def check_structs() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for s in REQUIRED_STRUCTS:
         found = f"pub enum {s}" in src or f"pub struct {s}" in src
@@ -179,7 +265,7 @@ def check_structs() -> list:
 
 
 def check_event_codes() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for code in REQUIRED_EVENT_CODES:
         found = code in src
@@ -188,7 +274,7 @@ def check_event_codes() -> list:
 
 
 def check_error_codes() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for code in REQUIRED_ERROR_CODES:
         found = code in src
@@ -197,16 +283,49 @@ def check_error_codes() -> list:
 
 
 def check_invariants() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
+    invariant_markers = {
+        "INV-TOI-PREFIX": [
+            "fn split_prefix",
+            "DomainPrefix::all()",
+            "strip_prefix(domain.prefix())",
+            "IdError::InvalidPrefix",
+        ],
+        "INV-TOI-DETERMINISTIC": [
+            'hasher.update(b"trust_object_hash_v1:")',
+            'hasher.update(b"trust_object_derive_v1:")',
+            "to_le_bytes()",
+            "to_be_bytes()",
+            "hex::encode(hasher.finalize())",
+        ],
+        "INV-TOI-COLLISION": [
+            "let domain_bytes = domain.prefix().as_bytes();",
+            "hasher.update(domain_bytes);",
+            "\"{}sha256:{}\"",
+            "\"{}{}:{}:{}\"",
+        ],
+        "INV-TOI-DIGEST": [
+            "Sha256::new()",
+            "validate_hex_digest",
+            "s.len() != 64",
+            "is_ascii_digit()",
+            "hex::encode(hasher.finalize())",
+        ],
+    }
     for inv in REQUIRED_INVARIANTS:
-        found = inv in src
-        checks.append(_check(f"invariant {inv}", found))
+        markers = invariant_markers[inv]
+        missing = [marker for marker in markers if marker not in src]
+        checks.append(_check(
+            f"invariant {inv}",
+            len(missing) == 0,
+            "implementation markers present" if not missing else f"missing: {missing}",
+        ))
     return checks
 
 
 def check_functions() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for fn_name in REQUIRED_FUNCTIONS:
         found = f"fn {fn_name}" in src or f"pub fn {fn_name}" in src
@@ -224,7 +343,7 @@ def check_spec_sections() -> list:
 
 
 def check_domain_prefixes() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for name, prefix in DOMAIN_PREFIXES:
         found_variant = name in src
@@ -239,7 +358,7 @@ def check_domain_prefixes() -> list:
 
 
 def check_derivation_modes() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for mode in DERIVATION_MODES:
         found = mode in src
@@ -248,7 +367,7 @@ def check_derivation_modes() -> list:
 
 
 def check_sha256_usage() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     checks.append(_check("imports sha2::Sha256", "Sha256" in src))
     checks.append(_check("uses hex::encode", "hex::encode" in src))
@@ -257,7 +376,7 @@ def check_sha256_usage() -> list:
 
 
 def check_serde_derives() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for t in ["DomainPrefix", "DerivationMode", "TrustObjectId",
               "IdRegistry", "DomainRegistryEntry", "IdEvent"]:
@@ -272,7 +391,7 @@ def check_serde_derives() -> list:
 
 
 def check_tests() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     test_count = src.count("#[test]")
     checks.append(_check(
@@ -302,7 +421,7 @@ def check_tests() -> list:
 
 
 def check_send_sync() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     found = "assert_send" in src and "assert_sync" in src
     checks.append(_check("Send + Sync assertions", found))
@@ -310,7 +429,7 @@ def check_send_sync() -> list:
 
 
 def check_acceptance_criteria() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
 
     # AC1: 6 domain prefixes

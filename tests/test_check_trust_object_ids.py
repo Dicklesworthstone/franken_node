@@ -2,6 +2,7 @@
 
 import json
 import sys
+import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -176,6 +177,123 @@ class TestFileChecks(unittest.TestCase):
         result = mod.run_checks()
         spec_check = next(c for c in result["checks"] if "contract spec" in c["check"])
         self.assertTrue(spec_check["pass"])
+
+
+class TestCommentOnlyRustRegression(unittest.TestCase):
+    """Commented Rust markers must not satisfy implementation checks."""
+
+    def test_comment_only_rust_markers_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            impl_file = Path(tmp) / "trust_object_id.rs"
+            markers = (
+                REQUIRED_RUST_MARKERS
+                + [
+                    "Sha256",
+                    "hex::encode",
+                    "64",
+                    "hex chars",
+                    "Serialize",
+                    "Deserialize",
+                    "assert_send",
+                    "assert_sync",
+                    "cross_domain",
+                    "deterministic",
+                    "sha256",
+                    "256",
+                ]
+            )
+            impl_file.write_text(
+                "\n".join(f"// {marker}" for marker in markers)
+                + "\n/*\n"
+                + "\n".join("#[test]" for _ in range(45))
+                + "\n*/\n",
+                encoding="utf-8",
+            )
+
+            original_impl = mod.IMPL_FILE
+            mod.IMPL_FILE = impl_file
+            try:
+                result = mod.run_checks()
+            finally:
+                mod.IMPL_FILE = original_impl
+
+        by_name = {check["check"]: check for check in result["checks"]}
+        self.assertTrue(by_name["trust_object_id implementation exists"]["pass"])
+
+        rust_marker_prefixes = (
+            "struct/enum ",
+            "event code ",
+            "error code ",
+            "invariant ",
+            "function ",
+            "domain ",
+            "derivation mode ",
+            "serde derives on ",
+            "test: ",
+            "AC",
+        )
+        rust_marker_names = [
+            check["check"]
+            for check in result["checks"]
+            if check["check"].startswith(rust_marker_prefixes)
+            or check["check"]
+            in {
+                "6 domain prefixes defined",
+                "imports sha2::Sha256",
+                "uses hex::encode",
+                "SHA-256 digest length check",
+                "Rust unit tests present (0)",
+                "Send + Sync assertions",
+            }
+            or check["check"].startswith("domain prefix ")
+            or check["check"].startswith("Rust unit tests present")
+        ]
+        self.assertTrue(rust_marker_names)
+        self.assertTrue(all(not by_name[name]["pass"] for name in rust_marker_names))
+
+
+REQUIRED_RUST_MARKERS = (
+    mod.REQUIRED_EVENT_CODES
+    + mod.REQUIRED_ERROR_CODES
+    + mod.REQUIRED_INVARIANTS
+    + mod.REQUIRED_FUNCTIONS
+    + [name for name, _prefix in mod.DOMAIN_PREFIXES]
+    + [f'"{prefix}"' for _name, prefix in mod.DOMAIN_PREFIXES]
+    + mod.DERIVATION_MODES
+    + [f"pub struct {name}" for name in mod.REQUIRED_STRUCTS]
+    + [f"pub enum {name}" for name in mod.REQUIRED_STRUCTS]
+    + [
+        "fn split_prefix",
+        "DomainPrefix::all()",
+        "strip_prefix(domain.prefix())",
+        "IdError::InvalidPrefix",
+        "hasher.update(b\"trust_object_hash_v1:\")",
+        "hasher.update(b\"trust_object_derive_v1:\")",
+        "to_le_bytes()",
+        "to_be_bytes()",
+        "hex::encode(hasher.finalize())",
+        "let domain_bytes = domain.prefix().as_bytes();",
+        "hasher.update(domain_bytes);",
+        "\"{}sha256:{}\"",
+        "\"{}{}:{}:{}\"",
+        "Sha256::new()",
+        "validate_hex_digest",
+        "s.len() != 64",
+        "is_ascii_digit()",
+        "test_all_domains_count",
+        "test_parse_round_trip",
+        "test_cross_domain_collision",
+        "test_derive_content_addressed",
+        "test_derive_context_addressed",
+        "test_short_form",
+        "test_error_codes",
+        "test_trust_object_id_serde",
+        "test_types_send_sync",
+        "test_derive_trust_object_id_events_uses_caller_inputs",
+        "test_registry_new",
+        "test_content_addressed_deterministic",
+    ]
+)
 
 
 if __name__ == "__main__":
