@@ -24,24 +24,27 @@ use frankenengine_node::ops::validation_proof_cache::{
 };
 use frankenengine_node::ops::validation_proof_coalescer::{
     CAPACITY_SNAPSHOT_SCHEMA_VERSION, CompleteLeaseRequest, CreateLeaseRequest,
-    FenceStaleLeaseRequest, ValidationProofAdmissionDecision, ValidationProofAdmissionInput,
-    ValidationProofAdmissionPolicy, ValidationProofCoalescerDecision,
-    ValidationProofCoalescerDecisionKind, ValidationProofCoalescerOutcome,
-    ValidationProofCoalescerReceiptRef, ValidationProofCoalescerRequiredAction,
-    ValidationProofCoalescerStore, ValidationProofCoalescerTelemetryEvent,
-    ValidationProofLeaseState, ValidationProofPriority, ValidationProofRchCapacitySnapshot,
-    ValidationProofRchCommand, ValidationProofRchWorkerCapacity, ValidationProofTargetDirClass,
-    ValidationProofWorkKey, ValidationProofWorkKeyParts, ValidationSwarmSchedulerBuildInput,
+    FenceStaleLeaseRequest, ValidationCapacityMarketBidKind, ValidationProofAdmissionDecision,
+    ValidationProofAdmissionInput, ValidationProofAdmissionPolicy,
+    ValidationProofCoalescerDecision, ValidationProofCoalescerDecisionKind,
+    ValidationProofCoalescerOutcome, ValidationProofCoalescerReceiptRef,
+    ValidationProofCoalescerRequiredAction, ValidationProofCoalescerStore,
+    ValidationProofCoalescerTelemetryEvent, ValidationProofLeaseState, ValidationProofPriority,
+    ValidationProofRchCapacitySnapshot, ValidationProofRchCommand,
+    ValidationProofRchWorkerCapacity, ValidationProofTargetDirClass, ValidationProofWorkKey,
+    ValidationProofWorkKeyParts, ValidationSwarmSchedulerBuildInput,
     ValidationSwarmSchedulerCapacitySnapshot, ValidationSwarmSchedulerCoalescerState,
     ValidationSwarmSchedulerDecision, ValidationSwarmSchedulerDecisionKind,
     ValidationSwarmSchedulerDigestRef, ValidationSwarmSchedulerFlightRecorderState,
     ValidationSwarmSchedulerInput, ValidationSwarmSchedulerPolicy,
     ValidationSwarmSchedulerPriority, ValidationSwarmSchedulerProofDebtClass,
-    ValidationSwarmSchedulerTargetDirClass, build_validation_swarm_scheduler_input,
-    decide_validation_proof_admission, decide_validation_swarm_schedule,
-    decide_validation_swarm_schedule_from_build_input, error_codes as coalescer_error_codes,
-    event_codes as coalescer_event_codes, order_validation_swarm_scheduler_inputs,
-    reason_codes as coalescer_reason_codes, swarm_scheduler_error_codes,
+    ValidationSwarmSchedulerTargetDirClass, build_validation_capacity_market_bids,
+    build_validation_swarm_scheduler_input, decide_validation_proof_admission,
+    decide_validation_swarm_schedule, decide_validation_swarm_schedule_from_build_input,
+    error_codes as coalescer_error_codes, event_codes as coalescer_event_codes,
+    order_validation_swarm_scheduler_inputs, reason_codes as coalescer_reason_codes,
+    render_validation_capacity_market_bid_human, render_validation_capacity_market_bid_json,
+    swarm_scheduler_error_codes, validation_capacity_market_bid_from_decision,
 };
 use frankenengine_node::ops::validation_proof_debt_ledger::{
     ValidationProofDebtClass, build_validation_proof_debt_ledger,
@@ -1879,6 +1882,150 @@ fn scheduler_builder_rejects_malformed_and_bad_digest_inputs() {
         err.code(),
         swarm_scheduler_error_codes::ERR_VSS_COMMAND_DIGEST_MISMATCH
     );
+}
+
+#[test]
+fn capacity_market_bids_cover_contention_actions_and_render_stable_output()
+-> Result<(), Box<dyn std::error::Error>> {
+    let scenarios = [
+        swarm_scheduler_decision("market-run", "run-agent", |_| {}),
+        swarm_scheduler_decision("market-stale-steal", "stale-agent", |input| {
+            input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Stale;
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::StaleProducer;
+            input.queue_age_ms = 950_000;
+        }),
+        swarm_scheduler_decision("market-wait", "wait-agent", |input| {
+            input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Running;
+        }),
+        swarm_scheduler_decision("market-cache", "cache-agent", |input| {
+            input.coalescer_state = ValidationSwarmSchedulerCoalescerState::Completed;
+        }),
+        swarm_scheduler_decision("market-capacity", "capacity-agent", |input| {
+            input.capacity_snapshot = swarm_scheduler_capacity(0, 96, 0, 0);
+        }),
+        swarm_scheduler_decision("market-source-only", "source-agent", |input| {
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::SourceOnly;
+            input.flight_recorder_state =
+                ValidationSwarmSchedulerFlightRecorderState::SourceOnlyBlocker;
+            input.source_only_allowed = true;
+        }),
+        swarm_scheduler_decision("market-local-fallback", "fallback-agent", |input| {
+            input.flight_recorder_state =
+                ValidationSwarmSchedulerFlightRecorderState::LocalFallbackRefused;
+            input.worker_infra_retryable = true;
+        }),
+        swarm_scheduler_decision("market-product", "product-agent", |input| {
+            input.proof_debt_class = ValidationSwarmSchedulerProofDebtClass::ProductFailure;
+            input.flight_recorder_state =
+                ValidationSwarmSchedulerFlightRecorderState::ProductFailure;
+            input.product_failure = true;
+        }),
+    ];
+
+    let bids = scenarios
+        .iter()
+        .enumerate()
+        .map(|(index, decision)| {
+            validation_capacity_market_bid_from_decision(
+                decision,
+                u16::try_from(index + 1).expect("scenario index fits"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let bid_kinds = bids.iter().map(|bid| bid.bid).collect::<Vec<_>>();
+    assert!(bid_kinds.contains(&ValidationCapacityMarketBidKind::ReserveRchSlot));
+    assert!(bid_kinds.contains(&ValidationCapacityMarketBidKind::WaitForExistingProof));
+    assert!(bid_kinds.contains(&ValidationCapacityMarketBidKind::ReuseCacheReceipt));
+    assert!(bid_kinds.contains(&ValidationCapacityMarketBidKind::QueueWithRetryAfter));
+    assert!(bid_kinds.contains(&ValidationCapacityMarketBidKind::AllowSourceOnly));
+    assert!(bid_kinds.contains(&ValidationCapacityMarketBidKind::RefuseLocalFallback));
+    assert!(bid_kinds.contains(&ValidationCapacityMarketBidKind::FailClosed));
+
+    let queue_bid = bids
+        .iter()
+        .find(|bid| bid.bid == ValidationCapacityMarketBidKind::QueueWithRetryAfter)
+        .expect("queue bid present");
+    assert_eq!(queue_bid.retry_after_ms, Some(60_000));
+    assert!(!queue_bid.green_proof_eligible);
+
+    let reserve_bid = bids
+        .iter()
+        .find(|bid| bid.bid == ValidationCapacityMarketBidKind::ReserveRchSlot)
+        .expect("reserve bid present");
+    assert!(reserve_bid.green_proof_eligible);
+
+    let fallback_bid = bids
+        .iter()
+        .find(|bid| bid.bid == ValidationCapacityMarketBidKind::RefuseLocalFallback)
+        .expect("local fallback bid present");
+    assert!(fallback_bid.fail_closed);
+    assert!(!fallback_bid.green_proof_eligible);
+
+    for bid in &bids {
+        assert_eq!(
+            bid.schema_version,
+            "franken-node/validation-capacity-market/bid/v1"
+        );
+        assert!(!bid.command_digest_hex.trim().is_empty());
+        assert!(!bid.proof_work_key_hex.trim().is_empty());
+        assert!(
+            bid.capacity_evidence_source
+                .contains(&bid.capacity_snapshot_id)
+        );
+
+        let json = render_validation_capacity_market_bid_json(bid)?;
+        let rendered: serde_json::Value = serde_json::from_str(&json)?;
+        assert_eq!(rendered["bid"], bid.bid.as_str());
+        assert_eq!(rendered["queue_rank"], u64::from(bid.queue_rank));
+
+        let human = render_validation_capacity_market_bid_human(bid);
+        assert!(human.contains("capacity_market_bid"));
+        assert!(human.contains(bid.bid.as_str()));
+        assert!(human.contains(&bid.reason_code));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn capacity_market_orders_bids_by_fairness_rank_and_queue_position()
+-> Result<(), Box<dyn std::error::Error>> {
+    let policy = swarm_scheduler_policy();
+    let inputs = [
+        swarm_scheduler_input("market-tie-right", "agent-b"),
+        swarm_scheduler_input("market-tie-left", "agent-a"),
+        {
+            let mut aged = swarm_scheduler_input("market-aged-p4", "agent-c");
+            aged.priority = ValidationSwarmSchedulerPriority::P4;
+            aged.queue_age_ms = 700_000;
+            aged.capacity_snapshot = swarm_scheduler_capacity(0, 96, 0, 0);
+            aged
+        },
+        {
+            let mut p0 = swarm_scheduler_input("market-p0", "agent-d");
+            p0.priority = ValidationSwarmSchedulerPriority::P0;
+            p0
+        },
+    ];
+
+    let bids = build_validation_capacity_market_bids(&policy, &inputs, ts(40))?;
+    assert_eq!(bids.len(), inputs.len());
+    assert_eq!(bids[0].agent_name, "agent-d");
+    assert_eq!(bids[0].queue_rank, 1);
+    assert_eq!(bids[1].agent_name, "agent-c");
+    assert_eq!(bids[1].queue_rank, 2);
+    assert_eq!(bids[2].agent_name, "agent-a");
+    assert_eq!(bids[2].queue_rank, 3);
+    assert_eq!(bids[3].agent_name, "agent-b");
+    assert_eq!(bids[3].queue_rank, 4);
+    assert_eq!(
+        bids[1].bid,
+        ValidationCapacityMarketBidKind::QueueWithRetryAfter
+    );
+    assert_eq!(bids[1].fairness_bucket.as_str(), "aging");
+
+    Ok(())
 }
 
 #[test]

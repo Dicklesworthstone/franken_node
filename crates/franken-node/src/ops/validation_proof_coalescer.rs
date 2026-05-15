@@ -114,6 +114,16 @@ pub mod swarm_scheduler_event_codes {
     pub const FAIL_INVALID_ARTIFACT: &str = "VSS-008";
 }
 
+pub mod capacity_market_reason_codes {
+    pub const ALLOW_SOURCE_ONLY: &str = "VCM_ALLOW_SOURCE_ONLY";
+    pub const RESERVE_RCH_SLOT: &str = "VCM_RESERVE_RCH_SLOT";
+    pub const WAIT_FOR_EXISTING_PROOF: &str = "VCM_WAIT_FOR_EXISTING_PROOF";
+    pub const REUSE_CACHE_RECEIPT: &str = "VCM_REUSE_CACHE_RECEIPT";
+    pub const QUEUE_WITH_RETRY_AFTER: &str = "VCM_QUEUE_WITH_RETRY_AFTER";
+    pub const REFUSE_LOCAL_FALLBACK: &str = "VCM_REFUSE_LOCAL_FALLBACK";
+    pub const FAIL_CLOSED: &str = "VCM_FAIL_CLOSED";
+}
+
 /// Process-local validation proof coalescer lease synchronization lock.
 ///
 /// Prevents TOCTOU race conditions in lease read-modify-write paths by
@@ -513,6 +523,8 @@ pub const SWARM_SCHEDULER_POLICY_SCHEMA_VERSION: &str =
     "franken-node/validation-swarm-scheduler/policy/v1";
 pub const SWARM_SCHEDULER_DECISION_SCHEMA_VERSION: &str =
     "franken-node/validation-swarm-scheduler/decision/v1";
+pub const VALIDATION_CAPACITY_MARKET_BID_SCHEMA_VERSION: &str =
+    "franken-node/validation-capacity-market/bid/v1";
 const SWARM_SCHEDULER_MAX_ID_BYTES: usize = 160;
 const SWARM_SCHEDULER_MAX_FIELD_BYTES: usize = 512;
 const SWARM_SCHEDULER_MAX_PATH_BYTES: usize = 2048;
@@ -875,6 +887,7 @@ pub struct ValidationSwarmSchedulerBuildInput {
 pub struct ValidationSwarmSchedulerDiagnostics {
     pub proof_work_key_hex: String,
     pub command_digest_hex: String,
+    pub capacity_snapshot_id: String,
     pub queue_age_ms: u64,
     pub slots_total: u16,
     pub slots_available: u16,
@@ -909,6 +922,59 @@ pub struct ValidationSwarmSchedulerDecision {
     pub green_proof_eligible: bool,
     pub operator_message: String,
     pub diagnostics: ValidationSwarmSchedulerDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationCapacityMarketBidKind {
+    AllowSourceOnly,
+    ReserveRchSlot,
+    WaitForExistingProof,
+    ReuseCacheReceipt,
+    QueueWithRetryAfter,
+    RefuseLocalFallback,
+    FailClosed,
+}
+
+impl ValidationCapacityMarketBidKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AllowSourceOnly => "allow_source_only",
+            Self::ReserveRchSlot => "reserve_rch_slot",
+            Self::WaitForExistingProof => "wait_for_existing_proof",
+            Self::ReuseCacheReceipt => "reuse_cache_receipt",
+            Self::QueueWithRetryAfter => "queue_with_retry_after",
+            Self::RefuseLocalFallback => "refuse_local_fallback",
+            Self::FailClosed => "fail_closed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationCapacityMarketBid {
+    pub schema_version: String,
+    pub bid_id: String,
+    pub bead_id: String,
+    pub agent_name: String,
+    pub bid: ValidationCapacityMarketBidKind,
+    pub reason_code: String,
+    pub source_decision: ValidationSwarmSchedulerDecisionKind,
+    pub source_reason_code: String,
+    pub required_action: ValidationSwarmSchedulerRequiredAction,
+    pub fairness_bucket: ValidationSwarmSchedulerFairnessBucket,
+    pub starvation_risk: ValidationSwarmSchedulerStarvationRisk,
+    pub command_digest_hex: String,
+    pub proof_work_key_hex: String,
+    pub capacity_snapshot_id: String,
+    pub queue_rank: u16,
+    pub queue_depth: u16,
+    pub slots_available: u16,
+    pub retry_after_ms: Option<u64>,
+    pub fail_closed: bool,
+    pub green_proof_eligible: bool,
+    pub capacity_evidence_source: String,
+    pub operator_message: String,
 }
 
 pub fn decide_validation_swarm_schedule(
@@ -1085,6 +1151,86 @@ pub fn order_validation_swarm_scheduler_inputs<'a>(
     Ok(ordered)
 }
 
+pub fn build_validation_capacity_market_bids(
+    policy: &ValidationSwarmSchedulerPolicy,
+    inputs: &[ValidationSwarmSchedulerInput],
+    decided_at: DateTime<Utc>,
+) -> Result<Vec<ValidationCapacityMarketBid>, ValidationProofCoalescerError> {
+    let ordered = order_validation_swarm_scheduler_inputs(policy, inputs)?;
+    let mut bids = Vec::with_capacity(ordered.len());
+    for (index, input) in ordered.into_iter().enumerate() {
+        let decision = decide_validation_swarm_schedule(policy, input, decided_at)?;
+        bids.push(validation_capacity_market_bid_from_decision(
+            &decision,
+            queue_rank_from_index(index),
+        ));
+    }
+    Ok(bids)
+}
+
+#[must_use]
+pub fn validation_capacity_market_bid_from_decision(
+    decision: &ValidationSwarmSchedulerDecision,
+    queue_rank: u16,
+) -> ValidationCapacityMarketBid {
+    let (bid, reason_code) = validation_capacity_market_bid_rule(decision);
+    ValidationCapacityMarketBid {
+        schema_version: VALIDATION_CAPACITY_MARKET_BID_SCHEMA_VERSION.to_string(),
+        bid_id: format!("vcm-bid-{}-{}", decision.input_ref, bid.as_str()),
+        bead_id: decision.bead_id.clone(),
+        agent_name: decision.agent_name.clone(),
+        bid,
+        reason_code: reason_code.to_string(),
+        source_decision: decision.decision,
+        source_reason_code: decision.reason_code.clone(),
+        required_action: decision.required_action,
+        fairness_bucket: decision.fairness_bucket,
+        starvation_risk: decision.starvation_risk,
+        command_digest_hex: decision.diagnostics.command_digest_hex.clone(),
+        proof_work_key_hex: decision.diagnostics.proof_work_key_hex.clone(),
+        capacity_snapshot_id: decision.diagnostics.capacity_snapshot_id.clone(),
+        queue_rank,
+        queue_depth: decision.diagnostics.queue_depth,
+        slots_available: decision.diagnostics.slots_available,
+        retry_after_ms: decision.diagnostics.retry_after_ms,
+        fail_closed: decision.fail_closed
+            || matches!(
+                bid,
+                ValidationCapacityMarketBidKind::FailClosed
+                    | ValidationCapacityMarketBidKind::RefuseLocalFallback
+            ),
+        green_proof_eligible: bid == ValidationCapacityMarketBidKind::ReserveRchSlot
+            && !decision.fail_closed,
+        capacity_evidence_source: format!(
+            "validation_swarm_scheduler:{}",
+            decision.diagnostics.capacity_snapshot_id
+        ),
+        operator_message: validation_capacity_market_operator_message(bid).to_string(),
+    }
+}
+
+#[must_use]
+pub fn render_validation_capacity_market_bid_human(bid: &ValidationCapacityMarketBid) -> String {
+    format!(
+        "capacity_market_bid bead={} bid={} reason_code={} queue_rank={} retry_after_ms={} capacity_source={} action={}",
+        bid.bead_id,
+        bid.bid.as_str(),
+        bid.reason_code,
+        bid.queue_rank,
+        bid.retry_after_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        bid.capacity_evidence_source,
+        bid.operator_message
+    )
+}
+
+pub fn render_validation_capacity_market_bid_json(
+    bid: &ValidationCapacityMarketBid,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(bid)
+}
+
 fn swarm_scheduler_input_ordering(
     policy: &ValidationSwarmSchedulerPolicy,
     left: &ValidationSwarmSchedulerInput,
@@ -1120,6 +1266,86 @@ fn swarm_scheduler_effective_priority_rank(
     let aging_steps = input.queue_age_ms / policy.aging_step_ms;
     let aging_boost = u8::try_from(aging_steps).unwrap_or(u8::MAX).min(2);
     base_rank.saturating_sub(aging_boost)
+}
+
+fn validation_capacity_market_bid_rule(
+    decision: &ValidationSwarmSchedulerDecision,
+) -> (ValidationCapacityMarketBidKind, &'static str) {
+    if decision.diagnostics.flight_recorder_state
+        == ValidationSwarmSchedulerFlightRecorderState::LocalFallbackRefused
+    {
+        return (
+            ValidationCapacityMarketBidKind::RefuseLocalFallback,
+            capacity_market_reason_codes::REFUSE_LOCAL_FALLBACK,
+        );
+    }
+
+    match decision.decision {
+        ValidationSwarmSchedulerDecisionKind::RunNow
+        | ValidationSwarmSchedulerDecisionKind::StealStaleWork => (
+            ValidationCapacityMarketBidKind::ReserveRchSlot,
+            capacity_market_reason_codes::RESERVE_RCH_SLOT,
+        ),
+        ValidationSwarmSchedulerDecisionKind::JoinExisting
+            if decision.diagnostics.coalescer_state
+                == ValidationSwarmSchedulerCoalescerState::Completed =>
+        {
+            (
+                ValidationCapacityMarketBidKind::ReuseCacheReceipt,
+                capacity_market_reason_codes::REUSE_CACHE_RECEIPT,
+            )
+        }
+        ValidationSwarmSchedulerDecisionKind::JoinExisting => (
+            ValidationCapacityMarketBidKind::WaitForExistingProof,
+            capacity_market_reason_codes::WAIT_FOR_EXISTING_PROOF,
+        ),
+        ValidationSwarmSchedulerDecisionKind::WaitForCapacity
+        | ValidationSwarmSchedulerDecisionKind::RejectLowPriority => (
+            ValidationCapacityMarketBidKind::QueueWithRetryAfter,
+            capacity_market_reason_codes::QUEUE_WITH_RETRY_AFTER,
+        ),
+        ValidationSwarmSchedulerDecisionKind::RecordSourceOnlyBlocker => (
+            ValidationCapacityMarketBidKind::AllowSourceOnly,
+            capacity_market_reason_codes::ALLOW_SOURCE_ONLY,
+        ),
+        ValidationSwarmSchedulerDecisionKind::FailClosedProduct
+        | ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact => (
+            ValidationCapacityMarketBidKind::FailClosed,
+            capacity_market_reason_codes::FAIL_CLOSED,
+        ),
+    }
+}
+
+fn validation_capacity_market_operator_message(
+    bid: ValidationCapacityMarketBidKind,
+) -> &'static str {
+    match bid {
+        ValidationCapacityMarketBidKind::AllowSourceOnly => {
+            "Record source-only evidence and do not count the proof as green."
+        }
+        ValidationCapacityMarketBidKind::ReserveRchSlot => {
+            "Reserve one RCH slot for the producer proof."
+        }
+        ValidationCapacityMarketBidKind::WaitForExistingProof => {
+            "Wait for the matching in-flight proof instead of launching a duplicate."
+        }
+        ValidationCapacityMarketBidKind::ReuseCacheReceipt => {
+            "Reuse the completed proof/cache receipt and avoid new cargo work."
+        }
+        ValidationCapacityMarketBidKind::QueueWithRetryAfter => {
+            "Queue the proof and retry after the market backoff."
+        }
+        ValidationCapacityMarketBidKind::RefuseLocalFallback => {
+            "Refuse local fallback; remote proof remains required."
+        }
+        ValidationCapacityMarketBidKind::FailClosed => {
+            "Surface the failure as a blocker; do not retry it as capacity work."
+        }
+    }
+}
+
+fn queue_rank_from_index(index: usize) -> u16 {
+    u16::try_from(index.saturating_add(1)).unwrap_or(u16::MAX)
 }
 
 fn validate_swarm_scheduler_policy(
@@ -1368,6 +1594,7 @@ fn build_swarm_scheduler_decision(
         diagnostics: ValidationSwarmSchedulerDiagnostics {
             proof_work_key_hex: input.proof_work_key.hex.clone(),
             command_digest_hex: input.command_digest.hex.clone(),
+            capacity_snapshot_id: input.capacity_snapshot.snapshot_id.clone(),
             queue_age_ms: input.queue_age_ms,
             slots_total: input.capacity_snapshot.slots_total,
             slots_available: input.capacity_snapshot.slots_available,
