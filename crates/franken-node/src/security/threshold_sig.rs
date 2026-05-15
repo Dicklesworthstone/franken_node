@@ -972,6 +972,8 @@ impl std::error::Error for ThresholdError {}
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
     use sha2::{Digest, Sha256};
 
@@ -2978,7 +2980,11 @@ mod tests {
                     &format!("ts-{}", i),
                 );
 
-                let mut results = results_clone.lock().unwrap();
+                let mut results = try_lock(
+                    &results_clone,
+                    "threshold signature concurrent verification results",
+                )
+                .expect("threshold signature concurrent results mutex should not be poisoned");
                 push_bounded(
                     &mut results,
                     (i, result.verified, result.valid_signatures),
@@ -2994,7 +3000,8 @@ mod tests {
             handle.join().unwrap();
         }
 
-        let results = results.lock().unwrap();
+        let results = try_lock(&results, "threshold signature final verification results")
+            .expect("threshold signature final results mutex should not be poisoned");
         assert_eq!(results.len(), 50);
 
         // All verifications should produce identical results (deterministic)
@@ -3040,7 +3047,11 @@ mod tests {
 
                 // Count failed verifications (expected due to invalid signatures)
                 if !result.verified {
-                    let mut counter = counter_clone.lock().unwrap();
+                    let mut counter = try_lock(
+                        &counter_clone,
+                        "threshold signature concurrent invalid counter",
+                    )
+                    .expect("threshold signature concurrent counter mutex should not be poisoned");
                     *counter = (*counter).saturating_add(1);
                 }
             });
@@ -3053,7 +3064,8 @@ mod tests {
         }
 
         // All should fail verification due to invalid signatures
-        let final_count = *shared_counter.lock().unwrap();
+        let final_count = *try_lock(&shared_counter, "threshold signature final invalid counter")
+            .expect("threshold signature final counter mutex should not be poisoned");
         assert_eq!(
             final_count, 20,
             "All concurrent invalid signatures should be rejected"
