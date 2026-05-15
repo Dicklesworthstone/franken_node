@@ -15,7 +15,7 @@
 | bd-13yn | signal poisoning and Sybil | PASS | PASS | PASS | 5 | PASS |
 | bd-1n1t | topology blind spots | PASS | PASS | PASS | 9 | PASS |
 | bd-paui | topological choke-point false positives | PASS | PASS | PASS | 21 | PASS |
-| bd-v4ps | temporal concept drift | PASS | PASS | PASS | 14 | PASS |
+| bd-v4ps | temporal concept drift | PASS | PASS | PASS | 15 | PASS |
 | bd-1rff | longitudinal privacy/re-identification | PASS | PASS | PASS | 16 | PASS |
 | bd-35m7 | trajectory-gaming camouflage | PASS | PASS | PASS | 16 | PASS |
 

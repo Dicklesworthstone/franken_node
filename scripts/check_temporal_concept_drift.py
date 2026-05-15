@@ -27,6 +27,7 @@ TITLE = "Risk control: temporal concept drift"
 
 CONTRACT = ROOT / "docs" / "specs" / "section_12" / "bd-v4ps_contract.md"
 REPORT = ROOT / "artifacts" / "12" / "temporal_concept_drift_report.json"
+EVIDENCE = ROOT / "artifacts" / "section_12" / "bd-v4ps" / "verification_evidence.json"
 
 REQUIRED_EVENT_CODES = ["TCD-001", "TCD-002", "TCD-003", "TCD-004", "TCD-005"]
 REQUIRED_CONTRACT_TERMS = [
@@ -40,6 +41,18 @@ REQUIRED_CONTRACT_TERMS = [
     "Scenario C",
     "Scenario D",
 ]
+REQUIRED_PIPELINE_COMMANDS = [
+    "python3 scripts/check_temporal_concept_drift.py --self-test --json",
+    "python3 scripts/check_temporal_concept_drift.py --json",
+    "python3 -m unittest tests/test_check_temporal_concept_drift.py",
+]
+REQUIRED_PIPELINE_SOURCE_PATHS = [
+    "artifacts/12/temporal_concept_drift_report.json",
+    "docs/specs/section_12/bd-v4ps_contract.md",
+    "scripts/check_temporal_concept_drift.py",
+    "tests/test_check_temporal_concept_drift.py",
+]
+PIPELINE_EXECUTION_MODE = "deterministic_fixture_replay"
 COHORT_MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
 
@@ -98,6 +111,26 @@ def load_report() -> tuple[dict | None, list[dict]]:
     return data, checks
 
 
+def load_evidence() -> tuple[dict | None, list[dict]]:
+    checks = []
+    if not EVIDENCE.exists():
+        checks.append({"check": "evidence: exists", "pass": False, "detail": "MISSING"})
+        return None, checks
+
+    checks.append({"check": "evidence: exists", "pass": True, "detail": "found"})
+    try:
+        data = _read_json(EVIDENCE)
+    except (json.JSONDecodeError, OSError):
+        checks.append({"check": "evidence: valid json", "pass": False, "detail": "invalid"})
+        return None, checks
+    if not isinstance(data, dict):
+        checks.append({"check": "evidence: valid json", "pass": False, "detail": "not an object"})
+        return None, checks
+
+    checks.append({"check": "evidence: valid json", "pass": True, "detail": "valid"})
+    return data, checks
+
+
 def evaluate_models(data: dict) -> dict:
     models = data.get("models", [])
     stale = [m for m in models if bool(m.get("stale", False))]
@@ -118,9 +151,88 @@ def evaluate_models(data: dict) -> dict:
     }
 
 
-def check_report(data: dict | None) -> list[dict]:
+def _evidence_command_statuses(evidence: dict | None) -> dict[str, str]:
+    if not isinstance(evidence, dict):
+        return {}
+    commands = evidence.get("commands", [])
+    if not isinstance(commands, list):
+        return {}
+    statuses: dict[str, str] = {}
+    for item in commands:
+        if not isinstance(item, dict):
+            continue
+        command = item.get("command")
+        status = item.get("status")
+        if isinstance(command, str) and isinstance(status, str):
+            statuses[command] = status.lower()
+    return statuses
+
+
+def check_recalibration_pipeline(data: dict, evidence: dict | None) -> tuple[list[dict], bool]:
+    checks = []
+    pipeline = data.get("recalibration_pipeline", {})
+    if not isinstance(pipeline, dict):
+        checks.append({
+            "check": "pipeline: object present",
+            "pass": False,
+            "detail": "missing or invalid recalibration_pipeline",
+        })
+        return checks, False
+
+    execution_mode_ok = pipeline.get("execution_mode") == PIPELINE_EXECUTION_MODE
+    checks.append({
+        "check": "pipeline: fixture execution mode is explicit",
+        "pass": execution_mode_ok,
+        "detail": str(pipeline.get("execution_mode", "MISSING")),
+    })
+
+    fixture_classification_ok = (
+        bool(pipeline.get("synthetic_data_run", False))
+        and bool(pipeline.get("fixture_only", False))
+        and not bool(pipeline.get("live_recalibration_claimed", True))
+    )
+    checks.append({
+        "check": "pipeline: synthetic fixture is not claimed as live recalibration",
+        "pass": fixture_classification_ok,
+        "detail": "fixture-only boundary explicit" if fixture_classification_ok else "missing fixture-only or live-claim guard",
+    })
+
+    completion_ok = bool(pipeline.get("completed_without_errors", False)) and float(pipeline.get("duration_seconds", 0.0)) > 0.0
+    checks.append({
+        "check": "pipeline: fixture replay completed without errors",
+        "pass": completion_ok,
+        "detail": "completed" if completion_ok else "pipeline failed/incomplete",
+    })
+
+    pipeline_evidence = pipeline.get("evidence", {})
+    source_paths = pipeline_evidence.get("source_paths", []) if isinstance(pipeline_evidence, dict) else []
+    required_sources_present = all(path in source_paths for path in REQUIRED_PIPELINE_SOURCE_PATHS)
+    required_sources_exist = all((ROOT / path).exists() for path in REQUIRED_PIPELINE_SOURCE_PATHS)
+    source_backed = required_sources_present and required_sources_exist
+    checks.append({
+        "check": "pipeline: fixture evidence source paths exist",
+        "pass": source_backed,
+        "detail": "all required source paths present" if source_backed else "missing required source path evidence",
+    })
+
+    statuses = _evidence_command_statuses(evidence)
+    missing_commands = [command for command in REQUIRED_PIPELINE_COMMANDS if statuses.get(command) != "pass"]
+    command_backed = not missing_commands
+    checks.append({
+        "check": "pipeline: verification commands are recorded as passing",
+        "pass": command_backed,
+        "detail": "all required commands pass" if command_backed else f"missing/failing: {', '.join(missing_commands)}",
+    })
+
+    return checks, all(check["pass"] for check in checks)
+
+
+def check_report(data: dict | None, evidence: dict | None = None) -> list[dict]:
     if data is None:
         return []
+
+    if evidence is None:
+        evidence, _ = load_evidence()
 
     checks = []
     models = data.get("models", [])
@@ -205,17 +317,8 @@ def check_report(data: dict | None) -> list[dict]:
         "detail": "improvement/non-regression satisfied" if improvement_ok else "post-recalibration regression detected",
     })
 
-    pipeline = data.get("recalibration_pipeline", {})
-    pipeline_ok = (
-        bool(pipeline.get("synthetic_data_run", False))
-        and bool(pipeline.get("completed_without_errors", False))
-        and float(pipeline.get("duration_seconds", 0.0)) > 0.0
-    )
-    checks.append({
-        "check": "pipeline: synthetic recalibration run completes without errors",
-        "pass": pipeline_ok,
-        "detail": "pipeline validated" if pipeline_ok else "pipeline failed/incomplete",
-    })
+    pipeline_checks, pipeline_ok = check_recalibration_pipeline(data, evidence)
+    checks.extend(pipeline_checks)
 
     cohort = data.get("cohort_accuracy", [])
     cohort_shape_ok = len(cohort) > 0 and all(
@@ -313,8 +416,8 @@ def check_report(data: dict | None) -> list[dict]:
     })
     checks.append({
         "check": "aggregate: recalibration pipeline pass flag true",
-        "pass": bool(aggregate.get("recalibration_pipeline_passed", False)),
-        "detail": f"reported={aggregate.get('recalibration_pipeline_passed')}",
+        "pass": bool(aggregate.get("recalibration_pipeline_passed", False)) == pipeline_ok and pipeline_ok,
+        "detail": f"reported={aggregate.get('recalibration_pipeline_passed')} computed={pipeline_ok}",
     })
 
     deterministic = evaluate_models({"models": list(models), "aggregate": {"drift_threshold_pct": 5.0}}) == evaluate_models({"models": list(reversed(models)), "aggregate": {"drift_threshold_pct": 5.0}})
@@ -343,10 +446,13 @@ def run_checks() -> dict:
     checks = []
     checks.append(check_file(CONTRACT, "contract doc"))
     checks.append(check_file(REPORT, "temporal drift report"))
+    checks.append(check_file(EVIDENCE, "verification evidence"))
     checks.extend(check_contract())
     data, load_checks = load_report()
     checks.extend(load_checks)
-    checks.extend(check_report(data))
+    evidence, evidence_checks = load_evidence()
+    checks.extend(evidence_checks)
+    checks.extend(check_report(data, evidence))
 
     passing = sum(1 for c in checks if c["pass"])
     failing = sum(1 for c in checks if not c["pass"])
@@ -384,9 +490,36 @@ def self_test() -> tuple[bool, list[dict]]:
         ],
         "aggregate": {"drift_threshold_pct": 5.0}
     }
+    pipeline_sample = {
+        "recalibration_pipeline": {
+            "execution_mode": PIPELINE_EXECUTION_MODE,
+            "synthetic_data_run": True,
+            "fixture_only": True,
+            "live_recalibration_claimed": False,
+            "completed_without_errors": True,
+            "duration_seconds": 1,
+            "evidence": {"source_paths": list(REQUIRED_PIPELINE_SOURCE_PATHS)},
+        }
+    }
+    evidence_sample = {
+        "commands": [
+            {"command": command, "status": "pass"}
+            for command in REQUIRED_PIPELINE_COMMANDS
+        ]
+    }
+    live_claim_sample = copy.deepcopy(pipeline_sample)
+    live_claim_sample["recalibration_pipeline"]["live_recalibration_claimed"] = True
     checks = []
     checks.append({"check": "self: evaluate_models", "pass": evaluate_models(sample)["models_stale"] == 1})
     checks.append({"check": "self: stale blocked", "pass": evaluate_models(sample)["stale_models_blocked"]})
+    checks.append({
+        "check": "self: fixture pipeline accepted",
+        "pass": check_recalibration_pipeline(pipeline_sample, evidence_sample)[1],
+    })
+    checks.append({
+        "check": "self: live-claiming fixture rejected",
+        "pass": not check_recalibration_pipeline(live_claim_sample, evidence_sample)[1],
+    })
     return all(c["pass"] for c in checks), checks
 
 

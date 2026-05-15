@@ -9,7 +9,7 @@ Prevent stale trust/compatibility/threat models from making unsafe decisions by 
 - `INV-TCD-TTL`: Every model has explicit TTL and last-calibration timestamp metadata.
 - `INV-TCD-STALE-BLOCK`: Models past TTL are flagged stale and blocked from deployment decisions.
 - `INV-TCD-DRIFT-GATE`: If recent 30-day cohort accuracy degrades by more than `5%` versus all-time baseline, recalibration is triggered.
-- `INV-TCD-RECAL-PIPELINE`: Recalibration pipeline executes end-to-end in CI and reports deterministic status.
+- `INV-TCD-RECAL-PIPELINE`: Recalibration pipeline evidence reports deterministic status and explicitly distinguishes fixture replay from live recalibration. Synthetic fixture evidence must carry a fixture-only classification, source-path evidence, and passing verifier commands; it must not be cited as live recalibration proof.
 - `INV-TCD-COHORT-REPORT`: Accuracy is reported by monthly cohort to expose temporal drift patterns.
 
 ## Determinism Requirements
@@ -30,7 +30,7 @@ Prevent stale trust/compatibility/threat models from making unsafe decisions by 
 - `TCD-001`: Model freshness evaluated.
 - `TCD-002`: Staleness alert emitted and deployment blocked.
 - `TCD-003`: Drift delta evaluated against threshold.
-- `TCD-004`: Recalibration pipeline completed.
+- `TCD-004`: Recalibration pipeline evidence completed with explicit fixture/live classification.
 - `TCD-005`: Cohort audit report generated.
 
 All events must include stable `trace_id`, `model_id`, and cohort context.

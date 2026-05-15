@@ -5,9 +5,9 @@
   "overall_pass": true,
   "verdict": "PASS",
   "summary": {
-    "passing": 41,
+    "passing": 48,
     "failing": 0,
-    "total": 41
+    "total": 48
   },
   "checks": [
     {
@@ -19,6 +19,11 @@
       "check": "file: temporal drift report",
       "pass": true,
       "detail": "exists: artifacts/12/temporal_concept_drift_report.json"
+    },
+    {
+      "check": "file: verification evidence",
+      "pass": true,
+      "detail": "exists: artifacts/section_12/bd-v4ps/verification_evidence.json"
     },
     {
       "check": "contract: exists",
@@ -81,6 +86,16 @@
       "detail": "valid"
     },
     {
+      "check": "evidence: exists",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "evidence: valid json",
+      "pass": true,
+      "detail": "valid"
+    },
+    {
       "check": "models: at least one model exists",
       "pass": true,
       "detail": "models=3"
@@ -121,9 +136,29 @@
       "detail": "improvement/non-regression satisfied"
     },
     {
-      "check": "pipeline: synthetic recalibration run completes without errors",
+      "check": "pipeline: fixture execution mode is explicit",
       "pass": true,
-      "detail": "pipeline validated"
+      "detail": "deterministic_fixture_replay"
+    },
+    {
+      "check": "pipeline: synthetic fixture is not claimed as live recalibration",
+      "pass": true,
+      "detail": "fixture-only boundary explicit"
+    },
+    {
+      "check": "pipeline: fixture replay completed without errors",
+      "pass": true,
+      "detail": "completed"
+    },
+    {
+      "check": "pipeline: fixture evidence source paths exist",
+      "pass": true,
+      "detail": "all required source paths present"
+    },
+    {
+      "check": "pipeline: verification commands are recorded as passing",
+      "pass": true,
+      "detail": "all required commands pass"
     },
     {
       "check": "cohort: monthly cohort accuracy breakdown present",
@@ -203,7 +238,7 @@
     {
       "check": "aggregate: recalibration pipeline pass flag true",
       "pass": true,
-      "detail": "reported=True"
+      "detail": "reported=True computed=True"
     },
     {
       "check": "determinism: order-insensitive model aggregation",

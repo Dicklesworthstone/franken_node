@@ -5,7 +5,7 @@
   "title": "Section-wide verification gate: comprehensive unit+e2e+logging",
   "gate_pass": true,
   "verdict": "PASS",
-  "timestamp": "2026-02-22T08:33:15.058848+00:00",
+  "timestamp": "2026-05-15T13:46:40.487457+00:00",
   "trace_id": "trace-bd-2x1e-section-gate",
   "beads_tested": [
     "bd-s4cu",
@@ -127,7 +127,7 @@
       "script_pass": true,
       "unit_pass": true,
       "evidence_pass": true,
-      "scenario_passes": 14,
+      "scenario_passes": 15,
       "scenario_source": "artifacts/section_12/bd-v4ps/check_report.json",
       "overall_pass": true,
       "risk_status": "mitigated"
@@ -198,7 +198,8 @@
             "self_test_present": true,
             "status": "PASS",
             "exit_code": 0,
-            "verdict": "PASS"
+            "verdict": "PASS",
+            "stderr": "{\"ts\": \"2026-05-15T13:46:39.015038+00:00\", \"level\": \"INFO\", \"logger\": \"check_migration_friction_persistence\", \"msg\": \"starting check_migration_friction_persistence verification\"}"
           },
           {
             "bead": "bd-2w4u",
@@ -281,14 +282,14 @@
       "details": {
         "total": 12,
         "passing": 12,
-        "tests_ran": 358,
+        "tests_ran": 390,
         "results": [
           {
             "bead": "bd-s4cu",
             "test": "tests/test_check_risk_compatibility.py",
             "exists": true,
             "status": "PASS",
-            "tests_ran": 21,
+            "tests_ran": 23,
             "tests_failed": 0,
             "exit_code": 0
           },
@@ -297,7 +298,7 @@
             "test": "tests/test_check_scope_explosion.py",
             "exists": true,
             "status": "PASS",
-            "tests_ran": 23,
+            "tests_ran": 25,
             "tests_failed": 0,
             "exit_code": 0
           },
@@ -306,7 +307,7 @@
             "test": "tests/test_check_trust_complexity.py",
             "exists": true,
             "status": "PASS",
-            "tests_ran": 37,
+            "tests_ran": 39,
             "tests_failed": 0,
             "exit_code": 0
           },
@@ -324,7 +325,7 @@
             "test": "tests/test_check_hardening_perf_regression.py",
             "exists": true,
             "status": "PASS",
-            "tests_ran": 21,
+            "tests_ran": 23,
             "tests_failed": 0,
             "exit_code": 0
           },
@@ -333,7 +334,7 @@
             "test": "tests/test_check_federated_privacy_leakage.py",
             "exists": true,
             "status": "PASS",
-            "tests_ran": 20,
+            "tests_ran": 22,
             "tests_failed": 0,
             "exit_code": 0
           },
@@ -342,7 +343,7 @@
             "test": "tests/test_check_signal_sybil.py",
             "exists": true,
             "status": "PASS",
-            "tests_ran": 73,
+            "tests_ran": 75,
             "tests_failed": 0,
             "exit_code": 0
           },
@@ -351,7 +352,7 @@
             "test": "tests/test_check_topology_blind_spots.py",
             "exists": true,
             "status": "PASS",
-            "tests_ran": 70,
+            "tests_ran": 72,
             "tests_failed": 0,
             "exit_code": 0
           },
@@ -360,7 +361,7 @@
             "test": "tests/test_check_chokepoint_false_positives.py",
             "exists": true,
             "status": "PASS",
-            "tests_ran": 20,
+            "tests_ran": 22,
             "tests_failed": 0,
             "exit_code": 0
           },
@@ -369,7 +370,7 @@
             "test": "tests/test_check_temporal_concept_drift.py",
             "exists": true,
             "status": "PASS",
-            "tests_ran": 17,
+            "tests_ran": 25,
             "tests_failed": 0,
             "exit_code": 0
           },
@@ -378,7 +379,7 @@
             "test": "tests/test_check_longitudinal_privacy.py",
             "exists": true,
             "status": "PASS",
-            "tests_ran": 18,
+            "tests_ran": 20,
             "tests_failed": 0,
             "exit_code": 0
           },
@@ -387,7 +388,7 @@
             "test": "tests/test_check_trajectory_gaming_camouflage.py",
             "exists": true,
             "status": "PASS",
-            "tests_ran": 20,
+            "tests_ran": 26,
             "tests_failed": 0,
             "exit_code": 0
           }
@@ -539,7 +540,7 @@
           },
           {
             "bead": "bd-v4ps",
-            "scenario_passes": 14,
+            "scenario_passes": 15,
             "source": "artifacts/section_12/bd-v4ps/check_report.json",
             "status": "PASS"
           },
@@ -564,7 +565,7 @@
       "event": "GATE_12_EVALUATION_STARTED",
       "trace_id": "trace-bd-2x1e-section-gate",
       "section": "12",
-      "timestamp": "2026-02-22T08:33:13.727853+00:00"
+      "timestamp": "2026-05-15T13:46:38.833676+00:00"
     },
     {
       "event": "GATE_12_BEAD_CHECKED",
@@ -651,5 +652,5 @@
       "status": "PASS"
     }
   ],
-  "content_hash": "df5f1d2d6850037e9acefaec3e3995cd422c4dfcd9509ad5a2971d8c126f2425"
+  "content_hash": "967413f41dfc59c97a41883404dbd2668921c409aeb6a4858d405248931b37a5"
 }

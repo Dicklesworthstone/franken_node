@@ -17,7 +17,7 @@
 - Every model includes TTL and last-calibration timestamp metadata.
 - Stale models are flagged and deployment-blocked.
 - Drift detection compares recent 30-day cohort accuracy against all-time baseline; deltas above `5%` trigger recalibration.
-- Recalibration pipeline synthetic CI run completes without errors.
+- Recalibration pipeline evidence is explicitly fixture-only, source-backed, and command-backed; synthetic fixture replay is not cited as live recalibration proof.
 - Monthly cohort accuracy breakdown is present for temporal auditability.
 
 ## Scenario Coverage
@@ -31,6 +31,7 @@
 
 - Model-order-insensitive aggregate evaluation is stable.
 - Adversarial stale-model unblock attempt is detected by verifier.
+- Tampered pipeline evidence fails closed when execution mode, live-claim guard, source paths, or recorded passing commands are missing.
 
 ## Reproducible Commands
 

@@ -2,7 +2,7 @@
   "bead_id": "bd-v4ps",
   "section": "12",
   "title": "Risk control: temporal concept drift",
-  "timestamp": "2026-02-21T00:00:00Z",
+  "timestamp": "2026-05-15T13:43:30Z",
   "verdict": "PASS",
   "files": {
     "contract": "docs/specs/section_12/bd-v4ps_contract.md",
@@ -20,15 +20,34 @@
     "drift_threshold_pct": 5.0,
     "stale_models_blocked": true,
     "recalibration_pipeline_passed": true,
+    "recalibration_pipeline_execution_mode": "deterministic_fixture_replay",
+    "recalibration_pipeline_fixture_only": true,
+    "live_recalibration_claimed": false,
     "cohorts_reported": 4,
-    "python_verification_checks": 41,
-    "python_unit_tests": 17,
+    "python_verification_checks": 48,
+    "python_unit_tests": 25,
     "event_codes": 5
   },
   "checks_summary": {
-    "passing": 41,
+    "passing": 48,
     "failing": 0,
-    "total": 41
+    "total": 48
+  },
+  "pipeline_evidence": {
+    "execution_mode": "deterministic_fixture_replay",
+    "fixture_only": true,
+    "live_recalibration_claimed": false,
+    "required_source_paths": [
+      "artifacts/12/temporal_concept_drift_report.json",
+      "docs/specs/section_12/bd-v4ps_contract.md",
+      "scripts/check_temporal_concept_drift.py",
+      "tests/test_check_temporal_concept_drift.py"
+    ],
+    "required_commands": [
+      "python3 scripts/check_temporal_concept_drift.py --self-test --json",
+      "python3 scripts/check_temporal_concept_drift.py --json",
+      "python3 -m unittest tests/test_check_temporal_concept_drift.py"
+    ]
   },
   "commands": [
     {

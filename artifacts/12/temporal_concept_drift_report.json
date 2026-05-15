@@ -54,10 +54,21 @@
     {"cohort_month": "2026-02", "accuracy_pct": 89.8}
   ],
   "recalibration_pipeline": {
-    "ci_pipeline_name": "drift-recalibration-synthetic",
+    "ci_pipeline_name": "drift-recalibration-fixture-boundary",
+    "execution_mode": "deterministic_fixture_replay",
     "synthetic_data_run": true,
+    "fixture_only": true,
+    "live_recalibration_claimed": false,
     "completed_without_errors": true,
-    "duration_seconds": 214
+    "duration_seconds": 214,
+    "evidence": {
+      "source_paths": [
+        "artifacts/12/temporal_concept_drift_report.json",
+        "docs/specs/section_12/bd-v4ps_contract.md",
+        "scripts/check_temporal_concept_drift.py",
+        "tests/test_check_temporal_concept_drift.py"
+      ]
+    }
   },
   "scenarios": [
     {
