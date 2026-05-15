@@ -116,7 +116,7 @@ mod tests {
         assert!(matches!(
             error,
             ManifestSchemaError::MissingField { ref field }
-                if field == "trust.trust_card_reference"
+                if field.eq("trust.trust_card_reference")
         ));
         assert_eq!(error.code(), "EMS_MISSING_FIELD");
     }
@@ -168,7 +168,7 @@ mod tests {
         assert!(matches!(
             error,
             ManifestSchemaError::MissingField { ref field }
-                if field == "provenance.attestation_chain[0].digest"
+                if field.eq("provenance.attestation_chain[0].digest")
         ));
         assert_eq!(error.code(), "EMS_MISSING_FIELD");
     }
@@ -242,7 +242,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ManifestSchemaError::MissingField { ref field } if field == "package.name"
+            ManifestSchemaError::MissingField { ref field } if field.eq("package.name")
         ));
         assert_eq!(error.code(), "EMS_MISSING_FIELD");
     }
@@ -257,7 +257,7 @@ mod tests {
         assert!(matches!(
             error,
             ManifestSchemaError::MissingField { ref field }
-                if field == "minimum_runtime_version"
+                if field.eq("minimum_runtime_version")
         ));
         assert_eq!(error.code(), "EMS_MISSING_FIELD");
     }
@@ -272,7 +272,7 @@ mod tests {
         assert!(matches!(
             error,
             ManifestSchemaError::MissingField { ref field }
-                if field == "behavioral_profile.summary"
+                if field.eq("behavioral_profile.summary")
         ));
         assert_eq!(error.code(), "EMS_MISSING_FIELD");
     }
@@ -288,7 +288,7 @@ mod tests {
         assert!(matches!(
             error,
             ManifestSchemaError::MissingField { ref field }
-                if field == "trust.revocation_status_pointer"
+                if field.eq("trust.revocation_status_pointer")
         ));
         assert_eq!(error.code(), "EMS_MISSING_FIELD");
     }
@@ -304,7 +304,7 @@ mod tests {
         assert!(matches!(
             error,
             ManifestSchemaError::MissingField { ref field }
-                if field == FIELD
+                if field.eq(FIELD)
         ));
         assert_eq!(error.code(), "EMS_MISSING_FIELD");
     }
@@ -319,7 +319,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ManifestSchemaError::MissingField { ref field } if field == FIELD
+            ManifestSchemaError::MissingField { ref field } if field.eq(FIELD)
         ));
         assert_eq!(error.code(), "EMS_MISSING_FIELD");
     }
@@ -576,9 +576,10 @@ mod tests {
 
         // Craft signature with length extension attack patterns
         let base_sig = "QUJDREVG"; // Valid base64: "ABCDEF"
+        let base64_padding = "=".repeat(2);
 
         let malicious_signatures = [
-            format!("{}==", base_sig),               // Padding manipulation
+            format!("{base_sig}{base64_padding}"),   // Padding manipulation
             format!("{}{}", base_sig, base_sig),     // Signature concatenation
             format!("{}deadbeef", base_sig),         // Appended bytes
             format!("{}00000000", base_sig),         // Null byte extension
