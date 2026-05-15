@@ -10,16 +10,17 @@
 //!
 //! These tests verify the actual implementation behavior, not just mock behavior.
 
+use frankenengine_node::control_plane::control_epoch::ControlEpoch;
+use frankenengine_node::lock_utils::try_lock;
 use frankenengine_node::security::constant_time::{ct_eq, ct_eq_bytes};
 use frankenengine_node::security::epoch_scoped_keys::{
-    AuthError, RootSecret, sign_epoch_artifact, verify_epoch_signature
+    AuthError, RootSecret, sign_epoch_artifact, verify_epoch_signature,
 };
+use frankenengine_node::security::network_guard::Protocol;
 use frankenengine_node::security::remote_cap::{
-    CapabilityGate, CapabilityProvider, ConnectivityMode, RemoteOperation, RemoteScope
+    CapabilityGate, CapabilityProvider, ConnectivityMode, RemoteOperation, RemoteScope,
 };
 use frankenengine_node::security::ssrf_policy::SsrfPolicyTemplate;
-use frankenengine_node::security::network_guard::Protocol;
-use frankenengine_node::control_plane::control_epoch::ControlEpoch;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -70,17 +71,17 @@ fn epoch_keys_use_constant_time_comparisons() {
     // We test this by verifying that signature verification fails correctly
     // when signatures differ (the ct_eq should be used internally)
 
-    let root_secret = RootSecret::from_hex(
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    ).expect("valid hex");
+    let root_secret =
+        RootSecret::from_hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .expect("valid hex");
 
     let epoch = ControlEpoch::new(42);
     let domain = "test_domain";
     let artifact = b"test_artifact_data";
 
     // Create a valid signature
-    let valid_sig = sign_epoch_artifact(artifact, epoch, domain, &root_secret)
-        .expect("sign should work");
+    let valid_sig =
+        sign_epoch_artifact(artifact, epoch, domain, &root_secret).expect("sign should work");
 
     // Create an invalid signature by modifying one byte
     let mut invalid_sig = valid_sig.clone();
@@ -100,9 +101,9 @@ fn root_secret_can_be_zeroized() {
     use zeroize::Zeroize;
 
     let test_bytes = [0xAB; 32];
-    let mut secret = RootSecret::from_hex(
-        "ababababababababababababababababababababababababababababababab"
-    ).expect("valid hex");
+    let mut secret =
+        RootSecret::from_hex("ababababababababababababababababababababababababababababababab")
+            .expect("valid hex");
 
     // Verify initial state
     assert_eq!(secret.as_bytes(), &test_bytes);
@@ -117,17 +118,29 @@ fn root_secret_can_be_zeroized() {
 #[test]
 fn derived_keys_use_constant_time_equality() {
     // Test that DerivedKey equality uses constant-time comparison
-    let root_secret = RootSecret::from_hex(
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    ).expect("valid hex");
+    let root_secret =
+        RootSecret::from_hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .expect("valid hex");
 
     let epoch1 = ControlEpoch::new(1);
     let epoch2 = ControlEpoch::new(2);
     let domain = "test_domain";
 
-    let key1a = frankenengine_node::security::epoch_scoped_keys::derive_epoch_key(&root_secret, epoch1, domain);
-    let key1b = frankenengine_node::security::epoch_scoped_keys::derive_epoch_key(&root_secret, epoch1, domain);
-    let key2 = frankenengine_node::security::epoch_scoped_keys::derive_epoch_key(&root_secret, epoch2, domain);
+    let key1a = frankenengine_node::security::epoch_scoped_keys::derive_epoch_key(
+        &root_secret,
+        epoch1,
+        domain,
+    );
+    let key1b = frankenengine_node::security::epoch_scoped_keys::derive_epoch_key(
+        &root_secret,
+        epoch1,
+        domain,
+    );
+    let key2 = frankenengine_node::security::epoch_scoped_keys::derive_epoch_key(
+        &root_secret,
+        epoch2,
+        domain,
+    );
 
     // Same epoch should produce identical keys
     assert_eq!(key1a, key1b);
@@ -143,52 +156,61 @@ fn capability_tokens_expire_with_fail_closed_semantics() {
     let provider = CapabilityProvider::new("test-secret");
     let scope = RemoteScope::new(
         vec![RemoteOperation::TelemetryExport],
-        vec!["https://example.com".to_string()]
+        vec!["https://example.com".to_string()],
     );
 
     let issued_at = 1_700_000_000u64;
     let ttl_secs = 300u64;
     let expires_at = issued_at + ttl_secs;
 
-    let (cap, _audit) = provider.issue(
-        "test-issuer",
-        scope,
-        issued_at,
-        ttl_secs,
-        true,  // operator_authorized
-        false, // single_use
-        "test-trace"
-    ).expect("should issue");
+    let (cap, _audit) = provider
+        .issue(
+            "test-issuer",
+            scope,
+            issued_at,
+            ttl_secs,
+            true,  // operator_authorized
+            false, // single_use
+            "test-trace",
+        )
+        .expect("should issue");
 
     let mut gate = CapabilityGate::new("test-secret");
 
     // Should be valid just before expiry
-    assert!(gate.authorize_network(
-        Some(&cap),
-        RemoteOperation::TelemetryExport,
-        "https://example.com/endpoint",
-        expires_at - 1,
-        "test-trace-before"
-    ).is_ok());
+    assert!(
+        gate.authorize_network(
+            Some(&cap),
+            RemoteOperation::TelemetryExport,
+            "https://example.com/endpoint",
+            expires_at - 1,
+            "test-trace-before"
+        )
+        .is_ok()
+    );
 
     // Should be EXPIRED at exact boundary (fail-closed: >= means expired)
-    let err = gate.authorize_network(
-        Some(&cap),
-        RemoteOperation::TelemetryExport,
-        "https://example.com/endpoint",
-        expires_at, // Exactly at expiry
-        "test-trace-at-boundary"
-    ).expect_err("should be expired at boundary");
+    let err = gate
+        .authorize_network(
+            Some(&cap),
+            RemoteOperation::TelemetryExport,
+            "https://example.com/endpoint",
+            expires_at, // Exactly at expiry
+            "test-trace-at-boundary",
+        )
+        .expect_err("should be expired at boundary");
     assert_eq!(err.code(), "REMOTECAP_EXPIRED");
 
     // Should be expired after boundary
-    let err = gate.authorize_network(
-        Some(&cap),
-        RemoteOperation::TelemetryExport,
-        "https://example.com/endpoint",
-        expires_at + 1,
-        "test-trace-after"
-    ).expect_err("should be expired after boundary");
+    let err = gate
+        .authorize_network(
+            Some(&cap),
+            RemoteOperation::TelemetryExport,
+            "https://example.com/endpoint",
+            expires_at + 1,
+            "test-trace-after",
+        )
+        .expect_err("should be expired after boundary");
     assert_eq!(err.code(), "REMOTECAP_EXPIRED");
 }
 
@@ -197,31 +219,35 @@ fn capability_tokens_not_valid_before_issue_time() {
     let provider = CapabilityProvider::new("test-secret");
     let scope = RemoteScope::new(
         vec![RemoteOperation::TelemetryExport],
-        vec!["https://example.com".to_string()]
+        vec!["https://example.com".to_string()],
     );
 
     let issued_at = 1_700_000_000u64;
 
-    let (cap, _audit) = provider.issue(
-        "test-issuer",
-        scope,
-        issued_at,
-        300,
-        true,
-        false,
-        "test-trace"
-    ).expect("should issue");
+    let (cap, _audit) = provider
+        .issue(
+            "test-issuer",
+            scope,
+            issued_at,
+            300,
+            true,
+            false,
+            "test-trace",
+        )
+        .expect("should issue");
 
     let mut gate = CapabilityGate::new("test-secret");
 
     // Should be invalid before issue time (fail-closed)
-    let err = gate.authorize_network(
-        Some(&cap),
-        RemoteOperation::TelemetryExport,
-        "https://example.com/endpoint",
-        issued_at - 1,
-        "test-trace-early"
-    ).expect_err("should not be valid before issue time");
+    let err = gate
+        .authorize_network(
+            Some(&cap),
+            RemoteOperation::TelemetryExport,
+            "https://example.com/endpoint",
+            issued_at - 1,
+            "test-trace-early",
+        )
+        .expect_err("should not be valid before issue time");
     assert_eq!(err.code(), "REMOTECAP_NOT_YET_VALID");
 }
 
@@ -230,38 +256,45 @@ fn single_use_tokens_prevent_replay() {
     let provider = CapabilityProvider::new("test-secret");
     let scope = RemoteScope::new(
         vec![RemoteOperation::TelemetryExport],
-        vec!["https://example.com".to_string()]
+        vec!["https://example.com".to_string()],
     );
 
-    let (cap, _audit) = provider.issue(
-        "test-issuer",
-        scope,
-        1_700_000_000,
-        300,
-        true,
-        true, // single_use = true
-        "test-trace"
-    ).expect("should issue");
+    let (cap, _audit) = provider
+        .issue(
+            "test-issuer",
+            scope,
+            1_700_000_000,
+            300,
+            true,
+            true, // single_use = true
+            "test-trace",
+        )
+        .expect("should issue");
 
     let mut gate = CapabilityGate::new("test-secret");
 
     // First use should succeed
-    assert!(gate.authorize_network(
-        Some(&cap),
-        RemoteOperation::TelemetryExport,
-        "https://example.com/endpoint",
-        1_700_000_010,
-        "test-trace-first"
-    ).is_ok());
+    assert!(
+        gate.authorize_network(
+            Some(&cap),
+            RemoteOperation::TelemetryExport,
+            "https://example.com/endpoint",
+            1_700_000_010,
+            "test-trace-first"
+        )
+        .is_ok()
+    );
 
     // Second use should fail (replay detection)
-    let err = gate.authorize_network(
-        Some(&cap),
-        RemoteOperation::TelemetryExport,
-        "https://example.com/endpoint",
-        1_700_000_011,
-        "test-trace-replay"
-    ).expect_err("second use should fail");
+    let err = gate
+        .authorize_network(
+            Some(&cap),
+            RemoteOperation::TelemetryExport,
+            "https://example.com/endpoint",
+            1_700_000_011,
+            "test-trace-replay",
+        )
+        .expect_err("second use should fail");
     assert_eq!(err.code(), "REMOTECAP_REPLAY");
 }
 
@@ -270,22 +303,24 @@ fn capability_tokens_use_saturating_arithmetic() {
     let provider = CapabilityProvider::new("test-secret");
     let scope = RemoteScope::new(
         vec![RemoteOperation::TelemetryExport],
-        vec!["https://example.com".to_string()]
+        vec!["https://example.com".to_string()],
     );
 
     // Issue with potential overflow condition
     let near_max_time = u64::MAX - 100;
     let large_ttl = 200;
 
-    let (cap, _audit) = provider.issue(
-        "test-issuer",
-        scope,
-        near_max_time,
-        large_ttl,
-        true,
-        false,
-        "test-trace"
-    ).expect("should issue even with potential overflow");
+    let (cap, _audit) = provider
+        .issue(
+            "test-issuer",
+            scope,
+            near_max_time,
+            large_ttl,
+            true,
+            false,
+            "test-trace",
+        )
+        .expect("should issue even with potential overflow");
 
     // expires_at should be saturated at u64::MAX, not wrapped around
     assert_eq!(cap.expires_at_epoch_secs(), u64::MAX);
@@ -293,22 +328,27 @@ fn capability_tokens_use_saturating_arithmetic() {
     let mut gate = CapabilityGate::new("test-secret");
 
     // Should be valid at issue time
-    assert!(gate.authorize_network(
-        Some(&cap),
-        RemoteOperation::TelemetryExport,
-        "https://example.com/endpoint",
-        near_max_time,
-        "test-trace-valid"
-    ).is_ok());
+    assert!(
+        gate.authorize_network(
+            Some(&cap),
+            RemoteOperation::TelemetryExport,
+            "https://example.com/endpoint",
+            near_max_time,
+            "test-trace-valid"
+        )
+        .is_ok()
+    );
 
     // Should be expired at u64::MAX (fail-closed)
-    let err = gate.authorize_network(
-        Some(&cap),
-        RemoteOperation::TelemetryExport,
-        "https://example.com/endpoint",
-        u64::MAX,
-        "test-trace-max"
-    ).expect_err("should be expired at u64::MAX");
+    let err = gate
+        .authorize_network(
+            Some(&cap),
+            RemoteOperation::TelemetryExport,
+            "https://example.com/endpoint",
+            u64::MAX,
+            "test-trace-max",
+        )
+        .expect_err("should be expired at u64::MAX");
     assert_eq!(err.code(), "REMOTECAP_EXPIRED");
 }
 
@@ -331,7 +371,11 @@ fn ssrf_policy_blocks_localhost_variants() {
 
     for variant in &localhost_variants {
         let result = policy.check_ssrf(variant, 80, Protocol::Http, "test-trace", "test-time");
-        assert!(result.is_err(), "Should block localhost variant: {}", variant);
+        assert!(
+            result.is_err(),
+            "Should block localhost variant: {}",
+            variant
+        );
     }
 }
 
@@ -365,7 +409,11 @@ fn ssrf_policy_blocks_ipv6_loopback() {
 
     for variant in &ipv6_variants {
         let result = policy.check_ssrf(variant, 80, Protocol::Http, "test-trace", "test-time");
-        assert!(result.is_err(), "Should block IPv6 loopback variant: {}", variant);
+        assert!(
+            result.is_err(),
+            "Should block IPv6 loopback variant: {}",
+            variant
+        );
     }
 }
 
@@ -384,7 +432,12 @@ fn ssrf_policy_blocks_bypass_attempts() {
 
     for (attempt, description) in &bypass_attempts {
         let result = policy.check_ssrf(attempt, 80, Protocol::Http, "test-trace", "test-time");
-        assert!(result.is_err(), "Should block bypass attempt {}: {}", description, attempt);
+        assert!(
+            result.is_err(),
+            "Should block bypass attempt {}: {}",
+            description,
+            attempt
+        );
     }
 }
 
@@ -415,7 +468,12 @@ fn ssrf_policy_allows_legitimate_public_targets() {
             let result = policy.check_ssrf(target, 443, Protocol::Http, "test-trace", "test-time");
             // Simple check for common public IPs
             if is_simple_public_ip(octets) {
-                assert!(result.is_ok(), "Should allow public IP {}: {}", description, target);
+                assert!(
+                    result.is_ok(),
+                    "Should allow public IP {}: {}",
+                    description,
+                    target
+                );
             }
         }
     }
@@ -426,13 +484,15 @@ fn ssrf_policy_allowlist_overrides_blocks() {
     let mut policy = SsrfPolicyTemplate::default_template("test-connector".to_string());
 
     // Add allowlist entry for normally blocked IP
-    let receipt = policy.add_allowlist(
-        "10.0.0.100",
-        Some(8080),
-        "Internal API for health checks",
-        "test-trace",
-        "test-time"
-    ).expect("should add allowlist entry");
+    let receipt = policy
+        .add_allowlist(
+            "10.0.0.100",
+            Some(8080),
+            "Internal API for health checks",
+            "test-trace",
+            "test-time",
+        )
+        .expect("should add allowlist entry");
 
     assert!(!receipt.receipt_id.is_empty());
     assert_eq!(receipt.host, "10.0.0.100");
@@ -444,7 +504,7 @@ fn ssrf_policy_allowlist_overrides_blocks() {
         8080,
         Protocol::Http,
         "test-trace-allowed",
-        "test-time"
+        "test-time",
     );
     assert!(result.is_ok(), "Allowlisted IP should be allowed");
 
@@ -454,9 +514,12 @@ fn ssrf_policy_allowlist_overrides_blocks() {
         3000,
         Protocol::Http,
         "test-trace-wrong-port",
-        "test-time"
+        "test-time",
     );
-    assert!(result.is_err(), "Should block same IP on non-allowlisted port");
+    assert!(
+        result.is_err(),
+        "Should block same IP on non-allowlisted port"
+    );
 }
 
 // === INTEGRATED CONFORMANCE TESTS ===
@@ -467,19 +530,22 @@ fn integration_fail_closed_semantics_across_modules() {
 
     // 1. SSRF: Malformed input should be blocked (fail-closed)
     let mut ssrf_policy = SsrfPolicyTemplate::default_template("test".to_string());
-    let malformed_result = ssrf_policy.check_ssrf(
-        "malformed..",
-        80,
-        Protocol::Http,
-        "test",
-        "test"
+    let malformed_result =
+        ssrf_policy.check_ssrf("malformed..", 80, Protocol::Http, "test", "test");
+    assert!(
+        malformed_result.is_err(),
+        "SSRF should fail-closed on malformed input"
     );
-    assert!(malformed_result.is_err(), "SSRF should fail-closed on malformed input");
 
     // 2. Capabilities: Expired tokens should be rejected (fail-closed)
     let provider = CapabilityProvider::new("test-secret");
-    let scope = RemoteScope::new(vec![RemoteOperation::TelemetryExport], vec!["https://test.com".to_string()]);
-    let (cap, _) = provider.issue("issuer", scope, 1000, 100, true, false, "trace").expect("issue");
+    let scope = RemoteScope::new(
+        vec![RemoteOperation::TelemetryExport],
+        vec!["https://test.com".to_string()],
+    );
+    let (cap, _) = provider
+        .issue("issuer", scope, 1000, 100, true, false, "trace")
+        .expect("issue");
     let mut gate = CapabilityGate::new("test-secret");
 
     let expired_result = gate.authorize_network(
@@ -487,21 +553,19 @@ fn integration_fail_closed_semantics_across_modules() {
         RemoteOperation::TelemetryExport,
         "https://test.com",
         1100, // Exactly at expiry boundary
-        "test"
+        "test",
     );
-    assert!(expired_result.is_err(), "Capabilities should fail-closed at expiry boundary");
+    assert!(
+        expired_result.is_err(),
+        "Capabilities should fail-closed at expiry boundary"
+    );
 
     // 3. Cryptographic verification should use constant-time comparison
-    let root_secret = RootSecret::from_hex(
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    ).expect("valid hex");
+    let root_secret =
+        RootSecret::from_hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .expect("valid hex");
 
-    let sig_result = sign_epoch_artifact(
-        b"test",
-        ControlEpoch::new(1),
-        "domain",
-        &root_secret
-    );
+    let sig_result = sign_epoch_artifact(b"test", ControlEpoch::new(1), "domain", &root_secret);
     assert!(sig_result.is_ok(), "Signing should work");
 }
 
@@ -548,49 +612,53 @@ mod security_hardening_comprehensive_negative_tests {
             "0123456789abcdef\u{0000}0123456789abcdef0123456789abcdef01234567", // Null byte
             "0123456789abcdef\u{FEFF}0123456789abcdef0123456789abcdef01234567", // BOM
             "0123456789abcdef\u{000C}0123456789abcdef0123456789abcdef01234567", // Form feed
-            "0123456789abcdef\n0123456789abcdef0123456789abcdef01234567",        // Newline
-            "012345е789abcdef0123456789abcdef0123456789abcdef01234567",          // Cyrillic 'е' homograph
+            "0123456789abcdef\n0123456789abcdef0123456789abcdef01234567",       // Newline
+            "012345е789abcdef0123456789abcdef0123456789abcdef01234567", // Cyrillic 'е' homograph
         ];
 
         for attack_vector in &unicode_attack_vectors {
             // RootSecret should reject Unicode injection attempts
             let result = RootSecret::from_hex(attack_vector);
-            assert!(result.is_err(), "Should reject Unicode injection in hex: {:?}", attack_vector);
+            assert!(
+                result.is_err(),
+                "Should reject Unicode injection in hex: {:?}",
+                attack_vector
+            );
         }
 
         // Domain names in signing should handle Unicode normalization attacks
         let root_secret = RootSecret::from_hex(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        ).expect("valid hex");
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("valid hex");
 
         let unicode_domains = [
-            "test\u{200B}domain",  // Zero-width space
-            "test\u{202E}niamod",  // Right-to-left override
-            "test\u{0000}domain",  // Null byte injection
-            "tеst_domain",         // Cyrillic 'е' homograph
-            "test\ndomain",        // Newline injection
+            "test\u{200B}domain", // Zero-width space
+            "test\u{202E}niamod", // Right-to-left override
+            "test\u{0000}domain", // Null byte injection
+            "tеst_domain",        // Cyrillic 'е' homograph
+            "test\ndomain",       // Newline injection
         ];
 
         for domain in &unicode_domains {
             // Signing with Unicode-injected domains should be handled safely
-            let result = sign_epoch_artifact(
-                b"test_artifact",
-                ControlEpoch::new(1),
-                domain,
-                &root_secret
-            );
+            let result =
+                sign_epoch_artifact(b"test_artifact", ControlEpoch::new(1), domain, &root_secret);
             // The function should either reject malformed domains or handle them consistently
             match result {
                 Ok(sig) => {
                     // If accepted, verification with same domain should work
-                    assert!(verify_epoch_signature(
-                        b"test_artifact",
-                        &sig,
-                        ControlEpoch::new(1),
-                        domain,
-                        &root_secret
-                    ).is_ok());
-                },
+                    assert!(
+                        verify_epoch_signature(
+                            b"test_artifact",
+                            &sig,
+                            ControlEpoch::new(1),
+                            domain,
+                            &root_secret
+                        )
+                        .is_ok()
+                    );
+                }
                 Err(_) => {
                     // Rejection is also acceptable for malformed domains
                 }
@@ -606,16 +674,16 @@ mod security_hardening_comprehensive_negative_tests {
         let provider = CapabilityProvider::new("test-secret");
         let scope = RemoteScope::new(
             vec![RemoteOperation::TelemetryExport],
-            vec!["https://example.com".to_string()]
+            vec!["https://example.com".to_string()],
         );
 
         // Test near-overflow scenarios
         let overflow_test_cases = [
-            (u64::MAX - 1, 2, u64::MAX),        // Should saturate to MAX
-            (u64::MAX - 100, 200, u64::MAX),    // Should saturate to MAX
-            (u64::MAX, 1, u64::MAX),            // Already at MAX
-            (0, u64::MAX, u64::MAX),            // TTL overflow
-            (1, u64::MAX - 1, u64::MAX),        // Near-MAX TTL
+            (u64::MAX - 1, 2, u64::MAX),     // Should saturate to MAX
+            (u64::MAX - 100, 200, u64::MAX), // Should saturate to MAX
+            (u64::MAX, 1, u64::MAX),         // Already at MAX
+            (0, u64::MAX, u64::MAX),         // TTL overflow
+            (1, u64::MAX - 1, u64::MAX),     // Near-MAX TTL
         ];
 
         for (issued_at, ttl_secs, expected_max) in &overflow_test_cases {
@@ -626,16 +694,19 @@ mod security_hardening_comprehensive_negative_tests {
                 *ttl_secs,
                 true,
                 false,
-                "overflow-test"
+                "overflow-test",
             );
 
             match result {
                 Ok((cap, _audit)) => {
                     // If successful, expiry should be capped at u64::MAX
-                    assert!(cap.expires_at_epoch_secs() <= *expected_max,
-                           "Expiry should not exceed u64::MAX for issued_at={}, ttl={}",
-                           issued_at, ttl_secs);
-                },
+                    assert!(
+                        cap.expires_at_epoch_secs() <= *expected_max,
+                        "Expiry should not exceed u64::MAX for issued_at={}, ttl={}",
+                        issued_at,
+                        ttl_secs
+                    );
+                }
                 Err(_) => {
                     // Rejection of overflow scenarios is also acceptable
                 }
@@ -646,15 +717,17 @@ mod security_hardening_comprehensive_negative_tests {
         let mut gate = CapabilityGate::new("test-secret");
 
         // Issue a token that will be used repeatedly
-        let (cap, _) = provider.issue(
-            "test-issuer",
-            scope.clone(),
-            1000,
-            3600,
-            true,
-            false,
-            "seq-test"
-        ).expect("should issue");
+        let (cap, _) = provider
+            .issue(
+                "test-issuer",
+                scope.clone(),
+                1000,
+                3600,
+                true,
+                false,
+                "seq-test",
+            )
+            .expect("should issue");
 
         // Simulate many operations to test sequence overflow handling
         for i in 0..1000u32 {
@@ -664,7 +737,7 @@ mod security_hardening_comprehensive_negative_tests {
                 RemoteOperation::TelemetryExport,
                 "https://example.com",
                 1001,
-                &trace_id
+                &trace_id,
             );
             // Should not panic even with many operations
         }
@@ -682,7 +755,12 @@ mod security_hardening_comprehensive_negative_tests {
 
         // Massive hostname list with varying lengths
         let massive_hosts: Vec<String> = (0..1000)
-            .map(|i| format!("https://very-long-hostname-{}.example.com/path/to/endpoint", i))
+            .map(|i| {
+                format!(
+                    "https://very-long-hostname-{}.example.com/path/to/endpoint",
+                    i
+                )
+            })
             .collect();
 
         let large_scope = RemoteScope::new(massive_operations, massive_hosts);
@@ -695,7 +773,7 @@ mod security_hardening_comprehensive_negative_tests {
             3600,
             true,
             false,
-            "memory-test"
+            "memory-test",
         );
 
         match result {
@@ -707,11 +785,11 @@ mod security_hardening_comprehensive_negative_tests {
                     RemoteOperation::TelemetryExport,
                     "https://very-long-hostname-0.example.com/path/to/endpoint",
                     1001,
-                    "memory-test-auth"
+                    "memory-test-auth",
                 );
                 // Should complete without excessive memory usage
                 assert!(auth_result.is_ok() || auth_result.is_err()); // Either outcome acceptable
-            },
+            }
             Err(_) => {
                 // Rejection of massive scopes is also acceptable
             }
@@ -723,13 +801,7 @@ mod security_hardening_comprehensive_negative_tests {
         // Add many allowlist entries to test memory handling
         for i in 0..100 {
             let host = format!("allowed-host-{}.example.com", i);
-            let _ = policy.add_allowlist(
-                &host,
-                Some(8080),
-                "Memory test entry",
-                "trace",
-                "time"
-            );
+            let _ = policy.add_allowlist(&host, Some(8080), "Memory test entry", "trace", "time");
         }
 
         // Policy should still function correctly
@@ -739,9 +811,12 @@ mod security_hardening_comprehensive_negative_tests {
             8080,
             Protocol::Http,
             "test",
-            "test"
+            "test",
         );
-        assert!(check_result.is_ok(), "Should find allowlisted entry efficiently");
+        assert!(
+            check_result.is_ok(),
+            "Should find allowlisted entry efficiently"
+        );
     }
 
     #[test]
@@ -755,74 +830,98 @@ mod security_hardening_comprehensive_negative_tests {
         let provider = CapabilityProvider::new("concurrent-test");
         let scope = RemoteScope::new(
             vec![RemoteOperation::TelemetryExport],
-            vec!["https://concurrent.example.com".to_string()]
+            vec!["https://concurrent.example.com".to_string()],
         );
 
         // Issue multiple tokens
-        let tokens: Vec<_> = (0..10).map(|i| {
-            provider.issue(
-                &format!("issuer-{}", i),
-                scope.clone(),
-                1000,
-                3600,
-                true,
-                true, // single_use to test replay detection
-                &format!("concurrent-{}", i)
-            ).expect("should issue").0
-        }).collect();
+        let tokens: Vec<_> = (0..10)
+            .map(|i| {
+                provider
+                    .issue(
+                        &format!("issuer-{}", i),
+                        scope.clone(),
+                        1000,
+                        3600,
+                        true,
+                        true, // single_use to test replay detection
+                        &format!("concurrent-{}", i),
+                    )
+                    .expect("should issue")
+                    .0
+            })
+            .collect();
 
         let gate = Arc::new(Mutex::new(CapabilityGate::new("concurrent-test")));
         let success_count = Arc::new(Mutex::new(0u32));
         let error_count = Arc::new(Mutex::new(0u32));
 
         // Simulate concurrent access to capability validation
-        let handles: Vec<_> = tokens.into_iter().enumerate().map(|(i, token)| {
-            let gate_clone = Arc::clone(&gate);
-            let success_clone = Arc::clone(&success_count);
-            let error_clone = Arc::clone(&error_count);
+        let handles: Vec<_> = tokens
+            .into_iter()
+            .enumerate()
+            .map(|(i, token)| {
+                let gate_clone = Arc::clone(&gate);
+                let success_clone = Arc::clone(&success_count);
+                let error_clone = Arc::clone(&error_count);
 
-            thread::spawn(move || {
-                // Simulate concurrent validation attempts
-                for attempt in 0..5 {
-                    let result = {
-                        let mut g = gate_clone.lock().unwrap();
-                        g.authorize_network(
-                            Some(&token),
-                            RemoteOperation::TelemetryExport,
-                            "https://concurrent.example.com",
-                            1001 + attempt,
-                            &format!("concurrent-{}-{}", i, attempt)
-                        )
-                    };
+                thread::spawn(move || {
+                    // Simulate concurrent validation attempts
+                    for attempt in 0..5 {
+                        let result = {
+                            let mut g =
+                                try_lock(&gate_clone, "authorize capability gate concurrently")
+                                    .expect("capability gate mutex should not be poisoned");
+                            g.authorize_network(
+                                Some(&token),
+                                RemoteOperation::TelemetryExport,
+                                "https://concurrent.example.com",
+                                1001 + attempt,
+                                &format!("concurrent-{}-{}", i, attempt),
+                            )
+                        };
 
-                    match result {
-                        Ok(_) => {
-                            let mut count = success_clone.lock().unwrap();
-                            *count = count.saturating_add(1);
-                        },
-                        Err(_) => {
-                            let mut count = error_clone.lock().unwrap();
-                            *count = count.saturating_add(1);
+                        match result {
+                            Ok(_) => {
+                                let mut count = try_lock(
+                                    &success_clone,
+                                    "count successful capability authorizations",
+                                )
+                                .expect("success counter mutex should not be poisoned");
+                                *count = count.saturating_add(1);
+                            }
+                            Err(_) => {
+                                let mut count = try_lock(
+                                    &error_clone,
+                                    "count failed capability authorizations",
+                                )
+                                .expect("error counter mutex should not be poisoned");
+                                *count = count.saturating_add(1);
+                            }
                         }
-                    }
 
-                    // Small delay to increase chance of race conditions
-                    thread::sleep(std::time::Duration::from_millis(1));
-                }
+                        // Small delay to increase chance of race conditions
+                        thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all threads
         for handle in handles {
             handle.join().unwrap();
         }
 
-        let final_success = *success_count.lock().unwrap();
-        let final_errors = *error_count.lock().unwrap();
+        let final_success = *try_lock(&success_count, "inspect final success count")
+            .expect("success counter mutex should not be poisoned");
+        let final_errors = *try_lock(&error_count, "inspect final error count")
+            .expect("error counter mutex should not be poisoned");
 
         // With single-use tokens, we should see exactly 10 successes and 40 replay errors
         // (first use of each token succeeds, subsequent attempts fail)
-        assert_eq!(final_success, 10, "Should have exactly 10 successful single-uses");
+        assert_eq!(
+            final_success, 10,
+            "Should have exactly 10 successful single-uses"
+        );
         assert_eq!(final_errors, 40, "Should have exactly 40 replay errors");
     }
 
@@ -832,16 +931,17 @@ mod security_hardening_comprehensive_negative_tests {
         // Edge cases in parsing/validation might allow security bypasses
 
         let root_secret = RootSecret::from_hex(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        ).expect("valid hex");
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("valid hex");
 
         // Test malformed hex inputs
         let malformed_hex_cases = [
-            "",                          // Empty string
-            "G123456789abcdef",         // Invalid hex character
-            "0123456789abcdef",         // Too short (16 chars, need 64)
+            "",                                                                   // Empty string
+            "G123456789abcdef", // Invalid hex character
+            "0123456789abcdef", // Too short (16 chars, need 64)
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdefAA", // Too long
-            "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",  // Mixed case
+            "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef", // Mixed case
             " 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", // Leading space
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ", // Trailing space
         ];
@@ -857,8 +957,8 @@ mod security_hardening_comprehensive_negative_tests {
         let artifact = b"test_artifact";
 
         // Create valid signature for tampering tests
-        let valid_sig = sign_epoch_artifact(artifact, epoch, domain, &root_secret)
-            .expect("should sign");
+        let valid_sig =
+            sign_epoch_artifact(artifact, epoch, domain, &root_secret).expect("should sign");
 
         // Test signature tampering edge cases
         let mut tampered_sig = valid_sig.clone();
@@ -867,28 +967,39 @@ mod security_hardening_comprehensive_negative_tests {
         for byte_pos in [0, 16, 31, 63] {
             if byte_pos < tampered_sig.bytes.len() {
                 tampered_sig.bytes[byte_pos] ^= 0x01;
-                let result = verify_epoch_signature(artifact, &tampered_sig, epoch, domain, &root_secret);
-                assert!(result.is_err(), "Should reject single bit flip at position {}", byte_pos);
+                let result =
+                    verify_epoch_signature(artifact, &tampered_sig, epoch, domain, &root_secret);
+                assert!(
+                    result.is_err(),
+                    "Should reject single bit flip at position {}",
+                    byte_pos
+                );
                 tampered_sig.bytes[byte_pos] ^= 0x01; // Restore
             }
         }
 
         // Test with modified epoch
         let wrong_epoch = ControlEpoch::new(43);
-        let result = verify_epoch_signature(artifact, &valid_sig, wrong_epoch, domain, &root_secret);
+        let result =
+            verify_epoch_signature(artifact, &valid_sig, wrong_epoch, domain, &root_secret);
         assert!(result.is_err(), "Should reject wrong epoch");
 
         // Test with modified domain (injection attempts)
         let domain_injection_cases = [
-            "test_domain\0extra",    // Null byte injection
-            "test_domain\ntest",     // Newline injection
-            "test_domain\r\ntest",   // CRLF injection
-            "test_domain\ttest",     // Tab injection
+            "test_domain\0extra",  // Null byte injection
+            "test_domain\ntest",   // Newline injection
+            "test_domain\r\ntest", // CRLF injection
+            "test_domain\ttest",   // Tab injection
         ];
 
         for injected_domain in &domain_injection_cases {
-            let result = verify_epoch_signature(artifact, &valid_sig, epoch, injected_domain, &root_secret);
-            assert!(result.is_err(), "Should reject domain injection: {:?}", injected_domain);
+            let result =
+                verify_epoch_signature(artifact, &valid_sig, epoch, injected_domain, &root_secret);
+            assert!(
+                result.is_err(),
+                "Should reject domain injection: {:?}",
+                injected_domain
+            );
         }
     }
 
@@ -905,9 +1016,18 @@ mod security_hardening_comprehensive_negative_tests {
         let test_cases = [
             ("0123456789abcdef0123456789abcdef01234567", "identical"),
             ("0000000000000000000000000000000000000000", "all different"),
-            ("0123456789abcdef0123456789abcdef01234568", "last char different"),
-            ("1123456789abcdef0123456789abcdef01234567", "first char different"),
-            ("0123456789abcdef1123456789abcdef01234567", "middle different"),
+            (
+                "0123456789abcdef0123456789abcdef01234568",
+                "last char different",
+            ),
+            (
+                "1123456789abcdef0123456789abcdef01234567",
+                "first char different",
+            ),
+            (
+                "0123456789abcdef1123456789abcdef01234567",
+                "middle different",
+            ),
         ];
 
         let mut timing_results = Vec::new();
@@ -932,25 +1052,34 @@ mod security_hardening_comprehensive_negative_tests {
 
         // Allow for some variation, but flag excessive differences
         let time_ratio = max_time as f64 / min_time as f64;
-        assert!(time_ratio < 3.0,
-               "Timing variation too high (ratio: {:.2}), possible timing leak. Results: {:?}",
-               time_ratio, timing_results);
+        assert!(
+            time_ratio < 3.0,
+            "Timing variation too high (ratio: {:.2}), possible timing leak. Results: {:?}",
+            time_ratio,
+            timing_results
+        );
 
         // Test byte-level constant-time comparison
         let reference_bytes = [0xAB; 32];
         let test_byte_cases = [
             ([0xAB; 32], "identical"),
             ([0x00; 32], "all different"),
-            ({
-                let mut bytes = [0xAB; 32];
-                bytes[31] = 0xAC;
-                bytes
-            }, "last byte different"),
-            ({
-                let mut bytes = [0xAB; 32];
-                bytes[0] = 0xAC;
-                bytes
-            }, "first byte different"),
+            (
+                {
+                    let mut bytes = [0xAB; 32];
+                    bytes[31] = 0xAC;
+                    bytes
+                },
+                "last byte different",
+            ),
+            (
+                {
+                    let mut bytes = [0xAB; 32];
+                    bytes[0] = 0xAC;
+                    bytes
+                },
+                "first byte different",
+            ),
         ];
 
         let mut byte_timing_results = Vec::new();
@@ -967,13 +1096,24 @@ mod security_hardening_comprehensive_negative_tests {
             byte_timing_results.push((elapsed, description));
         }
 
-        let min_byte_time = byte_timing_results.iter().map(|(time, _)| *time).min().unwrap();
-        let max_byte_time = byte_timing_results.iter().map(|(time, _)| *time).max().unwrap();
+        let min_byte_time = byte_timing_results
+            .iter()
+            .map(|(time, _)| *time)
+            .min()
+            .unwrap();
+        let max_byte_time = byte_timing_results
+            .iter()
+            .map(|(time, _)| *time)
+            .max()
+            .unwrap();
 
         let byte_time_ratio = max_byte_time as f64 / min_byte_time as f64;
-        assert!(byte_time_ratio < 3.0,
-               "Byte timing variation too high (ratio: {:.2}), possible timing leak. Results: {:?}",
-               byte_time_ratio, byte_timing_results);
+        assert!(
+            byte_time_ratio < 3.0,
+            "Byte timing variation too high (ratio: {:.2}), possible timing leak. Results: {:?}",
+            byte_time_ratio,
+            byte_timing_results
+        );
     }
 
     #[test]
@@ -1000,7 +1140,12 @@ mod security_hardening_comprehensive_negative_tests {
 
         for (bypass_attempt, description) in &encoding_bypass_cases {
             let result = policy.check_ssrf(bypass_attempt, 80, Protocol::Http, "test", "test");
-            assert!(result.is_err(), "Should block encoding bypass {}: {}", description, bypass_attempt);
+            assert!(
+                result.is_err(),
+                "Should block encoding bypass {}: {}",
+                description,
+                bypass_attempt
+            );
         }
 
         // Test numeric representation attacks
@@ -1022,10 +1167,15 @@ mod security_hardening_comprehensive_negative_tests {
             match result {
                 Ok(_) => {
                     // If accepted, it should consistently accept the same form
-                    let second_result = policy.check_ssrf(bypass_attempt, 80, Protocol::Http, "test2", "test2");
-                    assert_eq!(result.is_ok(), second_result.is_ok(),
-                              "Should consistently handle numeric form: {}", description);
-                },
+                    let second_result =
+                        policy.check_ssrf(bypass_attempt, 80, Protocol::Http, "test2", "test2");
+                    assert_eq!(
+                        result.is_ok(),
+                        second_result.is_ok(),
+                        "Should consistently handle numeric form: {}",
+                        description
+                    );
+                }
                 Err(_) => {
                     // Rejection is expected for localhost representations
                 }
@@ -1052,10 +1202,14 @@ mod security_hardening_comprehensive_negative_tests {
             match result {
                 Ok(_) => {
                     // If accepted, verify it doesn't cause issues in subsequent operations
-                    let second_result = policy.check_ssrf(injection_attempt, 443, Protocol::Http, "test2", "test2");
-                    assert!(second_result.is_ok() || second_result.is_err(),
-                           "Should handle injection consistently: {}", description);
-                },
+                    let second_result =
+                        policy.check_ssrf(injection_attempt, 443, Protocol::Http, "test2", "test2");
+                    assert!(
+                        second_result.is_ok() || second_result.is_err(),
+                        "Should handle injection consistently: {}",
+                        description
+                    );
+                }
                 Err(_) => {
                     // Rejection is also acceptable for malformed hostnames
                 }
@@ -1069,13 +1223,16 @@ mod security_hardening_comprehensive_negative_tests {
             Some(443),
             injection_reason,
             "trace\0injection",
-            "time\ninjection"
+            "time\ninjection",
         );
 
         match allowlist_result {
             Ok(receipt) => {
                 // If injection is accepted, verify it doesn't corrupt the allowlist
-                assert!(!receipt.receipt_id.is_empty(), "Receipt ID should not be empty");
+                assert!(
+                    !receipt.receipt_id.is_empty(),
+                    "Receipt ID should not be empty"
+                );
 
                 // Test that the allowlisted host still works correctly
                 let check_result = policy.check_ssrf_resolved(
@@ -1086,8 +1243,11 @@ mod security_hardening_comprehensive_negative_tests {
                     "test",
                     "test",
                 );
-                assert!(check_result.is_ok(), "Allowlisted host should still work after injection attempt");
-            },
+                assert!(
+                    check_result.is_ok(),
+                    "Allowlisted host should still work after injection attempt"
+                );
+            }
             Err(_) => {
                 // Rejection of injection attempts is also acceptable
             }
@@ -1102,7 +1262,7 @@ mod security_hardening_comprehensive_negative_tests {
         let provider = CapabilityProvider::new("audit-flood-test");
         let scope = RemoteScope::new(
             vec![RemoteOperation::TelemetryExport],
-            vec!["https://flood.example.com".to_string()]
+            vec!["https://flood.example.com".to_string()],
         );
 
         // Generate many tokens to create audit events
@@ -1115,13 +1275,16 @@ mod security_hardening_comprehensive_negative_tests {
                 3600,
                 true,
                 false,
-                &format!("flood-trace-with-very-long-identifier-that-might-cause-memory-issues-{}", i)
+                &format!(
+                    "flood-trace-with-very-long-identifier-that-might-cause-memory-issues-{}",
+                    i
+                ),
             );
 
             match result {
                 Ok((_, audit)) => {
                     audit_events.push(audit);
-                },
+                }
                 Err(_) => {
                     // Rate limiting or rejection is acceptable
                     break;
@@ -1130,17 +1293,19 @@ mod security_hardening_comprehensive_negative_tests {
         }
 
         // Test that audit events don't cause excessive memory usage
-        let total_audit_size: usize = audit_events.iter()
+        let total_audit_size: usize = audit_events
+            .iter()
             .map(|audit| {
-                audit.issuer.len() +
-                audit.trace_id.len() +
-                64 // Approximate size of other fields
+                audit.issuer.len() + audit.trace_id.len() + 64 // Approximate size of other fields
             })
             .sum();
 
         // Should not exceed reasonable memory bounds (e.g., 10MB for 1000 events)
-        assert!(total_audit_size < 10 * 1024 * 1024,
-               "Audit events consuming excessive memory: {} bytes", total_audit_size);
+        assert!(
+            total_audit_size < 10 * 1024 * 1024,
+            "Audit events consuming excessive memory: {} bytes",
+            total_audit_size
+        );
 
         // Test SSRF policy audit flooding
         let mut policy = SsrfPolicyTemplate::default_template("flood-test".to_string());
@@ -1160,7 +1325,7 @@ mod security_hardening_comprehensive_negative_tests {
                     Some(443),
                     &format!("Flood test entry {} with long description", i),
                     &trace,
-                    &time
+                    &time,
                 );
             }
         }
@@ -1171,9 +1336,12 @@ mod security_hardening_comprehensive_negative_tests {
             443,
             Protocol::Http,
             "final-trace",
-            "final-time"
+            "final-time",
         );
-        assert!(final_check.is_ok() || final_check.is_err(), "Policy should still function after flooding");
+        assert!(
+            final_check.is_ok() || final_check.is_err(),
+            "Policy should still function after flooding"
+        );
     }
 
     #[test]
@@ -1184,7 +1352,7 @@ mod security_hardening_comprehensive_negative_tests {
         let provider = CapabilityProvider::new("consistency-test");
         let scope = RemoteScope::new(
             vec![RemoteOperation::TelemetryExport],
-            vec!["https://consistency.example.com".to_string()]
+            vec!["https://consistency.example.com".to_string()],
         );
 
         // Test token issuance under error conditions
@@ -1203,7 +1371,7 @@ mod security_hardening_comprehensive_negative_tests {
                 3600,
                 true,
                 false,
-                "consistency-test"
+                "consistency-test",
             );
 
             match result {
@@ -1215,14 +1383,20 @@ mod security_hardening_comprehensive_negative_tests {
                         RemoteOperation::TelemetryExport,
                         "https://consistency.example.com",
                         1001,
-                        "consistency-validation"
+                        "consistency-validation",
                     );
-                    assert!(auth_result.is_ok(),
-                           "Token should be valid if issuance succeeded with {}", description);
+                    assert!(
+                        auth_result.is_ok(),
+                        "Token should be valid if issuance succeeded with {}",
+                        description
+                    );
 
                     // Audit should contain valid data
-                    assert!(!audit.trace_id.is_empty(), "Audit trace should not be empty");
-                },
+                    assert!(
+                        !audit.trace_id.is_empty(),
+                        "Audit trace should not be empty"
+                    );
+                }
                 Err(_) => {
                     // Rejection is also acceptable for malformed input
                 }
@@ -1232,15 +1406,17 @@ mod security_hardening_comprehensive_negative_tests {
         // Test gate state consistency after authorization failures
         let mut gate = CapabilityGate::new("consistency-test");
 
-        let (valid_cap, _) = provider.issue(
-            "valid-issuer",
-            scope.clone(),
-            1000,
-            3600,
-            true,
-            true, // single_use
-            "consistency-test"
-        ).expect("should issue valid token");
+        let (valid_cap, _) = provider
+            .issue(
+                "valid-issuer",
+                scope.clone(),
+                1000,
+                3600,
+                true,
+                true, // single_use
+                "consistency-test",
+            )
+            .expect("should issue valid token");
 
         // First authorization should succeed
         let first_result = gate.authorize_network(
@@ -1248,7 +1424,7 @@ mod security_hardening_comprehensive_negative_tests {
             RemoteOperation::TelemetryExport,
             "https://consistency.example.com",
             1001,
-            "first-use"
+            "first-use",
         );
         assert!(first_result.is_ok(), "First use should succeed");
 
@@ -1258,29 +1434,34 @@ mod security_hardening_comprehensive_negative_tests {
             RemoteOperation::TelemetryExport,
             "https://consistency.example.com",
             1002,
-            "replay-attempt"
+            "replay-attempt",
         );
         assert!(second_result.is_err(), "Replay should be detected");
 
         // Gate should still work with other tokens
-        let (other_cap, _) = provider.issue(
-            "other-issuer",
-            scope.clone(),
-            1000,
-            3600,
-            true,
-            false, // not single_use
-            "other-token"
-        ).expect("should issue other token");
+        let (other_cap, _) = provider
+            .issue(
+                "other-issuer",
+                scope.clone(),
+                1000,
+                3600,
+                true,
+                false, // not single_use
+                "other-token",
+            )
+            .expect("should issue other token");
 
         let other_result = gate.authorize_network(
             Some(&other_cap),
             RemoteOperation::TelemetryExport,
             "https://consistency.example.com",
             1003,
-            "other-token-test"
+            "other-token-test",
         );
-        assert!(other_result.is_ok(), "Gate should work with other tokens after replay detection");
+        assert!(
+            other_result.is_ok(),
+            "Gate should work with other tokens after replay detection"
+        );
 
         // Test SSRF policy state consistency
         let mut policy = SsrfPolicyTemplate::default_template("consistency-test".to_string());
@@ -1288,7 +1469,8 @@ mod security_hardening_comprehensive_negative_tests {
         // Add some valid allowlist entries
         let valid_entries = ["valid1.example.com", "valid2.example.com"];
         for host in &valid_entries {
-            let receipt = policy.add_allowlist(host, Some(443), "Valid entry", "trace", "time")
+            let receipt = policy
+                .add_allowlist(host, Some(443), "Valid entry", "trace", "time")
                 .expect("should add valid entry");
             assert!(!receipt.receipt_id.is_empty(), "Receipt should be valid");
         }
@@ -1301,7 +1483,8 @@ mod security_hardening_comprehensive_negative_tests {
         ];
 
         for (invalid_host, description) in &invalid_entries {
-            let result = policy.add_allowlist(invalid_host, Some(443), description, "trace", "time");
+            let result =
+                policy.add_allowlist(invalid_host, Some(443), description, "trace", "time");
 
             // Whether accepted or rejected, valid entries should still work
             let check_result = policy.check_ssrf_resolved(
@@ -1312,9 +1495,11 @@ mod security_hardening_comprehensive_negative_tests {
                 "test",
                 "test",
             );
-            assert!(check_result.is_ok(),
-                   "Valid allowlist entries should still work after invalid entry attempt: {}",
-                   description);
+            assert!(
+                check_result.is_ok(),
+                "Valid allowlist entries should still work after invalid entry attempt: {}",
+                description
+            );
         }
     }
 }

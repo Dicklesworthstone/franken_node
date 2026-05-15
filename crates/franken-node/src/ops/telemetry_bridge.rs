@@ -1732,6 +1732,8 @@ pub fn assert_persistence_loop_batches_ready_envelopes_for_tests() {
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
 
     fn test_state(queue_capacity: usize) -> Arc<Mutex<TelemetryBridgeState>> {
@@ -3728,7 +3730,8 @@ mod tests {
         };
 
         // Verify bounded storage prevents memory exhaustion
-        let mut locked_state = state.lock().unwrap();
+        let mut locked_state = try_lock(&state, "store massive telemetry detail in test state")
+            .expect("telemetry bridge test state mutex should not be poisoned");
         push_bounded(
             &mut locked_state.runtime_events,
             malicious_event.clone(),
@@ -3833,7 +3836,8 @@ mod tests {
         };
 
         // Verify event can be stored without overflow
-        let mut locked_state = state.lock().unwrap();
+        let mut locked_state = try_lock(&state, "store max-value telemetry event in test state")
+            .expect("telemetry bridge test state mutex should not be poisoned");
         push_bounded(
             &mut locked_state.runtime_events,
             near_max_event,
@@ -3948,7 +3952,8 @@ mod tests {
         );
 
         // Verify state accounting remains consistent regardless of outcome
-        let locked_state = state.lock().unwrap();
+        let locked_state = try_lock(&state, "inspect telemetry bridge stress accounting")
+            .expect("telemetry bridge test state mutex should not be poisoned");
         let total_events =
             locked_state.accepted_total + locked_state.shed_total + locked_state.dropped_total;
         assert!(total_events <= 2, "event accounting must remain consistent");

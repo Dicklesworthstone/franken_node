@@ -153,7 +153,7 @@ pub mod lock_utils {
 
     /// Safely acquire a mutex lock with proper error handling.
     ///
-    /// Replaces the dangerous pattern: `mutex.lock().unwrap()`
+    /// Replaces direct mutex-lock unwrapping that can panic on poisoning.
     /// With safe pattern: `safe_lock(&mutex)?`
     pub fn safe_lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, ActionableError> {
         mutex.lock().map_err(|poison_err| {
@@ -934,7 +934,11 @@ mod tests {
 
                         // Record result for verification
                         {
-                            let mut results_lock = results_clone.lock().unwrap();
+                            let mut results_lock = lock_utils::try_lock(
+                                &results_clone,
+                                "record concurrent error render",
+                            )
+                            .expect("actionable error results mutex should not be poisoned");
                             results_lock.push((thread_id, iteration, rendered.len()));
                         }
                     }
@@ -948,7 +952,9 @@ mod tests {
         }
 
         // Verify all concurrent operations completed successfully
-        let final_results = results.lock().unwrap();
+        let final_results =
+            lock_utils::try_lock(&results, "inspect concurrent error render results")
+                .expect("actionable error results mutex should not be poisoned");
         assert_eq!(
             final_results.len(),
             8 * 100,
@@ -1218,7 +1224,8 @@ mod tests {
 
         // Create a poisoned mutex by panicking while holding the lock
         let handle = thread::spawn(move || {
-            let _guard = poison_mutex.lock().unwrap();
+            let _guard = lock_utils::safe_lock(&poison_mutex)
+                .expect("poison fixture mutex should lock before intentional unwind");
             std::panic::resume_unwind(Box::new("intentional mutex poison"));
         });
 
@@ -1254,16 +1261,20 @@ mod tests {
 
             let handle = thread::spawn(move || {
                 // Always acquire in alphabetical order: lock_a before lock_b
-                let guard_a = lock_a_clone.lock().unwrap();
+                let guard_a =
+                    lock_utils::try_lock(&lock_a_clone, "acquire lock_a for ordering test")
+                        .expect("lock_a mutex should not be poisoned");
                 thread::sleep(Duration::from_millis(1)); // Create contention
-                let guard_b = lock_b_clone.lock().unwrap();
+                let guard_b =
+                    lock_utils::try_lock(&lock_b_clone, "acquire lock_b for ordering test")
+                        .expect("lock_b mutex should not be poisoned");
 
                 // Simulate work while holding both locks
                 let value = format!("{}-{}", *guard_a, *guard_b);
-                results_clone
-                    .lock()
-                    .unwrap()
-                    .push(format!("thread-{}: {}", i, value));
+                let mut results_guard =
+                    lock_utils::try_lock(&results_clone, "record multi-lock ordering result")
+                        .expect("multi-lock results mutex should not be poisoned");
+                results_guard.push(format!("thread-{}: {}", i, value));
 
                 // Locks released in reverse order automatically
             });
@@ -1287,7 +1298,8 @@ mod tests {
         );
 
         // Verify all threads completed successfully
-        let final_results = results.lock().unwrap();
+        let final_results = lock_utils::try_lock(&results, "inspect multi-lock ordering results")
+            .expect("multi-lock results mutex should not be poisoned");
         assert_eq!(final_results.len(), 4, "All threads should complete");
     }
 
@@ -1298,7 +1310,8 @@ mod tests {
 
         // Create a poisoned mutex by panicking while holding the lock
         let handle = thread::spawn(move || {
-            let _guard = poison_mutex.lock().unwrap();
+            let _guard = lock_utils::safe_lock(&poison_mutex)
+                .expect("poison fixture mutex should lock before intentional unwind");
             std::panic::resume_unwind(Box::new("intentional mutex poison"));
         });
 
