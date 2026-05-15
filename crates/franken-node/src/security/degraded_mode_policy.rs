@@ -654,6 +654,7 @@ fn criterion_satisfied(criterion: &RecoveryCriterion, status: &RecoveryStatus) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lock_utils::try_lock;
 
     fn base_policy() -> DegradedModePolicy {
         DegradedModePolicy::new("trust-input-stale")
@@ -1530,7 +1531,7 @@ mod tests {
 
         // Attempt to exhaust audit log through repeated activations and actions
         for i in 0..MAX_AUDIT_LOG_ENTRIES + 50 {
-            if engine.state() == DegradedModeState::Normal {
+            if matches!(engine.state(), DegradedModeState::Normal) {
                 let _ = engine.activate(
                     TriggerCondition::ManualActivation("op-0".to_string()),
                     1_000 + i as u64,
@@ -1826,7 +1827,11 @@ mod tests {
         for i in 0..10 {
             let engine_clone = Arc::clone(&engine);
             let handle = thread::spawn(move || {
-                let mut engine = engine_clone.lock().unwrap();
+                let mut engine = try_lock(
+                    &engine_clone,
+                    "activate degraded mode policy engine concurrently",
+                )
+                .expect("degraded mode policy engine mutex should not be poisoned");
                 let _ = engine.activate(
                     TriggerCondition::ManualActivation(format!("operator-{}", i)),
                     1_000 + i as u64,
@@ -1843,7 +1848,11 @@ mod tests {
         }
 
         // Verify only one activation succeeded (fail-closed behavior)
-        let engine = engine.lock().unwrap();
+        let engine = try_lock(
+            &engine,
+            "inspect degraded mode policy engine after activation concurrency",
+        )
+        .expect("degraded mode policy engine mutex should not be poisoned");
         assert!(
             matches!(
                 engine.state(),
@@ -1874,7 +1883,8 @@ mod tests {
         for i in 0..20 {
             let engine_clone = Arc::clone(&engine);
             let handle = thread::spawn(move || {
-                let mut engine = engine_clone.lock().unwrap();
+                let mut engine = try_lock(&engine_clone, "evaluate degraded action concurrently")
+                    .expect("degraded mode policy engine mutex should not be poisoned");
                 let _ = engine.evaluate_action(
                     &format!("action-{}", i),
                     &format!("actor-{}", i),
@@ -1890,7 +1900,8 @@ mod tests {
         }
 
         // Final consistency check
-        let engine = engine.lock().unwrap();
+        let engine = try_lock(&engine, "inspect degraded mode policy engine final state")
+            .expect("degraded mode policy engine mutex should not be poisoned");
         assert!(
             engine.audit_log().len() < 1000,
             "Audit log should remain bounded under concurrent load"
