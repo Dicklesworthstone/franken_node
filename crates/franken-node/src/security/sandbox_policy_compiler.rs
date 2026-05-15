@@ -347,6 +347,7 @@ impl std::error::Error for SandboxError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lock_utils::try_lock;
 
     // === Profile basics ===
 
@@ -1176,12 +1177,14 @@ mod tests {
                         _ => SandboxProfile::Permissive,
                     };
 
-                    let result = tracker_clone.lock().unwrap().change_profile(
-                        profile,
-                        format!("thread_{}_change_{}", thread_id, i),
-                        format!("ts_{}_{}", thread_id, i),
-                        true, // allow downgrades for test
-                    );
+                    let result = try_lock(&tracker_clone, "change sandbox profile concurrently")
+                        .expect("sandbox profile tracker mutex should not be poisoned")
+                        .change_profile(
+                            profile,
+                            format!("thread_{}_change_{}", thread_id, i),
+                            format!("ts_{}_{}", thread_id, i),
+                            true, // allow downgrades for test
+                        );
 
                     // All changes should succeed or fail cleanly
                     assert!(result.is_ok(), "Concurrent profile change should succeed");
@@ -1196,7 +1199,8 @@ mod tests {
         }
 
         // Verify tracker is in a consistent state
-        let final_tracker = tracker.lock().unwrap();
+        let final_tracker = try_lock(&tracker, "inspect sandbox profile tracker final state")
+            .expect("sandbox profile tracker mutex should not be poisoned");
         let profile_matches_policy =
             final_tracker.compiled_policy.profile == final_tracker.current_profile;
         assert!(
