@@ -14,13 +14,13 @@ import hashlib
 import json
 import re
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 IMPL = ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_execution_receipt.rs"
@@ -107,6 +107,81 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 
+def _strip_rust_comments(src: str) -> str:
+    without_block_comments = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
+    return re.sub(r"//.*", "", without_block_comments)
+
+
+def _impl_source() -> str:
+    return _read(IMPL)
+
+
+def _impl_code() -> str:
+    return _strip_rust_comments(_impl_source())
+
+
+def _mod_code() -> str:
+    return _strip_rust_comments(_read(MOD_RS))
+
+
+def _rust_module_decl_present(src: str, module_name: str) -> bool:
+    return bool(re.search(rf"\bpub\s+mod\s+{re.escape(module_name)}\s*;", src))
+
+
+def _rust_pub_item_present(src: str, item_kind: str, name: str) -> bool:
+    return bool(re.search(rf"\bpub\s+{item_kind}\s+{re.escape(name)}\b", src))
+
+
+def _rust_pub_fn_present(src: str, name: str) -> bool:
+    return bool(re.search(rf"\bpub\s+fn\s+{re.escape(name)}\s*\(", src))
+
+
+def _rust_pub_const_str_value_present(src: str, value: str) -> bool:
+    return bool(
+        re.search(
+            rf"\bpub\s+const\s+\w+\s*:\s*&str\s*=\s*\"{re.escape(value)}\"\s*;",
+            src,
+        )
+    )
+
+
+def _rust_enum_body(src: str, enum_name: str) -> str:
+    match = re.search(rf"\bpub\s+enum\s+{re.escape(enum_name)}\s*\{{(?P<body>.*?)\n\}}", src, re.DOTALL)
+    return match.group("body") if match else ""
+
+
+def _rust_enum_variant_present(src: str, enum_name: str, variant: str) -> bool:
+    return bool(re.search(rf"\b{re.escape(variant)}\b", _rust_enum_body(src, enum_name)))
+
+
+def _rust_action_variant(action: str) -> str:
+    return "".join(part.capitalize() for part in action.split("_"))
+
+
+def _rust_struct_body(src: str, struct_name: str) -> str:
+    match = re.search(rf"\bpub\s+struct\s+{re.escape(struct_name)}\s*\{{(?P<body>.*?)\n\}}", src, re.DOTALL)
+    return match.group("body") if match else ""
+
+
+def _rust_pub_struct_field_present(src: str, struct_name: str, field: str) -> bool:
+    return bool(re.search(rf"\bpub\s+{re.escape(field)}\s*:", _rust_struct_body(src, struct_name)))
+
+
+def _rust_test_count(src: str) -> int:
+    return len(re.findall(r"#\s*\[\s*test\s*\]", src))
+
+
+def _required_impl_symbol_present(src: str, symbol: str) -> bool:
+    parts = symbol.split()
+    if len(parts) < 3 or parts[0] != "pub":
+        return symbol in src
+    if parts[1] in {"struct", "enum"}:
+        return _rust_pub_item_present(src, parts[1], parts[2])
+    if parts[1] == "fn":
+        return _rust_pub_fn_present(src, parts[2])
+    return symbol in src
+
+
 def _safe_rel(path: Path) -> str:
     return str(path.relative_to(ROOT)) if str(path).startswith(str(ROOT)) else str(path)
 
@@ -125,7 +200,7 @@ def _load_json(path: Path) -> Any | None:
     if not path.is_file():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.JSONDecoder().decode(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return None
 
@@ -163,38 +238,42 @@ def check_file_presence() -> None:
 
 
 def check_impl_symbols() -> None:
-    src = _read(IMPL)
+    src = _impl_code()
     for symbol in REQUIRED_IMPL_SYMBOLS:
-        _check(f"impl_symbol_{symbol}", symbol in src, symbol)
+        _check(f"impl_symbol_{symbol}", _required_impl_symbol_present(src, symbol), symbol)
 
     for field in REQUIRED_RECEIPT_FIELDS:
-        _check(f"impl_field_{field}", field in src, field)
+        _check(f"impl_field_{field}", _rust_pub_struct_field_present(src, "ExecutionReceipt", field), field)
 
     for action in ACTION_TYPES:
-        _check(f"impl_action_type_{action}", action in src, action)
+        _check(
+            f"impl_action_type_{action}",
+            _rust_enum_variant_present(src, "ExecutionActionType", _rust_action_variant(action)),
+            action,
+        )
 
     for code in REQUIRED_EVENT_CODES:
-        _check(f"impl_event_{code}", code in src, code)
+        _check(f"impl_event_{code}", _rust_pub_const_str_value_present(src, code), code)
 
     for code in REQUIRED_ERROR_CODES:
-        _check(f"impl_error_{code}", code in src, code)
+        _check(f"impl_error_{code}", _rust_pub_const_str_value_present(src, code), code)
 
     for invariant in REQUIRED_INVARIANTS:
-        _check(f"impl_invariant_{invariant}", invariant in src, invariant)
+        _check(f"impl_invariant_{invariant}", _rust_pub_const_str_value_present(src, invariant), invariant)
 
     _check("impl_uses_sha256", "Sha256" in src, "Sha256")
     _check("impl_has_validation_hash_prefix", "sha256:" in src, "sha256:")
     _check("impl_has_canonicalization", "witness_references.sort()" in src, "witness_references.sort()")
 
-    test_count = src.count("#[test]")
+    test_count = _rust_test_count(src)
     _check("impl_minimum_unit_tests", test_count >= 15, f"{test_count} tests")
 
 
 def check_mod_wiring() -> None:
-    mod_text = _read(MOD_RS)
+    mod_text = _mod_code()
     _check(
         "connector_mod_wires_vef_execution_receipt",
-        "pub mod vef_execution_receipt;" in mod_text,
+        _rust_module_decl_present(mod_text, "vef_execution_receipt"),
         "pub mod vef_execution_receipt;",
     )
 
@@ -409,7 +488,7 @@ def self_test() -> dict[str, Any]:
 
 
 def main() -> int:
-    logger = configure_test_logging("check_vef_execution_receipt")
+    configure_test_logging("check_vef_execution_receipt")
     parser = argparse.ArgumentParser(description="Verify bd-p73r artifacts")
     parser.add_argument("--json", action="store_true", help="emit JSON result")
     parser.add_argument("--self-test", action="store_true", help="run checker self-test")

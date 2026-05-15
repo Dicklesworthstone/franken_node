@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_vef_execution_receipt.py"
@@ -72,7 +73,7 @@ class TestCli(unittest.TestCase):
             check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        parsed = json.loads(proc.stdout)
+        parsed = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(parsed["bead_id"], "bd-p73r")
         self.assertIn("checks", parsed)
 
@@ -104,7 +105,7 @@ class TestFailureInjection(unittest.TestCase):
         original = mod.VECTORS
         with tempfile.TemporaryDirectory() as temp_dir:
             try:
-                vector_copy = json.loads(original.read_text(encoding="utf-8"))
+                vector_copy = json.JSONDecoder().decode(original.read_text(encoding="utf-8"))
                 vector_copy["vectors"][0]["expected_hash"] = (
                     "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
                 )
@@ -119,6 +120,74 @@ class TestFailureInjection(unittest.TestCase):
                 self.assertIn("vector_0_expected_hash_matches_canonical_bytes", failed_checks)
             finally:
                 mod.VECTORS = original
+
+
+class TestCommentOnlyRegressions(unittest.TestCase):
+    def test_comment_only_impl_markers_fail_closed(self) -> None:
+        comment_only_impl = """
+// pub enum ExecutionActionType { NetworkAccess, FilesystemOperation, ProcessSpawn, SecretAccess, PolicyTransition, ArtifactPromotion }
+// pub struct ExecutionReceipt {
+//   pub schema_version: String,
+//   pub action_type: ExecutionActionType,
+//   pub capability_context: BTreeMap<String, String>,
+//   pub actor_identity: String,
+//   pub artifact_identity: String,
+//   pub policy_snapshot_hash: String,
+//   pub timestamp_millis: u64,
+//   pub sequence_number: u64,
+//   pub witness_references: Vec<String>,
+//   pub trace_id: String,
+// }
+// pub struct ExecutionReceiptError;
+// pub fn validate_receipt() {}
+// pub fn serialize_canonical() {}
+// pub fn receipt_hash_sha256() {}
+// pub fn verify_hash() {}
+// pub fn round_trip_canonical_bytes() {}
+// pub fn canonicalized() {}
+// pub const VEF_RECEIPT_001_CREATED: &str = "VEF-RECEIPT-001";
+// pub const VEF_RECEIPT_002_SERIALIZED: &str = "VEF-RECEIPT-002";
+// pub const ERR_VEF_RECEIPT_MISSING_FIELD: &str = "VEF-RECEIPT-ERR-001";
+// pub const ERR_VEF_RECEIPT_INVALID_VALUE: &str = "VEF-RECEIPT-ERR-002";
+// pub const ERR_VEF_RECEIPT_SCHEMA_VERSION: &str = "VEF-RECEIPT-ERR-003";
+// pub const ERR_VEF_RECEIPT_HASH_MISMATCH: &str = "VEF-RECEIPT-ERR-004";
+// pub const ERR_VEF_RECEIPT_INTERNAL: &str = "VEF-RECEIPT-ERR-005";
+// pub const INV_VEF_RECEIPT_DETERMINISTIC: &str = "INV-VEF-RECEIPT-DETERMINISTIC";
+// pub const INV_VEF_RECEIPT_HASH_STABLE: &str = "INV-VEF-RECEIPT-HASH-STABLE";
+// pub const INV_VEF_RECEIPT_VERSIONED: &str = "INV-VEF-RECEIPT-VERSIONED";
+// pub const INV_VEF_RECEIPT_TRACEABLE: &str = "INV-VEF-RECEIPT-TRACEABLE";
+// Sha256
+// sha256:
+// witness_references.sort()
+// #[test]
+// #[test]
+// #[test]
+"""
+        with patch.object(mod, "_impl_code", lambda: mod._strip_rust_comments(comment_only_impl)):
+            mod.RESULTS.clear()
+            mod.check_impl_symbols()
+            results = {entry["check"]: entry for entry in mod.RESULTS}
+
+        for check in (
+            "impl_symbol_pub enum ExecutionActionType",
+            "impl_symbol_pub struct ExecutionReceipt",
+            "impl_symbol_pub fn validate_receipt",
+            "impl_field_schema_version",
+            "impl_action_type_network_access",
+            "impl_event_VEF-RECEIPT-001",
+            "impl_error_VEF-RECEIPT-ERR-001",
+            "impl_invariant_INV-VEF-RECEIPT-DETERMINISTIC",
+            "impl_minimum_unit_tests",
+        ):
+            self.assertFalse(results[check]["pass"], check)
+
+    def test_comment_only_mod_wiring_fails_closed(self) -> None:
+        with patch.object(mod, "_mod_code", lambda: mod._strip_rust_comments("// pub mod vef_execution_receipt;")):
+            mod.RESULTS.clear()
+            mod.check_mod_wiring()
+            results = {entry["check"]: entry for entry in mod.RESULTS}
+
+        self.assertFalse(results["connector_mod_wires_vef_execution_receipt"]["pass"])
 
 
 if __name__ == "__main__":
