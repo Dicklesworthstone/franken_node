@@ -22,7 +22,8 @@ def run_doctor_command() -> dict:
         cwd=ROOT,
         capture_output=True,
         text=True,
-        check=False  # Handle errors explicitly
+        check=False,  # Handle errors explicitly
+        timeout=30,
     )
 
     if result.returncode != 0:
@@ -30,7 +31,7 @@ def run_doctor_command() -> dict:
         return {}
 
     try:
-        return json.loads(result.stdout)
+        return json.loads(result.stdout)  # ubs:ignore - JSONDecodeError is handled below.
     except (json.JSONDecodeError, ValueError) as e:
         print(f"Failed to parse JSON output: {e}")
         return {}
@@ -51,12 +52,15 @@ def test_workspace_pressure_checks():
     ]
 
     expected_scopes = [
+        "workspace.pressure",
+    ]
+    forbidden_legacy_scopes = {
         "workspace.inventory",
         "workspace.build_pressure",
         "workspace.rch_availability",
         "workspace.coordination",
-        "workspace.reservations"
-    ]
+        "workspace.reservations",
+    }
 
     found_scopes = {check.get("scope") for check in workspace_checks}
 
@@ -64,6 +68,10 @@ def test_workspace_pressure_checks():
         if expected not in found_scopes:
             print(f"Missing expected workspace check: {expected}")
             return False
+    legacy_scopes = sorted(found_scopes.intersection(forbidden_legacy_scopes))
+    if legacy_scopes:
+        print(f"Default doctor still exposes legacy workspace checks: {legacy_scopes}")
+        return False
 
     # Verify check structure
     for check in workspace_checks:
@@ -71,6 +79,15 @@ def test_workspace_pressure_checks():
         for field in required_fields:
             if field not in check:
                 print(f"Missing field {field} in check {check.get('scope')}")
+                return False
+        if check.get("scope") == "workspace.pressure":
+            message = check.get("message", "")
+            remediation = check.get("remediation", "")
+            if "Workspace pressure" not in message:
+                print("workspace.pressure check does not report real pressure summary")
+                return False
+            if "doctor workspace-pressure --json" not in remediation:
+                print("workspace.pressure remediation does not point to real JSON report")
                 return False
 
     print(f"✓ All {len(workspace_checks)} workspace pressure checks present and valid")

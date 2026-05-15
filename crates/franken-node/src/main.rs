@@ -117,6 +117,7 @@ use crate::cli::{
     VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
     load_doctor_policy_activation_input,
 };
+use crate::ops::workspace_pressure_policy::WorkspacePressureInputs;
 use crate::policy::{
     bayesian_diagnostics::{BayesianDiagnostics, CandidateRef, Observation},
     decision_engine::{DecisionEngine, DecisionOutcome, DecisionReason},
@@ -6266,25 +6267,10 @@ fn handle_doctor_evidence_readiness(
 
 fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Result<()> {
     use crate::ops::doctor::WorkspacePressureDoctor;
-    use crate::ops::workspace_pressure_policy::{
-        PolicyThresholds, WorkspacePressureInputs, get_workspace_disk_space,
-        get_workspace_file_reservations,
-    };
+    use crate::ops::workspace_pressure_policy::PolicyThresholds;
     use std::fs;
 
-    // Collect current workspace pressure inputs
-    let inputs = WorkspacePressureInputs {
-        free_disk_bytes: get_workspace_disk_space()
-            .map_err(|err| anyhow::anyhow!("failed collecting workspace disk space: {err}"))?,
-        target_dir_bytes: get_target_directory_size()?,
-        active_build_count: get_active_build_count()?,
-        rch_available_slots: get_rch_available_slots(),
-        memory_pressure: get_memory_pressure()?,
-        active_reservations: get_workspace_file_reservations().map_err(|err| {
-            anyhow::anyhow!("failed collecting workspace file reservations: {err}")
-        })?,
-        coordination_healthy: get_coordination_health()?,
-    };
+    let inputs = collect_workspace_pressure_inputs()?;
 
     // Determine thresholds based on CLI flags
     let doctor = if args.conservative {
@@ -6324,6 +6310,25 @@ fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Resul
     }
 
     Ok(())
+}
+
+fn collect_workspace_pressure_inputs() -> Result<WorkspacePressureInputs> {
+    use crate::ops::workspace_pressure_policy::{
+        get_workspace_disk_space, get_workspace_file_reservations,
+    };
+
+    Ok(WorkspacePressureInputs {
+        free_disk_bytes: get_workspace_disk_space()
+            .map_err(|err| anyhow::anyhow!("failed collecting workspace disk space: {err}"))?,
+        target_dir_bytes: get_target_directory_size()?,
+        active_build_count: get_active_build_count()?,
+        rch_available_slots: get_rch_available_slots(),
+        memory_pressure: get_memory_pressure()?,
+        active_reservations: get_workspace_file_reservations().map_err(|err| {
+            anyhow::anyhow!("failed collecting workspace file reservations: {err}")
+        })?,
+        coordination_healthy: get_coordination_health()?,
+    })
 }
 
 // Helper functions for collecting workspace pressure data
@@ -10068,314 +10073,55 @@ fn evaluate_doctor_check(
 
 // Workspace pressure evaluation functions (bd-p9mpd.5)
 
-fn evaluate_workspace_inventory_pressure() -> (DoctorStatus, String, String) {
-    // Stub implementation - full implementation depends on bd-p9mpd.2 (artifact inventory)
-    match std::fs::metadata(".") {
-        Ok(_) => {
-            // Simulate inventory check with basic disk usage
-            let estimated_artifacts = estimate_workspace_artifacts();
-            let protected_bytes = estimate_protected_bytes();
-            let disposable_bytes = estimate_disposable_bytes();
-
-            let message = format!(
-                "Workspace inventory: ~{} artifacts, {:.1}MB protected, {:.1}MB disposable",
-                estimated_artifacts,
-                protected_bytes as f64 / 1024.0 / 1024.0,
-                disposable_bytes as f64 / 1024.0 / 1024.0
+fn evaluate_workspace_pressure_governance() -> (DoctorStatus, String, String) {
+    let inputs = match collect_workspace_pressure_inputs() {
+        Ok(inputs) => inputs,
+        Err(err) => {
+            return (
+                DoctorStatus::Fail,
+                format!("Workspace pressure inputs unavailable: {err}"),
+                "Run `franken-node doctor workspace-pressure --json` after fixing the input collection error.".to_string(),
             );
-
-            if disposable_bytes > 500 * 1024 * 1024 {
-                // > 500MB disposable
-                (
-                    DoctorStatus::Warn,
-                    message,
-                    "Consider running workspace cleanup when safe".to_string(),
-                )
-            } else {
-                (
-                    DoctorStatus::Pass,
-                    message,
-                    "No action required".to_string(),
-                )
-            }
         }
-        Err(e) => (
-            DoctorStatus::Fail,
-            format!("Cannot access workspace: {}", e),
-            "Check workspace permissions and availability".to_string(),
-        ),
-    }
-}
-
-fn evaluate_build_pressure() -> (DoctorStatus, String, String) {
-    // Check for active cargo processes and target directories
-    let target_dirs = count_target_directories();
-    let active_builds = count_active_builds();
-
-    let message = format!(
-        "Build pressure: {} target directories, {} active processes",
-        target_dirs, active_builds
-    );
-
-    if active_builds > 3 {
-        (
-            DoctorStatus::Warn,
-            message,
-            "High build concurrency - consider using RCH for offload".to_string(),
-        )
-    } else if target_dirs > 5 {
-        (
-            DoctorStatus::Warn,
-            message,
-            "Many target directories detected - cleanup may free disk space".to_string(),
-        )
-    } else {
-        (
-            DoctorStatus::Pass,
-            message,
-            "Build pressure within normal range".to_string(),
-        )
-    }
-}
-
-fn evaluate_rch_availability() -> (DoctorStatus, String, String) {
-    // Check RCH daemon status (stub implementation)
-    match std::process::Command::new("rch").arg("status").output() {
-        Ok(output) if output.status.success() => {
-            let status_text = String::from_utf8_lossy(&output.stdout);
-            if status_text.contains("healthy") {
-                (
-                    DoctorStatus::Pass,
-                    "RCH available and healthy".to_string(),
-                    "No action required".to_string(),
-                )
-            } else if status_text.contains("degraded") {
-                (
-                    DoctorStatus::Warn,
-                    "RCH available but degraded".to_string(),
-                    "Check RCH worker status".to_string(),
-                )
-            } else {
-                (
-                    DoctorStatus::Warn,
-                    "RCH status unclear".to_string(),
-                    "Run 'rch doctor' for detailed status".to_string(),
-                )
-            }
-        }
-        Ok(_) => (
-            DoctorStatus::Warn,
-            "RCH command failed".to_string(),
-            "Check RCH installation and configuration".to_string(),
-        ),
-        Err(_) => (
-            DoctorStatus::Fail,
-            "RCH not available".to_string(),
-            "Install RCH or prepare for local-only builds".to_string(),
-        ),
-    }
-}
-
-fn evaluate_coordination_health() -> (DoctorStatus, String, String) {
-    // Check Agent Mail and Beads coordination (stub implementation)
-    let beads_health = check_beads_health();
-    let mail_health = check_agent_mail_health();
-
-    match (beads_health, mail_health) {
-        (true, true) => (
-            DoctorStatus::Pass,
-            "Agent coordination healthy".to_string(),
-            "No action required".to_string(),
-        ),
-        (true, false) => (
-            DoctorStatus::Warn,
-            "Beads healthy, Agent Mail issues detected".to_string(),
-            "Check Agent Mail MCP server connectivity".to_string(),
-        ),
-        (false, true) => (
-            DoctorStatus::Warn,
-            "Agent Mail healthy, Beads issues detected".to_string(),
-            "Run 'br sync --flush-only' to check Beads state".to_string(),
-        ),
-        (false, false) => (
-            DoctorStatus::Fail,
-            "Agent coordination degraded".to_string(),
-            "Check both Beads and Agent Mail connectivity".to_string(),
-        ),
-    }
-}
-
-fn evaluate_active_reservations() -> (DoctorStatus, String, String) {
-    evaluate_active_reservations_from_count(count_active_reservations())
-}
-
-fn evaluate_active_reservations_from_count(
-    reservations: Option<u32>,
-) -> (DoctorStatus, String, String) {
-    let Some(reservations) = reservations else {
-        return (
-            DoctorStatus::Warn,
-            "Active file reservations: unknown".to_string(),
-            "Agent Mail reservation data unavailable - check coordination before cleanup"
-                .to_string(),
-        );
     };
 
-    let message = format!("Active file reservations: {reservations}");
+    let doctor = crate::ops::doctor::WorkspacePressureDoctor::new();
+    let report = doctor.generate_report(&inputs);
+    let status = match report.status {
+        crate::ops::doctor::DoctorStatus::Healthy => DoctorStatus::Pass,
+        crate::ops::doctor::DoctorStatus::Warning | crate::ops::doctor::DoctorStatus::Degraded => {
+            DoctorStatus::Warn
+        }
+        crate::ops::doctor::DoctorStatus::Critical => DoctorStatus::Fail,
+    };
 
-    if reservations > 10 {
-        (
-            DoctorStatus::Warn,
-            message,
-            "Many active reservations - coordinate with other agents before cleanup".to_string(),
-        )
-    } else if reservations > 0 {
-        (
-            DoctorStatus::Pass,
-            message,
-            "Some active reservations - normal for multi-agent work".to_string(),
-        )
+    let coordination = if report.resources.coordination_healthy {
+        "healthy"
     } else {
-        (
-            DoctorStatus::Pass,
-            message,
-            "No active reservations".to_string(),
-        )
-    }
-}
+        "degraded"
+    };
+    let message = format!(
+        "Workspace pressure {}: {}; free_disk={}, target_dir={}, active_builds={}, rch={}, reservations={}, coordination={}",
+        report.status.as_str(),
+        report.summary,
+        report.resources.free_disk_human,
+        report.resources.target_dir_human,
+        report.resources.active_builds,
+        report.resources.rch_status.status_desc,
+        report.resources.active_reservations,
+        coordination
+    );
 
-// Helper functions for workspace pressure evaluation
+    let remediation = report
+        .recommended_actions
+        .first()
+        .map(|action| format!("{}: {}", action.action, action.explanation))
+        .unwrap_or_else(|| "No action required.".to_string());
+    let remediation = format!(
+        "{remediation} Detailed machine output: `franken-node doctor workspace-pressure --json`."
+    );
 
-fn estimate_workspace_artifacts() -> usize {
-    // Simple estimate based on common artifact locations
-    let mut count: usize = 0;
-
-    if let Ok(entries) = std::fs::read_dir("target") {
-        count = count.saturating_add(entries.count());
-    }
-
-    if let Ok(entries) = std::fs::read_dir("/tmp") {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str()
-                && (name.contains("cargo") || name.contains("rust") || name.contains("rch"))
-            {
-                count = count.saturating_add(1);
-            }
-        }
-    }
-
-    count
-}
-
-fn estimate_protected_bytes() -> u64 {
-    // Estimate protected bytes (source code, configs, logs)
-    let mut total: u64 = 0;
-
-    // Source directories
-    for dir in ["src", "crates", "tests", "docs", "scripts"] {
-        if let Ok(size) = calculate_directory_size(dir) {
-            total = total.saturating_add(size);
-        }
-    }
-
-    total
-}
-
-fn estimate_disposable_bytes() -> u64 {
-    // Estimate disposable bytes (target dirs, temp files)
-    let mut total: u64 = 0;
-
-    if let Ok(size) = calculate_directory_size("target") {
-        total = total.saturating_add(size);
-    }
-
-    // Temp directories
-    if let Ok(entries) = std::fs::read_dir("/tmp") {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str()
-                && (name.contains("cargo") || name.contains("rust") || name.contains("rch"))
-                && let Ok(size) = calculate_directory_size(entry.path())
-            {
-                total = total.saturating_add(size);
-            }
-        }
-    }
-
-    total
-}
-
-fn count_target_directories() -> usize {
-    let mut count: usize = 0;
-
-    if std::path::Path::new("target").exists() {
-        count = count.saturating_add(1);
-    }
-
-    // Count temp target directories
-    if let Ok(entries) = std::fs::read_dir("/tmp") {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str()
-                && (name.contains("target") || name.contains("cargo"))
-            {
-                count = count.saturating_add(1);
-            }
-        }
-    }
-
-    count
-}
-
-fn count_active_builds() -> usize {
-    // Check for active cargo/rustc processes
-    match std::process::Command::new("pgrep")
-        .arg("-c")
-        .arg("cargo|rustc")
-        .output()
-    {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse::<usize>()
-            .unwrap_or(0),
-        _ => 0,
-    }
-}
-
-fn check_beads_health() -> bool {
-    // Check if beads command works
-    std::process::Command::new("br")
-        .arg("list")
-        .arg("--limit=1")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn check_agent_mail_health() -> bool {
-    // Check if agent mail directory exists and is accessible
-    std::path::Path::new(".agent-mail").exists() || std::path::Path::new("agents").exists()
-}
-
-fn count_active_reservations() -> Option<u32> {
-    crate::ops::workspace_pressure_policy::try_get_workspace_file_reservations()
-}
-
-fn calculate_directory_size<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<u64> {
-    let path = path.as_ref();
-    if !path.exists() {
-        return Ok(0);
-    }
-
-    let mut total: u64 = 0;
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        if metadata.is_dir() {
-            total = total.saturating_add(calculate_directory_size(entry.path()).unwrap_or(0));
-        } else {
-            total = total.saturating_add(metadata.len());
-        }
-    }
-    Ok(total)
+    (status, message, remediation)
 }
 
 fn build_doctor_report(resolved: &config::ResolvedConfig, trace_id: &str) -> DoctorReport {
@@ -11059,40 +10805,12 @@ fn build_doctor_report_with_cwd_and_policy_input(
         },
     ));
 
-    // Workspace pressure governance checks (bd-p9mpd.5)
+    // Workspace pressure governance check (bd-p9mpd.5)
     checks.push(evaluate_doctor_check(
         "DR-WORKSPACE-001",
         "DOC-WSP-001",
-        "workspace.inventory",
-        evaluate_workspace_inventory_pressure,
-    ));
-
-    checks.push(evaluate_doctor_check(
-        "DR-WORKSPACE-002",
-        "DOC-WSP-002",
-        "workspace.build_pressure",
-        evaluate_build_pressure,
-    ));
-
-    checks.push(evaluate_doctor_check(
-        "DR-WORKSPACE-003",
-        "DOC-WSP-003",
-        "workspace.rch_availability",
-        evaluate_rch_availability,
-    ));
-
-    checks.push(evaluate_doctor_check(
-        "DR-WORKSPACE-004",
-        "DOC-WSP-004",
-        "workspace.coordination",
-        evaluate_coordination_health,
-    ));
-
-    checks.push(evaluate_doctor_check(
-        "DR-WORKSPACE-005",
-        "DOC-WSP-005",
-        "workspace.reservations",
-        evaluate_active_reservations,
+        "workspace.pressure",
+        evaluate_workspace_pressure_governance,
     ));
 
     // DR-RESOURCE-GOVERNOR-014: Check workspace resource pressure monitoring
@@ -12013,6 +11731,8 @@ mod doctor_tests {
                 "DR-ENV-007",
                 "DR-CONFIG-008",
                 "DR-BENCH-015",
+                "DR-WORKSPACE-001",
+                "DR-RESOURCE-GOVERNOR-014",
             ]
         );
         let event_codes = report
@@ -12035,6 +11755,13 @@ mod doctor_tests {
             .find(|check| check.code == "DR-BENCH-015")
             .expect("benchmark check present");
         assert_eq!(benchmark_check.event_code, "DOC-015");
+        let workspace_check = report
+            .checks
+            .iter()
+            .find(|check| check.code == "DR-WORKSPACE-001")
+            .expect("workspace pressure check present");
+        assert_eq!(workspace_check.event_code, "DOC-WSP-001");
+        assert_eq!(workspace_check.scope, "workspace.pressure");
         assert_eq!(report.structured_logs.len(), report.checks.len());
         assert_eq!(report.trace_id, "trace-test");
     }
