@@ -850,6 +850,7 @@ fn _assert_send_sync() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lock_utils::try_lock;
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -2365,7 +2366,8 @@ mod sybil_defense_negative_path_tests {
 
         // Register shared nodes
         {
-            let mut p = pipeline.lock().unwrap();
+            let mut p = try_lock(&pipeline, "register shared sybil defense nodes")
+                .expect("sybil defense pipeline mutex should not be poisoned");
             for i in 0..20 {
                 p.register_node(TrustNode::established(
                     format!("shared-node-{}", i),
@@ -2423,7 +2425,11 @@ mod sybil_defense_negative_path_tests {
         }
 
         // Verify pipeline remains in valid state after concurrent stress
-        let final_pipeline = pipeline.lock().unwrap();
+        let final_pipeline = try_lock(
+            &pipeline,
+            "inspect sybil defense pipeline after concurrent stress",
+        )
+        .expect("sybil defense pipeline mutex should not be poisoned");
         assert_eq!(
             final_pipeline.nodes().len(),
             20,
@@ -2440,7 +2446,11 @@ mod sybil_defense_negative_path_tests {
         }];
 
         drop(final_pipeline); // Release lock before reacquiring
-        let mut final_pipeline = pipeline.lock().unwrap();
+        let mut final_pipeline = try_lock(
+            &pipeline,
+            "process sybil defense signals after concurrent stress",
+        )
+        .expect("sybil defense pipeline mutex should not be poisoned");
         let final_result = final_pipeline.process_signals(&test_signals, 1_700_002_000);
         assert!(
             final_result.is_ok(),

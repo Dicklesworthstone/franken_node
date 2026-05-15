@@ -1004,6 +1004,7 @@ impl Default for AttestationLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lock_utils::try_lock;
 
     fn test_policy() -> ZkPolicy {
         ZkPolicy {
@@ -2366,7 +2367,9 @@ mod tests {
 
                 for i in 0..25 {
                     let attestation_id = format!("thread-{}-attestation-{}", thread_id, i);
-                    let mut ledger_guard = ledger.lock().unwrap();
+                    let mut ledger_guard =
+                        try_lock(&ledger, "generate zk attestations concurrently")
+                            .expect("zk attestation ledger mutex should not be poisoned");
 
                     let proof_result = ledger_guard.generate_proof(
                         &attestation_id,
@@ -2391,7 +2394,8 @@ mod tests {
         }
 
         // Verify ledger consistency
-        let final_ledger = ledger.lock().unwrap();
+        let final_ledger = try_lock(&ledger, "inspect zk attestation ledger final state")
+            .expect("zk attestation ledger mutex should not be poisoned");
         assert_eq!(final_ledger.attestations.len(), 100); // 4 threads × 25 attestations
         assert!(final_ledger.audit_trail.len() >= 100); // At least one audit record per attestation
     }
@@ -2438,7 +2442,7 @@ mod tests {
 
         for _ in 0..100 {
             // Time legitimate verification
-            let start = Instant::now();
+            let start = Instant::now(); // ubs:ignore - test timing measurement, not random generation.
             let _legit_verification_result = ledger.verify_proof(
                 &legit_result.as_ref().unwrap(),
                 &policy,
@@ -2448,7 +2452,7 @@ mod tests {
             push_bounded(&mut legit_times, start.elapsed(), MAX_TIMING_SAMPLES);
 
             // Time forged verification
-            let start = Instant::now();
+            let start = Instant::now(); // ubs:ignore - test timing measurement, not random generation.
             let _forged_verification_result = ledger.verify_proof(
                 &forged,
                 &policy,
@@ -2472,12 +2476,12 @@ mod tests {
             let timing_ratio = max_time.as_nanos() as f64 / min_time.as_nanos() as f64;
 
             // Security: guard against non-finite division results
-            if !timing_ratio.is_finite() {
-                panic!(
-                    "Invalid timing ratio computation: max={:?}, min={:?}",
-                    max_time, min_time
-                );
-            }
+            assert!(
+                timing_ratio.is_finite(),
+                "Invalid timing ratio computation: max={:?}, min={:?}",
+                max_time,
+                min_time
+            );
 
             // Allow up to 3x difference due to normal variance
             assert!(
