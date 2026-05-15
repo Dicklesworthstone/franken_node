@@ -111,14 +111,111 @@ def check_file(path: Path, label: str) -> dict[str, Any]:
     return {
         "check": f"file: {label}",
         "pass": ok,
-        "detail": f"exists: {path.relative_to(ROOT)}" if ok else f"missing: {path}",
+        "detail": f"exists: {display_path(path)}" if ok else f"missing: {path}",
     }
 
 
-def check_contains(path: Path, patterns: list[str], label: str) -> list[dict[str, Any]]:
+def display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def read_rust_source(path: Path) -> str:
+    return strip_rust_comments(read_text(path))
+
+
+def strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
+def check_contains(path: Path, patterns: list[str], label: str, *, strip_comments: bool = False) -> list[dict[str, Any]]:
     if not path.is_file():
         return [{"check": f"{label}: {pattern}", "pass": False, "detail": "file missing"} for pattern in patterns]
-    content = path.read_text(encoding="utf-8")
+    content = read_rust_source(path) if strip_comments else read_text(path)
     checks = []
     for pattern in patterns:
         checks.append(
@@ -135,7 +232,7 @@ def check_rust_tests() -> list[dict[str, Any]]:
     if not IMPL.is_file():
         return [{"check": "rust tests: implementation readable", "pass": False, "detail": "file missing"}]
 
-    content = IMPL.read_text(encoding="utf-8")
+    content = read_rust_source(IMPL)
     test_count = content.count("#[test]")
     checks = [
         {
@@ -234,8 +331,8 @@ def run_checks() -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     checks.append(check_file(IMPL, "counterfactual replay implementation"))
     checks.append(check_file(SPEC, "contract"))
-    checks.extend(check_contains(IMPL, REQUIRED_IMPL_PATTERNS, "impl"))
-    checks.extend(check_contains(MOD_RS, ["pub mod counterfactual_replay;"], "module wiring"))
+    checks.extend(check_contains(IMPL, REQUIRED_IMPL_PATTERNS, "impl", strip_comments=True))
+    checks.extend(check_contains(MOD_RS, ["pub mod counterfactual_replay;"], "module wiring", strip_comments=True))
     checks.extend(
         check_contains(
             MAIN_RS,
@@ -245,6 +342,7 @@ def run_checks() -> dict[str, Any]:
                 "counterfactual summary:",
             ],
             "cli wiring",
+            strip_comments=True,
         )
     )
     checks.append(check_file(EVIDENCE, "verification evidence"))
