@@ -308,6 +308,22 @@ class RealRepoTests(unittest.TestCase):
         self.assertEqual(rule["allowlist_escape_count"], 0)
         self.assertGreaterEqual(rule["allowlisted_occurrence_count"], 1)
 
+    def test_time_travel_fixture_identity_rule_allows_crate_metamorphic_test(self) -> None:
+        payload = mod.run_all()
+        rule = next(
+            rule
+            for rule in payload["rules"]
+            if rule["rule_id"] == "time_travel_fixture_identity_replay_boundary"
+        )
+        allowlisted_paths = {occurrence["path"] for occurrence in rule["allowlisted_occurrences"]}
+
+        self.assertEqual(rule["unexpected_occurrence_count"], 0)
+        self.assertEqual(rule["allowlist_escape_count"], 0)
+        self.assertIn(
+            "crates/franken-node/tests/time_travel_metamorphic.rs",
+            allowlisted_paths,
+        )
+
 
 class ArtifactWriteTests(unittest.TestCase):
     def test_write_artifacts_creates_expected_files(self) -> None:

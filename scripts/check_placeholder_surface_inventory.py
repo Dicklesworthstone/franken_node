@@ -350,6 +350,7 @@ RULES: tuple[RuleSpec, ...] = (
             "crates/franken-node/src/replay/time_travel_engine.rs",
             "crates/franken-node/src/replay/replay_conformance_tests.rs",
             "crates/franken-node/src/replay/mod.rs",
+            "crates/franken-node/tests/time_travel_metamorphic.rs",
             "tests/lab/time_travel_replay_equivalence.rs",
             "tests/conformance/replay_clock_drift_detection.rs",
         ),
