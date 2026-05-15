@@ -88,6 +88,10 @@ def _run_rust_tests() -> bool:
         return _check("GATE-RUST-UNIT", "Connector Rust unit tests pass", False, str(e))
 
 
+def _python_test_command(test_file: str) -> list[str]:
+    return [sys.executable, "-m", "pytest", "-q", test_file]
+
+
 def _run_python_tests() -> bool:
     """GATE-PYTHON-TESTS: Run Python tests scoped to section 10.13 check scripts."""
     # Collect test files referenced by 10.13 bead evidence
@@ -120,12 +124,15 @@ def _run_python_tests() -> bool:
     all_ok = True
     for tf in test_files:
         try:
-            class DummyResult:
-                returncode = 0
-                stdout = "test result: ok. 999 passed"
-                stderr = ""
-            result = DummyResult()
-            m = re.search(r"(\d+) passed", result.stdout)
+            result = subprocess.run(
+                _python_test_command(tf),
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=ROOT,
+            )
+            test_output = result.stdout + result.stderr
+            m = re.search(r"(\d+) passed", test_output)
             py_tests += int(m.group(1)) if m else 0
             if result.returncode != 0:
                 all_ok = False

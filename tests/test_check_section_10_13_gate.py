@@ -118,6 +118,40 @@ def test_rust_test_command_uses_rch_name_when_path_lookup_fails():
     assert cmd[:4] == ["rch", "exec", "--", "cargo"]
 
 
+def test_python_test_command_uses_pytest_for_target_file():
+    cmd = mod._python_test_command("tests/test_check_section_10_13_gate.py")
+
+    assert cmd == [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_check_section_10_13_gate.py",
+    ]
+
+
+def test_run_python_tests_executes_collected_tests():
+    result = mock.Mock(
+        returncode=0,
+        stdout="================ 12 passed in 0.42s ================\n",
+        stderr="",
+    )
+    with mock.patch.object(mod, "BEADS_10_13", []):
+        with mock.patch.object(mod.subprocess, "run", return_value=result) as run_mock:
+            mod.CHECKS.clear()
+            ok = mod._run_python_tests()
+
+    assert ok is True
+    run_mock.assert_called_once_with(
+        mod._python_test_command("tests/test_check_section_10_13_gate.py"),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=mod.ROOT,
+    )
+    assert mod.CHECKS[-1]["details"] == "12 tests passed across 1 files"
+
+
 def test_structural_partial_evidence_with_no_failures_counts_as_non_failing():
     evidence = {
         "verdict": "PARTIAL",
