@@ -13,13 +13,13 @@ import argparse
 import json
 import re
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 SPEC_PATH = ROOT / "docs" / "specs" / "section_10_6" / "bd-3q9_contract.md"
@@ -204,6 +204,112 @@ def _safe_rel(path: Path) -> str:
         return str(path)
 
 
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read_text(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        raw_start = _rust_raw_string_start(text, i)
+        if raw_start is not None:
+            body_start, hashes = raw_start
+            end = _rust_raw_string_end(text, body_start + 1, hashes)
+            if end is None:
+                out.append(text[i:])
+                break
+            out.append(text[i:end])
+            i = end
+            continue
+
+        ch = text[i]
+        if ch == '"':
+            end = _rust_quoted_literal_end(text, i)
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if text.startswith("//", i):
+            newline = text.find("\n", i + 2)
+            if newline == -1:
+                break
+            out.append("\n")
+            i = newline + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _rust_raw_string_start(text: str, index: int) -> tuple[int, int] | None:
+    n = len(text)
+    if text.startswith("br", index):
+        cursor = index + 2
+    elif text.startswith("r", index):
+        cursor = index + 1
+    else:
+        return None
+
+    hashes = 0
+    while cursor < n and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+    if cursor < n and text[cursor] == '"':
+        return cursor, hashes
+    return None
+
+
+def _rust_raw_string_end(text: str, index: int, hashes: int) -> int | None:
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, index)
+    if end == -1:
+        return None
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, index: int) -> int:
+    i = index + 1
+    n = len(text)
+    escaped = False
+    while i < n:
+        ch = text[i]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == '"':
+            return i + 1
+        i += 1
+    return n
+
+
+def _rust_block_comment_end(text: str, index: int) -> int:
+    depth = 1
+    i = index
+    n = len(text)
+    while i < n and depth:
+        if text.startswith("/*", i):
+            depth += 1
+            i += 2
+        elif text.startswith("*/", i):
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
+
+
 def _check(name: str, passed: bool, detail: str = "") -> dict[str, Any]:
     entry = {
         "check": name,
@@ -236,13 +342,19 @@ def _file_contains(path: Path, pattern: str, label: str) -> dict[str, Any]:
     )
 
 
-def _check_content(path: Path, patterns: list[str], category: str) -> list[dict[str, Any]]:
+def _check_content(
+    path: Path,
+    patterns: list[str],
+    category: str,
+    *,
+    strip_comments: bool = True,
+) -> list[dict[str, Any]]:
     results = []
     if not path.is_file():
         for p in patterns:
             results.append(_check(f"{category}: {p}", False, "file missing"))
         return results
-    text = path.read_text(encoding="utf-8")
+    text = _read_rust_source(path) if strip_comments else _read_text(path)
     for p in patterns:
         found = p in text
         results.append(_check(
@@ -256,7 +368,7 @@ def _check_content(path: Path, patterns: list[str], category: str) -> list[dict[
 def check_module_registered() -> dict[str, Any]:
     if not MOD_RS.is_file():
         return _check("module registered in mod.rs", False, "mod.rs missing")
-    text = MOD_RS.read_text(encoding="utf-8")
+    text = _read_rust_source(MOD_RS)
     found = "pub mod rollback_bundle;" in text
     return _check(
         "module registered in mod.rs",
@@ -268,7 +380,7 @@ def check_module_registered() -> dict[str, Any]:
 def check_impl_test_count() -> dict[str, Any]:
     if not RUST_IMPL.is_file():
         return _check("impl unit test count", False, "impl missing")
-    text = RUST_IMPL.read_text(encoding="utf-8")
+    text = _read_rust_source(RUST_IMPL)
     count = len(re.findall(r"#\[test\]", text))
     ok = count >= 40
     return _check(
@@ -281,7 +393,7 @@ def check_impl_test_count() -> dict[str, Any]:
 def check_serde_derives() -> dict[str, Any]:
     if not RUST_IMPL.is_file():
         return _check("Serialize/Deserialize derives", False, "impl missing")
-    text = RUST_IMPL.read_text(encoding="utf-8")
+    text = _read_rust_source(RUST_IMPL)
     has_ser = "Serialize" in text and "Deserialize" in text
     return _check(
         "Serialize/Deserialize derives",
@@ -293,7 +405,7 @@ def check_serde_derives() -> dict[str, Any]:
 def check_sha256_usage() -> dict[str, Any]:
     if not RUST_IMPL.is_file():
         return _check("SHA-256 usage", False, "impl missing")
-    text = RUST_IMPL.read_text(encoding="utf-8")
+    text = _read_rust_source(RUST_IMPL)
     has_sha = "Sha256" in text and "sha2" in text
     return _check(
         "SHA-256 usage",
@@ -305,7 +417,7 @@ def check_sha256_usage() -> dict[str, Any]:
 def check_idempotency_test() -> dict[str, Any]:
     if not RUST_IMPL.is_file():
         return _check("idempotency test", False, "impl missing")
-    text = RUST_IMPL.read_text(encoding="utf-8")
+    text = _read_rust_source(RUST_IMPL)
     found = "test_apply_rollback_idempotent" in text
     return _check(
         "idempotency test",
@@ -317,7 +429,7 @@ def check_idempotency_test() -> dict[str, Any]:
 def check_dry_run_test() -> dict[str, Any]:
     if not RUST_IMPL.is_file():
         return _check("dry-run test", False, "impl missing")
-    text = RUST_IMPL.read_text(encoding="utf-8")
+    text = _read_rust_source(RUST_IMPL)
     found = "test_dry_run_no_state_change" in text and "DryRun" in text
     return _check(
         "dry-run test",
@@ -329,7 +441,7 @@ def check_dry_run_test() -> dict[str, Any]:
 def check_deterministic_restore() -> dict[str, Any]:
     if not RUST_IMPL.is_file():
         return _check("deterministic restore logic", False, "impl missing")
-    text = RUST_IMPL.read_text(encoding="utf-8")
+    text = _read_rust_source(RUST_IMPL)
     has_snapshot = "StateSnapshot" in text
     has_diff = "fn diff(" in text
     has_hash = "fn snapshot_hash(" in text
@@ -347,7 +459,7 @@ def check_health_check_kinds() -> list[dict[str, Any]]:
         for hc in REQUIRED_HEALTH_CHECKS:
             results.append(_check(f"health_check: {hc}", False, "impl missing"))
         return results
-    text = RUST_IMPL.read_text(encoding="utf-8")
+    text = _read_rust_source(RUST_IMPL)
     for hc in REQUIRED_HEALTH_CHECKS:
         found = hc in text
         results.append(_check(
@@ -452,13 +564,19 @@ def run_all() -> dict[str, Any]:
     check_health_check_kinds()
 
     # Event codes in spec
-    _check_content(SPEC_PATH, REQUIRED_EVENT_CODES, "spec_event_code")
+    _check_content(
+        SPEC_PATH, REQUIRED_EVENT_CODES, "spec_event_code", strip_comments=False
+    )
 
     # Invariants in spec
-    _check_content(SPEC_PATH, REQUIRED_INVARIANTS, "spec_invariant")
+    _check_content(
+        SPEC_PATH, REQUIRED_INVARIANTS, "spec_invariant", strip_comments=False
+    )
 
     # Error codes in spec
-    _check_content(SPEC_PATH, REQUIRED_ERROR_CODES, "spec_error_code")
+    _check_content(
+        SPEC_PATH, REQUIRED_ERROR_CODES, "spec_error_code", strip_comments=False
+    )
 
     # Spec sections
     check_spec_sections()
@@ -492,19 +610,27 @@ def run_all() -> dict[str, Any]:
 def self_test() -> bool:
     """Run self-test verifying the check harness returns expected shape."""
     report = run_all()
-    assert isinstance(report, dict), "run_all must return dict"
-    assert report["bead_id"] == "bd-3q9", "bead_id must be bd-3q9"
-    assert report["section"] == "10.6", "section must be 10.6"
-    assert "checks" in report, "must have checks"
-    assert "summary" in report, "must have summary"
-    assert isinstance(report["checks"], list), "checks must be a list"
-    assert report["summary"]["total"] > 0, "must have at least one check"
-    assert all("check" in c and "pass" in c for c in report["checks"]), "each check must have check+pass"
+    if not isinstance(report, dict):
+        raise AssertionError("run_all must return dict")
+    if report["bead_id"] != "bd-3q9":
+        raise AssertionError("bead_id must be bd-3q9")
+    if report["section"] != "10.6":
+        raise AssertionError("section must be 10.6")
+    if "checks" not in report:
+        raise AssertionError("must have checks")
+    if "summary" not in report:
+        raise AssertionError("must have summary")
+    if not isinstance(report["checks"], list):
+        raise AssertionError("checks must be a list")
+    if report["summary"]["total"] <= 0:
+        raise AssertionError("must have at least one check")
+    if not all("check" in c and "pass" in c for c in report["checks"]):
+        raise AssertionError("each check must have check+pass")
     return True
 
 
 def main() -> None:
-    logger = configure_test_logging("check_rollback_bundles")
+    configure_test_logging("check_rollback_bundles")
     parser = argparse.ArgumentParser(
         description="Verify bd-3q9 release rollback bundles implementation"
     )

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -208,6 +209,96 @@ class TestRustTests:
         assert result["pass"] is True
 
 
+class TestCommentOnlyRustRegression:
+    def test_comment_only_rust_markers_fail_closed(self):
+        commented_impl = "\n".join(
+            [
+                *(f"// {item}" for item in checker.REQUIRED_RUST_TYPES),
+                *(f"// {item}" for item in checker.REQUIRED_RUST_METHODS),
+                *(f"// {item}" for item in checker.REQUIRED_EVENT_CODES),
+                *(f"// {item}" for item in checker.REQUIRED_INVARIANTS),
+                *(f"// {item}" for item in checker.REQUIRED_ERROR_CODES),
+                *(f"// {item}" for item in checker.REQUIRED_RUST_TESTS),
+                "// Serialize Deserialize",
+                "// Sha256 sha2",
+                "// test_apply_rollback_idempotent",
+                "// test_dry_run_no_state_change DryRun",
+                "// StateSnapshot fn diff( fn snapshot_hash(",
+                *(f"// {item}" for item in checker.REQUIRED_HEALTH_CHECKS),
+                "/*",
+                *("// #[test]\n// fn commented_test() {}" for _ in range(40)),
+                "*/",
+            ]
+        )
+
+        original_impl = checker.RUST_IMPL
+        original_mod_rs = checker.MOD_RS
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            impl_path = tmp / "rollback_bundle.rs"
+            mod_path = tmp / "mod.rs"
+            impl_path.write_text(commented_impl, encoding="utf-8")
+            mod_path.write_text("// pub mod rollback_bundle;\n", encoding="utf-8")
+
+            try:
+                checker.RUST_IMPL = impl_path
+                checker.MOD_RS = mod_path
+                checker.RESULTS.clear()
+
+                impl_exists = checker._file_exists(checker.RUST_IMPL, "Rust implementation")
+                mod_exists = checker._file_exists(checker.MOD_RS, "connector mod.rs")
+                module_registered = checker.check_module_registered()
+                type_results = checker._check_content(
+                    checker.RUST_IMPL, checker.REQUIRED_RUST_TYPES, "type"
+                )
+                method_results = checker._check_content(
+                    checker.RUST_IMPL, checker.REQUIRED_RUST_METHODS, "method"
+                )
+                event_results = checker._check_content(
+                    checker.RUST_IMPL, checker.REQUIRED_EVENT_CODES, "event"
+                )
+                invariant_results = checker._check_content(
+                    checker.RUST_IMPL, checker.REQUIRED_INVARIANTS, "invariant"
+                )
+                error_results = checker._check_content(
+                    checker.RUST_IMPL, checker.REQUIRED_ERROR_CODES, "error"
+                )
+                rust_test_results = checker._check_content(
+                    checker.RUST_IMPL, checker.REQUIRED_RUST_TESTS, "rust_test"
+                )
+                single_checks = [
+                    checker.check_impl_test_count(),
+                    checker.check_serde_derives(),
+                    checker.check_sha256_usage(),
+                    checker.check_idempotency_test(),
+                    checker.check_dry_run_test(),
+                    checker.check_deterministic_restore(),
+                    *checker.check_health_check_kinds(),
+                ]
+            finally:
+                checker.RUST_IMPL = original_impl
+                checker.MOD_RS = original_mod_rs
+                checker.RESULTS.clear()
+
+        if impl_exists["pass"] is not True:
+            pytest.fail("comment-only Rust implementation file should still exist")
+        if mod_exists["pass"] is not True:
+            pytest.fail("comment-only mod.rs file should still exist")
+        if module_registered["pass"] is not False:
+            pytest.fail("comment-only module registration must fail closed")
+        for group in [
+            type_results,
+            method_results,
+            event_results,
+            invariant_results,
+            error_results,
+            rust_test_results,
+            single_checks,
+        ]:
+            if not all(result["pass"] is False for result in group):
+                pytest.fail("comment-only Rust markers must fail closed")
+
+
 # ---------------------------------------------------------------------------
 # Serde and SHA-256
 # ---------------------------------------------------------------------------
@@ -330,7 +421,7 @@ class TestFullEvidence:
     def test_json_serializable(self):
         report = checker.run_all()
         serialized = json.dumps(report)
-        roundtrip = json.loads(serialized)
+        roundtrip = json.JSONDecoder().decode(serialized)
         assert roundtrip["bead_id"] == "bd-3q9"
 
     def test_checks_list_type(self):
