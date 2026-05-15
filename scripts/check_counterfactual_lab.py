@@ -7,10 +7,10 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 BEAD = "bd-383z"
@@ -19,7 +19,7 @@ SECTION = "10.17"
 SPEC_FILE = ROOT / "docs/specs/counterfactual_incident_lab.md"
 IMPL_FILE = ROOT / "crates/franken-node/src/ops/mitigation_synthesis.rs"
 MOD_FILE = ROOT / "crates/franken-node/src/ops/mod.rs"
-MAIN_FILE = ROOT / "crates/franken-node/src/main.rs"
+LIB_FILE = ROOT / "crates/franken-node/src/lib.rs"
 LAB_TEST = ROOT / "tests/lab/counterfactual_mitigation_eval.rs"
 UNIT_TEST_FILE = ROOT / "tests/test_check_counterfactual_lab.py"
 REPORT_FILE = ROOT / "artifacts/10.17/counterfactual_eval_report.json"
@@ -57,26 +57,129 @@ def _read(path: Path) -> str:
     return ""
 
 
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+
+        raw_start = _rust_raw_string_start(text, i)
+        if raw_start is not None:
+            body_start, hashes = raw_start
+            end = _rust_raw_string_end(text, body_start + 1, hashes)
+            if end is None:
+                out.append(text[i:])
+                break
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if ch == '"':
+            end = _rust_quoted_literal_end(text, i, ch)
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if text.startswith("//", i):
+            newline = text.find("\n", i + 2)
+            if newline == -1:
+                break
+            out.append("\n")
+            i = newline + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _rust_raw_string_start(text: str, index: int) -> tuple[int, int] | None:
+    n = len(text)
+    if text.startswith("br", index):
+        cursor = index + 2
+    elif text.startswith("r", index):
+        cursor = index + 1
+    else:
+        return None
+
+    hashes = 0
+    while cursor < n and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+    if cursor < n and text[cursor] == '"':
+        return cursor, hashes
+    return None
+
+
+def _rust_raw_string_end(text: str, index: int, hashes: int) -> int | None:
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, index)
+    if end == -1:
+        return None
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, index: int, quote: str) -> int:
+    i = index + 1
+    n = len(text)
+    escaped = False
+    while i < n:
+        ch = text[i]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == quote:
+            return i + 1
+        i += 1
+    return n
+
+
+def _rust_block_comment_end(text: str, index: int) -> int:
+    depth = 1
+    i = index
+    n = len(text)
+    while i < n and depth:
+        if text.startswith("/*", i):
+            depth += 1
+            i += 2
+        elif text.startswith("*/", i):
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
+
+
 def _check(name: str, ok: bool, detail: str = "") -> dict:
     return {"check": name, "passed": ok, "detail": detail or ("ok" if ok else "FAIL")}
 
 
 def _checks() -> list[dict]:
     checks = []
-    impl_src = _read(IMPL_FILE)
-    mod_src = _read(MOD_FILE)
-    main_src = _read(MAIN_FILE)
+    impl_src = _read_rust_source(IMPL_FILE)
+    mod_src = _read_rust_source(MOD_FILE)
+    lib_src = _read_rust_source(LIB_FILE)
     spec_src = _read(SPEC_FILE)
-    lab_test_src = _read(LAB_TEST)
+    lab_test_src = _read_rust_source(LAB_TEST)
 
     # File existence checks
     checks.append(_check("Spec file exists", SPEC_FILE.exists(), str(SPEC_FILE)))
     checks.append(_check("Implementation file exists", IMPL_FILE.exists(), str(IMPL_FILE)))
     checks.append(_check("Ops mod file exists", MOD_FILE.exists(), str(MOD_FILE)))
     checks.append(_check(
-        "Main module wired",
-        "pub mod ops;" in main_src,
-        "pub mod ops; in main.rs",
+        "Library module wired",
+        "pub mod ops;" in lib_src,
+        "pub mod ops; in lib.rs",
     ))
     checks.append(_check(
         "Ops mod exports mitigation_synthesis",
@@ -207,7 +310,7 @@ def self_test() -> dict:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_counterfactual_lab")
+    configure_test_logging("check_counterfactual_lab")
     parser = argparse.ArgumentParser(description="bd-383z checker")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--self-test", action="store_true")
