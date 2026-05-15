@@ -1,0 +1,114 @@
+{
+  "schema_version": "franken-node/cross-repo-validation-drift/schema-catalog/v1",
+  "json_schema_draft": "https://json-schema.org/draft/2020-12/schema",
+  "snapshot_schema_uri": "https://franken-node.local/schemas/cross-repo-validation-drift/snapshot/v1",
+  "snapshot_schema_version": "franken-node/cross-repo-validation-drift/snapshot/v1",
+  "fixture_schema_version": "franken-node/cross-repo-validation-drift/fixtures/v1",
+  "max_dirty_files": 64,
+  "max_symbol_probes": 32,
+  "max_string_bytes": 1024,
+  "required_fields": [
+    "schema_version",
+    "snapshot_id",
+    "bead_id",
+    "thread_id",
+    "generated_at",
+    "producer",
+    "validation_command",
+    "command_digest",
+    "cargo_pressure",
+    "sibling_repo",
+    "symbol_probes",
+    "agent_mail",
+    "classification",
+    "recommended_action"
+  ],
+  "dirty_states": [
+    "clean",
+    "dirty_relevant",
+    "dirty_unrelated",
+    "unavailable"
+  ],
+  "symbol_statuses": [
+    "present",
+    "missing_referenced",
+    "absent_from_call_sites",
+    "not_checked"
+  ],
+  "beads_lock_statuses": [
+    "ok",
+    "timeout",
+    "stale_file",
+    "unavailable"
+  ],
+  "agent_mail_statuses": [
+    "green",
+    "red_corrupt",
+    "unavailable"
+  ],
+  "classification_codes": [
+    "CRVD_SAFE_TO_RUN",
+    "CRVD_BLOCKED_CARGO_PRESSURE",
+    "CRVD_BLOCKED_SIBLING_DIRTY_RELEVANT",
+    "CRVD_BLOCKED_SIBLING_API_DRIFT",
+    "CRVD_BLOCKED_SIBLING_BEADS_LOCK",
+    "CRVD_BLOCKED_AGENT_MAIL_CORRUPT",
+    "CRVD_NEEDS_RCH_REPROOF"
+  ],
+  "recommended_actions": [
+    "run_rch_validation",
+    "wait_for_cargo_pressure",
+    "coordinate_sibling_owner",
+    "inspect_sibling_api_drift",
+    "record_beads_blocker",
+    "source_only_handoff"
+  ],
+  "schemas": {
+    "CrossRepoValidationDriftSnapshot": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "https://franken-node.local/schemas/cross-repo-validation-drift/snapshot/v1",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "snapshot_id",
+        "bead_id",
+        "thread_id",
+        "generated_at",
+        "producer",
+        "validation_command",
+        "command_digest",
+        "cargo_pressure",
+        "sibling_repo",
+        "symbol_probes",
+        "agent_mail",
+        "classification",
+        "recommended_action"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "franken-node/cross-repo-validation-drift/snapshot/v1"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^crvd-[a-z0-9-]+$"
+        },
+        "bead_id": {
+          "type": "string",
+          "pattern": "^bd-[A-Za-z0-9.]+$"
+        },
+        "thread_id": {
+          "type": "string",
+          "pattern": "^bd-[A-Za-z0-9.]+$"
+        },
+        "command_digest": {
+          "type": "object",
+          "required": [
+            "algorithm",
+            "hex",
+            "canonical_material"
+          ]
+        }
+      }
+    }
+  }
+}

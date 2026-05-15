@@ -1,0 +1,573 @@
+{
+  "schema_version": "franken-node/cross-repo-validation-drift/fixtures/v1",
+  "validation_time": "2026-05-15T10:00:00Z",
+  "valid_snapshots": [
+    {
+      "schema_version": "franken-node/cross-repo-validation-drift/snapshot/v1",
+      "snapshot_id": "crvd-clean-safe-to-run",
+      "bead_id": "bd-clean1",
+      "thread_id": "bd-clean1",
+      "generated_at": "2026-05-15T09:50:00Z",
+      "producer": {
+        "agent_name": "SnowyBeaver",
+        "tool": "cross_repo_validation_drift",
+        "source_only": true
+      },
+      "validation_command": {
+        "program": "rch",
+        "argv": [
+          "exec",
+          "--",
+          "env",
+          "CARGO_BUILD_JOBS=1",
+          "cargo",
+          "clippy",
+          "-p",
+          "frankenengine-node",
+          "--no-default-features",
+          "--test",
+          "validation_proof_cache",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "cwd": "/data/projects/franken_node",
+        "remote_required": true
+      },
+      "command_digest": {
+        "algorithm": "sha256",
+        "hex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "canonical_material": "program=rch argv=exec -- env CARGO_BUILD_JOBS=1 cargo clippy -p frankenengine-node --no-default-features --test validation_proof_cache -- -D warnings cwd=/data/projects/franken_node"
+      },
+      "cargo_pressure": {
+        "process_count": 0,
+        "threshold": 2,
+        "sampled_at": "2026-05-15T09:50:00Z"
+      },
+      "sibling_repo": {
+        "name": "frankensqlite",
+        "path": "/data/projects/frankensqlite",
+        "branch": "main",
+        "head": "0c016144",
+        "dirty_state": "clean",
+        "dirty_files": [],
+        "relevant_paths": [
+          "crates/fsqlite-core/src/connection.rs",
+          "crates/fsqlite-btree/src/cursor.rs"
+        ],
+        "beads_lock": {
+          "status": "ok",
+          "detail": "br status readable"
+        }
+      },
+      "symbol_probes": [
+        {
+          "symbol": "TableLeafDeleteRun",
+          "status": "present",
+          "searched_paths": [
+            "crates/fsqlite-btree/src/cursor.rs"
+          ],
+          "referenced_paths": [
+            "crates/fsqlite-core/src/connection.rs"
+          ]
+        }
+      ],
+      "agent_mail": {
+        "status": "green",
+        "detail": "health_check green"
+      },
+      "classification": {
+        "code": "CRVD_SAFE_TO_RUN",
+        "reasons": [
+          "sibling clean",
+          "cargo pressure below threshold"
+        ],
+        "operator_message": "Cross-repo validation preflight is safe to run through rch."
+      },
+      "recommended_action": {
+        "action": "run_rch_validation",
+        "exact_command": "RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary rch exec -- env CARGO_BUILD_JOBS=1 cargo clippy -q -p frankenengine-node --no-default-features --test validation_proof_cache -- -D warnings"
+      }
+    },
+    {
+      "schema_version": "franken-node/cross-repo-validation-drift/snapshot/v1",
+      "snapshot_id": "crvd-dirty-relevant-absent-symbols",
+      "bead_id": "bd-famte",
+      "thread_id": "bd-famte",
+      "generated_at": "2026-05-15T09:51:51Z",
+      "producer": {
+        "agent_name": "SnowyBeaver",
+        "tool": "cross_repo_validation_drift",
+        "source_only": true
+      },
+      "validation_command": {
+        "program": "rch",
+        "argv": [
+          "exec",
+          "--",
+          "env",
+          "CARGO_BUILD_JOBS=1",
+          "cargo",
+          "clippy",
+          "-q",
+          "-p",
+          "frankenengine-node",
+          "--no-default-features",
+          "--test",
+          "validation_proof_cache",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "cwd": "/data/projects/franken_node",
+        "remote_required": true
+      },
+      "command_digest": {
+        "algorithm": "sha256",
+        "hex": "2222222222222222222222222222222222222222222222222222222222222222",
+        "canonical_material": "program=rch argv=exec -- env CARGO_BUILD_JOBS=1 cargo clippy -q -p frankenengine-node --no-default-features --test validation_proof_cache -- -D warnings cwd=/data/projects/franken_node"
+      },
+      "cargo_pressure": {
+        "process_count": 28,
+        "threshold": 2,
+        "sampled_at": "2026-05-15T09:49:00Z"
+      },
+      "sibling_repo": {
+        "name": "frankensqlite",
+        "path": "/data/projects/frankensqlite",
+        "branch": "main",
+        "head": "0c016144",
+        "dirty_state": "dirty_relevant",
+        "dirty_files": [
+          "crates/fsqlite-btree/src/cursor.rs",
+          "crates/fsqlite-core/src/connection.rs",
+          "crates/fsqlite-func/src/lib.rs",
+          "crates/fsqlite-pager/src/lib.rs",
+          "crates/fsqlite-pager/src/pager.rs"
+        ],
+        "relevant_paths": [
+          "crates/fsqlite-btree/src/cursor.rs",
+          "crates/fsqlite-core/src/connection.rs",
+          "crates/fsqlite-func/src/lib.rs",
+          "crates/fsqlite-pager/src/lib.rs",
+          "crates/fsqlite-pager/src/pager.rs"
+        ],
+        "beads_lock": {
+          "status": "timeout",
+          "detail": "br list --status=in_progress --json timed out after 30000ms"
+        }
+      },
+      "symbol_probes": [
+        {
+          "symbol": "TableLeafDeleteRun",
+          "status": "absent_from_call_sites",
+          "searched_paths": [
+            "crates/fsqlite-btree/src/cursor.rs",
+            "crates/fsqlite-core/src/connection.rs"
+          ],
+          "referenced_paths": []
+        },
+        {
+          "symbol": "PagerCommitProfileSnapshot",
+          "status": "absent_from_call_sites",
+          "searched_paths": [
+            "crates/fsqlite-pager/src/lib.rs",
+            "crates/fsqlite-core/src/connection.rs"
+          ],
+          "referenced_paths": []
+        }
+      ],
+      "agent_mail": {
+        "status": "red_corrupt",
+        "detail": "sqlite schema missing required health_check tables"
+      },
+      "classification": {
+        "code": "CRVD_BLOCKED_SIBLING_DIRTY_RELEVANT",
+        "reasons": [
+          "cargo pressure above threshold",
+          "relevant sibling files dirty",
+          "sibling Beads lock unavailable",
+          "Agent Mail corrupt"
+        ],
+        "operator_message": "Do not run cargo yet; record Beads handoff and rerun proof when cargo pressure and sibling ownership are clear."
+      },
+      "recommended_action": {
+        "action": "record_beads_blocker",
+        "exact_command": "br comments add bd-famte --message <bounded cross-repo drift summary>"
+      }
+    },
+    {
+      "schema_version": "franken-node/cross-repo-validation-drift/snapshot/v1",
+      "snapshot_id": "crvd-missing-symbol-referenced",
+      "bead_id": "bd-famte",
+      "thread_id": "bd-famte",
+      "generated_at": "2026-05-15T09:52:00Z",
+      "producer": {
+        "agent_name": "SnowyBeaver",
+        "tool": "cross_repo_validation_drift",
+        "source_only": true
+      },
+      "validation_command": {
+        "program": "rch",
+        "argv": [
+          "exec",
+          "--",
+          "cargo",
+          "clippy"
+        ],
+        "cwd": "/data/projects/franken_node",
+        "remote_required": true
+      },
+      "command_digest": {
+        "algorithm": "sha256",
+        "hex": "3333333333333333333333333333333333333333333333333333333333333333",
+        "canonical_material": "program=rch argv=exec -- cargo clippy cwd=/data/projects/franken_node"
+      },
+      "cargo_pressure": {
+        "process_count": 0,
+        "threshold": 2,
+        "sampled_at": "2026-05-15T09:52:00Z"
+      },
+      "sibling_repo": {
+        "name": "frankensqlite",
+        "path": "/data/projects/frankensqlite",
+        "branch": "main",
+        "head": "0c016144",
+        "dirty_state": "clean",
+        "dirty_files": [],
+        "relevant_paths": [
+          "crates/fsqlite-core/src/connection.rs"
+        ],
+        "beads_lock": {
+          "status": "ok",
+          "detail": "br readable"
+        }
+      },
+      "symbol_probes": [
+        {
+          "symbol": "FunctionRegistry::window_accepts_arg_count",
+          "status": "missing_referenced",
+          "searched_paths": [
+            "crates/fsqlite-func/src/lib.rs",
+            "crates/fsqlite-core/src/connection.rs"
+          ],
+          "referenced_paths": [
+            "crates/fsqlite-core/src/connection.rs"
+          ]
+        }
+      ],
+      "agent_mail": {
+        "status": "green",
+        "detail": "health_check green"
+      },
+      "classification": {
+        "code": "CRVD_BLOCKED_SIBLING_API_DRIFT",
+        "reasons": [
+          "missing sibling API still referenced"
+        ],
+        "operator_message": "Repair or coordinate sibling API drift before rerunning franken_node validation."
+      },
+      "recommended_action": {
+        "action": "inspect_sibling_api_drift",
+        "exact_command": "rg -n 'window_accepts_arg_count' /data/projects/frankensqlite/crates"
+      }
+    },
+    {
+      "schema_version": "franken-node/cross-repo-validation-drift/snapshot/v1",
+      "snapshot_id": "crvd-beads-lock-timeout",
+      "bead_id": "bd-lock1",
+      "thread_id": "bd-lock1",
+      "generated_at": "2026-05-15T09:53:00Z",
+      "producer": {
+        "agent_name": "SnowyBeaver",
+        "tool": "cross_repo_validation_drift",
+        "source_only": true
+      },
+      "validation_command": {
+        "program": "rch",
+        "argv": [
+          "exec",
+          "--",
+          "cargo",
+          "test"
+        ],
+        "cwd": "/data/projects/franken_node",
+        "remote_required": true
+      },
+      "command_digest": {
+        "algorithm": "sha256",
+        "hex": "4444444444444444444444444444444444444444444444444444444444444444",
+        "canonical_material": "program=rch argv=exec -- cargo test cwd=/data/projects/franken_node"
+      },
+      "cargo_pressure": {
+        "process_count": 0,
+        "threshold": 2,
+        "sampled_at": "2026-05-15T09:53:00Z"
+      },
+      "sibling_repo": {
+        "name": "frankensqlite",
+        "path": "/data/projects/frankensqlite",
+        "branch": "main",
+        "head": "0c016144",
+        "dirty_state": "clean",
+        "dirty_files": [],
+        "relevant_paths": [
+          "crates/fsqlite-core/src/connection.rs"
+        ],
+        "beads_lock": {
+          "status": "timeout",
+          "detail": "timed out waiting for .beads/.write.lock"
+        }
+      },
+      "symbol_probes": [
+        {
+          "symbol": "TableLeafDeleteRun",
+          "status": "present",
+          "searched_paths": [
+            "crates/fsqlite-btree/src/cursor.rs"
+          ],
+          "referenced_paths": [
+            "crates/fsqlite-core/src/connection.rs"
+          ]
+        }
+      ],
+      "agent_mail": {
+        "status": "green",
+        "detail": "health_check green"
+      },
+      "classification": {
+        "code": "CRVD_BLOCKED_SIBLING_BEADS_LOCK",
+        "reasons": [
+          "sibling Beads ownership unavailable"
+        ],
+        "operator_message": "Do not edit sibling files until ownership can be verified."
+      },
+      "recommended_action": {
+        "action": "coordinate_sibling_owner",
+        "exact_command": "br list --status=in_progress --json"
+      }
+    },
+    {
+      "schema_version": "franken-node/cross-repo-validation-drift/snapshot/v1",
+      "snapshot_id": "crvd-mail-corrupt",
+      "bead_id": "bd-mail1",
+      "thread_id": "bd-mail1",
+      "generated_at": "2026-05-15T09:54:00Z",
+      "producer": {
+        "agent_name": "SnowyBeaver",
+        "tool": "cross_repo_validation_drift",
+        "source_only": true
+      },
+      "validation_command": {
+        "program": "rch",
+        "argv": [
+          "exec",
+          "--",
+          "cargo",
+          "fmt",
+          "--check"
+        ],
+        "cwd": "/data/projects/franken_node",
+        "remote_required": false
+      },
+      "command_digest": {
+        "algorithm": "sha256",
+        "hex": "5555555555555555555555555555555555555555555555555555555555555555",
+        "canonical_material": "program=rch argv=exec -- cargo fmt --check cwd=/data/projects/franken_node"
+      },
+      "cargo_pressure": {
+        "process_count": 0,
+        "threshold": 2,
+        "sampled_at": "2026-05-15T09:54:00Z"
+      },
+      "sibling_repo": {
+        "name": "frankensqlite",
+        "path": "/data/projects/frankensqlite",
+        "branch": "main",
+        "head": "0c016144",
+        "dirty_state": "dirty_unrelated",
+        "dirty_files": [
+          "README.md"
+        ],
+        "relevant_paths": [
+          "crates/fsqlite-core/src/connection.rs"
+        ],
+        "beads_lock": {
+          "status": "ok",
+          "detail": "br readable"
+        }
+      },
+      "symbol_probes": [
+        {
+          "symbol": "TableLeafDeleteRun",
+          "status": "present",
+          "searched_paths": [
+            "crates/fsqlite-btree/src/cursor.rs"
+          ],
+          "referenced_paths": [
+            "crates/fsqlite-core/src/connection.rs"
+          ]
+        }
+      ],
+      "agent_mail": {
+        "status": "red_corrupt",
+        "detail": "missing tables: projects, agents, messages, message_recipients"
+      },
+      "classification": {
+        "code": "CRVD_BLOCKED_AGENT_MAIL_CORRUPT",
+        "reasons": [
+          "Agent Mail unavailable; use Beads as soft lock"
+        ],
+        "operator_message": "Proceed only with Beads-visible ownership and leave durable comments."
+      },
+      "recommended_action": {
+        "action": "source_only_handoff",
+        "exact_command": "br comments add <id> --message <handoff>"
+      }
+    }
+  ],
+  "invalid_snapshots": [
+    {
+      "case": "missing_command_digest",
+      "expected_error": "ERR_CRVD_MISSING_FIELD",
+      "patch": {
+        "remove": [
+          "command_digest"
+        ]
+      }
+    },
+    {
+      "case": "bad_command_digest",
+      "expected_error": "ERR_CRVD_BAD_COMMAND_DIGEST",
+      "patch": {
+        "set": {
+          "command_digest.hex": "not-a-digest"
+        }
+      }
+    },
+    {
+      "case": "too_many_dirty_files",
+      "expected_error": "ERR_CRVD_UNBOUNDED_LIST",
+      "patch": {
+        "set": {
+          "sibling_repo.dirty_files": [
+            "file-00.rs",
+            "file-01.rs",
+            "file-02.rs",
+            "file-03.rs",
+            "file-04.rs",
+            "file-05.rs",
+            "file-06.rs",
+            "file-07.rs",
+            "file-08.rs",
+            "file-09.rs",
+            "file-10.rs",
+            "file-11.rs",
+            "file-12.rs",
+            "file-13.rs",
+            "file-14.rs",
+            "file-15.rs",
+            "file-16.rs",
+            "file-17.rs",
+            "file-18.rs",
+            "file-19.rs",
+            "file-20.rs",
+            "file-21.rs",
+            "file-22.rs",
+            "file-23.rs",
+            "file-24.rs",
+            "file-25.rs",
+            "file-26.rs",
+            "file-27.rs",
+            "file-28.rs",
+            "file-29.rs",
+            "file-30.rs",
+            "file-31.rs",
+            "file-32.rs",
+            "file-33.rs",
+            "file-34.rs",
+            "file-35.rs",
+            "file-36.rs",
+            "file-37.rs",
+            "file-38.rs",
+            "file-39.rs",
+            "file-40.rs",
+            "file-41.rs",
+            "file-42.rs",
+            "file-43.rs",
+            "file-44.rs",
+            "file-45.rs",
+            "file-46.rs",
+            "file-47.rs",
+            "file-48.rs",
+            "file-49.rs",
+            "file-50.rs",
+            "file-51.rs",
+            "file-52.rs",
+            "file-53.rs",
+            "file-54.rs",
+            "file-55.rs",
+            "file-56.rs",
+            "file-57.rs",
+            "file-58.rs",
+            "file-59.rs",
+            "file-60.rs",
+            "file-61.rs",
+            "file-62.rs",
+            "file-63.rs",
+            "file-64.rs"
+          ]
+        }
+      }
+    },
+    {
+      "case": "dirty_relevant_cannot_run",
+      "expected_error": "ERR_CRVD_DIRTY_RELEVANT_RUN",
+      "patch": {
+        "set": {
+          "sibling_repo.dirty_state": "dirty_relevant",
+          "sibling_repo.dirty_files": [
+            "crates/fsqlite-core/src/connection.rs"
+          ],
+          "recommended_action.action": "run_rch_validation",
+          "classification.code": "CRVD_SAFE_TO_RUN"
+        }
+      }
+    },
+    {
+      "case": "beads_lock_timeout_cannot_run",
+      "expected_error": "ERR_CRVD_BEADS_LOCK_RUN",
+      "patch": {
+        "set": {
+          "sibling_repo.beads_lock.status": "timeout",
+          "recommended_action.action": "run_rch_validation",
+          "classification.code": "CRVD_SAFE_TO_RUN"
+        }
+      }
+    },
+    {
+      "case": "cargo_pressure_cannot_run",
+      "expected_error": "ERR_CRVD_CARGO_PRESSURE_RUN",
+      "patch": {
+        "set": {
+          "cargo_pressure.process_count": 8,
+          "cargo_pressure.threshold": 2,
+          "recommended_action.action": "run_rch_validation",
+          "classification.code": "CRVD_SAFE_TO_RUN"
+        }
+      }
+    },
+    {
+      "case": "absent_symbol_with_references",
+      "expected_error": "ERR_CRVD_SYMBOL_STATE_MISMATCH",
+      "patch": {
+        "set": {
+          "symbol_probes.0.status": "absent_from_call_sites",
+          "symbol_probes.0.referenced_paths": [
+            "crates/fsqlite-core/src/connection.rs"
+          ]
+        }
+      }
+    }
+  ]
+}
