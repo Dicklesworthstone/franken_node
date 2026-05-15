@@ -4,6 +4,7 @@ import json
 import runpy
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -74,6 +75,91 @@ class TestAllChecksPass(unittest.TestCase):
         result = mod.run_all()
         for c in result["checks"]:
             self.assertTrue(c["passed"], f"Check failed: {c['check']}: {c['detail']}")
+
+
+class TestCommentOnlyRustRegression(unittest.TestCase):
+    """Commented Rust markers must not satisfy implementation checks."""
+
+    def test_comment_only_rust_markers_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            impl_file = tmp_path / "migration_pipeline.rs"
+            mod_file = tmp_path / "mod.rs"
+
+            markers = (
+                mod.REQUIRED_STAGE_TYPES
+                + mod.REQUIRED_PIPELINE_OPS
+                + mod.REQUIRED_EVENT_CODES
+                + mod.REQUIRED_ERROR_CODES
+                + mod.REQUIRED_INVARIANTS
+                + ["pub struct " + name for name in mod.REQUIRED_STRUCTS]
+                + [
+                    "pub enum PipelineStage",
+                    "pub enum TransformAction",
+                    "pipe-v1.0",
+                    "BTreeMap",
+                    "Serialize",
+                    "Deserialize",
+                    "test_deterministic",
+                    "test_idempotency",
+                    "test_rollback",
+                    "test_verification_threshold",
+                    "test_receipt_signed",
+                ]
+            )
+
+            impl_file.write_text(
+                "\n".join(f"// {marker}" for marker in markers)
+                + "\n/*\n"
+                + "\n".join("#[test]" for _ in range(25))
+                + "\n*/\n",
+                encoding="utf-8",
+            )
+            mod_file.write_text("// pub mod migration_pipeline;\n", encoding="utf-8")
+
+            original_impl = mod.IMPL_FILE
+            original_mod = mod.MOD_FILE
+            mod.IMPL_FILE = impl_file
+            mod.MOD_FILE = mod_file
+            try:
+                checks = mod._checks()
+            finally:
+                mod.IMPL_FILE = original_impl
+                mod.MOD_FILE = original_mod
+
+        by_name = {check["check"]: check for check in checks}
+        self.assertTrue(by_name["Rust module exists"]["passed"])
+        self.assertFalse(by_name["Wired into connector/mod.rs"]["passed"])
+
+        rust_marker_prefixes = (
+            "Stage type ",
+            "Pipeline operation ",
+            "Event code ",
+            "Error code ",
+            "Invariant ",
+            "Struct/enum ",
+        )
+        rust_marker_names = [
+            check["check"]
+            for check in checks
+            if check["check"].startswith(rust_marker_prefixes)
+            or check["check"]
+            in {
+                "PipelineStage enum defined",
+                "TransformAction enum defined",
+                "Schema version pipe-v1.0",
+                "BTreeMap usage for determinism",
+                "Serialize/Deserialize derives",
+                "Deterministic pipeline test",
+                "Idempotency test",
+                "Rollback test",
+                "95% threshold test",
+                "Receipt signing test",
+            }
+            or check["check"].startswith("Rust unit tests")
+        ]
+        self.assertTrue(rust_marker_names)
+        self.assertTrue(all(not by_name[name]["passed"] for name in rust_marker_names))
 
 
 class TestMinimumCheckCount(unittest.TestCase):
