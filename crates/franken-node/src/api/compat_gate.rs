@@ -2354,7 +2354,8 @@ mod compat_gate_malformed_payload_tests {
 
         let service = Arc::new(Mutex::new(CompatGateService::new()));
         {
-            let mut svc = try_lock(&service, "seed compatibility gate service scope");
+            let mut svc = try_lock(&service, "seed compatibility gate service scope")
+                .expect("compat gate service mutex should not be poisoned");
             svc.set_scope_mode("concurrent-scope", CompatMode::Balanced)
                 .unwrap();
         }
@@ -2377,7 +2378,8 @@ mod compat_gate_malformed_payload_tests {
                     let mut svc = try_lock(
                         &service_clone,
                         "mutate compatibility gate service concurrently",
-                    );
+                    )
+                    .expect("compat gate service mutex should not be poisoned");
 
                     match thread_id % 4 {
                         0 => {
@@ -2437,7 +2439,8 @@ mod compat_gate_malformed_payload_tests {
         }
 
         // Verify final state consistency
-        let svc = try_lock(&service, "inspect compatibility gate service final state");
+        let svc = try_lock(&service, "inspect compatibility gate service final state")
+            .expect("compat gate service mutex should not be poisoned");
 
         // Should have reasonable counts without overflows
         assert!(svc.receipts().len() <= MAX_RECEIPTS);

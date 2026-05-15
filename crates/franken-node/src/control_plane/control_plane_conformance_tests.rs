@@ -25,6 +25,7 @@ use super::fork_detection::{
     StateVector,
 };
 use crate::control_plane::marker_stream::{MarkerEventType, MarkerStream};
+use crate::lock_utils::try_lock;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -157,11 +158,9 @@ fn epoch_concurrent_access_safety() {
             for j in 0..100 {
                 let manifest = format!("manifest-{}-{}", i, j);
                 let trace = format!("trace-{}-{}", i, j);
-                let _result =
-                    store_clone
-                        .lock()
-                        .unwrap()
-                        .epoch_advance(&manifest, 1000 + j, &trace);
+                let mut store = try_lock(&store_clone, "advance epoch concurrently")
+                    .expect("epoch store mutex should not be poisoned");
+                let _result = store.epoch_advance(&manifest, 1000 + j, &trace);
             }
         });
         handles.push(handle);
@@ -172,7 +171,10 @@ fn epoch_concurrent_access_safety() {
     }
 
     // Verify final epoch is reasonable and no overflow occurred
-    let final_epoch = store.lock().unwrap().epoch_read().value();
+    let final_epoch = try_lock(&store, "inspect epoch store final state")
+        .expect("epoch store mutex should not be poisoned")
+        .epoch_read()
+        .value();
     assert!(final_epoch > 0 && final_epoch <= 1000);
 }
 
@@ -359,22 +361,17 @@ fn barrier_timeout_boundary_conditions() {
 
     // Exactly at global timeout boundary
     let outcome = barrier.try_commit(6000, "trace-timeout").unwrap();
-    match outcome {
-        super::epoch_transition_barrier::BarrierCommitOutcome::Aborted {
-            current_epoch,
-            reason,
-        } => {
-            assert_eq!(current_epoch, 0);
-            match reason {
-                AbortReason::Timeout {
-                    missing_participants,
-                } => {
-                    assert!(missing_participants.contains(&"slow-svc".to_string()));
-                }
-                _ => panic!("Expected timeout abort reason"),
-            }
-        }
-        _ => panic!("Expected auto-abort due to timeout"),
+    if let super::epoch_transition_barrier::BarrierCommitOutcome::Aborted {
+        current_epoch,
+        reason: AbortReason::Timeout {
+            missing_participants,
+        },
+    } = outcome
+    {
+        assert_eq!(current_epoch, 0);
+        assert!(missing_participants.contains(&"slow-svc".to_string()));
+    } else {
+        assert!(false, "Expected auto-abort due to timeout");
     }
 }
 
@@ -668,7 +665,8 @@ fn control_plane_components_thread_safe() {
     {
         let barrier_clone = Arc::clone(&barrier);
         let handle = thread::spawn(move || {
-            let mut b = barrier_clone.lock().unwrap();
+            let mut b = try_lock(&barrier_clone, "register barrier participant concurrently")
+                .expect("epoch transition barrier mutex should not be poisoned");
             b.register_participant("thread-svc-1");
         });
         handles.push(handle);
@@ -678,7 +676,8 @@ fn control_plane_components_thread_safe() {
     {
         let detector_clone = Arc::clone(&detector);
         let handle = thread::spawn(move || {
-            let mut d = detector_clone.lock().unwrap();
+            let mut d = try_lock(&detector_clone, "record divergence state concurrently")
+                .expect("divergence detector mutex should not be poisoned");
             let sv = StateVector {
                 epoch: 1,
                 marker_id: "marker-thread".to_string(),
@@ -698,13 +697,17 @@ fn control_plane_components_thread_safe() {
 
     // Verify state after concurrent access
     assert!(
-        barrier
-            .lock()
-            .unwrap()
+        try_lock(&barrier, "inspect barrier final state")
+            .expect("epoch transition barrier mutex should not be poisoned")
             .registered_participants()
             .contains("thread-svc-1")
     );
-    assert_eq!(detector.lock().unwrap().history_len(), 1);
+    assert_eq!(
+        try_lock(&detector, "inspect detector final state")
+            .expect("divergence detector mutex should not be poisoned")
+            .history_len(),
+        1
+    );
 }
 
 // ---- Integration Test: Full Control Plane Flow ----
@@ -752,11 +755,12 @@ fn control_plane_full_integration() {
         let outcome = barrier
             .try_commit(1050 + i, &format!("trace-commit-{}", i + 1))
             .unwrap();
-        match outcome {
-            super::epoch_transition_barrier::BarrierCommitOutcome::Committed { target_epoch } => {
-                assert_eq!(target_epoch, i + 1);
-            }
-            _ => panic!("Expected successful barrier commit"),
+        if let super::epoch_transition_barrier::BarrierCommitOutcome::Committed { target_epoch } =
+            outcome
+        {
+            assert_eq!(target_epoch, i + 1);
+        } else {
+            assert!(false, "Expected successful barrier commit");
         }
 
         // Verify fork detection sees consistent state
