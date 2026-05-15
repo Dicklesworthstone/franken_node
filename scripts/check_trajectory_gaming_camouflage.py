@@ -26,6 +26,9 @@ TITLE = "Risk control: trajectory-gaming camouflage"
 
 CONTRACT = ROOT / "docs" / "specs" / "section_12" / "bd-35m7_contract.md"
 REPORT = ROOT / "artifacts" / "12" / "trajectory_gaming_camouflage_report.json"
+RUNTIME_EXPORT_PATH = (
+    ROOT / "crates" / "franken-node" / "src" / "security" / "trajectory_gaming.rs"
+)
 
 REQUIRED_EVENT_CODES = ["TGC-001", "TGC-002", "TGC-003", "TGC-004", "TGC-005"]
 REQUIRED_CONTRACT_TERMS = [
@@ -43,7 +46,7 @@ REQUIRED_CONTRACT_TERMS = [
 RUST_INTEGRATION_SYMBOLS = [
     (
         "trajectory runtime contract",
-        ROOT / "crates" / "franken-node" / "src" / "security" / "trajectory_gaming.rs",
+        RUNTIME_EXPORT_PATH,
         ["CamouflageHint", "ingest_verifier_hints", "export_runtime_trajectory"],
     ),
     (
@@ -91,8 +94,117 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read_text(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        raw_start = _rust_raw_string_start(text, i)
+        if raw_start is not None:
+            body_start, hashes = raw_start
+            end = _rust_raw_string_end(text, body_start + 1, hashes)
+            if end is None:
+                out.append(text[i:])
+                break
+            out.append(text[i:end])
+            i = end
+            continue
+
+        ch = text[i]
+        if ch == '"':
+            end = _rust_quoted_literal_end(text, i)
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if text.startswith("//", i):
+            newline = text.find("\n", i + 2)
+            if newline == -1:
+                break
+            out.append("\n")
+            i = newline + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _rust_raw_string_start(text: str, index: int) -> tuple[int, int] | None:
+    n = len(text)
+    if text.startswith("br", index):
+        cursor = index + 2
+    elif text.startswith("r", index):
+        cursor = index + 1
+    else:
+        return None
+
+    hashes = 0
+    while cursor < n and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+    if cursor < n and text[cursor] == '"':
+        return cursor, hashes
+    return None
+
+
+def _rust_raw_string_end(text: str, index: int, hashes: int) -> int | None:
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, index)
+    if end == -1:
+        return None
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, index: int) -> int:
+    i = index + 1
+    n = len(text)
+    escaped = False
+    while i < n:
+        ch = text[i]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == '"':
+            return i + 1
+        i += 1
+    return n
+
+
+def _rust_block_comment_end(text: str, index: int) -> int:
+    depth = 1
+    i = index
+    n = len(text)
+    while i < n and depth:
+        if text.startswith("/*", i):
+            depth += 1
+            i += 2
+        elif text.startswith("*/", i):
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
+
+
 def _read_json(path: Path) -> dict:
     return json.JSONDecoder().decode(_read_text(path))
+
+
+def safe_rel(path: Path) -> Path | str:
+    try:
+        return path.relative_to(ROOT)
+    except ValueError:
+        return path
 
 
 def check_file(path: Path, label: str) -> dict:
@@ -100,7 +212,7 @@ def check_file(path: Path, label: str) -> dict:
     return {
         "check": f"file: {label}",
         "pass": ok,
-        "detail": f"exists: {path.relative_to(ROOT)}" if ok else f"MISSING: {path}",
+        "detail": f"exists: {safe_rel(path)}" if ok else f"MISSING: {path}",
     }
 
 
@@ -130,7 +242,7 @@ def check_rust_integration() -> list[dict]:
         checks.append({
             "check": f"rust: {label} path exists",
             "pass": exists,
-            "detail": f"exists: {path.relative_to(ROOT)}" if exists else f"MISSING: {path}",
+            "detail": f"exists: {safe_rel(path)}" if exists else f"MISSING: {path}",
         })
         if not exists:
             for symbol in symbols:
@@ -141,7 +253,7 @@ def check_rust_integration() -> list[dict]:
                 })
             continue
 
-        text = _read_text(path)
+        text = _read_rust_source(path)
         for symbol in symbols:
             present = symbol in text
             checks.append({
@@ -153,7 +265,7 @@ def check_rust_integration() -> list[dict]:
 
 
 def check_runtime_export_truthfulness() -> list[dict]:
-    path = ROOT / "crates" / "franken-node" / "src" / "security" / "trajectory_gaming.rs"
+    path = RUNTIME_EXPORT_PATH
     if not path.exists():
         return [{
             "check": "rust: trajectory runtime export truthfulness",
@@ -161,7 +273,7 @@ def check_runtime_export_truthfulness() -> list[dict]:
             "detail": f"MISSING: {path}",
         }]
 
-    text = _read_text(path)
+    text = _read_rust_source(path)
     checks = []
     for token in RUNTIME_EXPORT_FORBIDDEN_TOKENS:
         present = token in text

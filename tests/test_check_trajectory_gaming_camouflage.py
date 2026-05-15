@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import check_trajectory_gaming_camouflage as mod
+import check_trajectory_gaming_camouflage as mod  # noqa: E402
 
 
 class TestConstants(unittest.TestCase):
@@ -69,6 +69,69 @@ class TestRustIntegrationChecks(unittest.TestCase):
         self.assertGreaterEqual(len(checks), len(mod.RUNTIME_EXPORT_FORBIDDEN_TOKENS))
         for check in checks:
             self.assertTrue(check["pass"], f"Failed: {check['check']} -> {check['detail']}")
+
+    def test_rust_integration_symbols_ignore_comment_only_markers(self):
+        original_symbols = mod.RUST_INTEGRATION_SYMBOLS
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rust_path = Path(tmpdir) / "trajectory_gaming.rs"
+            rust_path.write_text(
+                "\n".join(
+                    [
+                        "// CamouflageHint",
+                        "// ingest_verifier_hints",
+                        "/* export_runtime_trajectory */",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            try:
+                mod.RUST_INTEGRATION_SYMBOLS = [
+                    (
+                        "comment-only trajectory runtime contract",
+                        rust_path,
+                        [
+                            "CamouflageHint",
+                            "ingest_verifier_hints",
+                            "export_runtime_trajectory",
+                        ],
+                    )
+                ]
+                checks = mod.check_rust_integration()
+            finally:
+                mod.RUST_INTEGRATION_SYMBOLS = original_symbols
+
+        self.assertTrue(checks[0]["pass"])
+        for check in checks[1:]:
+            self.assertFalse(check["pass"], check["check"])
+
+    def test_runtime_export_truthfulness_requires_non_comment_status_markers(self):
+        original_path = mod.RUNTIME_EXPORT_PATH
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rust_path = Path(tmpdir) / "trajectory_gaming.rs"
+            rust_path.write_text(
+                "\n".join(
+                    [
+                        "// analysis_ready",
+                        "/* TGC_RUNTIME_TRAJECTORY_ONLY */",
+                        "pub fn export_runtime_trajectory() {}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            try:
+                mod.RUNTIME_EXPORT_PATH = rust_path
+                checks = mod.check_runtime_export_truthfulness()
+            finally:
+                mod.RUNTIME_EXPORT_PATH = original_path
+
+        status_check = next(
+            check
+            for check in checks
+            if check["check"] == "rust: trajectory runtime export declares non-analysis status"
+        )
+        self.assertFalse(status_check["pass"])
 
 
 class TestReportLoad(unittest.TestCase):
