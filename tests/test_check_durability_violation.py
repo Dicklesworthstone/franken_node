@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import tempfile
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -48,7 +49,7 @@ class TestContentChecks(TestCase):
             self.assertTrue(r["pass"], f"Missing event code: {r['check']}")
 
     def test_invariants_found(self):
-        results = mod.check_content(mod.IMPL, mod.INVARIANTS, "invariant")
+        results = mod.check_content(mod.IMPL, mod.INVARIANTS, "invariant", strip_comments=False)
         for r in results:
             self.assertTrue(r["pass"], f"Missing invariant: {r['check']}")
 
@@ -115,8 +116,66 @@ class TestRunChecks(TestCase):
         result = mod.run_checks()
         # Ensure it's JSON-serializable
         json_str = json.dumps(result)
-        parsed = json.loads(json_str)
+        parsed = json.JSONDecoder().decode(json_str)
         self.assertEqual(parsed["bead_id"], "bd-b9b6")
+
+    def test_comment_only_source_markers_fail_closed(self):
+        commented_tests = "\n".join(
+            f"// #[test]\n// fn {test_name}() {{}}" for test_name in mod.REQUIRED_TESTS
+        )
+        comment_only_impl = "\n".join(
+            [
+                *(f"// {marker}" for marker in mod.REQUIRED_TYPES),
+                *(f"// {marker}" for marker in mod.REQUIRED_METHODS),
+                *(f"// {code}" for code in mod.EVENT_CODES),
+                *(f"// {invariant}" for invariant in mod.INVARIANTS),
+                *(f"// {event_type}" for event_type in mod.CAUSAL_EVENT_TYPES),
+                *(f"// {halt_policy}" for halt_policy in mod.HALT_POLICIES),
+                *(f"// {error_code}" for error_code in mod.ERROR_CODES),
+                "/*",
+                commented_tests,
+                "*/",
+            ]
+        )
+
+        original_impl = mod.IMPL
+        original_mod = mod.MOD_RS
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            impl_path = tmp / "durability_violation.rs"
+            mod_path = tmp / "mod.rs"
+            impl_path.write_text(comment_only_impl, encoding="utf-8")
+            mod_path.write_text("pub mod durability_violation;\n", encoding="utf-8")
+
+            try:
+                mod.IMPL = impl_path
+                mod.MOD_RS = mod_path
+                result = mod.run_checks()
+            finally:
+                mod.IMPL = original_impl
+                mod.MOD_RS = original_mod
+
+        checks = {check["check"]: check["pass"] for check in result["checks"]}
+        self.assertTrue(checks["file: implementation"])
+        self.assertTrue(checks["module registered in mod.rs"])
+        self.assertFalse(checks["unit test count"])
+        self.assertEqual(result["test_count"], 0)
+        for invariant in mod.INVARIANTS:
+            self.assertTrue(checks[f"invariant: {invariant}"], invariant)
+
+        expected_failures = []
+        expected_failures.extend(f"type: {marker}" for marker in mod.REQUIRED_TYPES)
+        expected_failures.extend(f"method: {marker}" for marker in mod.REQUIRED_METHODS)
+        expected_failures.extend(f"event_code: {code}" for code in mod.EVENT_CODES)
+        expected_failures.extend(
+            f"causal_event_type: {event_type}" for event_type in mod.CAUSAL_EVENT_TYPES
+        )
+        expected_failures.extend(f"halt_policy: {halt_policy}" for halt_policy in mod.HALT_POLICIES)
+        expected_failures.extend(f"error_type: {error_code}" for error_code in mod.ERROR_CODES)
+        expected_failures.extend(f"test: {test_name}" for test_name in mod.REQUIRED_TESTS)
+        for check_name in expected_failures:
+            self.assertIn(check_name, checks)
+            self.assertFalse(checks[check_name], check_name)
 
 
 class TestSelfTest(TestCase):
