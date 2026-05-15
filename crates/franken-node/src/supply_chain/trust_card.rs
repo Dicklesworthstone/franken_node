@@ -275,12 +275,12 @@ fn camouflage_risk_summary(current: &str, kinds: &str, max_severity: f64) -> Str
 
 fn card_matches_filter(card: &TrustCard, filter: &TrustCardListFilter) -> bool {
     if let Some(level) = filter.certification_level
-        && card.certification_level != level
+        && !card.certification_level.eq(&level)
     {
         return false;
     }
     if let Some(publisher_id) = &filter.publisher_id
-        && &card.publisher.publisher_id != publisher_id
+        && !card.publisher.publisher_id.eq(publisher_id)
     {
         return false;
     }
@@ -348,17 +348,19 @@ pub const TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA: &str = "franken-node/trust-card-r
 fn get_registry_key(config: &crate::config::TrustConfig) -> Result<Vec<u8>, TrustCardError> {
     match &config.registry_signing_key {
         Some(key_base64) => {
-            if key_base64.trim() != key_base64 || key_base64.is_empty() {
+            if !key_base64.trim().eq(key_base64) || key_base64.is_empty() {
                 return Err(TrustCardError::InvalidInput {
                     reason: "registry_signing_key must be non-empty base64 without surrounding whitespace"
                         .to_string(),
                 });
             }
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(key_base64)
+            let mut decoded = vec![0_u8; base64::decoded_len_estimate(key_base64.len())];
+            let decoded_len = base64::engine::general_purpose::STANDARD
+                .decode_slice(key_base64.as_bytes(), &mut decoded)
                 .map_err(|err| TrustCardError::InvalidInput {
                     reason: format!("registry_signing_key must be valid base64: {err}"),
                 })?;
+            decoded.truncate(decoded_len);
             if decoded.len() < MIN_CONFIGURED_REGISTRY_KEY_BYTES {
                 return Err(TrustCardError::InvalidInput {
                     reason: format!(
@@ -379,14 +381,17 @@ fn get_registry_key(config: &crate::config::TrustConfig) -> Result<Vec<u8>, Trus
 /// Used for trusted file sources where comprehensive validation is less critical.
 fn validate_basic_bounds(snapshot: &TrustCardRegistrySnapshot) -> Result<(), TrustCardError> {
     // Basic schema version check
-    if snapshot.schema_version != TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA {
+    if !snapshot
+        .schema_version
+        .eq(TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA)
+    {
         return Err(TrustCardError::UnsupportedSnapshotSchema(
             snapshot.schema_version.clone(),
         ));
     }
 
     // Basic sanity checks on numeric fields
-    if snapshot.cache_ttl_secs == 0 {
+    if snapshot.cache_ttl_secs.eq(&0) {
         return Err(TrustCardError::InvalidSnapshot(
             "cache_ttl_secs must be positive".to_string(),
         ));
@@ -1062,7 +1067,7 @@ impl TrustCardRegistry {
 
     fn advance_snapshot_sequence_for_mutation(&mut self) {
         self.previous_snapshot_hash =
-            if self.snapshot_epoch == 0 && self.cards_by_extension.is_empty() {
+            if self.snapshot_epoch.eq(&0) && self.cards_by_extension.is_empty() {
                 None
             } else {
                 self.last_snapshot_hash
@@ -1091,7 +1096,10 @@ impl TrustCardRegistry {
         registry_key: &[u8],
         loaded_at_secs: u64,
     ) -> Result<Self, TrustCardError> {
-        if snapshot.schema_version != TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA {
+        if !snapshot
+            .schema_version
+            .eq(TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA)
+        {
             return Err(TrustCardError::UnsupportedSnapshotSchema(
                 snapshot.schema_version,
             ));
@@ -2120,14 +2128,14 @@ impl TrustCardRegistry {
                 .ok_or_else(|| TrustCardError::NotFound(extension_id.to_string()))?;
             let left = history
                 .iter()
-                .find(|card| card.trust_card_version == left_version)
+                .find(|card| card.trust_card_version.eq(&left_version))
                 .ok_or_else(|| TrustCardError::VersionNotFound {
                     extension_id: extension_id.to_string(),
                     version: left_version,
                 })?;
             let right = history
                 .iter()
-                .find(|card| card.trust_card_version == right_version)
+                .find(|card| card.trust_card_version.eq(&right_version))
                 .ok_or_else(|| TrustCardError::VersionNotFound {
                     extension_id: extension_id.to_string(),
                     version: right_version,
@@ -2174,7 +2182,7 @@ impl TrustCardRegistry {
             .and_then(|history| {
                 history
                     .iter()
-                    .find(|card| card.trust_card_version == trust_card_version)
+                    .find(|card| card.trust_card_version.eq(&trust_card_version))
             })
             .cloned();
         if let Some(card) = card {
@@ -2412,35 +2420,41 @@ fn comparison_from_cards(
     right_extension_id: String,
 ) -> TrustCardComparison {
     let mut changes = Vec::new();
-    if left.certification_level != right.certification_level {
+    if !left.certification_level.eq(&right.certification_level) {
         changes.push(TrustCardDiffEntry {
             field: "certification_level".to_string(),
             left: format!("{:?}", left.certification_level).to_ascii_lowercase(),
             right: format!("{:?}", right.certification_level).to_ascii_lowercase(),
         });
     }
-    if left.reputation_score_basis_points != right.reputation_score_basis_points {
+    if !left
+        .reputation_score_basis_points
+        .eq(&right.reputation_score_basis_points)
+    {
         changes.push(TrustCardDiffEntry {
             field: "reputation_score_basis_points".to_string(),
             left: left.reputation_score_basis_points.to_string(),
             right: right.reputation_score_basis_points.to_string(),
         });
     }
-    if left.revocation_status != right.revocation_status {
+    if !left.revocation_status.eq(&right.revocation_status) {
         changes.push(TrustCardDiffEntry {
             field: "revocation_status".to_string(),
             left: format!("{:?}", left.revocation_status).to_ascii_lowercase(),
             right: format!("{:?}", right.revocation_status).to_ascii_lowercase(),
         });
     }
-    if left.active_quarantine != right.active_quarantine {
+    if !left.active_quarantine.eq(&right.active_quarantine) {
         changes.push(TrustCardDiffEntry {
             field: "active_quarantine".to_string(),
             left: left.active_quarantine.to_string(),
             right: right.active_quarantine.to_string(),
         });
     }
-    if left.capability_declarations != right.capability_declarations {
+    if !left
+        .capability_declarations
+        .eq(&right.capability_declarations)
+    {
         changes.push(TrustCardDiffEntry {
             field: "capability_declarations".to_string(),
             left: left
@@ -2457,7 +2471,7 @@ fn comparison_from_cards(
                 .join(","),
         });
     }
-    if left.extension.version != right.extension.version {
+    if !left.extension.version.eq(&right.extension.version) {
         changes.push(TrustCardDiffEntry {
             field: "extension_version".to_string(),
             left: left.extension.version.clone(),
@@ -2489,7 +2503,7 @@ pub fn paginate<T: Clone>(
     page: usize,
     per_page: usize,
 ) -> Result<Vec<T>, TrustCardError> {
-    if page == 0 || per_page == 0 {
+    if page.eq(&0) || per_page.eq(&0) {
         return Err(TrustCardError::InvalidPagination { page, per_page });
     }
     let start = (page - 1).saturating_mul(per_page);
@@ -2810,7 +2824,7 @@ fn validate_snapshot_history(
     let mut previous_hash: Option<String> = None;
 
     for card in history {
-        if card.extension.extension_id != extension_id {
+        if !card.extension.extension_id.eq(extension_id) {
             return Err(TrustCardError::InvalidSnapshot(format!(
                 "extension bucket `{extension_id}` contains card for `{}`",
                 card.extension.extension_id
@@ -2825,7 +2839,10 @@ fn validate_snapshot_history(
             )));
         }
         if let Some(prev_hash) = &previous_hash
-            && card.previous_version_hash.as_deref() != Some(prev_hash.as_str())
+            && !card
+                .previous_version_hash
+                .as_deref()
+                .eq(&Some(prev_hash.as_str()))
         {
             return Err(TrustCardError::InvalidSnapshot(format!(
                 "extension `{extension_id}` broke previous_version_hash linkage"
@@ -2979,7 +2996,10 @@ fn verify_snapshot_high_water(
     high_water: &TrustCardRegistrySnapshotHighWater,
     registry_key: &[u8],
 ) -> Result<(), TrustCardError> {
-    if high_water.schema_version != TRUST_CARD_REGISTRY_HIGH_WATER_SCHEMA {
+    if !high_water
+        .schema_version
+        .eq(TRUST_CARD_REGISTRY_HIGH_WATER_SCHEMA)
+    {
         return Err(TrustCardError::InvalidSnapshot(format!(
             "unsupported trust-card registry high-water schema `{}`",
             high_water.schema_version
@@ -3036,7 +3056,7 @@ fn validate_snapshot_high_water(
         )));
     }
 
-    if snapshot.snapshot_epoch == high_water.snapshot_epoch {
+    if snapshot.snapshot_epoch.eq(&high_water.snapshot_epoch) {
         if !constant_time::ct_eq(&snapshot.snapshot_hash, &high_water.snapshot_hash) {
             return Err(TrustCardError::InvalidSnapshot(format!(
                 "snapshot rollback rejected for {}: epoch {} hash differs from high-water",
@@ -3108,7 +3128,7 @@ fn persist_snapshot_high_water_if_newer(
         None => true,
         Some(current) => {
             snapshot.snapshot_epoch > current.snapshot_epoch
-                || (snapshot.snapshot_epoch == current.snapshot_epoch
+                || (snapshot.snapshot_epoch.eq(&current.snapshot_epoch)
                     && !constant_time::ct_eq(&snapshot.snapshot_hash, &current.snapshot_hash))
         }
     };
@@ -3180,6 +3200,8 @@ mod tests {
     use crate::security::trajectory_gaming::{CamouflageHint, CamouflageKind};
     use base64::Engine as _;
     use std::collections::BTreeMap;
+
+    type TestResult = Result<(), String>;
 
     fn test_evidence_refs() -> Vec<VerifiedEvidenceRef> {
         use super::super::certification::EvidenceType;
@@ -3413,14 +3435,14 @@ mod tests {
         let camouflage_record = second
             .audit_history
             .iter()
-            .find(|record| record.event_code == TRUST_CARD_CAMOUFLAGE_SUSPECTED)
+            .find(|record| record.event_code.eq(TRUST_CARD_CAMOUFLAGE_SUSPECTED))
             .expect("camouflage audit record");
         assert!(camouflage_record.detail.contains("phase_shift"));
         assert!(
             registry
                 .telemetry()
                 .iter()
-                .any(|event| event.event_code == TRUST_CARD_CAMOUFLAGE_SUSPECTED)
+                .any(|event| event.event_code.eq(TRUST_CARD_CAMOUFLAGE_SUSPECTED))
         );
         verify_card_signature(&second, DEFAULT_REGISTRY_KEY).expect("signature valid");
     }
@@ -3776,7 +3798,7 @@ mod tests {
             )
             .expect_err("tampered latest card must be rejected");
         assert!(
-            matches!(err, TrustCardError::CardHashMismatch(extension) if extension == "npm:@beta/telemetry-bridge")
+            matches!(err, TrustCardError::CardHashMismatch(extension) if extension.eq("npm:@beta/telemetry-bridge"))
         );
     }
 
@@ -3798,7 +3820,7 @@ mod tests {
             .compare_versions("npm:@beta/telemetry-bridge", 1, 2, 1_100, "trace")
             .expect_err("tampered historical card must be rejected");
         assert!(
-            matches!(err, TrustCardError::CardHashMismatch(extension) if extension == "npm:@beta/telemetry-bridge")
+            matches!(err, TrustCardError::CardHashMismatch(extension) if extension.eq("npm:@beta/telemetry-bridge"))
         );
     }
 
@@ -3902,7 +3924,7 @@ mod tests {
             )
             .expect_err("missing extension must fail update");
 
-        assert!(matches!(err, TrustCardError::NotFound(id) if id == "npm:@missing/plugin"));
+        assert!(matches!(err, TrustCardError::NotFound(id) if id.eq("npm:@missing/plugin")));
         assert!(registry.cards_by_extension.is_empty());
         assert!(registry.cache_by_extension.is_empty());
     }
@@ -3920,7 +3942,7 @@ mod tests {
             )
             .expect_err("missing left card must fail compare");
 
-        assert!(matches!(err, TrustCardError::NotFound(id) if id == "npm:@missing/plugin"));
+        assert!(matches!(err, TrustCardError::NotFound(id) if id.eq("npm:@missing/plugin")));
     }
 
     #[test]
@@ -3936,7 +3958,7 @@ mod tests {
             )
             .expect_err("missing right card must fail compare");
 
-        assert!(matches!(err, TrustCardError::NotFound(id) if id == "npm:@missing/plugin"));
+        assert!(matches!(err, TrustCardError::NotFound(id) if id.eq("npm:@missing/plugin")));
     }
 
     #[test]
@@ -3947,7 +3969,7 @@ mod tests {
             .compare_versions("npm:@missing/plugin", 1, 2, 1_100, "trace")
             .expect_err("missing history must fail version compare");
 
-        assert!(matches!(err, TrustCardError::NotFound(id) if id == "npm:@missing/plugin"));
+        assert!(matches!(err, TrustCardError::NotFound(id) if id.eq("npm:@missing/plugin")));
     }
 
     #[test]
@@ -3963,7 +3985,7 @@ mod tests {
             TrustCardError::VersionNotFound {
                 extension_id,
                 version: 99
-            } if extension_id == "npm:@beta/telemetry-bridge"
+            } if extension_id.eq("npm:@beta/telemetry-bridge")
         ));
     }
 
@@ -3980,7 +4002,7 @@ mod tests {
             TrustCardError::VersionNotFound {
                 extension_id,
                 version: 99
-            } if extension_id == "npm:@beta/telemetry-bridge"
+            } if extension_id.eq("npm:@beta/telemetry-bridge")
         ));
     }
 
@@ -4083,7 +4105,7 @@ mod tests {
             .expect_err("exact ttl boundary must refresh from source and reject tampering");
         assert!(matches!(
             read_err,
-            TrustCardError::CardHashMismatch(extension) if extension == "npm:@acme/plugin"
+            TrustCardError::CardHashMismatch(extension) if extension.eq("npm:@acme/plugin")
         ));
 
         let mut sync_registry = TrustCardRegistry::new(10, DEFAULT_REGISTRY_KEY);
@@ -4103,7 +4125,7 @@ mod tests {
             .expect_err("exact ttl boundary must not treat the cache entry as fresh");
         assert!(matches!(
             sync_err,
-            TrustCardError::CardHashMismatch(extension) if extension == "npm:@acme/plugin"
+            TrustCardError::CardHashMismatch(extension) if extension.eq("npm:@acme/plugin")
         ));
     }
 
@@ -4319,7 +4341,7 @@ mod tests {
             .list(&TrustCardListFilter::empty(), "trace", 1_100)
             .expect_err("tampered latest card must fail list");
         assert!(
-            matches!(err, TrustCardError::CardHashMismatch(extension) if extension == "npm:@beta/telemetry-bridge")
+            matches!(err, TrustCardError::CardHashMismatch(extension) if extension.eq("npm:@beta/telemetry-bridge"))
         );
     }
 
@@ -4345,7 +4367,7 @@ mod tests {
             .expect_err("tampered latest card must block append");
         assert!(matches!(
             err,
-            TrustCardError::CardHashMismatch(extension) if extension == "npm:@acme/plugin"
+            TrustCardError::CardHashMismatch(extension) if extension.eq("npm:@acme/plugin")
         ));
     }
 
@@ -4382,7 +4404,7 @@ mod tests {
             .expect_err("tampered latest card must block update");
         assert!(matches!(
             err,
-            TrustCardError::CardHashMismatch(extension) if extension == "npm:@acme/plugin"
+            TrustCardError::CardHashMismatch(extension) if extension.eq("npm:@acme/plugin")
         ));
     }
 
@@ -4402,7 +4424,7 @@ mod tests {
             .search("tampered", 1_100, "trace")
             .expect_err("tampered card must fail search");
         assert!(
-            matches!(err, TrustCardError::CardHashMismatch(extension) if extension == "npm:@beta/telemetry-bridge")
+            matches!(err, TrustCardError::CardHashMismatch(extension) if extension.eq("npm:@beta/telemetry-bridge"))
         );
     }
 
@@ -4449,7 +4471,7 @@ mod tests {
             .read_version("npm:@beta/telemetry-bridge", 1)
             .expect_err("tampered historical card must fail");
         assert!(
-            matches!(err, TrustCardError::CardHashMismatch(extension) if extension == "npm:@beta/telemetry-bridge")
+            matches!(err, TrustCardError::CardHashMismatch(extension) if extension.eq("npm:@beta/telemetry-bridge"))
         );
     }
 
@@ -4473,7 +4495,7 @@ mod tests {
             .expect_err("tampered source must be rejected");
         assert!(matches!(
             err,
-            TrustCardError::CardHashMismatch(extension) if extension == "npm:@acme/plugin"
+            TrustCardError::CardHashMismatch(extension) if extension.eq("npm:@acme/plugin")
         ));
         assert!(!registry.cache_by_extension.contains_key("npm:@acme/plugin"));
     }
@@ -4515,7 +4537,7 @@ mod tests {
         assert!(ts.contains('T'), "fallback must be valid ISO8601: {ts}");
         assert!(ts.ends_with('Z'), "fallback must end with Z: {ts}");
         assert!(
-            !ts.chars().all(|c| c.is_ascii_digit() || c == 'Z'),
+            !ts.chars().all(|c| c.is_ascii_digit() || c.eq(&'Z')),
             "fallback must not be raw digits+Z: {ts}"
         );
     }
@@ -4567,7 +4589,7 @@ mod tests {
         assert!(matches!(
             err,
             TrustCardError::SnapshotWrite { path, detail }
-                if path == snapshot_path
+                if path.eq(&snapshot_path)
                     && detail.contains("failed opening parent directory")
         ));
     }
@@ -4676,7 +4698,7 @@ mod tests {
         let err = TrustCardRegistry::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, 2_000)
             .expect_err("tampered snapshot must fail");
         assert!(
-            matches!(err, TrustCardError::CardHashMismatch(extension) if extension == "npm:@beta/telemetry-bridge")
+            matches!(err, TrustCardError::CardHashMismatch(extension) if extension.eq("npm:@beta/telemetry-bridge"))
         );
     }
 
@@ -4711,7 +4733,7 @@ mod tests {
         assert!(matches!(
             err,
             TrustCardError::UnsupportedSnapshotSchema(schema)
-                if schema == "franken-node/trust-card-registry-state/v0"
+                if schema.eq("franken-node/trust-card-registry-state/v0")
         ));
     }
 
@@ -5203,11 +5225,11 @@ mod tests {
                 );
 
                 // Verify output doesn't contain obvious patterns that might indicate key leakage
-                let all_zero = result_bytes.iter().all(|&b| b == 0);
-                let all_same = result_bytes.iter().all(|&b| b == result_bytes[0]);
+                let all_zero = result_bytes.iter().all(|&b| b.eq(&0));
+                let all_same = result_bytes.iter().all(|&b| b.eq(&result_bytes[0]));
 
                 // While technically possible, these patterns are extremely unlikely with proper HMAC
-                if malicious_key.len() > 0 && !malicious_key.iter().all(|&b| b == 0) {
+                if !malicious_key.is_empty() && !malicious_key.iter().all(|&b| b.eq(&0)) {
                     assert!(
                         !all_zero,
                         "HMAC output should not be all zeros with non-zero key"
@@ -5604,7 +5626,7 @@ mod tests {
     /// Detects: State corruption, mutation ordering bugs, cache inconsistencies
     #[cfg(test)]
     #[test]
-    fn mr_trust_card_add_revoke_commutativity() {
+    fn mr_trust_card_add_revoke_commutativity() -> TestResult {
         let mut registry1 = TrustCardRegistry::new(60, b"metamorphic-test-key");
         let mut registry2 = TrustCardRegistry::new(60, b"metamorphic-test-key");
 
@@ -5681,8 +5703,9 @@ mod tests {
             ) => {
                 assert_eq!(r1, r2, "Revocation reasons should match");
             }
-            _ => panic!("Both cards should be revoked"),
+            other => return Err(format!("Both cards should be revoked, got {other:?}")),
         }
+        Ok(())
     }
 
     /// MR2: Trust-card mutation sequence commutativity for independent fields
@@ -6365,7 +6388,7 @@ mod tests {
     }
 
     #[test]
-    fn contextual_validation_error_sanitization_untrusted() {
+    fn contextual_validation_error_sanitization_untrusted() -> TestResult {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("malformed-trust-card-state.json");
         std::fs::write(&path, "invalid json {").expect("write malformed");
@@ -6384,12 +6407,17 @@ mod tests {
             TrustCardError::InvalidSnapshot(detail) => {
                 assert_eq!(detail, "snapshot validation failed");
             }
-            _ => panic!("Expected sanitized InvalidSnapshot error, got: {:?}", err),
+            other => {
+                return Err(format!(
+                    "Expected sanitized InvalidSnapshot error, got: {other:?}"
+                ));
+            }
         }
+        Ok(())
     }
 
     #[test]
-    fn contextual_validation_error_detail_preserved_trusted() {
+    fn contextual_validation_error_detail_preserved_trusted() -> TestResult {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("malformed-trust-card-state.json");
         std::fs::write(&path, "invalid json {").expect("write malformed");
@@ -6409,8 +6437,13 @@ mod tests {
                 // Should contain actual JSON parsing error details
                 assert!(detail.contains("EOF") || detail.contains("expected"));
             }
-            _ => panic!("Expected detailed SnapshotParse error, got: {:?}", err),
+            other => {
+                return Err(format!(
+                    "Expected detailed SnapshotParse error, got: {other:?}"
+                ));
+            }
         }
+        Ok(())
     }
 
     #[test]
@@ -6499,16 +6532,17 @@ mod tests {
     }
 
     #[test]
-    fn registry_from_config_rejects_invalid_configured_key() {
+    fn registry_from_config_rejects_invalid_configured_key() -> TestResult {
         let mut config = crate::config::Config::for_profile(crate::config::Profile::Balanced).trust;
         config.registry_signing_key = Some("not-base64".to_string());
 
         let err = match TrustCardRegistry::from_config(&config) {
-            Ok(_) => panic!("invalid key should fail closed"),
+            Ok(_) => return Err("invalid key should fail closed".to_string()),
             Err(err) => err,
         };
 
         assert!(matches!(err, TrustCardError::InvalidInput { .. }));
+        Ok(())
     }
 
     #[test]
