@@ -23,6 +23,10 @@ class TestConstants(unittest.TestCase):
     def test_required_contract_terms(self):
         self.assertGreaterEqual(len(mod.REQUIRED_CONTRACT_TERMS), 10)
 
+    def test_runtime_export_forbidden_tokens_configured(self):
+        self.assertIn("tgc-runtime-placeholder", mod.RUNTIME_EXPORT_FORBIDDEN_TOKENS)
+        self.assertIn("export_for_verifier", mod.RUNTIME_EXPORT_FORBIDDEN_TOKENS)
+
 
 class TestFileChecks(unittest.TestCase):
     def test_contract_exists(self):
@@ -59,6 +63,12 @@ class TestRustIntegrationChecks(unittest.TestCase):
             "rust: trust-card camouflage mark symbol TRUST_CARD_CAMOUFLAGE_SUSPECTED",
             names,
         )
+
+    def test_runtime_export_truthfulness_checks_pass(self):
+        checks = mod.check_runtime_export_truthfulness()
+        self.assertGreaterEqual(len(checks), len(mod.RUNTIME_EXPORT_FORBIDDEN_TOKENS))
+        for check in checks:
+            self.assertTrue(check["pass"], f"Failed: {check['check']} -> {check['detail']}")
 
 
 class TestReportLoad(unittest.TestCase):

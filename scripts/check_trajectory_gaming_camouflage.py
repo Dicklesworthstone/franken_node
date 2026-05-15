@@ -44,7 +44,7 @@ RUST_INTEGRATION_SYMBOLS = [
     (
         "trajectory runtime contract",
         ROOT / "crates" / "franken-node" / "src" / "security" / "trajectory_gaming.rs",
-        ["CamouflageHint", "ingest_verifier_hints", "export_for_verifier"],
+        ["CamouflageHint", "ingest_verifier_hints", "export_runtime_trajectory"],
     ),
     (
         "in-process camouflage detector",
@@ -75,6 +75,15 @@ RUST_INTEGRATION_SYMBOLS = [
         ROOT / "tests" / "security" / "camouflage_detector.rs",
         ["evaluate_camouflage_fixture", "fixture_phase_shift_clear_emits_phase_shift_hint"],
     ),
+]
+
+RUNTIME_EXPORT_FORBIDDEN_TOKENS = [
+    "export_for_verifier",
+    "tgc-runtime-placeholder",
+    "Sub-task 1 of bd-35m7 only establishes the contract",
+    "Sub-tasks 2-4 will replace placeholders",
+    '"pattern_count": 0',
+    '"scenarios": []',
 ]
 
 
@@ -140,6 +149,32 @@ def check_rust_integration() -> list[dict]:
                 "pass": present,
                 "detail": "present" if present else f"MISSING: {symbol}",
             })
+    return checks
+
+
+def check_runtime_export_truthfulness() -> list[dict]:
+    path = ROOT / "crates" / "franken-node" / "src" / "security" / "trajectory_gaming.rs"
+    if not path.exists():
+        return [{
+            "check": "rust: trajectory runtime export truthfulness",
+            "pass": False,
+            "detail": f"MISSING: {path}",
+        }]
+
+    text = _read_text(path)
+    checks = []
+    for token in RUNTIME_EXPORT_FORBIDDEN_TOKENS:
+        present = token in text
+        checks.append({
+            "check": f"rust: trajectory runtime export forbids {token}",
+            "pass": not present,
+            "detail": "absent" if not present else f"FORBIDDEN token present: {token}",
+        })
+    checks.append({
+        "check": "rust: trajectory runtime export declares non-analysis status",
+        "pass": "analysis_ready" in text and "TGC_RUNTIME_TRAJECTORY_ONLY" in text,
+        "detail": "present" if "analysis_ready" in text and "TGC_RUNTIME_TRAJECTORY_ONLY" in text else "missing",
+    })
     return checks
 
 
@@ -432,6 +467,7 @@ def run_checks() -> dict:
     checks.append(check_file(REPORT, "trajectory-gaming camouflage report"))
     checks.extend(check_contract())
     checks.extend(check_rust_integration())
+    checks.extend(check_runtime_export_truthfulness())
     data, load_checks = load_report()
     checks.extend(load_checks)
     checks.extend(check_report(data))

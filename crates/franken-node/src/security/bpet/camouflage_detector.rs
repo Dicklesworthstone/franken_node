@@ -6,8 +6,8 @@
 //! [`CamouflageHint`](crate::security::trajectory_gaming::CamouflageHint)s
 //! describing suspected trajectory-gaming behaviour. The runtime can use this
 //! to short-circuit the Python verifier on the hot path; the verifier still
-//! provides the ground-truth gate via `export_for_verifier` /
-//! `ingest_verifier_hints` (sub-task 1).
+//! provides the ground-truth gate through fixture/report evidence, while
+//! `ingest_verifier_hints` converts verifier output into typed runtime hints.
 //!
 //! Heuristics implemented here:
 //!

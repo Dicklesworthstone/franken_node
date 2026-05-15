@@ -10,13 +10,11 @@
 //!   that capture observed-vs-declared capability vectors over a time window.
 //! * [`CamouflageHint`] / [`CamouflageKind`] — typed parse of the verifier's
 //!   "this looks like trajectory gaming" output.
-//! * [`export_for_verifier`] — serialise a series into the JSON shape that the
-//!   Python script's `evaluate_policy` / `check_report` functions already
-//!   accept (mimicry corpus + detection model + motif randomization + hybrid
-//!   fusion + scenarios). Sub-tasks 2-5 of bd-35m7 will fill in the analysis
-//!   that actually populates those fields with real data; this sub-task only
-//!   establishes the stable contract so the Python verifier and the Rust
-//!   runtime can talk.
+//! * [`export_runtime_trajectory`] — serialise the bounded runtime trajectory
+//!   sample stream without claiming mimicry-corpus, detector-recall,
+//!   randomization, fusion, or adaptive-adversary metrics. Those verifier
+//!   metrics must come from the detector/report surfaces, not from synthetic
+//!   defaults in this runtime bridge.
 //! * [`ingest_verifier_hints`] — parse the verifier's output (the `checks`
 //!   list emitted by `run_checks()` plus any per-scenario diagnostics) into a
 //!   list of typed [`CamouflageHint`]s that the trust-card pipeline can
@@ -259,17 +257,17 @@ fn capability_to_json(cap: &BTreeMap<String, f64>) -> Value {
     Value::Object(map)
 }
 
-/// Serialise a [`TrajectorySeries`] into the JSON shape consumed by
-/// `scripts/check_trajectory_gaming_camouflage.py`.
+/// Serialise a [`TrajectorySeries`] as a runtime-only trajectory payload.
 ///
-/// Sub-task 1 of bd-35m7 only establishes the contract: the structural fields
-/// the Python verifier expects (`mimicry_corpus`, `detection_model`,
-/// `motif_randomization`, `hybrid_signal_fusion`, `scenarios`,
-/// `event_codes`, `trace_id`, `aggregate`) are emitted with deterministic
-/// placeholder values plus the full sample stream under a new
-/// `runtime_trajectory` block. Sub-tasks 2-4 will replace placeholders with
-/// values computed from `series`.
-pub fn export_for_verifier(series: &TrajectorySeries) -> Result<Value, TrajectoryGamingError> {
+/// This function intentionally does not emit the verifier's
+/// `mimicry_corpus`, `detection_model`, `motif_randomization`,
+/// `hybrid_signal_fusion`, `scenarios`, or `aggregate` fields. Those fields are
+/// verification evidence and must be populated by the detector/report pipeline.
+/// Returning an explicit `analysis_ready=false` payload prevents callers from
+/// confusing a bounded sample export with a completed camouflage report.
+pub fn export_runtime_trajectory(
+    series: &TrajectorySeries,
+) -> Result<Value, TrajectoryGamingError> {
     let mut samples_json: Vec<Value> = Vec::with_capacity(series.samples.len());
     for sample in &series.samples {
         samples_json.push(json!({
@@ -279,50 +277,11 @@ pub fn export_for_verifier(series: &TrajectorySeries) -> Result<Value, Trajector
         }));
     }
 
-    // Placeholder values that match the structural expectations of the Python
-    // verifier so the contract round-trips. The detector lives in sub-task 2;
-    // until then we ship an empty-but-structurally-valid payload that the
-    // verifier can parse without crashing.
     let payload = json!({
-        "bead_id": "bd-35m7",
-        "section": "12",
-        "title": "Risk control: trajectory-gaming camouflage",
-        "trace_id": "trace-bd-35m7-runtime",
-        "schema_version": "tgc-runtime-v1.0",
-        "mimicry_corpus": {
-            "pattern_count": 0,
-            "update_interval_days": 0,
-            "quarterly_update_required_days": 92,
-        },
-        "detection_model": {
-            "model_id": "tgc-runtime-placeholder",
-            "known_mimicry_recall_pct": 0.0,
-            "known_mimicry_threshold_pct": 90.0,
-            "adaptive_attack_rounds": 0,
-            "adaptive_round_recall_pct": [],
-            "adaptive_recall_threshold_pct": 80.0,
-            "retrained_after_new_pattern": false,
-        },
-        "motif_randomization": {
-            "evaluations": [],
-            "subsets_unique": false,
-        },
-        "hybrid_signal_fusion": {
-            "channels": ["behavioral", "provenance", "code_analysis", "reputation"],
-            "fusion_policy": "deny_if_any_non_behavioral_critical_fail",
-            "gaming_behavioral_only_flagged": false,
-            "adjudications": [],
-        },
-        "scenarios": [],
-        "event_codes": ["TGC-001", "TGC-002", "TGC-003", "TGC-004", "TGC-005"],
-        "aggregate": {
-            "pattern_count": 0,
-            "known_mimicry_recall_pct": 0.0,
-            "adaptive_min_round_recall_pct": 0.0,
-            "motif_subsets_unique": false,
-            "hybrid_behavioral_gaming_flagged": false,
-            "update_interval_days": 0,
-        },
+        "schema_version": "franken-node/trajectory-gaming/runtime-trajectory/v1",
+        "analysis_ready": false,
+        "reason_code": "TGC_RUNTIME_TRAJECTORY_ONLY",
+        "summary": "runtime trajectory export contains bounded samples only; verifier metrics require detector/report evidence",
         "runtime_trajectory": {
             "window_start": series.window_start,
             "window_end": series.window_end,
@@ -337,9 +296,9 @@ pub fn export_for_verifier(series: &TrajectorySeries) -> Result<Value, Trajector
 /// Parse the verifier's output JSON into a list of [`CamouflageHint`]s.
 ///
 /// The Python verifier emits either a `checks` list (from `run_checks()`) or
-/// a `hints` list (the new structured channel sub-task 2 will populate). We
-/// look for `hints` first, then fall back to extracting hints from the
-/// `checks` list (each failed check becomes a hint with placeholder severity).
+/// a `hints` list. We look for `hints` first, then fall back to extracting
+/// hints from the `checks` list (each failed check becomes a synthetic hint
+/// with severity `1.0` and explicit evidence marker).
 pub fn ingest_verifier_hints(json: &Value) -> Result<Vec<CamouflageHint>, TrajectoryGamingError> {
     let obj = json
         .as_object()
@@ -477,26 +436,39 @@ mod tests {
     }
 
     #[test]
-    fn export_round_trip_emits_required_verifier_shape() {
+    fn export_runtime_trajectory_emits_truthful_runtime_only_shape() {
         let mut series = TrajectorySeries::new(1_700_000_000, 1_700_000_600).unwrap();
         append_sample(&mut series, make_sample(1_700_000_010)).unwrap();
         append_sample(&mut series, make_sample(1_700_000_020)).unwrap();
 
-        let payload = export_for_verifier(&series).expect("export ok");
+        let payload = export_runtime_trajectory(&series).expect("export ok");
         let obj = payload.as_object().expect("root is object");
 
-        // Required by Python verifier's check_report():
-        for field in &[
+        assert_eq!(
+            obj.get("schema_version").and_then(Value::as_str),
+            Some("franken-node/trajectory-gaming/runtime-trajectory/v1")
+        );
+        assert_eq!(
+            obj.get("analysis_ready").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            obj.get("reason_code").and_then(Value::as_str),
+            Some("TGC_RUNTIME_TRAJECTORY_ONLY")
+        );
+        for verifier_evidence_field in &[
             "mimicry_corpus",
             "detection_model",
             "motif_randomization",
             "hybrid_signal_fusion",
             "scenarios",
             "event_codes",
-            "trace_id",
             "aggregate",
         ] {
-            assert!(obj.contains_key(*field), "missing field: {field}");
+            assert!(
+                !obj.contains_key(*verifier_evidence_field),
+                "runtime-only export must not fake verifier evidence field: {verifier_evidence_field}"
+            );
         }
 
         // Sample stream survives the round-trip.
@@ -631,7 +603,11 @@ mod tests {
     #[test]
     fn empty_series_export_is_well_formed() {
         let series = TrajectorySeries::new(100, 200).unwrap();
-        let payload = export_for_verifier(&series).expect("export ok");
+        let payload = export_runtime_trajectory(&series).expect("export ok");
+        assert_eq!(
+            payload.get("analysis_ready").and_then(Value::as_bool),
+            Some(false)
+        );
         let rt = payload.get("runtime_trajectory").unwrap();
         assert_eq!(rt.get("sample_count").unwrap().as_u64().unwrap(), 0);
         assert!(rt.get("samples").unwrap().as_array().unwrap().is_empty());
