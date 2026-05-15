@@ -150,17 +150,85 @@ class TestJsonOutput(TestCase):
     def test_json_serializable(self):
         result = mod.run_checks()
         serialized = json.dumps(result)
-        parsed = json.loads(serialized)
+        parsed = json.JSONDecoder().decode(serialized)
         self.assertEqual(parsed["bead_id"], "bd-18ud")
 
     def test_cli_json(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_durability_modes.py"), "--json"],
-            capture_output=True, text=True,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
         )
         self.assertEqual(result.returncode, 0)
-        data = json.loads(result.stdout)
+        data = json.JSONDecoder().decode(result.stdout)
         self.assertEqual(data["verdict"], "PASS")
+
+
+class TestCommentOnlyRegression(TestCase):
+    def test_comment_only_source_markers_fail_closed(self):
+        commented_impl = "\n".join(
+            [
+                *(f"// {marker}" for marker in mod.REQUIRED_TYPES),
+                *(f"// {marker}" for marker in mod.REQUIRED_METHODS),
+                *(f"// {marker}" for marker in mod.EVENT_CODES),
+                *(f"// {marker}" for marker in mod.ERROR_CODES),
+                *(f"// {marker}" for marker in mod.INVARIANTS),
+                *(f"// {marker}" for marker in mod.REQUIRED_TESTS),
+                "// Serialize Deserialize",
+                "// Local Quorum min_acks",
+                "// ERR_QUORUM_INSUFFICIENT acked >= min_acks",
+                "// ModeSwitchPolicy is_authorized",
+                "// fn derive( deterministic: true",
+                "/*",
+                *("// #[test]\n// fn commented_test() {}" for _ in range(40)),
+                "*/",
+            ]
+        )
+
+        original_impl = mod.IMPL
+        original_mod = mod.MOD_RS
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            impl_path = tmp / "durability.rs"
+            mod_path = tmp / "mod.rs"
+            impl_path.write_text(commented_impl, encoding="utf-8")
+            mod_path.write_text("// pub mod durability;\n", encoding="utf-8")
+
+            try:
+                mod.IMPL = impl_path
+                mod.MOD_RS = mod_path
+                result = mod.run_checks()
+            finally:
+                mod.IMPL = original_impl
+                mod.MOD_RS = original_mod
+
+        checks = {check["check"]: check["pass"] for check in result["checks"]}
+        self.assertTrue(checks["file: implementation"])
+        self.assertTrue(checks["file: spec contract"])
+        self.assertTrue(checks["file: claim matrix artifact"])
+        self.assertTrue(checks["claim matrix artifact exists"])
+        self.assertTrue(checks["claim matrix: all deterministic"])
+
+        expected_failures = [
+            "module registered in mod.rs",
+            "unit test count",
+            "Serialize/Deserialize derives",
+            "two mode variants",
+            "fail-closed quorum semantics",
+            "mode switch policy",
+            "claim determinism implementation",
+        ]
+        expected_failures.extend(f"type: {marker}" for marker in mod.REQUIRED_TYPES)
+        expected_failures.extend(f"method: {marker}" for marker in mod.REQUIRED_METHODS)
+        expected_failures.extend(f"event_code: {marker}" for marker in mod.EVENT_CODES)
+        expected_failures.extend(f"error_code: {marker}" for marker in mod.ERROR_CODES)
+        expected_failures.extend(f"invariant: {marker}" for marker in mod.INVARIANTS)
+        expected_failures.extend(f"test: {marker}" for marker in mod.REQUIRED_TESTS)
+        for check_name in expected_failures:
+            self.assertIn(check_name, checks)
+            self.assertFalse(checks[check_name], check_name)
 
 
 if __name__ == "__main__":
