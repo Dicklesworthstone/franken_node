@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import check_zone_segmentation as checker
+import check_zone_segmentation as checker  # noqa: E402
 
 
 class TestSelfTest(unittest.TestCase):
@@ -218,6 +219,82 @@ class TestIndividualChecks(unittest.TestCase):
         self.assertTrue(r["passed"])
 
 
+class TestCommentOnlyRustRegression(unittest.TestCase):
+    """Rust-source checks must not pass from commented-out markers."""
+
+    def test_comment_only_rust_markers_fail_closed(self):
+        variants = [
+            "CrossZoneViolation", "TenantNotBound", "ZoneNotFound",
+            "DelegationDepthExceeded", "IsolationViolation", "DuplicateZone",
+            "DuplicateTenant", "BridgeAuthIncomplete", "FreshnessStale",
+            "KeyZoneMismatch",
+        ]
+        commented_module = "\n".join(
+            [
+                *(f"// {item}" for item in checker.REQUIRED_STRUCTS),
+                *(f"// fn {item}()" for item in checker.REQUIRED_METHODS),
+                *(f"// {item}" for item in checker.EVENT_CODES),
+                *(f"// {item}" for item in checker.INVARIANTS),
+                "// Strict Permissive Custom",
+                *(f"// {item}" for item in variants),
+                "// FreshnessStale freshness_valid",
+                "// KeyZoneMismatch key_zone_bindings",
+                "/*",
+                *("// #[test]\n// fn commented_test() {}" for _ in range(25)),
+                "*/",
+            ]
+        )
+
+        original_module = checker.RUST_MODULE
+        original_mod_rs = checker.MOD_RS
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            module_path = tmp / "trust_zone.rs"
+            mod_path = tmp / "mod.rs"
+            module_path.write_text(commented_module, encoding="utf-8")
+            mod_path.write_text("// pub mod trust_zone;\n", encoding="utf-8")
+
+            try:
+                checker.RUST_MODULE = module_path
+                checker.MOD_RS = mod_path
+                checker.RESULTS.clear()
+                for fn in [
+                    checker.check_rust_module_exists,
+                    checker.check_rust_module_registered,
+                    checker.check_rust_structs,
+                    checker.check_rust_methods,
+                    checker.check_rust_event_codes,
+                    checker.check_rust_invariants,
+                    checker.check_rust_isolation_levels,
+                    checker.check_rust_test_count,
+                    checker.check_rust_segmentation_errors,
+                    checker.check_rust_freshness_gate,
+                    checker.check_rust_key_zone_binding,
+                ]:
+                    fn()
+                results = {item["name"]: item["passed"] for item in checker.RESULTS}
+            finally:
+                checker.RUST_MODULE = original_module
+                checker.MOD_RS = original_mod_rs
+                checker.RESULTS.clear()
+
+        self.assertTrue(results["rust_module_exists"])
+        for name in [
+            "rust_module_registered",
+            "rust_structs",
+            "rust_methods",
+            "rust_event_codes",
+            "rust_invariants",
+            "rust_isolation_levels",
+            "rust_test_count",
+            "rust_segmentation_errors",
+            "rust_freshness_gate",
+            "rust_key_zone_binding",
+        ]:
+            self.assertIn(name, results)
+            self.assertFalse(results[name], name)
+
+
 class TestCheckHelper(unittest.TestCase):
     """_check() appends to RESULTS correctly."""
 
@@ -277,17 +354,20 @@ class TestJsonOutput(unittest.TestCase):
     def test_json_serializable(self):
         result = checker.run_all()
         json_str = json.dumps(result, indent=2)
-        parsed = json.loads(json_str)
+        parsed = json.JSONDecoder().decode(json_str)
         self.assertEqual(parsed["bead_id"], "bd-1vp")
 
     def test_cli_json(self):
         proc = subprocess.run(
             [sys.executable,
              str(ROOT / "scripts" / "check_zone_segmentation.py"), "--json"],
-            capture_output=True, text=True,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
         )
         self.assertEqual(proc.returncode, 0)
-        data = json.loads(proc.stdout)
+        data = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(data["bead_id"], "bd-1vp")
         self.assertEqual(data["verdict"], "PASS")
 
@@ -295,7 +375,10 @@ class TestJsonOutput(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable,
              str(ROOT / "scripts" / "check_zone_segmentation.py"), "--self-test"],
-            capture_output=True, text=True,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
         )
         self.assertEqual(proc.returncode, 0)
         self.assertIn("self_test passed", proc.stdout)
