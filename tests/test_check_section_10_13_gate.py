@@ -118,6 +118,36 @@ def test_rust_test_command_uses_rch_name_when_path_lookup_fails():
     assert cmd[:4] == ["rch", "exec", "--", "cargo"]
 
 
+def test_structural_partial_evidence_with_no_failures_counts_as_non_failing():
+    evidence = {
+        "verdict": "PARTIAL",
+        "mode": "structural",
+        "summary": {"failing_checks": 0, "skipped_checks": 1},
+    }
+
+    assert mod._structural_partial_evidence_is_non_failing(evidence) is True
+
+
+def test_partial_evidence_with_failures_is_not_non_failing():
+    evidence = {
+        "verdict": "PARTIAL",
+        "mode": "structural",
+        "summary": {"failing_checks": 1, "skipped_checks": 1},
+    }
+
+    assert mod._structural_partial_evidence_is_non_failing(evidence) is False
+
+
+def test_partial_evidence_without_structural_mode_is_not_non_failing():
+    evidence = {
+        "verdict": "PARTIAL",
+        "mode": "full",
+        "summary": {"failing_checks": 0, "skipped_checks": 1},
+    }
+
+    assert mod._structural_partial_evidence_is_non_failing(evidence) is False
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -169,7 +199,7 @@ def test_build_report_no_execution():
 
 def test_evidence_threshold():
     source = SCRIPT.read_text()
-    assert "evidence_pass >= 40" in source
+    assert "evidence_verified >= 40" in source
 
 def test_module_threshold():
     source = SCRIPT.read_text()

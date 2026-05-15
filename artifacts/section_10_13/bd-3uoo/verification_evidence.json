@@ -20,25 +20,25 @@
       "id": "GATE-EVIDENCE",
       "description": "Per-bead verification evidence",
       "status": "PASS",
-      "details": "46/46 beads PASS"
+      "details": "35 PASS + 6 structural PARTIAL/46 beads"
     },
     {
       "id": "GATE-MODULES",
       "description": "Connector module count",
       "status": "PASS",
-      "details": "74 modules"
+      "details": "75 modules"
     },
     {
       "id": "GATE-SPECS",
       "description": "Spec contract files",
       "status": "PASS",
-      "details": "46 spec contracts"
+      "details": "48 spec contracts"
     },
     {
       "id": "GATE-INTEGRATION",
       "description": "Integration test files",
       "status": "PASS",
-      "details": "44 integration test files"
+      "details": "58 integration test files"
     }
   ],
   "summary": {

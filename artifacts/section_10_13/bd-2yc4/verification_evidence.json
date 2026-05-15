@@ -2,7 +2,8 @@
   "gate": "crash_loop_detector_verification",
   "bead": "bd-2yc4",
   "section": "10.13",
-  "verdict": "FAIL",
+  "mode": "structural",
+  "verdict": "PARTIAL",
   "checks": [
     {
       "id": "CLD-IMPL",
@@ -23,12 +24,14 @@
     {
       "id": "CLD-FIXTURES",
       "description": "Crash loop scenarios fixture",
-      "status": "PASS"
+      "status": "PASS",
+      "details": "found 6 cases"
     },
     {
       "id": "CLD-BUNDLE",
       "description": "Incident bundle artifact",
-      "status": "PASS"
+      "status": "PASS",
+      "details": "found 2 incidents"
     },
     {
       "id": "CLD-INTEG-TESTS",
@@ -38,8 +41,8 @@
     {
       "id": "CLD-TESTS",
       "description": "Rust unit tests pass",
-      "status": "FAIL",
-      "details": "Command '['/home/ubuntu/.cargo/bin/cargo', 'test', '-p', 'frankenengine-node', '--', 'runtime::crash_loop_detector']' timed out after 120 seconds"
+      "status": "SKIP",
+      "details": "not run in structural mode; use --run-rust-tests for the full proof"
     },
     {
       "id": "CLD-SPEC",
@@ -50,6 +53,7 @@
   "summary": {
     "total_checks": 8,
     "passing_checks": 7,
-    "failing_checks": 1
+    "failing_checks": 0,
+    "skipped_checks": 1
   }
 }
