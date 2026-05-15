@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.lib.test_logger import configure_test_logging
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 IMPL = ROOT / "crates" / "franken-node" / "src" / "connector" / "control_evidence.rs"
 SPEC = ROOT / "docs" / "integration" / "control_evidence_contract.md"
@@ -142,17 +142,24 @@ def check_file(path, label):
     return {
         "check": f"file: {label}",
         "pass": ok,
-        "detail": f"exists: {path.relative_to(ROOT)}" if ok else f"MISSING: {path}",
+        "detail": f"exists: {safe_rel(path)}" if ok else f"MISSING: {path}",
     }
 
 
-def check_content(path, patterns, category):
+def safe_rel(path):
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def check_content(path, patterns, category, *, strip_comments=True):
     results = []
     if not path.exists():
         for p in patterns:
             results.append({"check": f"{category}: {p}", "pass": False, "detail": "file missing"})
         return results
-    text = path.read_text()
+    text = read_rust_source(path) if strip_comments else read_text(path)
     for p in patterns:
         found = p in text
         results.append({
@@ -163,10 +170,117 @@ def check_content(path, patterns, category):
     return results
 
 
+def read_text(path):
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def read_rust_source(path):
+    return strip_rust_comments(read_text(path))
+
+
+def strip_rust_comments(text):
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+
+        raw_start = rust_raw_string_start(text, i)
+        if raw_start is not None:
+            body_start, hashes = raw_start
+            end = rust_raw_string_end(text, body_start + 1, hashes)
+            if end is None:
+                out.append(text[i:])
+                break
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if ch == '"':
+            end = rust_quoted_literal_end(text, i, ch)
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if text.startswith("//", i):
+            newline = text.find("\n", i + 2)
+            if newline == -1:
+                break
+            out.append("\n")
+            i = newline + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = rust_block_comment_end(text, i + 2)
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def rust_raw_string_start(text, index):
+    n = len(text)
+    if text.startswith("br", index):
+        cursor = index + 2
+    elif text.startswith("r", index):
+        cursor = index + 1
+    else:
+        return None
+
+    hashes = 0
+    while cursor < n and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+    if cursor < n and text[cursor] == '"':
+        return cursor, hashes
+    return None
+
+
+def rust_raw_string_end(text, index, hashes):
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, index)
+    if end == -1:
+        return None
+    return end + len(terminator)
+
+
+def rust_quoted_literal_end(text, index, quote):
+    i = index + 1
+    n = len(text)
+    escaped = False
+    while i < n:
+        ch = text[i]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == quote:
+            return i + 1
+        i += 1
+    return n
+
+
+def rust_block_comment_end(text, index):
+    depth = 1
+    i = index
+    n = len(text)
+    while i < n and depth:
+        if text.startswith("/*", i):
+            depth += 1
+            i += 2
+        elif text.startswith("*/", i):
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
+
+
 def check_module_registered():
     if not MOD_RS.exists():
         return {"check": "module registered in mod.rs", "pass": False, "detail": "mod.rs missing"}
-    text = MOD_RS.read_text()
+    text = read_rust_source(MOD_RS)
     found = "pub mod control_evidence;" in text
     return {
         "check": "module registered in mod.rs",
@@ -178,7 +292,7 @@ def check_module_registered():
 def check_test_count():
     if not IMPL.exists():
         return {"check": "unit test count", "pass": False, "detail": "impl missing"}
-    text = IMPL.read_text()
+    text = read_rust_source(IMPL)
     count = len(re.findall(r"#\[test\]", text))
     ok = count >= 40
     return {
@@ -191,7 +305,7 @@ def check_test_count():
 def check_serde_derives():
     if not IMPL.exists():
         return {"check": "Serialize/Deserialize derives", "pass": False, "detail": "impl missing"}
-    text = IMPL.read_text()
+    text = read_rust_source(IMPL)
     has_ser = "Serialize" in text and "Deserialize" in text
     return {
         "check": "Serialize/Deserialize derives",
@@ -206,7 +320,7 @@ def check_samples_jsonl():
         results.append({"check": "samples JSONL exists", "pass": False, "detail": "MISSING"})
         return results
     results.append({"check": "samples JSONL exists", "pass": True, "detail": "found"})
-    lines = [l for l in SAMPLES.read_text().strip().split("\n") if l.strip()]
+    lines = [line for line in read_text(SAMPLES).strip().split("\n") if line.strip()]
     ok = len(lines) >= 10
     results.append({
         "check": "samples JSONL: entry count",
@@ -217,7 +331,7 @@ def check_samples_jsonl():
     types_found = set()
     for line in lines:
         try:
-            entry = json.loads(line)
+            entry = json.JSONDecoder().decode(line)
             types_found.add(entry.get("decision_type", ""))
         except json.JSONDecodeError:
             pass
@@ -235,7 +349,7 @@ def check_spec_content():
     if not SPEC.exists():
         results.append({"check": "spec: decision types listed", "pass": False, "detail": "spec missing"})
         return results
-    text = SPEC.read_text()
+    text = read_text(SPEC)
     for dt in DECISION_TYPES:
         found = dt in text
         results.append({

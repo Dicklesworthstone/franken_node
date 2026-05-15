@@ -4,6 +4,7 @@
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -145,6 +146,68 @@ class TestRunChecks(unittest.TestCase):
         result = checker.run_checks()
         self.assertGreaterEqual(result["summary"]["total"], 85)
 
+    def test_comment_only_source_markers_fail_closed(self):
+        commented_tests = "\n".join(
+            f"// #[test]\n// fn {test_name}() {{}}" for test_name in checker.REQUIRED_TESTS
+        )
+        comment_only_impl = "\n".join(
+            [
+                *(f"// {marker}" for marker in checker.REQUIRED_TYPES),
+                *(f"// {marker}" for marker in checker.REQUIRED_METHODS),
+                *(f"// {code}" for code in checker.EVENT_CODES),
+                *(f"// {invariant}" for invariant in checker.INVARIANTS),
+                "// Serialize Deserialize",
+                "/*",
+                commented_tests,
+                "*/",
+            ]
+        )
+        comment_only_conformance = "\n".join(
+            f"// fn {test_name}() {{}}" for test_name in checker.REQUIRED_CONFORMANCE_TESTS
+        )
+
+        original_impl = checker.IMPL
+        original_mod = checker.MOD_RS
+        original_conformance = checker.CONFORMANCE_TEST
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            impl_path = tmp / "control_evidence.rs"
+            mod_path = tmp / "mod.rs"
+            conformance_path = tmp / "control_policy_evidence_required.rs"
+            impl_path.write_text(comment_only_impl, encoding="utf-8")
+            mod_path.write_text("pub mod control_evidence;\n", encoding="utf-8")
+            conformance_path.write_text(comment_only_conformance, encoding="utf-8")
+
+            try:
+                checker.IMPL = impl_path
+                checker.MOD_RS = mod_path
+                checker.CONFORMANCE_TEST = conformance_path
+                result = checker.run_checks()
+            finally:
+                checker.IMPL = original_impl
+                checker.MOD_RS = original_mod
+                checker.CONFORMANCE_TEST = original_conformance
+
+        checks = {check["check"]: check["pass"] for check in result["checks"]}
+        self.assertTrue(checks["file: implementation"])
+        self.assertTrue(checks["module registered in mod.rs"])
+        self.assertFalse(checks["unit test count"])
+        self.assertFalse(checks["Serialize/Deserialize derives"])
+        self.assertEqual(result["test_count"], "0")
+
+        expected_failures = []
+        expected_failures.extend(f"type: {marker}" for marker in checker.REQUIRED_TYPES)
+        expected_failures.extend(f"method: {marker}" for marker in checker.REQUIRED_METHODS)
+        expected_failures.extend(f"event_code: {code}" for code in checker.EVENT_CODES)
+        expected_failures.extend(f"invariant: {invariant}" for invariant in checker.INVARIANTS)
+        expected_failures.extend(f"test: {test_name}" for test_name in checker.REQUIRED_TESTS)
+        expected_failures.extend(
+            f"conformance_test: {test_name}" for test_name in checker.REQUIRED_CONFORMANCE_TESTS
+        )
+        for check_name in expected_failures:
+            self.assertIn(check_name, checks)
+            self.assertFalse(checks[check_name], check_name)
+
 
 class TestSelfTest(unittest.TestCase):
     def test_self_test_passes(self):
@@ -183,7 +246,7 @@ class TestJsonOutput(unittest.TestCase):
     def test_cli_json(self):
         proc = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_control_evidence.py"), "--json"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, check=False,
         )
         self.assertEqual(proc.returncode, 0)
         data = json.JSONDecoder().decode(proc.stdout)
@@ -192,7 +255,7 @@ class TestJsonOutput(unittest.TestCase):
     def test_cli_human(self):
         proc = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_control_evidence.py")],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, check=False,
         )
         self.assertEqual(proc.returncode, 0)
         self.assertIn("PASS", proc.stdout)
