@@ -52,6 +52,105 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _strip_rust_comments(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+
+        raw_start = _rust_raw_string_start(text, i)
+        if raw_start is not None:
+            body_start, hashes = raw_start
+            end = _rust_raw_string_end(text, body_start + 1, hashes)
+            if end is None:
+                out.append(text[i:])
+                break
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if ch == '"':
+            end = _rust_quoted_literal_end(text, i, ch)
+            out.append(text[i:end])
+            i = end
+            continue
+
+        if text.startswith("//", i):
+            newline = text.find("\n", i + 2)
+            if newline == -1:
+                break
+            out.append("\n")
+            i = newline + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _rust_raw_string_start(text: str, index: int) -> tuple[int, int] | None:
+    n = len(text)
+    if text.startswith("br", index):
+        cursor = index + 2
+    elif text.startswith("r", index):
+        cursor = index + 1
+    else:
+        return None
+
+    hashes = 0
+    while cursor < n and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+    if cursor < n and text[cursor] == '"':
+        return cursor, hashes
+    return None
+
+
+def _rust_raw_string_end(text: str, index: int, hashes: int) -> int | None:
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, index)
+    if end == -1:
+        return None
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, index: int, quote: str) -> int:
+    i = index + 1
+    n = len(text)
+    escaped = False
+    while i < n:
+        ch = text[i]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == quote:
+            return i + 1
+        i += 1
+    return n
+
+
+def _rust_block_comment_end(text: str, index: int) -> int:
+    depth = 1
+    i = index
+    n = len(text)
+    while i < n and depth:
+        if text.startswith("/*", i):
+            depth += 1
+            i += 2
+        elif text.startswith("*/", i):
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
+
+
 def _read_json_object(path: Path) -> dict[str, Any]:
     payload = json.JSONDecoder().decode(_read_text(path))
     if not isinstance(payload, dict):
@@ -159,10 +258,10 @@ def _checks() -> list[dict[str, Any]]:
     ok("spec_exists", SPEC.is_file(), str(SPEC))
     ok("vectors_exists", VECTORS.is_file(), str(VECTORS))
 
-    src = _read_text(IMPL) if IMPL.is_file() else ""
+    src = _strip_rust_comments(_read_text(IMPL)) if IMPL.is_file() else ""
     production_src = src.partition("#[cfg(test)]")[0]
-    mod_src = _read_text(MOD_RS) if MOD_RS.is_file() else ""
-    conf_src = _read_text(CONF_TEST) if CONF_TEST.is_file() else ""
+    mod_src = _strip_rust_comments(_read_text(MOD_RS)) if MOD_RS.is_file() else ""
+    conf_src = _strip_rust_comments(_read_text(CONF_TEST)) if CONF_TEST.is_file() else ""
 
     ok(
         "module_wiring",

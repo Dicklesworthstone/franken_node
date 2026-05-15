@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_idempotency_key_derivation.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import check_idempotency_key_derivation as checker
+import check_idempotency_key_derivation as checker  # noqa: E402
 
 
 def decode_json(payload: str) -> dict:
@@ -137,6 +137,56 @@ class VectorValidationTests(unittest.TestCase):
 
 
 class OverallTests(unittest.TestCase):
+    def test_comment_only_source_markers_fail_closed(self):
+        commented_tests = "\n".join(
+            f"// #[test]\n// fn commented_idempotency_test_{idx}() {{}}" for idx in range(12)
+        )
+        comment_only_impl = "\n".join(
+            [
+                *(f"// {marker}" for marker in checker.REQUIRED_IMPL_MARKERS),
+                "// append_len_prefixed_field idempotency_key_derive_v1:",
+                "// #[cfg(test)]",
+                "/*",
+                commented_tests,
+                "*/",
+            ]
+        )
+        comment_only_conf = "\n".join(
+            [*(f"// {marker}" for marker in checker.REQUIRED_CONF_MARKERS)]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            impl_path = tmp / "idempotency.rs"
+            mod_path = tmp / "mod.rs"
+            conf_path = tmp / "idempotency_key_derivation.rs"
+            impl_path.write_text(comment_only_impl, encoding="utf-8")
+            mod_path.write_text("pub mod idempotency;\n", encoding="utf-8")
+            conf_path.write_text(comment_only_conf, encoding="utf-8")
+
+            original_impl = checker.IMPL
+            original_mod = checker.MOD_RS
+            original_conf = checker.CONF_TEST
+            try:
+                checker.IMPL = impl_path
+                checker.MOD_RS = mod_path
+                checker.CONF_TEST = conf_path
+                checks = checker._checks()
+            finally:
+                checker.IMPL = original_impl
+                checker.MOD_RS = original_mod
+                checker.CONF_TEST = original_conf
+
+        check_map = {c["check"]: c for c in checks}
+        self.assertTrue(check_map["impl_exists"]["passed"])
+        self.assertTrue(check_map["module_wiring"]["passed"])
+        for marker in checker.REQUIRED_IMPL_MARKERS:
+            self.assertFalse(check_map[f"impl_marker_{marker}"]["passed"], marker)
+        for marker in checker.REQUIRED_CONF_MARKERS:
+            self.assertFalse(check_map[f"conf_marker_{marker}"]["passed"], marker)
+        self.assertFalse(check_map["injective_canonical_framing"]["passed"])
+        self.assertFalse(check_map["impl_test_count"]["passed"])
+
     def test_injective_canonical_framing_check_passes(self):
         checks = checker._checks()
         check_map = {c["check"]: c for c in checks}
