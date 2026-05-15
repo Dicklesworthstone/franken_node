@@ -34,6 +34,8 @@ use frankenengine_node::dgis::contagion_simulator::{
     InfectionState, SimulatorConfig, TerminationReason, detect_termination, simulate,
 };
 
+type TestResult = Result<(), String>;
+
 /// Resolve the absolute path to a profile fixture from the per-crate
 /// `CARGO_MANIFEST_DIR` (which is `crates/franken-node/` at test time)
 /// up to `tests/security/contagion_profiles/<name>.json` at the
@@ -51,21 +53,21 @@ fn profile_path(name: &str) -> PathBuf {
 
 /// Load and validate a shipped profile fixture by name.
 ///
-/// Panics on failure (this is a test helper, not production code) with
-/// a message that names the failing fixture so the assertion error is
-/// self-describing.
-fn load_profile(name: &str) -> ContagionProfile {
+/// Returns a descriptive error that names the failing fixture on I/O or
+/// validation failure.
+fn load_profile(name: &str) -> Result<ContagionProfile, String> {
     let path = profile_path(name);
-    let json = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()));
-    load_profile_from_json(&json).unwrap_or_else(|e| panic!("load profile {name}: {e:?}"))
+    let json =
+        fs::read_to_string(&path).map_err(|e| format!("read fixture {}: {e}", path.display()))?;
+    load_profile_from_json(&json).map_err(|e| format!("load profile {name}: {e:?}"))
 }
 
 #[test]
-fn test_xz_style_profile_evaluates_to_pass() {
-    let profile = load_profile("xz_style");
+fn test_xz_style_profile_evaluates_to_pass() -> TestResult {
+    let profile = load_profile("xz_style")?;
     assert_eq!(profile.name, "xz_style");
-    let verdict = evaluate_profile(&profile).expect("xz_style evaluate");
+    let verdict =
+        evaluate_profile(&profile).map_err(|e| format!("xz_style evaluate failed: {e:?}"))?;
     assert!(
         verdict.passed,
         "xz_style verdict diverged from expected: {:?}",
@@ -78,13 +80,15 @@ fn test_xz_style_profile_evaluates_to_pass() {
     assert!(verdict.actual_terminated_at <= profile.expected.terminated_by_step);
     let expected_reason: TerminationReason = profile.expected.termination_reason.into();
     assert_eq!(verdict.actual_termination_reason, expected_reason);
+    Ok(())
 }
 
 #[test]
-fn test_dependency_confusion_profile_evaluates_to_pass() {
-    let profile = load_profile("dependency_confusion");
+fn test_dependency_confusion_profile_evaluates_to_pass() -> TestResult {
+    let profile = load_profile("dependency_confusion")?;
     assert_eq!(profile.name, "dependency_confusion");
-    let verdict = evaluate_profile(&profile).expect("dependency_confusion evaluate");
+    let verdict = evaluate_profile(&profile)
+        .map_err(|e| format!("dependency_confusion evaluate failed: {e:?}"))?;
     assert!(
         verdict.passed,
         "dependency_confusion verdict diverged: {:?}",
@@ -95,13 +99,15 @@ fn test_dependency_confusion_profile_evaluates_to_pass() {
     assert!(verdict.actual_terminated_at <= profile.expected.terminated_by_step);
     let expected_reason: TerminationReason = profile.expected.termination_reason.into();
     assert_eq!(verdict.actual_termination_reason, expected_reason);
+    Ok(())
 }
 
 #[test]
-fn test_typosquat_profile_evaluates_to_pass() {
-    let profile = load_profile("typosquat");
+fn test_typosquat_profile_evaluates_to_pass() -> TestResult {
+    let profile = load_profile("typosquat")?;
     assert_eq!(profile.name, "typosquat");
-    let verdict = evaluate_profile(&profile).expect("typosquat evaluate");
+    let verdict =
+        evaluate_profile(&profile).map_err(|e| format!("typosquat evaluate failed: {e:?}"))?;
     assert!(
         verdict.passed,
         "typosquat verdict diverged: {:?}",
@@ -112,21 +118,22 @@ fn test_typosquat_profile_evaluates_to_pass() {
     assert!(verdict.actual_terminated_at <= profile.expected.terminated_by_step);
     let expected_reason: TerminationReason = profile.expected.termination_reason.into();
     assert_eq!(verdict.actual_termination_reason, expected_reason);
+    Ok(())
 }
 
 #[test]
-fn test_all_profiles_deterministic_across_two_runs() {
+fn test_all_profiles_deterministic_across_two_runs() -> TestResult {
     // For each shipped fixture: load and evaluate twice, then assert the
     // two `ProfileVerdict`s are byte-identical. This guards against any
     // accidentally-introduced non-determinism (HashMap iteration order,
     // wall-clock seeds, etc.) anywhere in the load + simulate + compare
     // pipeline.
     for name in ["xz_style", "dependency_confusion", "typosquat"] {
-        let profile = load_profile(name);
+        let profile = load_profile(name)?;
         let v1 = evaluate_profile(&profile)
-            .unwrap_or_else(|e| panic!("{name}: first evaluate failed {e:?}"));
+            .map_err(|e| format!("{name}: first evaluate failed {e:?}"))?;
         let v2 = evaluate_profile(&profile)
-            .unwrap_or_else(|e| panic!("{name}: second evaluate failed {e:?}"));
+            .map_err(|e| format!("{name}: second evaluate failed {e:?}"))?;
         assert_eq!(
             v1, v2,
             "{name}: two evaluations of the same profile must be byte-identical",
@@ -135,12 +142,12 @@ fn test_all_profiles_deterministic_across_two_runs() {
         // Also confirm trace-level determinism by running `simulate`
         // directly twice and comparing the full SimulationTrace.
         let graph = build_graph_from_spec(&profile.graph)
-            .unwrap_or_else(|e| panic!("{name}: build_graph_from_spec failed {e:?}"));
+            .map_err(|e| format!("{name}: build_graph_from_spec failed {e:?}"))?;
         let cfg: SimulatorConfig = profile.config.clone().into();
         let t1 = simulate(&graph, &profile.initial_infected, &cfg)
-            .unwrap_or_else(|e| panic!("{name}: first simulate failed {e:?}"));
+            .map_err(|e| format!("{name}: first simulate failed {e:?}"))?;
         let t2 = simulate(&graph, &profile.initial_infected, &cfg)
-            .unwrap_or_else(|e| panic!("{name}: second simulate failed {e:?}"));
+            .map_err(|e| format!("{name}: second simulate failed {e:?}"))?;
         assert_eq!(
             t1, t2,
             "{name}: two simulations must produce identical traces"
@@ -152,15 +159,16 @@ fn test_all_profiles_deterministic_across_two_runs() {
             "{name}: trace length must equal terminated_at + 1",
         );
     }
+    Ok(())
 }
 
 #[test]
-fn test_profile_with_missing_node_fails_evaluation() {
+fn test_profile_with_missing_node_fails_evaluation() -> TestResult {
     // Synthesize a profile where `initial_infected` references a node id
     // that is NOT in `graph.nodes`. `evaluate_profile` must surface this
     // as `ProfileError::UnknownNode` rather than panicking or producing a
     // misleading verdict.
-    let mut profile = load_profile("xz_style");
+    let mut profile = load_profile("xz_style")?;
     profile.initial_infected = vec!["pkg:does_not_exist_in_graph".to_string()];
     let err = evaluate_profile(&profile).expect_err("missing initial_infected must reject");
     assert_eq!(err, ProfileError::UnknownNode);
@@ -180,6 +188,7 @@ fn test_profile_with_missing_node_fails_evaluation() {
     };
     let err = build_graph_from_spec(&bad_spec).expect_err("dangling edge must reject");
     assert_eq!(err, ProfileError::UnknownNode);
+    Ok(())
 }
 
 #[test]
@@ -242,7 +251,7 @@ fn test_profile_with_nan_weight_rejected_at_load() {
 }
 
 #[test]
-fn test_full_spread_termination_reached() {
+fn test_full_spread_termination_reached() -> TestResult {
     // Construct a small dense profile programmatically (no JSON) so the
     // FullSpread reach is unambiguous: 4 nodes, every (src,dst) pair with
     // src!=dst, weight 1.0, threshold 0.0 — every non-infected node gets
@@ -284,7 +293,8 @@ fn test_full_spread_termination_reached() {
             terminated_by_step: 4,
         },
     };
-    let verdict = evaluate_profile(&profile).expect("dense profile evaluation must succeed");
+    let verdict = evaluate_profile(&profile)
+        .map_err(|e| format!("dense profile evaluation failed: {e:?}"))?;
     assert!(
         verdict.passed,
         "dense profile must pass; divergences={:?}",
@@ -300,10 +310,11 @@ fn test_full_spread_termination_reached() {
         "FullSpread on a dense threshold-0 graph must complete in <= 1 step (got {})",
         verdict.actual_terminated_at,
     );
+    Ok(())
 }
 
 #[test]
-fn test_no_spread_termination_when_no_edges() {
+fn test_no_spread_termination_when_no_edges() -> TestResult {
     // Two assertions cover the "no spread" contract:
     //
     //   (a) The supported entry point: `simulate` with one seed on a
@@ -330,13 +341,13 @@ fn test_no_spread_termination_when_no_edges() {
         decay_factor: 0.5,
         seed: 0,
     };
-    let trace =
-        simulate(&g, &["n0".to_string()], &cfg).expect("simulate on isolated graph must succeed");
+    let trace = simulate(&g, &["n0".to_string()], &cfg)
+        .map_err(|e| format!("simulate on isolated graph failed: {e:?}"))?;
     assert_eq!(trace.termination_reason, TerminationReason::Converged);
     let last = trace
         .states_per_step
         .last()
-        .expect("trace must contain at least step 0");
+        .ok_or_else(|| "trace must contain at least step 0".to_string())?;
     assert_eq!(last.infected_count(), 1);
 
     // (b) detect_termination path → NoSpread when prev and cur are both
@@ -361,6 +372,7 @@ fn test_no_spread_termination_when_no_edges() {
         // pruned by a future cleanup pass.
         let _sample: ContagionEdge =
             ContagionEdge::new(node.clone(), 0.0, EdgeKind::DependencyImport)
-                .expect("zero-weight edge is constructible");
+                .map_err(|e| format!("zero-weight edge should be constructible: {e:?}"))?;
     }
+    Ok(())
 }
