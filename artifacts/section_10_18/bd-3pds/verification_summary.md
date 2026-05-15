@@ -9,6 +9,10 @@
 - 22+ unit tests with invariant markers
 
 ## Verification
-- **25/25** checks passed
+- **64/64** checker gates passed
+- **19** checker unit tests passed
 - Sealed capsule immutability, schema stability
 - Independent verifiability, complete evidence requirement
+- Checker now validates module wiring, public Rust items/functions, public
+  event/error constants, CapsuleError variants, and Rust test markers from
+  comment-stripped source so comment-only markers fail closed.

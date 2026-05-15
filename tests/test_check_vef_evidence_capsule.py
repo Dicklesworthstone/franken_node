@@ -6,6 +6,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,6 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_vef_evidence_capsule.py"
 
 spec = importlib.util.spec_from_file_location("check_vef_evidence_capsule", SCRIPT)
+if spec is None or spec.loader is None:
+    raise RuntimeError(f"Unable to import VEF evidence capsule checker from {SCRIPT}")
 mod = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = mod
 spec.loader.exec_module(mod)
@@ -84,7 +87,7 @@ class TestCli(unittest.TestCase):
             capture_output=True, text=True, timeout=30, check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        parsed = json.loads(proc.stdout)
+        parsed = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(parsed["bead_id"], "bd-3pds")
         self.assertEqual(parsed["mode"], "self-test")
 
@@ -93,7 +96,7 @@ class TestCli(unittest.TestCase):
             [sys.executable, str(SCRIPT), "--json"],
             capture_output=True, text=True, timeout=30, check=False,
         )
-        parsed = json.loads(proc.stdout)
+        parsed = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(parsed["bead_id"], "bd-3pds")
         self.assertIn("checks", parsed)
 
@@ -119,6 +122,68 @@ class TestConstants(unittest.TestCase):
 
     def test_invariant_count(self) -> None:
         self.assertEqual(len(mod.INVARIANTS), 4)
+
+
+class TestCommentOnlyRegressions(unittest.TestCase):
+    def test_comment_only_impl_markers_fail_closed(self) -> None:
+        original_impl = mod.IMPL_FILE
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                fake_impl = Path(tmpdir) / "evidence_capsule.rs"
+                fake_impl.write_text(
+                    "\n".join(
+                        [
+                            "// pub struct VefEvidence {}",
+                            "// pub struct EvidenceCapsule {}",
+                            "// pub struct CapsuleVerificationResult {}",
+                            "// pub struct ExternalVerifierEndpoint {}",
+                            "// pub struct ExportManifest {}",
+                            "// pub struct VerifierRegistry {}",
+                            "// pub enum CapsuleError { EmptyEvidence, AlreadySealed }",
+                            '// pub const EVIDENCE_CAPSULE_CREATED: &str = "EVIDENCE_CAPSULE_CREATED";',
+                            '// pub const ERR_CAPSULE_EMPTY_EVIDENCE: &str = "ERR_CAPSULE_EMPTY_EVIDENCE";',
+                            "// pub fn new() {}",
+                            "// pub fn seal() {}",
+                            "// #[test]",
+                            "// fn comment_only_test() {}",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                mod.IMPL_FILE = fake_impl
+                mod.RESULTS.clear()
+
+                mod.check_impl_symbols()
+                mod.check_event_codes()
+                mod.check_error_codes()
+                mod.check_error_variants()
+                mod.check_unit_tests()
+        finally:
+            mod.IMPL_FILE = original_impl
+
+        by_name = {entry["check"]: entry for entry in mod.RESULTS}
+        self.assertFalse(by_name["impl_symbol_VefEvidence"]["pass"])
+        self.assertFalse(by_name["impl_symbol_new"]["pass"])
+        self.assertFalse(by_name["event_EVIDENCE_CAPSULE_CREATED"]["pass"])
+        self.assertFalse(by_name["error_code_ERR_CAPSULE_EMPTY_EVIDENCE"]["pass"])
+        self.assertFalse(by_name["error_variant_EmptyEvidence"]["pass"])
+        self.assertFalse(by_name["impl_minimum_unit_tests"]["pass"])
+
+    def test_comment_only_mod_wiring_fails_closed(self) -> None:
+        original_mod = mod.MOD_FILE
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                fake_mod = Path(tmpdir) / "mod.rs"
+                fake_mod.write_text("// pub mod evidence_capsule;\n", encoding="utf-8")
+                mod.MOD_FILE = fake_mod
+                mod.RESULTS.clear()
+
+                mod.check_mod_wiring()
+        finally:
+            mod.MOD_FILE = original_mod
+
+        by_name = {entry["check"]: entry for entry in mod.RESULTS}
+        self.assertFalse(by_name["mod_wires_evidence_capsule"]["pass"])
 
 
 if __name__ == "__main__":

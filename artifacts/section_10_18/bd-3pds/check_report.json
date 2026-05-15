@@ -290,7 +290,7 @@
     {
       "check": "impl_minimum_unit_tests",
       "pass": true,
-      "detail": "22 tests"
+      "detail": "48 tests"
     },
     {
       "check": "evidence_exists",
@@ -328,5 +328,5 @@
       "detail": "PASS"
     }
   ],
-  "timestamp": "2026-02-22T07:16:10.810716+00:00"
+  "timestamp": "2026-05-15T14:10:27.997852+00:00"
 }

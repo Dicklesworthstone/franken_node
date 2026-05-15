@@ -15,14 +15,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 BEAD_ID = "bd-3pds"
 SECTION = "10.18"
@@ -89,6 +90,73 @@ INVARIANTS = [
 RESULTS: list[dict[str, Any]] = []
 
 
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def _strip_rust_comments(src: str) -> str:
+    without_block_comments = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
+    return re.sub(r"//.*", "", without_block_comments)
+
+
+def _impl_source() -> str:
+    return _read_text(IMPL_FILE)
+
+
+def _impl_code() -> str:
+    return _strip_rust_comments(_impl_source())
+
+
+def _mod_code() -> str:
+    return _strip_rust_comments(_read_text(MOD_FILE))
+
+
+def _rust_module_decl_present(src: str, module_name: str) -> bool:
+    return bool(re.search(rf"\bpub\s+mod\s+{re.escape(module_name)}\s*;", src))
+
+
+def _rust_pub_item_present(src: str, item_kind: str, name: str) -> bool:
+    return bool(re.search(rf"\bpub\s+{item_kind}\s+{re.escape(name)}\b", src))
+
+
+def _rust_pub_fn_present(src: str, name: str) -> bool:
+    return bool(re.search(rf"\bpub\s+fn\s+{re.escape(name)}\s*\(", src))
+
+
+def _rust_pub_const_str_present(src: str, name: str, value: str | None = None) -> bool:
+    expected_value = value or name
+    return bool(
+        re.search(
+            rf"\bpub\s+const\s+{re.escape(name)}\s*:\s*&str\s*=\s*\"{re.escape(expected_value)}\"\s*;",
+            src,
+        )
+    )
+
+
+def _rust_enum_body(src: str, enum_name: str) -> str:
+    match = re.search(rf"\bpub\s+enum\s+{re.escape(enum_name)}\s*\{{(?P<body>.*?)\n\}}", src, re.DOTALL)
+    return match.group("body") if match else ""
+
+
+def _rust_enum_variant_present(src: str, enum_name: str, variant: str) -> bool:
+    return bool(re.search(rf"\b{re.escape(variant)}\b", _rust_enum_body(src, enum_name)))
+
+
+def _rust_test_count(src: str) -> int:
+    return len(re.findall(r"#\s*\[\s*test\s*\]", src))
+
+
+def _required_symbol_present(src: str, symbol: str) -> bool:
+    parts = symbol.split()
+    if len(parts) < 3 or parts[0] != "pub":
+        return symbol in src
+    if parts[1] in {"struct", "enum"}:
+        return _rust_pub_item_present(src, parts[1], parts[2])
+    if parts[1] == "fn":
+        return _rust_pub_fn_present(src, parts[2])
+    return symbol in src
+
+
 def _check(name: str, passed: bool, detail: str = "") -> dict[str, Any]:
     entry = {
         "check": name,
@@ -100,7 +168,7 @@ def _check(name: str, passed: bool, detail: str = "") -> dict[str, Any]:
 
 
 def _read_impl() -> str:
-    return IMPL_FILE.read_text() if IMPL_FILE.is_file() else ""
+    return _impl_source()
 
 
 def check_file_presence() -> None:
@@ -112,33 +180,41 @@ def check_mod_wiring() -> None:
     if not MOD_FILE.is_file():
         _check("mod_wires_evidence_capsule", False, "mod.rs missing")
         return
-    mod_text = MOD_FILE.read_text()
-    _check("mod_wires_evidence_capsule", "pub mod evidence_capsule;" in mod_text, "pub mod evidence_capsule;")
+    mod_text = _mod_code()
+    _check(
+        "mod_wires_evidence_capsule",
+        _rust_module_decl_present(mod_text, "evidence_capsule"),
+        "pub mod evidence_capsule;",
+    )
 
 
 def check_impl_symbols() -> None:
-    src = _read_impl()
+    src = _impl_code()
     for sym in REQUIRED_SYMBOLS:
         label = sym.split()[-1]
-        _check(f"impl_symbol_{label}", sym in src, sym)
+        _check(f"impl_symbol_{label}", _required_symbol_present(src, sym), sym)
 
 
 def check_event_codes() -> None:
-    src = _read_impl()
+    src = _impl_code()
     for code in EVENT_CODES:
-        _check(f"event_{code}", code in src, code)
+        _check(f"event_{code}", _rust_pub_const_str_present(src, code), code)
 
 
 def check_error_codes() -> None:
-    src = _read_impl()
+    src = _impl_code()
     for code in ERROR_CODES:
-        _check(f"error_code_{code}", code in src, code)
+        _check(f"error_code_{code}", _rust_pub_const_str_present(src, code), code)
 
 
 def check_error_variants() -> None:
-    src = _read_impl()
+    src = _impl_code()
     for variant in ERROR_VARIANTS:
-        _check(f"error_variant_{variant}", variant in src, variant)
+        _check(
+            f"error_variant_{variant}",
+            _rust_enum_variant_present(src, "CapsuleError", variant),
+            variant,
+        )
 
 
 def check_invariants() -> None:
@@ -148,8 +224,7 @@ def check_invariants() -> None:
 
 
 def check_contract_properties() -> None:
-    src = _read_impl()
-    src_lower = src.lower()
+    src = _impl_code()
 
     _check("contract_schema_version",
            "evidence-capsule-v1" in src,
@@ -209,8 +284,8 @@ def check_contract_properties() -> None:
 
 
 def check_unit_tests() -> None:
-    src = _read_impl()
-    test_count = src.count("#[test]")
+    src = _impl_code()
+    test_count = _rust_test_count(src)
     _check("impl_minimum_unit_tests", test_count >= 18, f"{test_count} tests")
 
 
@@ -220,11 +295,15 @@ def check_evidence() -> None:
         return
     _check("evidence_exists", True, str(EVIDENCE_FILE.relative_to(ROOT)))
     try:
-        data = json.loads(EVIDENCE_FILE.read_text())
+        data = json.JSONDecoder().decode(_read_text(EVIDENCE_FILE))
         _check("evidence_parseable", True, "valid JSON")
         _check("evidence_bead_id", data.get("bead_id") == BEAD_ID, str(data.get("bead_id")))
         verdict = data.get("verdict", data.get("overall_pass"))
-        _check("evidence_verdict", bool(verdict == "PASS" or verdict is True), str(verdict))
+        _check(
+            "evidence_verdict",
+            bool(verdict == "PASS" or (isinstance(verdict, bool) and verdict)),
+            str(verdict),
+        )
     except (json.JSONDecodeError, OSError):
         _check("evidence_parseable", False, "parse error")
 
@@ -305,7 +384,7 @@ def self_test() -> dict[str, Any]:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_vef_evidence_capsule")
+    configure_test_logging("check_vef_evidence_capsule")
     parser = argparse.ArgumentParser(description=f"Verification checker for {BEAD_ID}")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--self-test", action="store_true")
