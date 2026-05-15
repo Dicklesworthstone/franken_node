@@ -768,6 +768,8 @@ mod tests {
     use super::*;
     use crate::dgis::graph_ingestion::{EdgeKind, GraphEdge, GraphNode, NodeKind};
 
+    type TestResult = Result<(), String>;
+
     fn mk_maintainer(
         id: &str,
         packages: &[&str],
@@ -1232,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn nan_threshold_rejected_in_config() {
+    fn nan_threshold_rejected_in_config() -> TestResult {
         let cfg = SpofDetectorConfig {
             key_person_threshold: f64::NAN,
             ..Default::default()
@@ -1248,7 +1250,7 @@ mod tests {
         .expect_err("NaN threshold must reject");
         match err {
             SpofError::InvalidConfig { field, .. } => assert_eq!(field, "key_person_threshold"),
-            other => panic!("expected InvalidConfig, got {other:?}"),
+            other => return Err(format!("expected InvalidConfig, got {other:?}")),
         }
 
         let cfg = SpofDetectorConfig {
@@ -1268,8 +1270,9 @@ mod tests {
             SpofError::InvalidConfig { field, .. } => {
                 assert_eq!(field, "org_concentration_threshold")
             }
-            other => panic!("expected InvalidConfig, got {other:?}"),
+            other => return Err(format!("expected InvalidConfig, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
