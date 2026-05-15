@@ -4,6 +4,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -84,7 +85,7 @@ class TestCli(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        parsed = json.loads(proc.stdout)
+        parsed = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(parsed["bead_id"], "bd-kcg9")
 
     def test_self_test_exit_zero(self):
@@ -176,6 +177,86 @@ class TestMissingSources(unittest.TestCase):
             checks = mod.run_all_checks()
             spec_check = next(c for c in checks if c["check"] == "Contract file exists")
             self.assertFalse(spec_check["passed"])
+
+
+class TestCommentOnlyRustRegression(unittest.TestCase):
+    """Commented Rust markers must not satisfy implementation checks."""
+
+    def test_comment_only_rust_markers_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            impl_file = tmp_path / "zk_attestation.rs"
+            security_mod_file = tmp_path / "mod.rs"
+            security_test_file = tmp_path / "zk_attestation_verification.rs"
+
+            impl_file.write_text(
+                "\n".join(f"// {marker}" for marker in REQUIRED_IMPL_MARKERS)
+                + "\n/*\n"
+                + "\n".join("#[test]" for _ in range(mod.MIN_TESTS))
+                + "\n*/\n",
+                encoding="utf-8",
+            )
+            security_mod_file.write_text("// pub mod zk_attestation;\n", encoding="utf-8")
+            security_test_file.write_text(
+                "/*\n" + "\n".join("#[test]" for _ in range(10)) + "\n*/\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(mod, "IMPL_FILE", impl_file), mock.patch.object(
+                mod, "SECURITY_MOD_FILE", security_mod_file
+            ), mock.patch.object(mod, "SECURITY_TEST", security_test_file):
+                checks = mod.run_all_checks()
+
+        by_name = {check["check"]: check for check in checks}
+        self.assertTrue(by_name["Implementation file exists"]["passed"])
+        self.assertTrue(by_name["Security test exists"]["passed"])
+
+        rust_backed_checks = [
+            check["check"]
+            for check in checks
+            if check["check"] == "Security module wired"
+            or check["check"].startswith("Impl type '")
+            or check["check"].startswith("Impl method '")
+            or check["check"].startswith("FN code ")
+            or check["check"].startswith("Impl error code ")
+            or check["check"].startswith("Impl invariant ")
+            or check["check"]
+            in {
+                "Rust inline tests >= 20",
+                "Security tests >= 10",
+                "Uses BTreeMap",
+                "Schema version defined",
+                "Schema version value",
+                "Serde derives",
+                "cfg(test) module",
+                "Invariants module",
+                "Selective disclosure",
+            }
+        ]
+        self.assertTrue(rust_backed_checks)
+        passing_markers = [name for name in rust_backed_checks if by_name[name]["passed"]]
+        self.assertEqual(passing_markers, [])
+
+
+REQUIRED_IMPL_MARKERS = (
+    [f"pub struct {name}" for name in mod.REQUIRED_TYPES]
+    + [f"pub enum {name}" for name in mod.REQUIRED_TYPES]
+    + [f"fn {name}" for name in mod.REQUIRED_METHODS]
+    + mod.REQUIRED_FN_CODES
+    + mod.REQUIRED_IMPL_ERROR_CODES
+    + mod.REQUIRED_IMPL_INVARIANTS
+    + [
+        "BTreeMap",
+        "SCHEMA_VERSION",
+        "zka-v1.0",
+        "Serialize",
+        "Deserialize",
+        "#[cfg(test)]",
+        "pub mod invariants",
+        "metadata_commitment",
+        "proof_bytes_hex",
+    ]
+)
 
 
 if __name__ == "__main__":

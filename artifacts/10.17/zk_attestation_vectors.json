@@ -396,7 +396,7 @@
     {
       "check": "Rust inline tests >= 20",
       "passed": true,
-      "detail": "found 39"
+      "detail": "found 62"
     },
     {
       "check": "Security tests >= 10",

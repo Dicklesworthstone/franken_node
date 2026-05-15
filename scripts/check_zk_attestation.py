@@ -10,8 +10,7 @@ import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 BEAD = "bd-kcg9"
@@ -129,6 +128,92 @@ def _read(path: Path) -> str:
     return ""
 
 
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = _rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = _rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
 def _check(name: str, ok: bool, detail: str = "") -> dict:
     return {"check": name, "passed": ok, "detail": detail or ("ok" if ok else "FAIL")}
 
@@ -150,11 +235,11 @@ def _has_method(source: str, name: str) -> bool:
 def run_all_checks() -> list[dict]:
     """Return list of check dicts."""
     checks: list[dict] = []
-    impl_src = _read(IMPL_FILE)
+    impl_src = _read_rust_source(IMPL_FILE)
     spec_src = _read(SPEC_FILE)
     contract_src = _read(CONTRACT_FILE)
-    sec_mod_src = _read(SECURITY_MOD_FILE)
-    sec_test_src = _read(SECURITY_TEST)
+    sec_mod_src = _read_rust_source(SECURITY_MOD_FILE)
+    sec_test_src = _read_rust_source(SECURITY_TEST)
 
     # ── File existence ───────────────────────────────────────────────────
     checks.append(_check("Spec file exists", SPEC_FILE.exists(), str(SPEC_FILE)))
@@ -312,7 +397,7 @@ def self_test() -> dict:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_zk_attestation")
+    configure_test_logging("check_zk_attestation")
     parser = argparse.ArgumentParser(description="bd-kcg9 checker")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--self-test", action="store_true")
