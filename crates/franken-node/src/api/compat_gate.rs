@@ -2260,6 +2260,7 @@ mod compat_gate_fresh_negative_tests {
 #[cfg(test)]
 mod compat_gate_malformed_payload_tests {
     use super::*;
+    use crate::lock_utils::try_lock;
 
     #[test]
     fn compat_mode_deserialize_rejects_display_case_label() {
@@ -2353,7 +2354,7 @@ mod compat_gate_malformed_payload_tests {
 
         let service = Arc::new(Mutex::new(CompatGateService::new()));
         {
-            let mut svc = service.lock().unwrap();
+            let mut svc = try_lock(&service, "seed compatibility gate service scope");
             svc.set_scope_mode("concurrent-scope", CompatMode::Balanced)
                 .unwrap();
         }
@@ -2373,7 +2374,10 @@ mod compat_gate_malformed_payload_tests {
 
                 // Each thread performs different types of operations
                 for i in 0..50 {
-                    let mut svc = service_clone.lock().unwrap();
+                    let mut svc = try_lock(
+                        &service_clone,
+                        "mutate compatibility gate service concurrently",
+                    );
 
                     match thread_id % 4 {
                         0 => {
@@ -2433,7 +2437,7 @@ mod compat_gate_malformed_payload_tests {
         }
 
         // Verify final state consistency
-        let svc = service.lock().unwrap();
+        let svc = try_lock(&service, "inspect compatibility gate service final state");
 
         // Should have reasonable counts without overflows
         assert!(svc.receipts().len() <= MAX_RECEIPTS);
