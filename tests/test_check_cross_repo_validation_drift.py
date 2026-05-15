@@ -83,6 +83,52 @@ class CrossRepoValidationDriftTests(unittest.TestCase):
                 expected = hashlib.sha256(material.encode("utf-8")).hexdigest()
                 self.assertEqual(snapshot["command_digest"]["hex"], expected)
 
+    def test_handoff_payloads_are_valid_and_deterministic(self) -> None:
+        for snapshot in self.fixtures["valid_snapshots"]:
+            with self.subTest(snapshot=snapshot["snapshot_id"]):
+                first = mod.build_handoff_payload(snapshot)
+                second = mod.build_handoff_payload(snapshot)
+                self.assertEqual(first, second)
+                self.assertEqual(mod.validate_handoff_payload(first), [])
+
+    def test_mail_corrupt_handoff_uses_beads_soft_lock(self) -> None:
+        snapshot = next(
+            item
+            for item in self.fixtures["valid_snapshots"]
+            if item["snapshot_id"] == "crvd-mail-corrupt"
+        )
+        handoff = mod.build_handoff_payload(snapshot)
+        self.assertTrue(handoff["ownership_uncertainty"]["requires_beads_soft_lock"])
+        self.assertFalse(handoff["mail_targeting"]["broadcast"])
+        self.assertIn("Agent Mail", handoff["markdown"])
+
+    def test_ack_failure_handoff_uses_beads_soft_lock(self) -> None:
+        snapshot = mod.apply_fixture_patch(
+            self.valid_snapshot,
+            {
+                "set": {
+                    "agent_mail.status": "unavailable",
+                    "agent_mail.detail": "acknowledge_message failed: sqlite schema missing messages table",
+                    "classification.code": "CRVD_BLOCKED_AGENT_MAIL_CORRUPT",
+                    "classification.operator_message": "Agent Mail ack failed; use Beads-visible handoff.",
+                    "classification.reasons": ["Agent Mail ack failure"],
+                    "recommended_action.action": "source_only_handoff",
+                    "recommended_action.exact_command": "br comments add <id> --message <handoff>",
+                }
+            },
+        )
+        self.assertEqual(mod.validate_snapshot(snapshot), [])
+        handoff = mod.build_handoff_payload(snapshot)
+        self.assertTrue(handoff["ownership_uncertainty"]["requires_beads_soft_lock"])
+        self.assertIn("acknowledge_message failed", handoff["ownership_uncertainty"]["agent_mail_detail"])
+
+    def test_safe_to_run_handoff_keeps_deferred_rch_command(self) -> None:
+        handoff = mod.build_handoff_payload(self.valid_snapshot)
+        self.assertEqual(handoff["next_safest_action"], "run_rch_validation")
+        self.assertTrue(handoff["exact_deferred_rch_command"].startswith("rch exec --"))
+        self.assertIn("cargo clippy", handoff["exact_deferred_rch_command"])
+        self.assertIn(handoff["exact_deferred_rch_command"], handoff["markdown"])
+
     def test_invalid_fixture_cases_emit_expected_errors(self) -> None:
         for case in self.fixtures["invalid_snapshots"]:
             with self.subTest(case=case["case"]):
@@ -196,6 +242,39 @@ class CrossRepoValidationDriftTests(unittest.TestCase):
         parsed = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(parsed["bead_id"], "bd-7vk3p.1")
         self.assertEqual(parsed["verdict"], "PASS")
+
+    def test_handoff_json_cli_output(self) -> None:
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--handoff", "crvd-mail-corrupt", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        parsed = json.JSONDecoder().decode(proc.stdout)
+        self.assertEqual(parsed["schema_version"], mod.HANDOFF_SCHEMA_VERSION)
+        self.assertEqual(parsed["classification_code"], "CRVD_BLOCKED_AGENT_MAIL_CORRUPT")
+
+    def test_handoff_markdown_cli_output(self) -> None:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "--handoff",
+                "crvd-dirty-relevant-absent-symbols",
+                "--handoff-format",
+                "markdown",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("# Cross-Repo Validation Handoff", proc.stdout)
+        self.assertIn("bd-famte", proc.stdout)
+        self.assertIn("CRVD_BLOCKED_SIBLING_DIRTY_RELEVANT", proc.stdout)
 
     def test_self_test_cli_exit_zero(self) -> None:
         proc = subprocess.run(

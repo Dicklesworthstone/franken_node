@@ -32,6 +32,7 @@ TITLE = "Cross-repo validation dependency drift snapshots"
 SNAPSHOT_SCHEMA_VERSION = "franken-node/cross-repo-validation-drift/snapshot/v1"
 SCHEMA_CATALOG_VERSION = "franken-node/cross-repo-validation-drift/schema-catalog/v1"
 FIXTURE_SCHEMA_VERSION = "franken-node/cross-repo-validation-drift/fixtures/v1"
+HANDOFF_SCHEMA_VERSION = "franken-node/cross-repo-validation-drift/handoff/v1"
 
 SCHEMA_FILE = (
     ROOT
@@ -114,6 +115,8 @@ MAX_SYMBOL_PROBES = 32
 MAX_LIST_ITEMS = 128
 MAX_STRING_BYTES = 1024
 MAX_PATH_BYTES = 240
+MAX_HANDOFF_JSON_BYTES = 8192
+MAX_HANDOFF_MARKDOWN_BYTES = 4096
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 BEAD_RE = re.compile(r"^bd-[A-Za-z0-9.]+$")
 SNAPSHOT_ID_RE = re.compile(r"^crvd-[a-z0-9-]+$")
@@ -299,6 +302,26 @@ def _canonical_command(snapshot: dict[str, Any]) -> str:
     return " ".join(argv)
 
 
+def _validation_command_string(snapshot: dict[str, Any]) -> str:
+    command = snapshot.get("validation_command")
+    if not isinstance(command, dict):
+        return "rch exec -- <validation-command>"
+    program = command.get("program")
+    argv = command.get("argv")
+    if not isinstance(program, str) or not isinstance(argv, list):
+        return "rch exec -- <validation-command>"
+    if not all(isinstance(part, str) for part in argv):
+        return "rch exec -- <validation-command>"
+    return " ".join([program, *argv])
+
+
+def _sorted_path_values(value: Any, max_items: int = MAX_LIST_ITEMS) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    paths = [str(item) for item in value if isinstance(item, str)]
+    return sorted(paths)[:max_items]
+
+
 def derive_classification(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Derive the fail-closed cross-repo validation decision for a snapshot."""
     command = _canonical_command(snapshot)
@@ -344,7 +367,7 @@ def derive_classification(snapshot: dict[str, Any]) -> dict[str, Any]:
             "operator_message": "Cargo pressure is above threshold; wait before launching RCH validation.",
         }
 
-    if mail_status == "red_corrupt":
+    if mail_status in {"red_corrupt", "unavailable"}:
         return {
             "code": "CRVD_BLOCKED_AGENT_MAIL_CORRUPT",
             "action": "source_only_handoff",
@@ -369,6 +392,147 @@ def derive_classification(snapshot: dict[str, Any]) -> dict[str, Any]:
         "exact_command": command,
         "operator_message": "Cross-repo validation preflight is safe to run through rch.",
     }
+
+
+def render_handoff_markdown(payload: dict[str, Any]) -> str:
+    dirty_files = payload.get("active_dirty_file_summary", {}).get("files", [])
+    dirty_lines = [f"- {path}" for path in dirty_files] if dirty_files else ["- none"]
+    lines = [
+        "# Cross-Repo Validation Handoff",
+        f"- bead_id: {payload.get('bead_id')}",
+        f"- thread_id: {payload.get('thread_id')}",
+        f"- snapshot_id: {payload.get('snapshot_id')}",
+        f"- classification: {payload.get('classification_code')}",
+        f"- next_safest_action: {payload.get('next_safest_action')}",
+        f"- exact_deferred_rch_command: {payload.get('exact_deferred_rch_command')}",
+        f"- recommended_command: {payload.get('recommended_command')}",
+        f"- command_digest: sha256:{payload.get('command_digest')}",
+        "",
+        "## Sibling Repo",
+        f"- name: {payload.get('sibling_repo', {}).get('name')}",
+        f"- path: {payload.get('sibling_repo', {}).get('path')}",
+        f"- branch: {payload.get('sibling_repo', {}).get('branch')}",
+        f"- head: {payload.get('sibling_repo', {}).get('head')}",
+        f"- dirty_state: {payload.get('sibling_repo', {}).get('dirty_state')}",
+        f"- Sibling Beads lock: {payload.get('ownership_uncertainty', {}).get('sibling_beads_lock_status')}",
+        f"- Agent Mail: {payload.get('ownership_uncertainty', {}).get('agent_mail_status')}",
+        "",
+        "## Active Dirty Files",
+        *dirty_lines,
+        "",
+        "## Operator Message",
+        str(payload.get("operator_message")),
+    ]
+    return "\n".join(lines)
+
+
+def build_handoff_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    classification = snapshot.get("classification") if isinstance(snapshot.get("classification"), dict) else {}
+    recommended_action = (
+        snapshot.get("recommended_action") if isinstance(snapshot.get("recommended_action"), dict) else {}
+    )
+    sibling_repo = snapshot.get("sibling_repo") if isinstance(snapshot.get("sibling_repo"), dict) else {}
+    agent_mail = snapshot.get("agent_mail") if isinstance(snapshot.get("agent_mail"), dict) else {}
+    beads_lock = sibling_repo.get("beads_lock") if isinstance(sibling_repo.get("beads_lock"), dict) else {}
+    cargo_pressure = snapshot.get("cargo_pressure") if isinstance(snapshot.get("cargo_pressure"), dict) else {}
+    command_digest = snapshot.get("command_digest") if isinstance(snapshot.get("command_digest"), dict) else {}
+    dirty_files = _sorted_path_values(sibling_repo.get("dirty_files"), MAX_DIRTY_FILES)
+    relevant_paths = _sorted_path_values(sibling_repo.get("relevant_paths"), MAX_LIST_ITEMS)
+    lock_status = beads_lock.get("status")
+    mail_status = agent_mail.get("status")
+    requires_soft_lock = mail_status in {"red_corrupt", "unavailable"} or lock_status != "ok"
+
+    payload: dict[str, Any] = {
+        "schema_version": HANDOFF_SCHEMA_VERSION,
+        "snapshot_id": snapshot.get("snapshot_id"),
+        "bead_id": snapshot.get("bead_id"),
+        "thread_id": snapshot.get("thread_id"),
+        "classification_code": classification.get("code"),
+        "next_safest_action": recommended_action.get("action"),
+        "exact_deferred_rch_command": _validation_command_string(snapshot),
+        "recommended_command": _canonical_command(snapshot),
+        "operator_message": classification.get("operator_message"),
+        "command_digest": command_digest.get("hex"),
+        "cargo_pressure": {
+            "process_count": cargo_pressure.get("process_count"),
+            "threshold": cargo_pressure.get("threshold"),
+            "sampled_at": cargo_pressure.get("sampled_at"),
+        },
+        "sibling_repo": {
+            "name": sibling_repo.get("name"),
+            "path": sibling_repo.get("path"),
+            "branch": sibling_repo.get("branch"),
+            "head": sibling_repo.get("head"),
+            "dirty_state": sibling_repo.get("dirty_state"),
+            "relevant_paths": relevant_paths,
+        },
+        "ownership_uncertainty": {
+            "requires_beads_soft_lock": requires_soft_lock,
+            "sibling_beads_lock_status": lock_status,
+            "sibling_beads_lock_detail": beads_lock.get("detail"),
+            "agent_mail_status": mail_status,
+            "agent_mail_detail": agent_mail.get("detail"),
+        },
+        "active_dirty_file_summary": {
+            "dirty_state": sibling_repo.get("dirty_state"),
+            "count": len(dirty_files),
+            "files": dirty_files,
+        },
+        "mail_targeting": {
+            "broadcast": False,
+            "recipient_scope": "relevant_bead_owner_or_sibling_repo_owner",
+        },
+    }
+    payload["markdown"] = render_handoff_markdown(payload)
+    return payload
+
+
+def validate_handoff_payload(payload: Any) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        return ["ERR_CRVD_BAD_HANDOFF"]
+    if payload.get("schema_version") != HANDOFF_SCHEMA_VERSION:
+        errors.append("ERR_CRVD_BAD_HANDOFF")
+    if payload.get("classification_code") not in CLASSIFICATION_CODES:
+        errors.append("ERR_CRVD_BAD_HANDOFF")
+    if payload.get("next_safest_action") not in RECOMMENDED_ACTIONS:
+        errors.append("ERR_CRVD_BAD_HANDOFF")
+    for field in [
+        "snapshot_id",
+        "bead_id",
+        "thread_id",
+        "exact_deferred_rch_command",
+        "recommended_command",
+        "operator_message",
+        "command_digest",
+    ]:
+        if not _bounded_string(payload.get(field)):
+            errors.append("ERR_CRVD_BAD_HANDOFF")
+    if not _is_sha256_hex(payload.get("command_digest")):
+        errors.append("ERR_CRVD_BAD_HANDOFF")
+    dirty_files = _get_path(payload, "active_dirty_file_summary.files")
+    relevant_paths = _get_path(payload, "sibling_repo.relevant_paths")
+    if not _list_of_bounded_paths(dirty_files, MAX_DIRTY_FILES) or not _sorted_unique_strings(dirty_files):
+        errors.append("ERR_CRVD_BAD_HANDOFF")
+    if not _list_of_bounded_paths(relevant_paths, MAX_LIST_ITEMS) or not _sorted_unique_strings(relevant_paths):
+        errors.append("ERR_CRVD_BAD_HANDOFF")
+    broadcast = _get_path(payload, "mail_targeting.broadcast")
+    if not isinstance(broadcast, bool) or broadcast:
+        errors.append("ERR_CRVD_BAD_HANDOFF")
+
+    markdown = payload.get("markdown")
+    if not _bounded_string(markdown, MAX_HANDOFF_MARKDOWN_BYTES):
+        errors.append("ERR_CRVD_BAD_HANDOFF")
+    elif not all(
+        str(payload.get(field)) in markdown
+        for field in ["bead_id", "classification_code", "exact_deferred_rch_command", "next_safest_action"]
+    ):
+        errors.append("ERR_CRVD_BAD_HANDOFF")
+
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > MAX_HANDOFF_JSON_BYTES:
+        errors.append("ERR_CRVD_BAD_HANDOFF")
+    return list(dict.fromkeys(errors))
 
 
 def validate_snapshot(snapshot: Any, *, expected_bead_id: str | None = None) -> list[str]:
@@ -671,6 +835,17 @@ def run_all() -> dict[str, Any]:
             errors == [],
             ",".join(errors),
         ))
+        handoff = build_handoff_payload(snapshot)
+        handoff_errors = validate_handoff_payload(handoff)
+        checks.append(_check(
+            f"handoff.{snapshot.get('snapshot_id', index)}.passes",
+            handoff_errors == [],
+            ",".join(handoff_errors),
+        ))
+        checks.append(_check(
+            f"handoff.{snapshot.get('snapshot_id', index)}.deterministic",
+            handoff == build_handoff_payload(snapshot),
+        ))
         code = _get_path(snapshot, "classification.code")
         if code in coverage:
             coverage[code] = True
@@ -742,9 +917,61 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument("--self-test", action="store_true", help="run self-test checks")
+    parser.add_argument("--handoff", metavar="SNAPSHOT_ID", help="emit a fixture handoff payload")
+    parser.add_argument(
+        "--handoff-format",
+        choices=["json", "markdown"],
+        default="json",
+        help="handoff output format",
+    )
     args = parser.parse_args()
 
     configure_test_logging("check_cross_repo_validation_drift")
+
+    if args.handoff:
+        fixtures = _load_json(FIXTURES_FILE)
+        snapshot = next(
+            (
+                item
+                for item in _fixture_cases(fixtures)
+                if isinstance(item, dict) and item.get("snapshot_id") == args.handoff
+            ),
+            None,
+        )
+        if snapshot is None:
+            result = {
+                "bead_id": BEAD_ID,
+                "title": TITLE,
+                "schema_version": HANDOFF_SCHEMA_VERSION,
+                "verdict": "FAIL",
+                "error": "ERR_CRVD_HANDOFF_SNAPSHOT_NOT_FOUND",
+            }
+            if args.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print("FAIL ERR_CRVD_HANDOFF_SNAPSHOT_NOT_FOUND")
+            return 1
+        snapshot_errors = validate_snapshot(snapshot)
+        payload = build_handoff_payload(snapshot)
+        handoff_errors = validate_handoff_payload(payload)
+        if snapshot_errors or handoff_errors:
+            result = {
+                "bead_id": snapshot.get("bead_id"),
+                "title": TITLE,
+                "schema_version": HANDOFF_SCHEMA_VERSION,
+                "verdict": "FAIL",
+                "errors": snapshot_errors + handoff_errors,
+            }
+            if args.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                print(f"FAIL {','.join(result['errors'])}")
+            return 1
+        if args.handoff_format == "markdown" and not args.json:
+            print(payload["markdown"])
+        else:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
 
     if args.self_test:
         checks = run_self_test()
