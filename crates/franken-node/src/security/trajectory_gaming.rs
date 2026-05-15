@@ -81,7 +81,7 @@ impl TrajectorySample {
         observed_capability: BTreeMap<String, f64>,
         declared_capability: BTreeMap<String, f64>,
     ) -> Result<Self, TrajectoryGamingError> {
-        for (_, v) in &observed_capability {
+        for v in observed_capability.values() {
             if !v.is_finite() {
                 return Err(TrajectoryGamingError::NonFinite {
                     field: "observed_capability",
@@ -89,7 +89,7 @@ impl TrajectorySample {
                 });
             }
         }
-        for (_, v) in &declared_capability {
+        for v in declared_capability.values() {
             if !v.is_finite() {
                 return Err(TrajectoryGamingError::NonFinite {
                     field: "declared_capability",
@@ -200,7 +200,7 @@ pub fn append_sample(
     sample: TrajectorySample,
 ) -> Result<(), TrajectoryGamingError> {
     let sample_index = series.samples.len();
-    for (_, v) in &sample.observed_capability {
+    for v in sample.observed_capability.values() {
         if !v.is_finite() {
             return Err(TrajectoryGamingError::NonFinite {
                 field: "observed_capability",
@@ -208,7 +208,7 @@ pub fn append_sample(
             });
         }
     }
-    for (_, v) in &sample.declared_capability {
+    for v in sample.declared_capability.values() {
         if !v.is_finite() {
             return Err(TrajectoryGamingError::NonFinite {
                 field: "declared_capability",
@@ -371,10 +371,10 @@ pub fn ingest_verifier_hints(json: &Value) -> Result<Vec<CamouflageHint>, Trajec
             let mut evidence: BTreeMap<String, f64> = BTreeMap::new();
             if let Some(Value::Object(ev)) = h_obj.get("evidence") {
                 for (k, v) in ev {
-                    if let Some(num) = v.as_f64() {
-                        if num.is_finite() {
-                            evidence.insert(k.clone(), num);
-                        }
+                    if let Some(num) = v.as_f64()
+                        && num.is_finite()
+                    {
+                        evidence.insert(k.clone(), num);
                     }
                 }
             }
@@ -382,10 +382,10 @@ pub fn ingest_verifier_hints(json: &Value) -> Result<Vec<CamouflageHint>, Trajec
             let mut sample_indices: Vec<usize> = Vec::new();
             if let Some(Value::Array(arr)) = h_obj.get("sample_indices") {
                 for v in arr {
-                    if let Some(n) = v.as_u64() {
-                        if let Ok(u) = usize::try_from(n) {
-                            sample_indices.push(u);
-                        }
+                    if let Some(n) = v.as_u64()
+                        && let Ok(u) = usize::try_from(n)
+                    {
+                        sample_indices.push(u);
                     }
                 }
             }

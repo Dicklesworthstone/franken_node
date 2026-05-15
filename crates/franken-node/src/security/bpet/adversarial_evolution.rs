@@ -555,13 +555,13 @@ impl EvolutionTrace {
         if self.steps.len() > MAX_EVOLUTION_STEPS {
             return Err(AdversarialError::TraceCapacityExceeded(self.steps.len()));
         }
-        if let Some(ended_at) = self.ended_at {
-            if ended_at < self.started_at {
-                return Err(AdversarialError::EndedBeforeStarted {
-                    started_at: self.started_at,
-                    ended_at,
-                });
-            }
+        if let Some(ended_at) = self.ended_at
+            && ended_at < self.started_at
+        {
+            return Err(AdversarialError::EndedBeforeStarted {
+                started_at: self.started_at,
+                ended_at,
+            });
         }
         let mut last_ts: Option<i64> = None;
         for step in &self.steps {
@@ -572,13 +572,13 @@ impl EvolutionTrace {
                 });
             }
             validate_step(step)?;
-            if let Some(prev) = last_ts {
-                if step.ts < prev {
-                    return Err(AdversarialError::NonMonotonicTimestamp {
-                        step_ts: step.ts,
-                        last_ts: prev,
-                    });
-                }
+            if let Some(prev) = last_ts
+                && step.ts < prev
+            {
+                return Err(AdversarialError::NonMonotonicTimestamp {
+                    step_ts: step.ts,
+                    last_ts: prev,
+                });
             }
             last_ts = Some(step.ts);
         }
@@ -609,13 +609,13 @@ pub fn append_step(trace: &mut EvolutionTrace, step: EvolutionStep) -> Result<()
         });
     }
     validate_step(&step)?;
-    if let Some(last) = trace.steps.last() {
-        if step.ts < last.ts {
-            return Err(AdversarialError::NonMonotonicTimestamp {
-                step_ts: step.ts,
-                last_ts: last.ts,
-            });
-        }
+    if let Some(last) = trace.steps.last()
+        && step.ts < last.ts
+    {
+        return Err(AdversarialError::NonMonotonicTimestamp {
+            step_ts: step.ts,
+            last_ts: last.ts,
+        });
     }
     trace.steps.push(step);
     Ok(())

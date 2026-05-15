@@ -755,10 +755,8 @@ fn project_features(
     // Combine the harness-known ground-truth drift with the drift engine's
     // capability velocity so even a 1-sample window produces a non-trivial
     // signal in the early steps of the campaign. Both inputs are finite.
-    let drift_signal = ((observed_drift.abs() + capability_velocity).min(1.0)).max(0.0);
-    let regime_signal = (velocity_entropy * 0.5 + capability_accel * 0.5)
-        .min(1.0)
-        .max(0.0);
+    let drift_signal = (observed_drift.abs() + capability_velocity).clamp(0.0, 1.0);
+    let regime_signal = (velocity_entropy * 0.5 + capability_accel * 0.5).clamp(0.0, 1.0);
     // Hazard rises with creep gradient + adversary-kind-specific bias so
     // that signature-rollover / capability-creep campaigns get explicit
     // weight even on short windows.
@@ -767,7 +765,7 @@ fn project_features(
         AdversaryKind::FalseRecoveryClaim => 0.05,
         _ => 0.0,
     };
-    let hazard_signal = (creep + hazard_bias).min(1.0).max(0.0);
+    let hazard_signal = (creep + hazard_bias).clamp(0.0, 1.0);
     // Provenance signal proxies novelty — a heavy novelty pulse means the
     // observed distribution diverges from baseline (relevant for
     // signature-rollover + indirect-via-dep adversaries).

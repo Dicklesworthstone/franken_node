@@ -8,20 +8,20 @@
 //! Design constraints (per bd-1q38 acceptance criteria and the project's
 //! standing hardening conventions):
 //!
-//!   * Determinism. Identical `(graph, initial_infected, config)` triples must
-//!     produce identical [`SimulationTrace`] outputs. No floating-point fan-in
-//!     order ambiguity: nodes are scanned via [`ContagionGraph::nodes()`] order
-//!     and neighbors via their stored slice order (both already deterministic
-//!     in sub-task 1).
-//!   * Every f64 (config field, accumulated exposure, weighted contribution)
-//!     is `is_finite()`-guarded. Non-finite intermediates surface as
-//!     [`SimulatorError::NonFiniteFloat`] rather than poisoning the trace.
-//!   * Counters use `saturating_add` so a runaway loop cannot wrap the step
-//!     counter and bypass the `max_steps` guard.
-//!   * `max_steps` is capped at [`MAX_SIMULATION_STEPS`] to bound memory of
-//!     `states_per_step` regardless of caller input.
-//!   * The simulator never panics on a malformed graph: every error path
-//!     returns a typed [`SimulatorError`].
+//! * Determinism. Identical `(graph, initial_infected, config)` triples must
+//!   produce identical [`SimulationTrace`] outputs. No floating-point fan-in
+//!   order ambiguity: nodes are scanned via [`ContagionGraph::nodes()`] order
+//!   and neighbors via their stored slice order (both already deterministic
+//!   in sub-task 1).
+//! * Every f64 (config field, accumulated exposure, weighted contribution)
+//!   is `is_finite()`-guarded. Non-finite intermediates surface as
+//!   [`SimulatorError::NonFiniteFloat`] rather than poisoning the trace.
+//! * Counters use `saturating_add` so a runaway loop cannot wrap the step
+//!   counter and bypass the `max_steps` guard.
+//! * `max_steps` is capped at [`MAX_SIMULATION_STEPS`] to bound memory of
+//!   `states_per_step` regardless of caller input.
+//! * The simulator never panics on a malformed graph: every error path
+//!   returns a typed [`SimulatorError`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,10 +41,11 @@ const MAX_TRACE_SNAPSHOTS: usize = (MAX_SIMULATION_STEPS as usize).saturating_ad
 /// Per-step infection state.
 ///
 /// Invariants enforced at construction and after every [`step`]:
-///   * Every value in `exposure_level` is `is_finite()`.
-///   * `step` only increases via `saturating_add`.
-///   * `infected` is a subset of the graph's node ids when the state is
-///     produced by [`step`] / [`simulate`].
+///
+/// * Every value in `exposure_level` is `is_finite()`.
+/// * `step` only increases via `saturating_add`.
+/// * `infected` is a subset of the graph's node ids when the state is
+///   produced by [`step`] / [`simulate`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct InfectionState {
     infected: BTreeSet<NodeId>,
@@ -104,10 +105,11 @@ impl InfectionState {
 /// Tunable parameters for a single simulation run.
 ///
 /// All fields are sanity-checked by [`SimulatorConfig::validate`] before use:
-///   * `max_steps` is clamped down to [`MAX_SIMULATION_STEPS`].
-///   * `infection_threshold` and `decay_factor` must be finite and in
-///     `[0.0, 1.0]`.
-///   * `seed` is opaque and accepted as-is.
+///
+/// * `max_steps` is clamped down to [`MAX_SIMULATION_STEPS`].
+/// * `infection_threshold` and `decay_factor` must be finite and in
+///   `[0.0, 1.0]`.
+/// * `seed` is opaque and accepted as-is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimulatorConfig {
     pub max_steps: u32,
@@ -156,11 +158,7 @@ impl SimulatorConfig {
     /// [`MAX_SIMULATION_STEPS`]. The original is left unchanged so callers
     /// can still display what they passed in for diagnostics.
     fn clamped(&self) -> Self {
-        let max_steps = if self.max_steps > MAX_SIMULATION_STEPS {
-            MAX_SIMULATION_STEPS
-        } else {
-            self.max_steps
-        };
+        let max_steps = self.max_steps.min(MAX_SIMULATION_STEPS);
         Self {
             max_steps,
             infection_threshold: self.infection_threshold,
@@ -218,17 +216,18 @@ pub enum SimulatorError {
 /// Execute one step of the contagion process.
 ///
 /// Semantics:
-///   1. Already-infected nodes stay infected.
-///   2. Each non-infected node accumulates exposure from infected in-neighbors
-///      (i.e. infected sources that have an edge pointing at this node),
-///      weighted by [`super::contagion_graph::ContagionEdge::weight`].
-///   3. Prior exposure is decayed by `config.decay_factor` before new
-///      contributions are added — so `decay_factor == 0.0` is "memoryless"
-///      and `decay_factor == 1.0` is "perfect memory" (with f64::MAX
-///      saturation).
-///   4. Nodes whose post-decay-plus-contribution exposure is
-///      `>= config.infection_threshold` become infected in the returned
-///      state.
+///
+/// 1. Already-infected nodes stay infected.
+/// 2. Each non-infected node accumulates exposure from infected in-neighbors
+///    (i.e. infected sources that have an edge pointing at this node),
+///    weighted by [`super::contagion_graph::ContagionEdge::weight`].
+/// 3. Prior exposure is decayed by `config.decay_factor` before new
+///    contributions are added — so `decay_factor == 0.0` is "memoryless"
+///    and `decay_factor == 1.0` is "perfect memory" (with f64::MAX
+///    saturation).
+/// 4. Nodes whose post-decay-plus-contribution exposure is
+///    `>= config.infection_threshold` become infected in the returned
+///    state.
 ///
 /// Deterministic: the iteration order over nodes is fixed by the graph's
 /// `nodes()` slice (which sub-task 1 documents as stable). No random tie
@@ -385,15 +384,16 @@ pub fn simulate(
 /// Classify whether the simulation should stop after `cur`.
 ///
 /// Order of precedence (matches [`simulate`]'s assumptions):
-///   1. `FullSpread`  — every node is infected.
-///   2. `NoSpread`    — `prev` and `cur` are both empty AND there were no
-///                      newly-infected nodes in `cur` relative to `prev`.
-///                      (Used only when the seed set was empty — defensive,
-///                      since [`simulate`] rejects empty seeds, but the
-///                      [`step`] surface allows it.)
-///   3. `Converged`   — `infected` and `exposure_level` are identical across
-///                      `prev` and `cur`.
-///   4. otherwise `None`.
+///
+/// 1. `FullSpread` — every node is infected.
+/// 2. `NoSpread` — `prev` and `cur` are both empty AND there were no
+///    newly-infected nodes in `cur` relative to `prev`.
+///    (Used only when the seed set was empty — defensive,
+///    since [`simulate`] rejects empty seeds, but the
+///    [`step`] surface allows it.)
+/// 3. `Converged` — `infected` and `exposure_level` are identical across
+///    `prev` and `cur`.
+/// 4. otherwise `None`.
 pub fn detect_termination(
     prev: &InfectionState,
     cur: &InfectionState,
@@ -614,7 +614,7 @@ mod tests {
         assert!(trace.terminated_at >= 9 && trace.terminated_at <= 11);
         // No exposure value ever went non-finite.
         for s in &trace.states_per_step {
-            for (_, v) in s.exposure_level().iter() {
+            for v in s.exposure_level().values() {
                 assert!(v.is_finite());
             }
         }
@@ -713,7 +713,7 @@ mod tests {
         };
         let trace = simulate(&g, &[id("n0")], &cfg).unwrap();
         for snapshot in &trace.states_per_step {
-            for (_, v) in snapshot.exposure_level().iter() {
+            for v in snapshot.exposure_level().values() {
                 assert!(
                     v.is_finite(),
                     "non-finite exposure at step {}",

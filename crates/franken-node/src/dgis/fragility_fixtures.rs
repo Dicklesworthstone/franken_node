@@ -156,9 +156,7 @@ impl FragilityFixture {
     /// The effective config that [`evaluate_fixture`] will pass to the
     /// detector: either the override or the production default.
     pub fn effective_config(&self) -> SpofDetectorConfig {
-        self.config_overrides
-            .clone()
-            .unwrap_or_else(SpofDetectorConfig::default)
+        self.config_overrides.clone().unwrap_or_default()
     }
 
     /// Validate nested invariants. Called by both [`load_fixture_from_json`]

@@ -4,32 +4,33 @@
 //! [`simulate`](super::contagion_simulator::simulate) state machine. This
 //! module provides:
 //!
-//!   * Serde-friendly *profile* descriptions (the actual JSON fixtures live
-//!     under `tests/security/contagion_profiles/`).
-//!   * Loader and graph-builder helpers that translate a profile into the
-//!     in-memory simulator inputs while enforcing the project's hardening
-//!     conventions (bounded growth, finite f64s, no panics on malformed input).
-//!   * An evaluator that runs the simulator against a profile's
-//!     `expected` block and returns a structured [`ProfileVerdict`] for use
-//!     by the integration test (sub-task 4) and verification gate
-//!     (sub-task 5).
+//! * Serde-friendly *profile* descriptions (the actual JSON fixtures live
+//!   under `tests/security/contagion_profiles/`).
+//! * Loader and graph-builder helpers that translate a profile into the
+//!   in-memory simulator inputs while enforcing the project's hardening
+//!   conventions (bounded growth, finite f64s, no panics on malformed input).
+//! * An evaluator that runs the simulator against a profile's
+//!   `expected` block and returns a structured [`ProfileVerdict`] for use
+//!   by the integration test (sub-task 4) and verification gate
+//!   (sub-task 5).
 //!
 //! Design constraints kept consistent with sub-tasks 1 + 2:
-//!   * Every f64 (`weight`, etc.) is `is_finite()`-guarded before it is
-//!     accepted into a profile or built into the graph.
-//!   * `nodes.len() <= MAX_PROFILE_NODES` (1024) and total
-//!     `edges.len() <= MAX_PROFILE_EDGES` (4096) per the prompt; both caps
-//!     surface a typed [`ProfileError::BoundedGrowthExceeded`] rather than
-//!     silently truncating, so a malformed fixture cannot pass validation
-//!     by being too large.
-//!   * Counters use `saturating_add` per the project's hardening pattern.
-//!   * No `unwrap`/`panic!` on parsed input — every fallible operation maps
-//!     to [`ProfileError`].
-//!   * The simulator types `EdgeKind` and `TerminationReason` are not yet
-//!     `Serialize`/`Deserialize`. Rather than retro-fitting them in this
-//!     sub-task (which would touch sub-tasks 1 + 2's frozen surface), we
-//!     mirror them with serde-friendly wire enums and convert at the loader
-//!     boundary.
+//!
+//! * Every f64 (`weight`, etc.) is `is_finite()`-guarded before it is
+//!   accepted into a profile or built into the graph.
+//! * `nodes.len() <= MAX_PROFILE_NODES` (1024) and total
+//!   `edges.len() <= MAX_PROFILE_EDGES` (4096) per the prompt; both caps
+//!   surface a typed [`ProfileError::BoundedGrowthExceeded`] rather than
+//!   silently truncating, so a malformed fixture cannot pass validation
+//!   by being too large.
+//! * Counters use `saturating_add` per the project's hardening pattern.
+//! * No `unwrap`/`panic!` on parsed input — every fallible operation maps
+//!   to [`ProfileError`].
+//! * The simulator types `EdgeKind` and `TerminationReason` are not yet
+//!   `Serialize`/`Deserialize`. Rather than retro-fitting them in this
+//!   sub-task (which would touch sub-tasks 1 + 2's frozen surface), we
+//!   mirror them with serde-friendly wire enums and convert at the loader
+//!   boundary.
 
 use serde::{Deserialize, Serialize};
 

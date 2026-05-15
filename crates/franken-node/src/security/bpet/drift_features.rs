@@ -555,7 +555,7 @@ fn compute_entropy_with_bins(window: &DriftWindow, bin_count: usize) -> BTreeMap
     if window.samples.is_empty() {
         return out;
     }
-    let bin_count = bin_count.max(2).min(4096);
+    let bin_count = bin_count.clamp(2, 4096);
     let field_names = collect_field_names(window);
     for field in field_names {
         let values = collect_field_values(window, &field);
@@ -599,7 +599,7 @@ pub fn compute_novelty(
     if window.samples.is_empty() || baseline.is_empty() {
         return 0.0;
     }
-    let bin_count = bin_count.max(2).min(4096);
+    let bin_count = bin_count.clamp(2, 4096);
     let mut total = 0.0_f64;
     let mut counted: u64 = 0;
     for (field, baseline_probs) in baseline {
@@ -760,7 +760,7 @@ fn collect_field_values(window: &DriftWindow, field: &str) -> Vec<f64> {
 }
 
 fn histogram_probabilities(values: &[f64], bin_count: usize) -> Vec<f64> {
-    let bin_count = bin_count.max(2).min(4096);
+    let bin_count = bin_count.clamp(2, 4096);
     let mut probs = vec![0.0_f64; bin_count];
     if values.is_empty() {
         return probs;

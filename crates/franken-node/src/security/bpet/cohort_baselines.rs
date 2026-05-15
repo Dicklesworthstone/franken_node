@@ -367,6 +367,12 @@ fn finite_mean(values: &[f64]) -> Option<f64> {
     mean.is_finite().then_some(mean)
 }
 
+fn concentrate_first_probability(probs: &mut [f64]) {
+    if let Some(first) = probs.first_mut() {
+        *first = 1.0;
+    }
+}
+
 fn histogram_probabilities(values: &[f64], bin_count: usize) -> Vec<f64> {
     let bin_count = bin_count.clamp(MIN_COHORT_BASELINE_BINS, MAX_COHORT_BASELINE_BINS);
     let mut probs = vec![0.0_f64; bin_count];
@@ -379,17 +385,13 @@ fn histogram_probabilities(values: &[f64], bin_count: usize) -> Vec<f64> {
     let max_v = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let range = max_v - min_v;
     if !range.is_finite() || range <= f64::EPSILON {
-        if let Some(first) = probs.first_mut() {
-            *first = 1.0;
-        }
+        concentrate_first_probability(&mut probs);
         return probs;
     }
 
     let bin_width = range / bin_count as f64;
     if !bin_width.is_finite() || bin_width <= 0.0 {
-        if let Some(first) = probs.first_mut() {
-            *first = 1.0;
-        }
+        concentrate_first_probability(&mut probs);
         return probs;
     }
 

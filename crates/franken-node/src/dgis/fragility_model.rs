@@ -351,12 +351,7 @@ impl Accumulator {
         if !total.is_finite() {
             total = 0.0;
         }
-        if total > 1.0 {
-            total = 1.0;
-        }
-        if total < 0.0 {
-            total = 0.0;
-        }
+        total = total.clamp(0.0, 1.0);
 
         FragilityScore {
             total,

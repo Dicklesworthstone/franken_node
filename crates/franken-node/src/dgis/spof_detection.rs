@@ -12,14 +12,14 @@
 //!
 //! 1. [`SpofKind::SingleMaintainer`] — a package whose only maintainer also
 //!    maintains many other packages (high blast-radius bus-factor-1).
-//! 2. [`SpofKind::KeyPerson`]        — a maintainer responsible for more than
+//! 2. [`SpofKind::KeyPerson`] — a maintainer responsible for more than
 //!    `key_person_threshold` share of total monthly downloads.
-//! 3. [`SpofKind::DependencyChain`]  — a `MaintainedBy → Depends → Depends …`
+//! 3. [`SpofKind::DependencyChain`] — a `MaintainedBy → Depends → Depends …`
 //!    chain whose every package is owned by a fragile maintainer
 //!    (cascade-failure path).
 //! 4. [`SpofKind::OrgConcentration`] — an organisation owning more than
 //!    `org_concentration_threshold` share of all package namespaces.
-//! 5. [`SpofKind::OrphanedPackage`]  — a package whose sole maintainer has
+//! 5. [`SpofKind::OrphanedPackage`] — a package whose sole maintainer has
 //!    been inactive for more than `orphan_threshold_days`.
 //!
 //! Hardening invariants enforced throughout:

@@ -139,13 +139,13 @@ impl PhenotypeTrajectory {
         let response = obs.issue_response_time_hours;
         let diversity = obs.contributor_diversity_index;
 
-        let activity_risk = (1.0 - activity).max(0.0);
-        let velocity_risk = (1.0 - (velocity / 10.0).min(1.0)).max(0.0);
-        let response_risk = (response / 720.0).min(1.0); // 30 days max
-        let diversity_risk = (1.0 - diversity).max(0.0);
+        let activity_risk = (1.0 - activity).clamp(0.0, 1.0);
+        let velocity_risk = (1.0 - (velocity / 10.0)).clamp(0.0, 1.0);
+        let response_risk = (response / 720.0).clamp(0.0, 1.0); // 30 days max
+        let diversity_risk = (1.0 - diversity).clamp(0.0, 1.0);
 
         (activity_risk * 0.3 + velocity_risk * 0.2 + response_risk * 0.25 + diversity_risk * 0.25)
-            .min(1.0)
+            .clamp(0.0, 1.0)
     }
 }
 

@@ -5,22 +5,24 @@
 //! adversarial campaign profiles (sub-task 3).
 //!
 //! Design constraints (per bd-1q38 acceptance criteria):
-//!   * Deterministic topology generation: identical `seed` + parameters
-//!     produces a byte-identical graph (key invariant for fixed-seed
-//!     reproducibility of the eventual simulator).
-//!   * No external RNG dependency — uses an inline SplitMix64 stream so
-//!     the type compiles without adding new crates.
-//!   * All `f64` edge weights are `is_finite()`-guarded; non-finite weights
-//!     are rejected at construction time *and* by `validate()` so a corrupted
-//!     graph from elsewhere cannot poison downstream consumers.
-//!   * Counters use `saturating_add` per the project's hardening conventions
-//!     to avoid overflow-based bypass in long-running batch sweeps.
+//!
+//! * Deterministic topology generation: identical `seed` + parameters
+//!   produces a byte-identical graph (key invariant for fixed-seed
+//!   reproducibility of the eventual simulator).
+//! * No external RNG dependency — uses an inline SplitMix64 stream so
+//!   the type compiles without adding new crates.
+//! * All `f64` edge weights are `is_finite()`-guarded; non-finite weights
+//!   are rejected at construction time *and* by `validate()` so a corrupted
+//!   graph from elsewhere cannot poison downstream consumers.
+//! * Counters use `saturating_add` per the project's hardening conventions
+//!   to avoid overflow-based bypass in long-running batch sweeps.
 //!
 //! Future sub-tasks layered on top of this file:
-//!   2. step function in `contagion_simulator.rs`
-//!   3. campaign profile fixtures under `tests/security/contagion_profiles/`
-//!   4. integration test in `tests/security/dgis_contagion_simulator.rs`
-//!   5. verification gate script + evidence JSON
+//!
+//! 2. step function in `contagion_simulator.rs`
+//! 3. campaign profile fixtures under `tests/security/contagion_profiles/`
+//! 4. integration test in `tests/security/dgis_contagion_simulator.rs`
+//! 5. verification gate script + evidence JSON
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -35,11 +37,11 @@ pub type NodeId = String;
 ///
 /// The four variants line up with the supply-chain compromise vectors that
 /// the simulator must reason about per bd-1q38:
-///   * `DependencyImport`  — A depends on B (xz-style transitive propagation)
-///   * `MaintainerOverlap` — same maintainer in commit access for A and B
-///                           (xz-style social-engineering pivot)
-///   * `OrgOverlap`        — same publishing org (dependency-confusion pivot)
-///   * `NamespaceShadow`   — typosquat / shadow namespace relationship
+/// * `DependencyImport`  — A depends on B (xz-style transitive propagation)
+/// * `MaintainerOverlap` — same maintainer in commit access for A and B
+///   (xz-style social-engineering pivot)
+/// * `OrgOverlap`        — same publishing org (dependency-confusion pivot)
+/// * `NamespaceShadow`   — typosquat / shadow namespace relationship
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeKind {
     DependencyImport,
@@ -175,9 +177,10 @@ impl ContagionGraph {
     }
 
     /// Verify graph invariants:
-    ///   * graph is non-empty
-    ///   * every edge weight is finite and non-negative
-    ///   * every edge target is in the node set
+    ///
+    /// * graph is non-empty
+    /// * every edge weight is finite and non-negative
+    /// * every edge target is in the node set
     pub fn validate(&self) -> Result<(), GraphError> {
         if self.nodes.is_empty() {
             return Err(GraphError::EmptyGraph);

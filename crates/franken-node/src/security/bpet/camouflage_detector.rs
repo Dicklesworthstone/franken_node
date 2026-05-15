@@ -613,6 +613,8 @@ mod tests {
     use super::*;
     use crate::security::trajectory_gaming::{TrajectorySample, TrajectorySeries, append_sample};
 
+    type SampleRow = (i64, BTreeMap<String, f64>, BTreeMap<String, f64>);
+
     fn cap(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
         let mut m = BTreeMap::new();
         for (k, v) in pairs {
@@ -621,9 +623,7 @@ mod tests {
         m
     }
 
-    fn build_series(
-        samples: &[(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)],
-    ) -> TrajectorySeries {
+    fn build_series(samples: &[SampleRow]) -> TrajectorySeries {
         let mut s = TrajectorySeries::new(0, i64::MAX).expect("valid window");
         for (ts, obs, decl) in samples {
             let sample =
@@ -636,7 +636,7 @@ mod tests {
     /// Generate `n` samples where the observed value is `low` for the first
     /// half and `high` for the second half — a classic phase shift.
     fn phase_shift_series(n: usize, low: f64, high: f64) -> TrajectorySeries {
-        let mut rows: Vec<(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)> = Vec::new();
+        let mut rows: Vec<SampleRow> = Vec::new();
         for i in 0..n {
             let v = if i < n / 2 { low } else { high };
             rows.push((
@@ -651,7 +651,7 @@ mod tests {
     /// Generate `n` benign samples where observed ≈ declared and there is
     /// no drift, no dropout, and no distribution mismatch.
     fn benign_series(n: usize) -> TrajectorySeries {
-        let mut rows: Vec<(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)> = Vec::new();
+        let mut rows: Vec<SampleRow> = Vec::new();
         for i in 0..n {
             rows.push((
                 i as i64,
@@ -698,7 +698,7 @@ mod tests {
     fn dropout_pattern_in_observed_capability_is_detected() {
         // 16 samples: declared has two capabilities; observed drops both
         // (zero) for the second half of every window.
-        let mut rows: Vec<(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)> = Vec::new();
+        let mut rows: Vec<SampleRow> = Vec::new();
         for i in 0..16 {
             let obs = if i % 2 == 0 {
                 cap(&[("net.egress", 0.30), ("fs.write", 0.10)])
@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn dropout_below_threshold_not_flagged() {
         // Only 10% of declared capabilities drop -> below 50% threshold.
-        let mut rows: Vec<(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)> = Vec::new();
+        let mut rows: Vec<SampleRow> = Vec::new();
         for i in 0..20 {
             let obs = if i == 7 {
                 cap(&[("net.egress", 0.0), ("fs.write", 0.10)])
@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn distribution_mismatch_via_kl_divergence_above_threshold() {
         // Observed concentrates all mass at one sample; declared is uniform.
-        let mut rows: Vec<(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)> = Vec::new();
+        let mut rows: Vec<SampleRow> = Vec::new();
         for i in 0..16 {
             let obs_v = if i == 0 { 1.0 } else { 0.0 };
             rows.push((
@@ -794,7 +794,7 @@ mod tests {
     fn gradual_creep_linear_slope_above_threshold_detected() {
         // observed / declared ratio grows linearly from ~0.5 to ~1.5 over 20
         // samples, giving slope ≈ 0.05 per sample.
-        let mut rows: Vec<(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)> = Vec::new();
+        let mut rows: Vec<SampleRow> = Vec::new();
         for i in 0..20 {
             let ratio = 0.5 + (i as f64) * 0.05;
             rows.push((
@@ -827,7 +827,7 @@ mod tests {
     #[test]
     fn gradual_creep_below_slope_threshold_not_flagged() {
         // Flat ratio = no creep.
-        let mut rows: Vec<(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)> = Vec::new();
+        let mut rows: Vec<SampleRow> = Vec::new();
         for i in 0..20 {
             rows.push((
                 i as i64,
@@ -916,7 +916,7 @@ mod tests {
     fn detector_deterministic_same_input_same_output() {
         // Build an adversarial-shaped series with all four signal types active
         // and assert two runs produce byte-identical hint vectors.
-        let mut rows: Vec<(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)> = Vec::new();
+        let mut rows: Vec<SampleRow> = Vec::new();
         for i in 0..32 {
             let phase_v = if i < 16 { 0.1 } else { 0.9 };
             let creep_ratio = 0.3 + (i as f64) * 0.02;

@@ -217,17 +217,19 @@ impl ManifestObservation {
             check_ident("dependency_name", k)?;
             check_ident("dependency_req", v)?;
         }
-        if let Some(sig) = &self.signature_hex {
-            if sig.len() > MAX_SIG_HEX_LEN {
-                return Err(IngestError::SignatureHexTooLong {
-                    observed: sig.len(),
-                });
-            }
-            if sig.contains('\0') {
-                return Err(IngestError::IdentContainsNul {
-                    field: "signature_hex",
-                });
-            }
+        if let Some(sig) = &self.signature_hex
+            && sig.len() > MAX_SIG_HEX_LEN
+        {
+            return Err(IngestError::SignatureHexTooLong {
+                observed: sig.len(),
+            });
+        }
+        if let Some(sig) = &self.signature_hex
+            && sig.contains('\0')
+        {
+            return Err(IngestError::IdentContainsNul {
+                field: "signature_hex",
+            });
         }
         Ok(())
     }
