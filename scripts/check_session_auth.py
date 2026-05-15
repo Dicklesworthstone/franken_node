@@ -19,7 +19,8 @@ from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 # ── File paths ─────────────────────────────────────────────────────────────
 
-IMPL_FILE = ROOT / "crates/franken-node/src/api/session_auth.rs"
+DEFAULT_IMPL_FILE = ROOT / "crates/franken-node/src/api/session_auth.rs"
+IMPL_FILE = DEFAULT_IMPL_FILE
 CARGO_TOML = ROOT / "crates/franken-node/Cargo.toml"
 SPEC_FILE = ROOT / "docs/specs/section_10_10/bd-oty_contract.md"
 POLICY_FILE = ROOT / "docs/policy/session_authenticated_control.md"
@@ -61,6 +62,38 @@ REQUIRED_INVARIANTS = [
     "INV-SCC-ROLE-KEYS",
     "INV-SCC-TERMINATED",
 ]
+
+INVARIANT_IMPLEMENTATION_MARKERS = {
+    "INV-SCC-SESSION-AUTH": [
+        "fn ensure_active_session(",
+        "SessionError::NoSession",
+        "self.ensure_active_session(session_id, timestamp, trace_id)?",
+        "MESSAGE_HMAC_PREFIX",
+        "constant_time::ct_eq_bytes(message_mac, &expected_mac)",
+    ],
+    "INV-SCC-MONOTONIC": [
+        "SessionError::SequenceViolation",
+        "MessageDirection::Send => session.send_seq",
+        "MessageDirection::Receive => session.recv_seq",
+        "sequence.checked_add(1)",
+        "send_seq_exhausted",
+        "recv_seq_exhausted",
+    ],
+    "INV-SCC-ROLE-KEYS": [
+        "fn validate_session_key_ids(",
+        "pub fn validate_key_roles(",
+        ".verify_role(encryption_key_id, KeyRole::Encryption",
+        ".verify_role(signing_key_id, KeyRole::Signing",
+        "SessionError::RoleMismatch",
+    ],
+    "INV-SCC-TERMINATED": [
+        "pub fn begin_termination(",
+        "pub fn terminate_session(",
+        "SessionState::Terminated",
+        "SessionError::SessionTerminated",
+        "session.terminate();",
+    ],
+}
 
 REQUIRED_FUNCTIONS = [
     "establish_session",
@@ -250,6 +283,92 @@ def _read(path: Path) -> str:
     return ""
 
 
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = _rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = _rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
 def _check(name: str, ok: bool, detail: str = "") -> dict:
     return {"check": name, "pass": ok, "detail": detail or ("ok" if ok else "FAIL")}
 
@@ -287,7 +406,7 @@ def check_file_existence() -> list:
 
 
 def check_structs() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for s in REQUIRED_STRUCTS:
         found = f"pub enum {s}" in src or f"pub struct {s}" in src
@@ -296,7 +415,7 @@ def check_structs() -> list:
 
 
 def check_event_codes() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for code in REQUIRED_EVENT_CODES:
         found = code in src
@@ -305,7 +424,7 @@ def check_event_codes() -> list:
 
 
 def check_error_codes() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for code in REQUIRED_ERROR_CODES:
         found = code in src
@@ -314,16 +433,18 @@ def check_error_codes() -> list:
 
 
 def check_invariants() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for inv in REQUIRED_INVARIANTS:
-        found = inv in src
-        checks.append(_check(f"invariant {inv}", found))
+        markers = INVARIANT_IMPLEMENTATION_MARKERS.get(inv, [])
+        missing = [marker for marker in markers if marker not in src]
+        detail = "implementation markers present" if not missing else f"missing: {missing}"
+        checks.append(_check(f"invariant {inv}", not missing, detail))
     return checks
 
 
 def check_functions() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for fn_name in REQUIRED_FUNCTIONS:
         found = f"fn {fn_name}" in src or f"pub fn {fn_name}" in src
@@ -341,7 +462,7 @@ def check_spec_sections() -> list:
 
 
 def check_session_states() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for state in SESSION_STATES:
         found = state in src
@@ -350,7 +471,7 @@ def check_session_states() -> list:
 
 
 def check_key_role_integration() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     # Must import KeyRole from key_role_separation
     found_import = "key_role_separation::KeyRole" in src or "key_role_separation::{KeyRole" in src
@@ -362,7 +483,7 @@ def check_key_role_integration() -> list:
 
 
 def check_direction_integration() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     found_import = "control_channel::Direction" in src
     checks.append(_check("imports Direction from control_channel", found_import))
@@ -373,7 +494,7 @@ def check_direction_integration() -> list:
 
 
 def check_serde_derives() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     for t in ["SessionState", "SessionConfig", "AuthenticatedSession",
               "AuthenticatedMessage", "MessageDirection", "SessionEvent"]:
@@ -388,7 +509,7 @@ def check_serde_derives() -> list:
 
 
 def check_tests() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     test_count = src.count("#[test]")
     checks.append(_check(
@@ -426,7 +547,7 @@ def check_policy_content() -> list:
 
 
 def check_send_sync() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
     found = "assert_send" in src and "assert_sync" in src
     checks.append(_check("Send + Sync assertions", found))
@@ -435,7 +556,7 @@ def check_send_sync() -> list:
 
 def check_acceptance_criteria() -> list:
     """Verify acceptance criteria from the spec."""
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     checks = []
 
     # AC1: Every control message requires active authenticated session
@@ -481,8 +602,21 @@ def check_acceptance_criteria() -> list:
 def _missing_patterns(path: Path, patterns: list[str]) -> list[str]:
     if not path.is_file():
         return patterns
-    content = path.read_text(encoding="utf-8")
+    content = _read_rust_source(path)
     return [pattern for pattern in patterns if pattern not in content]
+
+
+def _resolve_requirement_path(path: Path) -> Path:
+    if path == DEFAULT_IMPL_FILE:
+        return IMPL_FILE
+    return path
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return path.relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _crate_test_path(path: Path) -> str:
@@ -492,8 +626,9 @@ def _crate_test_path(path: Path) -> str:
 def check_real_session_auth_evidence() -> list:
     checks = []
     for name, path, patterns in REAL_EVIDENCE_REQUIREMENTS:
-        missing = _missing_patterns(path, patterns)
-        detail = "ok" if not missing else f"missing in {path.relative_to(ROOT)}: {missing}"
+        actual_path = _resolve_requirement_path(path)
+        missing = _missing_patterns(actual_path, patterns)
+        detail = "ok" if not missing else f"missing in {_display_path(actual_path)}: {missing}"
         checks.append(_check(name, not missing, detail))
     return checks
 
@@ -556,7 +691,7 @@ def check_session_auth_test_registration_truth() -> list:
 
 
 def check_session_auth_git_xref() -> list:
-    src = _read(IMPL_FILE)
+    src = _read_rust_source(IMPL_FILE)
     xref = next((entry for entry in SESSION_AUTH_GIT_XREF if entry["bead_id"] == "bd-390wi"), None)
     has_commit = xref is not None and len(xref["commit"]) == 40
     has_sequence_guard = (

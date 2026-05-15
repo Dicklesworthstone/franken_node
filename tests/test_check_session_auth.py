@@ -2,6 +2,7 @@
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -183,6 +184,114 @@ class TestPolicyContent(unittest.TestCase):
     def test_policy_file_path(self):
         self.assertTrue(mod.POLICY_FILE.name.endswith(".md"))
         self.assertIn("session_authenticated_control", mod.POLICY_FILE.name)
+
+
+class TestCommentOnlyRustRegression(unittest.TestCase):
+    """Commented Rust markers must not satisfy implementation checks."""
+
+    def test_comment_only_rust_markers_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            impl_file = Path(tmp) / "session_auth.rs"
+            impl_file.write_text(
+                "\n".join(f"// {marker}" for marker in REQUIRED_RUST_MARKERS)
+                + "\n/*\n"
+                + "\n".join("#[test]" for _ in range(40))
+                + "\n*/\n",
+                encoding="utf-8",
+            )
+
+            original_impl = mod.IMPL_FILE
+            mod.IMPL_FILE = impl_file
+            try:
+                result = mod.run_checks()
+            finally:
+                mod.IMPL_FILE = original_impl
+
+        by_name = {check["check"]: check for check in result["checks"]}
+        self.assertTrue(by_name["session_auth implementation exists"]["pass"])
+
+        rust_marker_prefixes = (
+            "struct/enum ",
+            "event code ",
+            "error code ",
+            "invariant ",
+            "function ",
+            "session state ",
+            "uses KeyRole::",
+            "uses Direction::",
+            "serde derives on ",
+            "test: ",
+            "AC",
+            "real evidence:",
+            "git_xref:",
+        )
+        rust_marker_names = [
+            check["check"]
+            for check in result["checks"]
+            if check["check"].startswith(rust_marker_prefixes)
+            or check["check"]
+            in {
+                "imports KeyRole from key_role_separation",
+                "imports Direction from control_channel",
+                "Send + Sync assertions",
+            }
+            or check["check"].startswith("Rust unit tests present")
+        ]
+        self.assertTrue(rust_marker_names)
+        passing_markers = [name for name in rust_marker_names if by_name[name]["pass"]]
+        self.assertEqual(passing_markers, [])
+
+
+REQUIRED_RUST_MARKERS = (
+    mod.REQUIRED_EVENT_CODES
+    + mod.REQUIRED_ERROR_CODES
+    + mod.REQUIRED_INVARIANTS
+    + mod.REQUIRED_FUNCTIONS
+    + mod.SESSION_STATES
+    + [f"KeyRole::{role}" for role in mod.KEY_ROLES]
+    + [f"Direction::{direction}" for direction in mod.DIRECTIONS]
+    + [f"pub struct {name}" for name in mod.REQUIRED_STRUCTS]
+    + [f"pub enum {name}" for name in mod.REQUIRED_STRUCTS]
+    + [
+        "key_role_separation::KeyRole",
+        "control_channel::Direction",
+        "Serialize",
+        "Deserialize",
+        "assert_send",
+        "assert_sync",
+        "NoSession",
+        "SessionTerminated",
+        "SequenceViolation",
+        "send_seq",
+        "recv_seq",
+        "replay_window",
+        "ReplayDetected",
+        "encryption_key_id",
+        "signing_key_id",
+        "validate_key_roles",
+        "Terminated",
+        "max_sessions",
+        "MaxSessionsReached",
+        "trace_id",
+        "session_id",
+        "SessionEvent",
+        "test_session_lifecycle",
+        "test_strict_send_sequence",
+        "test_windowed_replay_rejected",
+        "test_validate_key_roles",
+        "checked_add(1)",
+        "send_seq_exhausted = true",
+        "recv_seq_exhausted = true",
+        "SessionError::SequenceExhausted",
+        "test_send_sequence_exhaustion_rejected_before_duplicate_terminal_use",
+    ]
+    + [
+        marker
+        for markers in mod.INVARIANT_IMPLEMENTATION_MARKERS.values()
+        for marker in markers
+    ]
+    + [pattern for _name, _path, patterns in mod.REAL_EVIDENCE_REQUIREMENTS for pattern in patterns]
+)
 
 
 if __name__ == "__main__":
