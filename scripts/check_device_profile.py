@@ -30,6 +30,95 @@ def read_utf8(path: Path) -> str | None:
         return None
 
 
+def read_rust_source(path: Path) -> str | None:
+    content = read_utf8(path)
+    if content is None:
+        return None
+    return strip_rust_comments(content)
+
+
+def strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
 def load_json_object(path: Path) -> tuple[dict[str, object] | None, str | None]:
     try:
         raw = path.read_text(encoding="utf-8")
@@ -168,7 +257,7 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
         print("bd-8vby: Device Profile Registry - Verification\n")
 
     # DPR-IMPL: Implementation exists with required types
-    content = read_utf8(IMPL_PATH)
+    content = read_rust_source(IMPL_PATH)
     impl_exists = content is not None
     if content is not None:
         has_profile = "struct DeviceProfile" in content
@@ -224,7 +313,7 @@ def run_checks(*, run_tests: bool, emit_human: bool) -> dict[str, object]:
     )
 
     # DPR-CONF: Conformance tests exist and cover invariants
-    conformance_content = read_utf8(CONF_PATH)
+    conformance_content = read_rust_source(CONF_PATH)
     conf_exists = conformance_content is not None
     if conformance_content is not None:
         has_schema = "inv_dpr_schema" in conformance_content

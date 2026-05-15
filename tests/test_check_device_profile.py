@@ -6,6 +6,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from scripts import check_device_profile
 
@@ -58,6 +59,31 @@ class TestDeviceProfileReadHelpers(unittest.TestCase):
         self.assertIsNone(parsed)
         self.assertIsNotNone(error)
         self.assertIn("invalid UTF-8", error)
+
+    def test_read_rust_source_strips_comments_but_preserves_strings(self):
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "device_profile.rs"
+            path.write_text(
+                "\n".join(
+                    [
+                        'const MARKER: &str = "DeviceProfileRegistry";',
+                        "// struct DeviceProfileRegistry",
+                        'const RAW: &str = r#"PlacementPolicy"#;',
+                        "/* DPR_SCHEMA_INVALID */",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            content = check_device_profile.read_rust_source(path)
+
+        self.assertIsNotNone(content)
+        self.assertIsInstance(content, str)
+        content = content or ""
+        self.assertIn('"DeviceProfileRegistry"', content)
+        self.assertIn('r#"PlacementPolicy"#', content)
+        self.assertNotIn("struct DeviceProfileRegistry", content)
+        self.assertNotIn("DPR_SCHEMA_INVALID", content)
 
 
 class TestDeviceProfileImpl(unittest.TestCase):
@@ -182,6 +208,61 @@ class TestDeviceProfileCli(unittest.TestCase):
             check_device_profile.compute_verdict(failing=0, skipped=1, mode="full"),
             "FAIL",
         )
+
+
+class TestCommentOnlyRustRegression(unittest.TestCase):
+    """Commented Rust markers must not satisfy implementation checks."""
+
+    def test_comment_only_rust_markers_fail_closed(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            impl_path = temp_path / "device_profile.rs"
+            conf_path = temp_path / "placement_policy_schema.rs"
+            impl_path.write_text(
+                "\n".join(
+                    [
+                        "// struct DeviceProfile",
+                        "// struct PlacementConstraint",
+                        "// struct PlacementPolicy",
+                        "// struct PlacementResult",
+                        "// struct DeviceProfileRegistry",
+                        "// fn validate_profile",
+                        "// fn evaluate_placement",
+                        "/*",
+                        "DPR_SCHEMA_INVALID",
+                        "DPR_STALE_PROFILE",
+                        "DPR_INVALID_CONSTRAINT",
+                        "DPR_NO_MATCH",
+                        "*/",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            conf_path.write_text(
+                "\n".join(
+                    [
+                        "// inv_dpr_schema",
+                        "// inv_dpr_freshness",
+                        "/* inv_dpr_deterministic */",
+                        "/* inv_dpr_reject_invalid */",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(check_device_profile, "IMPL_PATH", impl_path),
+                mock.patch.object(check_device_profile, "CONF_PATH", conf_path),
+            ):
+                evidence = check_device_profile.run_checks(run_tests=False, emit_human=False)
+
+        statuses = {check["id"]: check["status"] for check in evidence["checks"]}
+        self.assertEqual(statuses["DPR-IMPL"], "FAIL")
+        self.assertEqual(statuses["DPR-ERRORS"], "FAIL")
+        self.assertEqual(statuses["DPR-CONF"], "FAIL")
+        self.assertEqual(statuses["DPR-FIXTURES"], "PASS")
+        self.assertEqual(statuses["DPR-SPEC"], "PASS")
+        self.assertEqual(evidence["verdict"], "FAIL")
 
 
 if __name__ == "__main__":
