@@ -578,6 +578,32 @@
       }
     }
   ],
+  "watchlist_examples": [
+    {
+      "bead_id": "bd-famte",
+      "snapshot_id": "crvd-dirty-relevant-absent-symbols",
+      "priority": 2,
+      "generated_at": "2026-05-15T09:51:51Z",
+      "classification_code": "CRVD_BLOCKED_SIBLING_DIRTY_RELEVANT",
+      "remote_required": true,
+      "product_failure": false,
+      "next_safest_action": "record_beads_blocker",
+      "command_digest": "5d2ae01403b3909b1fb2bee54dd9ed824a2bed0abd840a5cf7f80aeb2ccb73bd",
+      "exact_deferred_rch_command": "RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary rch exec -- env CARGO_BUILD_JOBS=1 cargo clippy -q -p frankenengine-node --no-default-features --test validation_proof_cache -- -D warnings"
+    },
+    {
+      "bead_id": "bd-pq2l4",
+      "snapshot_id": "crvd-product-clippy-failure",
+      "priority": 2,
+      "generated_at": "2026-05-15T00:45:59Z",
+      "classification_code": "PRODUCT_CLIPPY_FAILURE",
+      "remote_required": true,
+      "product_failure": true,
+      "next_safest_action": "fix_product_lints_before_retry",
+      "command_digest": "6d0da4a4dfc37f3006fb9f1bf0071a672d001006ec81abacf42fe3bff7b57be7",
+      "exact_deferred_rch_command": "RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary rch exec -- env CARGO_BUILD_JOBS=1 cargo clippy -p frankenengine-node --no-default-features --tests -- -D warnings"
+    }
+  ],
   "invalid_snapshots": [
     {
       "case": "missing_command_digest",

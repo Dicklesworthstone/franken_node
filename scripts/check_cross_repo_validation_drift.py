@@ -33,6 +33,7 @@ SNAPSHOT_SCHEMA_VERSION = "franken-node/cross-repo-validation-drift/snapshot/v1"
 SCHEMA_CATALOG_VERSION = "franken-node/cross-repo-validation-drift/schema-catalog/v1"
 FIXTURE_SCHEMA_VERSION = "franken-node/cross-repo-validation-drift/fixtures/v1"
 HANDOFF_SCHEMA_VERSION = "franken-node/cross-repo-validation-drift/handoff/v1"
+WATCHLIST_SCHEMA_VERSION = "franken-node/cross-repo-validation-drift/reproof-watchlist/v1"
 
 SCHEMA_FILE = (
     ROOT
@@ -117,9 +118,17 @@ MAX_STRING_BYTES = 1024
 MAX_PATH_BYTES = 240
 MAX_HANDOFF_JSON_BYTES = 8192
 MAX_HANDOFF_MARKDOWN_BYTES = 4096
+MAX_WATCHLIST_JSON_BYTES = 16384
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 BEAD_RE = re.compile(r"^bd-[A-Za-z0-9.]+$")
 SNAPSHOT_ID_RE = re.compile(r"^crvd-[a-z0-9-]+$")
+
+WATCHLIST_STATUS_RANK = {
+    "ready": 0,
+    "cooldown": 1,
+    "blocked": 2,
+    "excluded": 3,
+}
 
 
 def _read_text(path: Path) -> str:
@@ -535,6 +544,183 @@ def validate_handoff_payload(payload: Any) -> list[str]:
     return list(dict.fromkeys(errors))
 
 
+def _watchlist_examples(fixtures: dict[str, Any]) -> list[dict[str, Any]]:
+    examples = fixtures.get("watchlist_examples", [])
+    return examples if isinstance(examples, list) else []
+
+
+def _command_allows_remote_required(command: str) -> bool:
+    return command.startswith("RCH_REQUIRE_REMOTE=1 ") or command.startswith("rch exec ")
+
+
+def _watchlist_status(
+    *,
+    classification_code: Any,
+    cargo_count: Any,
+    cargo_threshold: Any,
+    remote_required: Any,
+    command: str,
+    product_failure: bool,
+) -> tuple[str, str, bool]:
+    if product_failure:
+        return ("excluded", "product_failure_not_infrastructure_retry", False)
+    if bool(remote_required) and not _command_allows_remote_required(command):
+        return ("blocked", "remote_required_local_fallback_refused", False)
+    pressure_high = isinstance(cargo_count, int) and isinstance(cargo_threshold, int) and cargo_count > cargo_threshold
+    if classification_code in {"CRVD_SAFE_TO_RUN", "CRVD_NEEDS_RCH_REPROOF"}:
+        if pressure_high:
+            return ("cooldown", "cargo_pressure_above_threshold", True)
+        return ("ready", "sibling_ready_for_rch_reproof", True)
+    if classification_code == "CRVD_BLOCKED_CARGO_PRESSURE":
+        return ("cooldown", "cargo_pressure_above_threshold", True)
+    return ("blocked", "sibling_or_coordination_blocker_still_present", False)
+
+
+def _watchlist_sort_key(entry: dict[str, Any]) -> tuple[int, int, float, str]:
+    status_rank = WATCHLIST_STATUS_RANK.get(str(entry.get("status")), 99)
+    priority = entry.get("priority")
+    priority_key = priority if isinstance(priority, int) else 99
+    generated_at = _parse_rfc3339(entry.get("generated_at"))
+    age_key = generated_at.timestamp() if generated_at is not None else 0.0
+    return (status_rank, priority_key, age_key, str(entry.get("bead_id")))
+
+
+def build_reproof_watchlist(
+    snapshots: list[dict[str, Any]],
+    examples: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    example_by_bead = {
+        str(example.get("bead_id")): example
+        for example in (examples or [])
+        if isinstance(example, dict) and isinstance(example.get("bead_id"), str)
+    }
+    entries: list[dict[str, Any]] = []
+    seen_beads: set[str] = set()
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            continue
+        bead_id = str(snapshot.get("bead_id"))
+        seen_beads.add(bead_id)
+        example = example_by_bead.get(bead_id, {})
+        command = str(example.get("exact_deferred_rch_command") or _validation_command_string(snapshot))
+        priority = example.get("priority", 2)
+        classification_code = _get_path(snapshot, "classification.code")
+        cargo_count = _get_path(snapshot, "cargo_pressure.process_count")
+        cargo_threshold = _get_path(snapshot, "cargo_pressure.threshold")
+        remote_required = _get_path(snapshot, "validation_command.remote_required")
+        status, reason, retryable = _watchlist_status(
+            classification_code=classification_code,
+            cargo_count=cargo_count,
+            cargo_threshold=cargo_threshold,
+            remote_required=remote_required,
+            command=command,
+            product_failure=False,
+        )
+        entries.append({
+            "bead_id": bead_id,
+            "snapshot_id": snapshot.get("snapshot_id"),
+            "priority": priority,
+            "generated_at": snapshot.get("generated_at"),
+            "classification_code": classification_code,
+            "status": status,
+            "reason": reason,
+            "retryable_when_ready": retryable,
+            "execute_allowed": status == "ready",
+            "cooldown_seconds": 300 if status == "cooldown" else 0,
+            "remote_required": remote_required,
+            "exact_deferred_rch_command": command,
+            "command_digest": example.get("command_digest") or _get_path(snapshot, "command_digest.hex"),
+            "next_safest_action": _get_path(snapshot, "recommended_action.action"),
+        })
+
+    for example in examples or []:
+        if not isinstance(example, dict):
+            continue
+        bead_id = example.get("bead_id")
+        if not isinstance(bead_id, str) or bead_id in seen_beads:
+            continue
+        product_failure = bool(example.get("product_failure"))
+        command = str(example.get("exact_deferred_rch_command", ""))
+        status, reason, retryable = _watchlist_status(
+            classification_code=example.get("classification_code"),
+            cargo_count=example.get("cargo_process_count", 0),
+            cargo_threshold=example.get("cargo_threshold", 2),
+            remote_required=example.get("remote_required"),
+            command=command,
+            product_failure=product_failure,
+        )
+        entries.append({
+            "bead_id": bead_id,
+            "snapshot_id": example.get("snapshot_id"),
+            "priority": example.get("priority", 2),
+            "generated_at": example.get("generated_at"),
+            "classification_code": example.get("classification_code"),
+            "status": status,
+            "reason": reason,
+            "retryable_when_ready": retryable,
+            "execute_allowed": status == "ready",
+            "cooldown_seconds": 300 if status == "cooldown" else 0,
+            "remote_required": example.get("remote_required"),
+            "exact_deferred_rch_command": command,
+            "command_digest": example.get("command_digest"),
+            "next_safest_action": example.get("next_safest_action"),
+            "product_failure": product_failure,
+        })
+
+    entries.sort(key=_watchlist_sort_key)
+    return {
+        "schema_version": WATCHLIST_SCHEMA_VERSION,
+        "dry_run": True,
+        "execution_requires_explicit_rch": True,
+        "entries": entries,
+    }
+
+
+def validate_reproof_watchlist(watchlist: Any) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(watchlist, dict):
+        return ["ERR_CRVD_BAD_WATCHLIST"]
+    if watchlist.get("schema_version") != WATCHLIST_SCHEMA_VERSION:
+        errors.append("ERR_CRVD_BAD_WATCHLIST")
+    if not isinstance(watchlist.get("dry_run"), bool) or not watchlist.get("dry_run"):
+        errors.append("ERR_CRVD_BAD_WATCHLIST")
+    if (
+        not isinstance(watchlist.get("execution_requires_explicit_rch"), bool)
+        or not watchlist.get("execution_requires_explicit_rch")
+    ):
+        errors.append("ERR_CRVD_BAD_WATCHLIST")
+    entries = watchlist.get("entries")
+    if not isinstance(entries, list) or not entries:
+        errors.append("ERR_CRVD_BAD_WATCHLIST")
+        return list(dict.fromkeys(errors))
+    if entries != sorted(entries, key=_watchlist_sort_key):
+        errors.append("ERR_CRVD_WATCHLIST_ORDER")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            errors.append("ERR_CRVD_BAD_WATCHLIST")
+            continue
+        command = entry.get("exact_deferred_rch_command")
+        if not _bounded_string(command):
+            errors.append("ERR_CRVD_BAD_WATCHLIST")
+        if entry.get("status") not in WATCHLIST_STATUS_RANK:
+            errors.append("ERR_CRVD_BAD_WATCHLIST")
+        if not _is_sha256_hex(entry.get("command_digest")):
+            errors.append("ERR_CRVD_BAD_WATCHLIST")
+        if bool(entry.get("product_failure")):
+            if entry.get("retryable_when_ready") or entry.get("execute_allowed"):
+                errors.append("ERR_CRVD_PRODUCT_FAILURE_RETRY")
+        if bool(entry.get("remote_required")):
+            if isinstance(command, str) and not _command_allows_remote_required(command):
+                if entry.get("reason") != "remote_required_local_fallback_refused":
+                    errors.append("ERR_CRVD_REMOTE_REQUIRED_LOCAL_FALLBACK")
+            elif entry.get("reason") == "remote_required_local_fallback_refused":
+                errors.append("ERR_CRVD_REMOTE_REQUIRED_LOCAL_FALLBACK")
+    encoded = json.dumps(watchlist, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > MAX_WATCHLIST_JSON_BYTES:
+        errors.append("ERR_CRVD_BAD_WATCHLIST")
+    return list(dict.fromkeys(errors))
+
+
 def validate_snapshot(snapshot: Any, *, expected_bead_id: str | None = None) -> list[str]:
     errors: list[str] = []
     if not isinstance(snapshot, dict):
@@ -898,6 +1084,37 @@ def run_all() -> dict[str, Any]:
     self_test_checks = run_self_test()
     checks.extend(self_test_checks)
 
+    watchlist = build_reproof_watchlist(valid_snapshots, _watchlist_examples(fixtures))
+    watchlist_errors = validate_reproof_watchlist(watchlist)
+    checks.append(_check("watchlist.reproof_policy_passes", watchlist_errors == [], ",".join(watchlist_errors)))
+    entries = watchlist.get("entries", [])
+    bd_famte = next(
+        (
+            entry
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("bead_id") == "bd-famte"
+        ),
+        {},
+    )
+    bd_pq2l4 = next(
+        (
+            entry
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("bead_id") == "bd-pq2l4"
+        ),
+        {},
+    )
+    checks.append(_check(
+        "watchlist.bd_famte_exact_command",
+        isinstance(bd_famte.get("exact_deferred_rch_command"), str)
+        and bd_famte["exact_deferred_rch_command"].startswith("RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=summary rch exec --"),
+    ))
+    checks.append(_check(
+        "watchlist.bd_pq2l4_product_failure_excluded",
+        bd_pq2l4.get("status") == "excluded"
+        and bd_pq2l4.get("reason") == "product_failure_not_infrastructure_retry",
+    ))
+
     passed = sum(1 for check in checks if check["passed"])
     total = len(checks)
     return {
@@ -918,6 +1135,7 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument("--self-test", action="store_true", help="run self-test checks")
     parser.add_argument("--handoff", metavar="SNAPSHOT_ID", help="emit a fixture handoff payload")
+    parser.add_argument("--watchlist", action="store_true", help="emit dry-run reproof watchlist")
     parser.add_argument(
         "--handoff-format",
         choices=["json", "markdown"],
@@ -927,6 +1145,30 @@ def main() -> int:
     args = parser.parse_args()
 
     configure_test_logging("check_cross_repo_validation_drift")
+
+    if args.watchlist:
+        fixtures = _load_json(FIXTURES_FILE)
+        watchlist = build_reproof_watchlist(_fixture_cases(fixtures), _watchlist_examples(fixtures))
+        errors = validate_reproof_watchlist(watchlist)
+        if errors:
+            result = {
+                "bead_id": BEAD_ID,
+                "title": TITLE,
+                "schema_version": WATCHLIST_SCHEMA_VERSION,
+                "verdict": "FAIL",
+                "errors": errors,
+            }
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 1
+        if args.json:
+            print(json.dumps(watchlist, indent=2, sort_keys=True))
+        else:
+            for entry in watchlist["entries"]:
+                print(
+                    f"{entry['status']} {entry['bead_id']} "
+                    f"{entry['classification_code']} {entry['reason']}"
+                )
+        return 0
 
     if args.handoff:
         fixtures = _load_json(FIXTURES_FILE)

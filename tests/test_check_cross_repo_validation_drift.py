@@ -129,6 +129,59 @@ class CrossRepoValidationDriftTests(unittest.TestCase):
         self.assertIn("cargo clippy", handoff["exact_deferred_rch_command"])
         self.assertIn(handoff["exact_deferred_rch_command"], handoff["markdown"])
 
+    def test_reproof_watchlist_is_valid_and_sorted(self) -> None:
+        watchlist = mod.build_reproof_watchlist(
+            self.fixtures["valid_snapshots"],
+            self.fixtures["watchlist_examples"],
+        )
+        self.assertEqual(mod.validate_reproof_watchlist(watchlist), [])
+        self.assertEqual(watchlist["entries"], sorted(watchlist["entries"], key=mod._watchlist_sort_key))
+
+    def test_reproof_watchlist_promotes_safe_and_blocks_dirty(self) -> None:
+        watchlist = mod.build_reproof_watchlist(
+            self.fixtures["valid_snapshots"],
+            self.fixtures["watchlist_examples"],
+        )
+        by_snapshot = {entry["snapshot_id"]: entry for entry in watchlist["entries"]}
+        self.assertEqual(by_snapshot["crvd-clean-safe-to-run"]["status"], "ready")
+        self.assertTrue(by_snapshot["crvd-clean-safe-to-run"]["execute_allowed"])
+        self.assertEqual(by_snapshot["crvd-dirty-relevant-absent-symbols"]["status"], "blocked")
+        self.assertFalse(by_snapshot["crvd-dirty-relevant-absent-symbols"]["execute_allowed"])
+
+    def test_reproof_watchlist_cargo_pressure_uses_cooldown(self) -> None:
+        watchlist = mod.build_reproof_watchlist(
+            self.fixtures["valid_snapshots"],
+            self.fixtures["watchlist_examples"],
+        )
+        by_snapshot = {entry["snapshot_id"]: entry for entry in watchlist["entries"]}
+        self.assertEqual(by_snapshot["crvd-cargo-pressure"]["status"], "cooldown")
+        self.assertEqual(by_snapshot["crvd-cargo-pressure"]["cooldown_seconds"], 300)
+        self.assertFalse(by_snapshot["crvd-cargo-pressure"]["execute_allowed"])
+
+    def test_reproof_watchlist_refuses_remote_required_local_fallback(self) -> None:
+        status, reason, retryable = mod._watchlist_status(
+            classification_code="CRVD_SAFE_TO_RUN",
+            cargo_count=0,
+            cargo_threshold=2,
+            remote_required=True,
+            command="cargo clippy -p frankenengine-node",
+            product_failure=False,
+        )
+        self.assertEqual(status, "blocked")
+        self.assertEqual(reason, "remote_required_local_fallback_refused")
+        self.assertFalse(retryable)
+
+    def test_reproof_watchlist_excludes_product_failures_and_preserves_real_commands(self) -> None:
+        watchlist = mod.build_reproof_watchlist(
+            self.fixtures["valid_snapshots"],
+            self.fixtures["watchlist_examples"],
+        )
+        by_bead = {entry["bead_id"]: entry for entry in watchlist["entries"]}
+        self.assertEqual(by_bead["bd-pq2l4"]["status"], "excluded")
+        self.assertFalse(by_bead["bd-pq2l4"]["retryable_when_ready"])
+        self.assertIn("--no-default-features --tests -- -D warnings", by_bead["bd-pq2l4"]["exact_deferred_rch_command"])
+        self.assertTrue(by_bead["bd-famte"]["exact_deferred_rch_command"].startswith("RCH_REQUIRE_REMOTE=1"))
+
     def test_invalid_fixture_cases_emit_expected_errors(self) -> None:
         for case in self.fixtures["invalid_snapshots"]:
             with self.subTest(case=case["case"]):
@@ -255,6 +308,20 @@ class CrossRepoValidationDriftTests(unittest.TestCase):
         parsed = json.JSONDecoder().decode(proc.stdout)
         self.assertEqual(parsed["schema_version"], mod.HANDOFF_SCHEMA_VERSION)
         self.assertEqual(parsed["classification_code"], "CRVD_BLOCKED_AGENT_MAIL_CORRUPT")
+
+    def test_watchlist_json_cli_output(self) -> None:
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--watchlist", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        parsed = json.JSONDecoder().decode(proc.stdout)
+        self.assertEqual(parsed["schema_version"], mod.WATCHLIST_SCHEMA_VERSION)
+        self.assertTrue(parsed["dry_run"])
+        self.assertTrue(any(entry["bead_id"] == "bd-pq2l4" for entry in parsed["entries"]))
 
     def test_handoff_markdown_cli_output(self) -> None:
         proc = subprocess.run(
