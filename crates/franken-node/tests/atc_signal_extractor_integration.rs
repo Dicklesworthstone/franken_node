@@ -142,10 +142,10 @@ fn public_extract_enforces_max_payload_bytes_fail_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn fixture_samples_extract_to_distinct_signals() {
+fn fixture_samples_extract_to_distinct_signals() -> Result<(), String> {
     let path = fixture_path();
-    let raw = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()));
+    let raw =
+        fs::read_to_string(&path).map_err(|e| format!("read fixture {}: {e}", path.display()))?;
     let policy = redacting_policy();
     let mut log = ExtractionAuditLog::new();
     let mut signals: Vec<AtcLocalSignal> = Vec::new();
@@ -156,9 +156,9 @@ fn fixture_samples_extract_to_distinct_signals() {
             continue;
         }
         let v: serde_json::Value =
-            serde_json::from_str(line).unwrap_or_else(|e| panic!("parse line {lineno}: {e}"));
+            serde_json::from_str(line).map_err(|e| format!("parse line {lineno}: {e}"))?;
         let sig =
-            extract_signal(&v, &policy).unwrap_or_else(|e| panic!("extract line {lineno}: {e:?}"));
+            extract_signal(&v, &policy).map_err(|e| format!("extract line {lineno}: {e:?}"))?;
         // Every sample must redact secret_token.
         assert!(!sig.redacted_payload.contains_key("secret_token"));
         log.record_ok(&sig);
@@ -175,28 +175,32 @@ fn fixture_samples_extract_to_distinct_signals() {
         log.entries()[0].event_code.as_str(),
         event_codes::SIGNAL_EXTRACTED
     );
+    Ok(())
 }
 
 #[test]
-fn fixture_replay_is_deterministic() {
+fn fixture_replay_is_deterministic() -> Result<(), String> {
     // Replaying the fixture twice yields byte-identical signal_id sequences.
     let path = fixture_path();
-    let raw = fs::read_to_string(&path).unwrap();
+    let raw =
+        fs::read_to_string(&path).map_err(|e| format!("read fixture {}: {e}", path.display()))?;
     let policy = redacting_policy();
 
-    let run = |label: &str| -> Vec<String> {
+    let run = |label: &str| -> Result<Vec<String>, String> {
         raw.lines()
             .filter(|l| !l.trim().is_empty())
             .map(|line| {
-                let v: serde_json::Value = serde_json::from_str(line).unwrap();
+                let v: serde_json::Value =
+                    serde_json::from_str(line).map_err(|e| format!("{label}: {e}"))?;
                 extract_signal(&v, &policy)
-                    .unwrap_or_else(|e| panic!("{label}: {e:?}"))
-                    .signal_id
+                    .map(|sig| sig.signal_id)
+                    .map_err(|e| format!("{label}: {e:?}"))
             })
             .collect()
     };
 
-    let a = run("run-1");
-    let b = run("run-2");
+    let a = run("run-1")?;
+    let b = run("run-2")?;
     assert_eq!(a, b, "INV-ATC-EXTRACT-DETERMINISM across fixture replays");
+    Ok(())
 }
