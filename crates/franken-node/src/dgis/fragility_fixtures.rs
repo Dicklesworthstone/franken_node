@@ -860,6 +860,8 @@ pub fn synthesize_multi_quorum_publishers() -> FragilityFixture {
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), String>;
+
     fn assert_label_present(verdict: &FixtureVerdict, label: SpofKindLabel) {
         let n = verdict
             .actual_finding_counts
@@ -1002,7 +1004,7 @@ mod tests {
     }
 
     #[test]
-    fn fixture_with_invalid_finding_label_rejected() {
+    fn fixture_with_invalid_finding_label_rejected() -> TestResult {
         // Inject an unknown SpofKindLabel string; serde must refuse it because
         // the enum is strictly enumerated.
         let bad_json = r#"{
@@ -1021,15 +1023,17 @@ mod tests {
         let err = load_fixture_from_json(bad_json).expect_err("must reject unknown label");
         match err {
             FragilityError::ShareOutOfRange { field, .. } => assert_eq!(field, "fixture_json"),
-            other => panic!(
-                "expected ShareOutOfRange wrapping serde error, got {:?}",
-                other
-            ),
+            other => {
+                return Err(format!(
+                    "expected ShareOutOfRange wrapping serde error, got {other:?}"
+                ));
+            }
         }
+        Ok(())
     }
 
     #[test]
-    fn expected_finding_validate_rejects_inverted_bounds() {
+    fn expected_finding_validate_rejects_inverted_bounds() -> TestResult {
         let bad = ExpectedFinding {
             kind: SpofKindLabel::KeyPerson,
             min_count: 5,
@@ -1040,8 +1044,9 @@ mod tests {
             FragilityError::ShareOutOfRange { field, .. } => {
                 assert_eq!(field, "expected_finding_bounds")
             }
-            other => panic!("unexpected error: {:?}", other),
+            other => return Err(format!("unexpected error: {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
