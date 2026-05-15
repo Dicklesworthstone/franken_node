@@ -662,6 +662,8 @@ impl ParticipationWeightEngine {
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
 
     fn make_established_participant(id: &str) -> ParticipantIdentity {
@@ -2368,7 +2370,11 @@ mod atc_participation_weighting_negative_path_tests {
 
                     // Each thread performs weight computation
                     let record = {
-                        let mut engine_guard = engine.lock().unwrap();
+                        let mut engine_guard = try_lock(
+                            &engine,
+                            "compute participation weights during concurrent simulation",
+                        )
+                        .expect("participation weight engine mutex should not be poisoned");
                         engine_guard.compute_weights(
                             &[participant],
                             &format!("concurrent_t{}_o{}", thread_id, operation),
@@ -2386,7 +2392,9 @@ mod atc_participation_weighting_negative_path_tests {
 
                 // Merge results
                 {
-                    let mut shared_results = results.lock().unwrap();
+                    let mut shared_results =
+                        try_lock(&results, "merge participation weighting concurrent results")
+                            .expect("participation weighting results mutex should not be poisoned");
                     shared_results.extend(thread_results);
                 }
             });
@@ -2401,13 +2409,18 @@ mod atc_participation_weighting_negative_path_tests {
                 .expect("Thread should complete without panics");
         }
 
-        let final_results = results.lock().unwrap();
+        let final_results = try_lock(
+            &results,
+            "inspect participation weighting concurrent results",
+        )
+        .expect("participation weighting results mutex should not be poisoned");
 
         // Should have processed all operations
         assert_eq!(final_results.len(), thread_count * operations_per_thread);
 
         // Check final engine state consistency
-        let final_engine = engine.lock().unwrap();
+        let final_engine = try_lock(&engine, "inspect participation weight engine final state")
+            .expect("participation weight engine mutex should not be poisoned");
 
         // All weights should be valid
         for (thread_id, operation, total_weight, final_weight) in &*final_results {
@@ -2480,34 +2493,34 @@ mod atc_participation_weighting_negative_path_tests {
             engine.compute_weights(&[participant], "deep_test", "2026-04-17T00:00:00Z")
         });
 
-        match result {
-            Ok(record) => {
-                // Successfully handled deep nesting
-                assert_eq!(record.participant_count, 1);
-                assert_eq!(record.weights[0].participant_id, "deep_nesting_test");
+        assert!(
+            result.is_ok(),
+            "Deep nesting caused panic - need stack overflow protection"
+        );
+        let Ok(record) = result else {
+            return;
+        };
 
-                // JSON serialization should handle or safely reject deep nesting
-                match serde_json::to_string(&record) {
-                    Ok(json) => {
-                        // If serialization succeeds, deserialization should too
-                        match serde_json::from_str::<WeightAuditRecord>(&json) {
-                            Ok(parsed) => {
-                                assert_eq!(parsed.participant_count, 1);
-                                assert_eq!(parsed.weights[0].participant_id, "deep_nesting_test");
-                            }
-                            Err(_) => {
-                                // Deserialization failure acceptable for extremely nested data
-                            }
-                        }
+        // Successfully handled deep nesting
+        assert_eq!(record.participant_count, 1);
+        assert_eq!(record.weights[0].participant_id, "deep_nesting_test");
+
+        // JSON serialization should handle or safely reject deep nesting
+        match serde_json::to_string(&record) {
+            Ok(json) => {
+                // If serialization succeeds, deserialization should too
+                match serde_json::from_str::<WeightAuditRecord>(&json) {
+                    Ok(parsed) => {
+                        assert_eq!(parsed.participant_count, 1);
+                        assert_eq!(parsed.weights[0].participant_id, "deep_nesting_test");
                     }
                     Err(_) => {
-                        // Serialization failure acceptable for extremely nested data
+                        // Deserialization failure acceptable for extremely nested data
                     }
                 }
             }
             Err(_) => {
-                // If panic occurs, need better stack protection
-                panic!("Deep nesting caused panic - need stack overflow protection");
+                // Serialization failure acceptable for extremely nested data
             }
         }
     }

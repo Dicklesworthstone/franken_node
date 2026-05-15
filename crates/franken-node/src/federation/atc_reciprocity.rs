@@ -556,6 +556,8 @@ impl ReciprocityEngine {
 
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
     use std::collections::BTreeSet;
 
@@ -1781,7 +1783,9 @@ mod atc_reciprocity_negative_path_tests {
 
                     // Each thread performs access evaluation
                     let decision = {
-                        let mut engine_guard = engine.lock().unwrap();
+                        let mut engine_guard =
+                            try_lock(&engine, "evaluate ATC reciprocity concurrent access")
+                                .expect("ATC reciprocity engine mutex should not be poisoned");
                         engine_guard.evaluate_access(&metrics, "2026-04-17T00:00:00Z")
                     };
 
@@ -1790,7 +1794,9 @@ mod atc_reciprocity_negative_path_tests {
 
                 // Merge results
                 {
-                    let mut shared_results = results.lock().unwrap();
+                    let mut shared_results =
+                        try_lock(&results, "merge ATC reciprocity concurrent results")
+                            .expect("ATC reciprocity results mutex should not be poisoned");
                     shared_results.extend(thread_results);
                 }
             });
@@ -1805,13 +1811,15 @@ mod atc_reciprocity_negative_path_tests {
                 .expect("Thread should complete without panics");
         }
 
-        let final_results = results.lock().unwrap();
+        let final_results = try_lock(&results, "inspect ATC reciprocity concurrent results")
+            .expect("ATC reciprocity results mutex should not be poisoned");
 
         // Should have processed all operations
         assert_eq!(final_results.len(), thread_count * operations_per_thread);
 
         // Check final engine state consistency
-        let final_engine = engine.lock().unwrap();
+        let final_engine = try_lock(&engine, "inspect ATC reciprocity engine final state")
+            .expect("ATC reciprocity engine mutex should not be poisoned");
 
         // Audit log should contain entries from all threads
         assert!(final_engine.audit_log().len() > 0);
@@ -1877,33 +1885,33 @@ mod atc_reciprocity_negative_path_tests {
         let result =
             std::panic::catch_unwind(|| engine.evaluate_access(&metrics, "2026-04-17T00:00:00Z"));
 
-        match result {
-            Ok(decision) => {
-                // Successfully handled deep nesting
-                assert!(decision.exception_applied);
-                assert_eq!(decision.participant_id, "deep_nesting_test");
+        assert!(
+            result.is_ok(),
+            "Deep nesting caused panic - need stack overflow protection"
+        );
+        let Ok(decision) = result else {
+            return;
+        };
 
-                // JSON serialization should handle or safely reject deep nesting
-                match serde_json::to_string(&decision) {
-                    Ok(json) => {
-                        // If serialization succeeds, deserialization should too
-                        match serde_json::from_str::<AccessDecision>(&json) {
-                            Ok(parsed) => {
-                                assert_eq!(parsed.participant_id, "deep_nesting_test");
-                            }
-                            Err(_) => {
-                                // Deserialization failure acceptable for extremely nested data
-                            }
-                        }
+        // Successfully handled deep nesting
+        assert!(decision.exception_applied);
+        assert_eq!(decision.participant_id, "deep_nesting_test");
+
+        // JSON serialization should handle or safely reject deep nesting
+        match serde_json::to_string(&decision) {
+            Ok(json) => {
+                // If serialization succeeds, deserialization should too
+                match serde_json::from_str::<AccessDecision>(&json) {
+                    Ok(parsed) => {
+                        assert_eq!(parsed.participant_id, "deep_nesting_test");
                     }
                     Err(_) => {
-                        // Serialization failure acceptable for extremely nested data
+                        // Deserialization failure acceptable for extremely nested data
                     }
                 }
             }
             Err(_) => {
-                // If panic occurs, need better stack protection
-                panic!("Deep nesting caused panic - need stack overflow protection");
+                // Serialization failure acceptable for extremely nested data
             }
         }
     }
