@@ -770,6 +770,8 @@ impl IsolationMesh {
 // ===========================================================================
 #[cfg(test)]
 mod tests {
+    use crate::lock_utils::try_lock;
+
     use super::*;
 
     fn shared_rail() -> IsolationRail {
@@ -1433,20 +1435,25 @@ mod tests {
 
             // Set up: fill hw-1 rail to capacity-1 (1 slot remaining)
             // hw-1 has capacity=1, so 0 slots remaining after placing w1
-            mesh.lock()
-                .unwrap()
-                .place_workload("w1", "hw-1", permissive_policy(), 1)
-                .expect("place w1 to fill hw-1");
+            {
+                let mut mesh_guard = try_lock(&mesh, "isolation mesh full-capacity setup")
+                    .expect("isolation mesh mutex should not be poisoned");
+                mesh_guard
+                    .place_workload("w1", "hw-1", permissive_policy(), 1)
+                    .expect("place w1 to fill hw-1");
+            }
 
             // Create 2 workloads to race for the remaining capacity
-            mesh.lock()
-                .unwrap()
-                .place_workload("racer1", "shared-1", permissive_policy(), 2)
-                .expect("place racer1");
-            mesh.lock()
-                .unwrap()
-                .place_workload("racer2", "shared-1", permissive_policy(), 3)
-                .expect("place racer2");
+            {
+                let mut mesh_guard = try_lock(&mesh, "isolation mesh full-capacity racers setup")
+                    .expect("isolation mesh mutex should not be poisoned");
+                mesh_guard
+                    .place_workload("racer1", "shared-1", permissive_policy(), 2)
+                    .expect("place racer1");
+                mesh_guard
+                    .place_workload("racer2", "shared-1", permissive_policy(), 3)
+                    .expect("place racer2");
+            }
 
             const NUM_RACERS: usize = 2;
             let barrier = Arc::new(Barrier::new(NUM_RACERS));
@@ -1464,11 +1471,12 @@ mod tests {
 
                     // Try to elevate to hw-1 (which should have 0 capacity left)
                     let workload_name = format!("racer{}", racer_id);
-                    let result = mesh_clone.lock().unwrap().elevate_workload(
-                        &workload_name,
-                        "hw-1",
-                        10 + racer_id as u64,
-                    );
+                    let result = {
+                        let mut mesh_guard =
+                            try_lock(&mesh_clone, "isolation mesh full-capacity race elevation")
+                                .expect("isolation mesh mutex should not be poisoned");
+                        mesh_guard.elevate_workload(&workload_name, "hw-1", 10 + racer_id as u64)
+                    };
 
                     if result.is_ok() {
                         success_count_clone.fetch_add(1, Ordering::SeqCst);
@@ -1500,7 +1508,8 @@ mod tests {
             );
 
             // Verify capacity accounting is correct
-            let mesh_guard = mesh.lock().unwrap();
+            let mesh_guard = try_lock(&mesh, "isolation mesh full-capacity accounting")
+                .expect("isolation mesh mutex should not be poisoned");
             assert_eq!(
                 mesh_guard.rail_states().get("hw-1").unwrap().active_count,
                 1,
@@ -1527,20 +1536,25 @@ mod tests {
 
             // Set up: fill proc-1 rail to capacity-1 (1 slot remaining)
             // proc-1 has capacity=2, so 1 slot remaining after placing w1
-            mesh.lock()
-                .unwrap()
-                .place_workload("w1", "proc-1", permissive_policy(), 1)
-                .expect("place w1 to occupy 1/2 proc-1 slots");
+            {
+                let mut mesh_guard = try_lock(&mesh, "isolation mesh available-slot setup")
+                    .expect("isolation mesh mutex should not be poisoned");
+                mesh_guard
+                    .place_workload("w1", "proc-1", permissive_policy(), 1)
+                    .expect("place w1 to occupy 1/2 proc-1 slots");
+            }
 
             // Create 2 workloads to race for the remaining 1 slot
-            mesh.lock()
-                .unwrap()
-                .place_workload("racer1", "shared-1", permissive_policy(), 2)
-                .expect("place racer1");
-            mesh.lock()
-                .unwrap()
-                .place_workload("racer2", "shared-1", permissive_policy(), 3)
-                .expect("place racer2");
+            {
+                let mut mesh_guard = try_lock(&mesh, "isolation mesh available-slot racers setup")
+                    .expect("isolation mesh mutex should not be poisoned");
+                mesh_guard
+                    .place_workload("racer1", "shared-1", permissive_policy(), 2)
+                    .expect("place racer1");
+                mesh_guard
+                    .place_workload("racer2", "shared-1", permissive_policy(), 3)
+                    .expect("place racer2");
+            }
 
             const NUM_RACERS: usize = 2;
             let barrier = Arc::new(Barrier::new(NUM_RACERS));
@@ -1558,11 +1572,12 @@ mod tests {
 
                     // Try to elevate to proc-1 (which should have 1 capacity left)
                     let workload_name = format!("racer{}", racer_id);
-                    let result = mesh_clone.lock().unwrap().elevate_workload(
-                        &workload_name,
-                        "proc-1",
-                        10 + racer_id as u64,
-                    );
+                    let result = {
+                        let mut mesh_guard =
+                            try_lock(&mesh_clone, "isolation mesh available-slot race elevation")
+                                .expect("isolation mesh mutex should not be poisoned");
+                        mesh_guard.elevate_workload(&workload_name, "proc-1", 10 + racer_id as u64)
+                    };
 
                     if result.is_ok() {
                         success_count_clone.fetch_add(1, Ordering::SeqCst);
@@ -1590,7 +1605,8 @@ mod tests {
             assert_eq!(success_results.len(), 1, "Exactly one racer should succeed");
 
             // Verify capacity accounting is correct
-            let mesh_guard = mesh.lock().unwrap();
+            let mesh_guard = try_lock(&mesh, "isolation mesh available-slot accounting")
+                .expect("isolation mesh mutex should not be poisoned");
             assert_eq!(
                 mesh_guard.rail_states().get("proc-1").unwrap().active_count,
                 2,
