@@ -13,8 +13,7 @@ import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 IMPL = ROOT / "crates" / "franken-node" / "src" / "encoding" / "deterministic_seed.rs"
 SPEC = ROOT / "docs" / "specs" / "section_10_14" / "bd-29r6_contract.md"
@@ -22,6 +21,55 @@ VECTORS = ROOT / "artifacts" / "10.14" / "seed_derivation_vectors.json"
 MOD_RS = ROOT / "crates" / "franken-node" / "src" / "encoding" / "mod.rs"
 
 BEAD_ID = "bd-29r6"
+JSON_DECODER = json.JSONDecoder()
+
+INVARIANT_IMPLEMENTATION_MARKERS = {
+    "INV-SEED-DOMAIN-SEP": [
+        "pub enum DomainTag",
+        "pub fn prefix(&self) -> &'static str",
+        "hasher.update(domain.prefix().as_bytes())",
+        "hasher.update([0x00])",
+    ],
+    "INV-SEED-STABLE": [
+        "Sha256::new()",
+        "hasher.update(content_hash.0)",
+        "hasher.update(config.config_hash())",
+        "hasher.finalize().into()",
+    ],
+    "INV-SEED-BOUNDED": [
+        "pub struct ContentHash(#[serde(with = \"hex_bytes\")] pub [u8; 32])",
+        "content_hash: &ContentHash",
+        "hasher.update(content_hash.0)",
+    ],
+    "INV-SEED-NO-PLATFORM": [
+        "BTreeMap<String, String>",
+        "for (k, v) in &self.parameters",
+        "self.version.to_le_bytes()",
+        "u64::try_from(k.len()).unwrap_or(u64::MAX).to_le_bytes()",
+        "u64::try_from(v.len()).unwrap_or(u64::MAX).to_le_bytes()",
+    ],
+}
+
+REQUIRED_RUST_TESTS = [
+    "test_derive_seed_deterministic",
+    "test_domain_separation_encoding_vs_repair",
+    "test_domain_separation_all_pairs",
+    "test_different_content_different_seed",
+    "test_different_config_different_seed",
+    "test_config_param_order_irrelevant",
+    "test_deriver_config_change_triggers_bump",
+    "test_no_collisions_100_samples",
+    "test_golden_vector_encoding_zero",
+    "test_golden_vector_repair_ff",
+    "test_golden_vector_encoding_seq_v2",
+    "test_golden_vector_scheduling_empty_params",
+    "test_golden_vector_verification_singlebit",
+    "test_seed_serialization_roundtrip",
+    "content_hash_serialization_roundtrip",
+    "test_single_bit_content_change",
+    "test_empty_content_hash",
+    "test_event_codes_defined",
+]
 
 # ---- helpers ---------------------------------------------------------------
 
@@ -29,13 +77,110 @@ def _check(name: str, ok: bool, detail: str = "") -> dict:
     return {"check": name, "pass": ok, "detail": detail}
 
 
+def display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def _file_check(label: str, path: Path) -> dict:
-    return _check(f"file: {label}", path.is_file(), f"exists: {path.relative_to(ROOT)}")
+    return _check(f"file: {label}", path.is_file(), f"exists: {display_path(path)}")
 
 
 def _contains(content: str, needle: str, label: str) -> dict:
     found = needle in content
     return _check(label, found, "found" if found else f"missing: {needle}")
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def read_rust_source(path: Path) -> str:
+    return strip_rust_comments(read_text(path))
+
+
+def strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
 
 
 # ---- golden vector validation -----------------------------------------------
@@ -68,7 +213,7 @@ def validate_vectors() -> list:
         return checks
     checks.append(_check("vectors file exists", True, str(VECTORS.relative_to(ROOT))))
 
-    data = json.loads(VECTORS.read_text())
+    data = JSON_DECODER.decode(read_text(VECTORS))
     vecs = data.get("vectors", [])
     checks.append(_check("vectors count >= 10", len(vecs) >= 10, f"{len(vecs)} vectors"))
 
@@ -98,11 +243,11 @@ def run_checks() -> dict:
     if not IMPL.is_file():
         return _result(checks)
 
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
 
     # Module registration
     if MOD_RS.is_file():
-        mod_content = MOD_RS.read_text()
+        mod_content = read_rust_source(MOD_RS)
         checks.append(_contains(mod_content, "pub mod deterministic_seed", "module registered in mod.rs"))
 
     # Key types
@@ -146,13 +291,13 @@ def run_checks() -> dict:
     checks.append(_contains(content, "SEED_VERSION_BUMP", "event_code: SEED_VERSION_BUMP"))
 
     # Invariant markers
-    for inv in [
-        "INV-SEED-DOMAIN-SEP",
-        "INV-SEED-STABLE",
-        "INV-SEED-BOUNDED",
-        "INV-SEED-NO-PLATFORM",
-    ]:
-        checks.append(_contains(content, inv, f"invariant: {inv}"))
+    for inv, markers in INVARIANT_IMPLEMENTATION_MARKERS.items():
+        missing = [marker for marker in markers if marker not in content]
+        checks.append(_check(
+            f"invariant: {inv}",
+            not missing,
+            "implementation markers found" if not missing else f"missing: {', '.join(missing)}",
+        ))
 
     # Send + Sync assertion
     checks.append(_contains(content, "assert_send_sync", "compile-time Send + Sync assertion"))
@@ -174,26 +319,7 @@ def run_checks() -> dict:
     ))
 
     # Named tests
-    for test_name in [
-        "test_derive_seed_deterministic",
-        "test_domain_separation_encoding_vs_repair",
-        "test_domain_separation_all_pairs",
-        "test_different_content_different_seed",
-        "test_different_config_different_seed",
-        "test_config_param_order_irrelevant",
-        "test_deriver_config_change_triggers_bump",
-        "test_no_collisions_100_samples",
-        "test_golden_vector_encoding_zero",
-        "test_golden_vector_repair_ff",
-        "test_golden_vector_encoding_seq_v2",
-        "test_golden_vector_scheduling_empty_params",
-        "test_golden_vector_verification_singlebit",
-        "test_seed_serialization_roundtrip",
-        "test_content_hash_serialization_roundtrip",
-        "test_single_bit_content_change",
-        "test_empty_content_hash",
-        "test_event_codes_defined",
-    ]:
+    for test_name in REQUIRED_RUST_TESTS:
         checks.append(_contains(content, test_name, f"test: {test_name}"))
 
     # Golden vector cross-validation
@@ -224,7 +350,7 @@ def self_test():
 
 
 def main():
-    logger = configure_test_logging("check_deterministic_seed")
+    configure_test_logging("check_deterministic_seed")
     result = run_checks()
     if "--json" in sys.argv:
         print(json.dumps(result, indent=2))
