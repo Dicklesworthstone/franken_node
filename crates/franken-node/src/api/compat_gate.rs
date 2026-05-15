@@ -1443,7 +1443,7 @@ mod tests {
         assert!(
             !svc.predicates
                 .iter()
-                .any(|predicate| predicate.predicate_id == "predicate-overflow")
+                .any(|predicate| predicate.predicate_id.as_str().eq("predicate-overflow"))
         );
     }
 
@@ -1754,7 +1754,7 @@ mod tests {
         assert!(
             !svc.predicates
                 .iter()
-                .any(|predicate| predicate.predicate_id == "predicate-overflow")
+                .any(|predicate| predicate.predicate_id.as_str().eq("predicate-overflow"))
         );
     }
 
@@ -2623,12 +2623,13 @@ mod compat_gate_malformed_payload_tests {
                 assert!(result.is_ok(), "Should accept shims within capacity");
             } else {
                 assert!(result.is_err(), "Should reject shims beyond capacity");
-                match result.unwrap_err() {
-                    CompatGateRegistrationError::ShimCapacityExceeded { capacity } => {
-                        assert_eq!(capacity, MAX_SHIMS);
+                let err = result.expect_err("capacity exhaustion should return shim cap error");
+                assert_eq!(
+                    err,
+                    CompatGateRegistrationError::ShimCapacityExceeded {
+                        capacity: MAX_SHIMS
                     }
-                    _ => panic!("Wrong error type for capacity exhaustion"),
-                }
+                );
             }
         }
 
