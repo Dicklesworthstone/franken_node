@@ -5,15 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import sys
-from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 CONTRACT_PATH = ROOT / "docs/specs/section_10_12/bd-2aj_contract.md"
 API_SCHEMA_PATH = ROOT / "docs/specs/section_10_12/bd-2aj_api_schema.md"
@@ -125,10 +124,108 @@ def check_file_exists(path: Path) -> dict[str, Any]:
     }
 
 
-def check_content(path: Path, required: list[str], reason: str) -> dict[str, Any]:
+def _read_text(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read_text(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = _rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = _rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
+def check_content(
+    path: Path,
+    required: list[str],
+    reason: str,
+    *,
+    strip_comments: bool = False,
+) -> dict[str, Any]:
     if not path.exists():
         return {"pass": False, "reason": reason, "found": [], "missing": required}
-    content = path.read_text()
+    content = _read_rust_source(path) if strip_comments else _read_text(path)
     found = [item for item in required if item in content]
     missing = [item for item in required if item not in content]
     return {"pass": len(missing) == 0, "found": found, "missing": missing}
@@ -140,7 +237,7 @@ def check_mod_registration() -> dict[str, Any]:
         "pub mod ecosystem_reputation;",
         "pub mod ecosystem_compliance;",
     ]
-    result = check_content(MOD_PATH, required, "connector mod.rs not found")
+    result = check_content(MOD_PATH, required, "connector mod.rs not found", strip_comments=True)
     return {
         "pass": result["pass"],
         "found": result["found"],
@@ -159,11 +256,11 @@ def check_event_codes() -> dict[str, Any]:
 
     joined = "\n".join(
         [
-            CONTRACT_PATH.read_text(),
-            API_SCHEMA_PATH.read_text(),
-            REGISTRY_PATH.read_text() if REGISTRY_PATH.exists() else "",
-            REPUTATION_PATH.read_text() if REPUTATION_PATH.exists() else "",
-            COMPLIANCE_PATH.read_text() if COMPLIANCE_PATH.exists() else "",
+            _read_text(CONTRACT_PATH),
+            _read_text(API_SCHEMA_PATH),
+            _read_rust_source(REGISTRY_PATH) if REGISTRY_PATH.exists() else "",
+            _read_rust_source(REPUTATION_PATH) if REPUTATION_PATH.exists() else "",
+            _read_rust_source(COMPLIANCE_PATH) if COMPLIANCE_PATH.exists() else "",
         ]
     )
     found = [code for code in REQUIRED_EVENT_CODES if code in joined]
@@ -181,7 +278,7 @@ def check_endpoint_coverage() -> dict[str, Any]:
             "coverage_pct": 0.0,
         }
 
-    content = API_SCHEMA_PATH.read_text()
+    content = _read_text(API_SCHEMA_PATH)
     found = [ep for ep in REQUIRED_SCHEMA_ENDPOINTS if ep in content]
     missing = [ep for ep in REQUIRED_SCHEMA_ENDPOINTS if ep not in content]
     coverage = len(found) / len(REQUIRED_SCHEMA_ENDPOINTS) if REQUIRED_SCHEMA_ENDPOINTS else 1.0
@@ -211,7 +308,7 @@ def check_anti_gaming() -> dict[str, Any]:
             "found": [],
             "missing": required_markers,
         }
-    content = REGISTRY_PATH.read_text() + "\n" + REPUTATION_PATH.read_text()
+    content = _read_rust_source(REGISTRY_PATH) + "\n" + _read_rust_source(REPUTATION_PATH)
     found = [marker for marker in required_markers if marker in content]
     missing = [marker for marker in required_markers if marker not in content]
     return {"pass": len(missing) == 0, "found": found, "missing": missing}
@@ -226,7 +323,7 @@ def check_cross_program_evidence() -> dict[str, Any]:
             "missing": REQUIRED_CROSS_PROGRAM_TESTS,
         }
 
-    content = COMPLIANCE_PATH.read_text()
+    content = _read_rust_source(COMPLIANCE_PATH)
     found = [name for name in REQUIRED_CROSS_PROGRAM_TESTS if name in content]
     missing = [name for name in REQUIRED_CROSS_PROGRAM_TESTS if name not in content]
     return {"pass": len(missing) == 0, "found": found, "missing": missing}
@@ -258,16 +355,19 @@ def run_all_checks() -> dict[str, Any]:
             REGISTRY_PATH,
             REQUIRED_REGISTRY_SYMBOLS,
             "registry module not found",
+            strip_comments=True,
         ),
         "reputation_symbols": check_content(
             REPUTATION_PATH,
             REQUIRED_REPUTATION_SYMBOLS,
             "reputation module not found",
+            strip_comments=True,
         ),
         "compliance_symbols": check_content(
             COMPLIANCE_PATH,
             REQUIRED_COMPLIANCE_SYMBOLS,
             "compliance module not found",
+            strip_comments=True,
         ),
         "event_codes": check_event_codes(),
         "anti_gaming": check_anti_gaming(),
@@ -318,7 +418,7 @@ def run_all_checks() -> dict[str, Any]:
 
 def write_evidence(evidence: dict[str, Any]) -> None:
     EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
-    EVIDENCE_PATH.write_text(json.dumps(evidence, indent=2) + "\n")
+    EVIDENCE_PATH.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
 
 
 def write_summary(evidence: dict[str, Any]) -> None:
@@ -366,15 +466,23 @@ def write_summary(evidence: dict[str, Any]) -> None:
         ]
     )
 
-    SUMMARY_PATH.write_text("\n".join(lines) + "\n")
+    SUMMARY_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def self_test() -> bool:
     evidence = run_all_checks()
-    assert isinstance(evidence, dict)
-    assert evidence["bead_id"] == "bd-2aj"
-    assert "checks" in evidence
-    assert "summary" in evidence
+    if not isinstance(evidence, dict):
+        print("self_test failed: evidence is not a dict", file=sys.stderr)
+        return False
+    if evidence.get("bead_id") != "bd-2aj":
+        print("self_test failed: bead_id mismatch", file=sys.stderr)
+        return False
+    if "checks" not in evidence or "summary" not in evidence:
+        print("self_test failed: missing checks or summary", file=sys.stderr)
+        return False
+    if _strip_rust_comments('"kept // literal"; // removed') != '"kept // literal"; ':
+        print("self_test failed: Rust comment stripper corrupted string literals", file=sys.stderr)
+        return False
 
     required_categories = [
         "files",
@@ -391,13 +499,15 @@ def self_test() -> bool:
         "auth_and_pagination",
     ]
     for category in required_categories:
-        assert category in evidence["checks"], f"missing category: {category}"
+        if category not in evidence["checks"]:
+            print(f"self_test failed: missing category: {category}", file=sys.stderr)
+            return False
 
     return True
 
 
 def main() -> None:
-    logger = configure_test_logging("check_ecosystem_apis")
+    configure_test_logging("check_ecosystem_apis")
     parser = argparse.ArgumentParser(description="Verify bd-2aj ecosystem APIs")
     parser.add_argument("--json", action="store_true", help="Output JSON evidence")
     parser.add_argument("--self-test", action="store_true", help="Run self-test")
