@@ -25,18 +25,109 @@ import argparse
 import json
 import re
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 BPET_SRC = ROOT / "crates/franken-node/src/security/bpet/economic_integration.rs"
 BPET_TRUST_SURFACE_SRC = ROOT / "crates/franken-node/src/security/bpet/trust_surface_integration.rs"
 BPET_MOD = ROOT / "crates/franken-node/src/security/bpet/mod.rs"
 SECURITY_MOD = ROOT / "crates/franken-node/src/security/mod.rs"
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read_text(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = _rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = _rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
 
 REQUIRED_STRUCTS = [
     "PhenotypeObservation",
@@ -136,7 +227,7 @@ def check_module_wiring() -> CheckResult:
     if not BPET_MOD.exists():
         issues.append("bpet/mod.rs not found")
     else:
-        content = BPET_MOD.read_text()
+        content = _read_rust_source(BPET_MOD)
         if "pub mod economic_integration" not in content:
             issues.append("economic_integration not declared in bpet/mod.rs")
         if "pub mod trust_surface_integration" not in content:
@@ -145,7 +236,7 @@ def check_module_wiring() -> CheckResult:
     if not SECURITY_MOD.exists():
         issues.append("security/mod.rs not found")
     else:
-        content = SECURITY_MOD.read_text()
+        content = _read_rust_source(SECURITY_MOD)
         if "pub mod bpet" not in content:
             issues.append("bpet not declared in security/mod.rs")
 
@@ -157,7 +248,7 @@ def check_module_wiring() -> CheckResult:
 def check_required_structs() -> CheckResult:
     if not BPET_SRC.exists():
         return CheckResult("structs", False, "source file missing")
-    content = BPET_SRC.read_text()
+    content = _read_rust_source(BPET_SRC)
     missing = [s for s in REQUIRED_STRUCTS if f"pub struct {s}" not in content and f"pub enum {s}" not in content]
     if missing:
         return CheckResult("structs", False, f"missing types: {missing}", {"missing": missing})
@@ -167,7 +258,7 @@ def check_required_structs() -> CheckResult:
 def check_event_codes() -> CheckResult:
     if not BPET_SRC.exists():
         return CheckResult("event_codes", False, "source file missing")
-    content = BPET_SRC.read_text()
+    content = _read_rust_source(BPET_SRC)
     missing = [c for c in REQUIRED_EVENT_CODES if c not in content]
     total = len(re.findall(r'"(BPET-ECON-\d+)"', content))
     if missing:
@@ -178,7 +269,7 @@ def check_event_codes() -> CheckResult:
 def check_propensity_scoring() -> CheckResult:
     if not BPET_SRC.exists():
         return CheckResult("propensity_scoring", False, "source file missing")
-    content = BPET_SRC.read_text()
+    content = _read_rust_source(BPET_SRC)
     checks = {
         "trajectory_struct": "pub struct PhenotypeTrajectory" in content,
         "observation_struct": "pub struct PhenotypeObservation" in content,
@@ -198,7 +289,7 @@ def check_propensity_scoring() -> CheckResult:
 def check_economic_pricing() -> CheckResult:
     if not BPET_SRC.exists():
         return CheckResult("economic_pricing", False, "source file missing")
-    content = BPET_SRC.read_text()
+    content = _read_rust_source(BPET_SRC)
     checks = {
         "pricing_struct": "pub struct CompromisePricing" in content,
         "risk_adjusted_cost": "risk_adjusted_cost" in content,
@@ -216,7 +307,7 @@ def check_economic_pricing() -> CheckResult:
 def check_intervention_roi() -> CheckResult:
     if not BPET_SRC.exists():
         return CheckResult("intervention_roi", False, "source file missing")
-    content = BPET_SRC.read_text()
+    content = _read_rust_source(BPET_SRC)
     checks = {
         "roi_struct": "pub struct InterventionRoi" in content,
         "roi_ratio": "roi_ratio" in content,
@@ -235,7 +326,7 @@ def check_intervention_roi() -> CheckResult:
 def check_motif_matching() -> CheckResult:
     if not BPET_SRC.exists():
         return CheckResult("motif_matching", False, "source file missing")
-    content = BPET_SRC.read_text()
+    content = _read_rust_source(BPET_SRC)
     checks = {
         "match_function": "fn match_motifs" in content,
         "motif_struct": "pub struct CompromiseMotif" in content,
@@ -256,7 +347,7 @@ def check_motif_matching() -> CheckResult:
 def check_playbook_generation() -> CheckResult:
     if not BPET_SRC.exists():
         return CheckResult("playbook", False, "source file missing")
-    content = BPET_SRC.read_text()
+    content = _read_rust_source(BPET_SRC)
     checks = {
         "playbook_struct": "BpetMitigationPlaybook" in content,
         "urgency_enum": "PlaybookUrgency" in content,
@@ -277,7 +368,7 @@ def check_playbook_generation() -> CheckResult:
 def check_test_coverage() -> CheckResult:
     if not BPET_SRC.exists():
         return CheckResult("test_coverage", False, "source file missing")
-    content = BPET_SRC.read_text()
+    content = _read_rust_source(BPET_SRC)
     missing = [p for p in REQUIRED_TEST_PATTERNS if not re.search(p, content)]
     total_tests = len(re.findall(r"#\[test\]", content))
     if missing:
@@ -288,7 +379,7 @@ def check_test_coverage() -> CheckResult:
 def check_audit_logging() -> CheckResult:
     if not BPET_SRC.exists():
         return CheckResult("audit_logging", False, "source file missing")
-    content = BPET_SRC.read_text()
+    content = _read_rust_source(BPET_SRC)
     checks = {
         "audit_struct": "pub struct BpetAuditRecord" in content,
         "audit_log_method": "fn audit_log" in content,
@@ -312,7 +403,7 @@ def check_trust_surface_integration() -> CheckResult:
             {"path": str(BPET_TRUST_SURFACE_SRC.relative_to(ROOT))},
         )
 
-    content = BPET_TRUST_SURFACE_SRC.read_text()
+    content = _read_rust_source(BPET_TRUST_SURFACE_SRC)
     missing_symbols = [symbol for symbol in TRUST_SURFACE_REQUIRED_SYMBOLS if symbol not in content]
     missing_tests = [test for test in TRUST_SURFACE_REQUIRED_TESTS if test not in content]
     if missing_symbols:
@@ -366,16 +457,20 @@ def run_all_checks() -> list[CheckResult]:
 
 def self_test() -> bool:
     results = run_all_checks()
-    assert len(results) >= 10
+    if len(results) < 10:
+        raise AssertionError("expected at least 10 checks")
     for r in results:
-        assert isinstance(r.name, str) and len(r.name) > 0
-        assert isinstance(r.passed, bool)
-        assert isinstance(r.message, str)
+        if not isinstance(r.name, str) or not r.name:
+            raise AssertionError("check result has an invalid name")
+        if not isinstance(r.passed, bool):
+            raise AssertionError(f"{r.name} result has a non-bool passed value")
+        if not isinstance(r.message, str):
+            raise AssertionError(f"{r.name} result has a non-string message")
     return True
 
 
 def main():
-    logger = configure_test_logging("check_bpet_economic")
+    configure_test_logging("check_bpet_economic")
     parser = argparse.ArgumentParser(description="BPET economic integration verification gate")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--self-test", action="store_true")
