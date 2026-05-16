@@ -12,8 +12,7 @@ import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 SPEC = ROOT / "docs" / "specs" / "section_10_10" / "bd-2ms_contract.md"
@@ -162,10 +161,108 @@ def _check(name: str, passed: bool, detail: str = "") -> dict:
     return {"check": name, "pass": passed, "detail": detail or ("found" if passed else "missing")}
 
 
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def read_rust_source(path: Path) -> str:
+    return strip_rust_comments(read_text(path))
+
+
+def strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
+def method_marker_present(content: str, marker: str) -> bool:
+    if not marker.startswith("pub fn ") or not marker.endswith("("):
+        return marker in content
+
+    prefix = marker[:-1]
+    return f"{prefix}(" in content or f"{prefix}<" in content
+
+
 def _file_contains(path: Path, pattern: str) -> bool:
     if not path.exists():
         return False
-    return pattern in path.read_text()
+    return pattern in read_rust_source(path)
 
 
 def check_files() -> list:
@@ -193,7 +290,7 @@ def check_types() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"type: {t}", False, "impl file missing") for t in REQUIRED_TYPES]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for t in REQUIRED_TYPES:
         checks.append(_check(f"type: {t}", t in content))
     return checks
@@ -203,9 +300,9 @@ def check_methods() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"method: {m}", False, "impl file missing") for m in REQUIRED_METHODS]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for m in REQUIRED_METHODS:
-        checks.append(_check(f"method: {m}", m in content))
+        checks.append(_check(f"method: {m}", method_marker_present(content, m)))
     return checks
 
 
@@ -213,7 +310,7 @@ def check_event_codes() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"event_code: {c}", False) for c in EVENT_CODES]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for code in EVENT_CODES:
         checks.append(_check(f"event_code: {code}", code in content))
     return checks
@@ -223,7 +320,7 @@ def check_invariants() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"invariant: {i}", False) for i in INVARIANTS]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for inv in INVARIANTS:
         checks.append(_check(f"invariant: {inv}", inv in content))
     return checks
@@ -233,7 +330,7 @@ def check_response_modes() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"response_mode: {m}", False) for m in RESPONSE_MODES]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for mode in RESPONSE_MODES:
         checks.append(_check(f"response_mode: {mode}", mode in content))
     return checks
@@ -243,7 +340,7 @@ def check_gate_states() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"gate_state: {s}", False) for s in GATE_STATES]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for state in GATE_STATES:
         checks.append(_check(f"gate_state: {state}", state in content))
     return checks
@@ -253,7 +350,7 @@ def check_mutation_kinds() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"mutation_kind: {k}", False) for k in MUTATION_KINDS]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for kind in MUTATION_KINDS:
         checks.append(_check(f"mutation_kind: {kind}", kind in content))
     return checks
@@ -263,7 +360,7 @@ def check_tests() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"test: {t}", False) for t in REQUIRED_TESTS]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for t in REQUIRED_TESTS:
         checks.append(_check(f"test: {t}", f"fn {t}" in content))
     return checks
@@ -272,7 +369,7 @@ def check_tests() -> list:
 def check_test_count() -> dict:
     if not IMPL.exists():
         return _check("test count >= 40", False, "impl file missing")
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     count = content.count("#[test]")
     return _check("test count >= 40", count >= 40, f"{count} tests found")
 
@@ -281,7 +378,7 @@ def check_upstream_integration() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"upstream: {p}", False) for p in UPSTREAM_PATTERNS]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for pattern in UPSTREAM_PATTERNS:
         checks.append(_check(f"upstream: {pattern}", pattern in content))
     return checks
@@ -290,7 +387,7 @@ def check_upstream_integration() -> list:
 def check_serde_derives() -> dict:
     if not IMPL.exists():
         return _check("Serialize/Deserialize derives", False)
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     has_ser = "Serialize" in content and "Deserialize" in content
     return _check("Serialize/Deserialize derives", has_ser)
 
@@ -298,7 +395,7 @@ def check_serde_derives() -> dict:
 def check_sha256_usage() -> dict:
     if not IMPL.exists():
         return _check("SHA-256 usage", False)
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     return _check("SHA-256 usage", "Sha256" in content or "sha2" in content)
 
 
@@ -306,7 +403,7 @@ def check_spec_sections() -> list:
     checks = []
     if not SPEC.exists():
         return [_check("spec: sections", False, "spec missing")]
-    content = SPEC.read_text()
+    content = read_text(SPEC)
     for section in [
         "StateVector", "DivergenceDetector", "RollbackProof",
         "Invariants", "Event Codes", "Error Codes", "Acceptance Criteria",
@@ -362,7 +459,7 @@ def self_test() -> tuple:
 
 
 def main():
-    logger = configure_test_logging("check_fork_detection")
+    configure_test_logging("check_fork_detection")
     if "--self-test" in sys.argv:
         ok, msg = self_test()
         print(msg)
@@ -379,7 +476,6 @@ def main():
         print(f"  [{status}] {c['check']}: {c['detail']}")
 
     passing = result["summary"]["passing"]
-    failing = result["summary"]["failing"]
     total = result["summary"]["total"]
     print(f"\nbd-2ms verification: {result['verdict']} ({passing}/{total} checks pass)")
     sys.exit(0 if result["overall_pass"] else 1)
