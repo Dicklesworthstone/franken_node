@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.lib.test_logger import configure_test_logging
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 IMPL = ROOT / "crates" / "franken-node" / "src" / "policy" / "approval_workflow.rs"
 SPEC = ROOT / "docs" / "specs" / "section_10_5" / "bd-sh3_contract.md"
@@ -115,22 +115,119 @@ REQUIRED_TESTS = [
 ]
 
 
+def safe_rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def check_file(path, label):
     ok = path.exists()
     return {
         "check": f"file: {label}",
         "pass": ok,
-        "detail": f"exists: {path.relative_to(ROOT)}" if ok else f"MISSING: {path}",
+        "detail": f"exists: {safe_rel(path)}" if ok else f"MISSING: {path}",
     }
 
 
-def check_content(path, patterns, category):
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def read_rust_source(path: Path) -> str:
+    return strip_rust_comments(read_text(path))
+
+
+def strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
+def check_content(path, patterns, category, *, strip_comments=True):
     results = []
     if not path.exists():
         for p in patterns:
             results.append({"check": f"{category}: {p}", "pass": False, "detail": "file missing"})
         return results
-    text = path.read_text()
+    text = read_rust_source(path) if strip_comments else read_text(path)
     for p in patterns:
         found = p in text
         results.append({
@@ -144,7 +241,7 @@ def check_content(path, patterns, category):
 def check_module_registered():
     if not MOD_RS.exists():
         return {"check": "module registered in mod.rs", "pass": False, "detail": "mod.rs missing"}
-    text = MOD_RS.read_text()
+    text = read_rust_source(MOD_RS)
     found = "pub mod approval_workflow;" in text
     return {
         "check": "module registered in mod.rs",
@@ -156,7 +253,7 @@ def check_module_registered():
 def check_test_count():
     if not IMPL.exists():
         return {"check": "unit test count", "pass": False, "detail": "impl missing"}
-    text = IMPL.read_text()
+    text = read_rust_source(IMPL)
     count = len(re.findall(r"#\[test\]", text))
     ok = count >= 20
     return {
@@ -169,7 +266,7 @@ def check_test_count():
 def check_serde_derives():
     if not IMPL.exists():
         return {"check": "Serialize/Deserialize derives", "pass": False, "detail": "impl missing"}
-    text = IMPL.read_text()
+    text = read_rust_source(IMPL)
     has_ser = "Serialize" in text and "Deserialize" in text
     return {
         "check": "Serialize/Deserialize derives",
@@ -183,7 +280,7 @@ def check_hash_chain():
     if not IMPL.exists():
         results.append({"check": "hash chain: SHA-256", "pass": False, "detail": "impl missing"})
         return results
-    text = IMPL.read_text()
+    text = read_rust_source(IMPL)
 
     has_sha256 = "Sha256" in text
     results.append({
@@ -220,7 +317,7 @@ def check_role_separation():
     if not IMPL.exists():
         results.append({"check": "role separation: sole approver check", "pass": False, "detail": "impl missing"})
         return results
-    text = IMPL.read_text()
+    text = read_rust_source(IMPL)
 
     has_sole = "ERR_SOLE_APPROVER" in text
     results.append({
@@ -250,7 +347,7 @@ def check_rollback_mechanism():
     if not IMPL.exists():
         results.append({"check": "rollback: function exists", "pass": False, "detail": "impl missing"})
         return results
-    text = IMPL.read_text()
+    text = read_rust_source(IMPL)
 
     has_rollback_fn = "pub fn rollback(" in text
     results.append({
@@ -288,7 +385,7 @@ def check_spec_invariants():
         for inv in INVARIANTS:
             results.append({"check": f"spec invariant: {inv}", "pass": False, "detail": "spec missing"})
         return results
-    text = SPEC.read_text()
+    text = read_text(SPEC)
     for inv in INVARIANTS:
         found = inv in text
         results.append({

@@ -4,8 +4,10 @@
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -52,6 +54,25 @@ class TestCheckContentHelper(unittest.TestCase):
         )
         self.assertEqual(len(results), 2)
         self.assertTrue(all(r["pass"] for r in results))
+
+
+class TestRustCommentStripping(unittest.TestCase):
+    def test_preserves_string_literals_while_stripping_comments(self):
+        source = "\n".join(
+            [
+                'const CODE: &str = "POLICY_CHANGE_PROPOSED";',
+                "// pub struct PolicyChangeEngine",
+                'const RAW: &str = r#"ERR_AUDIT_CHAIN_BROKEN"#;',
+                "/* #[test] */",
+            ]
+        )
+
+        stripped = checker.strip_rust_comments(source)
+
+        self.assertIn('"POLICY_CHANGE_PROPOSED"', stripped)
+        self.assertIn('r#"ERR_AUDIT_CHAIN_BROKEN"#', stripped)
+        self.assertNotIn("pub struct PolicyChangeEngine", stripped)
+        self.assertNotIn("#[test]", stripped)
 
 
 class TestCheckModuleRegistered(unittest.TestCase):
@@ -186,7 +207,7 @@ class TestJsonOutput(unittest.TestCase):
     def test_cli_json(self):
         proc = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_policy_change_workflow.py"), "--json"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, timeout=10,
         )
         self.assertEqual(proc.returncode, 0)
         data = json.JSONDecoder().decode(proc.stdout)
@@ -195,10 +216,89 @@ class TestJsonOutput(unittest.TestCase):
     def test_cli_human(self):
         proc = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "check_policy_change_workflow.py")],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, timeout=10,
         )
         self.assertEqual(proc.returncode, 0)
         self.assertIn("PASS", proc.stdout)
+
+
+class TestCommentOnlyRustRegression(unittest.TestCase):
+    """Commented Rust markers must not satisfy implementation checks."""
+
+    def test_comment_only_rust_markers_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            impl = tmp_path / "approval_workflow.rs"
+            mod_rs = tmp_path / "mod.rs"
+            impl.write_text(
+                "\n".join(f"// {marker}" for marker in COMMENT_ONLY_MARKERS)
+                + "\n/*\n"
+                + "\n".join("#[test]" for _ in range(20))
+                + "\nSerialize\nDeserialize\nSha256\nprev_hash\ncompute_entry_hash\n"
+                + "verify_audit_chain\nERR_SOLE_APPROVER\nproposed_by\n"
+                + "non_proposer_approvals\nold_value: d.new_value\n"
+                + "rollback_of\nrollback_command\n"
+                + "\n*/\n",
+                encoding="utf-8",
+            )
+            mod_rs.write_text("// pub mod approval_workflow;\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(checker, "IMPL", impl),
+                mock.patch.object(checker, "MOD_RS", mod_rs),
+            ):
+                result = checker.run_checks()
+
+        by_name = {check["check"]: check for check in result["checks"]}
+        self.assertTrue(by_name["file: implementation"]["pass"])
+        self.assertTrue(by_name["file: spec contract"]["pass"])
+
+        rust_backed_checks = [
+            check["check"]
+            for check in result["checks"]
+            if check["check"] == "module registered in mod.rs"
+            or check["check"] == "unit test count"
+            or check["check"] == "Serialize/Deserialize derives"
+            or check["check"].startswith(
+                (
+                    "type: ",
+                    "method: ",
+                    "event_code: ",
+                    "error_code: ",
+                    "state: ",
+                    "test: ",
+                    "hash chain: ",
+                    "role separation: ",
+                    "rollback: ",
+                )
+            )
+        ]
+        self.assertTrue(rust_backed_checks)
+        passing_markers = [name for name in rust_backed_checks if by_name[name]["pass"]]
+        self.assertEqual(passing_markers, [])
+
+
+COMMENT_ONLY_MARKERS = (
+    ["pub mod approval_workflow;"]
+    + checker.REQUIRED_TYPES
+    + checker.REQUIRED_METHODS
+    + checker.EVENT_CODES
+    + checker.ERROR_CODES
+    + checker.PROPOSAL_STATES
+    + [f"fn {test_name}" for test_name in checker.REQUIRED_TESTS]
+    + [
+        "Sha256",
+        "prev_hash",
+        "compute_entry_hash",
+        "verify_audit_chain",
+        "ERR_SOLE_APPROVER",
+        "proposed_by",
+        "non_proposer_approvals",
+        "old_value: d.new_value",
+        "rollback_of",
+        "rollback_command",
+    ]
+)
 
 
 if __name__ == "__main__":
