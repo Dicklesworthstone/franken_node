@@ -20,17 +20,108 @@ import argparse
 import json
 import re
 import sys
-from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
+
 BARRIER_SRC = ROOT / "crates/franken-node/src/security/dgis/barrier_primitives.rs"
 DGIS_MOD = ROOT / "crates/franken-node/src/security/dgis/mod.rs"
 SECURITY_MOD = ROOT / "crates/franken-node/src/security/mod.rs"
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read_text(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = _rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = _rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
 
 REQUIRED_BARRIER_TYPES = [
     "SandboxEscalation",
@@ -102,7 +193,7 @@ def check_module_wiring() -> CheckResult:
     if not SECURITY_MOD.exists():
         issues.append("security/mod.rs not found")
     else:
-        content = SECURITY_MOD.read_text()
+        content = _read_rust_source(SECURITY_MOD)
         if "pub mod dgis" not in content:
             issues.append("dgis not declared in security/mod.rs")
     if issues:
@@ -114,7 +205,7 @@ def check_barrier_types() -> CheckResult:
     """Check all 4 barrier types are defined."""
     if not BARRIER_SRC.exists():
         return CheckResult("barrier_types", False, "source file missing")
-    content = BARRIER_SRC.read_text()
+    content = _read_rust_source(BARRIER_SRC)
     missing = [bt for bt in REQUIRED_BARRIER_TYPES if bt not in content]
     if missing:
         return CheckResult("barrier_types", False, f"missing barrier types: {missing}", {"missing": missing})
@@ -125,7 +216,7 @@ def check_event_codes() -> CheckResult:
     """Check structured event codes follow convention."""
     if not BARRIER_SRC.exists():
         return CheckResult("event_codes", False, "source file missing")
-    content = BARRIER_SRC.read_text()
+    content = _read_rust_source(BARRIER_SRC)
     codes = re.findall(r'"(DGIS-BARRIER-[\w-]+)"', content)
     if len(codes) < 10:
         return CheckResult("event_codes", False, f"only {len(codes)} event codes found, expected >= 10", {"found": codes})
@@ -136,7 +227,7 @@ def check_required_structs() -> CheckResult:
     """Check all required structs/enums are defined."""
     if not BARRIER_SRC.exists():
         return CheckResult("structs", False, "source file missing")
-    content = BARRIER_SRC.read_text()
+    content = _read_rust_source(BARRIER_SRC)
     missing = [s for s in REQUIRED_STRUCTS if f"pub struct {s}" not in content and f"pub enum {s}" not in content]
     if missing:
         return CheckResult("structs", False, f"missing structs: {missing}", {"missing": missing})
@@ -147,7 +238,7 @@ def check_test_coverage() -> CheckResult:
     """Check unit tests cover all barrier categories."""
     if not BARRIER_SRC.exists():
         return CheckResult("test_coverage", False, "source file missing")
-    content = BARRIER_SRC.read_text()
+    content = _read_rust_source(BARRIER_SRC)
     missing = []
     for pattern in REQUIRED_TEST_PATTERNS:
         if not re.search(pattern, content):
@@ -161,7 +252,7 @@ def check_audit_receipt_fields() -> CheckResult:
     """Check audit receipts have required fields."""
     if not BARRIER_SRC.exists():
         return CheckResult("audit_receipts", False, "source file missing")
-    content = BARRIER_SRC.read_text()
+    content = _read_rust_source(BARRIER_SRC)
     required_fields = ["receipt_id", "event_code", "barrier_id", "node_id", "barrier_type", "action", "timestamp", "trace_id"]
     missing = [f for f in required_fields if f"pub {f}:" not in content]
     if missing:
@@ -173,7 +264,7 @@ def check_override_mechanism() -> CheckResult:
     """Check override mechanism with justification validation."""
     if not BARRIER_SRC.exists():
         return CheckResult("override_mechanism", False, "source file missing")
-    content = BARRIER_SRC.read_text()
+    content = _read_rust_source(BARRIER_SRC)
     checks = {
         "override_justification_struct": "pub struct OverrideJustification" in content,
         "principal_identity_field": "principal_identity" in content,
@@ -191,7 +282,7 @@ def check_composition_detection() -> CheckResult:
     """Check composition conflict detection is implemented."""
     if not BARRIER_SRC.exists():
         return CheckResult("composition", False, "source file missing")
-    content = BARRIER_SRC.read_text()
+    content = _read_rust_source(BARRIER_SRC)
     checks = {
         "composition_validity_check": "check_composition_validity" in content,
         "composition_conflict_error": "CompositionConflict" in content,
@@ -206,7 +297,7 @@ def check_policy_engine_wiring() -> CheckResult:
     """Check policy engine / barrier plan wiring."""
     if not BARRIER_SRC.exists():
         return CheckResult("policy_engine", False, "source file missing")
-    content = BARRIER_SRC.read_text()
+    content = _read_rust_source(BARRIER_SRC)
     checks = {
         "barrier_plan_struct": "pub struct BarrierPlan" in content,
         "apply_to_method": "fn apply_to(" in content,
@@ -222,7 +313,7 @@ def check_jsonl_export() -> CheckResult:
     """Check JSONL export capability for audit log."""
     if not BARRIER_SRC.exists():
         return CheckResult("jsonl_export", False, "source file missing")
-    content = BARRIER_SRC.read_text()
+    content = _read_rust_source(BARRIER_SRC)
     if "export_audit_log_jsonl" in content:
         return CheckResult("jsonl_export", True, "JSONL export method present")
     return CheckResult("jsonl_export", False, "missing export_audit_log_jsonl method")
@@ -248,17 +339,20 @@ def run_all_checks() -> list[CheckResult]:
 def self_test() -> bool:
     """Self-test: verify the checker itself works."""
     results = run_all_checks()
-    # At minimum, source_exists and module_wiring should pass if impl is present
-    assert len(results) >= 10, f"expected >= 10 checks, got {len(results)}"
+    if len(results) < 10:
+        raise AssertionError(f"expected >= 10 checks, got {len(results)}")
     for r in results:
-        assert isinstance(r.name, str) and len(r.name) > 0
-        assert isinstance(r.passed, bool)
-        assert isinstance(r.message, str)
+        if not isinstance(r.name, str) or not r.name:
+            raise AssertionError("check result has an invalid name")
+        if not isinstance(r.passed, bool):
+            raise AssertionError(f"{r.name} result has a non-bool passed value")
+        if not isinstance(r.message, str):
+            raise AssertionError(f"{r.name} result has a non-string message")
     return True
 
 
 def main():
-    logger = configure_test_logging("check_dgis_barrier")
+    configure_test_logging("check_dgis_barrier")
     parser = argparse.ArgumentParser(description="DGIS barrier primitives verification gate")
     parser.add_argument("--json", action="store_true", help="machine-readable JSON output")
     parser.add_argument("--self-test", action="store_true", help="run self-test")
