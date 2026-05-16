@@ -33,6 +33,15 @@ pub const EVD_SWEEP_003: &str = "EVD-SWEEP-003";
 /// Trajectory updated.
 pub const EVD_SWEEP_004: &str = "EVD-SWEEP-004";
 
+/// Sweep cadence scales with actual risk, not a fixed timer.
+pub const INV_SWEEP_ADAPTIVE: &str = "INV-SWEEP-ADAPTIVE";
+/// De-escalation requires consecutive lower-band readings.
+pub const INV_SWEEP_HYSTERESIS: &str = "INV-SWEEP-HYSTERESIS";
+/// Sweep overhead stays within configured resource budget.
+pub const INV_SWEEP_BOUNDED: &str = "INV-SWEEP-BOUNDED";
+/// Identical trajectory sequences produce identical schedules.
+pub const INV_SWEEP_DETERMINISTIC: &str = "INV-SWEEP-DETERMINISTIC";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -957,6 +966,10 @@ mod tests {
         assert_eq!(EVD_SWEEP_002, "EVD-SWEEP-002");
         assert_eq!(EVD_SWEEP_003, "EVD-SWEEP-003");
         assert_eq!(EVD_SWEEP_004, "EVD-SWEEP-004");
+        assert_eq!(INV_SWEEP_ADAPTIVE, "INV-SWEEP-ADAPTIVE");
+        assert_eq!(INV_SWEEP_HYSTERESIS, "INV-SWEEP-HYSTERESIS");
+        assert_eq!(INV_SWEEP_BOUNDED, "INV-SWEEP-BOUNDED");
+        assert_eq!(INV_SWEEP_DETERMINISTIC, "INV-SWEEP-DETERMINISTIC");
     }
 
     // ── Serialization ──
