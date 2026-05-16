@@ -2,6 +2,7 @@
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -56,6 +57,99 @@ class TestCheckContent(unittest.TestCase):
     def test_missing_file(self):
         results = mod.check_content(Path("/no"), ["anything"], "type")
         self.assertFalse(results[0]["pass"])
+
+
+class TestRustCommentStripping(unittest.TestCase):
+    def test_preserves_string_literals_while_stripping_comments(self):
+        source = "\n".join(
+            [
+                'pub const URL: &str = "https://example.test//kept"; // pub enum KeyRole',
+                'pub const BLOCKY: &str = "not /* a comment */"; /* fn bind() {} */',
+                'pub const RAW: &str = r#"raw // kept /* kept */"#;',
+                "/* outer /* nested */ still comment */ pub struct RealMarker;",
+            ]
+        )
+
+        stripped = mod._strip_rust_comments(source)
+
+        self.assertIn('"https://example.test//kept"', stripped)
+        self.assertIn('"not /* a comment */"', stripped)
+        self.assertIn('r#"raw // kept /* kept */"#', stripped)
+        self.assertIn("pub struct RealMarker;", stripped)
+        self.assertNotIn("pub enum KeyRole", stripped)
+        self.assertNotIn("fn bind()", stripped)
+        self.assertNotIn("nested", stripped)
+
+
+class TestCommentOnlyRustRegression(unittest.TestCase):
+    def test_comment_only_rust_markers_fail_closed(self):
+        original_impl = mod.IMPL
+        original_mod = mod.MOD_RS
+        markers = (
+            mod.REQUIRED_TYPES
+            + mod.REQUIRED_METHODS
+            + mod.REQUIRED_ERROR_CODES
+            + mod.REQUIRED_EVENT_CODES
+            + mod.REQUIRED_INVARIANTS
+            + mod.REQUIRED_ROLES
+            + mod.REQUIRED_TESTS
+            + [marker for markers in mod.INVARIANT_IMPLEMENTATION_MARKERS.values() for marker in markers]
+            + [
+                "pub key_id",
+                "pub role",
+                "pub public_key_bytes",
+                "pub bound_at",
+                "pub bound_by",
+                "pub max_validity_seconds",
+                "0x00, 0x01",
+                "0x00, 0x02",
+                "0x00, 0x03",
+                "0x00, 0x04",
+            ]
+        )
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                fake_impl = Path(tmpdir) / "key_role_separation.rs"
+                fake_mod = Path(tmpdir) / "mod.rs"
+                fake_impl.write_text(
+                    "\n".join(f"// {marker}" for marker in markers)
+                    + "\n/*\n"
+                    + "\n".join("#[test]" for _ in range(30))
+                    + "\n*/\n",
+                    encoding="utf-8",
+                )
+                fake_mod.write_text("// pub mod key_role_separation;\n", encoding="utf-8")
+                mod.IMPL = fake_impl
+                mod.MOD_RS = fake_mod
+
+                result = mod.run_checks()
+        finally:
+            mod.IMPL = original_impl
+            mod.MOD_RS = original_mod
+
+        by_name = {check["check"]: check for check in result["checks"]}
+        self.assertTrue(by_name["file: implementation"]["pass"])
+        self.assertFalse(by_name["module registered in mod.rs"]["pass"])
+
+        rust_check_prefixes = (
+            "type: ",
+            "method: ",
+            "error_code: ",
+            "event_code: ",
+            "invariant: ",
+            "role: ",
+            "role tag: ",
+            "binding field: ",
+            "test: ",
+        )
+        rust_check_names = [
+            check["check"]
+            for check in result["checks"]
+            if check["check"].startswith(rust_check_prefixes)
+            or check["check"] == "unit test count"
+        ]
+        self.assertTrue(rust_check_names)
+        self.assertTrue(all(not by_name[name]["pass"] for name in rust_check_names))
 
 
 class TestCheckModuleRegistered(unittest.TestCase):
@@ -159,7 +253,7 @@ class TestAllEventCodes(unittest.TestCase):
 
 class TestAllInvariants(unittest.TestCase):
     def test_found(self):
-        results = mod.check_content(mod.IMPL, mod.REQUIRED_INVARIANTS, "invariant")
+        results = mod.check_invariants(mod.IMPL)
         for r in results:
             self.assertTrue(r["pass"], r["check"])
 

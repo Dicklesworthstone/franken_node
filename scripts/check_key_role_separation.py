@@ -43,6 +43,96 @@ def _safe_rel(path):
         return str(path)
 
 
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read_text(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = _rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = _rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
 REQUIRED_TYPES = [
     "pub enum KeyRole",
     "pub struct KeyRoleBinding",
@@ -81,6 +171,33 @@ REQUIRED_INVARIANTS = [
     "INV-KRS-ROLE-GUARD",
     "INV-KRS-ROTATION-ATOMIC",
 ]
+
+INVARIANT_IMPLEMENTATION_MARKERS = {
+    "INV-KRS-ROLE-EXCLUSIVITY": [
+        "self.active.get(key_id)",
+        "existing_role != role",
+        "KeyRoleEvent::violation(",
+        "KeyRoleSeparationError::RoleSeparationViolation",
+    ],
+    "INV-KRS-ONE-ACTIVE": [
+        "pub fn lookup_by_role(",
+        "self.active.values().filter",
+        "b.role == role",
+        "self.active.insert(key_id.to_string(), binding)",
+    ],
+    "INV-KRS-ROLE-GUARD": [
+        "pub fn verify_role(",
+        "actual_role != expected_role",
+        "KeyRoleEvent::violation(",
+        "KeyRoleSeparationError::KeyRoleMismatch",
+    ],
+    "INV-KRS-ROTATION-ATOMIC": [
+        "pub fn rotate(",
+        "self.active.remove(old_key_id)",
+        "self.active.insert(new_key_id.to_string(), new_binding)",
+        "KeyRoleEvent::rotated(",
+    ],
+}
 
 REQUIRED_ROLES = [
     "Signing",
@@ -172,7 +289,7 @@ def check_content(path, patterns, category):
                 "detail": "file missing",
             })
         return results
-    content = path.read_text(encoding="utf-8")
+    content = _read_rust_source(path) if path.suffix == ".rs" else _read_text(path)
     for p in patterns:
         found = p in content
         short = p[:30].upper().replace(' ', '-').replace('(', '').replace(')', '')
@@ -185,12 +302,36 @@ def check_content(path, patterns, category):
     return results
 
 
+def check_invariants(path):
+    results = []
+    if not path.is_file():
+        for inv in REQUIRED_INVARIANTS:
+            results.append({
+                "id": f"KRS-INVARIANT-{inv}",
+                "check": f"invariant: {inv}",
+                "pass": False,
+                "detail": "file missing",
+            })
+        return results
+    content = _read_rust_source(path)
+    for inv in REQUIRED_INVARIANTS:
+        markers = INVARIANT_IMPLEMENTATION_MARKERS[inv]
+        missing = [marker for marker in markers if marker not in content]
+        results.append({
+            "id": f"KRS-INVARIANT-{inv}",
+            "check": f"invariant: {inv}",
+            "pass": not missing,
+            "detail": "implementation markers present" if not missing else f"missing: {missing}",
+        })
+    return results
+
+
 def check_module_registered():
     if not MOD_RS.is_file():
         return {"id": "KRS-MOD-REG", "check": "module registered in mod.rs",
                 "pass": False, "detail": "mod.rs missing"}
-    content = MOD_RS.read_text(encoding="utf-8")
-    found = "key_role_separation" in content
+    content = _read_rust_source(MOD_RS)
+    found = "pub mod key_role_separation;" in content
     return {
         "id": "KRS-MOD-REG",
         "check": "module registered in mod.rs",
@@ -206,7 +347,7 @@ def check_role_tags(path):
         results.append({"id": "KRS-ROLE-TAGS", "check": "role tags",
                         "pass": False, "detail": "file missing"})
         return results
-    content = path.read_text(encoding="utf-8")
+    content = _read_rust_source(path)
     for role, tag in [("Signing", "0x00, 0x01"), ("Encryption", "0x00, 0x02"),
                       ("Issuance", "0x00, 0x03"), ("Attestation", "0x00, 0x04")]:
         found = tag in content
@@ -223,7 +364,7 @@ def check_test_count(path):
     if not path.is_file():
         return {"id": "KRS-TEST-COUNT", "check": "test count",
                 "pass": False, "detail": "file missing"}
-    content = path.read_text(encoding="utf-8")
+    content = _read_rust_source(path)
     count = len(re.findall(r"#\[test\]", content))
     return {
         "id": "KRS-TEST-COUNT",
@@ -238,7 +379,7 @@ def check_binding_fields(path):
     results = []
     if not path.is_file():
         return results
-    content = path.read_text(encoding="utf-8")
+    content = _read_rust_source(path)
     for field in ["key_id", "role", "public_key_bytes", "bound_at", "bound_by",
                   "max_validity_seconds"]:
         found = f"pub {field}" in content
@@ -275,7 +416,7 @@ def run_checks():
     checks.extend(check_content(IMPL, REQUIRED_EVENT_CODES, "event_code"))
 
     # Invariants
-    checks.extend(check_content(IMPL, REQUIRED_INVARIANTS, "invariant"))
+    checks.extend(check_invariants(IMPL))
 
     # Role variants
     checks.extend(check_content(IMPL, REQUIRED_ROLES, "role"))
