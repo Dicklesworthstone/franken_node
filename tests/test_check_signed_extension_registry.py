@@ -6,13 +6,79 @@ import contextlib
 import io
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import check_signed_extension_registry as checker  # noqa: E402
+
+
+def write_comment_only_fixture(root: Path) -> dict[str, Path]:
+    src = root / "crates/franken-node/src/supply_chain/extension_registry.rs"
+    mod_rs = root / "crates/franken-node/src/supply_chain/mod.rs"
+    src.parent.mkdir(parents=True)
+
+    markers = [
+        "struct ExtensionSignature",
+        "ProvenanceAttestation",
+        "struct VersionEntry",
+        "struct RevocationRecord",
+        "struct SignedExtension",
+        "struct RegistryAuditRecord",
+        "struct RegistrationRequest",
+        "struct RegistryResult",
+        "struct RegistryConfig",
+        "struct SignedExtensionRegistry",
+        "enum ExtensionStatus",
+        *checker.EXTENSION_STATUSES,
+        "enum RevocationReason",
+        *checker.REVOCATION_REASONS,
+        "fn register(",
+        "fn add_version(",
+        "fn deprecate(",
+        "fn revoke(",
+        "fn query(",
+        "fn list(",
+        "fn version_lineage(",
+        "artifact_signing::verify_signature(",
+        "KeyRing",
+        "signature.signature_bytes",
+        "SER_ERR_INVALID_SIGNATURE",
+        "prov::verify_attestation_chain(",
+        "VerificationPolicy",
+        "provenance.vcs_commit_sha",
+        "provenance.build_system_identifier",
+        "provenance.output_hash",
+        "SER_ERR_PROVENANCE_CHAIN_INVALID",
+        "pub struct AdmissionKernel",
+        "compute_admission_digest(",
+        "extension_registry_admission_v1:",
+        "canonical_registration_manifest_bytes",
+        "registration_manifest_divergence",
+        "tv::verify_inclusion(",
+        "NegativeWitness",
+        "admission_receipts",
+        "revocation_sequence",
+        "is_terminal",
+        "content_hash",
+        "Sha256",
+        "hex::encode",
+        "audit_log",
+        "export_audit_log_jsonl",
+        *[f'"{code}"' for code in checker.EVENT_CODES],
+        *checker.INVARIANTS,
+        *["#[test]" for _ in range(30)],
+    ]
+    src.write_text(
+        "// " + "\n// ".join(markers[:40]) + "\n/*\n" + "\n".join(markers[40:]) + "\n*/\n",
+        encoding="utf-8",
+    )
+    mod_rs.write_text("// pub mod extension_registry;\n", encoding="utf-8")
+    return {"src": src, "mod": mod_rs}
 
 
 def run_main(args: list[str]) -> tuple[int, str]:
@@ -209,6 +275,52 @@ class TestSignedExtensionRegistryChecker(unittest.TestCase):
         returncode, stdout = run_main([])
         self.assertEqual(returncode, 0)
         self.assertIn("PASS", stdout)
+
+    def test_comment_only_rust_markers_fail_closed(self):
+        rust_checks = [
+            self.mod.check_module_wiring,
+            self.mod.check_structs,
+            self.mod.check_extension_statuses,
+            self.mod.check_revocation_reasons,
+            self.mod.check_registry_operations,
+            self.mod.check_signature_verification,
+            self.mod.check_provenance_validation,
+            self.mod.check_admission_kernel,
+            self.mod.check_monotonic_revocation,
+            self.mod.check_event_codes,
+            self.mod.check_invariants,
+            self.mod.check_content_hash,
+            self.mod.check_audit_logging,
+            self.mod.check_test_coverage,
+        ]
+        with tempfile.TemporaryDirectory(prefix="ser-comment-only-") as tmpdir:
+            paths = write_comment_only_fixture(Path(tmpdir))
+            with (
+                patch.object(self.mod, "SRC", paths["src"]),
+                patch.object(self.mod, "MOD_RS", paths["mod"]),
+            ):
+                source_exists = self.mod.check_source_exists()
+                results = [fn() for fn in rust_checks]
+
+        self.assertTrue(source_exists[1])
+        self.assertEqual(
+            [name for name, ok, _ in results if ok],
+            [],
+        )
+
+    def test_strip_rust_comments_preserves_event_code_strings(self):
+        source = (
+            'pub const KEEP: &str = "SER-001 // literal"; // "SER-002"\n'
+            'pub const RAW: &str = r#"INV-SER-SIGNED /* literal */"#;\n'
+            "pub/* hidden */ struct SignedExtensionRegistry;\n"
+        )
+
+        stripped = self.mod._strip_rust_comments(source)
+
+        self.assertIn('"SER-001 // literal"', stripped)
+        self.assertIn('r#"INV-SER-SIGNED /* literal */"#', stripped)
+        self.assertIn("pub  struct SignedExtensionRegistry;", stripped)
+        self.assertNotIn('"SER-002"', stripped)
 
 
 if __name__ == "__main__":

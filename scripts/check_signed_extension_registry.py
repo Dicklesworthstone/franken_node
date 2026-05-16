@@ -175,19 +175,108 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    cursor = 0
+    length = len(text)
+    while cursor < length:
+        if text.startswith("//", cursor):
+            end = text.find("\n", cursor)
+            if end == -1:
+                break
+            result.append("\n")
+            cursor = end + 1
+            continue
+
+        if text.startswith("/*", cursor):
+            end = _rust_block_comment_end(text, cursor + 2)
+            comment = text[cursor:end]
+            result.append("\n" * comment.count("\n") or " ")
+            cursor = end
+            continue
+
+        raw_end = _rust_raw_string_end(text, cursor)
+        if raw_end is not None:
+            result.append(text[cursor:raw_end])
+            cursor = raw_end
+            continue
+
+        if text[cursor] == '"':
+            end = _rust_quoted_literal_end(text, cursor)
+            result.append(text[cursor:end])
+            cursor = end
+            continue
+
+        result.append(text[cursor])
+        cursor += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
 def check_source_exists() -> tuple[str, bool, str]:
     ok = SRC.is_file()
     return ("source_exists", ok, f"Source file exists: {SRC.name}")
 
 
 def check_module_wiring() -> tuple[str, bool, str]:
-    content = _read(MOD_RS)
+    content = _read_rust_source(MOD_RS)
     ok = "pub mod extension_registry;" in content
     return ("module_wiring", ok, "Module wired in supply_chain/mod.rs")
 
 
 def check_structs() -> tuple[str, bool, str]:
-    src = _read(SRC)
+    src = _read_rust_source(SRC)
     required = [
         "struct ExtensionSignature",
         "ProvenanceAttestation",  # Imported from provenance module
@@ -207,21 +296,21 @@ def check_structs() -> tuple[str, bool, str]:
 
 
 def check_extension_statuses() -> tuple[str, bool, str]:
-    src = _read(SRC)
+    src = _read_rust_source(SRC)
     missing = [s for s in EXTENSION_STATUSES if s not in src]
     ok = len(missing) == 0 and "enum ExtensionStatus" in src
     return ("extension_statuses", ok, f"4 statuses: {4 - len(missing)}/4")
 
 
 def check_revocation_reasons() -> tuple[str, bool, str]:
-    src = _read(SRC)
+    src = _read_rust_source(SRC)
     missing = [r for r in REVOCATION_REASONS if r not in src]
     ok = len(missing) == 0 and "enum RevocationReason" in src
     return ("revocation_reasons", ok, f"5 reasons: {5 - len(missing)}/5")
 
 
 def check_registry_operations() -> tuple[str, bool, str]:
-    src = _read(SRC)
+    src = _read_rust_source(SRC)
     ops = [
         "fn register(" in src,
         "fn add_version(" in src,
@@ -236,7 +325,7 @@ def check_registry_operations() -> tuple[str, bool, str]:
 
 
 def check_signature_verification() -> tuple[str, bool, str]:
-    src = _read(SRC)
+    src = _read_rust_source(SRC)
     checks = [
         "artifact_signing::verify_signature(" in src,
         "KeyRing" in src,
@@ -248,7 +337,7 @@ def check_signature_verification() -> tuple[str, bool, str]:
 
 
 def check_provenance_validation() -> tuple[str, bool, str]:
-    src = _read(SRC)
+    src = _read_rust_source(SRC)
     checks = [
         "prov::verify_attestation_chain(" in src,
         "VerificationPolicy" in src,
@@ -262,7 +351,7 @@ def check_provenance_validation() -> tuple[str, bool, str]:
 
 
 def check_admission_kernel() -> tuple[str, bool, str]:
-    src = _read(SRC)
+    src = _read_rust_source(SRC)
     checks = [
         "pub struct AdmissionKernel" in src,
         "compute_admission_digest(" in src,
@@ -278,7 +367,7 @@ def check_admission_kernel() -> tuple[str, bool, str]:
 
 
 def check_monotonic_revocation() -> tuple[str, bool, str]:
-    src = _read(SRC)
+    src = _read_rust_source(SRC)
     checks = [
         "revocation_sequence" in src,
         "RevocationRecord" in src,
@@ -290,21 +379,21 @@ def check_monotonic_revocation() -> tuple[str, bool, str]:
 
 
 def check_event_codes() -> tuple[str, bool, str]:
-    src = _read(SRC)
+    src = _read_rust_source(SRC)
     found = [c for c in EVENT_CODES if f'"{c}"' in src]
     ok = len(found) == len(EVENT_CODES)
     return ("event_codes", ok, f"Event codes: {len(found)}/{len(EVENT_CODES)}")
 
 
 def check_invariants() -> tuple[str, bool, str]:
-    src = _read(SRC)
+    src = _read_rust_source(SRC)
     found = [i for i in INVARIANTS if i in src]
     ok = len(found) == len(INVARIANTS)
     return ("invariants", ok, f"Invariants: {len(found)}/{len(INVARIANTS)}")
 
 
 def check_content_hash() -> tuple[str, bool, str]:
-    src = _read(SRC)
+    src = _read_rust_source(SRC)
     checks = [
         "content_hash" in src,
         "Sha256" in src,
@@ -315,7 +404,7 @@ def check_content_hash() -> tuple[str, bool, str]:
 
 
 def check_audit_logging() -> tuple[str, bool, str]:
-    src = _read(SRC)
+    src = _read_rust_source(SRC)
     checks = [
         "struct RegistryAuditRecord" in src,
         "audit_log" in src,
@@ -339,7 +428,7 @@ def check_spec_alignment() -> tuple[str, bool, str]:
 
 
 def check_test_coverage() -> tuple[str, bool, str]:
-    src = _read(SRC)
+    src = _read_rust_source(SRC)
     test_count = len(re.findall(r"#\[test\]", src))
     ok = test_count >= 25
     return ("test_coverage", ok, f"Rust unit tests: {test_count} (target >= 25)")
