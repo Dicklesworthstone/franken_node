@@ -124,6 +124,28 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(len(mod.INVARIANTS), 4)
 
 
+class TestRustCommentStripping(unittest.TestCase):
+    def test_preserves_string_literals_while_stripping_comments(self) -> None:
+        source = "\n".join(
+            [
+                'pub const URL: &str = "https://example.test//kept"; // pub struct CommentOnly',
+                'pub const BLOCKY: &str = "not /* a comment */"; /* pub fn fake() {} */',
+                'pub const RAW: &str = r#"raw // kept /* kept */"#;',
+                "/* outer /* nested */ still comment */ pub struct RealMarker;",
+            ]
+        )
+
+        stripped = mod._strip_rust_comments(source)
+
+        self.assertIn('"https://example.test//kept"', stripped)
+        self.assertIn('"not /* a comment */"', stripped)
+        self.assertIn('r#"raw // kept /* kept */"#', stripped)
+        self.assertIn("pub struct RealMarker;", stripped)
+        self.assertNotIn("CommentOnly", stripped)
+        self.assertNotIn("fake()", stripped)
+        self.assertNotIn("nested", stripped)
+
+
 class TestCommentOnlyRegressions(unittest.TestCase):
     def test_comment_only_impl_markers_fail_closed(self) -> None:
         original_impl = mod.IMPL_FILE
@@ -142,6 +164,7 @@ class TestCommentOnlyRegressions(unittest.TestCase):
                             "// pub enum CapsuleError { EmptyEvidence, AlreadySealed }",
                             '// pub const EVIDENCE_CAPSULE_CREATED: &str = "EVIDENCE_CAPSULE_CREATED";',
                             '// pub const ERR_CAPSULE_EMPTY_EVIDENCE: &str = "ERR_CAPSULE_EMPTY_EVIDENCE";',
+                            '// pub const INV_EVIDENCE_CAPSULE_COMPLETE: &str = "INV-EVIDENCE-CAPSULE-COMPLETE";',
                             "// pub fn new() {}",
                             "// pub fn seal() {}",
                             "// #[test]",
@@ -157,6 +180,7 @@ class TestCommentOnlyRegressions(unittest.TestCase):
                 mod.check_event_codes()
                 mod.check_error_codes()
                 mod.check_error_variants()
+                mod.check_invariants()
                 mod.check_unit_tests()
         finally:
             mod.IMPL_FILE = original_impl
@@ -167,6 +191,7 @@ class TestCommentOnlyRegressions(unittest.TestCase):
         self.assertFalse(by_name["event_EVIDENCE_CAPSULE_CREATED"]["pass"])
         self.assertFalse(by_name["error_code_ERR_CAPSULE_EMPTY_EVIDENCE"]["pass"])
         self.assertFalse(by_name["error_variant_EmptyEvidence"]["pass"])
+        self.assertFalse(by_name["invariant_INV-EVIDENCE-CAPSULE-COMPLETE"]["pass"])
         self.assertFalse(by_name["impl_minimum_unit_tests"]["pass"])
 
     def test_comment_only_mod_wiring_fails_closed(self) -> None:

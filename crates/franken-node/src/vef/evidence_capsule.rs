@@ -32,11 +32,11 @@ pub const ERR_CAPSULE_PROOF_MISSING: &str = "ERR_CAPSULE_PROOF_MISSING";
 pub const ERR_CAPSULE_REPLAY_DIVERGED: &str = "ERR_CAPSULE_REPLAY_DIVERGED";
 pub const ERR_CAPSULE_EXPORT_FAILED: &str = "ERR_CAPSULE_EXPORT_FAILED";
 
-// ── Invariants ──────────────────────────────────────────────────────
-// INV-EVIDENCE-CAPSULE-COMPLETE: capsule must contain all required evidence
-// INV-EVIDENCE-CAPSULE-SEALED: sealed capsules are immutable
-// INV-EVIDENCE-CAPSULE-VERIFIABLE: exported capsules must be independently verifiable
-// INV-EVIDENCE-CAPSULE-SCHEMA-STABLE: schema version must match expected format
+// ── Invariant identifiers ───────────────────────────────────────────
+pub const INV_EVIDENCE_CAPSULE_COMPLETE: &str = "INV-EVIDENCE-CAPSULE-COMPLETE";
+pub const INV_EVIDENCE_CAPSULE_SEALED: &str = "INV-EVIDENCE-CAPSULE-SEALED";
+pub const INV_EVIDENCE_CAPSULE_VERIFIABLE: &str = "INV-EVIDENCE-CAPSULE-VERIFIABLE";
+pub const INV_EVIDENCE_CAPSULE_SCHEMA_STABLE: &str = "INV-EVIDENCE-CAPSULE-SCHEMA-STABLE";
 
 /// VEF evidence record to embed in capsule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -95,8 +95,84 @@ def _read_text(path: Path) -> str:
 
 
 def _strip_rust_comments(src: str) -> str:
-    without_block_comments = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
-    return re.sub(r"//.*", "", without_block_comments)
+    result: list[str] = []
+    cursor = 0
+    while cursor < len(src):
+        if src.startswith("//", cursor):
+            end = src.find("\n", cursor)
+            if end == -1:
+                break
+            result.append("\n")
+            cursor = end + 1
+            continue
+
+        if src.startswith("/*", cursor):
+            cursor = _rust_block_comment_end(src, cursor + 2)
+            continue
+
+        raw_end = _rust_raw_string_end(src, cursor)
+        if raw_end is not None:
+            result.append(src[cursor:raw_end])
+            cursor = raw_end
+            continue
+
+        if src[cursor] == '"':
+            end = _rust_quoted_literal_end(src, cursor)
+            result.append(src[cursor:end])
+            cursor = end
+            continue
+
+        result.append(src[cursor])
+        cursor += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(src: str, start: int) -> int | None:
+    if src[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(src) and src[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(src) or src[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = src.find(terminator, cursor + 1)
+    if end == -1:
+        return len(src)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(src: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(src):
+        if src[cursor] == "\\":
+            cursor += 2
+            continue
+        if src[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(src)
+
+
+def _rust_block_comment_end(src: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(src) and depth:
+        if src.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif src.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
 
 
 def _impl_source() -> str:
@@ -167,10 +243,6 @@ def _check(name: str, passed: bool, detail: str = "") -> dict[str, Any]:
     return entry
 
 
-def _read_impl() -> str:
-    return _impl_source()
-
-
 def check_file_presence() -> None:
     _check("impl_exists", IMPL_FILE.is_file(), str(IMPL_FILE.relative_to(ROOT)))
     _check("mod_exists", MOD_FILE.is_file(), str(MOD_FILE.relative_to(ROOT)))
@@ -218,7 +290,7 @@ def check_error_variants() -> None:
 
 
 def check_invariants() -> None:
-    src = _read_impl()
+    src = _impl_code()
     for inv in INVARIANTS:
         _check(f"invariant_{inv}", inv in src, inv)
 
