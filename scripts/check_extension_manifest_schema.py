@@ -56,6 +56,95 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read_text(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    cursor = 0
+    length = len(text)
+    while cursor < length:
+        if text.startswith("//", cursor):
+            end = text.find("\n", cursor)
+            if end == -1:
+                break
+            result.append("\n")
+            cursor = end + 1
+            continue
+
+        if text.startswith("/*", cursor):
+            end = _rust_block_comment_end(text, cursor + 2)
+            comment = text[cursor:end]
+            result.append("\n" * comment.count("\n") or " ")
+            cursor = end
+            continue
+
+        raw_end = _rust_raw_string_end(text, cursor)
+        if raw_end is not None:
+            result.append(text[cursor:raw_end])
+            cursor = raw_end
+            continue
+
+        if text[cursor] == '"':
+            end = _rust_quoted_literal_end(text, cursor)
+            result.append(text[cursor:end])
+            cursor = end
+            continue
+
+        result.append(text[cursor])
+        cursor += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
 def _read_json_object(path: Path) -> dict[str, Any]:
     payload = json.JSONDecoder().decode(_read_text(path))
     if not isinstance(payload, dict):
@@ -140,7 +229,7 @@ def check_rust_integration() -> dict[str, Any]:
     if not RUST_IMPL_PATH.exists():
         return _check("EMS-RUST", "Rust module implements schema + engine integration", False, "missing rust module")
 
-    content = _read_text(RUST_IMPL_PATH)
+    content = _read_rust_source(RUST_IMPL_PATH)
     required_markers = [
         "pub struct SignedExtensionManifest",
         "pub fn validate_signed_manifest",
@@ -161,7 +250,7 @@ def check_log_codes() -> dict[str, Any]:
     if not RUST_IMPL_PATH.exists():
         return _check("EMS-LOGS", "Structured manifest event codes are defined", False)
 
-    content = _read_text(RUST_IMPL_PATH)
+    content = _read_rust_source(RUST_IMPL_PATH)
     missing = [code for code in REQUIRED_LOG_CODES if code not in content]
     return _check(
         "EMS-LOGS",
@@ -175,7 +264,7 @@ def check_integration_surface() -> dict[str, Any]:
     if not INTEGRATION_TEST_PATH.exists():
         return _check("EMS-INTEG", "Integration tests cover admission fail-closed invariants", False)
 
-    content = _read_text(INTEGRATION_TEST_PATH)
+    content = _read_rust_source(INTEGRATION_TEST_PATH)
     invariants = [
         "inv_ems_engine_compatibility_gate",
         "inv_ems_signature_gate_fail_closed",
