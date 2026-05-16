@@ -6,14 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
-import sys
-from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
+
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 IMPL = ROOT / "crates" / "franken-node" / "src" / "runtime" / "bounded_mask.rs"
 MOD_RS = ROOT / "crates" / "franken-node" / "src" / "runtime" / "mod.rs"
@@ -82,6 +82,92 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = _rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = _rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
 def _record(results: list[dict[str, Any]], name: str, passed: bool, detail: str) -> None:
     results.append({"name": name, "passed": passed, "detail": detail})
 
@@ -143,11 +229,11 @@ def run_checks(project_root: Path = ROOT) -> tuple[bool, dict[str, Any]]:
         }
         return False, payload
 
-    impl_text = _read(impl_path)
-    mod_text = _read(mod_path)
+    impl_text = _read_rust_source(impl_path)
+    mod_text = _read_rust_source(mod_path)
     spec_text = _read(spec_path)
     summary_text = _read(summary_path)
-    evidence_json = json.loads(_read(evidence_path))
+    evidence_json = json.JSONDecoder().decode(_read(evidence_path))
 
     # Implementation coverage
     ok, missing = _has_all_tokens(impl_text, REQUIRED_CONSTANTS)
@@ -223,16 +309,18 @@ def self_test() -> tuple[bool, dict[str, Any]]:
         "pub fn bounded_mask_with_report<T, F>() {}\n"
         "pub fn bounded_mask_with_policy<T, F>() {}\n"
     )
-    passed = ok and not missing and signature_ok
+    strip_ok = _strip_rust_comments('"kept // literal"; // removed') == '"kept // literal"; '
+    passed = ok and not missing and signature_ok and strip_ok
     return passed, {
         "self_test": "passed" if passed else "failed",
         "token_check_ok": ok,
         "signature_check_ok": signature_ok,
+        "strip_check_ok": strip_ok,
     }
 
 
 def main() -> int:
-    logger = configure_test_logging("check_bounded_masking")
+    configure_test_logging("check_bounded_masking")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument("--self-test", action="store_true", help="run script self-test")
