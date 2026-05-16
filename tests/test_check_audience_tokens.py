@@ -2,13 +2,15 @@
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import check_audience_tokens as mod
+import check_audience_tokens as mod  # noqa: E402
 
 
 class TestConstants(unittest.TestCase):
@@ -46,6 +48,25 @@ class TestCheckFiles(unittest.TestCase):
     def test_file_count(self):
         results = mod.check_files()
         self.assertEqual(len(results), 4)
+
+
+class TestRustCommentStripping(unittest.TestCase):
+    def test_preserves_string_literals_while_stripping_comments(self):
+        source = "\n".join(
+            [
+                'const CODE: &str = "ABT-001";',
+                "// pub struct AudienceBoundToken",
+                'const RAW: &str = r#"ERR_ABT_REPLAY_DETECTED"#;',
+                "/* #[test] */",
+            ]
+        )
+
+        stripped = mod.strip_rust_comments(source)
+
+        self.assertIn('"ABT-001"', stripped)
+        self.assertIn('r#"ERR_ABT_REPLAY_DETECTED"#', stripped)
+        self.assertNotIn("pub struct AudienceBoundToken", stripped)
+        self.assertNotIn("#[test]", stripped)
 
 
 class TestCheckModule(unittest.TestCase):
@@ -307,6 +328,85 @@ class TestModuleAttributes(unittest.TestCase):
     def test_safe_rel_outside_root(self):
         p = Path("/tmp/outside.txt")
         self.assertEqual(mod._safe_rel(p), "/tmp/outside.txt")
+
+
+class TestCommentOnlyRustRegression(unittest.TestCase):
+    """Commented Rust markers must not satisfy implementation checks."""
+
+    def test_comment_only_rust_markers_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            impl = tmp_path / "audience_token.rs"
+            mod_rs = tmp_path / "mod.rs"
+            impl.write_text(
+                "\n".join(f"// {marker}" for marker in COMMENT_ONLY_MARKERS)
+                + "\n/*\n"
+                + "\n".join("#[test]" for _ in range(50))
+                + "\nSerialize\nDeserialize\nSha256\nassert_send\nassert_sync\n"
+                + "\n*/\n",
+                encoding="utf-8",
+            )
+            mod_rs.write_text("// pub mod audience_token;\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(mod, "IMPL", impl),
+                mock.patch.object(mod, "MOD_RS", mod_rs),
+            ):
+                result = mod.run_checks()
+
+        by_name = {check["check"]: check for check in result["checks"]}
+        self.assertTrue(by_name["file: implementation"]["pass"])
+        self.assertTrue(by_name["file: control_plane mod.rs"]["pass"])
+
+        rust_backed_checks = [
+            check["check"]
+            for check in result["checks"]
+            if check["check"] == "module registered in mod.rs"
+            or check["check"].startswith(
+                (
+                    "type: ",
+                    "method: ",
+                    "event_code: ",
+                    "error_code: ",
+                    "invariant: ",
+                    "action_scope: ",
+                    "token_field: ",
+                    "test: ",
+                    "adversarial: ",
+                    "depth: ",
+                )
+            )
+            or check["check"] in {
+                "test count >= 50",
+                "Serialize/Deserialize derives",
+                "SHA-256 usage",
+                "Send+Sync assertions",
+            }
+        ]
+        self.assertTrue(rust_backed_checks)
+        passing_markers = [name for name in rust_backed_checks if by_name[name]["pass"]]
+        self.assertEqual(passing_markers, [])
+
+
+COMMENT_ONLY_MARKERS = (
+    ["pub mod audience_token;"]
+    + mod.REQUIRED_TYPES
+    + mod.REQUIRED_METHODS
+    + mod.EVENT_CODES
+    + mod.ERROR_CODES
+    + mod.INVARIANTS
+    + mod.ACTION_SCOPES
+    + [f"pub {field}:" for field in mod.TOKEN_FIELDS]
+    + [f"fn {test_name}" for test_name in mod.REQUIRED_TESTS]
+    + [
+        "forged",
+        "scope_escalation",
+        "audience_escalation",
+        "cross_audience_replay",
+        "expired_intermediate",
+        "depth_limit_exceeded",
+    ]
+)
 
 
 if __name__ == "__main__":

@@ -12,8 +12,7 @@ import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 SPEC = ROOT / "docs" / "specs" / "section_10_10" / "bd-1r2_contract.md"
@@ -186,10 +185,100 @@ def _check(name: str, passed: bool, detail: str = "") -> dict:
     return entry
 
 
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def read_rust_source(path: Path) -> str:
+    return strip_rust_comments(read_text(path))
+
+
+def strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
 def _file_contains(path: Path, pattern: str) -> bool:
     if not path.exists():
         return False
-    return pattern in path.read_text()
+    return pattern in read_rust_source(path)
 
 
 def validate_token(token_obj: dict) -> tuple:
@@ -239,7 +328,7 @@ def check_types() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"type: {t}", False, "impl file missing") for t in REQUIRED_TYPES]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for t in REQUIRED_TYPES:
         checks.append(_check(f"type: {t}", t in content))
     return checks
@@ -249,7 +338,7 @@ def check_methods() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"method: {m}", False, "impl file missing") for m in REQUIRED_METHODS]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for m in REQUIRED_METHODS:
         checks.append(_check(f"method: {m}", m in content))
     return checks
@@ -259,7 +348,7 @@ def check_event_codes() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"event_code: {c}", False) for c in EVENT_CODES]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for code in EVENT_CODES:
         checks.append(_check(f"event_code: {code}", code in content))
     return checks
@@ -269,7 +358,7 @@ def check_error_codes() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"error_code: {c}", False) for c in ERROR_CODES]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for code in ERROR_CODES:
         checks.append(_check(f"error_code: {code}", code in content))
     return checks
@@ -279,7 +368,7 @@ def check_invariants() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"invariant: {i}", False) for i in INVARIANTS]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for inv in INVARIANTS:
         checks.append(_check(f"invariant: {inv}", inv in content))
     return checks
@@ -289,7 +378,7 @@ def check_action_scopes() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"action_scope: {s}", False) for s in ACTION_SCOPES]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for scope in ACTION_SCOPES:
         checks.append(_check(f"action_scope: {scope}", scope in content))
     return checks
@@ -299,7 +388,7 @@ def check_token_fields() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"token_field: {f}", False) for f in TOKEN_FIELDS]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for field in TOKEN_FIELDS:
         checks.append(_check(f"token_field: {field}", f"pub {field}:" in content or f"pub {field}(" in content))
     return checks
@@ -309,7 +398,7 @@ def check_tests() -> list:
     checks = []
     if not IMPL.exists():
         return [_check(f"test: {t}", False) for t in REQUIRED_TESTS]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     for t in REQUIRED_TESTS:
         checks.append(_check(f"test: {t}", f"fn {t}" in content))
     return checks
@@ -318,7 +407,7 @@ def check_tests() -> list:
 def check_test_count() -> dict:
     if not IMPL.exists():
         return _check("test count >= 50", False, "impl file missing")
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     count = content.count("#[test]")
     return _check("test count >= 50", count >= 50, f"{count} tests found")
 
@@ -326,7 +415,7 @@ def check_test_count() -> dict:
 def check_serde_derives() -> dict:
     if not IMPL.exists():
         return _check("Serialize/Deserialize derives", False)
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     has_ser = "Serialize" in content and "Deserialize" in content
     return _check("Serialize/Deserialize derives", has_ser)
 
@@ -334,14 +423,14 @@ def check_serde_derives() -> dict:
 def check_sha256_usage() -> dict:
     if not IMPL.exists():
         return _check("SHA-256 usage", False)
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     return _check("SHA-256 usage", "Sha256" in content or "sha2" in content)
 
 
 def check_send_sync() -> dict:
     if not IMPL.exists():
         return _check("Send+Sync assertions", False)
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     return _check("Send+Sync assertions", "assert_send" in content and "assert_sync" in content)
 
 
@@ -349,7 +438,7 @@ def check_spec_sections() -> list:
     checks = []
     if not SPEC.exists():
         return [_check("spec: sections", False, "spec missing")]
-    content = SPEC.read_text()
+    content = read_text(SPEC)
     for section in [
         "AudienceBoundToken", "ActionScope", "TokenChain", "TokenValidator",
         "Invariants", "Event Codes", "Error Codes", "Acceptance Criteria",
@@ -362,7 +451,7 @@ def check_policy_sections() -> list:
     checks = []
     if not POLICY.exists():
         return [_check("policy: sections", False, "policy missing")]
-    content = POLICY.read_text()
+    content = read_text(POLICY)
     for section in [
         "Token Issuance", "Delegation Rules", "Validation",
         "Invariants", "Event Codes", "Error Codes",
@@ -376,7 +465,7 @@ def check_adversarial_tests() -> list:
     checks = []
     if not IMPL.exists():
         return [_check("adversarial tests", False)]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     adversarial = [
         ("forged parent_hash", "forged"),
         ("scope escalation", "scope_escalation"),
@@ -395,7 +484,7 @@ def check_depth_coverage() -> list:
     checks = []
     if not IMPL.exists():
         return [_check("depth coverage", False)]
-    content = IMPL.read_text()
+    content = read_rust_source(IMPL)
     # Depth 1 = root-only chain (test_chain_new_root, test_validator_verify_chain_success, etc.)
     checks.append(_check("depth: 1 (root-only)", "test_chain_new_root" in content))
     # Depth 5 = multi-hop (test_chain_multi_hop_delegation goes to depth 4)
@@ -483,7 +572,7 @@ def self_test():
 
 
 def main():
-    logger = configure_test_logging("check_audience_tokens")
+    configure_test_logging("check_audience_tokens")
     if "--self-test" in sys.argv:
         self_test()
         return
