@@ -4,14 +4,14 @@
 import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT_PATH = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT_PATH))
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
+
+ROOT = str(ROOT_PATH)
 IMPL = os.path.join(ROOT, "crates/franken-node/src/connector/high_assurance_promotion.rs")
 MOD_RS = os.path.join(ROOT, "crates/franken-node/src/connector/mod.rs")
 SPEC = os.path.join(ROOT, "docs/specs/section_10_14/bd-3ort_contract.md")
@@ -27,9 +27,100 @@ def _file_exists(path: str, label: str) -> dict:
     return _check(f"file: {label}", exists, f"exists: {os.path.relpath(path, ROOT)}" if exists else f"missing: {os.path.relpath(path, ROOT)}")
 
 
+def _read_text(path: str) -> str:
+    if not os.path.isfile(path):
+        return ""
+    return Path(path).read_text(encoding="utf-8", errors="replace")
+
+
+def _read_rust_source(path: str) -> str:
+    return _strip_rust_comments(_read_text(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = _rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = _rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
 def _src_contains(pattern: str, label: str) -> dict:
-    with open(IMPL) as f:
-        src = f.read()
+    src = _read_rust_source(IMPL)
     found = bool(re.search(pattern, src))
     return _check(label, found)
 
@@ -43,13 +134,11 @@ def run_checks() -> list[dict]:
     checks.append(_file_exists(MATRIX, "promotion matrix artifact"))
 
     # Module registered
-    with open(MOD_RS) as f:
-        mod_src = f.read()
+    mod_src = _read_rust_source(MOD_RS)
     checks.append(_check("module registered in mod.rs",
                           "pub mod high_assurance_promotion;" in mod_src))
 
-    with open(IMPL) as f:
-        src = f.read()
+    src = _read_rust_source(IMPL)
 
     # Types
     for ty in ["pub enum AssuranceMode", "pub enum ObjectClass",
@@ -129,7 +218,7 @@ def run_checks() -> list[dict]:
 
     # Promotion matrix artifact validity
     if os.path.isfile(MATRIX):
-        with open(MATRIX) as f:
+        with open(MATRIX, encoding="utf-8") as f:
             matrix = json.load(f)
         checks.append(_check("matrix is list", isinstance(matrix, list)))
         checks.append(_check("matrix has 4 entries", len(matrix) == 4))
@@ -151,6 +240,10 @@ def run_checks() -> list[dict]:
 def self_test():
     """Run internal consistency checks."""
     checks = run_checks()
+    strip_check_ok = _strip_rust_comments('"kept // literal"; // removed') == '"kept // literal"; '
+    if not strip_check_ok:
+        print("self_test: Rust comment stripper corrupted string literals")
+        return False
     total = len(checks)
     passing = sum(1 for c in checks if c["pass"])
     failing = total - passing
@@ -163,7 +256,7 @@ def self_test():
 
 
 def main():
-    logger = configure_test_logging("check_high_assurance_promotion")
+    configure_test_logging("check_high_assurance_promotion")
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true")
@@ -178,6 +271,7 @@ def main():
     total = len(checks)
     passing = sum(1 for c in checks if c["pass"])
     failing = total - passing
+    test_count = len(re.findall(r"#\[test\]", _read_rust_source(IMPL))) if os.path.isfile(IMPL) else 0
 
     if args.json:
         result = {
@@ -186,7 +280,7 @@ def main():
             "section": "10.14",
             "overall_pass": failing == 0,
             "verdict": "PASS" if failing == 0 else "FAIL",
-            "test_count": 33,
+            "test_count": test_count,
             "summary": {"passing": passing, "failing": failing, "total": total},
             "checks": checks,
         }

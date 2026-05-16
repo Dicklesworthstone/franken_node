@@ -19,6 +19,13 @@ pub mod event_codes {
     pub const MODE_CHANGED: &str = "ASSURANCE_MODE_CHANGED";
 }
 
+/// HighAssurance promotion fails without a proof bundle.
+pub const INV_HA_PROOF_REQUIRED: &str = "INV-HA-PROOF-REQUIRED";
+/// Missing or insufficient proof keeps the artifact quarantined.
+pub const INV_HA_FAIL_CLOSED: &str = "INV-HA-FAIL-CLOSED";
+/// Mode downgrade requires explicit policy authorization.
+pub const INV_HA_MODE_POLICY: &str = "INV-HA-MODE-POLICY";
+
 // ── AssuranceMode ───────────────────────────────────────────────────
 
 /// Deployment assurance level for quarantine promotion.
@@ -957,6 +964,10 @@ mod tests {
 
     #[test]
     fn denial_reason_codes() {
+        assert_eq!(INV_HA_PROOF_REQUIRED, "INV-HA-PROOF-REQUIRED");
+        assert_eq!(INV_HA_FAIL_CLOSED, "INV-HA-FAIL-CLOSED");
+        assert_eq!(INV_HA_MODE_POLICY, "INV-HA-MODE-POLICY");
+
         let d1 = PromotionDenialReason::ProofBundleMissing {
             artifact_id: "a1".into(),
             object_class: ObjectClass::CriticalMarker,
@@ -1457,7 +1468,7 @@ mod tests {
                 AssuranceMode::HighAssurance
             };
 
-            let auth_opt = if target_mode == AssuranceMode::Standard {
+            let auth_opt = if matches!(target_mode, AssuranceMode::Standard) {
                 Some(&auth)
             } else {
                 None

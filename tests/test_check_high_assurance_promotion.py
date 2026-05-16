@@ -1,6 +1,7 @@
 """Unit tests for check_high_assurance_promotion.py verification script."""
 
 import importlib.util
+import json
 import os
 
 import pytest
@@ -14,6 +15,104 @@ SCRIPT = os.path.join(
 spec = importlib.util.spec_from_file_location("check_mod", SCRIPT)
 check_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check_mod)
+
+
+def _required_test_names() -> list[str]:
+    return [
+        check["check"].removeprefix("test: ")
+        for check in check_mod.run_checks()
+        if check["check"].startswith("test: ")
+    ]
+
+
+def _write_comment_only_fixture(root):
+    connector_dir = root / "crates/franken-node/src/connector"
+    spec_dir = root / "docs/specs/section_10_14"
+    artifact_dir = root / "artifacts/10.14"
+    connector_dir.mkdir(parents=True)
+    spec_dir.mkdir(parents=True)
+    artifact_dir.mkdir(parents=True)
+
+    paths = {
+        "impl": connector_dir / "high_assurance_promotion.rs",
+        "mod": connector_dir / "mod.rs",
+        "spec": spec_dir / "bd-3ort_contract.md",
+        "matrix": artifact_dir / "high_assurance_promotion_matrix.json",
+    }
+
+    paths["mod"].write_text("// pub mod high_assurance_promotion;\n", encoding="utf-8")
+
+    markers = [
+        "pub enum AssuranceMode",
+        "pub enum ObjectClass",
+        "pub enum ProofRequirement",
+        "pub struct ProofBundle",
+        "pub enum PromotionDenialReason",
+        "pub struct PolicyAuthorization",
+        "pub struct HighAssuranceGate",
+        "pub struct PromotionMatrixEntry",
+        "Standard",
+        "HighAssurance",
+        "CriticalMarker",
+        "StateObject",
+        "TelemetryArtifact",
+        "ConfigObject",
+        "FullProofChain",
+        "IntegrityProof",
+        "IntegrityHash",
+        "SchemaProof",
+        "ProofBundleMissing",
+        "ProofBundleInsufficient",
+        "UnauthorizedModeDowngrade",
+        "fn evaluate(",
+        "fn switch_mode(",
+        "fn promotion_matrix(",
+        "fn satisfies(",
+        "fn empty(",
+        "fn full(",
+        "fn label(",
+        "fn requires_proof(",
+        "fn code(",
+        "fn to_json(",
+        "fn proof_requirement_for(",
+        "QUARANTINE_PROMOTION_APPROVED",
+        "QUARANTINE_PROMOTION_DENIED",
+        "ASSURANCE_MODE_CHANGED",
+        "INV-HA-PROOF-REQUIRED",
+        "INV-HA-FAIL-CLOSED",
+        "INV-HA-MODE-POLICY",
+        "PROMOTION_DENIED_PROOF_BUNDLE_MISSING",
+        "PROMOTION_DENIED_PROOF_INSUFFICIENT",
+        "MODE_DOWNGRADE_UNAUTHORIZED",
+        *[f"fn {name}(" for name in _required_test_names()],
+        *["#[test]" for _ in range(25)],
+    ]
+    paths["impl"].write_text(
+        "// " + "\n// ".join(markers[:20]) + "\n/*\n    " + "\n    ".join(markers[20:]) + "\n*/\n",
+        encoding="utf-8",
+    )
+
+    paths["spec"].write_text("# bd-3ort contract\n", encoding="utf-8")
+    paths["matrix"].write_text(
+        json.dumps(
+            [
+                {
+                    "object_class": object_class,
+                    "assurance_mode": "high_assurance",
+                    "proof_requirement": "full_proof_chain",
+                }
+                for object_class in [
+                    "critical_marker",
+                    "state_object",
+                    "telemetry_artifact",
+                    "config_object",
+                ]
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    return paths
 
 
 class TestRunChecks:
@@ -165,3 +264,49 @@ class TestPromotionMatrix:
         checks = check_mod.run_checks()
         check = next(c for c in checks if c["check"] == "matrix has 4 entries")
         assert check["pass"]
+
+
+class TestCommentOnlyRustRegression:
+    """Regression tests for comment-only Rust marker false positives."""
+
+    def test_preserves_string_literals_while_stripping_comments(self):
+        source = (
+            'pub const KEEP: &str = "INV-HA-FAIL-CLOSED // literal"; // "INV-HA-MODE-POLICY"\n'
+            'pub const RAW: &str = r#"PROMOTION_DENIED_PROOF_INSUFFICIENT /* literal */"#; '
+            '/* "MODE_DOWNGRADE_UNAUTHORIZED" */\n'
+        )
+
+        stripped = check_mod._strip_rust_comments(source)
+
+        assert '"INV-HA-FAIL-CLOSED // literal"' in stripped
+        assert 'r#"PROMOTION_DENIED_PROOF_INSUFFICIENT /* literal */"#' in stripped
+        removed_comment_literals = ('"INV-HA-MODE-POLICY"', '"MODE_DOWNGRADE_UNAUTHORIZED"')
+        assert all(marker not in stripped for marker in removed_comment_literals)
+
+    def test_comment_only_rust_markers_fail_closed(self, tmp_path, monkeypatch):
+        paths = _write_comment_only_fixture(tmp_path)
+        monkeypatch.setattr(check_mod, "ROOT", str(tmp_path))
+        monkeypatch.setattr(check_mod, "IMPL", str(paths["impl"]))
+        monkeypatch.setattr(check_mod, "MOD_RS", str(paths["mod"]))
+        monkeypatch.setattr(check_mod, "SPEC", str(paths["spec"]))
+        monkeypatch.setattr(check_mod, "MATRIX", str(paths["matrix"]))
+
+        checks = check_mod.run_checks()
+
+        by_name = {check["check"]: check for check in checks}
+        artifact_checks = {
+            "file: implementation",
+            "file: spec contract",
+            "file: promotion matrix artifact",
+            "matrix is list",
+            "matrix has 4 entries",
+            "matrix covers all classes",
+            "HA entries have proof requirements",
+        }
+        for name in artifact_checks:
+            assert by_name[name]["pass"], name
+
+        rust_backed_failures = [check for check in checks if check["check"] not in artifact_checks]
+        assert rust_backed_failures
+        for check in rust_backed_failures:
+            assert not check["pass"], check["check"]
