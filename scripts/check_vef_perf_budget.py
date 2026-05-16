@@ -19,11 +19,11 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
-from typing import Any
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 CHECKS: list[dict[str, Any]] = []
@@ -97,6 +97,92 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def _read_rust_source(path: Path) -> str:
+    return _strip_rust_comments(_read_text(path))
+
+
+def _strip_rust_comments(text: str) -> str:
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            result.append("\n")
+            i = end + 1
+            continue
+
+        if text.startswith("/*", i):
+            i = _rust_block_comment_end(text, i + 2)
+            continue
+
+        raw_end = _rust_raw_string_end(text, i)
+        if raw_end is not None:
+            result.append(text[i:raw_end])
+            i = raw_end
+            continue
+
+        if text[i] == '"':
+            end = _rust_quoted_literal_end(text, i)
+            result.append(text[i:end])
+            i = end
+            continue
+
+        result.append(text[i])
+        i += 1
+
+    return "".join(result)
+
+
+def _rust_raw_string_end(text: str, start: int) -> int | None:
+    if text[start] != "r":
+        return None
+
+    cursor = start + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+
+    terminator = '"' + ("#" * hashes)
+    end = text.find(terminator, cursor + 1)
+    if end == -1:
+        return len(text)
+    return end + len(terminator)
+
+
+def _rust_quoted_literal_end(text: str, start: int) -> int:
+    cursor = start + 1
+    while cursor < len(text):
+        if text[cursor] == "\\":
+            cursor += 2
+            continue
+        if text[cursor] == '"':
+            return cursor + 1
+        cursor += 1
+    return len(text)
+
+
+def _rust_block_comment_end(text: str, start: int) -> int:
+    depth = 1
+    cursor = start
+    while cursor < len(text) and depth:
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+        else:
+            cursor += 1
+    return cursor
+
+
 # ---------------------------------------------------------------------------
 # Checks: Rust implementation
 # ---------------------------------------------------------------------------
@@ -109,13 +195,13 @@ def check_rust_module_exists() -> None:
 
 def check_mod_registration() -> None:
     mod_rs = ROOT / "crates" / "franken-node" / "src" / "connector" / "mod.rs"
-    src = _read_text(mod_rs)
+    src = _read_rust_source(mod_rs)
     registered = "pub mod vef_perf_budget;" in src
     _check("mod_registration", registered, "vef_perf_budget registered in connector/mod.rs" if registered else "vef_perf_budget NOT in connector/mod.rs")
 
 
 def check_hot_path_enum() -> None:
-    src = _read_text(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
+    src = _read_rust_source(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
     for path_name in VEF_HOT_PATHS:
         # Match the enum variant based on the label
         found = f'"{path_name}"' in src
@@ -123,28 +209,28 @@ def check_hot_path_enum() -> None:
 
 
 def check_mode_enum() -> None:
-    src = _read_text(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
+    src = _read_rust_source(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
     for mode in VEF_MODES:
         found = f'"{mode}"' in src
         _check(f"mode_{mode}", found, f"mode label {mode} in source")
 
 
 def check_event_codes() -> None:
-    src = _read_text(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
+    src = _read_rust_source(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
     for code in REQUIRED_EVENT_CODES:
         found = f'"{code}"' in src
         _check(f"event_code_{code}", found, f"event code {code} defined" if found else f"event code {code} missing")
 
 
 def check_invariant_constants() -> None:
-    src = _read_text(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
+    src = _read_rust_source(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
     for inv in REQUIRED_INVARIANTS:
         found = f'"{inv}"' in src
         _check(f"invariant_{inv}", found, f"invariant {inv} defined" if found else f"invariant {inv} missing")
 
 
 def check_budget_thresholds_defined() -> None:
-    src = _read_text(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
+    src = _read_rust_source(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
     for path_name, (p95, p99, cold) in NORMAL_BUDGETS.items():
         # Check that the numeric values appear in the source
         p95_found = str(p95) in src
@@ -159,32 +245,32 @@ def check_budget_thresholds_defined() -> None:
 
 
 def check_mode_multiplier_logic() -> None:
-    src = _read_text(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
+    src = _read_rust_source(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
     for mode, mult in MODE_MULTIPLIERS.items():
         found = str(mult) in src
         _check(f"multiplier_{mode}", found, f"{mode} multiplier {mult}" if found else f"{mode} multiplier {mult} missing")
 
 
 def check_gate_struct() -> None:
-    src = _read_text(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
+    src = _read_rust_source(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
     found = "pub struct VefOverheadGate" in src
     _check("gate_struct", found, "VefOverheadGate defined" if found else "VefOverheadGate missing")
 
 
 def check_evaluate_method() -> None:
-    src = _read_text(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
+    src = _read_rust_source(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
     found = "fn evaluate" in src
     _check("evaluate_method", found, "evaluate method present" if found else "evaluate method missing")
 
 
 def check_csv_output() -> None:
-    src = _read_text(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
+    src = _read_rust_source(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
     found = "fn to_csv" in src
     _check("csv_output", found, "to_csv method present" if found else "to_csv method missing")
 
 
 def check_inline_tests() -> None:
-    src = _read_text(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
+    src = _read_rust_source(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
     test_count = len(re.findall(r"#\[test\]", src))
     passed = test_count >= 10
     _check("inline_tests", passed, f"{test_count} inline tests found (need >= 10)")
@@ -219,14 +305,14 @@ def check_spec_event_codes() -> None:
 # ---------------------------------------------------------------------------
 
 def check_noise_tolerance() -> None:
-    src = _read_text(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
+    src = _read_rust_source(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
     has_cv = "max_cv_pct" in src
     has_noise = "noise_multiplier" in src
     _check("noise_tolerance", has_cv and has_noise, "cv and noise multiplier defined" if has_cv and has_noise else "missing noise tolerance fields")
 
 
 def check_warmup_iterations() -> None:
-    src = _read_text(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
+    src = _read_rust_source(ROOT / "crates" / "franken-node" / "src" / "connector" / "vef_perf_budget.rs")
     found = "warmup_iterations" in src
     _check("warmup_iterations", found, "warmup_iterations field present" if found else "warmup_iterations missing")
 
@@ -292,6 +378,11 @@ def self_test() -> bool:
         print("SELF-TEST FAIL: no checks returned", file=sys.stderr)
         return False
 
+    strip_check_ok = _strip_rust_comments('"kept // literal"; // removed') == '"kept // literal"; '
+    if not strip_check_ok:
+        print("SELF-TEST FAIL: Rust comment stripper corrupted string literals", file=sys.stderr)
+        return False
+
     required_keys = {"check", "pass", "detail"}
     for entry in checks:
         if not isinstance(entry, dict) or not required_keys.issubset(entry.keys()):
@@ -303,7 +394,7 @@ def self_test() -> bool:
 
 
 def main() -> None:
-    logger = configure_test_logging("check_vef_perf_budget")
+    configure_test_logging("check_vef_perf_budget")
     parser = argparse.ArgumentParser(description="bd-ufk5: VEF performance budget gate verification")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--self-test", action="store_true")
