@@ -127,7 +127,7 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
   token chain, MMR proofs, evidence-replay gate, divergence gate, key-role
   separation registry, control-lane scheduler, cancellation protocol,
   epoch-transition barrier, and provenance gate
-  (`crates/franken-node/tests/e2e_*.rs`, 18 files).
+  (`crates/franken-node/tests/e2e_*.rs`, 19 files).
 
 #### CI and gates
 
