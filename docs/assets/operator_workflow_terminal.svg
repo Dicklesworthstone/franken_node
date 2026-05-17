@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 540" font-family="ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas, monospace" font-size="13">
+  <!-- Window chrome -->
+  <rect x="0" y="0" width="900" height="540" rx="10" fill="#0b1020"/>
+  <rect x="0" y="0" width="900" height="34" rx="10" fill="#161b2e"/>
+  <rect x="0" y="22" width="900" height="12" fill="#161b2e"/>
+  <circle cx="20" cy="17" r="6" fill="#ff5f56"/>
+  <circle cx="40" cy="17" r="6" fill="#ffbd2e"/>
+  <circle cx="60" cy="17" r="6" fill="#27c93f"/>
+  <text x="450" y="22" fill="#6e7691" text-anchor="middle">~/projects/checkout-api  —  franken-node</text>
+
+  <!-- Body -->
+  <g transform="translate(20, 56)">
+    <text y="0" fill="#6ec1ff">$</text>
+    <text x="14" y="0" fill="#e6e8ee">franken-node migrate audit . --format json --out audit.json</text>
+
+    <text y="22" fill="#9ad0a4">audit complete: 14 findings (3 high, 8 medium, 3 low); SARIF written to audit.json</text>
+
+    <text y="48" fill="#6ec1ff">$</text>
+    <text x="14" y="48" fill="#e6e8ee">franken-node trust scan . --deep --audit</text>
+
+    <text y="70" fill="#9ad0a4">scanned 412 packages; 1 OSV vulnerability; 2 typosquat candidates flagged</text>
+    <text y="88" fill="#f0c674">  warn: npm:lodash-cli-tool@1.0.3 camouflage severity 0.71 (gradual_creep)</text>
+    <text y="106" fill="#f0c674">        publisher 2 weeks old, typosquat distance 2 from npm:lodash</text>
+
+    <text y="132" fill="#6ec1ff">$</text>
+    <text x="14" y="132" fill="#e6e8ee">franken-node verify lockstep . --runtimes node,bun,franken-node</text>
+
+    <text y="154" fill="#ff7e7e">lockstep verdict: divergent (1 of 4711 steps)</text>
+    <text y="172" fill="#ff7e7e">  step 12 in tests/cases/async-iter-001 diverged on franken-node</text>
+    <text y="190" fill="#9ad0a4">divergence receipt written: receipts/lockstep-2026-05-17-canary.fnreceipt</text>
+
+    <text y="216" fill="#6ec1ff">$</text>
+    <text x="14" y="216" fill="#e6e8ee">franken-node run . --policy strict --lockstep-preflight</text>
+
+    <text y="238" fill="#ff7e7e">refused: revocation frontier stale (max age 6h, actual 38h)</text>
+    <text y="256" fill="#6e7691">  hint: run `franken-node trust sync --force`, then retry</text>
+
+    <text y="282" fill="#6ec1ff">$</text>
+    <text x="14" y="282" fill="#e6e8ee">franken-node trust quarantine --artifact sha256:7e1f...c0a3</text>
+
+    <text y="304" fill="#9ad0a4">signed decision receipt: rec-2026-0042</text>
+    <text y="322" fill="#9ad0a4">  action_name: trust.quarantine</text>
+    <text y="340" fill="#9ad0a4">  decision: approved   confidence: 0.99   epoch_at: 12047</text>
+    <text y="358" fill="#9ad0a4">  signature_version: ed25519-v1   chain_hash: sha256:5678...</text>
+
+    <text y="384" fill="#6ec1ff">$</text>
+    <text x="14" y="384" fill="#e6e8ee">franken-node incident bundle --id INC-2026-0042 --verify</text>
+
+    <text y="406" fill="#9ad0a4">wrote INC-2026-0042.fnbundle (4711 events, integrity sha256:abc...)</text>
+
+    <text y="432" fill="#6ec1ff">$</text>
+    <text x="14" y="432" fill="#e6e8ee">franken-node incident counterfactual \</text>
+    <text y="450" fill="#e6e8ee">    --bundle INC-2026-0042.fnbundle \</text>
+    <text y="468" fill="#e6e8ee">    --trusted-public-key keys/replay-trust-anchor.pub \</text>
+    <text y="486" fill="#e6e8ee">    --policy strict</text>
+
+    <text y="504" fill="#9ad0a4">17 decisions changed under strict; severity_delta -3</text>
+  </g>
+</svg>

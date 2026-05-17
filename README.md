@@ -6,6 +6,7 @@
 
 <div align="center">
 
+![Status](https://img.shields.io/badge/status-pre--1.0-yellow)
 ![Build](https://img.shields.io/badge/build-passing-brightgreen)
 ![Security](https://img.shields.io/badge/security-trust--native-1f6feb)
 ![Unsafe](https://img.shields.io/badge/unsafe-forbidden-success)
@@ -25,6 +26,63 @@ incident forensics.
 # One-line installer (Linux / macOS)
 curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main/install.sh | bash
 ```
+
+> [!IMPORTANT]
+> **Status: pre-1.0.** The CLI surface and the on-the-wire JSON shapes
+> (decision receipts, trust cards, replay verdicts, counterfactual reports,
+> incident bundles) are stable and covered by golden tests. Internal Rust
+> APIs and feature-gated modules may still break between versions. See
+> [Stability](#stability) for the full breakdown.
+
+---
+
+## A concrete scenario
+
+It's Tuesday. A transitive npm dependency in your build was published 14
+days ago by a brand-new publisher whose username is 2 characters off a
+popular library. The package's behavior has slowly drifted in the last
+three minor releases.
+
+Under your current stack: the typosquat scanner flags it tomorrow; your
+package-lock pinned the new version yesterday; the egress check runs at
+deploy time and sees nothing wrong because the malicious payload
+activates after a 48-hour delay. By Friday you're paging the security
+team.
+
+Under `franken-node`:
+
+- `trust scan --deep --audit` (run on every `migrate audit`) flagged the
+  publisher as 2 weeks old with typosquat distance 2 from the canonical
+  package, **before the package was admitted**.
+- The trust card's `camouflage_hints` have been accumulating a
+  `GradualCreep` signal since the second minor release; the
+  `user_facing_risk_assessment` is already at `high`.
+- On any risky network egress, the **revocation freshness gate** would
+  fail closed because the local frontier is older than the
+  `balanced`-profile policy.
+- If the malicious behavior had already executed, `incident bundle` +
+  `incident replay` give you a byte-exact reproduction of the window,
+  and `incident counterfactual --policy strict` tells you in seconds
+  whether a tighter profile would have caught it.
+
+Every gate above is a runtime default, not an external scanner. Every
+decision is a signed receipt linked into the evidence ledger.
+
+<div align="center">
+  <img src="docs/assets/operator_workflow_terminal.svg" alt="franken-node operator workflow: audit, trust scan, lockstep, quarantine, incident bundle, counterfactual">
+</div>
+
+---
+
+## Who this README is for
+
+| If you're a... | Start at |
+|---|---|
+| **Developer evaluating** for a new project | [TL;DR](#tldr) → [Quick Example](#quick-example) → [Comparison](#comparison) |
+| **Operator deploying or running** the platform | [End-to-End Operator Workflow](#end-to-end-operator-workflow) → [Command Reference](#command-reference) → [Operational Runbooks](#operational-runbooks) → [Troubleshooting](#troubleshooting) |
+| **Security auditor verifying claims** | [Trust-Native Primitives](#trust-native-primitives) → [Threat Model](#threat-model) → [Cryptographic Primitives](#cryptographic-primitives) → [Reproduction Playbook](#reproduction-playbook) → [Verifier SDK](#verifier-sdk) |
+| **Architect making a build-vs-buy decision** | [Design Philosophy](#design-philosophy) → [The Trust Gradient](#the-trust-gradient) → [The Engine-Split Contract](#the-engine-split-contract) → [Limitations](#limitations) |
+| **CI/SRE wiring it into pipelines** | [Integration Patterns](#integration-patterns) → [Structured Logging and Observability](#structured-logging-and-observability) → [Doctor Walkthrough](#doctor-walkthrough) |
 
 ---
 
@@ -182,10 +240,12 @@ this repository is the **product layer** on top of that substrate.
 
 ## Installation
 
-> **Important:** this repository depends on sibling engine crates from
-> [`/dp/franken_engine`](https://github.com/Dicklesworthstone/franken_engine)
+> [!IMPORTANT]
+> This repository depends on sibling engine crates from
+> [`franken_engine`](https://github.com/Dicklesworthstone/franken_engine)
 > via the [Engine Split Contract](docs/ENGINE_SPLIT_CONTRACT.md). Source
-> builds require both repositories checked out side-by-side.
+> builds require both repositories checked out side-by-side. The one-line
+> installer side-steps this by shipping prebuilt binaries.
 
 ### Option 1: One-line installer (recommended)
 
@@ -196,6 +256,7 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main
 The installer downloads the latest signed release asset, verifies the
 checksum, and places `franken-node` on `PATH`.
 
+> [!NOTE]
 > Homebrew is not currently published for `franken-node`; the public
 > `Dicklesworthstone/homebrew-tap` repository does not yet ship a
 > `franken-node` formula. Use the installer above or build from source.
@@ -230,8 +291,10 @@ permitted by lint forbidance.
 franken-node verify release ./release-dir --key-dir ./trusted-public-keys
 ```
 
-`verify release` is fail-closed and accepts no built-in trust roots; you
-must point `--key-dir` at a directory of public keys you trust.
+> [!WARNING]
+> `verify release` is fail-closed and accepts no built-in trust roots.
+> You must point `--key-dir` at a directory of public keys you trust;
+> without it, verification refuses to proceed.
 
 ---
 
@@ -401,6 +464,25 @@ franken-node bench run --scenario secure-extension-heavy --output bench.json
 Auditors use `frankenengine-verifier-sdk` to validate the benchmark
 report's signature chain, recompute receipts, and verify capsule integrity
 without trusting the runtime that produced them.
+
+---
+
+## Stability
+
+`franken-node` is pre-1.0. The contract surface is split into three
+stability bands:
+
+| Surface | Stability | Notes |
+|---|---|---|
+| CLI command shape (`franken-node …` subcommands, flags, exit codes) | **Stable** | Removals and breaking flag changes land as a deliberate deprecation with a CHANGELOG entry. Downstream tests assert this surface in `cli_subcommand_goldens.rs`. |
+| On-the-wire JSON shapes (decision receipts, trust cards, replay verdicts, counterfactual reports, incident bundles, structured-log events) | **Stable** | Every shape has a `schema_version` and goldens under `tests/golden/`. Schema bumps are explicit and registered in `schema_versions.rs`. |
+| Internal Rust APIs (everything under `crates/franken-node/src/`) | **In flux** | Module names, struct fields, and feature-gated surfaces may change between versions. Pin a specific commit when depending. |
+| External verifier SDK (`frankenengine-verifier-sdk` at `sdk/verifier/`) | **Stabilizing** | Smaller, intentionally narrower than the product crate; intended to be the long-lived audit interface. |
+
+Anything not yet documented here, expect movement. The headline claims
+("trust-native runtime", "deterministic replay", "fail-closed gates")
+are backed by code today; the goal of pre-1.0 is to finalize ergonomics
+and dependency hygiene, not to retract the security commitments.
 
 ---
 
@@ -644,9 +726,21 @@ every leaf command available in the current build.
 | `franken-node debug evidence` | Inspect verifier evidence artifacts. Required: `--artifact`. `--kind` accepts `auto`, `node-replay-capsule`, `provenance-attestation`, `vef-evidence-capsule`. |
 | `franken-node debug trace` | Trace policy evaluation steps. Required: `--policy`, `--input`. |
 
-> All commands accept `--json` for machine-readable output; many accept
-> `--structured-logs-jsonl` to emit structured diagnostic events on stderr,
-> and `--trace-id <id>` to correlate log events across processes.
+> [!NOTE]
+> All commands accept `--json` for machine-readable output. Many also
+> accept `--structured-logs-jsonl` to emit stable, event-coded
+> diagnostic events on stderr (see [Structured Logging and
+> Observability](#structured-logging-and-observability)), and
+> `--trace-id <id>` to correlate log events across processes.
+
+> [!WARNING]
+> **Fail-closed commands.** `incident replay` and `incident
+> counterfactual` refuse to run without `--trusted-public-key` or
+> `--key-dir`. `registry publish` refuses without `--version` and
+> `--signing-key`. `verify release` refuses without `--key-dir`.
+> `safe-mode enter` requires `--reason`, `--operator-id`, and
+> `--trust-state-hash`. There are no built-in trust roots and no
+> implicit defaults; this is intentional, not an ergonomics gap.
 
 ---
 
@@ -792,33 +886,30 @@ cargo build --release -p frankenengine-node --no-default-features --features eng
 
 ## Architecture
 
-```text
-                         +-----------------------------------------+
-                         |              franken_node               |
-                         | compatibility, migration, trust UX, ops |
-                         |   verifier SDK, fleet & incident plane  |
-                         +-------------------+---------------------+
-                                             |
-              +------------------------------+------------------------------+
-              |                              |                              |
-   +----------v----------+        +----------v----------+        +----------v----------+
-   |     asupersync      |        |     frankentui      |        |     fastapi_rust    |
-   |  control-plane &    |        |  operator terminal  |        |   control-plane     |
-   |  transport semantics|        |  surfaces & dashes  |        |   HTTP/JSON API     |
-   +----------+----------+        +---------------------+        +----------+----------+
-              |                                                             |
-              +----------------------------+--------------------------------+
-                                           |
-                                +----------v-----------+
-                                |    franken_engine    |
-                                |  native JS/TS runtime|
-                                |  + extension host    |
-                                +----------+-----------+
-                                           |
-                                +----------v-----------+
-                                |     frankensqlite    |
-                                | audit / replay store |
-                                +----------------------+
+```mermaid
+flowchart TB
+    fn["<b>franken_node</b><br/>compatibility, migration, trust UX, ops<br/>verifier SDK, fleet &amp; incident plane"]
+    asu["<b>asupersync</b><br/>control-plane &amp;<br/>transport semantics"]
+    ftui["<b>frankentui</b><br/>operator terminal<br/>surfaces &amp; dashes"]
+    fapi["<b>fastapi_rust</b><br/>control-plane<br/>HTTP / JSON API"]
+    feng["<b>franken_engine</b><br/>native JS / TS runtime<br/>+ extension host"]
+    fsql["<b>frankensqlite</b><br/>audit / replay store"]
+
+    fn --> asu
+    fn --> ftui
+    fn --> fapi
+    asu --> feng
+    fapi --> feng
+    feng --> fsql
+
+    classDef product fill:#1f6feb,color:#fff,stroke:#0a3b91,stroke-width:1px;
+    classDef plane fill:#5b3cc4,color:#fff,stroke:#3a2780,stroke-width:1px;
+    classDef substrate fill:#27c93f,color:#0b1020,stroke:#1d8e2c,stroke-width:1px;
+    classDef store fill:#f0c674,color:#0b1020,stroke:#a8884c,stroke-width:1px;
+    class fn product;
+    class asu,ftui,fapi plane;
+    class feng substrate;
+    class fsql store;
 ```
 
 ### Repository layout
@@ -878,53 +969,19 @@ registry separately validates the card snapshot under a
 for remote refreshes), which picks the validation strategy without
 being stored on the card itself.
 
-```text
-            franken-node trust scan
-                        │
-                        v
-   +───────────────────────────────────────+
-   │  SEEDED                                │   freshly created from package.json,
-   │  loaded via TrustedFile context        │   no risk yet, no audit history
-   +───────────────────────────────────────+
-                        │
-                        │  trust sync       (refreshes from OSV; adds
-                        v                    publisher metadata)
-   +───────────────────────────────────────+
-   │  ACTIVE                                │   risk class computed
-   │  audit_history += [scan]               │   camouflage hints accumulated
-   +───────────────────────────────────────+
-                        │
-                        │  policy evaluation on a risky/dangerous action
-                        v
-                  (revocation gate)
-                   │           │
-                pass│           │fail (frontier stale)
-                   │           v
-                   │     refuse + emit decision receipt
-                   v
-   +───────────────────────────────────────+
-   │  CONSUMED                              │   action executed under this card
-   │  audit_history += [decision]           │   decision linked back to card
-   +───────────────────────────────────────+
-                        │
-                        │  publisher activity drifts;
-                        │  CamouflageHint severity rises
-                        v
-   +───────────────────────────────────────+
-   │  RISK-BUMPED                           │   apply_camouflage_assessment
-   │  risk_class advanced                   │   future actions may fail gates
-   +───────────────────────────────────────+
-                        │
-                        │  trust quarantine | trust revoke
-                        v
-   +───────────────────────────────────────+
-   │  REVOKED / QUARANTINED                 │   signed decision receipt
-   │  revocation.status updated             │   propagated to fleet
-   +───────────────────────────────────────+
-                        │
-                        │  fleet release (after remediation)
-                        v
-                   (returns to ACTIVE)
+```mermaid
+stateDiagram-v2
+    [*] --> Seeded: franken-node trust scan
+    Seeded --> Active: trust sync (refresh from OSV)
+    Active --> Consumed: revocation gate passes,<br/>action executes
+    Active --> Refused: revocation frontier stale,<br/>signed refusal receipt
+    Consumed --> RiskBumped: CamouflageHint severity<br/>crosses threshold
+    Active --> RiskBumped: same
+    RiskBumped --> RevokedQuarantined: trust quarantine /<br/>trust revoke
+    Active --> RevokedQuarantined: same
+    Consumed --> RevokedQuarantined: same
+    RevokedQuarantined --> Active: fleet release<br/>(after remediation)
+    Refused --> Active: trust sync --force
 ```
 
 Every transition is recorded in the card's `audit_history` and (for
@@ -971,29 +1028,24 @@ Trust in franken-node is graduated rather than binary. The same
 extension flows through the same set of gates on every action, and the
 gates layer:
 
-```text
-   publisher identity (Ed25519 signing key)
-            |
-            v
-   signed artifact in registry (--signing-key, --version)
-            |
-            v
-   provenance + assurance level check (registry.require_provenance, minimum_assurance_level)
-            |
-            v
-   trust card snapshot (publisher, version, audit history, camouflage)
-            |
-            v
-   revocation freshness gate (SafetyTier vs. frontier age)
-            |
-            v
-   capability scope (audience token + endpoint binding for network actions)
-            |
-            v
-   runtime policy profile (strict | balanced | legacy-risky)
-            |
-            v
-   decision receipt (signed, recorded in evidence ledger)
+```mermaid
+flowchart TD
+    A["Publisher identity<br/>Ed25519 signing key"] --> B["Signed artifact in registry<br/><code>--signing-key</code>, <code>--version</code>"]
+    B --> C["Provenance + assurance check<br/><code>require_provenance</code>, <code>minimum_assurance_level</code>"]
+    C --> D["Trust card snapshot<br/>publisher, version, audit history, camouflage"]
+    D --> E["Revocation freshness gate<br/><code>SafetyTier</code> vs. frontier age"]
+    E --> F["Capability scope<br/>audience token + endpoint binding"]
+    F --> G["Runtime policy profile<br/>strict | balanced | legacy-risky"]
+    G --> H["Decision receipt<br/>signed, linked into evidence ledger"]
+
+    classDef identity fill:#1f6feb,color:#fff,stroke:#0a3b91;
+    classDef storage fill:#5b3cc4,color:#fff,stroke:#3a2780;
+    classDef policy fill:#f0c674,color:#0b1020,stroke:#a8884c;
+    classDef audit fill:#27c93f,color:#0b1020,stroke:#1d8e2c;
+    class A,B identity;
+    class C,D storage;
+    class E,F,G policy;
+    class H audit;
 ```
 
 Each layer can fail closed independently. The gate-by-gate decomposition
@@ -2424,26 +2476,21 @@ The runbook index lives at `docs/runbooks/README.md`.
 between stages. Each output is a deterministic artifact: rerunning the
 same stage on the same input produces the same bytes.
 
-```text
-   source code                            +───────────────────────+
-   (Node / Bun project)  ─────► AUDIT ──► │  migration-audit.json │
-                                           +───────────────────────+
-                                                       │
-                                                       │  findings + recommended transforms
-                                                       v
-                                +───────────────────────────────+
-                                │ migration plan (in-memory)    │
-                                +───────────────────────────────+
-                                                       │
-                                                       │  --apply
-                                                       v
-                                              REWRITE ──► transformed source
-                                                       │   + rollback-plan.json
-                                                       v
-                                              VALIDATE ──► validation receipt
-                                                       │   (conformance + lockstep)
-                                                       v
-                                              ROLLOUT ──► fleet release receipts
+```mermaid
+flowchart LR
+    src["source code<br/>Node / Bun project"] --> audit["AUDIT<br/><code>migrate audit</code>"]
+    audit --> auditOut["migration-audit.json<br/>(SARIF / JSON / text)"]
+    auditOut --> rewrite["REWRITE<br/><code>migrate rewrite --apply</code>"]
+    rewrite --> rewriteOut["transformed source<br/>+ rollback-plan.json"]
+    rewriteOut --> validate["VALIDATE<br/><code>migrate validate</code>"]
+    validate --> validateOut["validation receipt<br/>(conformance + lockstep)"]
+    validateOut --> rollout["ROLLOUT<br/><code>fleet release</code>"]
+    rollout --> rolloutOut["fleet release receipts<br/>(signed, per-zone convergence)"]
+
+    classDef stage fill:#1f6feb,color:#fff,stroke:#0a3b91;
+    classDef artifact fill:#f0c674,color:#0b1020,stroke:#a8884c;
+    class src,audit,rewrite,validate,rollout stage;
+    class auditOut,rewriteOut,validateOut,rolloutOut artifact;
 ```
 
 Stage details:
