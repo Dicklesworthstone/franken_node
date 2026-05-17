@@ -869,18 +869,22 @@ cargo build --release -p frankenengine-node --no-default-features --features eng
 
 A trust card moves through a small set of operationally meaningful
 phases. These labels are descriptive, not enum variants in the source.
-What the source models concretely is the card's `risk_class`,
-`revocation.status`, `audit_history`, `camouflage_assessment`, and
-`source`; the diagram below shows how those fields evolve over the
-lifecycle of a single card.
+What the source models concretely is the card's
+`user_facing_risk_assessment`, `revocation_status`, `audit_history`,
+`camouflage_hints`, and `reputation_trend`; the diagram below shows
+how those fields evolve over the lifecycle of a single card. The
+registry separately validates the card snapshot under a
+`SnapshotSourceContext` (`TrustedFile` for local loads, `UntrustedNetwork`
+for remote refreshes), which picks the validation strategy without
+being stored on the card itself.
 
 ```text
             franken-node trust scan
                         │
                         v
    +───────────────────────────────────────+
-   │  SEEDED                                │   freshly created from package.json
-   │  source = "trusted-file"               │   no risk yet, no audit history
+   │  SEEDED                                │   freshly created from package.json,
+   │  loaded via TrustedFile context        │   no risk yet, no audit history
    +───────────────────────────────────────+
                         │
                         │  trust sync       (refreshes from OSV; adds
@@ -1082,10 +1086,13 @@ hash and validates the signature in constant time.
 
 A trust card is a per-extension record carrying publisher identity, audit
 history, version chain, vulnerability state, camouflage assessment, and
-revocation status. Cards are HMAC-signed snapshots; each snapshot's `source`
-field classifies whether its inputs came from a trusted file
-(operator-managed) or an untrusted network response (refreshed during
-`trust sync`).
+revocation status. Cards are HMAC-signed snapshots; the registry loads
+them under a `SnapshotSourceContext` of either `TrustedFile`
+(operator-managed local loads, lazy validation) or `UntrustedNetwork`
+(remote refreshes during `trust sync`, eager pre-parse signature check
+and a hard JSON size cap). The card itself carries `card_hash` and
+`registry_signature` so its integrity is verifiable regardless of which
+context loaded it.
 
 Camouflage assessment is produced by `security::bpet::camouflage_detector`
 and surfaced through `security::trajectory_gaming::CamouflageHint`, whose
@@ -1125,8 +1132,10 @@ form. The verification path:
 4. Tally successes; require at least `k`. Tally is bounded by `n` and
    uses `saturating_add` to defeat overflow-based bypass.
 
-Used by connector publication artifacts, fleet decision receipts, and
-high-assurance migration artifacts.
+The verification path is the `verify_threshold` / `verify_threshold_cached`
+public API in `security::threshold_sig`; the cached form pre-decodes the
+signer set once and re-uses it across many verifications of the same
+quorum.
 
 ### MMR proofs (Merkle Mountain Range)
 
@@ -1408,7 +1417,7 @@ distinguishes the role categories (signing keys, transport keys, etc.);
 a `KeyRoleBinding` records which key fingerprint maps to which role; a
 `KeyRoleRegistry` rejects any operation that attempts to mix roles.
 
-Why role separation matters operationally:
+Operational consequences:
 
 - A key compromise in one role does not silently compromise another.
   Stealing a transport key cannot be used to sign decision receipts.
@@ -2856,9 +2865,10 @@ behaviors must be explicitly enabled by policy.
 
 A per-extension record carrying publisher identity, risk assessment, audit
 history, version chain, vulnerability state, camouflage assessment, and
-revocation status. Cards are HMAC-signed snapshots, classified by source
-(trusted file vs. untrusted network), and consulted by the runtime before
-risky and dangerous actions.
+revocation status. Cards are HMAC-signed snapshots loaded under a
+`SnapshotSourceContext` (trusted-file vs. untrusted-network, which picks
+the validation strategy), and consulted by the runtime before risky and
+dangerous actions.
 
 ### What is the "counterfactual simulator"?
 
