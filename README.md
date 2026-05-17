@@ -1345,7 +1345,7 @@ replay the incident byte-for-byte. The fields, modeled on the SDK's
 | `verifier_identity` | The identity that *produced* the bundle (the runtime), not the consumer. |
 | `timeline` | Ordered `TimelineEvent` sequence with `sequence_number`, `event_id`, `timestamp`, `event_type`, `payload`, `state_snapshot`, `causal_parent`, `policy_version` per event. |
 | `initial_state_snapshot` | The captured runtime state at the start of the window. |
-| `evidence_refs` | Pointers into the evidence ledger (`evidence://…`) for each gate decision in the window. |
+| `evidence_refs` | Opaque string pointers (path-like or registry-defined IDs) for each gate decision's evidence in the window. |
 | `artifacts` | `BTreeMap<String, BundleArtifact>` carrying any referenced trust cards, capability tokens, decision receipts, or registry payloads inline. |
 | `chunks` | `BundleChunk` segments enabling partial verification when the timeline is large. |
 | `metadata` | Operator-supplied annotations (incident severity, owner, related tickets). |
@@ -1479,7 +1479,7 @@ signer / chain / signature triple.
 | `output_hash` | Canonical hash over the decision's outputs |
 | `decision` | Outcome enum: `Approved`, `Denied`, or `Escalated` |
 | `rationale` | Human-readable explanation for the outcome |
-| `evidence_refs` | List of `evidence://…` pointers into the evidence ledger |
+| `evidence_refs` | List of opaque string pointers (path-like or registry-defined IDs) backing this decision |
 | `policy_rule_chain` | Ordered list of policy rule IDs that produced this outcome |
 | `confidence` | f64 confidence score (canonicalized so NaN/Inf never appear) |
 | `rollback_command` | The exact command an operator would run to reverse the decision |
@@ -1784,7 +1784,7 @@ tests assert them against goldens.
   "output_hash": "sha256:def…",
   "decision": "approved",
   "rationale": "incident INC-2026-0007 remediated and verified",
-  "evidence_refs": ["evidence://INC-2026-0007/timeline", "evidence://INC-2026-0007/quarantine"],
+  "evidence_refs": ["INC-2026-0007/timeline.jsonl", "INC-2026-0007/quarantine-receipt.json"],
   "policy_rule_chain": ["fleet.release.requires_remediation", "fleet.release.requires_operator"],
   "confidence": 0.99,
   "rollback_command": "franken-node trust quarantine --artifact …",
@@ -1831,7 +1831,7 @@ shape is the canonical-key-order serialization of
   "audit_history": [
     {
       "timestamp": "2026-05-15T09:11:02Z",
-      "event_code": "TC-AUDIT-001",
+      "event_code": "TRUST_CARD_UPDATED",
       "detail": "scan completed",
       "trace_id": "trust-scan-2026-05-15"
     }
@@ -1909,7 +1909,7 @@ are `null` unless `--promote` was supplied with a signing key:
   "bundle_created_at": "2026-05-16T14:22:31.118Z",
   "bundle_integrity_hash": "sha256:abc…",
   "policy": "strict",
-  "evidence_refs": ["evidence://INC-2026-0042/timeline"],
+  "evidence_refs": ["INC-2026-0042/timeline.jsonl"],
   "total_decisions": 4711,
   "changed_decisions": 17,
   "severity_delta": -3,
