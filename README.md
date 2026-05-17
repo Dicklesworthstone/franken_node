@@ -1235,28 +1235,48 @@ infected nodes, and a saturating step counter. The simulator is
 **deterministic**: a fixed seed and profile yield an identical
 `SimulationTrace`, so a snapshot can be replayed bit-exactly.
 
-Termination is classified by `TerminationReason` (e.g. saturation, step
-budget exhausted, deterministic halt) and reported alongside the
-trajectory. The output is consumed by `dgis::fragility_model` (whose
+Termination is classified by `TerminationReason` and reported alongside
+the trajectory. The simulator sits next to two complementary DGIS
+modules in the same crate: `dgis::fragility_model` (whose
 `FragilityFactor`, `FragilityScore`, `MaintainerProfile`, and
-`PublisherProfile` types classify per-node brittleness) and by
-`dgis::spof_detection` to pinpoint single points of failure. The full
-chain feeds the BPET evolution risk scorer and the trust-card risk-bump
-logic.
+`PublisherProfile` types classify per-node brittleness against
+maintainer / publisher signals) and `dgis::spof_detection` (which
+consumes the fragility model to pinpoint single points of failure).
+A separate `security::dgis::update_copilot` module produces
+`TopologyRiskMetrics` that the BPET subsystem can ingest via
+`security::bpet::dgis_fusion`; the BPET evolution risk scorer described
+below operates on those topology metrics rather than on the contagion
+simulator's `InfectionState` directly.
 
 ### BPET evolution risk scorer
 
-`security::bpet` computes a per-extension evolution risk score from:
+`security::bpet::evolution_risk_scorer::compute_risk_score` takes a
+`FeatureVector` of four normalized features (each in `[0.0, 1.0]`):
 
-- phenotype features (publication cadence, dependent fan-out, maintainer
-  churn)
-- DGIS contagion vector at the current graph state
-- ATC reciprocity (whether the publisher contributes proportionally to
-  the consumption tier it receives)
+- `drift` — distributional drift of the observed behavior
+- `regime_shift` — probability that behavior has crossed a regime
+  boundary
+- `hazard` — current hazard rate from the extension's reliability
+  baseline
+- `provenance` — confidence in the publisher / supply-chain provenance
+  inputs
 
-The score is consumed by `migration::bpet_migration_gate` during rollout:
-a sufficient delta vs. the prior version raises the migration's required
-assurance level before the gate will admit it.
+It applies a `WeightingPolicy` (also four-dimensional, validated to be
+finite, non-negative, and sum-to-one within `SUM_TOLERANCE`) and emits
+an `ExplanationVector` plus a `ConfidenceInterval`. Companion modules
+extend the surface: `phenotype_extractor` (lifts evidence into
+`ExtractedFeature::{Known, Partial, Unknown}` annotations), `dgis_fusion`
+(folds `security::dgis::update_copilot::TopologyRiskMetrics` into the
+scorer's inputs), `trust_surface_integration` (mutates trust cards via
+`trust_card_mutation_from_guidance` and produces adversary-posterior
+updates), and `federation::bpet_atc_bridge` (carries the scorer output
+into the federation layer).
+
+`migration::bpet_migration_gate` is an independent admission gate that
+operates on `TrajectorySnapshot`/`TrajectoryDelta` inputs via
+`evaluate_admission` and `evaluate_rollout_health`; a sufficient delta
+versus the prior version raises the migration's required assurance level
+before the gate will admit it.
 
 ### VEF execution receipts
 
