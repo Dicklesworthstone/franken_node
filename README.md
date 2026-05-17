@@ -1227,9 +1227,11 @@ an artifact:
 
 ### DGIS contagion simulator
 
-`dgis::contagion_simulator` ingests a dependency graph (via
-`dgis::graph_ingestion`) and simulates adversarial spread against a
-configured `ContagionProfile`. Each tick advances an `InfectionState`
+`dgis::contagion_simulator::simulate` takes a `ContagionGraph` (defined
+in the sibling module `dgis::contagion_graph` with `ContagionEdge` and
+`EdgeKind` types) plus an `initial_infected: &[NodeId]` slice and a
+`SimulatorConfig`, and simulates adversarial spread against a configured
+`ContagionProfile`. Each tick advances an `InfectionState`
 tracking per-node exposure (`exposure_of(node)`), the set of currently
 infected nodes, and a saturating step counter. The simulator is
 **deterministic**: a fixed seed and profile yield an identical
@@ -1775,7 +1777,7 @@ tests assert them against goldens.
   "action_name": "fleet.release",
   "actor_identity": "ops-1",
   "timestamp": "2026-05-16T14:22:31.118Z",
-  "signature_version": "v1",
+  "signature_version": "ed25519-v1",
   "nonce": "9d4f3a…",
   "audience": "fleet:prod-us-east",
   "input_hash": "sha256:abc…",
@@ -1875,7 +1877,7 @@ serializes to this shape, with `verdict` rendered as `"identical"` or
 
 ```json
 {
-  "schema_version": "v1",
+  "schema_version": "ttr-v1.0",
   "trace_id": "INC-2026-0042",
   "verdict": "identical",
   "steps_replayed": 4711,

@@ -180,9 +180,11 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
   tracker, conformance gates, virtual transport; bd-qkjac.1).
 - Bead closer discipline (bd-8vo8v) enforced repo-wide: a close_reason must
   be ≥ 80 chars and cite at least one of a commit SHA, PR, or file:line;
-  `bug`/`feature` types must also cite a passing test. Audit found 18 of
-  2,944 closed beads (2.4%) genuinely false-closed and 37% with thin
-  reasons; see `beads_compliance_audit/closer_discipline_memo.md`.
+  `bug`/`feature` types must also cite a passing test. The 2026-05-11
+  compliance audit recalibrated 737 of 2,944 closed beads and found 18
+  genuinely false-closed (2.4% of the recalibration sample); a separate
+  scan of all 3,627 closed beads in scope found 1,354 (37%) with
+  thin or empty reasons. See `beads_compliance_audit/closer_discipline_memo.md`.
 - Mass UBS-criticals closure (bd-dwb9i): ~19 commits hardening
   supply-chain, trust-card, DGIS, BPET, connector, federation, policy, and
   transport modules against unbounded growth, overflow, and type confusion.
