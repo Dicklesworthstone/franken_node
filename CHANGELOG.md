@@ -16,44 +16,44 @@ shorthash are reachable with `git show <hash>`.
 ## [Unreleased]
 
 This window covers work landed on `main` between the previous changelog cut
-(2026-04-25) and 2026-05-16 — roughly 1,500+ commits across security
+(2026-04-25) and 2026-05-16: roughly 1,500+ commits across security
 hardening, validation infrastructure, operator tooling, and CI gate work.
 
 ### Added
 
 #### Operator tooling and CLI
 
-- `franken-node doctor workspace-pressure` — new doctor subcommand that reads
+- `franken-node doctor workspace-pressure`: new doctor subcommand that reads
   disk, memory, build-fleet, and RCH-queue signals and routes them through a
   policy decision (balanced / conservative / permissive thresholds), emitting
   recommended operator actions in JSON or human form. Implementation lives in
   `crates/franken-node/src/ops/doctor.rs` and is documented in
   `BD_P9MPD5_IMPLEMENTATION.md` (bd-p9mpd.5).
-- `franken-node ops resource-governor` — advisory subcommand that takes a
+- `franken-node ops resource-governor`: advisory subcommand that takes a
   process snapshot plus requested/active proof classes, RCH queue depth, and
   target-dir usage, and answers whether validation should run, defer, or
   deduplicate (target-dir lease planner, validation capacity-market bids).
 - `franken-node ops validation-readiness`, `ops validation-closeout`,
-  `ops config-audit`, and `ops metrics` — full operator surface for the
+  `ops config-audit`, and `ops metrics`: full operator surface for the
   validation broker / proof-cache lifecycle, with Prometheus-shaped metrics
   output (`ops/validation_broker.rs`, `ops/evidence_index.rs`).
-- `franken-node proofs queue status` and `franken-node proofs workers restart`
-  — operator entry points into the proof pipeline. The `restart` form fails
+- `franken-node proofs queue status` and `franken-node proofs workers restart`:
+  operator entry points into the proof pipeline. The `restart` form fails
   closed without `--operator-id`, `--operator-role`, `--reason`, and
   `--confirm` (`cli.rs::ProofWorkersCommand`).
-- `franken-node safe-mode {enter,status,exit}` — operator-driven lifecycle
+- `franken-node safe-mode {enter,status,exit}`: operator-driven lifecycle
   state machine backed by `runtime::safe_mode::SafeModeController`. Entry
   requires `--reason`, `--operator-id`, and `--trust-state-hash`; exit
   requires `--confirm` plus per-condition flags
   (`trust-state-consistent`, `no-unresolved-incidents`,
   `evidence-ledger-intact`).
-- `franken-node doctor close-condition` and `doctor evidence-readiness` — new
+- `franken-node doctor close-condition` and `doctor evidence-readiness`: new
   doctor leaves that emit dual-oracle close-condition receipts and report on
   evidence readiness from broker snapshots.
-- `franken-node debug {explain,evidence,trace}` — operator-facing surfaces for
+- `franken-node debug {explain,evidence,trace}`: operator-facing surfaces for
   walking a signed decision-receipt through verification, inspecting verifier
   evidence artifacts, and tracing policy evaluation steps.
-- `franken-node fleet agent` — long-running fleet-agent loop with `--zone`,
+- `franken-node fleet agent`: long-running fleet-agent loop with `--zone`,
   `--poll-interval-secs`, `--max-cycles`, and `--once` flags for embedded
   control-plane workers.
 - Cleanup executor with audit receipts (bd-p9mpd.7): age- and extension-aware
@@ -129,17 +129,17 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
 
 #### CI and gates
 
-- `.github/workflows/closer-discipline-gate.yml` — blocks merges with thin
+- `.github/workflows/closer-discipline-gate.yml`: blocks merges with thin
   or fabricated bead close-reasons, backed by
   `scripts/check_close_reason_quality.py`.
-- `.github/workflows/coverage-report.yml` — aggregated test coverage report.
-- `.github/workflows/compat-corpus-pass-gate.yml` — compatibility corpus
+- `.github/workflows/coverage-report.yml`: aggregated test coverage report.
+- `.github/workflows/compat-corpus-pass-gate.yml`: compatibility corpus
   threshold gate.
-- `.github/workflows/execution-normalization-gate.yml` — deterministic
+- `.github/workflows/execution-normalization-gate.yml`: deterministic
   execution / proof-normalization gate.
-- `.github/workflows/lockstep-runner-release-gate.yml` — lockstep runner
+- `.github/workflows/lockstep-runner-release-gate.yml`: lockstep runner
   release readiness.
-- `.github/workflows/mutants-gate.yml` — mutation-testing gate via
+- `.github/workflows/mutants-gate.yml`: mutation-testing gate via
   `cargo-mutants`.
 - Closer-discipline gate hooks added across 19+ `scripts/check_*.py`
   validators, plus the frankensqlite / policy / profile / tiered-trust
@@ -151,12 +151,12 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
   `docs/specs/dgis_quarantine_orchestration.md`,
   `docs/specs/validation_proof_explanation_bundle.md` (new validator
   contract).
-- `docs/validation/proof-lane-readiness-blocker-runbook.md` — operator
+- `docs/validation/proof-lane-readiness-blocker-runbook.md`: operator
   diagnostic playbook.
-- `docs/security/bpet_adversarial_playbook.md` — BPET adversary kinds,
+- `docs/security/bpet_adversarial_playbook.md`: BPET adversary kinds,
   detection signatures, parametric ramp curves, and detector-threshold
   tuning.
-- `beads_compliance_audit/closer_discipline_memo.md` (2026-05-12) —
+- `beads_compliance_audit/closer_discipline_memo.md` (2026-05-12)
   documents the false-closed bead anti-pattern and three-fix roadmap
   (checklist, pre-commit guard, CI gate).
 - BD implementation memos at repo root:
@@ -177,7 +177,7 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
   for predictable allocation and cache behavior (bd-17nu4).
 - Standardized `lock_utils` adoption across timing-sensitive test harnesses
   (ATC extractors, sybil proofs, degraded mode, sandbox policy, obligation
-  tracker, conformance gates, virtual transport — bd-qkjac.1).
+  tracker, conformance gates, virtual transport; bd-qkjac.1).
 - Bead closer discipline (bd-8vo8v) enforced repo-wide: a close_reason must
   be ≥ 80 chars and cite at least one of a commit SHA, PR, or file:line;
   `bug`/`feature` types must also cite a passing test. Audit found 18 of
@@ -188,9 +188,11 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
   transport modules against unbounded growth, overflow, and type confusion.
 - Engine dispatcher consumes the new `CapabilityProfile` getter API rather
   than direct field access.
-- `franken-node proof-pipeline` operator surface exposes proof creation,
-  batching, and transport telemetry with policy-visible lane assignment and
-  fallback logic.
+- Proof-pipeline operator surface (bd-rm6ex): new `ops/proof_pipeline.rs`
+  module plus `api/proof_pipeline_routes.rs` expose proof creation,
+  batching, and transport telemetry with policy-visible lane assignment
+  and fallback logic. The CLI surface lives under
+  `franken-node proofs {queue status, workers restart}`.
 - Dropped vendored `transplant/` (pi_agent_rust snapshot) and surrounding
   drift-detect infrastructure once cross-repo drift validation
   (bd-7vk3p) shipped.
@@ -200,7 +202,7 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
 - Preserved `TempDir` lifetime across the fleet-quarantine test scope so
   state is not cleaned up underneath the assertion phase.
 - Corrected JSON syntax in the decision-receipt golden fixture and
-  improved `usize → u64` conversion in VEF schema-conformance tests.
+  improved `usize` to `u64` conversion in VEF schema-conformance tests.
 - Hardened report generation against `chrono::Duration` conversion failure.
 - Closed a nonce-replay timing window in `control_plane::audience_token` by
   pulling fast-path comparison through `security::constant_time::ct_eq`.
@@ -213,8 +215,9 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
 - `time_travel_engine` f64 ratio checks: added `is_finite` guards and
   saturation around arithmetic that could overflow at extreme replay
   windows.
-- VEF receipt canonical hash schema migration v2 → v3: dropped a legacy
-  domain+length prefix that produced cross-version mismatch on replay.
+- VEF receipt canonical hash schema migration from v2 to v3: dropped a
+  legacy domain+length prefix that produced cross-version mismatch on
+  replay.
 - Bounded claim byte capacity before computing the binding hash, closing a
   DoS gap on adversarial claims.
 - Sanitized `signing_key` Debug output in `QuarantineController` to prevent
@@ -329,8 +332,8 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
 - RCH fixture-replay E2E covering 8 failure modes (remote success, SSH
   timeout E104, missing toolchain, filesystem pressure, local fallback
   refusal, cargo contention deferral, source-only blocking, product
-  compile failure) — `tests/e2e_rch_validation_fixture_replay.rs`,
-  bd-sh95a, `BD_SH95A_IMPLEMENTATION.md`.
+  compile failure) in `tests/e2e_rch_validation_fixture_replay.rs`
+  (bd-sh95a, `BD_SH95A_IMPLEMENTATION.md`).
 
 ### Tooling and CI
 
@@ -359,4 +362,4 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
   (`docs/ARCHITECTURE_OVERVIEW.md`) are the authoritative scope and shape
   documents; the README now points at them rather than restating policy.
 
-[Unreleased]: https://github.com/Dicklesworthstone/franken_node/compare/HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/franken_node/commits/main
