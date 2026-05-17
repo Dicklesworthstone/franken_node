@@ -1764,27 +1764,42 @@ tests assert them against goldens.
 }
 ```
 
-**Trust card** (`trust card`, `trust-card export`):
+**Trust card** (`trust card`, `trust-card export`) — the on-the-wire
+shape mirrors `supply_chain::trust_card::TrustCard`:
 
 ```json
 {
-  "schema_version": 2,
-  "extension_id": "npm:@example/plugin",
-  "version": "2.4.1",
-  "publisher": { "id": "did:example:abc", "verified": true },
-  "risk_class": "medium",
-  "camouflage_assessment": { "severity": "low", "signals": [] },
-  "revocation": { "status": "active", "frontier_at": "2026-05-16T12:00:00Z" },
-  "audit_history": [ { "at": "2026-05-15T09:11:02Z", "kind": "scan", "result": "pass" } ],
-  "source": "trusted-file"
+  "schema_version": "trust-card-v1.0",
+  "trust_card_version": 14,
+  "previous_version_hash": "sha256:1234…",
+  "extension": { "name": "@example/plugin", "version": "2.4.1", "ecosystem": "npm" },
+  "publisher": { "did": "did:example:abc", "verified": true },
+  "certification_level": "standard",
+  "capability_declarations": [],
+  "behavioral_profile": { "egress_summary": "documented", "fs_summary": "documented" },
+  "revocation_status": { "status": "active", "frontier_at": "2026-05-16T12:00:00Z" },
+  "provenance_summary": { "attestation_present": true },
+  "reputation_score_basis_points": 7350,
+  "reputation_trend": "stable",
+  "active_quarantine": false,
+  "dependency_trust_summary": [],
+  "last_verified_timestamp": "2026-05-15T09:11:02Z",
+  "user_facing_risk_assessment": { "level": "medium", "rationale": "…" },
+  "audit_history": [ { "at": "2026-05-15T09:11:02Z", "event_code": "TC-AUDIT-001" } ],
+  "derivation_evidence": null,
+  "camouflage_hints": [],
+  "card_hash": "sha256:5678…",
+  "registry_signature": "<HMAC-SHA-256>"
 }
 ```
 
-**Lockstep verdict** (`verify lockstep`):
+**Lockstep verdict** (`verify lockstep`) — illustrative shape; the
+authoritative contract lives in `docs/L1_LOCKSTEP_RUNNER.md` and the
+corresponding tests under `tests/conformance/`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": "v1",
   "runtimes": ["node", "bun", "franken-node"],
   "status": "divergent",
   "divergences": [
@@ -1819,17 +1834,23 @@ typed `DivergenceKind` (`output_mismatch`, `side_effect_mismatch`,
 `full_mismatch`, or `clock_drift` with `expected_ns`, `actual_ns`,
 `drift_ns`, `tolerance_ns`).
 
-**Counterfactual diff** (`incident counterfactual`):
+**Counterfactual diff** (`incident counterfactual`) — the operator-
+facing CLI summary mirrors `IncidentCounterfactualCliSummary` in
+`crates/franken-node/src/main.rs` and pins the schema to
+`"franken-node/incident-counterfactual-report/v1"`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema": "franken-node/incident-counterfactual-report/v1",
   "bundle_id": "INC-2026-0042.fnbundle",
-  "baseline_policy": "balanced",
-  "counterfactual_policy": "strict",
-  "decisions_changed": 17,
-  "actions_blocked_under_counterfactual": ["network.fetch:s3.aws.com"],
-  "evidence_emitted_only_under_counterfactual": ["evidence://ssrf-block/…"]
+  "incident_id": "INC-2026-0042",
+  "bundle_created_at": "2026-05-16T14:22:31.118Z",
+  "bundle_integrity_hash": "sha256:abc…",
+  "bundle_policy_version": "balanced/v1",
+  "evidence_refs": ["evidence://INC-2026-0042/timeline"],
+  "total_decisions": 4711,
+  "changed_decisions": 17,
+  "severity_delta": -3
 }
 ```
 
