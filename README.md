@@ -1434,15 +1434,20 @@ regressions surface in CI.
 ## Key-Role Separation
 
 `control_plane::key_role_separation` enforces that the same Ed25519 key
-cannot serve two distinct roles in the protocol. A `KeyRole` enum
-distinguishes the role categories (signing keys, transport keys, etc.);
-a `KeyRoleBinding` records which key fingerprint maps to which role; a
-`KeyRoleRegistry` rejects any operation that attempts to mix roles.
+cannot serve two distinct roles in the protocol. The `KeyRole` enum has
+four variants — `Signing` (authenticate control-plane messages and
+attestations), `Encryption` (protect confidential payloads in transit
+and at rest), `Issuance` (create delegation tokens and authority
+certificates), and `Attestation` (sign operator attestation payloads),
+each carrying a fixed 2-byte role tag. A `KeyRoleBinding` records which
+key fingerprint maps to which role; a `KeyRoleRegistry` rejects any
+operation that attempts to mix roles.
 
 Operational consequences:
 
 - A key compromise in one role does not silently compromise another.
-  Stealing a transport key cannot be used to sign decision receipts.
+  Stealing an `Encryption` key cannot be used to issue `Signing`
+  artifacts like decision receipts.
 - Role binding is enforced in constant time so a probe cannot leak
   whether a given key is "almost" the wrong role.
 - The registry emits a typed `KeyRoleSeparationError` on every refused

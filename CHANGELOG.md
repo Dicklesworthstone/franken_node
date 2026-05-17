@@ -60,10 +60,12 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
   cleanup driven through `ops/cleanup_executor.rs` and durable
   `storage/cleanup_receipts.rs`, with dry-run/execute modes and full
   store→search→retrieve→delete lifecycle. See `BD_P9MPD7_IMPLEMENTATION.md`.
-- Flight-recorder hygiene tracking (bd-iwa3z): `FlightRecorderTargetDir` and
-  `FlightRecorderSyncRootHygiene` classify build sync-roots as
-  `clean/stale/dirty/mixed/unknown` and surface age/size analysis through the
-  validation broker (`ops/validation_broker.rs`).
+- Flight-recorder hygiene tracking (bd-iwa3z): `FlightRecorderTargetDir`
+  wraps a `FlightRecorderTargetDirHygiene` (status enum
+  `clean/stale/dirty/mixed/unknown`) plus a `FlightRecorderSyncRootHygiene`
+  (status enum `clean/modified/untracked/conflicted/unknown`), and
+  surfaces artifact-count, stale-artifact-count, and size analysis
+  through the validation broker (`ops/validation_broker.rs`).
   See `BD_IWA3Z_IMPLEMENTATION.md`.
 
 #### Validation infrastructure
