@@ -1764,34 +1764,60 @@ tests assert them against goldens.
 }
 ```
 
-**Trust card** (`trust card`, `trust-card export`) — the on-the-wire
-shape mirrors `supply_chain::trust_card::TrustCard`:
+**Trust card** (`trust card`, `trust-card export`). The on-the-wire
+shape is the canonical-key-order serialization of
+`supply_chain::trust_card::TrustCard` (`trust-card export` requires
+`--json` and pipes through `to_canonical_json`):
 
 ```json
 {
   "schema_version": "trust-card-v1.0",
   "trust_card_version": 14,
   "previous_version_hash": "sha256:1234…",
-  "extension": { "name": "@example/plugin", "version": "2.4.1", "ecosystem": "npm" },
-  "publisher": { "did": "did:example:abc", "verified": true },
-  "certification_level": "standard",
+  "extension": { "extension_id": "npm:@example/plugin", "version": "2.4.1" },
+  "publisher": { "publisher_id": "pub-example", "display_name": "Example Org" },
+  "certification_level": "silver",
   "capability_declarations": [],
-  "behavioral_profile": { "egress_summary": "documented", "fs_summary": "documented" },
-  "revocation_status": { "status": "active", "frontier_at": "2026-05-16T12:00:00Z" },
-  "provenance_summary": { "attestation_present": true },
+  "behavioral_profile": {
+    "network_access": true,
+    "filesystem_access": false,
+    "subprocess_access": false,
+    "profile_summary": "documented"
+  },
+  "revocation_status": { "status": "active" },
+  "provenance_summary": {
+    "attestation_level": "verified",
+    "source_uri": "https://registry.example/@example/plugin/2.4.1",
+    "artifact_hashes": ["sha256:abc…"],
+    "verified_at": "2026-05-15T09:11:02Z"
+  },
   "reputation_score_basis_points": 7350,
   "reputation_trend": "stable",
   "active_quarantine": false,
   "dependency_trust_summary": [],
   "last_verified_timestamp": "2026-05-15T09:11:02Z",
-  "user_facing_risk_assessment": { "level": "medium", "rationale": "…" },
-  "audit_history": [ { "at": "2026-05-15T09:11:02Z", "event_code": "TC-AUDIT-001" } ],
+  "user_facing_risk_assessment": { "level": "medium", "summary": "…" },
+  "audit_history": [
+    {
+      "timestamp": "2026-05-15T09:11:02Z",
+      "event_code": "TC-AUDIT-001",
+      "detail": "scan completed",
+      "trace_id": "trust-scan-2026-05-15"
+    }
+  ],
   "derivation_evidence": null,
   "camouflage_hints": [],
   "card_hash": "sha256:5678…",
   "registry_signature": "<HMAC-SHA-256>"
 }
 ```
+
+`revocation_status` is a serde-tagged enum: `{"status": "active"}` for
+active cards, or `{"status": "revoked", "reason": "...", "revoked_at":
+"..."}` for revoked ones. `certification_level` is one of `unknown`,
+`bronze`, `silver`, `gold`, `platinum`; `reputation_trend` is one of
+`improving`, `stable`, `declining`; `user_facing_risk_assessment.level`
+is one of `low`, `medium`, `high`, `critical`.
 
 **Lockstep verdict** (`verify lockstep`) — illustrative shape; the
 authoritative contract lives in `docs/L1_LOCKSTEP_RUNNER.md` and the
@@ -1829,28 +1855,38 @@ serializes to this shape, with `verdict` rendered as `"identical"` or
 }
 ```
 
-When the verdict is `"diverged"`, each entry in `divergences` carries a
-typed `DivergenceKind` (`output_mismatch`, `side_effect_mismatch`,
-`full_mismatch`, or `clock_drift` with `expected_ns`, `actual_ns`,
-`drift_ns`, `tolerance_ns`).
+For a divergent replay, the `verdict` field serializes as
+`{"diverged": <n>}` (the `Diverged(usize)` variant; external tagging
+under `#[serde(rename_all = "snake_case")]`) and the `divergences`
+array carries one or more entries, each with a typed `DivergenceKind`:
+`output_mismatch`, `side_effect_mismatch`, `full_mismatch`, or
+`clock_drift` with `expected_ns`, `actual_ns`, `drift_ns`,
+`tolerance_ns`.
 
-**Counterfactual diff** (`incident counterfactual`) — the operator-
-facing CLI summary mirrors `IncidentCounterfactualCliSummary` in
+**Counterfactual diff** (`incident counterfactual`). The structured
+report is built by `incident_counterfactual_report_json` in
 `crates/franken-node/src/main.rs` and pins the schema to
-`"franken-node/incident-counterfactual-report/v1"`:
+`"franken-node/incident-counterfactual-report/v1"`. Promotion fields
+are `null` unless `--promote` was supplied with a signing key:
 
 ```json
 {
-  "schema": "franken-node/incident-counterfactual-report/v1",
+  "schema_version": "franken-node/incident-counterfactual-report/v1",
+  "timestamp": "2026-05-16T14:22:31.118Z",
   "bundle_id": "INC-2026-0042.fnbundle",
   "incident_id": "INC-2026-0042",
   "bundle_created_at": "2026-05-16T14:22:31.118Z",
   "bundle_integrity_hash": "sha256:abc…",
-  "bundle_policy_version": "balanced/v1",
+  "policy": "strict",
   "evidence_refs": ["evidence://INC-2026-0042/timeline"],
   "total_decisions": 4711,
   "changed_decisions": 17,
-  "severity_delta": -3
+  "severity_delta": -3,
+  "counterfactual_digest": "sha256:def…",
+  "counterfactual": { },
+  "promotion_contract": null,
+  "promotion_contract_digest": null,
+  "promotion_signature": null
 }
 ```
 
