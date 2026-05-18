@@ -247,26 +247,41 @@ pub enum Ed25519Error {
 
 ## Migration Strategy
 
-### Phase 1: Core Trait Implementation
-- Implement traits in new `crates/franken-node/src/crypto/` module
-- Add comprehensive test suite with security pattern validation
-- Verify trait API ergonomics with proof-of-concept usage
+### Phase 1: Core Trait Implementation — ✅ Complete (2026-05-01)
 
-### Phase 2: Consumer Module Updates  
-- **ed25519_verify**: Replace direct Ed25519 calls with `Ed25519Scheme` trait
-- **decision_receipt**: Migrate to `CryptoSigner` for receipt signing
-- **remote_cap**: Update capability verification to use trait abstractions
-- **replay_bundle**: Modernize bundle integrity checking
+Implemented under `crates/franken-node/src/crypto/`:
+- `mod.rs` — public surface (`SignatureScheme`, `CryptoSigner`, `KeyMaterial`, `Ed25519Scheme`, `Ed25519Signer`, `Ed25519Error`).
+- `schemes.rs` — `SignatureScheme` trait + `Ed25519Scheme` impl with `ED25519_SIGNATURE_PREIMAGE_DOMAIN = b"ed25519_signature_v1:"` and length-prefixed canonical inputs.
+- `signer.rs` — `CryptoSigner` trait + `Ed25519Signer` with built-in security patterns.
+- `key_material.rs` — `KeyMaterial` trait with secret-zeroization guarantees.
+- `error.rs` — typed errors implementing `std::error::Error`.
+- `tests.rs` — round-trip, domain-separation, and constant-time tests.
 
-### Phase 3: Security Hardening
-- Audit all crypto operations for pattern compliance
-- Add fuzzing test harnesses for trait implementations  
-- Performance benchmarking vs. direct crypto library calls
+The ergonomics proof-of-concept lives in the `tests.rs` test suite. No other module in the crate currently routes its signature path through these traits; Phase 2 covers that migration.
 
-### Phase 4: Advanced Features
-- Add support for additional signature schemes (P-256, etc.)
-- Implement hardware security module (HSM) key material backends
-- Add crypto agility for scheme migration
+### Phase 2: Consumer Module Updates — beads filed 2026-05-18
+
+| Module | Bead | Status |
+|---|---|---|
+| `security/decision_receipt.rs` | [`bd-dwx4l`](../../.beads/) | open |
+| `security/remote_cap.rs` (single-signer paths only; threshold-sig stays in `security::threshold_sig`) | [`bd-acvur`](../../.beads/) | open, blocked-by `bd-dwx4l` |
+| `tools/replay_bundle.rs` (the tool side; the SDK side at `sdk/verifier/src/bundle.rs` stays independent per the engine-split contract) | [`bd-lbnkf`](../../.beads/) | open, blocked-by `bd-dwx4l` |
+
+**Signature-compat consideration shared by all three migrations.** A naive migration that pipes the existing canonical preimage through `Ed25519Scheme::sign_with_domain` adds the wrapper domain (`b"ed25519_signature_v1:"`) plus length-prefix framing in front of bytes that are already canonically domain-separated and length-prefixed by the consumer module. That changes the bytes Ed25519 actually signs, which invalidates every existing signed `Receipt`, capability token, and `.fnbundle` in the wild and breaks every golden in `tests/golden/`.
+
+`bd-dwx4l` therefore introduces a `sign_raw` / `verify_raw` API on `Ed25519Scheme` (or a peer `RawSignatureScheme` trait) that bypasses the wrapper domain and length-prefix framing. Consumer modules that already do their own canonicalization use the raw path, getting the trait benefit (algorithm agility, consistent error handling, unified key material) without changing on-the-wire bytes. New consumers that have no canonical layer of their own use the default `sign_with_domain` and inherit the wrapper.
+
+### Phase 3: Security Hardening — bead filed 2026-05-18
+
+Tracked as [`bd-rcscw`](../../.beads/) (blocked-by `bd-dwx4l`, `bd-acvur`, `bd-lbnkf`). Covers:
+
+- Audit every crypto call site for the four invariants: constant-time comparison, domain-separator coverage, length-prefixed canonical inputs, saturating arithmetic on counters/sequences/timestamps in crypto paths.
+- New fuzz targets under `fuzz/fuzz_targets/`: `fuzz_crypto_scheme_roundtrip`, `fuzz_crypto_scheme_cross_domain`, `fuzz_crypto_signer_chain`.
+- Criterion benchmark `crypto_scheme_bench` proving the zero-cost-abstraction claim within 5% of direct `ed25519_dalek` calls.
+
+### Phase 4: Advanced Features — deferred
+
+Not yet scoped. When the time comes for additional schemes (P-256), HSM-backed `KeyMaterial`, or crypto agility for scheme migration, file the bead under `bd-18dd1` as a Phase 4 sub-tree.
 
 ## Testing Strategy
 
@@ -348,15 +363,21 @@ thiserror = "1.0"
 
 ## Follow-on Work
 
-This design phase creates the foundation for:
-- **bd-TBD**: Implement core crypto traits module
-- **bd-TBD**: Migrate ed25519_verify to trait abstractions  
-- **bd-TBD**: Update decision_receipt crypto operations
-- **bd-TBD**: Modernize remote_cap signature verification
-- **bd-TBD**: Refactor replay_bundle integrity checking
+This design phase created the foundation. Filed beads:
 
-Each migration bead will include:
-- Module-specific trait integration
-- Security pattern validation  
-- Performance benchmarking
-- Comprehensive test coverage
+| Phase | Item | Bead | Status |
+|---|---|---|---|
+| 1 | Implement core crypto traits module | (rolled into `bd-18dd1`) | ✅ closed 2026-05-01 |
+| 2 | Migrate `security::decision_receipt` to traits | `bd-dwx4l` | open |
+| 2 | Migrate `security::remote_cap` single-signer paths to traits | `bd-acvur` | open, blocked-by `bd-dwx4l` |
+| 2 | Migrate `tools::replay_bundle` tool-side to traits | `bd-lbnkf` | open, blocked-by `bd-dwx4l` |
+| 3 | Crypto audit + fuzz + Criterion bench | `bd-rcscw` | open, blocked-by Phase 2 |
+| 4 | P-256, HSM-backed `KeyMaterial`, scheme migration agility | (deferred, not yet scoped) | — |
+
+The "ed25519_verify" item from earlier drafts of this spec was aspirational; no such module exists in the crate. The relevant work is absorbed into the three Phase 2 migrations above (each consumer currently uses direct `ed25519_dalek` calls inline).
+
+Each migration bead includes:
+- Module-specific trait integration with **signature-compat preservation** (see Phase 2 above).
+- Security pattern validation (constant-time, domain separators, length-prefixed inputs, saturating arithmetic).
+- Re-running existing goldens to prove byte-identical canonical preimages.
+- A new integration test asserting the migration path (trait-mediated signature matches pre-migration golden bytes).
