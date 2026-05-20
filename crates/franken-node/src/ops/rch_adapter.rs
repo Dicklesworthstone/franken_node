@@ -37,6 +37,8 @@ const MAX_REDACTED_ENV_KEYS: usize = 256;
 const MAX_INVOCATION_ARGV: usize = 128;
 /// Maximum environment entries in an RCH invocation.
 const MAX_INVOCATION_ENV_ENTRIES: usize = 256;
+/// Maximum worker-id bytes accepted from remote RCH output or attestations.
+const MAX_WORKER_ID_LEN: usize = 128;
 
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
@@ -57,6 +59,20 @@ fn option_str_ct_eq(left: Option<&str>, right: Option<&str>) -> bool {
         (None, None) => true,
         _ => false,
     }
+}
+
+fn ensure_worker_id_safe(field: &'static str, worker: &str) -> Result<(), RchAdapterError> {
+    if worker.len() > MAX_WORKER_ID_LEN {
+        return Err(RchAdapterError::CollectionTooLarge {
+            field,
+            max: MAX_WORKER_ID_LEN,
+            actual: worker.len(),
+        });
+    }
+    if worker.is_empty() || worker.chars().any(char::is_control) {
+        return Err(RchAdapterError::MissingWorkerMetadata);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,6 +422,9 @@ impl RchAttestedProofReceipt {
             });
         }
         self.attestation.validate()?;
+        if let Some(worker_id) = self.outcome.worker_id.as_deref() {
+            ensure_worker_id_safe("outcome.worker_id", worker_id)?;
+        }
         if !constant_time::ct_eq(
             &self.outcome.command_digest,
             &self.attestation.command_digest.hex,
@@ -452,6 +471,9 @@ impl RchProofAttestation {
                 actual: self.redacted_env_keys.len(),
             });
         }
+        if let Some(worker_id) = self.worker_id.as_deref() {
+            ensure_worker_id_safe("worker_id", worker_id)?;
+        }
 
         for (field, digest) in [
             ("command_digest", &self.command_digest),
@@ -492,7 +514,9 @@ pub fn build_rch_attested_proof_receipt(
     outcome: RchAdapterOutcome,
     input: RchProofAttestationInput,
 ) -> Result<RchAttestedProofReceipt, RchAdapterError> {
-    if outcome.execution_mode == RchExecutionMode::Remote && outcome.worker_id.is_none() {
+    if let Some(worker_id) = outcome.worker_id.as_deref() {
+        ensure_worker_id_safe("outcome.worker_id", worker_id)?;
+    } else if outcome.execution_mode == RchExecutionMode::Remote {
         return Err(RchAdapterError::MissingWorkerMetadata);
     }
 
@@ -1369,7 +1393,7 @@ fn worker_id_from_output(output: &str) -> Option<String> {
 }
 
 fn worker_id_is_safe(worker: &str) -> bool {
-    !worker.is_empty() && !worker.chars().any(char::is_control)
+    ensure_worker_id_safe("worker_id", worker).is_ok()
 }
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
@@ -1750,6 +1774,31 @@ mod tests {
     }
 
     #[test]
+    fn remote_success_rejects_oversized_worker_id() {
+        let cmd = invocation(&[
+            "cargo",
+            "check",
+            "-p",
+            "frankenengine-node",
+            "--all-targets",
+        ]);
+        let worker_id = "w".repeat(MAX_WORKER_ID_LEN + 1);
+        let result = output(
+            0,
+            &format!("Finished `dev` profile\n[RCH] remote {worker_id} (803.3s)\n"),
+            "",
+        );
+
+        let outcome = classify_rch_output(&cmd, &result, &RchProcessSnapshot::quiet(), &policy());
+
+        assert_eq!(outcome.execution_mode, RchExecutionMode::Remote);
+        assert_eq!(outcome.worker_id, None);
+        assert_eq!(outcome.outcome, RchOutcomeClass::BrokerInternalError);
+        assert_eq!(outcome.reason_code, "RCH-REMOTE-WORKER-ID-INVALID");
+        assert!(!outcome.is_green());
+    }
+
+    #[test]
     fn ssh_timeout_is_worker_timeout_not_product_failure() {
         let cmd = invocation(&["cargo", "test", "-p", "frankenengine-node"]);
         let result = output(
@@ -2071,6 +2120,38 @@ mod tests {
             RchAdapterError::CollectionTooLarge {
                 field: "redacted_env_keys",
                 max: MAX_REDACTED_ENV_KEYS,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_worker_id_in_attestation_validate() {
+        let attestation = RchProofAttestation {
+            schema_version: RCH_PROOF_ATTESTATION_SCHEMA_VERSION.to_string(),
+            command_digest: DigestRef::sha256(b"test"),
+            env_allowlist_fingerprint: DigestRef::sha256(b"env"),
+            toolchain_fingerprint: DigestRef::sha256(b"toolchain"),
+            worker_id: Some("w".repeat(MAX_WORKER_ID_LEN + 1)),
+            worker_fingerprint: Some(DigestRef::sha256(b"worker")),
+            sync_root_fingerprint: None,
+            target_dir_fingerprint: DigestRef::sha256(b"target"),
+            source_fingerprints: vec![InputDigest {
+                path: "src/main.rs".to_string(),
+                algorithm: "sha256".to_string(),
+                hex: "a".repeat(64),
+                source: "test".to_string(),
+            }],
+            redacted_env_keys: Vec::new(),
+        };
+
+        let err = attestation.validate().expect_err("oversized worker_id");
+
+        assert!(matches!(
+            err,
+            RchAdapterError::CollectionTooLarge {
+                field: "worker_id",
+                max: MAX_WORKER_ID_LEN,
                 ..
             }
         ));
