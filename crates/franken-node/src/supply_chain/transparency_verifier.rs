@@ -431,6 +431,9 @@ fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
     if trimmed != artifact_id {
         return Some("artifact_id contains leading or trailing whitespace".to_string());
     }
+    if artifact_id.chars().any(char::is_control) {
+        return Some("artifact_id contains control character".to_string());
+    }
     None
 }
 
@@ -447,6 +450,9 @@ fn invalid_connector_id_reason(connector_id: &str) -> Option<String> {
     }
     if trimmed != connector_id {
         return Some("connector_id contains leading or trailing whitespace".to_string());
+    }
+    if connector_id.chars().any(char::is_control) {
+        return Some("connector_id contains control character".to_string());
     }
     None
 }
@@ -1390,6 +1396,29 @@ mod tests {
     }
 
     #[test]
+    fn artifact_id_with_control_character_rejected_before_leaf_mismatch() {
+        let (root, proofs) = build_test_tree(&["a", "b"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&proofs[0]),
+            "not-the-leaf-hash",
+            "conn-1",
+            "artifact\nshadow",
+            "artifact-control-character",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(!receipt.log_root_matched);
+        assert!(!receipt.proof_valid);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidArtifactId { reason }) if reason.contains("control character")
+        ));
+    }
+
+    #[test]
     fn connector_id_with_null_byte_rejected_before_missing_proof() {
         let policy = TransparencyPolicy {
             required: true,
@@ -1411,6 +1440,31 @@ mod tests {
         assert!(matches!(
             receipt.failure_reason,
             Some(ProofFailure::InvalidConnectorId { reason }) if reason.contains("null byte")
+        ));
+    }
+
+    #[test]
+    fn connector_id_with_control_character_rejected_before_missing_proof() {
+        let policy = TransparencyPolicy {
+            required: true,
+            pinned_roots: Vec::new(),
+        };
+        let receipt = verify_inclusion(
+            &policy,
+            None,
+            "unused-hash",
+            "conn-1\nshadow",
+            "artifact-1",
+            "connector-control-character",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(!receipt.log_root_matched);
+        assert!(!receipt.proof_valid);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidConnectorId { reason }) if reason.contains("control character")
         ));
     }
 
