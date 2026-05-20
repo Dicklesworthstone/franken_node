@@ -79,6 +79,35 @@ fn next_trust_card_version(
         })
 }
 
+fn validate_extension_id(extension_id: &str) -> Result<(), TrustCardError> {
+    let trimmed = extension_id.trim();
+    if trimmed.is_empty() {
+        return Err(TrustCardError::InvalidInput {
+            reason: "extension_id cannot be empty".to_string(),
+        });
+    }
+    if extension_id != trimmed {
+        return Err(TrustCardError::InvalidInput {
+            reason: "extension_id cannot contain leading or trailing whitespace".to_string(),
+        });
+    }
+    if extension_id.len() > MAX_EXTENSION_ID_LEN {
+        return Err(TrustCardError::InvalidInput {
+            reason: format!(
+                "extension_id length {} exceeds maximum {}",
+                extension_id.len(),
+                MAX_EXTENSION_ID_LEN
+            ),
+        });
+    }
+    if extension_id.chars().any(char::is_control) {
+        return Err(TrustCardError::InvalidInput {
+            reason: "extension_id cannot contain control characters or null bytes".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn ensure_evidence_refs_present(refs: &[VerifiedEvidenceRef]) -> Result<(), TrustCardError> {
     if refs.is_empty() {
         return Err(TrustCardError::EvidenceMissing);
@@ -397,17 +426,10 @@ fn validate_basic_bounds(snapshot: &TrustCardRegistrySnapshot) -> Result<(), Tru
         ));
     }
 
-    // Extension ID length validation to prevent memory exhaustion
+    // Extension ID validation to prevent malformed identifiers from entering
+    // signed registry state.
     for extension_id in snapshot.cards_by_extension.keys() {
-        if extension_id.len() > MAX_EXTENSION_ID_LEN {
-            return Err(TrustCardError::InvalidInput {
-                reason: format!(
-                    "extension_id length {} exceeds maximum {}",
-                    extension_id.len(),
-                    MAX_EXTENSION_ID_LEN
-                ),
-            });
-        }
+        validate_extension_id(extension_id)?;
     }
 
     Ok(())
@@ -1368,6 +1390,7 @@ impl TrustCardRegistry {
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCard, TrustCardError> {
+        validate_extension_id(&input.extension.extension_id)?;
         // Evidence binding gate: at least one evidence reference is required.
         ensure_evidence_refs_present(&input.evidence_refs)?;
 
@@ -1471,6 +1494,7 @@ impl TrustCardRegistry {
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCard, TrustCardError> {
+        validate_extension_id(extension_id)?;
         let latest = self
             .latest_verified_card(extension_id)?
             .cloned()
@@ -1600,6 +1624,7 @@ impl TrustCardRegistry {
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCard, TrustCardError> {
+        validate_extension_id(extension_id)?;
         let max_severity = validate_camouflage_hints(hints)?;
         ensure_evidence_refs_present(&evidence_refs)?;
 
@@ -1713,6 +1738,7 @@ impl TrustCardRegistry {
         now_secs: u64,
         trace_id: &str,
     ) -> Result<Option<TrustCard>, TrustCardError> {
+        validate_extension_id(extension_id)?;
         self.emit(
             TRUST_CARD_QUERIED,
             Some(extension_id.to_string()),
@@ -2072,6 +2098,8 @@ impl TrustCardRegistry {
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCardComparison, TrustCardError> {
+        validate_extension_id(left_extension_id)?;
+        validate_extension_id(right_extension_id)?;
         let comparison = {
             let left = self
                 .latest_card(left_extension_id)
@@ -2121,6 +2149,7 @@ impl TrustCardRegistry {
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCardComparison, TrustCardError> {
+        validate_extension_id(extension_id)?;
         let comparison = {
             let history = self
                 .cards_by_extension
@@ -2176,6 +2205,7 @@ impl TrustCardRegistry {
         extension_id: &str,
         trust_card_version: u64,
     ) -> Result<Option<TrustCard>, TrustCardError> {
+        validate_extension_id(extension_id)?;
         let card = self
             .cards_by_extension
             .get(extension_id)
@@ -2820,10 +2850,12 @@ fn validate_snapshot_history(
     history: &[TrustCard],
     registry_key: &[u8],
 ) -> Result<(), TrustCardError> {
+    validate_extension_id(extension_id)?;
     let mut previous_version = None;
     let mut previous_hash: Option<String> = None;
 
     for card in history {
+        validate_extension_id(&card.extension.extension_id)?;
         if !card.extension.extension_id.eq(extension_id) {
             return Err(TrustCardError::InvalidSnapshot(format!(
                 "extension bucket `{extension_id}` contains card for `{}`",
@@ -3192,10 +3224,10 @@ mod tests {
         PublisherIdentity, ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel,
         SnapshotSourceContext, TRUST_CARD_CAMOUFLAGE_SUSPECTED, TRUST_CARD_CREATED,
         TRUST_CARD_QUERIED, TrustCard, TrustCardComparison, TrustCardDiffEntry, TrustCardError,
-        TrustCardInput, TrustCardMutation, TrustCardRegistry, VerifiedEvidenceRef,
-        apply_camouflage_assessment, canonicalize_value, compute_trust_card_derivation_hash,
-        render_comparison_human, render_trust_card_human, sign_card_in_place, to_canonical_json,
-        update_card_hash, validate_trust_card_structure, verify_card_signature,
+        TrustCardInput, TrustCardListFilter, TrustCardMutation, TrustCardRegistry,
+        VerifiedEvidenceRef, apply_camouflage_assessment, canonicalize_value,
+        compute_trust_card_derivation_hash, render_comparison_human, render_trust_card_human,
+        sign_card_in_place, to_canonical_json, update_card_hash, verify_card_signature,
     };
     use crate::security::trajectory_gaming::{CamouflageHint, CamouflageKind};
     use base64::Engine as _;
@@ -4171,6 +4203,25 @@ mod tests {
             .create(input, 1_000, "trace")
             .expect_err("must fail");
         assert!(matches!(err, TrustCardError::EvidenceMissing));
+    }
+
+    #[test]
+    fn create_rejects_malformed_extension_ids_before_registry_mutation() {
+        for bad_id in ["", " npm:@acme/plugin", "npm:@acme/plugin ", "npm:\0evil"] {
+            let mut registry = TrustCardRegistry::default();
+            let mut input = sample_input();
+            input.extension.extension_id = bad_id.to_string();
+
+            let err = registry
+                .create(input, 1_000, "trace")
+                .expect_err("malformed extension id must fail closed");
+
+            assert!(matches!(err, TrustCardError::InvalidInput { .. }));
+            let empty = registry
+                .list(&TrustCardListFilter::empty(), "trace", 1_000)
+                .expect("failed create must not poison registry");
+            assert!(empty.is_empty());
+        }
     }
 
     #[test]
@@ -6648,9 +6699,10 @@ mod tests {
         let mut registry = TrustCardRegistry::default();
         let input = sample_input();
         registry.create(input.clone(), 1_000, "trace").unwrap();
+        let extension_id = input.extension.extension_id.clone();
 
         let card = registry
-            .get(&input.identity.extension_id, 1_000)
+            .read(&extension_id, 1_000, "trace-read")
             .unwrap()
             .unwrap();
 
@@ -6660,7 +6712,7 @@ mod tests {
 
         // The comparison logic should use constant_time::ct_eq for hash/signature comparison
         // This test ensures the pattern is preserved - implementation should fail on modified signature
-        let result = validate_trust_card_structure(&modified_card);
+        let result = verify_card_signature(&modified_card, DEFAULT_REGISTRY_KEY);
 
         // Should detect the signature mismatch (testing the validation uses secure comparison)
         assert!(
@@ -6679,7 +6731,7 @@ mod tests {
         // Add cards up to a reasonable limit to verify no overflow issues
         for i in 0..100 {
             let mut input = sample_input();
-            input.identity.extension_id = format!("test-extension-{}", i);
+            input.extension.extension_id = format!("test-extension-{}", i);
 
             // This should use saturating arithmetic internally for any counters/versions
             let result = registry.create(input, 1_000_u64.saturating_add(i), "trace");
@@ -6696,6 +6748,7 @@ mod tests {
 
         let mut registry = TrustCardRegistry::default();
         let input = sample_input();
+        let extension_id = input.extension.extension_id.clone();
 
         // Test that telemetry and audit operations respect bounded growth
         registry.create(input.clone(), 1_000, "trace").unwrap();
@@ -6703,11 +6756,11 @@ mod tests {
         // Simulate high-volume operations that could accumulate in bounded collections
         for i in 0..50 {
             let trace_id = format!("trace-{}", i);
-            let _ = registry.query(&input.identity.extension_id, &trace_id, 2_000);
+            let _ = registry.read(&extension_id, 2_000, &trace_id);
         }
 
         // Registry should still be operational (bounded collections prevent DoS)
-        let result = registry.get(&input.identity.extension_id, 2_000);
+        let result = registry.read(&extension_id, 2_000, "trace-final");
         assert!(
             result.is_ok(),
             "Registry should remain operational with bounded collections"
@@ -6723,7 +6776,7 @@ mod tests {
         // Test maximum extension ID length enforcement
         let oversized_id = "a".repeat(MAX_EXTENSION_ID_LEN + 1);
         let mut input = sample_input();
-        input.identity.extension_id = oversized_id;
+        input.extension.extension_id = oversized_id;
 
         let result = registry.create(input, 1_000, "trace");
 
