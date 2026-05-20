@@ -230,28 +230,42 @@ pub fn validate_signed_manifest(
         });
     }
 
-    ensure_non_empty(&manifest.package.name, "package.name")?;
-    ensure_non_empty(&manifest.package.version, "package.version")?;
-    ensure_non_empty(&manifest.package.publisher, "package.publisher")?;
-    ensure_non_empty(&manifest.package.author, "package.author")?;
-    ensure_non_empty(&manifest.minimum_runtime_version, "minimum_runtime_version")?;
-    ensure_non_empty(
+    // All manifest text fields MUST use ensure_manifest_text (not ensure_non_empty)
+    // to enforce MAX_MANIFEST_FIELD_BYTES and reject control characters. Using
+    // ensure_non_empty alone allows multi-megabyte strings (DoS) and \r\n injection
+    // (log manipulation) from attacker-supplied manifests.
+    ensure_manifest_text(&manifest.package.name, "package.name")?;
+    ensure_manifest_text(&manifest.package.version, "package.version")?;
+    ensure_manifest_text(&manifest.package.publisher, "package.publisher")?;
+    ensure_manifest_text(&manifest.package.author, "package.author")?;
+    ensure_manifest_text(&manifest.minimum_runtime_version, "minimum_runtime_version")?;
+    ensure_manifest_text(
         &manifest.behavioral_profile.summary,
         "behavioral_profile.summary",
     )?;
-    ensure_non_empty(
+    ensure_manifest_text(
         &manifest.trust.revocation_status_pointer,
         "trust.revocation_status_pointer",
     )?;
-    ensure_non_empty(
+    ensure_manifest_text(
         &manifest.trust.trust_card_reference,
         "trust.trust_card_reference",
     )?;
-    ensure_non_empty(
+    ensure_manifest_text(
         &manifest.signature.publisher_key_id,
         "signature.publisher_key_id",
     )?;
-    ensure_non_empty(&manifest.signature.signed_at, "signature.signed_at")?;
+    ensure_manifest_text(&manifest.signature.signed_at, "signature.signed_at")?;
+    // Provenance text fields were previously unvalidated — enforce same bounds.
+    ensure_manifest_text(&manifest.provenance.build_system, "provenance.build_system")?;
+    ensure_manifest_text(
+        &manifest.provenance.source_repository,
+        "provenance.source_repository",
+    )?;
+    ensure_manifest_text(
+        &manifest.provenance.source_revision,
+        "provenance.source_revision",
+    )?;
 
     if manifest.capabilities.is_empty() {
         return Err(ManifestSchemaError::EmptyCapabilities);
@@ -1633,5 +1647,48 @@ mod tests {
         manifest.behavioral_profile.declared_network_zones.clear();
         let result = validate_signed_manifest(&manifest);
         // Empty zones should be allowed
+    }
+
+    #[test]
+    fn manifest_text_fields_reject_overlong_and_control_chars() {
+        // Regression: prior to this fix, validate_signed_manifest used
+        // ensure_non_empty (not ensure_manifest_text) for most text fields,
+        // allowing multi-megabyte strings (DoS) and control-char injection
+        // (log manipulation) from attacker-supplied manifests. All text
+        // fields must now use ensure_manifest_text for length + control-char
+        // enforcement.
+
+        // package.name overlong
+        let mut manifest = valid_manifest();
+        manifest.package.name = "a".repeat(MAX_MANIFEST_FIELD_BYTES + 1);
+        let error = validate_signed_manifest(&manifest).expect_err("overlong name");
+        assert_eq!(error.code(), "EMS_INVALID_FIELD");
+        assert!(error.to_string().contains("exceeds"));
+
+        // package.name with control char
+        let mut manifest = valid_manifest();
+        manifest.package.name = "valid-name\r\nINJECTED".to_string();
+        let error = validate_signed_manifest(&manifest).expect_err("control char name");
+        assert_eq!(error.code(), "EMS_INVALID_FIELD");
+        assert!(error.to_string().contains("control"));
+
+        // provenance.build_system overlong (was previously unvalidated)
+        let mut manifest = valid_manifest();
+        manifest.provenance.build_system = "x".repeat(MAX_MANIFEST_FIELD_BYTES + 1);
+        let error = validate_signed_manifest(&manifest).expect_err("overlong build_system");
+        assert_eq!(error.code(), "EMS_INVALID_FIELD");
+
+        // provenance.source_repository with control char (was previously unvalidated)
+        let mut manifest = valid_manifest();
+        manifest.provenance.source_repository = "https://example.com\x00/repo".to_string();
+        let error = validate_signed_manifest(&manifest).expect_err("nul in source_repository");
+        assert_eq!(error.code(), "EMS_INVALID_FIELD");
+        assert!(error.to_string().contains("control"));
+
+        // signature.signed_at overlong
+        let mut manifest = valid_manifest();
+        manifest.signature.signed_at = "2026-01-01T00:00:00Z".to_string() + &"0".repeat(MAX_MANIFEST_FIELD_BYTES);
+        let error = validate_signed_manifest(&manifest).expect_err("overlong signed_at");
+        assert_eq!(error.code(), "EMS_INVALID_FIELD");
     }
 }
