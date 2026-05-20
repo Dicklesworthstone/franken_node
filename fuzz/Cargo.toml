@@ -310,3 +310,9 @@ name = "fuzz_audience_token_deserialize"
 path = "fuzz_targets/fuzz_audience_token_deserialize.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_blocked_proof_rehydration_input"
+path = "fuzz_targets/fuzz_blocked_proof_rehydration_input.rs"
+test = false
+doc = false
