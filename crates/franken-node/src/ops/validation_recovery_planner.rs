@@ -16,12 +16,17 @@ use crate::ops::validation_broker::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
 pub const RECOVERY_PLANNER_SCHEMA_VERSION: &str = "franken-node/validation-recovery-planner/v1";
+pub const BLOCKED_PROOF_REHYDRATION_SCHEMA_VERSION: &str =
+    "franken-node/blocked-proof-rehydration/v1";
 pub const DEFAULT_MAX_RETRY_ATTEMPTS: u32 = 3;
 pub const DEFAULT_MAX_WORKER_DIVERSITY: u32 = 2;
 pub const DEFAULT_TIMEOUT_BUDGET_MS: u64 = 1_800_000; // 30 minutes
 pub const DEFAULT_MAX_QUEUE_AGE_MS: u64 = 3_600_000; // 1 hour
+pub const DEFAULT_REHYDRATION_MAX_BLOCKER_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+pub const DEFAULT_REHYDRATION_RETRY_AFTER_MS: u64 = 60_000;
 
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
@@ -46,6 +51,17 @@ pub mod reason_codes {
     pub const USE_SOURCE_ONLY_BLOCKER: &str = "USE_SOURCE_ONLY_BLOCKER";
     pub const FAIL_CLOSED: &str = "FAIL_CLOSED";
     pub const NO_RECOVERY_NEEDED: &str = "NO_RECOVERY_NEEDED";
+}
+
+pub mod rehydration_reason_codes {
+    pub const READY_FOR_REPROOF: &str = "REHYDRATE_READY_FOR_REPROOF";
+    pub const WAIT_FOR_CAPACITY: &str = "REHYDRATE_WAIT_FOR_CAPACITY";
+    pub const WAIT_FOR_EXISTING_PROOF: &str = "REHYDRATE_WAIT_FOR_EXISTING_PROOF";
+    pub const REUSE_CACHE_RECEIPT: &str = "REHYDRATE_REUSE_CACHE_RECEIPT";
+    pub const SOURCE_ONLY_DURING_PRESSURE: &str = "REHYDRATE_SOURCE_ONLY_DURING_PRESSURE";
+    pub const STALE_COMMAND_MISSING_PATH: &str = "REHYDRATE_STALE_COMMAND_MISSING_PATH";
+    pub const STALE_CLOSED_BLOCKER: &str = "REHYDRATE_STALE_CLOSED_BLOCKER";
+    pub const STALE_BLOCKER_EVIDENCE: &str = "REHYDRATE_STALE_BLOCKER_EVIDENCE";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,6 +281,496 @@ pub enum RecoveryPlannerError {
     Internal(String),
     #[error("Digest computation failed: {0}")]
     DigestError(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockedProofBeadState {
+    Open,
+    Blocked,
+    InProgress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RehydrationBlockerStatus {
+    Open,
+    Blocked,
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RehydrationPathRef {
+    pub path: String,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RehydrationBlockerRef {
+    pub bead_id: String,
+    pub status: RehydrationBlockerStatus,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedProofBeadSummary {
+    pub bead_id: String,
+    pub state: BlockedProofBeadState,
+    pub priority: u8,
+    pub assignee: Option<String>,
+    pub updated_at_ms: u64,
+    pub deferred_command: String,
+    pub referenced_paths: Vec<RehydrationPathRef>,
+    pub sibling_blockers: Vec<RehydrationBlockerRef>,
+    pub latest_blocker_comment: String,
+    pub source_only_allowed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedProofRchSnapshot {
+    pub active_cargo_processes: u32,
+    pub max_active_cargo_processes: u32,
+    pub queue_depth: u32,
+    pub max_queue_depth: u32,
+    pub available_workers: u32,
+}
+
+impl BlockedProofRchSnapshot {
+    #[must_use]
+    pub fn validation_lane_is_safe(&self) -> bool {
+        self.active_cargo_processes <= self.max_active_cargo_processes
+            && self.queue_depth < self.max_queue_depth
+            && self.available_workers > 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedProofRehydrationInput {
+    pub schema_version: String,
+    pub now_ms: u64,
+    pub max_blocker_age_ms: u64,
+    pub rch_snapshot: BlockedProofRchSnapshot,
+    pub agent_mail_healthy: bool,
+    pub proof_cache_hit_beads: Vec<String>,
+    pub coalesced_commands: Vec<String>,
+    pub blocked_beads: Vec<BlockedProofBeadSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockedProofRehydrationAction {
+    ReadyForReproof,
+    WaitForCapacity,
+    WaitForExistingProof,
+    ReuseCacheReceipt,
+    SourceOnlyDuringPressure,
+    FailClosedReview,
+}
+
+impl BlockedProofRehydrationAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadyForReproof => "ready_for_reproof",
+            Self::WaitForCapacity => "wait_for_capacity",
+            Self::WaitForExistingProof => "wait_for_existing_proof",
+            Self::ReuseCacheReceipt => "reuse_cache_receipt",
+            Self::SourceOnlyDuringPressure => "source_only_during_pressure",
+            Self::FailClosedReview => "fail_closed_review",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedProofRehydrationCandidate {
+    pub schema_version: String,
+    pub bead_id: String,
+    pub command: String,
+    pub command_digest: String,
+    pub action: BlockedProofRehydrationAction,
+    pub reason_code: String,
+    pub retry_after_ms: Option<u64>,
+    pub required_preflight: String,
+    pub status_recommendation: String,
+    pub fail_closed: bool,
+    pub priority_rank: u32,
+    pub evidence_snippet: String,
+    pub decision_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedProofRehydrationPlan {
+    pub schema_version: String,
+    pub generated_at_ms: u64,
+    pub candidates: Vec<BlockedProofRehydrationCandidate>,
+    pub human_summary: String,
+}
+
+pub fn build_blocked_proof_rehydration_plan(
+    input: &BlockedProofRehydrationInput,
+) -> Result<BlockedProofRehydrationPlan, RecoveryPlannerError> {
+    validate_rehydration_input(input)?;
+
+    let cache_hits = input
+        .proof_cache_hit_beads
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let coalesced_commands = input
+        .coalesced_commands
+        .iter()
+        .map(|command| normalize_rehydration_command(command))
+        .collect::<BTreeSet<_>>();
+
+    let mut ordered = input.blocked_beads.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        let left_age = input.now_ms.saturating_sub(left.updated_at_ms);
+        let right_age = input.now_ms.saturating_sub(right.updated_at_ms);
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| right_age.cmp(&left_age))
+            .then_with(|| left.bead_id.cmp(&right.bead_id))
+    });
+
+    let mut seen_commands = BTreeSet::new();
+    let mut candidates = Vec::with_capacity(ordered.len());
+    for bead in ordered {
+        let normalized_command = normalize_rehydration_command(&bead.deferred_command);
+        let duplicate_command = seen_commands.contains(normalized_command.as_str());
+        let coalesced_command = coalesced_commands.contains(normalized_command.as_str());
+        let candidate = classify_blocked_proof_rehydration_candidate(
+            input,
+            bead,
+            &normalized_command,
+            duplicate_command,
+            cache_hits.contains(bead.bead_id.as_str()),
+            coalesced_command,
+            u32::try_from(candidates.len().saturating_add(1)).unwrap_or(u32::MAX),
+        )?;
+        seen_commands.insert(normalized_command);
+        candidates.push(candidate);
+    }
+
+    let human_summary = render_blocked_proof_rehydration_human(&candidates, input.now_ms);
+
+    Ok(BlockedProofRehydrationPlan {
+        schema_version: BLOCKED_PROOF_REHYDRATION_SCHEMA_VERSION.to_string(),
+        generated_at_ms: input.now_ms,
+        candidates,
+        human_summary,
+    })
+}
+
+#[must_use]
+pub fn render_blocked_proof_rehydration_human(
+    candidates: &[BlockedProofRehydrationCandidate],
+    generated_at_ms: u64,
+) -> String {
+    let ready = candidates
+        .iter()
+        .filter(|candidate| candidate.action == BlockedProofRehydrationAction::ReadyForReproof)
+        .count();
+    let waiting = candidates
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.action,
+                BlockedProofRehydrationAction::WaitForCapacity
+                    | BlockedProofRehydrationAction::WaitForExistingProof
+            )
+        })
+        .count();
+    let fail_closed = candidates
+        .iter()
+        .filter(|candidate| candidate.fail_closed)
+        .count();
+    let source_only = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.action == BlockedProofRehydrationAction::SourceOnlyDuringPressure
+        })
+        .count();
+
+    let mut output = format!(
+        "blocked_proof_rehydration generated_at_ms={} candidates={} ready={} waiting={} source_only={} fail_closed={}",
+        generated_at_ms,
+        candidates.len(),
+        ready,
+        waiting,
+        source_only,
+        fail_closed
+    );
+
+    for candidate in candidates {
+        output.push_str(&format!(
+            "\n- bead={} action={} reason_code={} retry_after_ms={} status={} command_digest={} preflight={} evidence={}",
+            candidate.bead_id,
+            candidate.action.as_str(),
+            candidate.reason_code,
+            candidate
+                .retry_after_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            candidate.status_recommendation,
+            candidate.command_digest,
+            candidate.required_preflight,
+            candidate.evidence_snippet
+        ));
+    }
+
+    output
+}
+
+fn classify_blocked_proof_rehydration_candidate(
+    input: &BlockedProofRehydrationInput,
+    bead: &BlockedProofBeadSummary,
+    command: &str,
+    duplicate_command: bool,
+    cache_hit: bool,
+    coalesced_command: bool,
+    priority_rank: u32,
+) -> Result<BlockedProofRehydrationCandidate, RecoveryPlannerError> {
+    let command_digest = digest_rehydration_command(&command);
+    let stale_age = input.now_ms.saturating_sub(bead.updated_at_ms) > input.max_blocker_age_ms;
+    let missing_path = bead.referenced_paths.iter().find(|path| !path.exists);
+    let closed_blocker = bead
+        .sibling_blockers
+        .iter()
+        .find(|blocker| blocker.status == RehydrationBlockerStatus::Closed);
+
+    let (
+        action,
+        reason_code,
+        retry_after_ms,
+        required_preflight,
+        status_recommendation,
+        fail_closed,
+        evidence,
+    ) = if duplicate_command || coalesced_command {
+        (
+            BlockedProofRehydrationAction::WaitForExistingProof,
+            rehydration_reason_codes::WAIT_FOR_EXISTING_PROOF,
+            Some(DEFAULT_REHYDRATION_RETRY_AFTER_MS),
+            "wait for existing proof receipt".to_string(),
+            "remain_blocked".to_string(),
+            false,
+            "equivalent proof work already in flight".to_string(),
+        )
+    } else if cache_hit {
+        (
+            BlockedProofRehydrationAction::ReuseCacheReceipt,
+            rehydration_reason_codes::REUSE_CACHE_RECEIPT,
+            None,
+            "verify cached receipt freshness".to_string(),
+            "ready_to_close_with_receipt".to_string(),
+            false,
+            "fresh proof-cache receipt is available".to_string(),
+        )
+    } else if let Some(path) = missing_path {
+        (
+            BlockedProofRehydrationAction::FailClosedReview,
+            rehydration_reason_codes::STALE_COMMAND_MISSING_PATH,
+            None,
+            "refresh deferred command before reproof".to_string(),
+            "remain_blocked".to_string(),
+            true,
+            format!("referenced path is missing: {}", path.path),
+        )
+    } else if let Some(blocker) = closed_blocker {
+        (
+            BlockedProofRehydrationAction::FailClosedReview,
+            rehydration_reason_codes::STALE_CLOSED_BLOCKER,
+            None,
+            "refresh blocker evidence before reproof".to_string(),
+            "remain_blocked".to_string(),
+            true,
+            format!("sibling blocker {} is already closed", blocker.bead_id),
+        )
+    } else if stale_age {
+        (
+            BlockedProofRehydrationAction::FailClosedReview,
+            rehydration_reason_codes::STALE_BLOCKER_EVIDENCE,
+            None,
+            "refresh stale blocker comment before reproof".to_string(),
+            "remain_blocked".to_string(),
+            true,
+            "blocker evidence is older than freshness window".to_string(),
+        )
+    } else if !input.rch_snapshot.validation_lane_is_safe() {
+        if bead.source_only_allowed {
+            (
+                BlockedProofRehydrationAction::SourceOnlyDuringPressure,
+                rehydration_reason_codes::SOURCE_ONLY_DURING_PRESSURE,
+                Some(DEFAULT_REHYDRATION_RETRY_AFTER_MS),
+                "run source-only checks and defer rch proof".to_string(),
+                "remain_blocked".to_string(),
+                false,
+                format!(
+                    "active_cargo={} queue_depth={} workers={}",
+                    input.rch_snapshot.active_cargo_processes,
+                    input.rch_snapshot.queue_depth,
+                    input.rch_snapshot.available_workers
+                ),
+            )
+        } else {
+            (
+                BlockedProofRehydrationAction::WaitForCapacity,
+                rehydration_reason_codes::WAIT_FOR_CAPACITY,
+                Some(DEFAULT_REHYDRATION_RETRY_AFTER_MS),
+                "wait for safe rch lane".to_string(),
+                "remain_blocked".to_string(),
+                false,
+                format!(
+                    "active_cargo={} queue_depth={} workers={}",
+                    input.rch_snapshot.active_cargo_processes,
+                    input.rch_snapshot.queue_depth,
+                    input.rch_snapshot.available_workers
+                ),
+            )
+        }
+    } else {
+        (
+            BlockedProofRehydrationAction::ReadyForReproof,
+            rehydration_reason_codes::READY_FOR_REPROOF,
+            None,
+            if input.agent_mail_healthy {
+                "reserve files and run focused rch proof".to_string()
+            } else {
+                "use bead assignee as soft lock and run focused rch proof".to_string()
+            },
+            "ready_for_reproof".to_string(),
+            false,
+            "fresh blocker evidence and safe rch lane".to_string(),
+        )
+    };
+
+    let evidence_snippet =
+        bounded_rehydration_snippet(&format!("{}; {}", evidence, bead.latest_blocker_comment));
+    let decision_digest = digest_rehydration_candidate(
+        &bead.bead_id,
+        action,
+        reason_code,
+        &command_digest,
+        &required_preflight,
+        &evidence_snippet,
+    )?;
+
+    Ok(BlockedProofRehydrationCandidate {
+        schema_version: BLOCKED_PROOF_REHYDRATION_SCHEMA_VERSION.to_string(),
+        bead_id: bead.bead_id.clone(),
+        command: command.to_string(),
+        command_digest,
+        action,
+        reason_code: reason_code.to_string(),
+        retry_after_ms,
+        required_preflight,
+        status_recommendation,
+        fail_closed,
+        priority_rank,
+        evidence_snippet,
+        decision_digest,
+    })
+}
+
+fn validate_rehydration_input(
+    input: &BlockedProofRehydrationInput,
+) -> Result<(), RecoveryPlannerError> {
+    if input.schema_version != BLOCKED_PROOF_REHYDRATION_SCHEMA_VERSION {
+        return Err(RecoveryPlannerError::InvalidInput(
+            "blocked proof rehydration schema_version mismatch".to_string(),
+        ));
+    }
+
+    if input.max_blocker_age_ms == 0 {
+        return Err(RecoveryPlannerError::InvalidInput(
+            "max_blocker_age_ms must be positive".to_string(),
+        ));
+    }
+
+    for bead in &input.blocked_beads {
+        validate_rehydration_text("bead_id", &bead.bead_id)?;
+        validate_rehydration_text("deferred_command", &bead.deferred_command)?;
+        validate_rehydration_text("latest_blocker_comment", &bead.latest_blocker_comment)?;
+        for path in &bead.referenced_paths {
+            validate_rehydration_text("referenced_path", &path.path)?;
+        }
+        for blocker in &bead.sibling_blockers {
+            validate_rehydration_text("blocker.bead_id", &blocker.bead_id)?;
+            validate_rehydration_text("blocker.summary", &blocker.summary)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_rehydration_text(field: &'static str, value: &str) -> Result<(), RecoveryPlannerError> {
+    if value.trim().is_empty() || value.contains('\0') {
+        return Err(RecoveryPlannerError::InvalidInput(format!(
+            "{field} must be non-empty text without NUL bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_rehydration_command(command: &str) -> String {
+    command.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn bounded_rehydration_snippet(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(180)
+        .collect()
+}
+
+fn digest_rehydration_command(command: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"blocked_proof_rehydration_command_v1:");
+    hasher.update(len_to_u64(command.len()).to_le_bytes());
+    hasher.update(command.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn digest_rehydration_candidate(
+    bead_id: &str,
+    action: BlockedProofRehydrationAction,
+    reason_code: &str,
+    command_digest: &str,
+    required_preflight: &str,
+    evidence_snippet: &str,
+) -> Result<String, RecoveryPlannerError> {
+    #[derive(Serialize)]
+    struct Material<'a> {
+        schema_version: &'a str,
+        bead_id: &'a str,
+        action: &'a str,
+        reason_code: &'a str,
+        command_digest: &'a str,
+        required_preflight: &'a str,
+        evidence_snippet: &'a str,
+    }
+
+    let material = Material {
+        schema_version: BLOCKED_PROOF_REHYDRATION_SCHEMA_VERSION,
+        bead_id,
+        action: action.as_str(),
+        reason_code,
+        command_digest,
+        required_preflight,
+        evidence_snippet,
+    };
+
+    let bytes = serde_json::to_vec(&material).map_err(|err| {
+        RecoveryPlannerError::DigestError(format!(
+            "failed to serialize rehydration digest material: {err}"
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"blocked_proof_rehydration_candidate_v1:");
+    hasher.update(len_to_u64(bytes.len()).to_le_bytes());
+    hasher.update(bytes);
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 pub struct ValidationRecoveryPlanner {
@@ -886,6 +1392,186 @@ mod tests {
             required_action: "reuse_receipt".to_string(),
             diagnostic: "proof cache hit".to_string(),
         }
+    }
+
+    fn rehydration_bead(
+        bead_id: &str,
+        priority: u8,
+        updated_at_ms: u64,
+        command: &str,
+    ) -> BlockedProofBeadSummary {
+        BlockedProofBeadSummary {
+            bead_id: bead_id.to_string(),
+            state: BlockedProofBeadState::Blocked,
+            priority,
+            assignee: Some("ScarletCanyon".to_string()),
+            updated_at_ms,
+            deferred_command: command.to_string(),
+            referenced_paths: vec![RehydrationPathRef {
+                path: "crates/franken-node/tests/validation_proof_cache.rs".to_string(),
+                exists: true,
+            }],
+            sibling_blockers: Vec::new(),
+            latest_blocker_comment: format!("Deferred proof command for {bead_id}: {command}"),
+            source_only_allowed: false,
+        }
+    }
+
+    fn rehydration_input(
+        blocked_beads: Vec<BlockedProofBeadSummary>,
+    ) -> BlockedProofRehydrationInput {
+        BlockedProofRehydrationInput {
+            schema_version: BLOCKED_PROOF_REHYDRATION_SCHEMA_VERSION.to_string(),
+            now_ms: NOW_MS,
+            max_blocker_age_ms: DEFAULT_REHYDRATION_MAX_BLOCKER_AGE_MS,
+            rch_snapshot: BlockedProofRchSnapshot {
+                active_cargo_processes: 0,
+                max_active_cargo_processes: 2,
+                queue_depth: 0,
+                max_queue_depth: 8,
+                available_workers: 4,
+            },
+            agent_mail_healthy: true,
+            proof_cache_hit_beads: Vec::new(),
+            coalesced_commands: Vec::new(),
+            blocked_beads,
+        }
+    }
+
+    #[test]
+    fn blocked_proof_rehydration_orders_by_priority_and_age_and_suppresses_duplicates() {
+        let command = "rch exec -- cargo test -p frankenengine-node validation_proof_cache";
+        let mut input = rehydration_input(vec![
+            rehydration_bead("bd-low", 3, NOW_MS - 1_000, command),
+            rehydration_bead("bd-old-high", 1, NOW_MS - 120_000, command),
+            rehydration_bead(
+                "bd-new-high",
+                1,
+                NOW_MS - 1_000,
+                "rch exec -- cargo test -p frankenengine-node validation_readiness",
+            ),
+        ]);
+        input
+            .coalesced_commands
+            .push("rch exec -- cargo test -p frankenengine-node validation_readiness".to_string());
+
+        let plan = build_blocked_proof_rehydration_plan(&input).unwrap();
+
+        assert_eq!(
+            plan.schema_version,
+            BLOCKED_PROOF_REHYDRATION_SCHEMA_VERSION
+        );
+        assert_eq!(plan.candidates[0].bead_id, "bd-old-high");
+        assert_eq!(
+            plan.candidates[0].action,
+            BlockedProofRehydrationAction::ReadyForReproof
+        );
+        assert_eq!(
+            plan.candidates[1].action,
+            BlockedProofRehydrationAction::WaitForExistingProof
+        );
+        assert_eq!(
+            plan.candidates[2].reason_code,
+            rehydration_reason_codes::WAIT_FOR_EXISTING_PROOF
+        );
+        assert!(plan.human_summary.contains("ready=1"));
+        assert!(plan.human_summary.contains("waiting=2"));
+    }
+
+    #[test]
+    fn blocked_proof_rehydration_fails_closed_for_missing_path_and_closed_blocker() {
+        let mut missing = rehydration_bead(
+            "bd-missing",
+            2,
+            NOW_MS - 10_000,
+            "rch exec -- cargo test -p frankenengine-node missing_path_test",
+        );
+        let missing_path = missing
+            .referenced_paths
+            .first_mut()
+            .expect("rehydration fixture includes a referenced path");
+        missing_path.exists = false;
+        missing_path.path = "crates/franken-node/tests/deleted_validation_test.rs".to_string();
+
+        let mut closed_blocker = rehydration_bead(
+            "bd-closed-blocker",
+            2,
+            NOW_MS - 9_000,
+            "rch exec -- cargo test -p frankenengine-node stale_blocker_test",
+        );
+        closed_blocker.sibling_blockers.push(RehydrationBlockerRef {
+            bead_id: "bd-franken-engine-stale".to_string(),
+            status: RehydrationBlockerStatus::Closed,
+            summary: "prior sibling API drift is closed".to_string(),
+        });
+
+        let plan =
+            build_blocked_proof_rehydration_plan(&rehydration_input(vec![missing, closed_blocker]))
+                .unwrap();
+
+        assert!(
+            plan.candidates
+                .iter()
+                .all(|candidate| candidate.fail_closed)
+        );
+        assert!(plan.candidates.iter().any(|candidate| {
+            candidate.reason_code == rehydration_reason_codes::STALE_COMMAND_MISSING_PATH
+                && candidate.evidence_snippet.contains("missing")
+        }));
+        assert!(plan.candidates.iter().any(|candidate| {
+            candidate.reason_code == rehydration_reason_codes::STALE_CLOSED_BLOCKER
+                && candidate
+                    .evidence_snippet
+                    .contains("bd-franken-engine-stale")
+        }));
+    }
+
+    #[test]
+    fn blocked_proof_rehydration_preserves_source_only_work_during_cargo_pressure() {
+        let mut source_only = rehydration_bead(
+            "bd-source-only",
+            2,
+            NOW_MS - 20_000,
+            "rch exec -- cargo test -p frankenengine-node source_only_deferred",
+        );
+        source_only.source_only_allowed = true;
+
+        let mut remote_required = rehydration_bead(
+            "bd-remote-required",
+            2,
+            NOW_MS - 10_000,
+            "rch exec -- cargo test -p frankenengine-node remote_required_deferred",
+        );
+        remote_required.source_only_allowed = false;
+
+        let mut input = rehydration_input(vec![source_only, remote_required]);
+        input.rch_snapshot.active_cargo_processes = 5;
+
+        let plan = build_blocked_proof_rehydration_plan(&input).unwrap();
+        let source_candidate = plan
+            .candidates
+            .iter()
+            .find(|candidate| candidate.bead_id == "bd-source-only")
+            .unwrap();
+        let remote_candidate = plan
+            .candidates
+            .iter()
+            .find(|candidate| candidate.bead_id == "bd-remote-required")
+            .unwrap();
+
+        assert_eq!(
+            source_candidate.action,
+            BlockedProofRehydrationAction::SourceOnlyDuringPressure
+        );
+        assert_eq!(
+            source_candidate.reason_code,
+            rehydration_reason_codes::SOURCE_ONLY_DURING_PRESSURE
+        );
+        assert_eq!(
+            remote_candidate.action,
+            BlockedProofRehydrationAction::WaitForCapacity
+        );
+        assert!(plan.human_summary.contains("source_only=1"));
     }
 
     #[test]
