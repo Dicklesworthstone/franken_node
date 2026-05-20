@@ -752,7 +752,10 @@ fn remote_cap_ed25519_gate_rejects_tampered_raw_crypto_trait_signature() {
         .to_string();
     let mut tampered = signature.clone();
     let last = tampered.pop().expect("non-empty hex signature");
-    tampered.push(if last == '0' { '1' } else { '0' });
+    tampered.push(match last {
+        '0' => '1',
+        _ => '0',
+    });
     assert_ne!(tampered, signature);
     cap_json["signature"] = serde_json::Value::String(tampered);
     let tampered_cap: RemoteCap =
