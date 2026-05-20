@@ -12,6 +12,7 @@ use crate::security::constant_time;
 
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 const MAX_AUDIT_PATH_ENTRIES: usize = crate::capacity_defaults::base::SMALL;
+const MAX_PROOF_ID_BYTES: usize = 512;
 
 // ── Hash helper ─────────────────────────────────────────────────────
 
@@ -425,6 +426,13 @@ fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
     if trimmed == RESERVED_ARTIFACT_ID {
         return Some(format!("artifact_id is reserved: {:?}", artifact_id));
     }
+    if artifact_id.len() > MAX_PROOF_ID_BYTES {
+        return Some(format!(
+            "artifact_id length {} exceeds maximum {}",
+            artifact_id.len(),
+            MAX_PROOF_ID_BYTES
+        ));
+    }
     if artifact_id.contains('\0') {
         return Some("artifact_id contains null byte".to_string());
     }
@@ -444,6 +452,13 @@ fn invalid_connector_id_reason(connector_id: &str) -> Option<String> {
     }
     if trimmed == RESERVED_ARTIFACT_ID {
         return Some(format!("connector_id is reserved: {:?}", connector_id));
+    }
+    if connector_id.len() > MAX_PROOF_ID_BYTES {
+        return Some(format!(
+            "connector_id length {} exceeds maximum {}",
+            connector_id.len(),
+            MAX_PROOF_ID_BYTES
+        ));
     }
     if connector_id.contains('\0') {
         return Some("connector_id contains null byte".to_string());
@@ -1097,6 +1112,32 @@ mod tests {
     }
 
     #[test]
+    fn oversized_artifact_id_rejected_before_leaf_mismatch() {
+        let (root, proofs) = build_test_tree(&["a", "b"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let oversized_artifact_id = "a".repeat(MAX_PROOF_ID_BYTES + 1);
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&proofs[0]),
+            "not-the-leaf-hash",
+            "conn-1",
+            &oversized_artifact_id,
+            "artifact-id-cap",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(!receipt.log_root_matched);
+        assert!(!receipt.proof_valid);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidArtifactId { reason })
+                if reason.contains("exceeds maximum")
+                    && reason.contains(&MAX_PROOF_ID_BYTES.to_string())
+        ));
+    }
+
+    #[test]
     fn empty_connector_id_rejected_before_missing_proof() {
         let policy = TransparencyPolicy {
             required: true,
@@ -1304,6 +1345,34 @@ mod tests {
         assert!(matches!(
             receipt.failure_reason,
             Some(ProofFailure::InvalidConnectorId { reason }) if reason.contains("empty")
+        ));
+    }
+
+    #[test]
+    fn oversized_connector_id_rejected_before_missing_proof() {
+        let policy = TransparencyPolicy {
+            required: true,
+            pinned_roots: vec![],
+        };
+        let oversized_connector_id = "c".repeat(MAX_PROOF_ID_BYTES + 1);
+        let receipt = verify_inclusion(
+            &policy,
+            None,
+            "irrelevant-hash",
+            &oversized_connector_id,
+            "artifact-1",
+            "connector-id-cap",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(!receipt.log_root_matched);
+        assert!(!receipt.proof_valid);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidConnectorId { reason })
+                if reason.contains("exceeds maximum")
+                    && reason.contains(&MAX_PROOF_ID_BYTES.to_string())
         ));
     }
 
