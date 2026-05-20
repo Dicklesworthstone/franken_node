@@ -33,6 +33,10 @@ fn read_len_exceeds_limit(len: usize, max_bytes: u64) -> bool {
     len_to_u64_saturating(len) > max_bytes
 }
 
+fn bounded_reader_limit(max_bytes: u64) -> u64 {
+    max_bytes.saturating_add(1)
+}
+
 /// Read file with size limits to prevent DoS via parser bombs.
 /// Returns file content as String if within size limit, error otherwise.
 pub fn bounded_read_to_string(path: &std::path::Path, max_bytes: u64) -> std::io::Result<String> {
@@ -47,7 +51,8 @@ pub fn bounded_read_to_string(path: &std::path::Path, max_bytes: u64) -> std::io
     }
 
     let mut content = String::new();
-    file.read_to_string(&mut content)?;
+    let mut limited = file.take(bounded_reader_limit(max_bytes));
+    limited.read_to_string(&mut content)?;
     let actual_bytes = len_to_u64_saturating(content.len());
     if actual_bytes > max_bytes {
         return Err(file_too_large_error(actual_bytes, max_bytes));
@@ -69,7 +74,8 @@ pub fn bounded_read(path: &std::path::Path, max_bytes: u64) -> std::io::Result<V
     }
 
     let mut content = Vec::new();
-    file.read_to_end(&mut content)?;
+    let mut limited = file.take(bounded_reader_limit(max_bytes));
+    limited.read_to_end(&mut content)?;
     let actual_bytes = len_to_u64_saturating(content.len());
     if actual_bytes > max_bytes {
         return Err(file_too_large_error(actual_bytes, max_bytes));
@@ -196,8 +202,8 @@ pub mod lock_utils {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionableError, MAX_HELP_URLS, bounded_read, lock_utils, push_bounded,
-        read_len_exceeds_limit,
+        ActionableError, MAX_HELP_URLS, bounded_read, bounded_reader_limit, lock_utils,
+        push_bounded, read_len_exceeds_limit,
     };
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -1472,6 +1478,13 @@ mod tests {
         assert!(!read_len_exceeds_limit(8, 8));
         assert!(read_len_exceeds_limit(9, 8));
         assert!(read_len_exceeds_limit(usize::MAX, 0));
+    }
+
+    #[test]
+    fn bounded_read_take_limit_saturates_for_one_byte_overrun_probe() {
+        assert_eq!(bounded_reader_limit(0), 1);
+        assert_eq!(bounded_reader_limit(8), 9);
+        assert_eq!(bounded_reader_limit(u64::MAX), u64::MAX);
     }
 
     #[cfg(target_os = "linux")]
