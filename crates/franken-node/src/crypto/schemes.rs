@@ -1,8 +1,7 @@
 //! Signature scheme trait abstractions and concrete implementations.
 
 use crate::crypto::error::Ed25519Error;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use serde::{Deserialize, Serialize};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
 const ED25519_SIGNATURE_PREIMAGE_DOMAIN: &[u8] = b"ed25519_signature_v1:";
 

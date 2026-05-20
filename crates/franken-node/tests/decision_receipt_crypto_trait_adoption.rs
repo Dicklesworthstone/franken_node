@@ -10,24 +10,24 @@
 //!
 //! Bead: bd-dwx4l (parent design: docs/specs/crypto_trait_abstraction.md).
 
-use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer as _, SigningKey};
 use frankenengine_node::crypto::{Ed25519Scheme, SignatureScheme};
 use frankenengine_node::security::decision_receipt::{
-    Decision, Receipt, sign_receipt, verify_receipt,
+    sign_receipt, verify_receipt, Decision, Receipt,
 };
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 const PRE_MIGRATION_CANONICAL_RECEIPT_JSON: &str = concat!(
     r#"{"action_name":"quarantine_extension","actor_identity":"security-admin@franken-node.prod","#,
     r#""audience":"franken-node-control-plane","confidence":4605831338911806259,"decision":"approved","#,
     r#""evidence_refs":["evidence:network-anomaly-detector:2026-001","#,
     r#""evidence:behavioral-analysis:ext-scan-001","evidence:reputation-feed:threat-intel-db"],"#,
-    r#""input_hash":"b406a1844ee3152574a7ed4dd0d4511dfc4736bbe57c2c9f1f8ea22c721cfb48","#,
+    r#""input_hash":"31649fb432998b8ee5f377ab7687c1d07a7bb993702799450c6f29af56a717aa","#,
     r#""nonce":"abcdef0123456789abcdef0123456789","#,
-    r#""output_hash":"13b470cfbc16a0b6a94a7f39fc91a1b54f52bfad71e510d6d1e64f973b371452","#,
+    r#""output_hash":"b1a29a5203c018b0ffce53cb944ee5a347d326d6204a07b9f1c07a56b0f2b1f2","#,
     r#""policy_rule_chain":["policy:network-egress-monitoring","policy:behavioral-reputation-gate","#,
     r#""policy:quarantine-on-threat-match"],"previous_receipt_hash":"previous-receipt-hash-abc123def456","#,
     r#""rationale":"Extension exhibits suspicious network behavior patterns consistent with data exfiltration","#,
@@ -154,9 +154,11 @@ fn decision_receipt_trait_raw_path_preserves_legacy_signature_bytes() {
 
     // Path A: trait-routed (post-migration `sign_receipt`).
     let signed = sign_receipt(&receipt, &signing_key).expect("trait-mediated sign should work");
-    let trait_signature_bytes = BASE64_STANDARD
-        .decode(&signed.signature)
+    let mut trait_signature_bytes = [0_u8; 64];
+    let decoded_len = BASE64_STANDARD
+        .decode_slice(&signed.signature, &mut trait_signature_bytes)
         .expect("signature should be base64");
+    assert_eq!(decoded_len, trait_signature_bytes.len());
 
     // Path B: direct ed25519-dalek sign over the canonical preimage
     // (this is what pre-migration `sign_receipt` did internally).
@@ -183,7 +185,7 @@ fn decision_receipt_trait_raw_path_preserves_legacy_signature_bytes() {
 
     // And direct ed25519-dalek strict-verify accepts the same bytes,
     // closing the byte-identity circle.
-    let sig = Signature::try_from(trait_signature_bytes.as_slice()).expect("64-byte signature");
+    let sig = Signature::try_from(&trait_signature_bytes[..]).expect("64-byte signature");
     public_key
         .verify_strict(canonical_receipt.as_bytes(), &sig)
         .expect("direct ed25519-dalek strict verify must accept the trait-emitted signature");
