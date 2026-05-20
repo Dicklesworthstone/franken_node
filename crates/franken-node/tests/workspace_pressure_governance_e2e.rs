@@ -425,6 +425,8 @@ fn target_dir_lease_plan_golden_ranks_roots_without_cleanup_commands() {
     let human = render_target_dir_lease_plan_human(&plan);
     assert!(human.contains("target_dir_lease"));
     assert!(human.contains("bd-c9hho.2"));
+    assert!(human
+        .contains("/data/tmp/franken-node-targets-b/franken-node-bd-c9hho-2-rch_cargo-build-output"));
     assert!(!human.contains("rm -rf"));
     assert!(!human.contains("git clean"));
 }
