@@ -572,8 +572,23 @@ fn canonical_serialization_key_ordering_stability() {
 
 #[test]
 fn trust_card_slice_canonical_json_serializes_for_list_output() {
-    let card: TrustCard =
-        serde_json::from_value(trust_card_value()).expect("trust-card fixture should parse");
+    let card = ArbitraryTrustCardData {
+        extension_id: "npm:@spec-derived/trust-card".to_string(),
+        version: "1.0.0".to_string(),
+        publisher_name: "Spec Derived".to_string(),
+        publisher_url: "https://registry.example/spec-derived".to_string(),
+        description: "Canonical serializer trust-card slice fixture".to_string(),
+        repository_url: "https://github.com/spec-derived/trust-card".to_string(),
+        homepage_url: "https://example.com/spec-derived/trust-card".to_string(),
+        risk_level: 0,
+        certification_level: 2,
+        trust_card_version: 1,
+        reputation_score_basis_points: 9500,
+        card_hash: format!("sha256:{:064x}", 1_u64),
+        registry_signature: "registry-signature-fixture".to_string(),
+        evidence_count: 1,
+    }
+    .to_trust_card();
     let cards = vec![card];
 
     let canonical =
