@@ -664,7 +664,10 @@ impl ArtifactError {
 }
 
 fn display_artifact_id(artifact_id: &str) -> &str {
-    if artifact_id.trim().is_empty() || is_reserved_artifact_id(artifact_id) {
+    if artifact_id.trim().is_empty()
+        || is_reserved_artifact_id(artifact_id)
+        || artifact_id.chars().any(char::is_control)
+    {
         RESERVED_ARTIFACT_ID
     } else {
         artifact_id
@@ -1977,12 +1980,22 @@ mod tests {
         envelope.add_requirement(CapabilityRequirement::new("cap:fs:read", "read", true));
         envelope.bind_to(&identity);
         let artifact = ExtensionArtifact::new(identity, Some(envelope));
-        let result = gate.admit(&artifact, "2026-02-21T00:00:00Z");
-        assert!(result.is_err());
+        let err = gate
+            .admit(&artifact, "2026-02-21T00:00:00Z")
+            .expect_err("control-character artifact_id must fail closed");
         assert_eq!(
-            result.unwrap_err().code(),
+            err.code(),
             error_codes::ERR_CART_INVALID_ENVELOPE
         );
+        assert!(!err.to_string().contains('\r'));
+        assert!(!err.to_string().contains('\n'));
+        assert!(gate.audit_log().iter().all(|entry| {
+            !entry.artifact_id.contains('\r') && !entry.artifact_id.contains('\n')
+        }));
+        assert!(gate
+            .audit_log()
+            .iter()
+            .any(|entry| entry.artifact_id == RESERVED_ARTIFACT_ID));
     }
 
     #[test]
