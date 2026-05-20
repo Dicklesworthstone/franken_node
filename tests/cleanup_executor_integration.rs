@@ -6,7 +6,9 @@
 use frankenengine_node::ops::workspace_pressure_policy::{
     CleanupCandidate, WorkspacePressureInputs, WorkspacePressurePolicy,
 };
-use frankenengine_node::storage::cleanup_receipts::{CleanupReceiptsStorage, ReceiptSearchFilter};
+use frankenengine_node::storage::cleanup_receipts::{
+    CleanupReceiptsError, CleanupReceiptsStorage, ReceiptSearchFilter,
+};
 use frankenengine_node::{
     lock_utils,
     ops::cleanup_executor::{
@@ -363,6 +365,51 @@ fn test_cleanup_receipts_storage_integration() {
     assert_eq!(stats.total_receipts, 1);
     assert_eq!(stats.execute_receipts, 1);
     assert_eq!(stats.dry_run_receipts, 0);
+}
+
+#[test]
+fn delete_receipt_rejects_index_path_escape_before_unlink() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let outside_dir = TempDir::new().expect("outside temp dir");
+    let outside_file = outside_dir.path().join("outside-receipt.json");
+    fs::write(&outside_file, "{}").expect("write outside file");
+
+    let receipts_dir = temp_dir.path().join("receipts");
+    let mut storage =
+        CleanupReceiptsStorage::with_directory(receipts_dir).expect("create receipts storage");
+
+    let mock_adapter = MockDeletionAdapter::default();
+    let executor = CleanupExecutor::with_protection_rules(test_cleanup_rules(), mock_adapter);
+    let candidates = vec![create_candidate(
+        "/tmp/delete_escape.tmp",
+        1024,
+        "Test delete escape",
+        false,
+    )];
+    let receipt = executor.execute_cleanup(
+        &candidates,
+        CleanupMode::Execute,
+        "delete_escape_test".to_string(),
+        "Delete escape regression".to_string(),
+        Some("delete_escape_bead".to_string()),
+    );
+    storage.store_receipt(&receipt).expect("store receipt");
+    storage
+        .override_receipt_file_path_for_test(&receipt.receipt_id, outside_file.clone())
+        .expect("override receipt path");
+
+    let err = storage
+        .delete_receipt(&receipt.receipt_id)
+        .expect_err("escaped index path must fail before unlink");
+
+    assert!(
+        matches!(err, CleanupReceiptsError::Corruption(message) if message.contains("escapes")),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        outside_file.exists(),
+        "escaped index path must not be removed by delete_receipt"
+    );
 }
 
 #[test]

@@ -264,19 +264,43 @@ impl CleanupReceiptsStorage {
         let metadata = self
             .index
             .receipts
-            .remove(receipt_id)
+            .get(receipt_id)
             .ok_or_else(|| CleanupReceiptsError::ReceiptNotFound(receipt_id.to_string()))?;
 
+        // Validate path is within storage directory before unlinking; index.json is persisted
+        // state and must not be able to redirect deletion outside the receipt store.
+        validate_path_within_storage(&metadata.file_path, &self.storage_dir)?;
+
+        let file_path = metadata.file_path.clone();
+
         // Remove file atomically (TOCTOU-safe)
-        if let Err(e) = fs::remove_file(&metadata.file_path)
+        if let Err(e) = fs::remove_file(&file_path)
             && e.kind() != std::io::ErrorKind::NotFound
         {
             return Err(e.into());
         }
 
+        self.index.receipts.remove(receipt_id);
         self.index.last_updated = Utc::now();
         self.save_index()?;
 
+        Ok(())
+    }
+
+    /// Test-support hook for exercising persisted-index corruption paths.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn override_receipt_file_path_for_test(
+        &mut self,
+        receipt_id: &str,
+        file_path: PathBuf,
+    ) -> Result<(), CleanupReceiptsError> {
+        let metadata = self
+            .index
+            .receipts
+            .get_mut(receipt_id)
+            .ok_or_else(|| CleanupReceiptsError::ReceiptNotFound(receipt_id.to_string()))?;
+        metadata.file_path = file_path;
         Ok(())
     }
 
