@@ -165,6 +165,7 @@ impl SignedExtensionManifest {
         // Projects publisher_signature, trust_chain_ref, and min_engine_version
         // for engine-level supply-chain checks.
         validate_signature(&self.signature)?;
+        validate_entrypoint_path(&self.entrypoint)?;
         let sig_bytes = base64::engine::general_purpose::STANDARD
             .decode(&self.signature.signature)
             .map_err(|e| ManifestSchemaError::EngineManifestProjection {
@@ -298,15 +299,16 @@ pub fn validate_signed_manifest(
 
     validate_signature(&manifest.signature)?;
 
+    // Path-traversal and manifest-local bounds guard. Empty entrypoints still
+    // flow to engine validation for EMS_ENGINE_REJECTED, but non-empty invalid
+    // paths fail before the engine projection clones attacker-controlled text.
+    validate_entrypoint_path(&manifest.entrypoint)?;
+
     // Required by bd-1gx AC(7): map into franken_engine ExtensionManifest and
     // reuse engine-level validation as part of admission checks.
     let engine_manifest = manifest.to_engine_manifest()?;
     validate_engine_manifest(&engine_manifest)
         .map_err(ManifestSchemaError::EngineManifestRejected)?;
-
-    // Path-traversal guard: runs after engine validation so that empty
-    // entrypoints are caught by the engine first (EMS_ENGINE_REJECTED).
-    validate_entrypoint_path(&manifest.entrypoint)?;
 
     Ok(())
 }
@@ -922,6 +924,22 @@ mod tests {
         assert!(
             error.to_string().contains("exceeds"),
             "error must surface the length-bound reason for triage; got {error}"
+        );
+    }
+
+    #[test]
+    fn entrypoint_rejects_oversized_direct_engine_projection_before_clone_path() {
+        let mut manifest = valid_manifest();
+        manifest.entrypoint = format!("dist/{}.js", "a".repeat(MAX_MANIFEST_FIELD_BYTES + 1));
+
+        let error = manifest
+            .to_engine_manifest()
+            .expect_err("oversized direct projection entrypoint must fail closed");
+
+        assert_eq!(error.code(), "EMS_ENTRYPOINT_PATH_TRAVERSAL");
+        assert!(
+            error.to_string().contains("exceeds"),
+            "direct projection must use manifest-local entrypoint bound; got {error}"
         );
     }
 
