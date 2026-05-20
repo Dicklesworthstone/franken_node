@@ -265,6 +265,7 @@ pub enum ArtifactIdInvalidReason {
     Empty,
     TooLong,
     ControlCharacter,
+    LeadingOrTrailingWhitespace,
 }
 
 impl ArtifactIdInvalidReason {
@@ -273,6 +274,7 @@ impl ArtifactIdInvalidReason {
             Self::Empty => "empty",
             Self::TooLong => "too_long",
             Self::ControlCharacter => "control_character",
+            Self::LeadingOrTrailingWhitespace => "leading_or_trailing_whitespace",
         }
     }
 }
@@ -304,8 +306,12 @@ fn policy_auth_field_is_valid(value: &str) -> bool {
 }
 
 fn artifact_id_invalid_reason(value: &str) -> Option<ArtifactIdInvalidReason> {
-    if value.trim().is_empty() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         return Some(ArtifactIdInvalidReason::Empty);
+    }
+    if value != trimmed {
+        return Some(ArtifactIdInvalidReason::LeadingOrTrailingWhitespace);
     }
     if value.len() > MAX_ARTIFACT_ID_BYTES {
         return Some(ArtifactIdInvalidReason::TooLong);
@@ -1218,8 +1224,16 @@ mod tests {
             })
         ));
 
+        let padded = gate.evaluate(" art-1 ", ObjectClass::CriticalMarker, Some(&bundle));
+        assert!(matches!(
+            padded,
+            Err(PromotionDenialReason::ArtifactIdInvalid {
+                reason: ArtifactIdInvalidReason::LeadingOrTrailingWhitespace
+            })
+        ));
+
         assert_eq!(gate.approvals(), 0);
-        assert_eq!(gate.denials(), 2);
+        assert_eq!(gate.denials(), 3);
     }
 
     #[test]
