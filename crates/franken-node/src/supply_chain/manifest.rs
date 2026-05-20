@@ -381,6 +381,11 @@ fn validate_entrypoint_path(entrypoint: &str) -> Result<(), ManifestSchemaError>
     if entrypoint.trim().is_empty() {
         return Ok(());
     }
+    if entrypoint.len() > MAX_MANIFEST_FIELD_BYTES {
+        return Err(ManifestSchemaError::EntrypointPathTraversal {
+            reason: format!("entrypoint exceeds {MAX_MANIFEST_FIELD_BYTES} bytes"),
+        });
+    }
     if entrypoint.starts_with('/') {
         return Err(ManifestSchemaError::EntrypointPathTraversal {
             reason: "entrypoint must be a relative path, not absolute".to_string(),
@@ -391,9 +396,14 @@ fn validate_entrypoint_path(entrypoint: &str) -> Result<(), ManifestSchemaError>
             reason: "entrypoint must not contain backslash characters".to_string(),
         });
     }
-    if entrypoint.contains('\0') {
+    // Reject every control character (not just NUL) to match the manifest
+    // text-validation discipline applied by ensure_manifest_text. A `\r\n`
+    // here would otherwise survive validation and reach audit-log
+    // formatting + the engine projection clone path with a log-injection
+    // payload riding the entrypoint string.
+    if entrypoint.chars().any(char::is_control) {
         return Err(ManifestSchemaError::EntrypointPathTraversal {
-            reason: "entrypoint must not contain null bytes".to_string(),
+            reason: "entrypoint must not contain control characters".to_string(),
         });
     }
     if entrypoint.split('/').any(|seg| seg == "..") {
@@ -875,6 +885,44 @@ mod tests {
         manifest.entrypoint = "dist/main\0.js".to_string();
         let error = validate_signed_manifest(&manifest).expect_err("should fail");
         assert_eq!(error.code(), "EMS_ENTRYPOINT_PATH_TRAVERSAL");
+    }
+
+    #[test]
+    fn entrypoint_rejects_control_characters_carriage_return_line_feed() {
+        // Regression: prior to this guard, `validate_entrypoint_path` rejected
+        // only NUL bytes among control characters. A publisher-supplied
+        // entrypoint like "dist/main.js\r\nINJECTED" survived validation and
+        // reached audit-event formatting + the engine projection JSON, opening
+        // a log-injection / surface-layout-poisoning channel. Reject every
+        // control character to match the discipline ensure_manifest_text
+        // applies to other manifest text fields.
+        let mut manifest = valid_manifest();
+        manifest.entrypoint = "dist/main.js\r\nINJECTED_LOG_LINE".to_string();
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+        assert_eq!(error.code(), "EMS_ENTRYPOINT_PATH_TRAVERSAL");
+        assert!(
+            error.to_string().contains("control characters"),
+            "error must surface the control-character reason for triage; got {error}"
+        );
+    }
+
+    #[test]
+    fn entrypoint_rejects_oversized_path() {
+        // Regression: prior to this guard, validate_entrypoint_path had no
+        // length bound, so a manifest with a multi-megabyte entrypoint would
+        // pass validation and be cloned into the engine projection JSON,
+        // giving an attacker an O(N) memory amplification primitive driven by
+        // a single field. Bound entrypoint to the same MAX_MANIFEST_FIELD_BYTES
+        // limit ensure_manifest_text enforces on every other text field.
+        let mut manifest = valid_manifest();
+        let oversized = "a".repeat(MAX_MANIFEST_FIELD_BYTES + 1);
+        manifest.entrypoint = format!("dist/{oversized}.js");
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+        assert_eq!(error.code(), "EMS_ENTRYPOINT_PATH_TRAVERSAL");
+        assert!(
+            error.to_string().contains("exceeds"),
+            "error must surface the length-bound reason for triage; got {error}"
+        );
     }
 
     #[test]
