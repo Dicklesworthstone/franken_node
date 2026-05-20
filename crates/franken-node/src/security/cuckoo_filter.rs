@@ -59,8 +59,17 @@ impl CuckooFilter {
     fn hash_and_fingerprint(&self, key: &str) -> (u64, u16) {
         let hash = self.hash_builder.hash_one(key);
 
-        // Ensure fingerprint is never 0 (used as empty marker)
-        let fingerprint = ((hash & FINGERPRINT_MASK as u64) as u16) | 1;
+        // Truncate to FINGERPRINT_BITS, then remap 0 → 1 so the empty-bucket
+        // marker is never produced. The previous implementation used
+        // `| 1`, which forced the LSB to 1 unconditionally and collapsed
+        // the 4096-value fingerprint space into 2048 odd values — halving
+        // the entropy and **doubling the false-positive rate** reported by
+        // `false_positive_rate()` (which assumes the full
+        // `1 << FINGERPRINT_BITS` space). Preserving 4095 distinct
+        // non-zero fingerprints restores the documented
+        // `2 * BUCKET_SIZE / 2^FINGERPRINT_BITS` base FPR.
+        let raw = (hash & FINGERPRINT_MASK as u64) as u16;
+        let fingerprint = if raw == 0 { 1 } else { raw };
         (hash, fingerprint)
     }
 
