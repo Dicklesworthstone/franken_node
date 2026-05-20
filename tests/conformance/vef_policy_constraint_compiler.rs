@@ -3,14 +3,11 @@
 //! Validates multi-action policy compilation, deterministic outputs, and proof
 //! worker envelope compatibility.
 
-#[path = "../../crates/franken-node/src/connector/vef_policy_constraints.rs"]
-mod vef_policy_constraints;
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::vef_policy_constraints::{
+    use frankenengine_node::connector::vef_policy_constraints::{
         ActionClass, LANGUAGE_VERSION, PolicyRule, RuleEffect, RuntimePolicy, compile_policy,
         proof_generator_accepts, round_trip_semantics,
     };
@@ -136,13 +133,35 @@ mod tests {
         let mut policy = sample_policy();
         policy
             .rules
-            .retain(|r| r.action_class != ActionClass::SecretAccess);
+            .retain(|r| !matches!(r.action_class, ActionClass::SecretAccess));
 
         let err = compile_policy(&policy, "trace-conformance-4").unwrap_err();
         assert!(
             err.code.ends_with("003"),
             "expected missing coverage code, got {}",
             err.code
+        );
+    }
+
+    #[test]
+    fn control_char_rule_id_rejection_does_not_echo_payload() {
+        let mut policy = sample_policy();
+        policy.rules[0].rule_id = "network\r\nINJECTED".to_string();
+
+        let err = compile_policy(&policy, "trace-conformance-control").unwrap_err();
+
+        assert!(
+            err.message.contains("control characters"),
+            "unexpected message: {}",
+            err.message
+        );
+        assert!(
+            err.rule_id.is_none(),
+            "unsafe rule_id must not be retained in structured error metadata"
+        );
+        assert!(
+            !err.to_string().contains("INJECTED"),
+            "display text must not echo control-character payload"
         );
     }
 }

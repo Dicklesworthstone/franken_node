@@ -391,7 +391,7 @@ fn normalize_policy(
                 event_codes::VEF_COMPILE_ERR_004_INVALID_RULE,
                 "rule_id must not contain NUL bytes",
                 trace_id,
-                Some(rule_id),
+                None,
             ));
         }
         if rule.rule_id.chars().any(char::is_control) {
@@ -399,7 +399,7 @@ fn normalize_policy(
                 event_codes::VEF_COMPILE_ERR_004_INVALID_RULE,
                 "rule_id must not contain control characters",
                 trace_id,
-                Some(rule_id),
+                None,
             ));
         }
         if let Some(reason) = invalid_trace_segment_reason("rule_id", rule_id) {
@@ -1059,6 +1059,8 @@ mod tests {
 
         assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_004_INVALID_RULE);
         assert!(err.message.contains("control characters"));
+        assert!(err.rule_id.is_none());
+        assert!(!err.to_string().contains("rule\tTAB"));
     }
 
     #[test]
@@ -1090,7 +1092,8 @@ mod tests {
 
         assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_004_INVALID_RULE);
         assert!(err.message.contains("rule_id must not contain NUL"));
-        assert_eq!(err.rule_id.as_deref(), Some("rule\0bad"));
+        assert!(err.rule_id.is_none());
+        assert!(!err.to_string().contains("rule\0bad"));
     }
 
     #[test]

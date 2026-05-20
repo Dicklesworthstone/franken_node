@@ -665,6 +665,10 @@ name = "vef_receipt_schema_conformance"
 path = "tests/vef_receipt_schema_conformance.rs"
 
 [[test]]
+name = "vef_policy_constraint_compiler"
+path = "../../tests/conformance/vef_policy_constraint_compiler.rs"
+
+[[test]]
 name = "vef_proof_scheduler_conformance"
 path = "tests/vef_proof_scheduler_conformance.rs"
 

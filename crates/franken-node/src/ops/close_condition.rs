@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use ed25519_dalek::{Signer, Verifier};
+use ed25519_dalek::Signer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
