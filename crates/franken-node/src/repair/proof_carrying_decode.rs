@@ -1298,9 +1298,8 @@ impl ProofCarryingDecoder {
         Ok(())
     }
 
-    // Inline negative-path tests
+    // Inline negative-path test helper, invoked by the test module below.
     #[cfg(test)]
-    #[allow(dead_code)]
     fn register_algorithm_negative_path_regressions() {
         // Test: registering duplicate algorithm should be idempotent
         let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
@@ -2117,6 +2116,11 @@ mod tests {
         let id = AlgorithmId::new("reed_solomon_8_4");
         assert_eq!(id.to_string(), "reed_solomon_8_4");
         assert_eq!(id.as_str(), "reed_solomon_8_4");
+    }
+
+    #[test]
+    fn register_algorithm_negative_path_regressions() {
+        ProofCarryingDecoder::register_algorithm_negative_path_regressions();
     }
 
     // ── ProofCarryingDecoder tests ──
