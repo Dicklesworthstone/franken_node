@@ -70,6 +70,8 @@ const MAX_EXTENSION_ID_LEN: usize = 256;
 const MAX_UNTRUSTED_JSON_SIZE: usize = 1_000_000; // 1MB
 const MAX_TELEMETRY_TRACE_ID_BYTES: usize = 256;
 const MAX_TELEMETRY_DETAIL_BYTES: usize = 1024;
+const MAX_EVIDENCE_ID_BYTES: usize = 512;
+const MAX_EVIDENCE_RECEIPT_HASH_BYTES: usize = 512;
 
 fn next_trust_card_version(
     previous_version: u64,
@@ -121,6 +123,49 @@ fn ensure_evidence_refs_present(refs: &[VerifiedEvidenceRef]) -> Result<(), Trus
                 "evidence_refs length {} exceeds maximum {}",
                 refs.len(),
                 MAX_TRUST_CARD_EVIDENCE_REFS
+            ),
+        });
+    }
+    for reference in refs {
+        validate_evidence_ref_field("evidence_id", &reference.evidence_id, MAX_EVIDENCE_ID_BYTES)?;
+        validate_evidence_ref_field(
+            "verification_receipt_hash",
+            &reference.verification_receipt_hash,
+            MAX_EVIDENCE_RECEIPT_HASH_BYTES,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_evidence_ref_field(
+    field: &'static str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), TrustCardError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(TrustCardError::InvalidInput {
+            reason: format!("evidence_refs.{field} cannot be empty"),
+        });
+    }
+    if value != trimmed {
+        return Err(TrustCardError::InvalidInput {
+            reason: format!("evidence_refs.{field} cannot contain leading or trailing whitespace"),
+        });
+    }
+    if value.len() > max_bytes {
+        return Err(TrustCardError::InvalidInput {
+            reason: format!(
+                "evidence_refs.{field} length {} exceeds maximum {}",
+                value.len(),
+                max_bytes
+            ),
+        });
+    }
+    if value.chars().any(char::is_control) {
+        return Err(TrustCardError::InvalidInput {
+            reason: format!(
+                "evidence_refs.{field} cannot contain control characters or null bytes"
             ),
         });
     }
@@ -3241,19 +3286,20 @@ mod canonical_perf_test;
 
 #[cfg(test)]
 mod tests {
+    use super::super::certification::EvidenceType;
     use super::{
         AuditRecord, BehavioralProfile, CamouflageHintRecord, CapabilityDeclaration,
         CapabilityRisk, CertificationLevel, DEFAULT_REGISTRY_KEY, DependencyTrustStatus,
         DerivationMetadata, ExtensionIdentity, MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS,
         MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES, MAX_CAMOUFLAGE_HINTS_ON_CARD,
-        MAX_TRUST_CARD_EVIDENCE_REFS, ProvenanceSummary, PublisherIdentity, ReputationTrend,
-        RevocationStatus, RiskAssessment, RiskLevel, SnapshotSourceContext,
-        TRUST_CARD_CAMOUFLAGE_SUSPECTED, TRUST_CARD_CREATED, TRUST_CARD_QUERIED, TrustCard,
-        TrustCardComparison, TrustCardDiffEntry, TrustCardError, TrustCardInput,
-        TrustCardListFilter, TrustCardMutation, TrustCardRegistry, VerifiedEvidenceRef,
-        apply_camouflage_assessment, canonicalize_value, compute_trust_card_derivation_hash,
-        render_comparison_human, render_trust_card_human, sign_card_in_place, to_canonical_json,
-        update_card_hash, verify_card_signature,
+        MAX_EVIDENCE_RECEIPT_HASH_BYTES, MAX_TRUST_CARD_EVIDENCE_REFS, ProvenanceSummary,
+        PublisherIdentity, ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel,
+        SnapshotSourceContext, TRUST_CARD_CAMOUFLAGE_SUSPECTED, TRUST_CARD_CREATED,
+        TRUST_CARD_QUERIED, TrustCard, TrustCardComparison, TrustCardDiffEntry, TrustCardError,
+        TrustCardInput, TrustCardListFilter, TrustCardMutation, TrustCardRegistry,
+        VerifiedEvidenceRef, apply_camouflage_assessment, canonicalize_value,
+        compute_trust_card_derivation_hash, render_comparison_human, render_trust_card_human,
+        sign_card_in_place, to_canonical_json, update_card_hash, verify_card_signature,
     };
     use crate::security::trajectory_gaming::{CamouflageHint, CamouflageKind};
     use base64::Engine as _;
@@ -4288,6 +4334,57 @@ mod tests {
             .list(&TrustCardListFilter::empty(), "trace", 1_000)
             .expect("failed create must not mutate registry");
         assert!(cards.is_empty());
+    }
+
+    #[test]
+    fn create_rejects_unsafe_evidence_ref_fields_before_hashing() {
+        let cases = [
+            (
+                "empty evidence_id",
+                "",
+                "c".repeat(64),
+                "evidence_refs.evidence_id",
+            ),
+            (
+                "padded evidence_id",
+                " ev-padded ",
+                "c".repeat(64),
+                "evidence_refs.evidence_id",
+            ),
+            (
+                "control evidence_id",
+                "ev\0split",
+                "c".repeat(64),
+                "evidence_refs.evidence_id",
+            ),
+            (
+                "oversized receipt hash",
+                "ev-valid",
+                "h".repeat(MAX_EVIDENCE_RECEIPT_HASH_BYTES.saturating_add(1)),
+                "evidence_refs.verification_receipt_hash",
+            ),
+        ];
+
+        for (label, evidence_id, receipt_hash, expected_field) in cases {
+            let mut registry = TrustCardRegistry::default();
+            let mut input = sample_input();
+            input.evidence_refs = vec![VerifiedEvidenceRef {
+                evidence_id: evidence_id.to_string(),
+                evidence_type: EvidenceType::ProvenanceChain,
+                verified_at_epoch: 1_000,
+                verification_receipt_hash: receipt_hash,
+            }];
+
+            let err = registry.create(input, 1_000, "trace").expect_err(label);
+            assert!(matches!(
+                err,
+                TrustCardError::InvalidInput { reason } if reason.contains(expected_field)
+            ));
+            let cards = registry
+                .list(&TrustCardListFilter::empty(), "trace", 1_000)
+                .expect("failed create must not mutate registry");
+            assert!(cards.is_empty(), "{label}");
+        }
     }
 
     #[test]
