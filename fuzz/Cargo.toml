@@ -340,3 +340,9 @@ name = "fuzz_contagion_graph_validate"
 path = "fuzz_targets/fuzz_contagion_graph_validate.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_vef_policy_constraints_compile"
+path = "fuzz_targets/fuzz_vef_policy_constraints_compile.rs"
+test = false
+doc = false
