@@ -23,7 +23,7 @@
 //! - **INV-VER-RESULT-SIGNED**: Every verification result carries a verifier signature.
 //! - **INV-VER-TRANSPARENCY-APPEND**: Transparency log entries are append-only and hash-chained.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -610,9 +610,18 @@ pub(crate) fn verify_ed25519_signature_with_key_hex(
     signature: &str,
 ) -> Result<(), VerifierSdkError> {
     let signature = parse_ed25519_signature_hex(signature)?;
-    verifying_key.verify(payload, &signature).map_err(|_| {
-        VerifierSdkError::SignatureInvalid("signature verification failed".to_string())
-    })
+    // SECURITY: `verify_strict` rejects non-canonical s-values (RFC 8032
+    // s-malleability) — see commit aca68213 and the codebase convention
+    // in crypto/schemes.rs:262-265 / control_plane/audience_token.rs:1173-1176.
+    // Every Ed25519 verification path in franken-node uses strict
+    // verification; this verifier-SDK helper feeds `verifier_economy`
+    // signature checks and was the only remaining lenient seam after
+    // aca68213 closed the `Ed25519Verifier` wrapper.
+    verifying_key
+        .verify_strict(payload, &signature)
+        .map_err(|_| {
+            VerifierSdkError::SignatureInvalid("signature verification failed".to_string())
+        })
 }
 
 pub(crate) fn verify_ed25519_signature_hex(

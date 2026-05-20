@@ -25561,7 +25561,7 @@ fn handle_debug_trace(args: &DebugTraceArgs) -> Result<()> {
 /// designed to prevent.
 fn handle_debug_explain(args: &DebugExplainArgs) -> Result<()> {
     use crate::cli::validate_user_content_pathbuf;
-    use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
+    use ed25519_dalek::{Signature as Ed25519Signature, VerifyingKey};
     use frankenengine_node::security::decision_receipt::{Receipt, signing_key_id};
     use serde::{Deserialize, Serialize};
     use sha2::{Digest, Sha256};
@@ -25833,7 +25833,12 @@ fn handle_debug_explain(args: &DebugExplainArgs) -> Result<()> {
         let mut sig_array = [0u8; 64];
         sig_array.copy_from_slice(&sig_bytes);
         let signature = Ed25519Signature::from_bytes(&sig_array);
-        match public_key.verify(canonical_payload.as_bytes(), &signature) {
+        // SECURITY: explain-mode uses `verify_strict` so the operator-facing
+        // "verifies" verdict matches what the production decision_receipt
+        // verifier (`security::decision_receipt::verify_receipt` →
+        // `Ed25519Scheme::verify_raw`) does. A lenient `verify` here would
+        // report `Ok` on an s-malleated receipt the production gate rejects.
+        match public_key.verify_strict(canonical_payload.as_bytes(), &signature) {
             Ok(()) => steps.push(ExplainStep::ok(
                 "signature_verify",
                 "ed25519 signature verifies against canonical Receipt payload",

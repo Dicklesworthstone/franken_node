@@ -22,7 +22,7 @@ const MAX_CUSTOM_CLAIM_KEY_BYTES: usize = crate::capacity_defaults::base::SMALL;
 const MAX_CUSTOM_CLAIM_VALUE_BYTES: usize = crate::capacity_defaults::base::MEDIUM;
 const MAX_CUSTOM_CLAIMS_CANONICAL_BYTES: usize = crate::capacity_defaults::base::LARGE;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -978,8 +978,15 @@ fn verify_link_signature(
     let verifying_key = parse_trusted_verifying_key(verifying_key_hex, link.role)?;
     let signature = parse_link_signature(&link.signature, link.role)?;
     let payload = canonical_signable_payload(attestation, link)?;
+    // SECURITY: `verify_strict` rejects RFC 8032 non-canonical s-values.
+    // Attestation-chain signature equality is load-bearing for the
+    // provenance-graph integrity claim in README §1015 ("supply-chain
+    // provenance"); a malleated link signature would otherwise verify
+    // and admit a byte-distinct duplicate attestation. Matches the
+    // codebase convention swept in by commit aca68213 across the
+    // `Ed25519Verifier` wrapper and the other direct-verify sites.
     verifying_key
-        .verify(payload.as_bytes(), &signature)
+        .verify_strict(payload.as_bytes(), &signature)
         .map_err(|_| VerificationFailure {
             code: VerificationErrorCode::InvalidSignature,
             broken_link: Some(link.role),
