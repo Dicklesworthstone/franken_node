@@ -388,7 +388,7 @@ pub struct RchArtifactDigest {
 impl RchArtifactDigest {
     #[must_use]
     pub fn from_output(output: &str) -> Self {
-        let snippet = bounded_snippet(output);
+        let snippet = bounded_output_snippet(output);
         Self {
             algorithm: "sha256".to_string(),
             hex: hex::encode(Sha256::digest(output.as_bytes())),
@@ -1591,6 +1591,18 @@ fn bounded_snippet(output: &str) -> String {
     snippet
 }
 
+fn bounded_output_snippet(output: &str) -> String {
+    let mut snippet = String::new();
+    for ch in output.chars() {
+        let ch = if ch.is_control() { '?' } else { ch };
+        if snippet.len().saturating_add(ch.len_utf8()) > SNIPPET_MAX_BYTES {
+            break;
+        }
+        snippet.push(ch);
+    }
+    snippet
+}
+
 fn looks_like_env_assignment(arg: &str) -> bool {
     let Some((key, _value)) = arg.split_once('=') else {
         return false;
@@ -1707,6 +1719,21 @@ mod tests {
         );
         assert!(classification.evidence_snippet.len() <= SNIPPET_MAX_BYTES);
         assert!(classification.evidence_snippet.contains("TOKEN=<redacted>"));
+    }
+
+    #[test]
+    fn artifact_digest_snippet_sanitizes_control_characters_without_changing_digest() {
+        let output = format!(
+            "line one\nline two\x1b[31m{}",
+            "x".repeat(SNIPPET_MAX_BYTES.saturating_mul(2))
+        );
+
+        let digest = RchArtifactDigest::from_output(&output);
+
+        assert_eq!(digest.hex, hex::encode(Sha256::digest(output.as_bytes())));
+        assert!(digest.snippet.len() <= SNIPPET_MAX_BYTES);
+        assert!(!digest.snippet.chars().any(char::is_control));
+        assert!(digest.snippet.contains("line one?line two?"));
     }
 
     #[test]
