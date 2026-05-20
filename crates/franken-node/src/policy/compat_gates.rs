@@ -353,8 +353,18 @@ pub(crate) fn verify_ed25519_canonical<T: Serialize>(
     let Ok(preimage) = signature_preimage(domain, value) else {
         return false;
     };
+    // Use `verify_strict` (not `verify`) to reject malleable / non-canonical-s
+    // signatures. The 71eee3b2 / aca68213 sweep that hardened the codebase
+    // to `verify_strict` everywhere missed this site because its grep
+    // pattern (`verifying_key.verify(` / `public_key.verify(`) didn't match
+    // a call where the verifying-key is the return value of a helper
+    // (`compatibility_policy_verifying_key().verify(...)`). `verify_strict`
+    // is a non-breaking hardening: signatures produced by `Ed25519Scheme` /
+    // `compatibility_policy_signing_key().sign(...)` are always canonical
+    // and continue to verify; only malleated duplicates (a class of
+    // signature forgery / replay-equivalence attack) are now rejected.
     compatibility_policy_verifying_key()
-        .verify(&preimage, &signature)
+        .verify_strict(&preimage, &signature)
         .is_ok()
 }
 
