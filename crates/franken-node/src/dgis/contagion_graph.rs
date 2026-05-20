@@ -36,10 +36,10 @@ pub type NodeId = String;
 /// Validate a node id before it enters the graph.
 ///
 /// Node ids are surfaced in fixture paths, reports, and operator output.
-/// Rejecting embedded NULs at the graph boundary prevents downstream path
-/// and display layers from seeing split identifiers.
+/// Rejecting control characters at the graph boundary prevents downstream path
+/// and display layers from seeing split identifiers or injected output lines.
 pub fn validate_node_id(node: &NodeId) -> Result<(), GraphError> {
-    if node.contains('\0') {
+    if node.chars().any(char::is_control) {
         return Err(GraphError::InvalidNodeId(node.clone()));
     }
     Ok(())
@@ -109,7 +109,7 @@ pub enum GraphError {
     WeightAboveOne,
     /// An edge points at a node that is not in the node set.
     UnknownTarget(NodeId),
-    /// A node id contained an embedded NUL byte.
+    /// A node id contained an embedded control character.
     InvalidNodeId(NodeId),
     /// Graph contains zero nodes; the simulator cannot run on an empty graph.
     EmptyGraph,
@@ -493,6 +493,41 @@ mod tests {
     fn validate_rejects_corrupted_null_byte_node_ids() {
         let bad = "pkg\0shadow".to_string();
         let mut g = ContagionGraph::new(19);
+        g.nodes.push(bad.clone());
+        g.edges.insert(bad.clone(), Vec::new());
+        assert_eq!(g.validate(), Err(GraphError::InvalidNodeId(bad)));
+    }
+
+    #[test]
+    fn node_ids_reject_control_characters() -> Result<(), String> {
+        let bad = "pkg\nshadow".to_string();
+        assert_eq!(
+            ContagionEdge::new(bad.clone(), 0.5, EdgeKind::DependencyImport).err(),
+            Some(GraphError::InvalidNodeId(bad.clone()))
+        );
+
+        let mut g = ContagionGraph::new(23);
+        g.add_node(bad.clone());
+        assert!(
+            g.nodes().is_empty(),
+            "control-character node id must not enter graph"
+        );
+
+        g.add_node("a".to_string());
+        g.add_node("b".to_string());
+        let valid_edge = ContagionEdge::new("b".to_string(), 0.5, EdgeKind::DependencyImport)
+            .map_err(|e| format!("valid edge rejected: {e:?}"))?;
+        assert_eq!(
+            g.add_edge(&bad, valid_edge).err(),
+            Some(GraphError::InvalidNodeId(bad.clone()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validate_rejects_corrupted_control_character_node_ids() {
+        let bad = "pkg\nshadow".to_string();
+        let mut g = ContagionGraph::new(29);
         g.nodes.push(bad.clone());
         g.edges.insert(bad.clone(), Vec::new());
         assert_eq!(g.validate(), Err(GraphError::InvalidNodeId(bad)));
