@@ -322,3 +322,9 @@ name = "fuzz_vef_execution_receipt_validate"
 path = "fuzz_targets/fuzz_vef_execution_receipt_validate.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_checksum_manifest_parse_canonical"
+path = "fuzz_targets/fuzz_checksum_manifest_parse_canonical.rs"
+test = false
+doc = false
