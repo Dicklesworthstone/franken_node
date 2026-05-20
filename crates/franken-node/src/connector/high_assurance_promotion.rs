@@ -298,7 +298,8 @@ impl PolicyAuthorization {
 fn policy_auth_field_is_valid(value: &str) -> bool {
     let trimmed = value.trim();
     !trimmed.is_empty()
-        && trimmed.len() <= MAX_POLICY_AUTH_FIELD_BYTES
+        && value == trimmed
+        && value.len() <= MAX_POLICY_AUTH_FIELD_BYTES
         && !trimmed.chars().any(char::is_control)
 }
 
@@ -1390,7 +1391,13 @@ mod tests {
             timestamp_ms: 1,
         };
 
-        assert!(whitespace_auth.is_valid()); // Non-empty after trim
+        assert!(!whitespace_auth.is_valid());
+        let result = gate.switch_mode(AssuranceMode::Standard, Some(&whitespace_auth));
+        assert!(matches!(
+            result,
+            Err(PromotionDenialReason::UnauthorizedModeDowngrade { .. })
+        ));
+        assert_eq!(gate.mode(), AssuranceMode::HighAssurance);
 
         // Test timestamp manipulation attacks
         let timestamp_attacks = vec![
@@ -1445,6 +1452,28 @@ mod tests {
             Err(PromotionDenialReason::UnauthorizedModeDowngrade { .. })
         ));
         assert_eq!(long_gate.mode(), AssuranceMode::HighAssurance);
+    }
+
+    #[test]
+    fn policy_auth_rejects_whitespace_padded_oversized_fields() {
+        let padded_auth = PolicyAuthorization {
+            policy_ref: format!(
+                "{}POL-001",
+                " ".repeat(MAX_POLICY_AUTH_FIELD_BYTES.saturating_add(1))
+            ),
+            authorizer_id: "admin".to_string(),
+            timestamp_ms: 1000,
+        };
+
+        assert!(!padded_auth.is_valid());
+
+        let mut gate = HighAssuranceGate::high_assurance();
+        let result = gate.switch_mode(AssuranceMode::Standard, Some(&padded_auth));
+        assert!(matches!(
+            result,
+            Err(PromotionDenialReason::UnauthorizedModeDowngrade { .. })
+        ));
+        assert_eq!(gate.mode(), AssuranceMode::HighAssurance);
     }
 
     #[test]
