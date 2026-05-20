@@ -338,7 +338,7 @@ pub struct BlockedProofRchSnapshot {
 impl BlockedProofRchSnapshot {
     #[must_use]
     pub fn validation_lane_is_safe(&self) -> bool {
-        self.active_cargo_processes <= self.max_active_cargo_processes
+        self.active_cargo_processes < self.max_active_cargo_processes
             && self.queue_depth < self.max_queue_depth
             && self.available_workers > 0
     }
@@ -533,7 +533,7 @@ fn classify_blocked_proof_rehydration_candidate(
     priority_rank: u32,
 ) -> Result<BlockedProofRehydrationCandidate, RecoveryPlannerError> {
     let command_digest = digest_rehydration_command(&command);
-    let stale_age = input.now_ms.saturating_sub(bead.updated_at_ms) > input.max_blocker_age_ms;
+    let stale_age = input.now_ms.saturating_sub(bead.updated_at_ms) >= input.max_blocker_age_ms;
     let missing_path = bead.referenced_paths.iter().find(|path| !path.exists);
     let closed_blocker = bead
         .sibling_blockers
@@ -1529,6 +1529,34 @@ mod tests {
     }
 
     #[test]
+    fn blocked_proof_rehydration_fails_closed_at_max_blocker_age_boundary() {
+        let boundary = rehydration_bead(
+            "bd-boundary-stale",
+            1,
+            NOW_MS - DEFAULT_REHYDRATION_MAX_BLOCKER_AGE_MS,
+            "rch exec -- cargo test -p frankenengine-node boundary_stale_blocker",
+        );
+
+        let plan = build_blocked_proof_rehydration_plan(&rehydration_input(vec![boundary]))
+            .expect("rehydration plan");
+        let candidate = plan
+            .candidates
+            .iter()
+            .find(|candidate| candidate.bead_id == "bd-boundary-stale")
+            .expect("boundary candidate");
+
+        assert_eq!(
+            candidate.action,
+            BlockedProofRehydrationAction::FailClosedReview
+        );
+        assert_eq!(
+            candidate.reason_code,
+            rehydration_reason_codes::STALE_BLOCKER_EVIDENCE
+        );
+        assert!(candidate.fail_closed);
+    }
+
+    #[test]
     fn blocked_proof_rehydration_preserves_source_only_work_during_cargo_pressure() {
         let mut source_only = rehydration_bead(
             "bd-source-only",
@@ -1977,5 +2005,38 @@ mod tests {
         assert_eq!(decision.action, RecoveryAction::DrainWorkerThenRetry);
         assert_eq!(decision.reason_code, reason_codes::DRAIN_WORKER_THEN_RETRY);
         assert_eq!(decision.retry_after_ms, Some(120_000)); // 2 minute backoff
+    }
+
+    #[test]
+    fn validation_lane_is_safe_fails_closed_at_active_cargo_boundary() {
+        let under = BlockedProofRchSnapshot {
+            active_cargo_processes: 1,
+            max_active_cargo_processes: 2,
+            queue_depth: 0,
+            max_queue_depth: 8,
+            available_workers: 4,
+        };
+        assert!(under.validation_lane_is_safe());
+
+        // active == max: adding one more would exceed the cap; must fail closed
+        // to match CapacitySnapshot::has_cargo_capacity (line 166) which uses
+        // `<` on the same boundary.
+        let at_cap = BlockedProofRchSnapshot {
+            active_cargo_processes: 2,
+            max_active_cargo_processes: 2,
+            queue_depth: 0,
+            max_queue_depth: 8,
+            available_workers: 4,
+        };
+        assert!(!at_cap.validation_lane_is_safe());
+
+        let over = BlockedProofRchSnapshot {
+            active_cargo_processes: 3,
+            max_active_cargo_processes: 2,
+            queue_depth: 0,
+            max_queue_depth: 8,
+            available_workers: 4,
+        };
+        assert!(!over.validation_lane_is_safe());
     }
 }
