@@ -124,7 +124,7 @@ fn build_balanced_proofs(items: &[&str]) -> (String, Vec<InclusionProof>) {
             leaf_hash: left.to_string(),
             audit_path: vec![right.to_string()],
         };
-        recompute_root(&depth_one)
+        recompute_root(&depth_one).expect("depth-one proof recomputes")
     };
 
     let n01 = pair(&leaves[0], &leaves[1]);
@@ -137,7 +137,7 @@ fn build_balanced_proofs(items: &[&str]) -> (String, Vec<InclusionProof>) {
             leaf_hash: n01.clone(),
             audit_path: vec![n23.clone()],
         };
-        recompute_root(&p)
+        recompute_root(&p).expect("balanced root proof recomputes")
     };
 
     let proofs = vec![
@@ -476,7 +476,7 @@ fn e2e_transparency_inclusion_single_leaf_tree_round_trip() {
         leaf_hash: leaf.clone(),
         audit_path: vec![],
     };
-    let computed = recompute_root(&proof);
+    let computed = recompute_root(&proof).expect("size-1 proof recomputes");
     assert_eq!(computed, leaf, "size-1 root must equal its only leaf");
     h.log_phase(
         "size1_tree_built",

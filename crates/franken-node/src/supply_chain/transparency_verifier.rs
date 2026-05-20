@@ -179,19 +179,30 @@ impl fmt::Display for ProofFailure {
 ///
 /// Optimized version that works with byte arrays internally to avoid per-step
 /// hex encoding allocations.
-fn recompute_root_bytes(proof: &InclusionProof) -> [u8; 32] {
-    // Decode the hex leaf hash to bytes
-    let mut current: [u8; 32] = hex::decode(&proof.leaf_hash)
-        .unwrap_or_else(|e| panic!("Invalid leaf hash hex: {}", e))
-        .try_into()
-        .unwrap_or_else(|_| panic!("Leaf hash must be exactly 32 bytes"));
+fn decode_merkle_hash_hex(value: &str, field: &str) -> Result<[u8; 32], ProofFailure> {
+    let mut out = [0_u8; 32];
+    hex::decode_to_slice(value, &mut out).map_err(|err| match err {
+        hex::FromHexError::InvalidStringLength | hex::FromHexError::OddLength => {
+            ProofFailure::PathInvalid {
+                computed: format!("{field}_hex_chars={}", value.len()),
+                expected: format!("{field}_hex_chars=64"),
+            }
+        }
+        hex::FromHexError::InvalidHexCharacter { .. } => ProofFailure::PathInvalid {
+            computed: format!("{field}=invalid_hex"),
+            expected: format!("{field} must be 32-byte hex"),
+        },
+    })?;
+    Ok(out)
+}
+
+fn recompute_root_bytes(proof: &InclusionProof) -> Result<[u8; 32], ProofFailure> {
+    let mut current = decode_merkle_hash_hex(&proof.leaf_hash, "leaf_hash")?;
     let mut index = proof.leaf_index;
 
-    for sibling in &proof.audit_path {
-        let sibling_bytes: [u8; 32] = hex::decode(sibling)
-            .unwrap_or_else(|e| panic!("Invalid audit path hex: {}", e))
-            .try_into()
-            .unwrap_or_else(|_| panic!("Audit path entry must be exactly 32 bytes"));
+    for (path_index, sibling) in proof.audit_path.iter().enumerate() {
+        let field = format!("audit_path[{path_index}]");
+        let sibling_bytes = decode_merkle_hash_hex(sibling, &field)?;
 
         if index.is_multiple_of(2) {
             current = hash_pair_bytes(&current[..], &sibling_bytes[..]);
@@ -201,16 +212,15 @@ fn recompute_root_bytes(proof: &InclusionProof) -> [u8; 32] {
         index /= 2;
     }
 
-    current
+    Ok(current)
 }
 
 /// Recompute the Merkle root from a leaf and its audit path.
 ///
 /// At each level, if the current index is even we hash (current || sibling),
 /// if odd we hash (sibling || current). Then shift the index right by 1.
-pub fn recompute_root(proof: &InclusionProof) -> String {
-    let root_bytes = recompute_root_bytes(proof);
-    hex::encode(root_bytes)
+pub fn recompute_root(proof: &InclusionProof) -> Result<String, ProofFailure> {
+    recompute_root_bytes(proof).map(hex::encode)
 }
 
 fn audit_path_len_limit(tree_size: u64) -> usize {
@@ -348,7 +358,21 @@ pub fn verify_inclusion(
     }
 
     // Recompute root
-    let computed_root = recompute_root(proof);
+    let computed_root = match recompute_root(proof) {
+        Ok(root) => root,
+        Err(failure_reason) => {
+            return ProofReceipt {
+                connector_id: connector_id.into(),
+                artifact_id: artifact_id.into(),
+                verified: false,
+                log_root_matched: false,
+                proof_valid: false,
+                failure_reason: Some(failure_reason),
+                trace_id: trace_id.into(),
+                timestamp: timestamp.into(),
+            };
+        }
+    };
 
     // Check if root is pinned
     let root_pinned = policy.is_checkpoint_pinned(proof.tree_size, &computed_root);
@@ -548,7 +572,7 @@ mod tests {
     use super::{
         InclusionProof, LogRoot, ProofFailure, ProofReceipt, TransparencyError, TransparencyPolicy,
         audit_path_len_limit, build_test_tree, hash_pair, leaf_hash, recompute_root,
-        verify_inclusion, verify_inclusion_proof,
+        recompute_root_bytes, verify_inclusion, verify_inclusion_proof,
     };
 
     fn test_policy(root: &str, tree_size: u64) -> TransparencyPolicy {
@@ -605,7 +629,7 @@ mod tests {
     fn build_tree_returns_valid_proofs() {
         let (root, proofs) = build_test_tree(&["a", "b", "c", "d"]);
         for proof in &proofs {
-            let computed = recompute_root(proof);
+            let computed = recompute_root(proof).expect("valid proof recomputes root");
             assert_eq!(computed, root, "proof for leaf {} failed", proof.leaf_index);
         }
     }
@@ -614,8 +638,14 @@ mod tests {
     fn build_tree_two_leaves() {
         let (root, proofs) = build_test_tree(&["x", "y"]);
         assert_eq!(proofs.len(), 2);
-        assert_eq!(recompute_root(&proofs[0]), root);
-        assert_eq!(recompute_root(&proofs[1]), root);
+        assert_eq!(
+            recompute_root(&proofs[0]).expect("first proof recomputes"),
+            root
+        );
+        assert_eq!(
+            recompute_root(&proofs[1]).expect("second proof recomputes"),
+            root
+        );
     }
 
     #[test]
@@ -625,8 +655,8 @@ mod tests {
 
         for proof in &proofs {
             // Both implementations should produce the same root
-            let hex_root = recompute_root(proof);
-            let byte_root = recompute_root_bytes(proof);
+            let hex_root = recompute_root(proof).expect("valid proof recomputes root");
+            let byte_root = recompute_root_bytes(proof).expect("valid proof recomputes bytes");
             let byte_root_as_hex = hex::encode(byte_root);
 
             assert_eq!(
@@ -802,6 +832,63 @@ mod tests {
             "ts",
         );
         assert!(!receipt.verified);
+    }
+
+    #[test]
+    fn malformed_matching_leaf_hash_fails_closed_without_panic() {
+        let (root, proofs) = build_test_tree(&["a", "b", "c", "d"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let mut bad_proof = proofs[0].clone();
+        bad_proof.leaf_hash = "not_hex".to_string();
+
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&bad_proof),
+            &bad_proof.leaf_hash,
+            "conn-1",
+            "art-1",
+            "malformed-leaf-hex",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(!receipt.proof_valid);
+        assert!(!receipt.log_root_matched);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::PathInvalid { ref computed, .. })
+                if computed == "leaf_hash=invalid_hex"
+        ));
+    }
+
+    #[test]
+    fn malformed_audit_path_hash_fails_closed_without_panic() {
+        let (root, proofs) = build_test_tree(&["a", "b", "c", "d"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let mut bad_proof = proofs[0].clone();
+        if bad_proof.audit_path.is_empty() {
+            bad_proof.audit_path.push(proofs[1].leaf_hash.clone());
+        }
+        bad_proof.audit_path[0] = "abcdef".to_string();
+
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&bad_proof),
+            &bad_proof.leaf_hash,
+            "conn-1",
+            "art-1",
+            "malformed-audit-path-hex",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(!receipt.proof_valid);
+        assert!(!receipt.log_root_matched);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::PathInvalid { ref computed, .. })
+                if computed == "audit_path[0]_hex_chars=6"
+        ));
     }
 
     #[test]
