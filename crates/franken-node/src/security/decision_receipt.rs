@@ -283,6 +283,11 @@ pub enum ReceiptError {
     },
     #[error("unsafe path '{path}': {reason}")]
     UnsafePath { path: String, reason: String },
+    #[error("unsafe receipt field '{field}': {reason}")]
+    UnsafeReceiptField {
+        field: &'static str,
+        reason: &'static str,
+    },
     #[error("unsupported format: {0}")]
     UnsupportedFormat(String),
     #[error("internal error: {0}")]
@@ -306,7 +311,7 @@ impl Receipt {
         rollback_command: &str,
     ) -> Result<Self, ReceiptError> {
         validate_confidence(confidence)?;
-        Ok(Self {
+        let receipt = Self {
             receipt_id: Uuid::now_v7().to_string(),
             action_name: action_name.to_string(),
             actor_identity: actor_identity.to_string(),
@@ -323,7 +328,9 @@ impl Receipt {
             confidence,
             rollback_command: rollback_command.to_string(),
             previous_receipt_hash: None,
-        })
+        };
+        validate_receipt_payload_fields(&receipt)?;
+        Ok(receipt)
     }
 
     /// Attach previous hash link for append-only chain usage.
@@ -476,6 +483,7 @@ pub fn sign_receipt(
     receipt: &Receipt,
     signing_key: &Ed25519PrivateKey,
 ) -> Result<SignedReceipt, ReceiptError> {
+    validate_receipt_payload_fields(receipt)?;
     validate_confidence(receipt.confidence)?;
     validate_signature_version(&receipt.signature_version)?;
     let payload = canonical_json(receipt)?;
@@ -523,6 +531,7 @@ pub fn verify_receipt_with_audience(
     replay_tracker: Option<&ReplayTracker>,
     expected_audience: Option<&str>,
 ) -> Result<bool, ReceiptError> {
+    validate_receipt_payload_fields(&signed.receipt)?;
     validate_confidence(signed.receipt.confidence)?;
     validate_signature_version(&signed.receipt.signature_version)?;
 
@@ -602,6 +611,7 @@ pub fn append_signed_receipt(
 /// Verify append-only hash-chain linkage and deterministic hash material.
 pub fn verify_hash_chain(receipts: &[SignedReceipt]) -> Result<(), ReceiptError> {
     for (idx, signed) in receipts.iter().enumerate() {
+        validate_receipt_payload_fields(&signed.receipt)?;
         validate_signature_version(&signed.receipt.signature_version)?;
         let expected_previous = if idx == 0 {
             None
@@ -726,6 +736,7 @@ pub fn import_receipts_cbor(bytes: &[u8]) -> Result<Vec<SignedReceipt>, ReceiptE
     let receipts: Vec<SignedReceipt> =
         serde_cbor::from_slice(bytes).map_err(ReceiptError::CborDecode)?;
     for signed in &receipts {
+        validate_receipt_payload_fields(&signed.receipt)?;
         validate_confidence(signed.receipt.confidence)?;
     }
     Ok(receipts)
@@ -918,6 +929,47 @@ fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, ReceiptError> {
 fn validate_confidence(confidence: f64) -> Result<(), ReceiptError> {
     if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
         return Err(ReceiptError::InvalidConfidence { value: confidence });
+    }
+    Ok(())
+}
+
+fn validate_receipt_payload_fields(receipt: &Receipt) -> Result<(), ReceiptError> {
+    for (field, value) in [
+        ("receipt_id", receipt.receipt_id.as_str()),
+        ("action_name", receipt.action_name.as_str()),
+        ("actor_identity", receipt.actor_identity.as_str()),
+        ("timestamp", receipt.timestamp.as_str()),
+        ("signature_version", receipt.signature_version.as_str()),
+        ("nonce", receipt.nonce.as_str()),
+        ("audience", receipt.audience.as_str()),
+        ("input_hash", receipt.input_hash.as_str()),
+        ("output_hash", receipt.output_hash.as_str()),
+        ("rationale", receipt.rationale.as_str()),
+        ("rollback_command", receipt.rollback_command.as_str()),
+    ] {
+        validate_receipt_text_field(field, value)?;
+    }
+
+    if let Some(previous_hash) = receipt.previous_receipt_hash.as_deref() {
+        validate_receipt_text_field("previous_receipt_hash", previous_hash)?;
+    }
+
+    for evidence_ref in &receipt.evidence_refs {
+        validate_receipt_text_field("evidence_refs", evidence_ref)?;
+    }
+    for policy_rule in &receipt.policy_rule_chain {
+        validate_receipt_text_field("policy_rule_chain", policy_rule)?;
+    }
+
+    Ok(())
+}
+
+fn validate_receipt_text_field(field: &'static str, value: &str) -> Result<(), ReceiptError> {
+    if value.chars().any(char::is_control) {
+        return Err(ReceiptError::UnsafeReceiptField {
+            field,
+            reason: "contains control characters or null bytes",
+        });
     }
     Ok(())
 }
@@ -1909,22 +1961,44 @@ mod tests {
 
     /// Negative path: null bytes embedded in string fields
     #[test]
-    fn null_bytes_in_receipt_fields_preserved_causing_downstream_issues() {
-        let mut receipt = make_receipt("quarantine", Decision::Approved);
-        receipt.actor_identity = "admin\0@example.com".to_string();
-        receipt.rollback_command = "franken-node\0 --incident \0 INC-\0001".to_string();
-        receipt.evidence_refs = vec!["EVD\0-001".to_string(), "ref\0with\0nulls".to_string()];
-
+    fn control_characters_in_receipt_fields_rejected_before_signing() {
         let key = demo_signing_key();
-        let signed = sign_receipt(&receipt, &key).expect("null bytes should be preserved");
 
-        assert!(signed.receipt.actor_identity.contains('\0'));
-        assert!(signed.receipt.rollback_command.contains('\0'));
-        assert!(signed.receipt.evidence_refs[0].contains('\0'));
+        let mut actor_receipt = make_receipt("quarantine", Decision::Approved);
+        actor_receipt.actor_identity = "admin\0@example.com".to_string();
+        let err = sign_receipt(&actor_receipt, &key)
+            .expect_err("actor_identity NUL must fail closed before signing");
+        assert!(matches!(
+            err,
+            ReceiptError::UnsafeReceiptField {
+                field: "actor_identity",
+                ..
+            }
+        ));
 
-        // Canonical JSON serialization preserves null bytes which may break downstream parsers
-        let canonical = canonical_json(&signed.receipt).expect("canonical JSON");
-        assert!(canonical.contains("\\u0000"));
+        let mut rollback_receipt = make_receipt("quarantine", Decision::Approved);
+        rollback_receipt.rollback_command = "franken-node\n --incident INC-001".to_string();
+        let err = sign_receipt(&rollback_receipt, &key)
+            .expect_err("rollback_command newline must fail closed before signing");
+        assert!(matches!(
+            err,
+            ReceiptError::UnsafeReceiptField {
+                field: "rollback_command",
+                ..
+            }
+        ));
+
+        let mut evidence_receipt = make_receipt("quarantine", Decision::Approved);
+        evidence_receipt.evidence_refs = vec!["EVD\0-001".to_string()];
+        let err = sign_receipt(&evidence_receipt, &key)
+            .expect_err("evidence_refs NUL must fail closed before signing");
+        assert!(matches!(
+            err,
+            ReceiptError::UnsafeReceiptField {
+                field: "evidence_refs",
+                ..
+            }
+        ));
     }
 
     /// Negative path: malformed file path handling in export operations
