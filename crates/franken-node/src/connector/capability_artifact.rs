@@ -866,6 +866,25 @@ impl AdmissionGate {
             });
         }
 
+        // Control characters in artifact_id enable log injection since the ID
+        // appears in log_rejection() and AuditEntry via format!/write!.
+        if aid.chars().any(char::is_control) {
+            let detail =
+                "artifact identity artifact_id contains control characters".to_string();
+            self.log_rejection(aid, timestamp, &detail);
+            self.push_audit(AuditEntry {
+                event_code: event_codes::CART_005.to_string(),
+                artifact_id: aid.clone(),
+                timestamp: timestamp.to_string(),
+                outcome: "rejected".to_string(),
+                detail: detail.clone(),
+            });
+            return Err(ArtifactError::InvalidEnvelope {
+                artifact_id: aid.clone(),
+                detail,
+            });
+        }
+
         let author = &artifact.identity.author;
         if author.trim().is_empty() {
             let detail = "artifact identity author is empty".to_string();
@@ -885,6 +904,22 @@ impl AdmissionGate {
 
         if author != author.trim() {
             let detail = "artifact identity author has leading or trailing whitespace".to_string();
+            self.log_rejection(aid, timestamp, &detail);
+            self.push_audit(AuditEntry {
+                event_code: event_codes::CART_005.to_string(),
+                artifact_id: aid.clone(),
+                timestamp: timestamp.to_string(),
+                outcome: "rejected".to_string(),
+                detail: detail.clone(),
+            });
+            return Err(ArtifactError::InvalidEnvelope {
+                artifact_id: aid.clone(),
+                detail,
+            });
+        }
+
+        if author.chars().any(char::is_control) {
+            let detail = "artifact identity author contains control characters".to_string();
             self.log_rejection(aid, timestamp, &detail);
             self.push_audit(AuditEntry {
                 event_code: event_codes::CART_005.to_string(),
@@ -1930,6 +1965,40 @@ mod tests {
         assert!(gate.audit_log().iter().any(|entry| {
             entry.event_code == event_codes::CART_003 && entry.artifact_id == " ext-id "
         }));
+    }
+
+    #[test]
+    fn test_admission_rejects_artifact_id_control_chars() {
+        // Control characters in artifact_id enable log injection since the ID
+        // appears in log_rejection() and AuditEntry via format!/write!.
+        let mut gate = AdmissionGate::new();
+        let identity = ArtifactIdentity::new("ext\r\nINJECTED", "author", "2026-02-21T00:00:00Z");
+        let mut envelope = CapabilityEnvelope::new();
+        envelope.add_requirement(CapabilityRequirement::new("cap:fs:read", "read", true));
+        envelope.bind_to(&identity);
+        let artifact = ExtensionArtifact::new(identity, Some(envelope));
+        let result = gate.admit(&artifact, "2026-02-21T00:00:00Z");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().code(),
+            error_codes::ERR_CART_INVALID_ENVELOPE
+        );
+    }
+
+    #[test]
+    fn test_admission_rejects_author_control_chars() {
+        let mut gate = AdmissionGate::new();
+        let identity = ArtifactIdentity::new("ext-ctrl", "author\tTAB", "2026-02-21T00:00:00Z");
+        let mut envelope = CapabilityEnvelope::new();
+        envelope.add_requirement(CapabilityRequirement::new("cap:fs:read", "read", true));
+        envelope.bind_to(&identity);
+        let artifact = ExtensionArtifact::new(identity, Some(envelope));
+        let result = gate.admit(&artifact, "2026-02-21T00:00:00Z");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().code(),
+            error_codes::ERR_CART_INVALID_ENVELOPE
+        );
     }
 
     #[test]
