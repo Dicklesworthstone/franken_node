@@ -2651,7 +2651,7 @@ pub fn compute_card_hash(card: &TrustCard) -> Result<String, TrustCardError> {
 ///
 /// # Errors
 /// Returns `TrustCardError` if value serialization fails.
-pub fn to_canonical_json<T: Serialize>(value: &T) -> Result<String, TrustCardError> {
+pub fn to_canonical_json<T: Serialize + ?Sized>(value: &T) -> Result<String, TrustCardError> {
     let raw = serde_json::to_value(value)?;
     let canonical = canonicalize_value(raw);
     Ok(serde_json::to_string(&canonical)?)
@@ -6007,6 +6007,23 @@ mod tests {
         let scrubbed = scrub_trust_card_output(&canonical_json);
 
         insta::assert_snapshot!("trust_card_canonical_json", scrubbed);
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_json_accepts_trust_card_slices() -> Result<(), TrustCardError> {
+        let card = canonical_trust_card_fixture()?;
+        let cards = vec![card];
+        let canonical_json = to_canonical_json(cards.as_slice())?;
+
+        assert!(
+            canonical_json.starts_with('['),
+            "trust-card list JSON should serialize as an array"
+        );
+        assert!(
+            canonical_json.contains("npm:@acme/security-plugin"),
+            "canonical trust-card list JSON should include the extension identity"
+        );
         Ok(())
     }
 

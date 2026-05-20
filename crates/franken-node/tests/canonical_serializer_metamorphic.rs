@@ -16,8 +16,10 @@ use frankenengine_node::supply_chain::trust_card::{
     ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardInput,
     to_canonical_json,
 };
+use hex::FromHex;
 use proptest::prelude::*;
 use serde_json::{Map, Value};
+use std::io::Read;
 
 /// Arbitrary implementation for generating diverse JSON structures to test canonicalization
 #[derive(Debug, Clone, Arbitrary)]
@@ -217,8 +219,8 @@ proptest! {
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
             "canonical hex encoding must be lowercase ASCII hex"
         );
-        let hex_decoded = hex::decode(&hex_encoded)
-            .map_err(|err| TestCaseError::fail(format!("hex decode failed after encode: {err}")))?;
+        let hex_decoded = Vec::from_hex(&hex_encoded)
+            .map_err(|err| TestCaseError::fail(format!("hex parse failed after encode: {err}")))?;
         prop_assert_eq!(
             hex_decoded.as_slice(),
             payload.as_slice(),
@@ -230,9 +232,10 @@ proptest! {
             !base64_encoded.bytes().any(|byte| byte.is_ascii_whitespace()),
             "canonical base64 encoding must not contain whitespace"
         );
-        let base64_decoded = STANDARD
-            .decode(&base64_encoded)
-            .map_err(|err| TestCaseError::fail(format!("base64 decode failed after encode: {err}")))?;
+        let mut base64_decoded = Vec::new();
+        base64::read::DecoderReader::new(base64_encoded.as_bytes(), &STANDARD)
+            .read_to_end(&mut base64_decoded)
+            .map_err(|err| TestCaseError::fail(format!("base64 parse failed after encode: {err}")))?;
         prop_assert_eq!(
             base64_decoded.as_slice(),
             payload.as_slice(),
@@ -565,6 +568,19 @@ fn canonical_serialization_key_ordering_stability() {
     assert!(
         canonical.find("\"alpha_nested\"").unwrap() < canonical.find("\"zebra_nested\"").unwrap()
     );
+}
+
+#[test]
+fn trust_card_slice_canonical_json_serializes_for_list_output() {
+    let card: TrustCard =
+        serde_json::from_value(trust_card_value()).expect("trust-card fixture should parse");
+    let cards = vec![card];
+
+    let canonical =
+        to_canonical_json(cards.as_slice()).expect("trust-card slice should canonicalize");
+
+    assert!(canonical.starts_with('['));
+    assert!(canonical.contains("npm:@spec-derived/trust-card"));
 }
 
 fn connector_payload_pair(seed: u64, object_type: TrustObjectType) -> (String, String) {
