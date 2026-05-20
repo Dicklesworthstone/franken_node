@@ -320,6 +320,25 @@ pub fn verify_inclusion(
     }
 
     let audit_path_limit = audit_path_len_limit(proof.tree_size);
+    if proof.audit_path.len() < audit_path_limit {
+        return ProofReceipt {
+            connector_id: connector_id.into(),
+            artifact_id: artifact_id.into(),
+            verified: false,
+            log_root_matched: false,
+            proof_valid: false,
+            failure_reason: Some(ProofFailure::PathInvalid {
+                computed: format!(
+                    "audit_path_len={}, tree_size={}",
+                    proof.audit_path.len(),
+                    proof.tree_size
+                ),
+                expected: format!("audit_path_len >= {audit_path_limit}"),
+            }),
+            trace_id: trace_id.into(),
+            timestamp: timestamp.into(),
+        };
+    }
     if proof.audit_path.len() > audit_path_limit {
         return ProofReceipt {
             connector_id: connector_id.into(),
@@ -1180,7 +1199,35 @@ mod tests {
         assert!(!receipt.verified);
         assert!(matches!(
             receipt.failure_reason,
-            Some(ProofFailure::RootNotPinned { .. })
+            Some(ProofFailure::PathInvalid { ref expected, .. })
+                if expected.contains("audit_path_len >=")
+        ));
+    }
+
+    #[test]
+    fn short_audit_path_rejected_even_when_leaf_hash_is_pinned_as_root() {
+        let (_, proofs) = build_test_tree(&["a", "b", "c", "d"]);
+        let mut bad_proof = proofs[0].clone();
+        bad_proof.audit_path.clear();
+        let policy = test_policy(&bad_proof.leaf_hash, bad_proof.tree_size);
+
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&bad_proof),
+            &bad_proof.leaf_hash,
+            "conn-1",
+            "artifact-1",
+            "short-path-pinned-leaf-root",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(!receipt.log_root_matched);
+        assert!(!receipt.proof_valid);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::PathInvalid { ref expected, .. })
+                if expected.contains("audit_path_len >=")
         ));
     }
 
