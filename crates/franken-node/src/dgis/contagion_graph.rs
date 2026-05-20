@@ -110,6 +110,13 @@ pub struct ContagionGraph {
 /// sweep that sub-task 4 will exercise.
 const MAX_EDGES_PER_NODE: usize = 4096;
 
+/// Cap on total nodes in a single graph. Matches
+/// `dgis::contagion_profiles::MAX_PROFILE_NODES` (the only non-test consumer
+/// that already enforces this bound at the loader). Keeping the cap inside
+/// `ContagionGraph` itself prevents a caller of `generate_deterministic` or
+/// repeated `add_node` from bypassing the loader's check and ballooning memory.
+const MAX_NODES: usize = 1024;
+
 impl ContagionGraph {
     /// Construct an empty graph with the given seed. Intended for callers
     /// that build the graph node-by-node (used by campaign-profile loaders
@@ -134,8 +141,14 @@ impl ContagionGraph {
     }
 
     /// Add a node. Idempotent: re-adding an existing id is a no-op.
+    /// Also a no-op once the graph already holds `MAX_NODES` distinct nodes —
+    /// this preserves the fire-and-forget API while bounding memory against
+    /// callers that bypass the profile loader's check.
     pub fn add_node(&mut self, node: NodeId) {
         if !self.edges.contains_key(&node) {
+            if self.nodes.len() >= MAX_NODES {
+                return;
+            }
             self.nodes.push(node.clone());
             self.edges.insert(node, Vec::new());
         }
@@ -218,6 +231,11 @@ impl ContagionGraph {
             0.0
         };
 
+        // Clamp before the loop so the edge-generation phase below cannot
+        // index past the actual `graph.nodes` length (add_node silently
+        // refuses past MAX_NODES, which would otherwise leave src_idx /
+        // dst_idx pointing at missing entries).
+        let n_nodes = n_nodes.min(MAX_NODES);
         let mut graph = Self::new(seed);
         for i in 0..n_nodes {
             graph.add_node(format!("n{:08}", i));

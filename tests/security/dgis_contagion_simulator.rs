@@ -376,3 +376,53 @@ fn test_no_spread_termination_when_no_edges() -> TestResult {
     }
     Ok(())
 }
+
+/// Regression: `ContagionGraph::add_node` must silently cap at the internal
+/// `MAX_NODES` limit (currently 1024, matching `MAX_PROFILE_NODES`) so a
+/// caller that bypasses the profile loader cannot balloon memory. The cap
+/// is intentionally not exported; we observe it via the public `nodes()`
+/// slice after pushing well past it.
+#[test]
+fn contagion_graph_add_node_caps_memory_below_max_nodes_plus_overflow() -> TestResult {
+    const OVERFLOW: usize = 5_000;
+    let mut g = ContagionGraph::new(0);
+    for i in 0..OVERFLOW {
+        g.add_node(format!("n{i:08}"));
+    }
+    // The cap is private; assert the observable shape: nodes() length is
+    // strictly less than what we tried to insert, AND is non-empty (so the
+    // graph still validates with at least the cap's worth of nodes).
+    let nodes_len: NodeId = format!("nodes_len={}", g.nodes().len());
+    assert!(
+        g.nodes().len() < OVERFLOW,
+        "add_node failed to bound: {nodes_len}"
+    );
+    assert!(
+        g.nodes().len() >= 1024,
+        "add_node bounded below the documented cap: {nodes_len}"
+    );
+    // Idempotent re-add of an already-present id is still a no-op even at
+    // cap (does not double-insert, does not panic).
+    let last_count = g.nodes().len();
+    g.add_node("n00000000".to_string());
+    assert_eq!(g.nodes().len(), last_count);
+    Ok(())
+}
+
+/// Regression: `generate_deterministic` must clamp `n_nodes` so the
+/// edge-generation loop (which indexes `graph.nodes[src_idx]`) cannot
+/// panic when the caller passes an unbounded value. Before the cap was
+/// added, `n_nodes >> MAX_NODES` would either OOM or panic on index OOB
+/// once add_node started silently refusing.
+#[test]
+fn generate_deterministic_clamps_n_nodes_without_panic() -> TestResult {
+    // 8 * MAX_NODES; would OOM the test runner pre-fix.
+    let g = ContagionGraph::generate_deterministic(0xC0DE_FACE, 8192, 0.01);
+    assert!(
+        g.nodes().len() <= 1024,
+        "generate_deterministic exceeded MAX_NODES: {}",
+        g.nodes().len()
+    );
+    assert!(g.validate().is_ok(), "clamped graph must still validate");
+    Ok(())
+}
