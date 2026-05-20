@@ -68,6 +68,8 @@ const MAX_EXTENSION_ID_LEN: usize = 256;
 
 /// Maximum JSON payload size for untrusted sources to prevent DoS attacks.
 const MAX_UNTRUSTED_JSON_SIZE: usize = 1_000_000; // 1MB
+const MAX_TELEMETRY_TRACE_ID_BYTES: usize = 256;
+const MAX_TELEMETRY_DETAIL_BYTES: usize = 1024;
 
 fn next_trust_card_version(
     previous_version: u64,
@@ -123,6 +125,18 @@ fn ensure_evidence_refs_present(refs: &[VerifiedEvidenceRef]) -> Result<(), Trus
         });
     }
     Ok(())
+}
+
+fn sanitize_telemetry_field(value: &str, max_bytes: usize) -> String {
+    let mut sanitized = String::new();
+    for ch in value.chars() {
+        let ch = if ch.is_control() { '?' } else { ch };
+        if sanitized.len().saturating_add(ch.len_utf8()) > max_bytes {
+            break;
+        }
+        sanitized.push(ch);
+    }
+    sanitized
 }
 
 fn validate_camouflage_hints(hints: &[CamouflageHint]) -> Result<f64, TrustCardError> {
@@ -2288,10 +2302,11 @@ impl TrustCardRegistry {
             &mut self.telemetry,
             TelemetryEvent {
                 event_code: event_code.to_string(),
-                extension_id,
-                trace_id: trace_id.to_string(),
+                extension_id: extension_id
+                    .map(|id| sanitize_telemetry_field(&id, MAX_EXTENSION_ID_LEN)),
+                trace_id: sanitize_telemetry_field(trace_id, MAX_TELEMETRY_TRACE_ID_BYTES),
                 timestamp_secs,
-                detail: detail.to_string(),
+                detail: sanitize_telemetry_field(detail, MAX_TELEMETRY_DETAIL_BYTES),
             },
             MAX_TELEMETRY,
         );
@@ -4092,6 +4107,31 @@ mod tests {
             .map(|evt| evt.event_code.as_str())
             .collect();
         assert!(codes.contains(&TRUST_CARD_CACHE_HIT));
+    }
+
+    #[test]
+    fn telemetry_sanitizes_control_characters_and_bounds_operator_fields() {
+        let mut registry = TrustCardRegistry::new(60, DEFAULT_REGISTRY_KEY);
+        let long_query = format!(
+            "telemetry\n{}\0",
+            "x".repeat(MAX_TELEMETRY_DETAIL_BYTES.saturating_mul(2))
+        );
+
+        registry
+            .search(&long_query, 1_010, "trace\r\nid\0")
+            .expect("search should emit sanitized telemetry");
+
+        let event = registry.telemetry().last().expect("telemetry event");
+        assert_eq!(event.event_code, TRUST_CARD_QUERIED);
+        assert!(!event.trace_id.chars().any(char::is_control));
+        assert!(!event.detail.chars().any(char::is_control));
+        assert!(event.trace_id.len() <= MAX_TELEMETRY_TRACE_ID_BYTES);
+        assert!(event.detail.len() <= MAX_TELEMETRY_DETAIL_BYTES);
+        assert!(
+            event
+                .detail
+                .starts_with("search trust cards by query: telemetry?")
+        );
     }
 
     #[test]
