@@ -194,6 +194,9 @@ impl CleanupReceiptsStorage {
             .get(receipt_id)
             .ok_or_else(|| CleanupReceiptsError::ReceiptNotFound(receipt_id.to_string()))?;
 
+        // Validate path is within storage directory before reading (path traversal protection)
+        validate_path_within_storage(&metadata.file_path, &self.storage_dir)?;
+
         if !metadata.file_path.exists() {
             return Err(CleanupReceiptsError::Corruption(format!(
                 "Receipt file missing: {}",
@@ -385,16 +388,21 @@ impl CleanupReceiptsStorage {
 
     fn cleanup_stale_index_entries(&mut self) {
         // Collect stale keys as references to avoid cloning
+        // Also remove entries with paths that escape the storage directory (path traversal protection)
         let stale_keys: Vec<String> = self
             .index
             .receipts
             .iter()
             .filter_map(|(receipt_id, metadata)| {
+                // Remove if file doesn't exist
                 if !metadata.file_path.exists() {
-                    Some(receipt_id.clone())
-                } else {
-                    None
+                    return Some(receipt_id.clone());
                 }
+                // Remove if path escapes storage directory (path traversal protection)
+                if validate_path_within_storage(&metadata.file_path, &self.storage_dir).is_err() {
+                    return Some(receipt_id.clone());
+                }
+                None
             })
             .collect();
 
@@ -454,6 +462,79 @@ fn sanitize_filename(input: &str) -> String {
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
         .collect()
+}
+
+/// Validate that a file path is safely within the storage directory.
+///
+/// Rejects path traversal attempts (e.g., `../` segments, absolute paths that
+/// escape the storage root). Canonicalizes both paths before comparison to
+/// handle symlink resolution.
+fn validate_path_within_storage(
+    file_path: &std::path::Path,
+    storage_dir: &std::path::Path,
+) -> Result<(), CleanupReceiptsError> {
+    // Reject obviously malicious paths before canonicalization
+    let path_str = file_path.to_string_lossy();
+    if path_str.contains("..") {
+        return Err(CleanupReceiptsError::Corruption(format!(
+            "Path traversal rejected: {}",
+            file_path.display()
+        )));
+    }
+
+    // Canonicalize storage_dir (it must exist)
+    let canonical_storage = storage_dir.canonicalize().map_err(|e| {
+        CleanupReceiptsError::Corruption(format!(
+            "Cannot canonicalize storage directory {}: {}",
+            storage_dir.display(),
+            e
+        ))
+    })?;
+
+    // For file_path, try canonicalize if it exists, otherwise check the parent
+    let canonical_file = if file_path.exists() {
+        file_path.canonicalize().map_err(|e| {
+            CleanupReceiptsError::Corruption(format!(
+                "Cannot canonicalize file path {}: {}",
+                file_path.display(),
+                e
+            ))
+        })?
+    } else {
+        // File doesn't exist yet (e.g., about to be written)
+        // Canonicalize parent and append filename
+        let parent = file_path.parent().ok_or_else(|| {
+            CleanupReceiptsError::Corruption(format!(
+                "File path has no parent: {}",
+                file_path.display()
+            ))
+        })?;
+        let filename = file_path.file_name().ok_or_else(|| {
+            CleanupReceiptsError::Corruption(format!(
+                "File path has no filename: {}",
+                file_path.display()
+            ))
+        })?;
+        let canonical_parent = parent.canonicalize().map_err(|e| {
+            CleanupReceiptsError::Corruption(format!(
+                "Cannot canonicalize parent directory {}: {}",
+                parent.display(),
+                e
+            ))
+        })?;
+        canonical_parent.join(filename)
+    };
+
+    // Check that the file path starts with the storage directory
+    if !canonical_file.starts_with(&canonical_storage) {
+        return Err(CleanupReceiptsError::Corruption(format!(
+            "File path {} escapes storage directory {}",
+            file_path.display(),
+            storage_dir.display()
+        )));
+    }
+
+    Ok(())
 }
 
 /// Generate summary report for all receipts.
@@ -740,5 +821,59 @@ mod tests {
         // Verify receipt IDs are in expected order (newest timestamp = test_000)
         assert_eq!(results[0].receipt_id, "test_000");
         assert_eq!(results[4].receipt_id, "test_004");
+    }
+
+    #[test]
+    fn test_path_traversal_rejected_in_index() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let storage_path = temp_dir.path().to_path_buf();
+        let mut storage = CleanupReceiptsStorage::with_directory(storage_path.clone()).expect("storage");
+
+        // Store a valid receipt first
+        let receipt = create_test_receipt("test_traversal", "test_actor", CleanupMode::Execute);
+        storage.store_receipt(&receipt).expect("store receipt");
+
+        // Manually corrupt the index to point outside storage directory
+        let index_path = storage_path.join("index.json");
+        let index_data = std::fs::read_to_string(&index_path).expect("read index");
+        let corrupted_index = index_data.replace(
+            &storage_path.to_string_lossy().to_string(),
+            "/etc"
+        );
+        std::fs::write(&index_path, corrupted_index).expect("write corrupted index");
+
+        // Reload storage with corrupted index
+        let storage2 = CleanupReceiptsStorage::with_directory(storage_path).expect("storage reload");
+
+        // Attempt to retrieve receipt should fail due to path traversal protection
+        let result = storage2.get_receipt("test_traversal");
+        assert!(
+            result.is_err(),
+            "Path traversal should be rejected: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_path_traversal_dotdot_rejected() {
+        let temp_dir = TempDir::new().expect("temp dir");
+
+        // Validate direct path traversal attempt
+        let malicious_path = temp_dir.path().join("../../../etc/passwd");
+        let result = validate_path_within_storage(&malicious_path, temp_dir.path());
+        assert!(
+            result.is_err(),
+            "Path with .. should be rejected: {:?}",
+            result
+        );
+
+        // Validate absolute path outside storage is rejected
+        let outside_path = std::path::PathBuf::from("/etc/passwd");
+        let result = validate_path_within_storage(&outside_path, temp_dir.path());
+        assert!(
+            result.is_err(),
+            "Path outside storage dir should be rejected: {:?}",
+            result
+        );
     }
 }
