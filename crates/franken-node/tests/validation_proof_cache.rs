@@ -761,6 +761,78 @@ fn evidence_hotset_prefetch_plan_fails_closed_for_unsafe_candidates() {
     assert_eq!(err.code(), "RG_HOTSET_DUPLICATE_ARTIFACT");
 }
 
+/// Regression: `path_is_protected_workspace_state` previously used `.contains("/foo/")`
+/// substring matching for `messages`, `agents`, `sessions`, `memories`, and `logs`.
+/// Three classes of input slipped through as "not protected":
+///   1. Relative paths like `messages/secret.md` (no leading "/").
+///   2. Absolute paths to the protected directory itself with no trailing
+///      "/", e.g. `/data/projects/franken_node/messages`.
+///   3. Backslash-separated paths on cross-platform fixtures.
+/// Each non-protected entry would then be accepted by `validated()`, marked
+/// `cleanup_eligible = true`, and ultimately deleted by the cleanup adapter.
+/// After the fix to segment-match every protected directory name, these
+/// paths are rejected at `ResourceArtifactInventory::try_new` before they
+/// can reach the cleanup adapter.
+#[test]
+fn protected_workspace_paths_reject_relative_and_no_trailing_slash_forms() {
+    for (label, path) in [
+        ("relative_messages", "messages/secret.md"),
+        ("relative_agents", "agents/identity.json"),
+        ("relative_sessions", "sessions/0001.log"),
+        ("relative_memories", "memories/MEMORY.md"),
+        ("relative_logs", "logs/audit.log"),
+        (
+            "absolute_messages_no_trailing_slash",
+            "/data/projects/franken_node/messages",
+        ),
+        (
+            "absolute_agents_no_trailing_slash",
+            "/data/projects/franken_node/agents",
+        ),
+        (
+            "backslash_messages",
+            "C:\\workspaces\\franken_node\\messages\\secret.md",
+        ),
+    ] {
+        let entry = ResourceArtifactInventoryEntry::new(
+            path,
+            "/data/projects/franken_node",
+            ResourceArtifactKind::GeneratedEvidence,
+            ResourceArtifactSafetyClass::GeneratedEvidence,
+            Some(64),
+        );
+        let err = ResourceArtifactInventory::try_new(vec![entry])
+            .expect_err(&format!("{label}: protected path must be rejected"));
+        assert_eq!(
+            err.code(),
+            "RG_ARTIFACT_PROTECTED_PATH",
+            "{label}: unexpected error code (path {path})"
+        );
+    }
+}
+
+/// Companion: a substring that contains a protected name as part of a
+/// non-protected segment must NOT trip the check. `messages_archive` is the
+/// canonical false-positive worry when moving from substring to segment
+/// matching, so pin it as an integration test rather than relying on the
+/// inline tests block which `[lib] test = false` keeps from running.
+#[test]
+fn protected_workspace_path_check_does_not_flag_lookalike_segments() {
+    let entry = ResourceArtifactInventoryEntry::new(
+        "/data/projects/franken_node/artifacts/messages_archive/index.json",
+        "/data/projects/franken_node",
+        ResourceArtifactKind::GeneratedEvidence,
+        ResourceArtifactSafetyClass::GeneratedEvidence,
+        Some(64),
+    );
+    let inventory = ResourceArtifactInventory::try_new(vec![entry])
+        .expect("messages_archive is not a protected segment");
+    assert!(
+        inventory.entries[0].cleanup_eligible,
+        "messages_archive lookalike must remain cleanup-eligible"
+    );
+}
+
 #[test]
 fn evidence_hotset_prefetch_plan_shrinks_under_resource_governor_pressure() {
     let artifacts = (0..4)

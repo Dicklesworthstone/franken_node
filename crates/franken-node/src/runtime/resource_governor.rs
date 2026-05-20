@@ -1889,13 +1889,36 @@ fn reject_unsafe_path(
 }
 
 fn path_is_protected_workspace_state(path: &str) -> bool {
-    path.split('/')
-        .any(|component| matches!(component, ".beads" | ".agent-mail" | "agent-mail"))
-        || path.contains("/messages/")
-        || path.contains("/agents/")
-        || path.contains("/sessions/")
-        || path.contains("/memories/")
-        || path.contains("/logs/")
+    // Segment-match every protected directory name. The previous mix of
+    // `split('/').any(...)` for three names and `path.contains("/foo/")`
+    // substring checks for the other five let three classes of input slip
+    // past as "not protected":
+    //   1. Relative paths under a protected dir, e.g. "messages/secret.md"
+    //      (no leading "/" so `.contains("/messages/")` is false).
+    //   2. Absolute paths to the protected dir itself with no trailing
+    //      slash, e.g. "/data/projects/franken_node/messages".
+    //   3. Backslash-separated paths on cross-platform fixtures.
+    // Once `path_is_protected_workspace_state` returned false, an entry
+    // with `safety_class == GeneratedEvidence` would be accepted by
+    // `validated()`, marked `cleanup_eligible = true` by
+    // `derived_cleanup_eligibility`, pass `check_cleanup_eligibility`, and
+    // get handed to the cleanup adapter which calls `fs::remove_file` /
+    // `fs::remove_dir_all` on the path. Segment-matching closes the gap
+    // without changing behavior for any path that already matched the
+    // substring form.
+    path.split(['/', '\\']).any(|component| {
+        matches!(
+            component,
+            ".beads"
+                | ".agent-mail"
+                | "agent-mail"
+                | "messages"
+                | "agents"
+                | "sessions"
+                | "memories"
+                | "logs"
+        )
+    })
 }
 
 fn decode_proc_cmdline(raw: &[u8]) -> String {
