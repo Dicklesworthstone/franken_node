@@ -3,9 +3,10 @@ use std::collections::BTreeSet;
 use frankenengine_node::tools::swarm_scenario::{
     EVENT_ASSERTION_FAILED, EVENT_COMPLETED, EVENT_FAIL_CLOSED_CONFIRMED,
     EVENT_FLEET_ACTION_PUBLISHED, EVENT_OPERATOR_RECOMMENDATION_RECORDED, EVENT_REPLAY_BUILT,
-    SwarmScenarioError, SwarmScenarioVerdict, all_green_fleet_replay_scenario_spec,
-    high_contention_swarm_scenario_specs, recovery_fail_closed_scenario_spec,
-    registered_swarm_scenarios, render_swarm_scenario_jsonl, run_deterministic_swarm_scenario,
+    SwarmScenarioError, SwarmScenarioOperatorIncident, SwarmScenarioVerdict,
+    all_green_fleet_replay_scenario_spec, high_contention_swarm_scenario_specs,
+    recovery_fail_closed_scenario_spec, registered_swarm_scenarios, render_swarm_scenario_jsonl,
+    run_deterministic_swarm_scenario,
 };
 
 type TestResult = Result<(), String>;
@@ -283,4 +284,52 @@ fn high_contention_scenario_rejects_missing_operator_evidence_ref() -> TestResul
             "expected missing generated artifact rejection for operator evidence ref, got {other:?}"
         )),
     }
+}
+
+/// Regression: `validate_operator_incidents` previously rejected empty
+/// strings (commit 44e9bf7f) but accepted `reason_code` / `operator_action` /
+/// `evidence_ref` that contained control characters. Those strings flow
+/// verbatim into JSON scenario-output logs and `SwarmScenarioAssertion`
+/// records; an embedded `\n` would let a poisoned spec inject extra event
+/// rows into the reviewer's log pane. This test pins the fail-closed path
+/// for each of the three fields independently so that a future regression
+/// removing the rejection on any one of them is caught.
+#[test]
+fn high_contention_scenario_rejects_control_characters_in_operator_incident_text() -> TestResult {
+    let mutators: [(&str, fn(&mut SwarmScenarioOperatorIncident)); 3] = [
+        ("reason_code", |incident| {
+            incident.reason_code = "SWARM_REASON\nleak".to_string();
+        }),
+        ("operator_action", |incident| {
+            incident.operator_action = "do thing\nleak".to_string();
+        }),
+        ("evidence_ref", |incident| {
+            incident.evidence_ref = "scenario_artifacts/foo\nbar/file.json".to_string();
+        }),
+    ];
+    for (field, mutate) in mutators {
+        let mut spec = high_contention_swarm_scenario_specs()
+            .into_iter()
+            .next()
+            .ok_or_else(|| "high-contention scenario pack was empty".to_string())?;
+        let incident = spec
+            .operator_incidents
+            .get_mut(0)
+            .ok_or_else(|| "high-contention scenario omitted operator incident".to_string())?;
+        mutate(incident);
+        let root = tempfile::tempdir().map_err(|err| format!("failed creating tempdir: {err}"))?;
+
+        match run_deterministic_swarm_scenario(&spec, root.path()) {
+            Err(SwarmScenarioError::OperatorIncidentFieldContainsControl {
+                field: rejected_field,
+                ..
+            }) if rejected_field == field => {}
+            other => {
+                return Err(format!(
+                    "expected control-character rejection for operator incident field `{field}`, got {other:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }

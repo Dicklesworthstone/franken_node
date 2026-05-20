@@ -189,6 +189,13 @@ pub enum SwarmScenarioError {
         scenario_id: String,
         field: &'static str,
     },
+    #[error(
+        "scenario `{scenario_id}` operator incident field `{field}` contains a control character"
+    )]
+    OperatorIncidentFieldContainsControl {
+        scenario_id: String,
+        field: &'static str,
+    },
     #[error("invalid rfc3339 timestamp `{timestamp}`: {source}")]
     TimestampParse {
         timestamp: String,
@@ -769,18 +776,9 @@ fn validate_spec(spec: &SwarmScenarioSpec) -> Result<(), SwarmScenarioError> {
 
 fn validate_operator_incidents(spec: &SwarmScenarioSpec) -> Result<(), SwarmScenarioError> {
     for incident in &spec.operator_incidents {
-        if incident.reason_code.trim().is_empty() {
-            return Err(SwarmScenarioError::EmptyOperatorIncidentField {
-                scenario_id: spec.scenario_id.clone(),
-                field: "reason_code",
-            });
-        }
-        if incident.operator_action.trim().is_empty() {
-            return Err(SwarmScenarioError::EmptyOperatorIncidentField {
-                scenario_id: spec.scenario_id.clone(),
-                field: "operator_action",
-            });
-        }
+        validate_operator_incident_text(spec, "reason_code", &incident.reason_code)?;
+        validate_operator_incident_text(spec, "operator_action", &incident.operator_action)?;
+        validate_operator_incident_text(spec, "evidence_ref", &incident.evidence_ref)?;
         validate_relative_path(Path::new(&incident.evidence_ref))?;
     }
     Ok(())
@@ -790,6 +788,32 @@ fn is_safe_component(value: &str) -> bool {
     value
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// Fail closed on empty or control-character content in operator-incident
+/// text fields. `reason_code`, `operator_action`, and `evidence_ref` flow
+/// into JSON scenario-output logs and assertion records that downstream
+/// reviewers ingest as one-event-per-line; an embedded `\n` would let a
+/// poisoned spec stamp arbitrary content into a subsequent log row. Same
+/// threat model as `validate_rehydration_text` and `validate_identifier`.
+fn validate_operator_incident_text(
+    spec: &SwarmScenarioSpec,
+    field: &'static str,
+    value: &str,
+) -> Result<(), SwarmScenarioError> {
+    if value.trim().is_empty() {
+        return Err(SwarmScenarioError::EmptyOperatorIncidentField {
+            scenario_id: spec.scenario_id.clone(),
+            field,
+        });
+    }
+    if value.chars().any(char::is_control) {
+        return Err(SwarmScenarioError::OperatorIncidentFieldContainsControl {
+            scenario_id: spec.scenario_id.clone(),
+            field,
+        });
+    }
+    Ok(())
 }
 
 fn parse_base_timestamp(timestamp: &str) -> Result<DateTime<Utc>, SwarmScenarioError> {
