@@ -32,14 +32,9 @@ fn hash_pair_bytes(left: &[u8], right: &[u8]) -> [u8; 32] {
 /// resistance from truncation.
 #[cfg(test)]
 fn hash_pair(left: &str, right: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(b"transparency_interior_v1:");
-    h.update(len_to_u64(left.len()).to_le_bytes());
-    h.update(left.as_bytes());
-    h.update(len_to_u64(right.len()).to_le_bytes());
-    h.update(right.as_bytes());
-    let digest = h.finalize();
-    hex::encode(digest)
+    let left = decode_merkle_hash_hex(left, "left").expect("test hash must be 32-byte hex");
+    let right = decode_merkle_hash_hex(right, "right").expect("test hash must be 32-byte hex");
+    hex::encode(hash_pair_bytes(&left, &right))
 }
 
 /// Compute the leaf hash for a piece of data.
@@ -629,17 +624,23 @@ mod tests {
     #[test]
     fn hashes_use_full_sha256_width() {
         assert_eq!(leaf_hash("hello").len(), 64);
-        assert_eq!(hash_pair("a", "b").len(), 64);
+        assert_eq!(hash_pair(&leaf_hash("a"), &leaf_hash("b")).len(), 64);
     }
 
     #[test]
     fn hash_pair_deterministic() {
-        assert_eq!(hash_pair("a", "b"), hash_pair("a", "b"));
+        assert_eq!(
+            hash_pair(&leaf_hash("a"), &leaf_hash("b")),
+            hash_pair(&leaf_hash("a"), &leaf_hash("b"))
+        );
     }
 
     #[test]
     fn hash_pair_order_matters() {
-        assert_ne!(hash_pair("a", "b"), hash_pair("b", "a"));
+        assert_ne!(
+            hash_pair(&leaf_hash("a"), &leaf_hash("b")),
+            hash_pair(&leaf_hash("b"), &leaf_hash("a"))
+        );
     }
 
     // === build_test_tree ===
