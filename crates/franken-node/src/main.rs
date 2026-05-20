@@ -12258,6 +12258,54 @@ mod trust_command_tests {
     }
 
     #[test]
+    fn trust_card_json_flow_renders_canonical_card_json() -> Result<()> {
+        let now_secs = 1_700_000_012;
+        let mut registry = supply_chain::trust_card::fixture_registry(now_secs)?;
+        let card = registry
+            .read(
+                "npm:@acme/auth-guard",
+                now_secs,
+                "trace-test-trust-card-json",
+            )?
+            .ok_or_else(|| anyhow::anyhow!("trust card should exist"))?;
+
+        let rendered = render_trust_card_for_trust_command(&card, true)?;
+        let parsed: serde_json::Value = serde_json::from_str(&rendered)?;
+
+        assert_eq!(parsed["schema_version"], "trust-card-v1.0");
+        assert_eq!(parsed["extension"]["extension_id"], "npm:@acme/auth-guard");
+        assert!(!rendered.contains("extension | publisher | cert"));
+        Ok(())
+    }
+
+    #[test]
+    fn trust_list_json_flow_renders_filtered_card_array_json() -> Result<()> {
+        let now_secs = 1_700_000_013;
+        let mut registry = supply_chain::trust_card::fixture_registry(now_secs)?;
+        let cards = registry.list(
+            &TrustCardListFilter::empty(),
+            "trace-test-trust-list-json",
+            now_secs,
+        )?;
+        let filtered =
+            filter_trust_cards_for_trust_command(cards, Some(RiskLevel::Critical), Some(true));
+
+        let rendered = render_trust_card_list_for_trust_command(&filtered, true)?;
+        let parsed: serde_json::Value = serde_json::from_str(&rendered)?;
+
+        let items = parsed
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("trust list json should be an array"))?;
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0]["extension"]["extension_id"],
+            "npm:@beta/telemetry-bridge"
+        );
+        assert!(!rendered.contains("extension | publisher | cert"));
+        Ok(())
+    }
+
+    #[test]
     fn trust_scan_positive_flow_creates_cards_from_manifest_without_network() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -18741,6 +18789,22 @@ fn render_trust_card_list(cards: &[TrustCard]) -> String {
         ));
     }
     lines.join("\n")
+}
+
+fn render_trust_card_for_trust_command(card: &TrustCard, json: bool) -> Result<String> {
+    if json {
+        Ok(trust_card_to_json(card)?)
+    } else {
+        Ok(render_trust_card_human(card))
+    }
+}
+
+fn render_trust_card_list_for_trust_command(cards: &[TrustCard], json: bool) -> Result<String> {
+    if json {
+        Ok(trust_card_to_json(cards)?)
+    } else {
+        Ok(render_trust_card_list(cards))
+    }
 }
 
 fn revoke_trust_card(
@@ -26308,7 +26372,7 @@ fn main() -> Result<()> {
                 let card = response
                     .data
                     .ok_or_else(|| trust_card_not_found_error(&args.extension_id))?;
-                println!("{}", render_trust_card_human(&card));
+                println!("{}", render_trust_card_for_trust_command(&card, args.json)?);
             }
             TrustCommand::List(args) => {
                 let risk_filter = parse_risk_level_filter(args.risk.as_deref())?;
@@ -26323,7 +26387,10 @@ fn main() -> Result<()> {
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
                 let filtered =
                     filter_trust_cards_for_trust_command(cards, risk_filter, args.revoked);
-                println!("{}", render_trust_card_list(&filtered));
+                println!(
+                    "{}",
+                    render_trust_card_list_for_trust_command(&filtered, args.json)?
+                );
             }
             TrustCommand::Scan(args) => {
                 let project_root = args
