@@ -26,6 +26,7 @@ pub const INV_HA_FAIL_CLOSED: &str = "INV-HA-FAIL-CLOSED";
 /// Mode downgrade requires explicit policy authorization.
 pub const INV_HA_MODE_POLICY: &str = "INV-HA-MODE-POLICY";
 const MAX_POLICY_AUTH_FIELD_BYTES: usize = 256;
+const MAX_ARTIFACT_ID_BYTES: usize = 512;
 
 // ── AssuranceMode ───────────────────────────────────────────────────
 
@@ -194,6 +195,8 @@ impl ProofBundle {
 /// Reason a high-assurance promotion was denied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromotionDenialReason {
+    /// Artifact id is empty, oversized, or contains control bytes.
+    ArtifactIdInvalid { reason: ArtifactIdInvalidReason },
     /// Proof bundle missing entirely.
     ProofBundleMissing {
         artifact_id: String,
@@ -215,6 +218,7 @@ pub enum PromotionDenialReason {
 impl PromotionDenialReason {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::ArtifactIdInvalid { .. } => "PROMOTION_DENIED_INVALID_ARTIFACT_ID",
             Self::ProofBundleMissing { .. } => "PROMOTION_DENIED_PROOF_BUNDLE_MISSING",
             Self::ProofBundleInsufficient { .. } => "PROMOTION_DENIED_PROOF_INSUFFICIENT",
             Self::UnauthorizedModeDowngrade { .. } => "MODE_DOWNGRADE_UNAUTHORIZED",
@@ -225,6 +229,9 @@ impl PromotionDenialReason {
 impl fmt::Display for PromotionDenialReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ArtifactIdInvalid { reason } => {
+                write!(f, "{}: reason={}", self.code(), reason.label())
+            }
             Self::ProofBundleMissing {
                 artifact_id,
                 object_class,
@@ -253,6 +260,23 @@ impl fmt::Display for PromotionDenialReason {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactIdInvalidReason {
+    Empty,
+    TooLong,
+    ControlCharacter,
+}
+
+impl ArtifactIdInvalidReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::TooLong => "too_long",
+            Self::ControlCharacter => "control_character",
+        }
+    }
+}
+
 // ── PolicyAuthorization ─────────────────────────────────────────────
 
 /// Authorization for mode changes.
@@ -276,6 +300,19 @@ fn policy_auth_field_is_valid(value: &str) -> bool {
     !trimmed.is_empty()
         && trimmed.len() <= MAX_POLICY_AUTH_FIELD_BYTES
         && !trimmed.chars().any(char::is_control)
+}
+
+fn artifact_id_invalid_reason(value: &str) -> Option<ArtifactIdInvalidReason> {
+    if value.trim().is_empty() {
+        return Some(ArtifactIdInvalidReason::Empty);
+    }
+    if value.len() > MAX_ARTIFACT_ID_BYTES {
+        return Some(ArtifactIdInvalidReason::TooLong);
+    }
+    if value.chars().any(char::is_control) {
+        return Some(ArtifactIdInvalidReason::ControlCharacter);
+    }
+    None
 }
 
 // ── HighAssuranceGate ───────────────────────────────────────────────
@@ -340,6 +377,11 @@ impl HighAssuranceGate {
         object_class: ObjectClass,
         proof_bundle: Option<&ProofBundle>,
     ) -> Result<(), PromotionDenialReason> {
+        if let Some(reason) = artifact_id_invalid_reason(artifact_id) {
+            self.denials = self.denials.saturating_add(1);
+            return Err(PromotionDenialReason::ArtifactIdInvalid { reason });
+        }
+
         if self.mode == AssuranceMode::Standard {
             self.approvals = self.approvals.saturating_add(1);
             return Ok(());
@@ -1038,6 +1080,11 @@ mod tests {
             to: AssuranceMode::Standard,
         };
         assert_eq!(d3.code(), "MODE_DOWNGRADE_UNAUTHORIZED");
+
+        let d4 = PromotionDenialReason::ArtifactIdInvalid {
+            reason: ArtifactIdInvalidReason::ControlCharacter,
+        };
+        assert_eq!(d4.code(), "PROMOTION_DENIED_INVALID_ARTIFACT_ID");
     }
 
     #[test]
@@ -1133,13 +1180,45 @@ mod tests {
         let result3 = gate.switch_mode(AssuranceMode::Standard, Some(&unicode_policy_auth));
         assert!(result3.is_ok()); // Should succeed since auth is technically valid
 
-        // Path traversal injection in artifact ID
+        // Path traversal plus control bytes in artifact ID must fail closed.
         let path_traversal_id = "../../../etc/passwd\0\nmalicious_path";
         let result4 = gate.evaluate(path_traversal_id, ObjectClass::ConfigObject, Some(&bundle));
-        assert!(result4.is_ok());
+        assert!(matches!(
+            result4,
+            Err(PromotionDenialReason::ArtifactIdInvalid {
+                reason: ArtifactIdInvalidReason::ControlCharacter
+            })
+        ));
 
         // Verify counters updated correctly despite Unicode attacks
-        assert_eq!(gate.approvals(), 4);
+        assert_eq!(gate.approvals(), 3);
+        assert_eq!(gate.denials(), 1);
+    }
+
+    #[test]
+    fn invalid_artifact_ids_fail_closed_before_proof_evaluation() {
+        let mut gate = HighAssuranceGate::standard();
+        let bundle = ProofBundle::full();
+
+        let empty = gate.evaluate("  ", ObjectClass::CriticalMarker, Some(&bundle));
+        assert!(matches!(
+            empty,
+            Err(PromotionDenialReason::ArtifactIdInvalid {
+                reason: ArtifactIdInvalidReason::Empty
+            })
+        ));
+
+        let oversized_id = "a".repeat(MAX_ARTIFACT_ID_BYTES + 1);
+        let oversized = gate.evaluate(&oversized_id, ObjectClass::CriticalMarker, Some(&bundle));
+        assert!(matches!(
+            oversized,
+            Err(PromotionDenialReason::ArtifactIdInvalid {
+                reason: ArtifactIdInvalidReason::TooLong
+            })
+        ));
+
+        assert_eq!(gate.approvals(), 0);
+        assert_eq!(gate.denials(), 2);
     }
 
     #[test]
