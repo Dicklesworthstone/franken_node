@@ -1362,17 +1362,50 @@ fn snapshot_evidence(input: &RchQueueSnapshotInput) -> String {
 }
 
 fn redact_snapshot_evidence(evidence: &str) -> String {
+    let mut redacted = Vec::new();
+    let mut suppress_sensitive_continuation = false;
+
+    for token in evidence.split_whitespace() {
+        let Some((key_prefix, _value)) = token.split_once('=') else {
+            if token.contains('\0') {
+                suppress_sensitive_continuation = false;
+            }
+            if !suppress_sensitive_continuation {
+                redacted.push(token.to_string());
+            }
+            continue;
+        };
+
+        let key = env_key_from_assignment_prefix(key_prefix);
+        if is_sensitive_env_key(key) {
+            redacted.push(format!("{key}=<redacted>"));
+            suppress_sensitive_continuation = true;
+            continue;
+        }
+
+        suppress_sensitive_continuation = false;
+        redacted.push(token.to_string());
+    }
+
+    redacted.join(" ")
+}
+
+fn env_key_from_assignment_prefix(prefix: &str) -> &str {
+    let key_part = prefix.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_');
+    key_part
+        .rsplit(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .next()
+        .unwrap_or(key_part)
+}
+
+#[cfg(test)]
+fn old_whitespace_token_redaction(evidence: &str) -> String {
     evidence
         .split_whitespace()
         .map(|token| {
-            let key_part = token
+            let key = token
                 .split_once('=')
-                .map_or(token, |(key, _value)| key)
-                .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_');
-            let key = key_part
-                .rsplit(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-                .next()
-                .unwrap_or(key_part);
+                .map_or(token, |(key, _value)| env_key_from_assignment_prefix(key));
             if is_sensitive_env_key(key) {
                 format!("{key}=<redacted>")
             } else {
@@ -1897,5 +1930,26 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn snapshot_redaction_suppresses_spaced_secret_continuations() {
+        let mut evidence = String::new();
+        push_len_prefixed_field(
+            &mut evidence,
+            "stdout_tail",
+            "API_TOKEN=alpha beta gamma regular=value",
+        );
+
+        let old = old_whitespace_token_redaction(&evidence);
+        assert!(old.contains("beta"));
+        assert!(old.contains("gamma"));
+
+        let redacted = redact_snapshot_evidence(&evidence);
+        assert!(redacted.contains("API_TOKEN=<redacted>"));
+        assert!(!redacted.contains("alpha"));
+        assert!(!redacted.contains("beta"));
+        assert!(!redacted.contains("gamma"));
+        assert!(redacted.contains("regular=value"));
     }
 }
