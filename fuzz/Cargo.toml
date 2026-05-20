@@ -328,3 +328,9 @@ name = "fuzz_checksum_manifest_parse_canonical"
 path = "fuzz_targets/fuzz_checksum_manifest_parse_canonical.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_decision_receipt_verify"
+path = "fuzz_targets/fuzz_decision_receipt_verify.rs"
+test = false
+doc = false
