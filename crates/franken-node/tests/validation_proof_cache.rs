@@ -731,6 +731,22 @@ fn evidence_hotset_prefetch_plan_fails_closed_for_unsafe_candidates() {
     .expect_err("non-finite score must fail closed");
     assert_eq!(err.code(), "RG_HOTSET_INVALID_SCORE");
 
+    let control_digest = hotset_artifact(
+        "/data/projects/franken_node/artifacts/hotset/control-digest.json",
+        ResourceArtifactKind::GeneratedEvidence,
+        ResourceArtifactSafetyClass::GeneratedEvidence,
+        64,
+        "digest\npoison",
+    );
+    let control_probe = StaticHotsetProbe::new(std::slice::from_ref(&control_digest));
+    let err = plan_evidence_hotset_prefetch_with_probe(
+        vec![hotset_candidate(control_digest, 1.0, 0.0, 0.0)],
+        hotset_policy(128, 1, ResourceGovernorDecisionKind::Allow),
+        &control_probe,
+    )
+    .expect_err("control characters in artifact digest must fail closed");
+    assert_eq!(err.code(), "RG_ARTIFACT_STRING_CONTAINS_CONTROL");
+
     let dup_probe = StaticHotsetProbe::new(std::slice::from_ref(&artifact));
     let err = plan_evidence_hotset_prefetch_with_probe(
         vec![

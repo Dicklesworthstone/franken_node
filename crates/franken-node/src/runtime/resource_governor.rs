@@ -200,9 +200,9 @@ impl ResourceDiskPressureRoot {
     }
 
     fn validated(self) -> Result<Self, ResourcePressureSampleError> {
-        validate_artifact_string("disk_root.path", &self.path, MAX_ARTIFACT_PATH_BYTES)
-            .map_err(ResourcePressureSampleError::Artifact)?;
         reject_unsafe_path("disk_root.path", &self.path)
+            .map_err(ResourcePressureSampleError::Artifact)?;
+        validate_artifact_string("disk_root.path", &self.path, MAX_ARTIFACT_PATH_BYTES)
             .map_err(ResourcePressureSampleError::Artifact)?;
         Ok(self)
     }
@@ -657,10 +657,10 @@ impl ResourceArtifactInventoryEntry {
     }
 
     fn validated(mut self) -> Result<Self, ResourceArtifactInventoryError> {
-        validate_artifact_string("path", &self.path, MAX_ARTIFACT_PATH_BYTES)?;
-        validate_artifact_string("repo_key", &self.repo_key, MAX_ARTIFACT_PATH_BYTES)?;
         reject_unsafe_path("path", &self.path)?;
         reject_unsafe_path("repo_key", &self.repo_key)?;
+        validate_artifact_string("path", &self.path, MAX_ARTIFACT_PATH_BYTES)?;
+        validate_artifact_string("repo_key", &self.repo_key, MAX_ARTIFACT_PATH_BYTES)?;
         validate_optional_artifact_string("owner_agent", self.owner_agent.as_deref())?;
         validate_optional_artifact_string("bead_id", self.bead_id.as_deref())?;
         validate_optional_artifact_string(
@@ -1157,6 +1157,8 @@ pub enum ResourceArtifactInventoryError {
         len: usize,
         max: usize,
     },
+    #[error("RG_ARTIFACT_STRING_CONTAINS_CONTROL: {field} contains a control character")]
+    StringContainsControl { field: &'static str },
     #[error("RG_ARTIFACT_PATH_CONTAINS_NUL: {field} contains a NUL byte")]
     PathContainsNul { field: &'static str },
     #[error("RG_ARTIFACT_PATH_TRAVERSAL: {field} contains parent traversal")]
@@ -1172,6 +1174,7 @@ impl ResourceArtifactInventoryError {
         match self {
             Self::TooManyEntries { .. } => "RG_ARTIFACT_TOO_MANY_ENTRIES",
             Self::StringTooLong { .. } => "RG_ARTIFACT_STRING_TOO_LONG",
+            Self::StringContainsControl { .. } => "RG_ARTIFACT_STRING_CONTAINS_CONTROL",
             Self::PathContainsNul { .. } => "RG_ARTIFACT_PATH_CONTAINS_NUL",
             Self::PathTraversal { .. } => "RG_ARTIFACT_PATH_TRAVERSAL",
             Self::ProtectedPath { .. } => "RG_ARTIFACT_PROTECTED_PATH",
@@ -1852,6 +1855,8 @@ fn validate_artifact_string(
     let len = value.len();
     if len > max {
         Err(ResourceArtifactInventoryError::StringTooLong { field, len, max })
+    } else if value.chars().any(char::is_control) {
+        Err(ResourceArtifactInventoryError::StringContainsControl { field })
     } else {
         Ok(())
     }
