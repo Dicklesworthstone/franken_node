@@ -167,6 +167,8 @@ pub enum ReplayBundleError {
         expected: &'static str,
         actual: String,
     },
+    #[error("incident id is unsafe: {reason}")]
+    IncidentIdInvalid { reason: &'static str },
     #[error("incident evidence incident_id mismatch: expected `{expected}`, found `{actual}`")]
     EvidenceIncidentIdMismatch { expected: String, actual: String },
     #[error("incident evidence field `{field}` cannot be empty")]
@@ -525,6 +527,7 @@ pub fn validate_incident_evidence_package(
             field: "incident_id".to_string(),
         });
     }
+    validate_incident_id_shape(&package.incident_id)?;
 
     if let Some(expected_incident_id) = expected_incident_id
         && package.incident_id != expected_incident_id
@@ -771,6 +774,25 @@ fn is_trust_artifact_ref(reference: &str) -> bool {
         .any(|component| matches!(component, "trust" | "trust-artifacts" | "trust_artifacts"))
 }
 
+fn validate_incident_id_shape(incident_id: &str) -> Result<(), ReplayBundleError> {
+    if incident_id.trim() != incident_id {
+        return Err(ReplayBundleError::IncidentIdInvalid {
+            reason: "contains leading or trailing whitespace",
+        });
+    }
+    if incident_id.contains('\0') || incident_id.chars().any(char::is_control) {
+        return Err(ReplayBundleError::IncidentIdInvalid {
+            reason: "contains control characters or null bytes",
+        });
+    }
+    if incident_id.contains('/') || incident_id.contains('\\') || incident_id.contains("..") {
+        return Err(ReplayBundleError::IncidentIdInvalid {
+            reason: "contains path traversal syntax",
+        });
+    }
+    Ok(())
+}
+
 fn validate_nonempty_field(field: &str, value: &str) -> Result<(), ReplayBundleError> {
     if value.trim().is_empty() {
         return Err(ReplayBundleError::EvidenceFieldEmpty {
@@ -853,6 +875,7 @@ pub fn generate_replay_bundle(
     if incident_id.trim().is_empty() {
         return Err(ReplayBundleError::EmptyIncidentId);
     }
+    validate_incident_id_shape(incident_id)?;
     if event_log.len() > MAX_PREPARED_EVENTS {
         return Err(ReplayBundleError::TooManyEvents {
             count: event_log.len(),
@@ -3281,6 +3304,28 @@ mod tests {
                 }
                     if rejected == reference
             ));
+        }
+    }
+
+    #[test]
+    fn incident_ids_reject_control_bytes_and_path_syntax() {
+        for incident_id in [
+            " incident-001",
+            "incident-001 ",
+            "incident\n001",
+            "incident\0null",
+            "../incident-001",
+            r"incident\001",
+        ] {
+            let err = generate_replay_bundle(incident_id, &fixture_events())
+                .expect_err("unsafe direct incident_id must fail closed");
+            assert!(matches!(err, ReplayBundleError::IncidentIdInvalid { .. }));
+
+            let mut package = fixture_evidence_package("INC-EVID-VAL-ID");
+            package.incident_id = incident_id.to_string();
+            let err = validate_incident_evidence_package(&package, None)
+                .expect_err("unsafe evidence incident_id must fail closed");
+            assert!(matches!(err, ReplayBundleError::IncidentIdInvalid { .. }));
         }
     }
 
