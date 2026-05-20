@@ -14,7 +14,6 @@ use std::io::Write;
 use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use ed25519_dalek::Signer;
 #[cfg(feature = "compression")]
 use flate2::{Compression, write::GzEncoder};
 use serde::{Deserialize, Serialize};
@@ -22,10 +21,8 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::security::{
-    constant_time,
-    crypto::{Ed25519Verifier, HexSignatureVerifier},
-};
+use crate::crypto::{Ed25519Scheme, SignatureScheme};
+use crate::security::constant_time;
 
 pub(crate) const MAX_BUNDLE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_REPLAY_BUNDLE_BYTES: u64 = 64 * 1024 * 1024; // 64 MB limit for replay bundle JSON parsing
@@ -1013,7 +1010,14 @@ pub fn sign_replay_bundle(
     }
 
     let payload = replay_bundle_signature_payload(bundle);
-    let signature = signing_material.signing_key.sign(&payload);
+    // Route through `Ed25519Scheme::sign_raw`: `replay_bundle_signature_payload`
+    // already prepends `REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN` and
+    // length-prefixes every contributing field, so the wrapper domain on
+    // `sign_with_domain` would double-wrap and invalidate every `.fnbundle`
+    // golden plus every issued bundle in the wild.
+    let secret_key_bytes = signing_material.signing_key.to_bytes();
+    let signature_bytes = Ed25519Scheme::sign_raw(&secret_key_bytes, &payload)
+        .expect("Ed25519Scheme::sign_raw is infallible for a valid SigningKey seed");
     let verifying_key = signing_material.signing_key.verifying_key();
     bundle.signature = Some(ReplayBundleSignature {
         algorithm: "ed25519".to_string(),
@@ -1024,7 +1028,7 @@ pub fn sign_replay_bundle(
         signing_identity: signing_material.signing_identity.to_string(),
         trust_scope: REPLAY_BUNDLE_SIGNATURE_TRUST_SCOPE.to_string(),
         signed_payload_sha256: hex::encode(Sha256::digest(&payload)),
-        signature_hex: hex::encode(signature.to_bytes()),
+        signature_hex: hex::encode(signature_bytes),
     });
     Ok(())
 }
@@ -1073,13 +1077,14 @@ pub fn verify_replay_bundle_signature(
             detail: format!("expected 32 bytes, got {}", bytes.len()),
         }
     })?;
-    let verifier = Ed25519Verifier::from_bytes(&public_key_bytes).map_err(|err| {
-        ReplayBundleError::SignaturePublicKeyMalformed {
+    // Validate the public-key bytes by parsing them; failure means malformed.
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes).map_err(
+        |err| ReplayBundleError::SignaturePublicKeyMalformed {
             detail: err.to_string(),
-        }
-    })?;
+        },
+    )?;
     let derived_key_id =
-        crate::supply_chain::artifact_signing::KeyId::from_verifying_key(verifier.verifying_key())
+        crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key)
             .to_string();
     if !constant_time::ct_eq(&signature.key_id, &derived_key_id) {
         tracing::warn!(
@@ -1096,9 +1101,25 @@ pub fn verify_replay_bundle_signature(
         return Err(ReplayBundleError::SignaturePayloadHashMismatch);
     }
 
-    verifier
-        .verify_hex(&payload, &signature.signature_hex)
-        .map_err(|_| ReplayBundleError::SignatureInvalid)
+    // Route through `Ed25519Scheme::verify_raw` to mirror the trait-based
+    // sign path (`sign_raw`). The signature payload already carries its own
+    // length-prefixed domain separator (`REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN`),
+    // so we deliberately bypass the trait's wrapper-domain surface here —
+    // see the comment on the sign side for the on-the-wire-compat reason.
+    let sig_bytes = hex::decode(&signature.signature_hex).map_err(|source| {
+        ReplayBundleError::SignatureMalformed {
+            detail: source.to_string(),
+        }
+    })?;
+    let signature_array = Ed25519Scheme::signature_from_bytes(&sig_bytes).map_err(|err| {
+        ReplayBundleError::SignatureMalformed {
+            detail: err.to_string(),
+        }
+    })?;
+    if !Ed25519Scheme::verify_raw(&public_key_bytes, &payload, &signature_array) {
+        return Err(ReplayBundleError::SignatureInvalid);
+    }
+    Ok(())
 }
 
 /// Trust configuration for replay bundle verification

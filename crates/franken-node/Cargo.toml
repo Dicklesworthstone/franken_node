@@ -883,6 +883,10 @@ name = "decision_receipt_crypto_trait_adoption"
 path = "tests/decision_receipt_crypto_trait_adoption.rs"
 
 [[test]]
+name = "replay_bundle_crypto_trait_adoption"
+path = "tests/replay_bundle_crypto_trait_adoption.rs"
+
+[[test]]
 name = "artifact_signing_metamorphic"
 path = "tests/artifact_signing_metamorphic.rs"
 
