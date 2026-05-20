@@ -4455,3 +4455,55 @@ fn e2e_harness_matrix_loads_and_covers_required_cases() {
         );
     }
 }
+
+/// Regression: at the EXACT freshness boundary (`now == freshness_expires_at`)
+/// the proof cache must fail closed and reject the lookup with
+/// ERR_VPC_STALE_ENTRY. Prior to the fix, the entry-freshness check at
+/// `validation_proof_cache.rs:1431` used `<` rather than `<=`, which let a
+/// hit slip through at the exact expiry instant — diverging from the
+/// project convention documented at `vef/evidence_capsule.rs:1231-1232`
+/// (`now >= expires_at` ✓, `now > expires_at` ✗) and applied by
+/// `key_role_separation.rs:590`, `staking_governance.rs:927`,
+/// `validation_proof_coalescer.rs:2047`, and `validation_broker.rs:2145,2181`.
+#[test]
+fn stale_receipt_at_freshness_boundary_fails_closed() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = ValidationProofCacheStore::new(dir.path());
+    let request = request();
+    // Receipt freshness expires at ts(3); lookup runs at the SAME ts(3).
+    let receipt = receipt_with_expiry(ts(3));
+    let (receipt_path, receipt_bytes) = write_receipt(dir.path(), &receipt);
+    let key = ValidationProofCacheKey::from_request_and_receipt(&request, &receipt, scope())
+        .expect("key");
+    let entry = store
+        .build_entry(
+            key.clone(),
+            receipt_path,
+            &receipt,
+            &receipt_bytes,
+            "LavenderElk",
+            ts(2),
+        )
+        .expect("entry");
+    store.put_entry(&entry).expect("entry persisted");
+
+    // At now == entry.freshness_expires_at the entry must be reported stale.
+    let err = store
+        .lookup(&key, ts(3))
+        .expect_err("boundary lookup must fail closed");
+    assert_eq!(err.code(), error_codes::ERR_VPC_STALE_ENTRY);
+
+    // And one second before the boundary the entry is still a healthy hit:
+    // pin the asymmetry so a future refactor cannot silently regress to `<`.
+    match store.lookup(&key, ts(2)).expect("pre-boundary lookup") {
+        ValidationProofCacheLookup::Hit(hit) => {
+            assert_eq!(hit.entry.cache_key.hex, key.hex);
+        }
+        ValidationProofCacheLookup::Miss(decision) => {
+            panic!(
+                "ts(2) (one second before freshness_expires_at) must be a hit, got Miss: {:?}",
+                decision.decision
+            );
+        }
+    }
+}

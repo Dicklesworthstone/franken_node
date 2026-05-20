@@ -936,7 +936,8 @@ impl ValidationProofCacheStore {
                 continue;
             }
 
-            if entry.freshness_expires_at < now || entry_is_older_than_policy(&entry, policy, now) {
+            if entry.freshness_expires_at <= now || entry_is_older_than_policy(&entry, policy, now)
+            {
                 removed_entries.push(gc_entry_from_entry(
                     &entry,
                     relative_path,
@@ -1428,7 +1429,12 @@ fn validate_entry_for_receipt(
     validate_key_receipt_match(&entry.cache_key, receipt)?;
     validate_key_receipt_match(requested_key, receipt)?;
     map_receipt_error(receipt.validate_at(now))?;
-    if entry.freshness_expires_at < now {
+    // Fail-closed expiry: at `freshness_expires_at == now` the entry is no
+    // longer fresh. Matches the project convention documented at
+    // vef/evidence_capsule.rs:1231-1232 and applied in key_role_separation
+    // (`now >= expires_at`), staking_governance / validation_proof_coalescer
+    // (`expires_at <= now`).
+    if entry.freshness_expires_at <= now {
         return Err(ValidationProofCacheError::contract(
             error_codes::ERR_VPC_STALE_ENTRY,
             "proof cache entry freshness has expired",
