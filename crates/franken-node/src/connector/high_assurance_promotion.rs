@@ -25,6 +25,7 @@ pub const INV_HA_PROOF_REQUIRED: &str = "INV-HA-PROOF-REQUIRED";
 pub const INV_HA_FAIL_CLOSED: &str = "INV-HA-FAIL-CLOSED";
 /// Mode downgrade requires explicit policy authorization.
 pub const INV_HA_MODE_POLICY: &str = "INV-HA-MODE-POLICY";
+const MAX_POLICY_AUTH_FIELD_BYTES: usize = 256;
 
 // ── AssuranceMode ───────────────────────────────────────────────────
 
@@ -264,10 +265,17 @@ pub struct PolicyAuthorization {
 
 impl PolicyAuthorization {
     fn is_valid(&self) -> bool {
-        !self.policy_ref.trim().is_empty()
-            && !self.authorizer_id.trim().is_empty()
+        policy_auth_field_is_valid(&self.policy_ref)
+            && policy_auth_field_is_valid(&self.authorizer_id)
             && self.timestamp_ms != 0
     }
+}
+
+fn policy_auth_field_is_valid(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= MAX_POLICY_AUTH_FIELD_BYTES
+        && !trimmed.chars().any(char::is_control)
 }
 
 // ── HighAssuranceGate ───────────────────────────────────────────────
@@ -1111,10 +1119,10 @@ mod tests {
         let result2 = gate.evaluate(zero_width_id, ObjectClass::StateObject, Some(&bundle));
         assert!(result2.is_ok());
 
-        // Test Unicode injection in policy authorization
+        // Test Unicode markers in policy authorization that do not introduce control bytes.
         let unicode_policy_auth = PolicyAuthorization {
             policy_ref: "\u{202E}ycilop_ekal\u{202D}real_policy_POL-001".to_string(),
-            authorizer_id: "admin\u{0000}\ninjection\u{FEFF}".to_string(),
+            authorizer_id: "admin\u{FEFF}".to_string(),
             timestamp_ms: 1000,
         };
 
@@ -1280,18 +1288,21 @@ mod tests {
     fn negative_policy_authorization_bypass_and_forgery_attacks() {
         let mut gate = HighAssuranceGate::high_assurance();
 
-        // Test authorization with malicious field injections
+        // Test authorization with malicious control-character injections.
         let malicious_auth = PolicyAuthorization {
             policy_ref: "POL-001\0DROP TABLE policies;\nGRANT ALL".to_string(),
             authorizer_id: "admin'; DELETE FROM users; --".to_string(),
             timestamp_ms: u64::MAX, // Extreme timestamp
         };
 
-        // Should be considered "valid" since fields are non-empty
-        assert!(malicious_auth.is_valid());
+        assert!(!malicious_auth.is_valid());
 
         let result = gate.switch_mode(AssuranceMode::Standard, Some(&malicious_auth));
-        assert!(result.is_ok()); // Dangerous but technically valid auth
+        assert!(matches!(
+            result,
+            Err(PromotionDenialReason::UnauthorizedModeDowngrade { .. })
+        ));
+        assert_eq!(gate.mode(), AssuranceMode::HighAssurance);
 
         // Test authorization bypass with whitespace manipulation
         let whitespace_auth = PolicyAuthorization {
@@ -1346,11 +1357,15 @@ mod tests {
             timestamp_ms: 1000,
         };
 
-        assert!(long_field_auth.is_valid());
+        assert!(!long_field_auth.is_valid());
 
         let mut long_gate = HighAssuranceGate::high_assurance();
         let result = long_gate.switch_mode(AssuranceMode::Standard, Some(&long_field_auth));
-        assert!(result.is_ok()); // Should handle long strings gracefully
+        assert!(matches!(
+            result,
+            Err(PromotionDenialReason::UnauthorizedModeDowngrade { .. })
+        ));
+        assert_eq!(long_gate.mode(), AssuranceMode::HighAssurance);
     }
 
     #[test]
