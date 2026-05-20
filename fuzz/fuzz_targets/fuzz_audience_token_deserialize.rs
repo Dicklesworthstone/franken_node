@@ -19,9 +19,9 @@
 //!     survive the constructor-path check, because they enforce the same
 //!     property set with different machinery — divergence is itself a
 //!     bug);
-//!   - the same invariants hold for the `Vec<AudienceBoundToken>`
-//!     (`TokenChain`-shape) entry point used by callers that load a chain
-//!     from disk or RPC.
+//!   - the same invariants hold for the `TokenChain` entry point used by
+//!     callers that load a chain from disk or RPC, including its bounded
+//!     token-vector visitor.
 //!
 //! Inputs are biased toward exercising the new control-char rejection
 //! seam: a JSON template with one targeted field swapped for arbitrary
@@ -30,7 +30,7 @@
 use arbitrary::Arbitrary;
 use frankenengine_node::control_plane::audience_token::{
     AudienceBoundToken, ERR_ABT_TOKEN_FIELD_CONTROL_CHAR, ERR_ABT_TOKEN_TOO_LARGE,
-    MAX_AUDIENCES_PER_TOKEN, MAX_TOKEN_FIELD_BYTES, MAX_TOKEN_SIGNATURE_BYTES,
+    MAX_AUDIENCES_PER_TOKEN, MAX_TOKEN_FIELD_BYTES, MAX_TOKEN_SIGNATURE_BYTES, TokenChain,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -64,7 +64,7 @@ fuzz_target!(|case: AudienceTokenDeserializeCase| {
         raw.truncate(MAX_RAW_BYTES);
     }
     check_panic_free::<AudienceBoundToken>(&raw);
-    check_panic_free::<Vec<AudienceBoundToken>>(&raw);
+    check_panic_free::<TokenChain>(&raw);
 
     // (B) Targeted poison: build a structurally valid token JSON and
     //     replace one field's value with attacker-controlled bytes,
@@ -77,7 +77,7 @@ fuzz_target!(|case: AudienceTokenDeserializeCase| {
     //     exercise the BoundedTokenVecVisitor that `TokenChain`-loading
     //     callers route through.
     if let Some(chain_json) = build_poisoned_chain_json(&case) {
-        check_panic_free::<Vec<AudienceBoundToken>>(chain_json.as_bytes());
+        check_panic_free::<TokenChain>(chain_json.as_bytes());
     }
 });
 
@@ -101,9 +101,9 @@ impl AudienceShapeCheck for AudienceBoundToken {
     }
 }
 
-impl AudienceShapeCheck for Vec<AudienceBoundToken> {
+impl AudienceShapeCheck for TokenChain {
     fn assert_shape_invariants(&self) {
-        for token in self {
+        for token in self.tokens() {
             assert_token_post_deserialize_invariants(token);
         }
     }
@@ -148,7 +148,10 @@ fn assert_token_post_deserialize_invariants(token: &AudienceBoundToken) {
     if let Err(err) = token.validate_shape() {
         let code = err.code.as_str();
         assert!(
-            code == ERR_ABT_TOKEN_TOO_LARGE || code == ERR_ABT_TOKEN_FIELD_CONTROL_CHAR,
+            matches!(
+                code,
+                ERR_ABT_TOKEN_TOO_LARGE | ERR_ABT_TOKEN_FIELD_CONTROL_CHAR
+            ),
             "validate_shape rejected deserializer-accepted token with unexpected code {code}: {err:?}"
         );
     }
@@ -226,7 +229,7 @@ fn build_poisoned_chain_json(case: &AudienceTokenDeserializeCase) -> Option<Stri
     for _ in 0..count {
         arr.push(token_value.clone());
     }
-    serde_json::to_string(&serde_json::Value::Array(arr)).ok()
+    serde_json::to_string(&serde_json::json!({ "tokens": arr })).ok()
 }
 
 fn poison_string(case: &AudienceTokenDeserializeCase) -> String {
