@@ -1543,7 +1543,20 @@ fn swarm_scheduler_input_digest_is_safe(digest: &InputDigest) -> bool {
 }
 
 fn swarm_scheduler_field_is_safe(value: &str, max_bytes: usize) -> bool {
-    !value.trim().is_empty() && value.len() <= max_bytes && !value.contains('\0')
+    // Reject any control character (newline, CR, tab, NUL, the rest of the
+    // C0/C1 ranges). These fields — bead_id, agent_name, snapshot_id,
+    // input.digest paths, feature flags, etc. — flow verbatim into
+    // `render_validation_capacity_market_bid_human` as a one-line log
+    // payload. An embedded `\n` would let a poisoned
+    // `ValidationSwarmSchedulerInput` (which derives `Deserialize`, so JSON
+    // input fixtures are in scope) stamp arbitrary content into the
+    // operator pane that reads as a separate event. Same threat model and
+    // mitigation as `validate_rehydration_text` / `validate_artifact_string`
+    // / `validate_identifier` / the swarm_scenario operator-incident
+    // validator.
+    !value.trim().is_empty()
+        && value.len() <= max_bytes
+        && !value.chars().any(char::is_control)
 }
 
 fn build_swarm_scheduler_decision(

@@ -2336,6 +2336,43 @@ fn scheduler_builder_rejects_malformed_and_bad_digest_inputs() {
     );
 }
 
+/// Regression: `swarm_scheduler_field_is_safe` previously rejected only NUL
+/// bytes. Other control characters (newline, CR, tab, the rest of the
+/// C0/C1 ranges) were accepted and then flowed verbatim into
+/// `render_validation_capacity_market_bid_human` — a single-line operator
+/// log payload — so a poisoned `ValidationSwarmSchedulerInput` (which
+/// derives `Deserialize`, so untrusted JSON spec input is in scope) could
+/// stamp arbitrary content into the reviewer's pane as if it were a
+/// separate event. The validator now rejects every `char::is_control()`
+/// codepoint, including NUL. This pins the new fail-closed path for the
+/// common `\n` case across both the build-input validator and the
+/// scheduler-input validator so a future regression on either side is
+/// caught.
+#[test]
+fn scheduler_validators_reject_control_characters_in_text_fields() {
+    let mut newline_build = swarm_scheduler_build_input("newline", "newline-agent");
+    newline_build.bead_id = "bd-good\npoisoned".to_string();
+
+    let err = build_validation_swarm_scheduler_input(newline_build)
+        .expect_err("newline bead id must be rejected by the build-input validator");
+
+    assert_eq!(
+        err.code(),
+        swarm_scheduler_error_codes::ERR_VSS_MALFORMED_INPUT
+    );
+
+    let mut newline_input = swarm_scheduler_input("newline", "newline-agent");
+    newline_input.agent_name = "agent-good\nleak".to_string();
+
+    let err = decide_validation_swarm_schedule(&swarm_scheduler_policy(), &newline_input, ts(40))
+        .expect_err("newline agent_name must be rejected by the scheduler-input validator");
+
+    assert_eq!(
+        err.code(),
+        swarm_scheduler_error_codes::ERR_VSS_MALFORMED_INPUT
+    );
+}
+
 #[test]
 fn capacity_market_bids_cover_contention_actions_and_render_stable_output()
 -> Result<(), Box<dyn std::error::Error>> {
