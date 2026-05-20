@@ -17643,7 +17643,7 @@ fn inspect_local_registry_artifact(
         };
     };
 
-    if version_hash != artifact.manifest.artifact_sha256 {
+    if !security::constant_time::ct_eq(version_hash, &artifact.manifest.artifact_sha256) {
         return RegistryArtifactVerification {
             status: RegistryArtifactIntegrityStatus::InvalidMetadata,
             detail: format!(
@@ -17665,7 +17665,7 @@ fn inspect_local_registry_artifact(
         }
     };
     let actual_hash = compute_registry_artifact_sha256(&package_bytes);
-    if actual_hash != artifact.manifest.artifact_sha256 {
+    if !security::constant_time::ct_eq(&actual_hash, &artifact.manifest.artifact_sha256) {
         return RegistryArtifactVerification {
             status: RegistryArtifactIntegrityStatus::HashMismatch,
             detail: format!(
@@ -22205,7 +22205,9 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
                     "Entry {} missing prev_entry_hash (expected: {})",
                     index, expected
                 ));
-            } else if !entry.prev_entry_hash.is_empty() && entry.prev_entry_hash != *expected {
+            } else if !entry.prev_entry_hash.is_empty()
+                && !security::constant_time::ct_eq(&entry.prev_entry_hash, expected)
+            {
                 hash_chain_errors.push(format!(
                     "Entry {} hash chain broken: expected {}, got {}",
                     index, expected, entry.prev_entry_hash
