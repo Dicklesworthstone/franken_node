@@ -14,6 +14,8 @@ Each scenario declares:
 - `deadline_millis`
 - fleet nodes with `node_id`, `zone_id`, `health`, and `quarantine_version`
 - optional fault injection
+- optional operator incidents with `incident_kind`, `reason_code`,
+  `operator_action`, and `evidence_ref`
 - expected scenario event codes
 - expected evidence artifact paths
 
@@ -43,6 +45,23 @@ report builder. It must not replace those domains with synthetic mocks.
 - Reports scenario verdict `fail_closed` when the recovery gap is visible and
   actionable.
 
+High-contention operator pack:
+
+- `corrupt-coordination-bead-fallback`
+- `blocked-proof-cargo-pressure`
+- `quiet-lane-reproof-admission`
+- `stale-rch-job-classification`
+- `target-dir-lease-choice`
+- `source-only-validation-saturation`
+
+These scenarios encode recurring multi-agent contention incidents without live
+Cargo or RCH execution. Each fixture still uses the real file-backed fleet
+transport, replay bundle builder, and incident timeline builder, then records a
+deterministic operator recommendation tied to the generated timeline artifact.
+Operators should use the emitted reason code and action line as the incident
+decision record when deciding whether to stay source-only, admit a quiet-lane
+proof, classify stale RCH progress, or choose an isolated target directory.
+
 ## Event Log Contract
 
 Scenario logs are JSONL. Every line contains:
@@ -63,10 +82,15 @@ Stable event codes include:
 - `SWARM_SCENARIO_REPLAY_BUILT`
 - `SWARM_SCENARIO_TIMELINE_BUILT`
 - `SWARM_SCENARIO_FAIL_CLOSED_CONFIRMED`
+- `SWARM_SCENARIO_OPERATOR_RECOMMENDATION_RECORDED`
 - `SWARM_SCENARIO_EVIDENCE_COLLECTED`
 - `SWARM_SCENARIO_EXPECTED_EVENTS_CONFIRMED`
 - `SWARM_SCENARIO_COMPLETED`
 - `SWARM_SCENARIO_ASSERTION_FAILED`
+
+`SWARM_SCENARIO_OPERATOR_RECOMMENDATION_RECORDED` detail fields are stable and
+must include `trace_id`, `scenario_id`, `incident_kind`, `reason_code`,
+`operator_action`, and `evidence_ref`.
 
 Failed assertions must include `phase`, `event_code`, `expected`, `actual`, and
 `artifact_path` fields so operators can identify the failed phase and source

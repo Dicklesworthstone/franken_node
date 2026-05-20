@@ -41,6 +41,8 @@ pub const EVENT_FLEET_ACTION_PUBLISHED: &str = "SWARM_SCENARIO_FLEET_ACTION_PUBL
 pub const EVENT_REPLAY_BUILT: &str = "SWARM_SCENARIO_REPLAY_BUILT";
 pub const EVENT_TIMELINE_BUILT: &str = "SWARM_SCENARIO_TIMELINE_BUILT";
 pub const EVENT_FAIL_CLOSED_CONFIRMED: &str = "SWARM_SCENARIO_FAIL_CLOSED_CONFIRMED";
+pub const EVENT_OPERATOR_RECOMMENDATION_RECORDED: &str =
+    "SWARM_SCENARIO_OPERATOR_RECOMMENDATION_RECORDED";
 pub const EVENT_EVIDENCE_COLLECTED: &str = "SWARM_SCENARIO_EVIDENCE_COLLECTED";
 pub const EVENT_EXPECTED_EVENTS_CONFIRMED: &str = "SWARM_SCENARIO_EXPECTED_EVENTS_CONFIRMED";
 pub const EVENT_COMPLETED: &str = "SWARM_SCENARIO_COMPLETED";
@@ -50,6 +52,12 @@ const DEFAULT_BASE_TIMESTAMP: &str = "2026-05-05T10:00:00.000000Z";
 const DEFAULT_DEADLINE_MILLIS: u64 = 5_000;
 const ALL_GREEN_ID: &str = "all-green-fleet-replay";
 const RECOVERY_ID: &str = "negative-recovery-fail-closed";
+const CORRUPT_COORDINATION_ID: &str = "corrupt-coordination-bead-fallback";
+const BLOCKED_PROOF_ID: &str = "blocked-proof-cargo-pressure";
+const QUIET_LANE_ID: &str = "quiet-lane-reproof-admission";
+const STALE_RCH_ID: &str = "stale-rch-job-classification";
+const TARGET_DIR_ID: &str = "target-dir-lease-choice";
+const SOURCE_ONLY_ID: &str = "source-only-validation-saturation";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmScenarioSpec {
@@ -60,6 +68,8 @@ pub struct SwarmScenarioSpec {
     pub nodes: Vec<SwarmScenarioNode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fault: Option<SwarmScenarioFault>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operator_incidents: Vec<SwarmScenarioOperatorIncident>,
     pub expected_event_codes: Vec<String>,
     pub expected_artifact_paths: Vec<String>,
 }
@@ -70,6 +80,25 @@ pub struct SwarmScenarioNode {
     pub zone_id: String,
     pub health: NodeHealth,
     pub quarantine_version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmScenarioOperatorIncident {
+    pub incident_kind: SwarmScenarioOperatorIncidentKind,
+    pub reason_code: String,
+    pub operator_action: String,
+    pub evidence_ref: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmScenarioOperatorIncidentKind {
+    CorruptCoordinationBeadFallback,
+    BlockedProofRehydrationCargoPressure,
+    QuietLaneReproofAdmission,
+    StaleRchJobClassification,
+    TargetDirLeaseChoice,
+    SourceOnlyValidationSaturation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +184,11 @@ pub enum SwarmScenarioError {
     InvalidScenarioId { scenario_id: String },
     #[error("scenario `{scenario_id}` must declare at least one node")]
     EmptyNodeSet { scenario_id: String },
+    #[error("scenario `{scenario_id}` operator incident field `{field}` cannot be empty")]
+    EmptyOperatorIncidentField {
+        scenario_id: String,
+        field: &'static str,
+    },
     #[error("invalid rfc3339 timestamp `{timestamp}`: {source}")]
     TimestampParse {
         timestamp: String,
@@ -203,6 +237,7 @@ pub fn all_green_fleet_replay_scenario_spec() -> SwarmScenarioSpec {
             },
         ],
         fault: None,
+        operator_incidents: Vec::new(),
         expected_event_codes: vec![
             EVENT_SETUP.to_string(),
             EVENT_FLEET_STATE_SEEDED.to_string(),
@@ -243,6 +278,7 @@ pub fn recovery_fail_closed_scenario_spec() -> SwarmScenarioSpec {
             },
         ],
         fault: Some(SwarmScenarioFault::TamperReplayIntegrity),
+        operator_incidents: Vec::new(),
         expected_event_codes: vec![
             EVENT_SETUP.to_string(),
             EVENT_FLEET_STATE_SEEDED.to_string(),
@@ -263,11 +299,136 @@ pub fn recovery_fail_closed_scenario_spec() -> SwarmScenarioSpec {
 }
 
 #[must_use]
-pub fn registered_swarm_scenarios() -> Vec<SwarmScenarioSpec> {
+pub fn high_contention_swarm_scenario_specs() -> Vec<SwarmScenarioSpec> {
     vec![
+        high_contention_scenario_spec(
+            CORRUPT_COORDINATION_ID,
+            0x5eed_1001,
+            NodeHealth::Degraded,
+            SwarmScenarioOperatorIncidentKind::CorruptCoordinationBeadFallback,
+            "SWARM_COORDINATION_CORRUPT_BEAD_FALLBACK",
+            "treat bead assignee as the soft lock and continue source-only coordination",
+        ),
+        high_contention_scenario_spec(
+            BLOCKED_PROOF_ID,
+            0x5eed_1002,
+            NodeHealth::Degraded,
+            SwarmScenarioOperatorIncidentKind::BlockedProofRehydrationCargoPressure,
+            "SWARM_BLOCKED_PROOF_CARGO_PRESSURE",
+            "defer proof rehydration and record the exact rch command for a quiet lane",
+        ),
+        high_contention_scenario_spec(
+            QUIET_LANE_ID,
+            0x5eed_1003,
+            NodeHealth::Healthy,
+            SwarmScenarioOperatorIncidentKind::QuietLaneReproofAdmission,
+            "SWARM_QUIET_LANE_REPROOF_ADMITTED",
+            "admit one low-priority rch reproof with isolated target-dir evidence",
+        ),
+        high_contention_scenario_spec(
+            STALE_RCH_ID,
+            0x5eed_1004,
+            NodeHealth::Degraded,
+            SwarmScenarioOperatorIncidentKind::StaleRchJobClassification,
+            "SWARM_STALE_RCH_PROGRESS_CLASSIFIED",
+            "classify the stale job before launching a duplicate proof attempt",
+        ),
+        high_contention_scenario_spec(
+            TARGET_DIR_ID,
+            0x5eed_1005,
+            NodeHealth::Healthy,
+            SwarmScenarioOperatorIncidentKind::TargetDirLeaseChoice,
+            "SWARM_TARGET_DIR_LEASE_SELECTED",
+            "choose a per-agent target directory before starting cargo-backed proof",
+        ),
+        high_contention_scenario_spec(
+            SOURCE_ONLY_ID,
+            0x5eed_1006,
+            NodeHealth::Degraded,
+            SwarmScenarioOperatorIncidentKind::SourceOnlyValidationSaturation,
+            "SWARM_SOURCE_ONLY_DURING_VALIDATION_SATURATION",
+            "continue source-only work and avoid new cargo or rch launches",
+        ),
+    ]
+}
+
+fn high_contention_scenario_spec(
+    scenario_id: &str,
+    seed: u64,
+    second_node_health: NodeHealth,
+    incident_kind: SwarmScenarioOperatorIncidentKind,
+    reason_code: &str,
+    operator_action: &str,
+) -> SwarmScenarioSpec {
+    SwarmScenarioSpec {
+        scenario_id: scenario_id.to_string(),
+        seed,
+        base_timestamp: DEFAULT_BASE_TIMESTAMP.to_string(),
+        deadline_millis: DEFAULT_DEADLINE_MILLIS,
+        nodes: vec![
+            SwarmScenarioNode {
+                node_id: "node-a".to_string(),
+                zone_id: "zone-a".to_string(),
+                health: NodeHealth::Healthy,
+                quarantine_version: 0,
+            },
+            SwarmScenarioNode {
+                node_id: "node-b".to_string(),
+                zone_id: "zone-b".to_string(),
+                health: second_node_health,
+                quarantine_version: if second_node_health == NodeHealth::Degraded {
+                    1
+                } else {
+                    0
+                },
+            },
+        ],
+        fault: None,
+        operator_incidents: vec![SwarmScenarioOperatorIncident {
+            incident_kind,
+            reason_code: reason_code.to_string(),
+            operator_action: operator_action.to_string(),
+            evidence_ref: timeline_artifact_path(scenario_id),
+        }],
+        expected_event_codes: high_contention_expected_event_codes(),
+        expected_artifact_paths: scenario_artifact_paths(scenario_id),
+    }
+}
+
+fn high_contention_expected_event_codes() -> Vec<String> {
+    vec![
+        EVENT_SETUP.to_string(),
+        EVENT_FLEET_STATE_SEEDED.to_string(),
+        EVENT_FLEET_ACTION_PUBLISHED.to_string(),
+        EVENT_REPLAY_BUILT.to_string(),
+        EVENT_TIMELINE_BUILT.to_string(),
+        EVENT_OPERATOR_RECOMMENDATION_RECORDED.to_string(),
+        EVENT_EVIDENCE_COLLECTED.to_string(),
+        EVENT_COMPLETED.to_string(),
+    ]
+}
+
+fn scenario_artifact_paths(scenario_id: &str) -> Vec<String> {
+    vec![
+        "fleet/actions.jsonl".to_string(),
+        format!("scenario_artifacts/{scenario_id}/incident_evidence.json"),
+        format!("scenario_artifacts/{scenario_id}/replay_bundle.json"),
+        timeline_artifact_path(scenario_id),
+    ]
+}
+
+fn timeline_artifact_path(scenario_id: &str) -> String {
+    format!("scenario_artifacts/{scenario_id}/incident_timeline.json")
+}
+
+#[must_use]
+pub fn registered_swarm_scenarios() -> Vec<SwarmScenarioSpec> {
+    let mut scenarios = vec![
         all_green_fleet_replay_scenario_spec(),
         recovery_fail_closed_scenario_spec(),
-    ]
+    ];
+    scenarios.extend(high_contention_swarm_scenario_specs());
+    scenarios
 }
 
 pub fn run_deterministic_swarm_scenario(
@@ -296,6 +457,7 @@ pub fn run_deterministic_swarm_scenario(
             "deadline_millis": spec.deadline_millis,
             "node_count": spec.nodes.len(),
             "fault": spec.fault,
+            "operator_incident_count": spec.operator_incidents.len(),
         }),
     )?;
 
@@ -501,6 +663,8 @@ pub fn run_deterministic_swarm_scenario(
         });
     }
 
+    record_operator_incidents(spec, &package, base_timestamp, &mut logs, &mut assertions)?;
+
     let artifact_paths = artifacts
         .iter()
         .map(|artifact| artifact.artifact_path.clone())
@@ -552,7 +716,7 @@ pub fn run_deterministic_swarm_scenario(
         scenario_id: spec.scenario_id.clone(),
         seed: spec.seed,
         verdict,
-        operator_output: operator_output_for_verdict(verdict),
+        operator_output: operator_output_for_verdict(verdict, &spec.operator_incidents),
         logs,
         artifacts,
         assertions,
@@ -589,6 +753,26 @@ fn validate_spec(spec: &SwarmScenarioSpec) -> Result<(), SwarmScenarioError> {
         return Err(SwarmScenarioError::EmptyNodeSet {
             scenario_id: spec.scenario_id.clone(),
         });
+    }
+    validate_operator_incidents(spec)?;
+    Ok(())
+}
+
+fn validate_operator_incidents(spec: &SwarmScenarioSpec) -> Result<(), SwarmScenarioError> {
+    for incident in &spec.operator_incidents {
+        if incident.reason_code.trim().is_empty() {
+            return Err(SwarmScenarioError::EmptyOperatorIncidentField {
+                scenario_id: spec.scenario_id.clone(),
+                field: "reason_code",
+            });
+        }
+        if incident.operator_action.trim().is_empty() {
+            return Err(SwarmScenarioError::EmptyOperatorIncidentField {
+                scenario_id: spec.scenario_id.clone(),
+                field: "operator_action",
+            });
+        }
+        validate_relative_path(Path::new(&incident.evidence_ref))?;
     }
     Ok(())
 }
@@ -784,6 +968,55 @@ fn expected_gap_for_fault(fault: SwarmScenarioFault) -> &'static str {
     }
 }
 
+fn record_operator_incidents(
+    spec: &SwarmScenarioSpec,
+    package: &IncidentEvidencePackage,
+    base_timestamp: DateTime<Utc>,
+    logs: &mut Vec<SwarmScenarioLog>,
+    assertions: &mut Vec<SwarmScenarioAssertion>,
+) -> Result<(), SwarmScenarioError> {
+    for incident in &spec.operator_incidents {
+        let artifact_path = incident.evidence_ref.clone();
+        let success = !incident.reason_code.trim().is_empty()
+            && !incident.operator_action.trim().is_empty()
+            && validate_relative_path(Path::new(&incident.evidence_ref)).is_ok();
+        push_log(
+            logs,
+            base_timestamp,
+            "operator",
+            EVENT_OPERATOR_RECOMMENDATION_RECORDED,
+            success,
+            Some(artifact_path.clone()),
+            Some(SwarmScenarioAssertionSummary {
+                name: "operator recommendation recorded".to_string(),
+                success,
+            }),
+            json!({
+                "trace_id": &package.trace_id,
+                "scenario_id": &spec.scenario_id,
+                "incident_kind": incident.incident_kind,
+                "reason_code": &incident.reason_code,
+                "operator_action": &incident.operator_action,
+                "evidence_ref": &incident.evidence_ref,
+            }),
+        )?;
+        let assertion = SwarmScenarioAssertion {
+            name: "operator recommendation recorded".to_string(),
+            phase: "operator".to_string(),
+            event_code: EVENT_OPERATOR_RECOMMENDATION_RECORDED.to_string(),
+            expected: incident.reason_code.clone(),
+            actual: incident.operator_action.clone(),
+            artifact_path,
+            success,
+        };
+        if !success {
+            push_assertion_failure_log(logs, base_timestamp, &assertion)?;
+        }
+        assertions.push(assertion);
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_log(
     logs: &mut Vec<SwarmScenarioLog>,
@@ -950,8 +1183,11 @@ fn scenario_verdict(
     }
 }
 
-fn operator_output_for_verdict(verdict: SwarmScenarioVerdict) -> Vec<String> {
-    match verdict {
+fn operator_output_for_verdict(
+    verdict: SwarmScenarioVerdict,
+    operator_incidents: &[SwarmScenarioOperatorIncident],
+) -> Vec<String> {
+    let mut output = match verdict {
         SwarmScenarioVerdict::Pass => vec![
             "scenario completed with deterministic fleet and replay evidence".to_string(),
             "attach scenario logs and artifacts to release evidence".to_string(),
@@ -964,7 +1200,13 @@ fn operator_output_for_verdict(verdict: SwarmScenarioVerdict) -> Vec<String> {
             "scenario assertions failed".to_string(),
             "inspect assertion event_code, expected, actual, and artifact_path fields".to_string(),
         ],
-    }
+    };
+    output.extend(
+        operator_incidents
+            .iter()
+            .map(|incident| format!("{}: {}", incident.reason_code, incident.operator_action)),
+    );
+    output
 }
 
 fn write_json_artifact<T: Serialize>(
