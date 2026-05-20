@@ -6,9 +6,9 @@
 use frankenengine_node::ops::workspace_pressure_policy::{
     CleanupCandidate, WorkspacePressureInputs, WorkspacePressurePolicy,
 };
-use frankenengine_node::storage::cleanup_receipts::{
-    CleanupReceiptsError, CleanupReceiptsStorage, ReceiptSearchFilter,
-};
+use frankenengine_node::storage::cleanup_receipts::{CleanupReceiptsStorage, ReceiptSearchFilter};
+#[cfg(feature = "test-support")]
+use frankenengine_node::storage::cleanup_receipts::CleanupReceiptsError;
 use frankenengine_node::{
     lock_utils,
     ops::cleanup_executor::{
@@ -367,6 +367,7 @@ fn test_cleanup_receipts_storage_integration() {
     assert_eq!(stats.dry_run_receipts, 0);
 }
 
+#[cfg(feature = "test-support")]
 #[test]
 fn delete_receipt_rejects_index_path_escape_before_unlink() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -403,7 +404,7 @@ fn delete_receipt_rejects_index_path_escape_before_unlink() {
         .expect_err("escaped index path must fail before unlink");
 
     assert!(
-        matches!(err, CleanupReceiptsError::Corruption(message) if message.contains("escapes")),
+        matches!(err, CleanupReceiptsError::Corruption(ref message) if message.contains("escapes")),
         "unexpected error: {err:?}"
     );
     assert!(
