@@ -30,6 +30,8 @@ pub const REPAIR_PROOF_MISSING: &str = "REPAIR_PROOF_MISSING";
 pub const REPAIR_PROOF_INVALID: &str = "REPAIR_PROOF_INVALID";
 pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
 const MAX_REGISTERED_ALGORITHMS: usize = 4096;
+/// Maximum length for algorithm ID strings (bytes).
+const MAX_ALGORITHM_ID_BYTES: usize = 256;
 
 #[cfg(test)]
 fn test_push_bounded() {
@@ -1267,6 +1269,23 @@ impl ProofCarryingDecoder {
         &mut self,
         algorithm_id: AlgorithmId,
     ) -> Result<(), ProofCarryingDecodeError> {
+        // Validate algorithm_id to prevent DoS (length) and log injection (control chars).
+        // The ID appears in error messages via format!() so must be sanitized.
+        if algorithm_id.as_str().len() > MAX_ALGORITHM_ID_BYTES {
+            return Err(ProofCarryingDecodeError::ReconstructionFailed {
+                object_id: "algorithm_registration".to_string(),
+                reason: format!(
+                    "algorithm_id exceeds maximum length of {} bytes",
+                    MAX_ALGORITHM_ID_BYTES
+                ),
+            });
+        }
+        if algorithm_id.as_str().chars().any(char::is_control) {
+            return Err(ProofCarryingDecodeError::ReconstructionFailed {
+                object_id: "algorithm_registration".to_string(),
+                reason: "algorithm_id must not contain control characters".to_string(),
+            });
+        }
         if !self.registered_algorithms.contains(&algorithm_id) {
             if self.registered_algorithms.len() >= MAX_REGISTERED_ALGORITHMS {
                 return Err(ProofCarryingDecodeError::CapacityExceeded {
@@ -1357,17 +1376,38 @@ impl ProofCarryingDecoder {
             "Unicode algorithm IDs should work"
         );
 
-        // Test: very long algorithm ID should be handled
+        // Test: very long algorithm ID should be rejected
+        let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
+        let long_id = "x".repeat(MAX_ALGORITHM_ID_BYTES + 1);
+        let err = decoder
+            .register_algorithm(AlgorithmId::new(&long_id))
+            .unwrap_err();
+        assert!(
+            matches!(err, ProofCarryingDecodeError::ReconstructionFailed { .. }),
+            "oversized algorithm ID should be rejected"
+        );
+
+        // Test: algorithm ID at max length should be accepted
         let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
         let initial_count = decoder.registered_algorithms().len();
-        let long_id = "x".repeat(10000);
+        let at_limit_id = "y".repeat(MAX_ALGORITHM_ID_BYTES);
         decoder
-            .register_algorithm(AlgorithmId::new(&long_id))
+            .register_algorithm(AlgorithmId::new(&at_limit_id))
             .unwrap();
         assert_eq!(
             decoder.registered_algorithms().len(),
             initial_count + 1,
-            "very long algorithm IDs should work"
+            "algorithm ID at max length should work"
+        );
+
+        // Test: algorithm ID with control characters should be rejected
+        let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test", "secret");
+        let err = decoder
+            .register_algorithm(AlgorithmId::new("algo\r\nINJECT"))
+            .unwrap_err();
+        assert!(
+            matches!(err, ProofCarryingDecodeError::ReconstructionFailed { .. }),
+            "algorithm ID with control chars should be rejected"
         );
     }
 
