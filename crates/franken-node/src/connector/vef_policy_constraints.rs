@@ -27,6 +27,7 @@ const MAX_POLICY_RULES: usize = MAX_RULES;
 const MAX_RULE_CAPABILITIES: usize = MAX_FIELDS;
 const MAX_RULE_CONSTRAINTS: usize = MAX_FIELDS;
 const MAX_COMPILED_PREDICATES: usize = MAX_PREDICATES;
+const MAX_TRACE_ID_BYTES: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -314,6 +315,21 @@ fn invalid_trace_segment_reason(field: &str, value: &str) -> Option<String> {
     }
     if value.contains('/') {
         return Some(format!("{field} must not contain path separators"));
+    }
+    None
+}
+
+fn invalid_trace_id_reason(trace_id: &str) -> Option<String> {
+    if trace_id.len() > MAX_TRACE_ID_BYTES {
+        return Some(format!(
+            "trace_id must not exceed {MAX_TRACE_ID_BYTES} bytes"
+        ));
+    }
+    if contains_nul(trace_id) {
+        return Some("trace_id must not contain NUL bytes".to_string());
+    }
+    if trace_id.chars().any(char::is_control) {
+        return Some("trace_id must not contain control characters".to_string());
     }
     None
 }
@@ -633,11 +649,20 @@ pub fn compile_policy(
     policy: &RuntimePolicy,
     trace_id: &str,
 ) -> Result<CompiledConstraintEnvelope, ConstraintCompileError> {
+    let raw_trace_id = trace_id;
     let trace_id = trace_id.trim();
     if trace_id.is_empty() {
         return Err(ConstraintCompileError::new(
             event_codes::VEF_COMPILE_ERR_001_INVALID_INPUT,
             "trace_id must be non-empty",
+            "",
+            None,
+        ));
+    }
+    if let Some(reason) = invalid_trace_id_reason(raw_trace_id) {
+        return Err(ConstraintCompileError::new(
+            event_codes::VEF_COMPILE_ERR_001_INVALID_INPUT,
+            reason,
             "",
             None,
         ));
@@ -998,6 +1023,29 @@ mod tests {
     fn empty_trace_id_fails() {
         let err = compile_policy(&full_policy(), "   ").unwrap_err();
         assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_001_INVALID_INPUT);
+    }
+
+    #[test]
+    fn trace_id_with_control_char_fails_without_echoing_payload() {
+        let err = compile_policy(&full_policy(), "trace\r\nINJECTED").unwrap_err();
+
+        assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_001_INVALID_INPUT);
+        assert!(err.message.contains("control characters"));
+        assert!(err.rule_id.is_none());
+        assert!(!err.to_string().contains("INJECTED"));
+        assert!(!err.to_string().contains('\r'));
+        assert!(!err.to_string().contains('\n'));
+    }
+
+    #[test]
+    fn overlong_trace_id_fails_without_echoing_payload() {
+        let trace_id = "t".repeat(MAX_TRACE_ID_BYTES + 1);
+        let err = compile_policy(&full_policy(), &trace_id).unwrap_err();
+
+        assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_001_INVALID_INPUT);
+        assert!(err.message.contains("must not exceed"));
+        assert!(err.rule_id.is_none());
+        assert!(!err.to_string().contains(&trace_id));
     }
 
     #[test]
