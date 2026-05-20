@@ -148,8 +148,16 @@ pub struct StateVector {
 impl StateVector {
     /// Compute a deterministic state hash from the given payload.
     ///
-    /// In production this would be SHA-256 over canonical serialization.
-    /// For the crate's purposes we use a deterministic hasher.
+    /// Domain-separated SHA-256 over a length-prefixed `payload`. The
+    /// `b"fork_detection_state_v1:"` prefix isolates fork-detection
+    /// state hashes from other v1 hash schemes in the codebase, and the
+    /// `u64` length prefix prevents delimiter-collision aliasing
+    /// between adjacent concatenated fields. The previous doc-comment
+    /// claimed this was a placeholder; that was true before the
+    /// `b693c2d9` ("migrate all hashing to domain-separated SHA-256")
+    /// sweep but stale ever since, and it costs reviewer time to
+    /// re-investigate whenever a `/mock-code-finder` pass surfaces the
+    /// "In production this would..." string.
     #[must_use]
     pub fn compute_state_hash(payload: &str) -> String {
         let mut hasher = sha2::Sha256::new();
