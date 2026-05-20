@@ -186,7 +186,7 @@ impl ReplayTracker {
             ReceiptError::Internal(format!("Failed to acquire replay tracker lock: {}", e))
         })?;
 
-        if used.contains(&nonce.to_string()) {
+        if nonce_already_used(&used, nonce) {
             return Err(ReceiptError::ReplayAttack {
                 nonce: nonce.to_string(),
             });
@@ -202,6 +202,14 @@ impl ReplayTracker {
 
         Ok(())
     }
+}
+
+fn nonce_already_used(used_nonces: &VecDeque<String>, nonce: &str) -> bool {
+    let mut found = false;
+    for used_nonce in used_nonces {
+        found |= crate::security::constant_time::ct_eq(used_nonce, nonce);
+    }
+    found
 }
 
 /// Runtime registry for actions that require receipts.
@@ -2233,6 +2241,18 @@ mod tests {
             }
             other => panic!("expected ReplayAttack error, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn replay_tracker_nonce_lookup_scans_full_window() {
+        let mut used = VecDeque::new();
+        used.push_back("nonce-before".to_string());
+        used.push_back("nonce-middle".to_string());
+        used.push_back("nonce-after".to_string());
+
+        assert!(nonce_already_used(&used, "nonce-middle"));
+        assert!(nonce_already_used(&used, "nonce-after"));
+        assert!(!nonce_already_used(&used, "nonce-missing"));
     }
 
     #[test]
