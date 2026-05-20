@@ -273,6 +273,32 @@ fn fixture_ssh_timeout_is_retryable_worker_timeout() {
 }
 
 #[test]
+fn worker_missing_dp_path_dependency_is_infrastructure_failure() {
+    let cmd = invocation(&["cargo", "test", "-p", "frankenengine-node", "malformed_"]);
+    let output = command_output(
+        101,
+        "",
+        "error: failed to load manifest for dependency `fastapi-rust`\n\
+         Caused by:\n\
+           failed to read `/dp/fastapi_rust/crates/fastapi/Cargo.toml`\n\
+         Caused by:\n\
+           No such file or directory (os error 2)\n",
+    );
+
+    let outcome = classify_rch_output(
+        &cmd,
+        &output,
+        &RchProcessSnapshot::quiet(),
+        &RchCommandPolicy::default(),
+    );
+
+    assert_eq!(outcome.outcome, RchOutcomeClass::WorkerFilesystemError);
+    assert_eq!(outcome.reason_code, "RCH-WORKER-FILESYSTEM");
+    assert!(outcome.retryable);
+    assert!(!outcome.product_failure);
+}
+
+#[test]
 fn fixture_local_fallback_is_not_green_even_with_exit_zero() {
     let cmd = invocation(&["cargo", "check", "-p", "frankenengine-node", "--tests"]);
     let output = command_output(0, "[RCH] local fallback\nFinished `dev` profile\n", "");

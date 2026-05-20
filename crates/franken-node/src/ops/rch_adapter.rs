@@ -1213,6 +1213,8 @@ fn classify_worker_failure(normalized: &str) -> Option<ClassifiedOutcome> {
             "permission denied",
             "failed to create directory",
             "could not create temp dir",
+            "failed to read /dp/",
+            "no such file or directory (os error 2)",
         ],
     ) {
         return Some(ClassifiedOutcome {
