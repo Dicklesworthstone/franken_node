@@ -742,6 +742,44 @@ fn remote_cap_ed25519_gate_accepts_raw_crypto_trait_preimage() {
 }
 
 #[test]
+fn remote_cap_ed25519_gate_rejects_tampered_raw_crypto_trait_signature() {
+    let signing_key = SigningKey::from_bytes(&[0x42; 32]);
+    let cap = ed25519_remote_cap_for_gate(&signing_key);
+    let mut cap_json = serde_json::to_value(&cap).expect("serialize remote cap");
+    let signature = cap_json["signature"]
+        .as_str()
+        .expect("fixture signature")
+        .to_string();
+    let mut tampered = signature.clone();
+    let last = tampered.pop().expect("non-empty hex signature");
+    tampered.push(if last == '0' { '1' } else { '0' });
+    assert_ne!(tampered, signature);
+    cap_json["signature"] = serde_json::Value::String(tampered);
+    let tampered_cap: RemoteCap =
+        serde_json::from_value(cap_json).expect("tampered remote cap fixture");
+    let mut gate = CapabilityGate::with_ed25519_verifying_key(signing_key.verifying_key());
+
+    let err = gate
+        .authorize_network(
+            Some(&tampered_cap),
+            RemoteOperation::TelemetryExport,
+            "https://telemetry.example.com/v1",
+            1_700_000_001,
+            "trace-ed25519-tampered-gate",
+        )
+        .expect_err("tampered Ed25519 remote capability signature must fail closed");
+
+    assert_eq!(err.code(), "REMOTECAP_INVALID");
+    let denied_event = gate.audit_log().last().expect("denial audit event");
+    assert_eq!(denied_event.event_code, "REMOTECAP_DENIED");
+    assert!(!denied_event.allowed);
+    assert_eq!(
+        denied_event.denial_code.as_deref(),
+        Some("REMOTECAP_INVALID")
+    );
+}
+
+#[test]
 fn remote_cap_signed_subject_mismatch_is_rejected() {
     let signing_key = SigningKey::from_bytes(&[0x42; 32]);
     let capability = ImpossibleCapability::OutboundNetwork;
