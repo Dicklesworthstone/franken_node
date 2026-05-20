@@ -988,7 +988,7 @@ pub fn classify_rch_queue_snapshot(
     } else if input.queue_depth >= policy.max_queue_depth
         || input
             .oldest_queued_age_seconds
-            .is_some_and(|age| age > policy.max_oldest_queued_age_seconds)
+            .is_some_and(|age| age >= policy.max_oldest_queued_age_seconds)
     {
         (
             RchQueueSnapshotClass::QueueSaturated,

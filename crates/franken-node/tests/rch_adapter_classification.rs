@@ -469,6 +469,19 @@ fn queue_snapshot_catalog_covers_required_real_world_classes() {
             )
         },
         {
+            let mut input = queue_snapshot("oldest-queued-at-limit");
+            input.oldest_queued_age_seconds = Some(policy.max_oldest_queued_age_seconds);
+            input.heartbeat_age_seconds = Some(1);
+            input.progress_age_seconds = Some(1);
+            (
+                input,
+                RchQueueSnapshotClass::QueueSaturated,
+                false,
+                true,
+                "RCH-SNAPSHOT-QUEUE-SATURATED",
+            )
+        },
+        {
             let mut input = queue_snapshot("sibling-drift");
             input.stderr_tail =
                 "frankensqlite path dependency unresolved import TableLeafDeleteRun".to_string();
