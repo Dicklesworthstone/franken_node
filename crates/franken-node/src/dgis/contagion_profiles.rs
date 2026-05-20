@@ -288,6 +288,9 @@ pub fn load_profile_from_json(json: &str) -> Result<ContagionProfile, ProfileErr
     if profile.expected.max_infected_count > profile.graph.nodes.len() {
         return Err(ProfileError::InvalidExpected);
     }
+    if profile.expected.terminated_by_step > profile.config.max_steps {
+        return Err(ProfileError::InvalidExpected);
+    }
 
     Ok(profile)
 }
@@ -674,6 +677,20 @@ mod tests {
             "expected":{"termination_reason":"Converged","min_infected_count":5,"max_infected_count":2,"terminated_by_step":4}
         }"#;
         let err = load_profile_from_json(bad).expect_err("min>max must reject");
+        assert_eq!(err, ProfileError::InvalidExpected);
+    }
+
+    #[test]
+    fn loader_rejects_expected_termination_after_configured_max_step() {
+        let bad = r#"{
+            "name":"bad","description":"non-load-bearing termination bound",
+            "graph":{"nodes":["a","b"],"edges":[],"seed":1},
+            "initial_infected":["a"],
+            "config":{"max_steps":4,"infection_threshold":0.5,"decay_factor":0.5,"seed":1},
+            "expected":{"termination_reason":"Converged","min_infected_count":1,"max_infected_count":2,"terminated_by_step":5}
+        }"#;
+        let err = load_profile_from_json(bad)
+            .expect_err("terminated_by_step past max_steps must reject");
         assert_eq!(err, ProfileError::InvalidExpected);
     }
 
