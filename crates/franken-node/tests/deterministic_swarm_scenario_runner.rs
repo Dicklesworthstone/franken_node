@@ -262,6 +262,28 @@ fn high_contention_scenario_rejects_unsafe_operator_evidence_ref() -> TestResult
 }
 
 #[test]
+fn swarm_scenario_rejects_expected_artifact_path_traversal() -> TestResult {
+    let mut spec = high_contention_swarm_scenario_specs()
+        .into_iter()
+        .next()
+        .ok_or_else(|| "high-contention scenario pack was empty".to_string())?;
+    spec.expected_artifact_paths
+        .push("../unsafe-expected-artifact.json".to_string());
+    let root = tempfile::tempdir().map_err(|err| format!("failed creating tempdir: {err}"))?;
+
+    match run_deterministic_swarm_scenario(&spec, root.path()) {
+        Err(SwarmScenarioError::UnsafeArtifactPath { path })
+            if path == "../unsafe-expected-artifact.json" =>
+        {
+            Ok(())
+        }
+        other => Err(format!(
+            "expected unsafe artifact path rejection for expected_artifact_paths, got {other:?}"
+        )),
+    }
+}
+
+#[test]
 fn high_contention_scenario_rejects_missing_operator_evidence_ref() -> TestResult {
     let mut spec = high_contention_swarm_scenario_specs()
         .into_iter()
