@@ -724,6 +724,10 @@ name = "threshold_signature_verification"
 path = "../../tests/security/threshold_signature_verification.rs"
 
 [[test]]
+name = "ed25519_verifier_rejects_malleable_signatures"
+path = "../../tests/security/ed25519_verifier_rejects_malleable_signatures.rs"
+
+[[test]]
 name = "obligation_tracked_channels"
 path = "../../tests/security/obligation_tracked_channels.rs"
 

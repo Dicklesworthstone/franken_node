@@ -111,8 +111,6 @@ impl SignatureVerifier for Ed25519Verifier {
         message: &[u8],
         signature_bytes: &[u8],
     ) -> Result<(), SignatureVerificationError> {
-        use ed25519_dalek::Verifier;
-
         if signature_bytes.len() != 64 {
             return Err(SignatureVerificationError::MalformedSignature);
         }
@@ -123,8 +121,19 @@ impl SignatureVerifier for Ed25519Verifier {
 
         let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
 
+        // SECURITY: use `verify_strict`, NOT the lenient `verify`. `verify`
+        // accepts non-canonical s-values (s >= L) — RFC 8032 s-malleable
+        // signatures — which lets an adversary who observed one valid
+        // signature emit a second byte-distinct signature that still
+        // verifies over the same message. The evidence_ledger derives its
+        // replay key from the literal signature bytes
+        // (`observability::evidence_ledger::replay_key` at v1:268), so an
+        // s-malleated signature bypasses replay detection there. The
+        // codebase convention (see crypto/schemes.rs:262-265 and
+        // control_plane/audience_token.rs:1173-1176) is strict verification
+        // for every Ed25519 surface; this wrapper was the missing seam.
         self.verifying_key
-            .verify(message, &signature)
+            .verify_strict(message, &signature)
             .map_err(|_| SignatureVerificationError::VerificationFailed)
     }
 
