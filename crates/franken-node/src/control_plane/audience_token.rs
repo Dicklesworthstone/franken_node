@@ -57,6 +57,15 @@ pub const ERR_ABT_SIGNATURE_INVALID: &str = "ERR_ABT_SIGNATURE_INVALID";
 /// Token or token chain exceeds bounded-input limits.
 // ubs:ignore - public error code string, not credential material.
 pub const ERR_ABT_TOKEN_TOO_LARGE: &str = "ERR_ABT_TOKEN_TOO_LARGE";
+/// Token string field contains a control character (NUL, newline, etc.).
+/// Token fields surface in audit log entries and operator error messages
+/// via `format!("Token '{}' ...", token_id)` / `format!("Nonce '{}' ...", nonce)`;
+/// an embedded `\n` lets a malicious token stamp arbitrary content into a
+/// subsequent log row. Fail closed at validation time on both the
+/// constructor path (`validate_shape`) and the deserializer path
+/// (`BoundedStringVisitor`) so the bytes never reach the format string.
+// ubs:ignore - public error code string, not credential material.
+pub const ERR_ABT_TOKEN_FIELD_CONTROL_CHAR: &str = "ERR_ABT_TOKEN_FIELD_CONTROL_CHAR";
 
 // ---------------------------------------------------------------------------
 // Invariant tags
@@ -411,6 +420,9 @@ fn validate_bounded_str(
     ) {
         return Err(TokenError::token_too_large(violation.to_string()));
     }
+    if value.chars().any(char::is_control) {
+        return Err(TokenError::token_field_control_char(field));
+    }
     Ok(())
 }
 
@@ -476,6 +488,12 @@ impl BoundedStringVisitor {
                 self.max_bytes
             )));
         }
+        if value.chars().any(char::is_control) {
+            return Err(E::custom(format!(
+                "{} must not contain control characters",
+                self.field
+            )));
+        }
         Ok(value.to_string())
     }
 }
@@ -518,6 +536,12 @@ impl<'de> Visitor<'de> for BoundedStringVisitor {
                 self.field,
                 value.len(),
                 self.max_bytes
+            )));
+        }
+        if value.chars().any(char::is_control) {
+            return Err(E::custom(format!(
+                "{} must not contain control characters",
+                self.field
             )));
         }
         Ok(value)
@@ -797,6 +821,13 @@ impl TokenError {
 
     pub fn token_too_large(detail: impl Into<String>) -> Self {
         Self::new(ERR_ABT_TOKEN_TOO_LARGE, detail)
+    }
+
+    pub fn token_field_control_char(field: &str) -> Self {
+        Self::new(
+            ERR_ABT_TOKEN_FIELD_CONTROL_CHAR,
+            format!("{field} must not contain control characters"),
+        )
     }
 }
 
@@ -1139,8 +1170,10 @@ impl TokenValidator {
                 format!("signature length invalid: {error}"),
             )
         })?;
+        // verify_strict rejects malleable / non-canonical-s signatures,
+        // matching the codebase convention in crypto/schemes.rs for forgery hardening.
         verifying_key
-            .verify(&preimage, &signature)
+            .verify_strict(&preimage, &signature)
             .map_err(|error| {
                 TokenError::signature_invalid(
                     &token.token_id,
@@ -2896,5 +2929,39 @@ mod tests {
         assert_eq!(err.code, ERR_ABT_AUDIENCE_MISMATCH);
         assert_eq!(validator.tokens_rejected(), 1);
         assert_eq!(validator.nonce_count(), 0);
+    }
+
+    #[test]
+    fn verify_strict_is_used_for_signature_verification() {
+        // SECURITY: Ensure verify_strict is used, not verify, to reject malleable signatures.
+        // verify_strict rejects non-canonical-s signatures that verify() would accept,
+        // preventing signature malleability attacks per the codebase convention in
+        // crypto/schemes.rs.
+        let source_content = include_str!("audience_token.rs");
+
+        // verify_token_signature must use verify_strict, not verify
+        assert!(
+            source_content.contains(".verify_strict("),
+            "verify_token_signature must use verify_strict for forgery hardening"
+        );
+
+        // Ensure we don't have a plain .verify( call on verifying_key
+        // (exclude verify_strict and verify_chain which are legitimate)
+        let verify_calls: Vec<_> = source_content
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.contains("verifying_key")
+                    && line.contains(".verify(")
+                    && !line.contains(".verify_strict(")
+                    && !line.contains(".verify_chain(")
+            })
+            .collect();
+
+        assert!(
+            verify_calls.is_empty(),
+            "Found non-strict verify calls on verifying_key: {:?}",
+            verify_calls
+        );
     }
 }
