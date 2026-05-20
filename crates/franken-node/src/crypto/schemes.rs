@@ -3,7 +3,6 @@
 use crate::crypto::error::Ed25519Error;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use std::marker::PhantomData;
 
 const ED25519_SIGNATURE_PREIMAGE_DOMAIN: &[u8] = b"ed25519_signature_v1:";
 
@@ -228,7 +227,7 @@ impl SignatureScheme for Ed25519Scheme {
         #[cfg(not(feature = "blake3"))]
         let digest_bytes = &digest[..];
 
-        verifying_key.verify(digest_bytes, &sig).is_ok()
+        verifying_key.verify_strict(digest_bytes, &sig).is_ok()
     }
 
     fn sign_raw(
