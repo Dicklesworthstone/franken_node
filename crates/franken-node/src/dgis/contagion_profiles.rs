@@ -218,6 +218,8 @@ pub enum ProfileError {
     /// `min_infected_count > max_infected_count`, or a similar
     /// internally-inconsistent `expected` block.
     InvalidExpected,
+    /// Simulator config fields were finite but outside the accepted range.
+    InvalidConfig,
     /// The simulator surfaced an error while running the profile (config
     /// out of range, exposure went non-finite, etc.).
     SimulatorFailure(SimulatorError),
@@ -272,6 +274,12 @@ pub fn load_profile_from_json(json: &str) -> Result<ContagionProfile, ProfileErr
 
     if !profile.config.infection_threshold.is_finite() || !profile.config.decay_factor.is_finite() {
         return Err(ProfileError::InvalidWeight);
+    }
+    if !(0.0..=1.0).contains(&profile.config.infection_threshold)
+        || !(0.0..=1.0).contains(&profile.config.decay_factor)
+        || profile.config.max_steps == 0
+    {
+        return Err(ProfileError::InvalidConfig);
     }
 
     if profile.expected.min_infected_count > profile.expected.max_infected_count {
@@ -651,6 +659,19 @@ mod tests {
         }"#;
         let err = load_profile_from_json(bad).expect_err("min>max must reject");
         assert_eq!(err, ProfileError::InvalidExpected);
+    }
+
+    #[test]
+    fn loader_rejects_out_of_range_config_before_simulation() {
+        let bad = r#"{
+            "name":"bad","description":"invalid threshold",
+            "graph":{"nodes":["a","b"],"edges":[],"seed":1},
+            "initial_infected":["a"],
+            "config":{"max_steps":4,"infection_threshold":1.5,"decay_factor":0.5,"seed":1},
+            "expected":{"termination_reason":"Converged","min_infected_count":0,"max_infected_count":2,"terminated_by_step":4}
+        }"#;
+        let err = load_profile_from_json(bad).expect_err("out-of-range config must reject");
+        assert_eq!(err, ProfileError::InvalidConfig);
     }
 
     #[test]
