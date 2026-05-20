@@ -28,6 +28,7 @@ pub(crate) const MAX_BUNDLE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_REPLAY_BUNDLE_BYTES: u64 = 64 * 1024 * 1024; // 64 MB limit for replay bundle JSON parsing
 pub(crate) const MAX_CHUNKS_PER_BUNDLE: usize = 1000; // Hardening: prevent unbounded chunk growth
 pub(crate) const MAX_EVENT_LOG: usize = 50000; // Hardening: prevent unbounded event log growth
+const MAX_EVIDENCE_REFS: usize = MAX_EVENT_LOG; // Hardening: evidence refs are indexed during validation
 const MAX_PREPARED_EVENTS: usize = 50000; // Hardening: prevent unbounded prepared events
 const DEFAULT_POLICY_VERSION: &str = "0.1.0";
 const DEFAULT_CREATED_AT: &str = "1970-01-01T00:00:00.000000Z";
@@ -172,6 +173,8 @@ pub enum ReplayBundleError {
     EvidenceFieldEmpty { field: String },
     #[error("incident evidence evidence_refs must be non-empty")]
     EvidenceRefsEmpty,
+    #[error("incident evidence contains {count} evidence refs, exceeding maximum {max}")]
+    TooManyEvidenceRefs { count: usize, max: usize },
     #[error("incident evidence events must be non-empty")]
     EvidenceEventsEmpty,
     #[error("incident evidence contains duplicate event_id `{event_id}`")]
@@ -541,6 +544,12 @@ pub fn validate_incident_evidence_package(
 
     if package.evidence_refs.is_empty() {
         return Err(ReplayBundleError::EvidenceRefsEmpty);
+    }
+    if package.evidence_refs.len() > MAX_EVIDENCE_REFS {
+        return Err(ReplayBundleError::TooManyEvidenceRefs {
+            count: package.evidence_refs.len(),
+            max: MAX_EVIDENCE_REFS,
+        });
     }
     for evidence_ref in &package.evidence_refs {
         validate_relative_evidence_ref(evidence_ref)?;
@@ -3233,6 +3242,22 @@ mod tests {
         let err = validate_incident_evidence_package(&package, Some("INC-EVID-VAL-001"))
             .expect_err("must fail");
         assert!(matches!(err, ReplayBundleError::EvidenceRefsEmpty));
+    }
+
+    #[test]
+    fn evidence_package_rejects_oversized_evidence_refs() {
+        let mut package = fixture_evidence_package("INC-EVID-VAL-REF-CAP");
+        package.evidence_refs = (0..=MAX_EVIDENCE_REFS)
+            .map(|idx| format!("refs/logs/extra-{idx}.json"))
+            .collect();
+
+        let err = validate_incident_evidence_package(&package, Some("INC-EVID-VAL-REF-CAP"))
+            .expect_err("evidence refs must fail closed at cap");
+        assert!(matches!(
+            err,
+            ReplayBundleError::TooManyEvidenceRefs { count, max }
+                if count == MAX_EVIDENCE_REFS.saturating_add(1) && max == MAX_EVIDENCE_REFS
+        ));
     }
 
     #[test]
