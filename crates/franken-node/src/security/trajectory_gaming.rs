@@ -1,4 +1,4 @@
-//! Trajectory-gaming camouflage runtime integration (bd-35m7.1 sub-task 1/5).
+//! Trajectory-gaming camouflage runtime integration.
 //!
 //! Exposes the stable Rust-side interface that the Python verifier
 //! `scripts/check_trajectory_gaming_camouflage.py` consumes when grading
