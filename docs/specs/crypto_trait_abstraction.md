@@ -264,8 +264,8 @@ The ergonomics proof-of-concept lives in the `tests.rs` test suite. No other mod
 | Module | Bead | Status |
 |---|---|---|
 | `security/decision_receipt.rs` | [`bd-dwx4l`](../../.beads/) | closed 2026-05-20 |
-| `security/remote_cap.rs` (single-signer paths only; threshold-sig stays in `security::threshold_sig`) | [`bd-acvur`](../../.beads/) | open, blocked-by `bd-dwx4l` |
-| `tools/replay_bundle.rs` (the tool side; the SDK side at `sdk/verifier/src/bundle.rs` stays independent per the engine-split contract) | [`bd-lbnkf`](../../.beads/) | open, blocked-by `bd-dwx4l` |
+| `security/remote_cap.rs` (single-signer paths only; threshold-sig stays in `security::threshold_sig`) | [`bd-acvur`](../../.beads/) | closed 2026-05-20 |
+| `tools/replay_bundle.rs` (the tool side; the SDK side at `sdk/verifier/src/bundle.rs` stays independent per the engine-split contract) | [`bd-lbnkf`](../../.beads/) | closed 2026-05-20 |
 
 **Signature-compat consideration shared by all three migrations.** A naive migration that pipes the existing canonical preimage through `Ed25519Scheme::sign_with_domain` adds the wrapper domain (`b"ed25519_signature_v1:"`) plus length-prefix framing in front of bytes that are already canonically domain-separated and length-prefixed by the consumer module. That changes the bytes Ed25519 actually signs, which invalidates every existing signed `Receipt`, capability token, and `.fnbundle` in the wild and breaks every golden in `tests/golden/`.
 
@@ -278,6 +278,11 @@ Tracked as [`bd-rcscw`](../../.beads/) (blocked-by `bd-dwx4l`, `bd-acvur`, `bd-l
 - Audit every crypto call site for the four invariants: constant-time comparison, domain-separator coverage, length-prefixed canonical inputs, saturating arithmetic on counters/sequences/timestamps in crypto paths.
 - New fuzz targets under `fuzz/fuzz_targets/`: `fuzz_crypto_scheme_roundtrip`, `fuzz_crypto_scheme_cross_domain`, `fuzz_crypto_signer_chain`.
 - Criterion benchmark `crypto_scheme_bench` proving the zero-cost-abstraction claim within 5% of direct `ed25519_dalek` calls.
+
+Evidence landed for `bd-rcscw` on 2026-05-20:
+- Invariant regression coverage in `crates/franken-node/src/crypto/tests.rs` and `crates/franken-node/src/crypto/schemes.rs` covers constant-time/fail-closed verification, wrapper-domain separation, length-prefixed collision resistance, and saturating length counters.
+- Fuzz harnesses are registered in `fuzz/Cargo.toml` at `fuzz_crypto_scheme_roundtrip`, `fuzz_crypto_scheme_cross_domain`, and `fuzz_crypto_signer_chain`.
+- `crates/franken-node/benches/crypto_scheme_bench.rs` compares direct `ed25519_dalek` raw signing/verifying with `Ed25519Scheme::sign_raw` and `Ed25519Scheme::verify_raw` over identical caller-owned preimages.
 
 ### Phase 4: Advanced Features — deferred
 
@@ -369,9 +374,9 @@ This design phase created the foundation. Filed beads:
 |---|---|---|---|
 | 1 | Implement core crypto traits module | (rolled into `bd-18dd1`) | ✅ closed 2026-05-01 |
 | 2 | Migrate `security::decision_receipt` to traits | `bd-dwx4l` | closed 2026-05-20 |
-| 2 | Migrate `security::remote_cap` single-signer paths to traits | `bd-acvur` | open, blocked-by `bd-dwx4l` |
-| 2 | Migrate `tools::replay_bundle` tool-side to traits | `bd-lbnkf` | open, blocked-by `bd-dwx4l` |
-| 3 | Crypto audit + fuzz + Criterion bench | `bd-rcscw` | open, blocked-by Phase 2 |
+| 2 | Migrate `security::remote_cap` single-signer paths to traits | `bd-acvur` | closed 2026-05-20 |
+| 2 | Migrate `tools::replay_bundle` tool-side to traits | `bd-lbnkf` | closed 2026-05-20 |
+| 3 | Crypto audit + fuzz + Criterion bench | `bd-rcscw` | in progress 2026-05-20 |
 | 4 | P-256, HSM-backed `KeyMaterial`, scheme migration agility | (deferred, not yet scoped) | — |
 
 The "ed25519_verify" item from earlier drafts of this spec was aspirational; no such module exists in the crate. The relevant work is absorbed into the three Phase 2 migrations above (each consumer currently uses direct `ed25519_dalek` calls inline).

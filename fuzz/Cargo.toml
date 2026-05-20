@@ -286,3 +286,21 @@ name = "fuzz_quarantine_audit_timestamp_rfc3339"
 path = "fuzz_targets/fuzz_quarantine_audit_timestamp_rfc3339.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_crypto_scheme_roundtrip"
+path = "fuzz_targets/fuzz_crypto_scheme_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_crypto_scheme_cross_domain"
+path = "fuzz_targets/fuzz_crypto_scheme_cross_domain.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_crypto_signer_chain"
+path = "fuzz_targets/fuzz_crypto_signer_chain.rs"
+test = false
+doc = false

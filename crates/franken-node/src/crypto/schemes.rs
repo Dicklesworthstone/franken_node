@@ -341,6 +341,12 @@ mod tests {
     }
 
     #[test]
+    fn test_ed25519_length_prefix_counter_saturates() {
+        assert_eq!(len_to_u64(0), 0);
+        assert_eq!(len_to_u64(usize::MAX), u64::MAX);
+    }
+
+    #[test]
     fn test_ed25519_raw_signature_preserves_caller_preimage() {
         let (pk, sk) = Ed25519Scheme::generate_keypair().unwrap();
         let message = b"caller-owned canonical preimage";
