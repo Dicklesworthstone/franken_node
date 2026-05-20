@@ -4,7 +4,9 @@ use frankenengine_node::connector::lifecycle::ConnectorState;
 use frankenengine_node::connector::obligation_tracker::{
     ObligationState, ObligationTracker, event_codes,
 };
-use frankenengine_node::connector::region_ownership::{RegionError, atomic_next_for_test};
+use frankenengine_node::connector::region_ownership::{
+    ControlPlaneCx, Region, RegionError, atomic_next_for_test,
+};
 use frankenengine_node::connector::rollout_state::{
     PersistError, RolloutPhase, RolloutState, load, persist_lock_registry_key_for_test,
     persist_with_obligation_tracker_and_rename_and_orphan_for_test,
@@ -53,6 +55,23 @@ fn region_sequence_fails_closed_at_u64_boundary() {
         }
     );
     assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+}
+
+#[test]
+fn region_register_task_preserves_nul_specific_invalid_task_reason() {
+    let cx = ControlPlaneCx::new_root("test-conn", "trace-region-nul", 42)
+        .expect("create test control-plane cx");
+    let mut region = Region::new_root(cx, 5000).expect("create root region");
+
+    let err = region
+        .register_task("task\0shadow")
+        .expect_err("NUL task id must fail validation");
+
+    assert!(matches!(err, RegionError::InvalidTaskId { .. }));
+    assert!(
+        err.to_string().contains("NUL"),
+        "NUL rejection should keep its specific diagnostic: {err}"
+    );
 }
 
 #[test]

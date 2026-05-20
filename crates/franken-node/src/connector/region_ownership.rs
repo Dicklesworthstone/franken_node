@@ -344,6 +344,9 @@ fn invalid_task_id_reason(task_id: &str) -> Option<&'static str> {
     if task_id.trim() != task_id {
         return Some("task_id must not contain leading or trailing whitespace");
     }
+    if task_id.contains('\0') {
+        return Some("task_id must not contain NUL bytes");
+    }
     // Reject every control character, not just NUL. `RegionError::TaskNotFound`
     // at line 315 renders `task_id` via `{}` (Display, not Debug), so a
     // poisoned id like "valid\nforged" would emit a forged second log line
