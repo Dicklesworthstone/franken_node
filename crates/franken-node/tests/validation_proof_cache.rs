@@ -65,8 +65,10 @@ use frankenengine_node::ops::validation_recovery_planner::{
     RehydrationPathRef, build_blocked_proof_rehydration_plan, rehydration_reason_codes,
 };
 use frankenengine_node::runtime::resource_governor::{
+    EvidenceHotsetFileProbe, EvidenceHotsetPrefetchCandidate, EvidenceHotsetPrefetchPolicy,
     ResourceArtifactInventory, ResourceArtifactInventoryEntry, ResourceArtifactKind,
     ResourceArtifactOpenFileStatus, ResourceArtifactPin, ResourceArtifactSafetyClass,
+    ResourceGovernorDecisionKind, plan_evidence_hotset_prefetch_with_probe, reason_codes,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -477,6 +479,316 @@ fn artifact_entry_for_cache_entry(
 
 fn artifact_inventory(entries: Vec<ResourceArtifactInventoryEntry>) -> ResourceArtifactInventory {
     ResourceArtifactInventory::try_new(entries).expect("artifact inventory")
+}
+
+struct StaticHotsetProbe {
+    files: BTreeMap<String, u64>,
+}
+
+impl StaticHotsetProbe {
+    fn new(entries: &[ResourceArtifactInventoryEntry]) -> Self {
+        Self {
+            files: entries
+                .iter()
+                .map(|entry| (entry.path.clone(), entry.bytes.unwrap_or(0)))
+                .collect(),
+        }
+    }
+
+    fn without(mut self, path: &str) -> Self {
+        self.files.remove(path);
+        self
+    }
+}
+
+impl EvidenceHotsetFileProbe for StaticHotsetProbe {
+    fn file_len(&self, path: &str) -> Option<u64> {
+        self.files.get(path).copied()
+    }
+}
+
+fn hotset_artifact(
+    path: &str,
+    kind: ResourceArtifactKind,
+    safety_class: ResourceArtifactSafetyClass,
+    bytes: u64,
+    digest: &str,
+) -> ResourceArtifactInventoryEntry {
+    let mut entry = ResourceArtifactInventoryEntry::new(
+        path,
+        "/data/projects/franken_node",
+        kind,
+        safety_class,
+        Some(bytes),
+    )
+    .with_open_file_status(ResourceArtifactOpenFileStatus::NotOpen);
+    entry.content_digest = Some(format!("sha256:{digest}"));
+    entry
+}
+
+fn hotset_candidate(
+    artifact: ResourceArtifactInventoryEntry,
+    recent_bead_activity: f64,
+    proof_cache_reuse: f64,
+    test_target_frequency: f64,
+) -> EvidenceHotsetPrefetchCandidate {
+    EvidenceHotsetPrefetchCandidate::new(
+        artifact,
+        recent_bead_activity,
+        proof_cache_reuse,
+        test_target_frequency,
+    )
+}
+
+fn hotset_policy(
+    max_total_bytes: u64,
+    max_files: usize,
+    pressure_decision: ResourceGovernorDecisionKind,
+) -> EvidenceHotsetPrefetchPolicy {
+    EvidenceHotsetPrefetchPolicy {
+        max_total_bytes,
+        max_files,
+        pressure_decision,
+    }
+}
+
+#[test]
+fn evidence_hotset_prefetch_plan_ranks_mixed_fixture_as_stable_golden() {
+    let test_fixture = hotset_artifact(
+        "/data/projects/franken_node/tests/golden/validation-hotset.json",
+        ResourceArtifactKind::GeneratedEvidence,
+        ResourceArtifactSafetyClass::SourceNeverDelete,
+        64,
+        "test-fixture",
+    );
+    let proof_cache = hotset_artifact(
+        "/data/projects/franken_node/artifacts/validation_broker/proof_cache/index.json",
+        ResourceArtifactKind::CacheEntry,
+        ResourceArtifactSafetyClass::GeneratedEvidence,
+        32,
+        "proof-cache",
+    );
+    let spec_manifest = hotset_artifact(
+        "/data/projects/franken_node/docs/specs/validation-hotset.md",
+        ResourceArtifactKind::Unknown,
+        ResourceArtifactSafetyClass::SourceNeverDelete,
+        128,
+        "spec-manifest",
+    );
+    let artifacts = vec![
+        spec_manifest.clone(),
+        proof_cache.clone(),
+        test_fixture.clone(),
+    ];
+    let probe = StaticHotsetProbe::new(&artifacts);
+
+    let plan = plan_evidence_hotset_prefetch_with_probe(
+        vec![
+            hotset_candidate(spec_manifest, 4.0, 3.0, 5.0),
+            hotset_candidate(proof_cache, 2.0, 8.0, 1.0),
+            hotset_candidate(test_fixture, 7.0, 1.0, 9.0),
+        ],
+        hotset_policy(512, 3, ResourceGovernorDecisionKind::Allow),
+        &probe,
+    )
+    .expect("hotset plan");
+
+    let selected_paths = plan
+        .selected
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected_paths,
+        vec![
+            "/data/projects/franken_node/tests/golden/validation-hotset.json",
+            "/data/projects/franken_node/artifacts/validation_broker/proof_cache/index.json",
+            "/data/projects/franken_node/docs/specs/validation-hotset.md",
+        ]
+    );
+    assert_eq!(
+        plan.schema_version,
+        "franken-node/resource-governor/evidence-hotset-prefetch/v1"
+    );
+    assert_eq!(plan.estimated_bytes, 224);
+    assert!(plan.rejected.is_empty());
+    assert_eq!(plan.selected[0].artifact_digest, "sha256:test-fixture");
+    assert_eq!(plan.selected[0].eviction_priority, 3);
+    assert!(
+        plan.selected[0]
+            .reason_codes
+            .contains(&reason_codes::HOTSET_TEST_TARGET_FREQUENCY.to_string())
+    );
+    let golden = serde_json::to_value(&plan).expect("serialize hotset plan");
+    assert_eq!(golden["selected"][1]["kind"], "cache_entry");
+    assert_eq!(golden["selected"][2]["safety_class"], "source-never-delete");
+}
+
+#[test]
+fn evidence_hotset_prefetch_plan_enforces_byte_and_file_caps() {
+    let large = hotset_artifact(
+        "/data/projects/franken_node/artifacts/hotset/large.json",
+        ResourceArtifactKind::GeneratedEvidence,
+        ResourceArtifactSafetyClass::GeneratedEvidence,
+        96,
+        "large",
+    );
+    let small = hotset_artifact(
+        "/data/projects/franken_node/artifacts/hotset/small.json",
+        ResourceArtifactKind::CacheEntry,
+        ResourceArtifactSafetyClass::GeneratedEvidence,
+        16,
+        "small",
+    );
+    let medium = hotset_artifact(
+        "/data/projects/franken_node/docs/specs/hotset-medium.md",
+        ResourceArtifactKind::Unknown,
+        ResourceArtifactSafetyClass::SourceNeverDelete,
+        64,
+        "medium",
+    );
+    let artifacts = vec![large.clone(), small.clone(), medium.clone()];
+    let probe = StaticHotsetProbe::new(&artifacts);
+
+    let byte_capped = plan_evidence_hotset_prefetch_with_probe(
+        vec![
+            hotset_candidate(large.clone(), 10.0, 0.0, 0.0),
+            hotset_candidate(small.clone(), 1.0, 1.0, 0.0),
+            hotset_candidate(medium.clone(), 1.0, 0.0, 0.0),
+        ],
+        hotset_policy(100, 3, ResourceGovernorDecisionKind::Allow),
+        &probe,
+    )
+    .expect("byte-capped plan");
+    assert_eq!(byte_capped.selected.len(), 1);
+    assert_eq!(byte_capped.selected[0].path, large.path);
+    assert!(
+        byte_capped
+            .rejected
+            .iter()
+            .any(|entry| entry.reason_code == reason_codes::HOTSET_CAP_BYTES)
+    );
+
+    let file_capped = plan_evidence_hotset_prefetch_with_probe(
+        vec![
+            hotset_candidate(large, 10.0, 0.0, 0.0),
+            hotset_candidate(small, 1.0, 1.0, 0.0),
+            hotset_candidate(medium, 1.0, 0.0, 0.0),
+        ],
+        hotset_policy(1_000, 1, ResourceGovernorDecisionKind::Allow),
+        &probe,
+    )
+    .expect("file-capped plan");
+    assert_eq!(file_capped.selected.len(), 1);
+    assert!(
+        file_capped
+            .rejected
+            .iter()
+            .all(|entry| entry.reason_code == reason_codes::HOTSET_CAP_FILES)
+    );
+}
+
+#[test]
+fn evidence_hotset_prefetch_plan_fails_closed_for_unsafe_candidates() {
+    let artifact = hotset_artifact(
+        "/data/projects/franken_node/artifacts/hotset/missing.json",
+        ResourceArtifactKind::GeneratedEvidence,
+        ResourceArtifactSafetyClass::GeneratedEvidence,
+        64,
+        "missing",
+    );
+    let missing_probe =
+        StaticHotsetProbe::new(std::slice::from_ref(&artifact)).without(&artifact.path);
+    let err = plan_evidence_hotset_prefetch_with_probe(
+        vec![hotset_candidate(artifact.clone(), 1.0, 0.0, 0.0)],
+        hotset_policy(128, 1, ResourceGovernorDecisionKind::Allow),
+        &missing_probe,
+    )
+    .expect_err("missing file must fail closed");
+    assert_eq!(err.code(), "RG_HOTSET_MISSING_FILE");
+
+    let protected = hotset_artifact(
+        "/data/projects/franken_node/.beads/issues.jsonl",
+        ResourceArtifactKind::CacheEntry,
+        ResourceArtifactSafetyClass::BeadsMailNeverDelete,
+        64,
+        "beads",
+    );
+    let protected_probe = StaticHotsetProbe::new(std::slice::from_ref(&protected));
+    let err = plan_evidence_hotset_prefetch_with_probe(
+        vec![hotset_candidate(protected, 1.0, 0.0, 0.0)],
+        hotset_policy(128, 1, ResourceGovernorDecisionKind::Allow),
+        &protected_probe,
+    )
+    .expect_err("protected workspace state must fail closed");
+    assert_eq!(err.code(), "RG_HOTSET_PROTECTED_PATH");
+
+    let err = plan_evidence_hotset_prefetch_with_probe(
+        vec![hotset_candidate(artifact.clone(), f64::INFINITY, 0.0, 0.0)],
+        hotset_policy(128, 1, ResourceGovernorDecisionKind::Allow),
+        &StaticHotsetProbe::new(std::slice::from_ref(&artifact)),
+    )
+    .expect_err("non-finite score must fail closed");
+    assert_eq!(err.code(), "RG_HOTSET_INVALID_SCORE");
+
+    let dup_probe = StaticHotsetProbe::new(std::slice::from_ref(&artifact));
+    let err = plan_evidence_hotset_prefetch_with_probe(
+        vec![
+            hotset_candidate(artifact.clone(), 1.0, 0.0, 0.0),
+            hotset_candidate(artifact, 2.0, 0.0, 0.0),
+        ],
+        hotset_policy(128, 2, ResourceGovernorDecisionKind::Allow),
+        &dup_probe,
+    )
+    .expect_err("duplicate artifacts must fail closed");
+    assert_eq!(err.code(), "RG_HOTSET_DUPLICATE_ARTIFACT");
+}
+
+#[test]
+fn evidence_hotset_prefetch_plan_shrinks_under_resource_governor_pressure() {
+    let artifacts = (0..4)
+        .map(|idx| {
+            hotset_artifact(
+                &format!("/data/projects/franken_node/artifacts/hotset/pressure-{idx}.json"),
+                ResourceArtifactKind::GeneratedEvidence,
+                ResourceArtifactSafetyClass::GeneratedEvidence,
+                64,
+                &format!("pressure-{idx}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let probe = StaticHotsetProbe::new(&artifacts);
+    let candidates = artifacts
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(idx, artifact)| hotset_candidate(artifact, 8.0 - idx as f64, 1.0, 1.0))
+        .collect::<Vec<_>>();
+
+    let low_priority = plan_evidence_hotset_prefetch_with_probe(
+        candidates.clone(),
+        hotset_policy(1_000, 4, ResourceGovernorDecisionKind::AllowLowPriority),
+        &probe,
+    )
+    .expect("low-priority plan");
+    assert_eq!(low_priority.max_files, 2);
+    assert_eq!(low_priority.selected.len(), 2);
+    assert_eq!(low_priority.rejected.len(), 2);
+
+    let deferred = plan_evidence_hotset_prefetch_with_probe(
+        candidates,
+        hotset_policy(1_000, 4, ResourceGovernorDecisionKind::Defer),
+        &probe,
+    )
+    .expect("deferred plan");
+    assert!(deferred.selected.is_empty());
+    assert_eq!(deferred.rejected.len(), 4);
+    assert!(
+        deferred
+            .rejected
+            .iter()
+            .all(|entry| entry.reason_code == reason_codes::HOTSET_PRESSURE_BACKOFF)
+    );
 }
 
 fn populated_store(

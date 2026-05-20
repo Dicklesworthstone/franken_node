@@ -15,6 +15,8 @@ pub const REPORT_SCHEMA_VERSION: &str = "franken-node/resource-governor/report/v
 pub const ARTIFACT_SCHEMA_VERSION: &str = "franken-node/resource-governor/artifact/v1";
 pub const PRESSURE_SAMPLE_SCHEMA_VERSION: &str =
     "franken-node/resource-governor/pressure-sample/v1";
+pub const HOTSET_PREFETCH_SCHEMA_VERSION: &str =
+    "franken-node/resource-governor/evidence-hotset-prefetch/v1";
 pub const COMMAND_NAME: &str = "ops resource-governor";
 pub const MAX_ARTIFACT_INVENTORY_ENTRIES: usize = 1_024;
 pub const MAX_ARTIFACT_PATH_BYTES: usize = 4_096;
@@ -49,6 +51,17 @@ pub mod reason_codes {
     pub const DEFER_CORRUPT_COORDINATION: &str = "RG_DEFER_CORRUPT_COORDINATION";
     pub const DEFER_CONTENTION: &str = "RG_DEFER_CONTENTION";
     pub const DEFER_STALE_OBSERVATION: &str = "RG_DEFER_STALE_OBSERVATION";
+    pub const HOTSET_RECENT_BEAD_ACTIVITY: &str = "RG_HOTSET_RECENT_BEAD_ACTIVITY";
+    pub const HOTSET_PROOF_CACHE_REUSE: &str = "RG_HOTSET_PROOF_CACHE_REUSE";
+    pub const HOTSET_TEST_TARGET_FREQUENCY: &str = "RG_HOTSET_TEST_TARGET_FREQUENCY";
+    pub const HOTSET_SOURCE_MANIFEST: &str = "RG_HOTSET_SOURCE_MANIFEST";
+    pub const HOTSET_GENERATED_EVIDENCE: &str = "RG_HOTSET_GENERATED_EVIDENCE";
+    pub const HOTSET_PROOF_CACHE_METADATA: &str = "RG_HOTSET_PROOF_CACHE_METADATA";
+    pub const HOTSET_REBUILDABLE_OUTPUT: &str = "RG_HOTSET_REBUILDABLE_OUTPUT";
+    pub const HOTSET_UNKNOWN_KIND: &str = "RG_HOTSET_UNKNOWN_KIND";
+    pub const HOTSET_CAP_BYTES: &str = "RG_HOTSET_CAP_BYTES";
+    pub const HOTSET_CAP_FILES: &str = "RG_HOTSET_CAP_FILES";
+    pub const HOTSET_PRESSURE_BACKOFF: &str = "RG_HOTSET_PRESSURE_BACKOFF";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -725,6 +738,412 @@ impl ResourceArtifactInventory {
 
     pub fn cleanup_candidates(&self) -> impl Iterator<Item = &ResourceArtifactInventoryEntry> {
         self.entries.iter().filter(|entry| entry.cleanup_eligible)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceHotsetPrefetchCandidate {
+    pub artifact: ResourceArtifactInventoryEntry,
+    pub recent_bead_activity: f64,
+    pub proof_cache_reuse: f64,
+    pub test_target_frequency: f64,
+}
+
+impl EvidenceHotsetPrefetchCandidate {
+    pub fn new(
+        artifact: ResourceArtifactInventoryEntry,
+        recent_bead_activity: f64,
+        proof_cache_reuse: f64,
+        test_target_frequency: f64,
+    ) -> Self {
+        Self {
+            artifact,
+            recent_bead_activity,
+            proof_cache_reuse,
+            test_target_frequency,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceHotsetPrefetchPolicy {
+    pub max_total_bytes: u64,
+    pub max_files: usize,
+    pub pressure_decision: ResourceGovernorDecisionKind,
+}
+
+impl Default for EvidenceHotsetPrefetchPolicy {
+    fn default() -> Self {
+        Self {
+            max_total_bytes: 512 * 1024 * 1024,
+            max_files: 256,
+            pressure_decision: ResourceGovernorDecisionKind::Allow,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceHotsetPrefetchEntry {
+    pub path: String,
+    pub kind: ResourceArtifactKind,
+    pub safety_class: ResourceArtifactSafetyClass,
+    pub artifact_digest: String,
+    pub estimated_bytes: u64,
+    pub score_micros: u64,
+    pub reason_codes: Vec<String>,
+    pub eviction_priority: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceHotsetRejectedEntry {
+    pub path: String,
+    pub reason_code: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceHotsetPrefetchPlan {
+    pub schema_version: String,
+    pub pressure_decision: ResourceGovernorDecisionKind,
+    pub max_total_bytes: u64,
+    pub max_files: usize,
+    pub estimated_bytes: u64,
+    pub candidates_considered: usize,
+    pub selected: Vec<EvidenceHotsetPrefetchEntry>,
+    pub rejected: Vec<EvidenceHotsetRejectedEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum EvidenceHotsetPrefetchError {
+    #[error("RG_HOTSET_TOO_MANY_CANDIDATES: hotset has {count} candidates, max {max}")]
+    TooManyCandidates { count: usize, max: usize },
+    #[error("RG_HOTSET_DUPLICATE_ARTIFACT: duplicate artifact path {path}")]
+    DuplicateArtifact { path: String },
+    #[error("RG_HOTSET_MISSING_FILE: artifact path {path} is not a readable file")]
+    MissingFile { path: String },
+    #[error("RG_HOTSET_MISSING_DIGEST: artifact path {path} has no content digest")]
+    MissingDigest { path: String },
+    #[error("RG_HOTSET_PROTECTED_PATH: artifact path {path} is protected workspace state")]
+    ProtectedPath { path: String },
+    #[error("RG_HOTSET_INVALID_SCORE: {field} for {path} is {value}")]
+    InvalidScore {
+        path: String,
+        field: &'static str,
+        value: f64,
+    },
+    #[error("{0}")]
+    Artifact(ResourceArtifactInventoryError),
+}
+
+impl EvidenceHotsetPrefetchError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::TooManyCandidates { .. } => "RG_HOTSET_TOO_MANY_CANDIDATES",
+            Self::DuplicateArtifact { .. } => "RG_HOTSET_DUPLICATE_ARTIFACT",
+            Self::MissingFile { .. } => "RG_HOTSET_MISSING_FILE",
+            Self::MissingDigest { .. } => "RG_HOTSET_MISSING_DIGEST",
+            Self::ProtectedPath { .. } => "RG_HOTSET_PROTECTED_PATH",
+            Self::InvalidScore { .. } => "RG_HOTSET_INVALID_SCORE",
+            Self::Artifact(source) => source.code(),
+        }
+    }
+}
+
+pub trait EvidenceHotsetFileProbe {
+    fn file_len(&self, path: &str) -> Option<u64>;
+}
+
+pub struct FsEvidenceHotsetFileProbe;
+
+impl EvidenceHotsetFileProbe for FsEvidenceHotsetFileProbe {
+    fn file_len(&self, path: &str) -> Option<u64> {
+        let metadata = fs::metadata(path).ok()?;
+        if metadata.is_file() {
+            Some(metadata.len())
+        } else {
+            None
+        }
+    }
+}
+
+pub fn plan_evidence_hotset_prefetch(
+    candidates: Vec<EvidenceHotsetPrefetchCandidate>,
+    policy: EvidenceHotsetPrefetchPolicy,
+) -> Result<EvidenceHotsetPrefetchPlan, EvidenceHotsetPrefetchError> {
+    plan_evidence_hotset_prefetch_with_probe(candidates, policy, &FsEvidenceHotsetFileProbe)
+}
+
+pub fn plan_evidence_hotset_prefetch_with_probe(
+    candidates: Vec<EvidenceHotsetPrefetchCandidate>,
+    policy: EvidenceHotsetPrefetchPolicy,
+    probe: &impl EvidenceHotsetFileProbe,
+) -> Result<EvidenceHotsetPrefetchPlan, EvidenceHotsetPrefetchError> {
+    if candidates.len() > MAX_ARTIFACT_INVENTORY_ENTRIES {
+        return Err(EvidenceHotsetPrefetchError::TooManyCandidates {
+            count: candidates.len(),
+            max: MAX_ARTIFACT_INVENTORY_ENTRIES,
+        });
+    }
+
+    let mut seen_paths = BTreeSet::new();
+    let mut ranked = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let ranked_candidate = RankedHotsetCandidate::try_from_candidate(candidate, probe)?;
+        if !seen_paths.insert(ranked_candidate.artifact.path.clone()) {
+            return Err(EvidenceHotsetPrefetchError::DuplicateArtifact {
+                path: ranked_candidate.artifact.path,
+            });
+        }
+        ranked.push(ranked_candidate);
+    }
+
+    ranked.sort_by(|left, right| {
+        right
+            .score_micros
+            .cmp(&left.score_micros)
+            .then_with(|| left.estimated_bytes.cmp(&right.estimated_bytes))
+            .then_with(|| left.artifact.path.cmp(&right.artifact.path))
+    });
+
+    let (max_total_bytes, max_files) = pressure_adjusted_hotset_caps(&policy);
+    let pressure_backoff = max_total_bytes == 0 || max_files == 0;
+    let mut estimated_bytes = 0_u64;
+    let mut selected = Vec::new();
+    let mut rejected = Vec::new();
+
+    for candidate in ranked {
+        if pressure_backoff {
+            rejected.push(candidate.rejected(
+                reason_codes::HOTSET_PRESSURE_BACKOFF,
+                "resource-governor pressure decision suppresses prefetch",
+            ));
+            continue;
+        }
+        if selected.len() >= max_files {
+            rejected.push(candidate.rejected(
+                reason_codes::HOTSET_CAP_FILES,
+                "hotset file-count cap reached",
+            ));
+            continue;
+        }
+        let Some(next_bytes) = estimated_bytes.checked_add(candidate.estimated_bytes) else {
+            rejected.push(candidate.rejected(
+                reason_codes::HOTSET_CAP_BYTES,
+                "hotset byte estimate overflowed",
+            ));
+            continue;
+        };
+        if next_bytes > max_total_bytes {
+            rejected.push(
+                candidate.rejected(reason_codes::HOTSET_CAP_BYTES, "hotset byte cap reached"),
+            );
+            continue;
+        }
+
+        estimated_bytes = next_bytes;
+        selected.push(candidate.selected());
+    }
+
+    let selected_len = selected.len();
+    for (idx, entry) in selected.iter_mut().enumerate() {
+        entry.eviction_priority = selected_len.saturating_sub(idx);
+    }
+
+    Ok(EvidenceHotsetPrefetchPlan {
+        schema_version: HOTSET_PREFETCH_SCHEMA_VERSION.to_string(),
+        pressure_decision: policy.pressure_decision,
+        max_total_bytes,
+        max_files,
+        estimated_bytes,
+        candidates_considered: seen_paths.len(),
+        selected,
+        rejected,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct RankedHotsetCandidate {
+    artifact: ResourceArtifactInventoryEntry,
+    estimated_bytes: u64,
+    artifact_digest: String,
+    score_micros: u64,
+    reason_codes: Vec<String>,
+}
+
+impl RankedHotsetCandidate {
+    fn try_from_candidate(
+        candidate: EvidenceHotsetPrefetchCandidate,
+        probe: &impl EvidenceHotsetFileProbe,
+    ) -> Result<Self, EvidenceHotsetPrefetchError> {
+        let artifact = candidate
+            .artifact
+            .validated()
+            .map_err(EvidenceHotsetPrefetchError::Artifact)?;
+        if path_is_protected_workspace_state(&artifact.path)
+            || hotset_safety_class_is_protected(artifact.safety_class)
+        {
+            return Err(EvidenceHotsetPrefetchError::ProtectedPath {
+                path: artifact.path,
+            });
+        }
+
+        let estimated_bytes = probe.file_len(&artifact.path).ok_or_else(|| {
+            EvidenceHotsetPrefetchError::MissingFile {
+                path: artifact.path.clone(),
+            }
+        })?;
+        let artifact_digest = artifact
+            .content_digest
+            .as_deref()
+            .map(str::trim)
+            .filter(|digest| !digest.is_empty())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| EvidenceHotsetPrefetchError::MissingDigest {
+                path: artifact.path.clone(),
+            })?;
+        let recent = validate_hotset_score(
+            &artifact.path,
+            "recent_bead_activity",
+            candidate.recent_bead_activity,
+        )?;
+        let reuse = validate_hotset_score(
+            &artifact.path,
+            "proof_cache_reuse",
+            candidate.proof_cache_reuse,
+        )?;
+        let frequency = validate_hotset_score(
+            &artifact.path,
+            "test_target_frequency",
+            candidate.test_target_frequency,
+        )?;
+        let score_micros = recent
+            .saturating_mul(5)
+            .saturating_add(reuse.saturating_mul(4))
+            .saturating_add(frequency.saturating_mul(3))
+            .saturating_add(hotset_kind_weight_micros(artifact.kind))
+            .saturating_sub((estimated_bytes / 4096).min(250_000));
+        let reason_codes = hotset_reason_codes(&artifact, recent, reuse, frequency);
+
+        Ok(Self {
+            artifact,
+            estimated_bytes,
+            artifact_digest,
+            score_micros,
+            reason_codes,
+        })
+    }
+
+    fn selected(self) -> EvidenceHotsetPrefetchEntry {
+        EvidenceHotsetPrefetchEntry {
+            path: self.artifact.path,
+            kind: self.artifact.kind,
+            safety_class: self.artifact.safety_class,
+            artifact_digest: self.artifact_digest,
+            estimated_bytes: self.estimated_bytes,
+            score_micros: self.score_micros,
+            reason_codes: self.reason_codes,
+            eviction_priority: 0,
+        }
+    }
+
+    fn rejected(self, reason_code: &str, detail: &str) -> EvidenceHotsetRejectedEntry {
+        EvidenceHotsetRejectedEntry {
+            path: self.artifact.path,
+            reason_code: reason_code.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+}
+
+fn validate_hotset_score(
+    path: &str,
+    field: &'static str,
+    value: f64,
+) -> Result<u64, EvidenceHotsetPrefetchError> {
+    if !value.is_finite() || value.is_sign_negative() {
+        return Err(EvidenceHotsetPrefetchError::InvalidScore {
+            path: path.to_string(),
+            field,
+            value,
+        });
+    }
+    let scaled = value * 1_000_000.0;
+    if !scaled.is_finite() || scaled > u64::MAX as f64 {
+        return Err(EvidenceHotsetPrefetchError::InvalidScore {
+            path: path.to_string(),
+            field,
+            value,
+        });
+    }
+    Ok(scaled.round() as u64)
+}
+
+fn hotset_safety_class_is_protected(safety_class: ResourceArtifactSafetyClass) -> bool {
+    matches!(
+        safety_class,
+        ResourceArtifactSafetyClass::UserDataNeverDelete
+            | ResourceArtifactSafetyClass::LogsSessionHistoryNeverDelete
+            | ResourceArtifactSafetyClass::BeadsMailNeverDelete
+    )
+}
+
+fn hotset_kind_weight_micros(kind: ResourceArtifactKind) -> u64 {
+    match kind {
+        ResourceArtifactKind::CacheEntry => 3_000_000,
+        ResourceArtifactKind::GeneratedEvidence => 2_000_000,
+        ResourceArtifactKind::CargoTargetDir | ResourceArtifactKind::RchTargetDir => 1_000_000,
+        ResourceArtifactKind::TempOutput => 250_000,
+        ResourceArtifactKind::Unknown => 0,
+    }
+}
+
+fn hotset_reason_codes(
+    artifact: &ResourceArtifactInventoryEntry,
+    recent: u64,
+    reuse: u64,
+    frequency: u64,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if recent > 0 {
+        reasons.push(reason_codes::HOTSET_RECENT_BEAD_ACTIVITY.to_string());
+    }
+    if reuse > 0 {
+        reasons.push(reason_codes::HOTSET_PROOF_CACHE_REUSE.to_string());
+    }
+    if frequency > 0 {
+        reasons.push(reason_codes::HOTSET_TEST_TARGET_FREQUENCY.to_string());
+    }
+    reasons.push(
+        match artifact.kind {
+            ResourceArtifactKind::CacheEntry => reason_codes::HOTSET_PROOF_CACHE_METADATA,
+            ResourceArtifactKind::GeneratedEvidence => reason_codes::HOTSET_GENERATED_EVIDENCE,
+            ResourceArtifactKind::CargoTargetDir | ResourceArtifactKind::RchTargetDir => {
+                reason_codes::HOTSET_REBUILDABLE_OUTPUT
+            }
+            ResourceArtifactKind::TempOutput => reason_codes::HOTSET_REBUILDABLE_OUTPUT,
+            ResourceArtifactKind::Unknown => reason_codes::HOTSET_UNKNOWN_KIND,
+        }
+        .to_string(),
+    );
+    if artifact.safety_class == ResourceArtifactSafetyClass::SourceNeverDelete {
+        reasons.push(reason_codes::HOTSET_SOURCE_MANIFEST.to_string());
+    }
+    reasons
+}
+
+fn pressure_adjusted_hotset_caps(policy: &EvidenceHotsetPrefetchPolicy) -> (u64, usize) {
+    match policy.pressure_decision {
+        ResourceGovernorDecisionKind::Allow => (policy.max_total_bytes, policy.max_files),
+        ResourceGovernorDecisionKind::AllowLowPriority
+        | ResourceGovernorDecisionKind::DedupeOnly => (
+            policy.max_total_bytes / 2,
+            if policy.max_files == 0 {
+                0
+            } else {
+                (policy.max_files / 2).max(1)
+            },
+        ),
+        ResourceGovernorDecisionKind::SourceOnly | ResourceGovernorDecisionKind::Defer => (0, 0),
     }
 }
 
