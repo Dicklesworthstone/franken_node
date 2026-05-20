@@ -1306,8 +1306,11 @@ fn is_worker_missing_dependency_path(normalized: &str) -> bool {
 fn is_worker_target_metadata_loss(normalized: &str) -> bool {
     normalized.contains("extern location for")
         && normalized.contains("does not exist")
-        && normalized.contains(".rch-target")
         && normalized.contains(".rmeta")
+        && contains_any(
+            normalized,
+            &[".rch-target", "franken-tgt-", "rch_target_", "rch-target-"],
+        )
 }
 
 fn normalize_cargo_argv(

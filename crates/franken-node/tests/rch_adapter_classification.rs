@@ -330,6 +330,39 @@ fn worker_rmeta_loss_is_infrastructure_failure() {
 }
 
 #[test]
+fn worker_rmeta_loss_in_tmp_target_dir_is_infrastructure_failure() {
+    let cmd = invocation(&[
+        "env",
+        "CARGO_TARGET_DIR=/tmp/franken-tgt-ubuntu-23952",
+        "cargo",
+        "test",
+        "-p",
+        "frankenengine-node",
+        "--test",
+        "deterministic_swarm_scenario_runner",
+    ]);
+    let output = command_output(
+        101,
+        "",
+        "error: extern location for pin_project_lite does not exist: \
+         /tmp/franken-tgt-ubuntu-23952/debug/deps/libpin_project_lite.rmeta\n\
+         error: could not compile `tokio` (lib) due to 1 previous error\n",
+    );
+
+    let outcome = classify_rch_output(
+        &cmd,
+        &output,
+        &RchProcessSnapshot::quiet(),
+        &RchCommandPolicy::default(),
+    );
+
+    assert_eq!(outcome.outcome, RchOutcomeClass::WorkerFilesystemError);
+    assert_eq!(outcome.reason_code, "RCH-WORKER-FILESYSTEM");
+    assert!(outcome.retryable);
+    assert!(!outcome.product_failure);
+}
+
+#[test]
 fn product_missing_source_file_remains_compile_failure() {
     let cmd = invocation(&["cargo", "check", "-p", "frankenengine-node"]);
     let output = command_output(
