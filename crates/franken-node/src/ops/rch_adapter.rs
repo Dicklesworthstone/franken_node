@@ -1222,11 +1222,15 @@ fn requires_remote(invocation: &RchInvocation) -> bool {
     invocation
         .env
         .get("RCH_REQUIRE_REMOTE")
-        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        || invocation
-            .argv
-            .iter()
-            .any(|arg| arg == "RCH_REQUIRE_REMOTE=1" || arg == "RCH_REQUIRE_REMOTE=true")
+        .is_some_and(|value| remote_required_value_enabled(value))
+        || invocation.argv.iter().any(|arg| {
+            arg.strip_prefix("RCH_REQUIRE_REMOTE=")
+                .is_some_and(remote_required_value_enabled)
+        })
+}
+
+fn remote_required_value_enabled(value: &str) -> bool {
+    value == "1" || value.eq_ignore_ascii_case("true")
 }
 
 fn execution_mode_from_output(output: &str) -> RchExecutionMode {
@@ -1473,6 +1477,31 @@ mod tests {
             allowed.target_dir.as_deref(),
             Some("/data/tmp/franken_node-test-target")
         );
+    }
+
+    #[test]
+    fn accepts_case_insensitive_env_wrapped_remote_requirement() {
+        let cmd = RchInvocation {
+            argv: [
+                "env",
+                "RCH_REQUIRE_REMOTE=True",
+                "cargo",
+                "check",
+                "-p",
+                "frankenengine-node",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+            env: BTreeMap::new(),
+            cwd: "/data/projects/franken_node".to_string(),
+        };
+
+        let allowed =
+            validate_allowed_rch_command(&cmd, &policy()).expect("argv remote env is accepted");
+
+        assert_eq!(allowed.action, RchValidationAction::Check);
+        assert_eq!(allowed.package.as_deref(), Some("frankenengine-node"));
     }
 
     #[test]
