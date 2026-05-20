@@ -286,6 +286,11 @@ fn invalid_policy_id_reason(policy_id: &str) -> Option<String> {
     if contains_nul(policy_id) {
         return Some("policy_id must not contain NUL bytes".to_string());
     }
+    // Control characters (CR, LF, tab, etc.) in policy IDs enable log injection
+    // since IDs appear in trace_link and audit logs via format!().
+    if policy_id.chars().any(char::is_control) {
+        return Some("policy_id must not contain control characters".to_string());
+    }
     if trimmed != policy_id {
         return Some("policy_id contains leading or trailing whitespace".to_string());
     }
@@ -385,6 +390,14 @@ fn normalize_policy(
             return Err(ConstraintCompileError::new(
                 event_codes::VEF_COMPILE_ERR_004_INVALID_RULE,
                 "rule_id must not contain NUL bytes",
+                trace_id,
+                Some(rule_id),
+            ));
+        }
+        if rule.rule_id.chars().any(char::is_control) {
+            return Err(ConstraintCompileError::new(
+                event_codes::VEF_COMPILE_ERR_004_INVALID_RULE,
+                "rule_id must not contain control characters",
                 trace_id,
                 Some(rule_id),
             ));
@@ -1022,6 +1035,30 @@ mod tests {
         assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_001_INVALID_INPUT);
         assert!(err.message.contains("policy_id must not contain NUL"));
         assert!(err.rule_id.is_none());
+    }
+
+    #[test]
+    fn policy_id_with_control_char_fails() {
+        // Control characters in IDs enable log injection since IDs appear
+        // in trace_link and audit logs via format!().
+        let mut policy = full_policy();
+        policy.policy_id = "policy\r\nINJECTED".to_string();
+
+        let err = compile_policy(&policy, "trace-policy-ctrl").unwrap_err();
+
+        assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_001_INVALID_INPUT);
+        assert!(err.message.contains("control characters"));
+    }
+
+    #[test]
+    fn rule_id_with_control_char_fails() {
+        let mut policy = full_policy();
+        policy.rules[0].rule_id = "rule\tTAB".to_string();
+
+        let err = compile_policy(&policy, "trace-rule-ctrl").unwrap_err();
+
+        assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_004_INVALID_RULE);
+        assert!(err.message.contains("control characters"));
     }
 
     #[test]
