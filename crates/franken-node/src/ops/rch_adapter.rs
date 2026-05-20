@@ -914,7 +914,7 @@ pub fn classify_rch_output(
             detail,
         }
     } else if command_was_deferred(output)
-        && process_snapshot.active_cargo_processes > policy.max_active_cargo_processes
+        && process_snapshot.active_cargo_processes >= policy.max_active_cargo_processes
     {
         ClassifiedOutcome {
             outcome: RchOutcomeClass::ContentionDeferred,
@@ -1780,6 +1780,27 @@ mod tests {
         let outcome = classify_rch_output(&cmd, &result, &snapshot, &policy());
 
         assert_eq!(outcome.outcome, RchOutcomeClass::ContentionDeferred);
+        assert!(!outcome.product_failure);
+    }
+
+    #[test]
+    fn contention_defers_at_exact_active_cargo_cap() {
+        let cmd = invocation(&["cargo", "check", "-p", "frankenengine-node"]);
+        let result = RchCommandOutput {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration_ms: 0,
+        };
+        let snapshot = RchProcessSnapshot {
+            active_cargo_processes: policy().max_active_cargo_processes,
+            active_rch_processes: 0,
+        };
+
+        let outcome = classify_rch_output(&cmd, &result, &snapshot, &policy());
+
+        assert_eq!(outcome.outcome, RchOutcomeClass::ContentionDeferred);
+        assert!(outcome.retryable);
         assert!(!outcome.product_failure);
     }
 
