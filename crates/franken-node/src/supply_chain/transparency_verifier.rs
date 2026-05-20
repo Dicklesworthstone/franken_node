@@ -13,6 +13,7 @@ use crate::security::constant_time;
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 const MAX_AUDIT_PATH_ENTRIES: usize = crate::capacity_defaults::base::SMALL;
 const MAX_PROOF_ID_BYTES: usize = 512;
+const MAX_PROOF_RECEIPT_FIELD_BYTES: usize = 512;
 
 // ── Hash helper ─────────────────────────────────────────────────────
 
@@ -120,6 +121,40 @@ pub struct ProofReceipt {
     pub failure_reason: Option<ProofFailure>,
     pub trace_id: String,
     pub timestamp: String,
+}
+
+fn sanitize_proof_receipt_field(value: &str) -> String {
+    let mut sanitized = String::new();
+    for ch in value.chars() {
+        let ch = if ch.is_control() { '?' } else { ch };
+        if sanitized.len().saturating_add(ch.len_utf8()) > MAX_PROOF_RECEIPT_FIELD_BYTES {
+            break;
+        }
+        sanitized.push(ch);
+    }
+    sanitized
+}
+
+fn proof_receipt(
+    connector_id: &str,
+    artifact_id: &str,
+    verified: bool,
+    log_root_matched: bool,
+    proof_valid: bool,
+    failure_reason: Option<ProofFailure>,
+    trace_id: &str,
+    timestamp: &str,
+) -> ProofReceipt {
+    ProofReceipt {
+        connector_id: sanitize_proof_receipt_field(connector_id),
+        artifact_id: sanitize_proof_receipt_field(artifact_id),
+        verified,
+        log_root_matched,
+        proof_valid,
+        failure_reason,
+        trace_id: sanitize_proof_receipt_field(trace_id),
+        timestamp: sanitize_proof_receipt_field(timestamp),
+    }
 }
 
 /// Reason for proof verification failure.
@@ -240,29 +275,29 @@ pub fn verify_inclusion(
     timestamp: &str,
 ) -> ProofReceipt {
     if let Some(reason) = invalid_artifact_id_reason(artifact_id) {
-        return ProofReceipt {
-            connector_id: connector_id.into(),
-            artifact_id: artifact_id.into(),
-            verified: false,
-            log_root_matched: false,
-            proof_valid: false,
-            failure_reason: Some(ProofFailure::InvalidArtifactId { reason }),
-            trace_id: trace_id.into(),
-            timestamp: timestamp.into(),
-        };
+        return proof_receipt(
+            connector_id,
+            artifact_id,
+            false,
+            false,
+            false,
+            Some(ProofFailure::InvalidArtifactId { reason }),
+            trace_id,
+            timestamp,
+        );
     }
 
     if let Some(reason) = invalid_connector_id_reason(connector_id) {
-        return ProofReceipt {
-            connector_id: connector_id.into(),
-            artifact_id: artifact_id.into(),
-            verified: false,
-            log_root_matched: false,
-            proof_valid: false,
-            failure_reason: Some(ProofFailure::InvalidConnectorId { reason }),
-            trace_id: trace_id.into(),
-            timestamp: timestamp.into(),
-        };
+        return proof_receipt(
+            connector_id,
+            artifact_id,
+            false,
+            false,
+            false,
+            Some(ProofFailure::InvalidConnectorId { reason }),
+            trace_id,
+            timestamp,
+        );
     }
 
     // Check if proof is provided
@@ -270,60 +305,60 @@ pub fn verify_inclusion(
         Some(p) => p,
         None => {
             if policy.required {
-                return ProofReceipt {
-                    connector_id: connector_id.into(),
-                    artifact_id: artifact_id.into(),
-                    verified: false,
-                    log_root_matched: false,
-                    proof_valid: false,
-                    failure_reason: Some(ProofFailure::ProofMissing),
-                    trace_id: trace_id.into(),
-                    timestamp: timestamp.into(),
-                };
+                return proof_receipt(
+                    connector_id,
+                    artifact_id,
+                    false,
+                    false,
+                    false,
+                    Some(ProofFailure::ProofMissing),
+                    trace_id,
+                    timestamp,
+                );
             }
             // Not required, not provided → pass
-            return ProofReceipt {
-                connector_id: connector_id.into(),
-                artifact_id: artifact_id.into(),
-                verified: true,
-                log_root_matched: true,
-                proof_valid: true,
-                failure_reason: None,
-                trace_id: trace_id.into(),
-                timestamp: timestamp.into(),
-            };
+            return proof_receipt(
+                connector_id,
+                artifact_id,
+                true,
+                true,
+                true,
+                None,
+                trace_id,
+                timestamp,
+            );
         }
     };
 
     // Validate proof metadata bounds before any hash work.
     if proof.tree_size == 0 || proof.leaf_index >= proof.tree_size {
-        return ProofReceipt {
-            connector_id: connector_id.into(),
-            artifact_id: artifact_id.into(),
-            verified: false,
-            log_root_matched: false,
-            proof_valid: false,
-            failure_reason: Some(ProofFailure::PathInvalid {
+        return proof_receipt(
+            connector_id,
+            artifact_id,
+            false,
+            false,
+            false,
+            Some(ProofFailure::PathInvalid {
                 computed: format!(
                     "leaf_index={}, tree_size={}",
                     proof.leaf_index, proof.tree_size
                 ),
                 expected: "0 <= leaf_index < tree_size".into(),
             }),
-            trace_id: trace_id.into(),
-            timestamp: timestamp.into(),
-        };
+            trace_id,
+            timestamp,
+        );
     }
 
     let audit_path_limit = audit_path_len_limit(proof.tree_size);
     if proof.audit_path.len() < audit_path_limit {
-        return ProofReceipt {
-            connector_id: connector_id.into(),
-            artifact_id: artifact_id.into(),
-            verified: false,
-            log_root_matched: false,
-            proof_valid: false,
-            failure_reason: Some(ProofFailure::PathInvalid {
+        return proof_receipt(
+            connector_id,
+            artifact_id,
+            false,
+            false,
+            false,
+            Some(ProofFailure::PathInvalid {
                 computed: format!(
                     "audit_path_len={}, tree_size={}",
                     proof.audit_path.len(),
@@ -331,18 +366,18 @@ pub fn verify_inclusion(
                 ),
                 expected: format!("audit_path_len >= {audit_path_limit}"),
             }),
-            trace_id: trace_id.into(),
-            timestamp: timestamp.into(),
-        };
+            trace_id,
+            timestamp,
+        );
     }
     if proof.audit_path.len() > audit_path_limit {
-        return ProofReceipt {
-            connector_id: connector_id.into(),
-            artifact_id: artifact_id.into(),
-            verified: false,
-            log_root_matched: false,
-            proof_valid: false,
-            failure_reason: Some(ProofFailure::PathInvalid {
+        return proof_receipt(
+            connector_id,
+            artifact_id,
+            false,
+            false,
+            false,
+            Some(ProofFailure::PathInvalid {
                 computed: format!(
                     "audit_path_len={}, tree_size={}",
                     proof.audit_path.len(),
@@ -350,72 +385,72 @@ pub fn verify_inclusion(
                 ),
                 expected: format!("audit_path_len <= {audit_path_limit}"),
             }),
-            trace_id: trace_id.into(),
-            timestamp: timestamp.into(),
-        };
+            trace_id,
+            timestamp,
+        );
     }
 
     // Check leaf hash matches artifact hash
     if !constant_time::ct_eq_bytes(proof.leaf_hash.as_bytes(), artifact_hash.as_bytes()) {
-        return ProofReceipt {
-            connector_id: connector_id.into(),
-            artifact_id: artifact_id.into(),
-            verified: false,
-            log_root_matched: false,
-            proof_valid: false,
-            failure_reason: Some(ProofFailure::LeafMismatch {
+        return proof_receipt(
+            connector_id,
+            artifact_id,
+            false,
+            false,
+            false,
+            Some(ProofFailure::LeafMismatch {
                 expected: artifact_hash.into(),
                 actual: proof.leaf_hash.clone(),
             }),
-            trace_id: trace_id.into(),
-            timestamp: timestamp.into(),
-        };
+            trace_id,
+            timestamp,
+        );
     }
 
     // Recompute root
     let computed_root = match recompute_root(proof) {
         Ok(root) => root,
         Err(failure_reason) => {
-            return ProofReceipt {
-                connector_id: connector_id.into(),
-                artifact_id: artifact_id.into(),
-                verified: false,
-                log_root_matched: false,
-                proof_valid: false,
-                failure_reason: Some(failure_reason),
-                trace_id: trace_id.into(),
-                timestamp: timestamp.into(),
-            };
+            return proof_receipt(
+                connector_id,
+                artifact_id,
+                false,
+                false,
+                false,
+                Some(failure_reason),
+                trace_id,
+                timestamp,
+            );
         }
     };
 
     // Check if root is pinned
     let root_pinned = policy.is_checkpoint_pinned(proof.tree_size, &computed_root);
     if !root_pinned {
-        return ProofReceipt {
-            connector_id: connector_id.into(),
-            artifact_id: artifact_id.into(),
-            verified: false,
-            log_root_matched: false,
-            proof_valid: false,
-            failure_reason: Some(ProofFailure::RootNotPinned {
+        return proof_receipt(
+            connector_id,
+            artifact_id,
+            false,
+            false,
+            false,
+            Some(ProofFailure::RootNotPinned {
                 root_hash: computed_root,
             }),
-            trace_id: trace_id.into(),
-            timestamp: timestamp.into(),
-        };
+            trace_id,
+            timestamp,
+        );
     }
 
-    ProofReceipt {
-        connector_id: connector_id.into(),
-        artifact_id: artifact_id.into(),
-        verified: true,
-        log_root_matched: true,
-        proof_valid: true,
-        failure_reason: None,
-        trace_id: trace_id.into(),
-        timestamp: timestamp.into(),
-    }
+    proof_receipt(
+        connector_id,
+        artifact_id,
+        true,
+        true,
+        true,
+        None,
+        trace_id,
+        timestamp,
+    )
 }
 
 fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
@@ -1535,6 +1570,46 @@ mod tests {
             receipt.failure_reason,
             Some(ProofFailure::InvalidConnectorId { reason }) if reason.contains("control character")
         ));
+    }
+
+    #[test]
+    fn proof_receipt_operator_fields_sanitize_controls_and_bounds() {
+        let policy = TransparencyPolicy {
+            required: false,
+            pinned_roots: Vec::new(),
+        };
+        let connector_id = format!(
+            "conn\n{}",
+            "c".repeat(MAX_PROOF_RECEIPT_FIELD_BYTES.saturating_mul(2))
+        );
+        let trace_id = format!(
+            "trace\r{}",
+            "t".repeat(MAX_PROOF_RECEIPT_FIELD_BYTES.saturating_mul(2))
+        );
+
+        let receipt = verify_inclusion(
+            &policy,
+            None,
+            "unused-hash",
+            &connector_id,
+            "artifact\0shadow",
+            &trace_id,
+            "2026-04-26T22:00:00Z\x1b",
+        );
+
+        for field in [
+            receipt.connector_id.as_str(),
+            receipt.artifact_id.as_str(),
+            receipt.trace_id.as_str(),
+            receipt.timestamp.as_str(),
+        ] {
+            assert!(!field.chars().any(char::is_control), "field={field:?}");
+            assert!(field.len() <= MAX_PROOF_RECEIPT_FIELD_BYTES);
+        }
+        assert!(receipt.connector_id.starts_with("conn?"));
+        assert!(receipt.artifact_id.contains("artifact?shadow"));
+        assert!(receipt.trace_id.starts_with("trace?"));
+        assert!(receipt.timestamp.ends_with('?'));
     }
 
     #[test]
