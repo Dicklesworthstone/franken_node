@@ -314,7 +314,9 @@ pub fn load_profile_from_json(json: &str) -> Result<ContagionProfile, ProfileErr
 }
 
 fn validate_profile_metadata(profile: &ContagionProfile) -> Result<(), ProfileError> {
-    if profile.name.is_empty()
+    let trimmed_name = profile.name.trim();
+    if trimmed_name.is_empty()
+        || profile.name != trimmed_name
         || profile.name.len() > MAX_PROFILE_NAME_BYTES
         || profile.name.chars().any(char::is_control)
         || profile.description.len() > MAX_PROFILE_DESCRIPTION_BYTES
@@ -708,6 +710,19 @@ mod tests {
             "expected":{"termination_reason":"Converged","min_infected_count":0,"max_infected_count":2,"terminated_by_step":4}
         }"#;
         let err = load_profile_from_json(bad).expect_err("control-char name must reject");
+        assert_eq!(err, ProfileError::InvalidMetadata);
+    }
+
+    #[test]
+    fn loader_rejects_whitespace_padded_profile_name() {
+        let bad = r#"{
+            "name":" bad ","description":"padded profile name",
+            "graph":{"nodes":["a","b"],"edges":[{"from":"a","to":"b","weight":0.5,"edge_kind":"DependencyImport"}],"seed":1},
+            "initial_infected":["a"],
+            "config":{"max_steps":4,"infection_threshold":0.5,"decay_factor":0.5,"seed":1},
+            "expected":{"termination_reason":"Converged","min_infected_count":0,"max_infected_count":2,"terminated_by_step":4}
+        }"#;
+        let err = load_profile_from_json(bad).expect_err("padded profile name must reject");
         assert_eq!(err, ProfileError::InvalidMetadata);
     }
 
