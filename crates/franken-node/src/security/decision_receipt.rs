@@ -96,6 +96,9 @@ pub const DECISION_RECEIPT_SIGNATURE_VERSION: &str = "ed25519-v1";
 /// Receipts older than this are rejected to prevent replay attacks via clock skew.
 pub const MAX_RECEIPT_AGE_SECS: u64 = 3600; // 1 hour
 const MAX_RECEIPT_ID_BYTES: usize = 128;
+const MAX_RECEIPT_TEXT_FIELD_BYTES: usize = 4096;
+const MAX_RECEIPT_REFS: usize = 256;
+const MAX_RECEIPT_REF_BYTES: usize = 512;
 
 /// High-impact decision classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -956,12 +959,8 @@ fn validate_receipt_payload_fields(receipt: &Receipt) -> Result<(), ReceiptError
         validate_receipt_text_field("previous_receipt_hash", previous_hash)?;
     }
 
-    for evidence_ref in &receipt.evidence_refs {
-        validate_receipt_text_field("evidence_refs", evidence_ref)?;
-    }
-    for policy_rule in &receipt.policy_rule_chain {
-        validate_receipt_text_field("policy_rule_chain", policy_rule)?;
-    }
+    validate_receipt_ref_list("evidence_refs", &receipt.evidence_refs)?;
+    validate_receipt_ref_list("policy_rule_chain", &receipt.policy_rule_chain)?;
 
     Ok(())
 }
@@ -993,6 +992,31 @@ fn validate_receipt_text_field(field: &'static str, value: &str) -> Result<(), R
             field,
             reason: "contains control characters or null bytes",
         });
+    }
+    if value.len() > MAX_RECEIPT_TEXT_FIELD_BYTES {
+        return Err(ReceiptError::UnsafeReceiptField {
+            field,
+            reason: "exceeds maximum text field length",
+        });
+    }
+    Ok(())
+}
+
+fn validate_receipt_ref_list(field: &'static str, values: &[String]) -> Result<(), ReceiptError> {
+    if values.len() > MAX_RECEIPT_REFS {
+        return Err(ReceiptError::UnsafeReceiptField {
+            field,
+            reason: "exceeds maximum reference count",
+        });
+    }
+    for value in values {
+        validate_receipt_text_field(field, value)?;
+        if value.len() > MAX_RECEIPT_REF_BYTES {
+            return Err(ReceiptError::UnsafeReceiptField {
+                field,
+                reason: "exceeds maximum reference length",
+            });
+        }
     }
     Ok(())
 }
@@ -1223,6 +1247,7 @@ mod tests {
         let err = Receipt::new(
             "quarantine",
             "control-plane@prod",
+            "franken-node-control-plane",
             &json!({"z": 1, "a": 2}),
             &json!({"result": "ok"}),
             Decision::Approved,
@@ -1241,6 +1266,7 @@ mod tests {
         let err = Receipt::new(
             "quarantine",
             "control-plane@prod",
+            "franken-node-control-plane",
             &json!({"z": 1, "a": 2}),
             &json!({"result": "ok"}),
             Decision::Approved,
@@ -1979,20 +2005,52 @@ mod tests {
 
     /// Negative path: extremely long string fields approaching memory limits
     #[test]
-    fn extremely_long_rationale_field_accepted_despite_memory_pressure() {
-        let huge_rationale = "A".repeat(1_000_000); // 1MB rationale
+    fn extremely_long_rationale_field_rejected_before_signing() {
+        let huge_rationale = "A".repeat(MAX_RECEIPT_TEXT_FIELD_BYTES.saturating_add(1));
         let mut receipt = make_receipt("quarantine", Decision::Escalated);
-        receipt.rationale = huge_rationale.clone();
+        receipt.rationale = huge_rationale;
 
         let key = demo_signing_key();
-        let signed = sign_receipt(&receipt, &key).expect("huge rationale should be signable");
+        let err =
+            sign_receipt(&receipt, &key).expect_err("huge rationale must fail closed before hash");
+        assert!(matches!(
+            err,
+            ReceiptError::UnsafeReceiptField {
+                field: "rationale",
+                ..
+            }
+        ));
+    }
 
-        assert_eq!(signed.receipt.rationale.len(), 1_000_000);
-        assert!(signed.receipt.rationale.starts_with("AAAA"));
+    #[test]
+    fn oversized_receipt_reference_vectors_rejected_before_signing() {
+        let key = demo_signing_key();
 
-        // Hash computation should handle large inputs
-        assert!(!signed.chain_hash.is_empty());
-        assert_eq!(signed.chain_hash.len(), 64); // SHA-256 hex length
+        let mut too_many_refs = make_receipt("quarantine", Decision::Escalated);
+        too_many_refs.evidence_refs = (0..=MAX_RECEIPT_REFS)
+            .map(|idx| format!("ledger-{idx:04}"))
+            .collect();
+        let err = sign_receipt(&too_many_refs, &key)
+            .expect_err("too many evidence refs must fail closed before signing");
+        assert!(matches!(
+            err,
+            ReceiptError::UnsafeReceiptField {
+                field: "evidence_refs",
+                ..
+            }
+        ));
+
+        let mut oversized_ref = make_receipt("quarantine", Decision::Escalated);
+        oversized_ref.policy_rule_chain = vec!["R".repeat(MAX_RECEIPT_REF_BYTES.saturating_add(1))];
+        let err = sign_receipt(&oversized_ref, &key)
+            .expect_err("oversized policy ref must fail closed before signing");
+        assert!(matches!(
+            err,
+            ReceiptError::UnsafeReceiptField {
+                field: "policy_rule_chain",
+                ..
+            }
+        ));
     }
 
     /// Negative path: null bytes embedded in string fields
@@ -2138,6 +2196,7 @@ mod tests {
         let err = Receipt::new(
             "quarantine",
             "actor",
+            "franken-node-control-plane",
             &json!({}),
             &json!({}),
             Decision::Approved,
@@ -2156,6 +2215,7 @@ mod tests {
         let err = Receipt::new(
             "quarantine",
             "actor",
+            "franken-node-control-plane",
             &json!({}),
             &json!({}),
             Decision::Denied,
@@ -2189,6 +2249,7 @@ mod tests {
         let receipt = Receipt::new(
             "test_action",
             "test_actor",
+            "franken-node-control-plane",
             &deeply_nested,
             &problematic_input,
             Decision::Approved,
