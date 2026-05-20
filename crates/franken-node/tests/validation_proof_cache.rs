@@ -61,8 +61,9 @@ use frankenengine_node::ops::validation_readiness::{
 use frankenengine_node::ops::validation_recovery_planner::{
     BLOCKED_PROOF_REHYDRATION_SCHEMA_VERSION, BlockedProofBeadState, BlockedProofBeadSummary,
     BlockedProofRchSnapshot, BlockedProofRehydrationAction, BlockedProofRehydrationInput,
-    DEFAULT_REHYDRATION_MAX_BLOCKER_AGE_MS, RehydrationBlockerRef, RehydrationBlockerStatus,
-    RehydrationPathRef, build_blocked_proof_rehydration_plan, rehydration_reason_codes,
+    DEFAULT_REHYDRATION_MAX_BLOCKER_AGE_MS, RecoveryPlannerError, RehydrationBlockerRef,
+    RehydrationBlockerStatus, RehydrationPathRef, build_blocked_proof_rehydration_plan,
+    rehydration_reason_codes,
 };
 use frankenengine_node::runtime::resource_governor::{
     EvidenceHotsetFileProbe, EvidenceHotsetPrefetchCandidate, EvidenceHotsetPrefetchPolicy,
@@ -4187,6 +4188,51 @@ fn blocked_proof_rehydration_stale_duplicate_does_not_hide_fail_closed_review() 
     assert_eq!(
         valid_candidate.action,
         BlockedProofRehydrationAction::ReadyForReproof
+    );
+}
+
+#[test]
+fn blocked_proof_rehydration_fails_closed_at_max_blocker_age_boundary() {
+    let boundary = blocked_rehydration_bead(
+        "bd-boundary-stale",
+        1,
+        REHYDRATION_NOW_MS - DEFAULT_REHYDRATION_MAX_BLOCKER_AGE_MS,
+        "rch exec -- cargo test -p frankenengine-node boundary_stale_blocker",
+    );
+
+    let plan = build_blocked_proof_rehydration_plan(&blocked_rehydration_input(vec![boundary]))
+        .expect("rehydration plan");
+    let candidate = plan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.bead_id == "bd-boundary-stale")
+        .expect("boundary candidate");
+
+    assert_eq!(
+        candidate.action,
+        BlockedProofRehydrationAction::FailClosedReview
+    );
+    assert_eq!(
+        candidate.reason_code,
+        rehydration_reason_codes::STALE_BLOCKER_EVIDENCE
+    );
+    assert!(candidate.fail_closed);
+}
+
+#[test]
+fn blocked_proof_rehydration_rejects_control_characters_in_bead_ids() {
+    let bead = blocked_rehydration_bead(
+        "bd-good\nforged-summary-line",
+        1,
+        REHYDRATION_NOW_MS - 10_000,
+        "rch exec -- cargo test -p frankenengine-node validation_proof_cache",
+    );
+
+    let error = build_blocked_proof_rehydration_plan(&blocked_rehydration_input(vec![bead]))
+        .expect_err("control characters in bead ids must fail closed");
+
+    assert!(
+        matches!(error, RecoveryPlannerError::InvalidInput(message) if message.contains("bead_id"))
     );
 }
 

@@ -706,9 +706,9 @@ fn validate_rehydration_input(
 }
 
 fn validate_rehydration_text(field: &'static str, value: &str) -> Result<(), RecoveryPlannerError> {
-    if value.trim().is_empty() || value.contains('\0') {
+    if value.trim().is_empty() || value.chars().any(char::is_control) {
         return Err(RecoveryPlannerError::InvalidInput(format!(
-            "{field} must be non-empty text without NUL bytes"
+            "{field} must be non-empty text without control characters"
         )));
     }
     Ok(())
