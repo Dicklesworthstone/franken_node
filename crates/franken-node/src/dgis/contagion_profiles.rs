@@ -266,7 +266,15 @@ pub fn load_profile_from_json(json: &str) -> Result<ContagionProfile, ProfileErr
         return Err(ProfileError::BoundedGrowthExceeded);
     }
 
+    for node in &profile.graph.nodes {
+        validate_node_id(node)?;
+    }
+    for node in &profile.initial_infected {
+        validate_node_id(node)?;
+    }
     for edge in &profile.graph.edges {
+        validate_node_id(&edge.from)?;
+        validate_node_id(&edge.to)?;
         if !edge.weight.is_finite() || edge.weight < 0.0 || edge.weight > 1.0 {
             return Err(ProfileError::InvalidWeight);
         }
@@ -652,6 +660,22 @@ mod tests {
     }
 
     #[test]
+    fn loader_rejects_null_byte_initial_infected_from_json() {
+        let bad = r#"{
+            "name":"bad","description":"nul seed",
+            "graph":{"nodes":["a","b"],"edges":[{"from":"a","to":"b","weight":0.5,"edge_kind":"DependencyImport"}],"seed":1},
+            "initial_infected":["a\u0000seed"],
+            "config":{"max_steps":4,"infection_threshold":0.5,"decay_factor":0.5,"seed":1},
+            "expected":{"termination_reason":"Converged","min_infected_count":0,"max_infected_count":2,"terminated_by_step":4}
+        }"#;
+        let err = load_profile_from_json(bad).expect_err("NUL seed id must reject at load time");
+        assert!(matches!(
+            err,
+            ProfileError::GraphFailure(GraphError::InvalidNodeId(_))
+        ));
+    }
+
+    #[test]
     fn loader_rejects_bounded_growth_overflow() {
         // Build a spec just over MAX_PROFILE_NODES.
         let mut nodes: Vec<NodeId> = Vec::with_capacity(MAX_PROFILE_NODES + 1);
@@ -689,8 +713,8 @@ mod tests {
             "config":{"max_steps":4,"infection_threshold":0.5,"decay_factor":0.5,"seed":1},
             "expected":{"termination_reason":"Converged","min_infected_count":1,"max_infected_count":2,"terminated_by_step":5}
         }"#;
-        let err = load_profile_from_json(bad)
-            .expect_err("terminated_by_step past max_steps must reject");
+        let err =
+            load_profile_from_json(bad).expect_err("terminated_by_step past max_steps must reject");
         assert_eq!(err, ProfileError::InvalidExpected);
     }
 
