@@ -464,6 +464,100 @@ fn e2e_transparency_inclusion_rejects_overlong_audit_path() {
 }
 
 #[test]
+fn e2e_transparency_inclusion_malformed_leaf_hash_fails_closed_without_panic() {
+    let h =
+        Harness::new("e2e_transparency_inclusion_malformed_leaf_hash_fails_closed_without_panic");
+    let (root, proofs) = build_balanced_proofs(&[
+        "sha256:art-alpha",
+        "sha256:art-bravo",
+        "sha256:art-charlie",
+        "sha256:art-delta",
+    ]);
+    let policy = pinned_policy(&root, 4);
+    let mut bad_proof = proofs[0].clone();
+    bad_proof.leaf_hash = "not_hex".to_string();
+
+    let receipt = verify_inclusion(
+        &policy,
+        Some(&bad_proof),
+        &bad_proof.leaf_hash,
+        "conn-real-1",
+        "art-real-1",
+        "trace-malformed-leaf",
+        "2026-04-26T22:00:12Z",
+    );
+
+    assert!(!receipt.verified);
+    assert!(!receipt.log_root_matched);
+    assert!(!receipt.proof_valid);
+    if let Some(ProofFailure::PathInvalid { computed, expected }) = receipt.failure_reason.as_ref()
+    {
+        assert_eq!(computed, "leaf_hash_hex_chars=7");
+        assert_eq!(expected, "leaf_hash_hex_chars=64");
+        h.log_phase(
+            "malformed_leaf_hash_rejected",
+            true,
+            json!({"computed": computed, "expected": expected}),
+        );
+    } else {
+        assert!(
+            matches!(
+                receipt.failure_reason.as_ref(),
+                Some(ProofFailure::PathInvalid { .. })
+            ),
+            "expected PathInvalid for malformed leaf hash"
+        );
+    }
+}
+
+#[test]
+fn e2e_transparency_inclusion_malformed_audit_path_fails_closed_without_panic() {
+    let h =
+        Harness::new("e2e_transparency_inclusion_malformed_audit_path_fails_closed_without_panic");
+    let (root, proofs) = build_balanced_proofs(&[
+        "sha256:art-alpha",
+        "sha256:art-bravo",
+        "sha256:art-charlie",
+        "sha256:art-delta",
+    ]);
+    let policy = pinned_policy(&root, 4);
+    let mut bad_proof = proofs[0].clone();
+    bad_proof.audit_path[0] = "not_hex".to_string();
+
+    let receipt = verify_inclusion(
+        &policy,
+        Some(&bad_proof),
+        &bad_proof.leaf_hash,
+        "conn-real-1",
+        "art-real-1",
+        "trace-malformed-audit-path",
+        "2026-04-26T22:00:13Z",
+    );
+
+    assert!(!receipt.verified);
+    assert!(!receipt.log_root_matched);
+    assert!(!receipt.proof_valid);
+    if let Some(ProofFailure::PathInvalid { computed, expected }) = receipt.failure_reason.as_ref()
+    {
+        assert_eq!(computed, "audit_path[0]_hex_chars=7");
+        assert_eq!(expected, "audit_path[0]_hex_chars=64");
+        h.log_phase(
+            "malformed_audit_path_rejected",
+            true,
+            json!({"computed": computed, "expected": expected}),
+        );
+    } else {
+        assert!(
+            matches!(
+                receipt.failure_reason.as_ref(),
+                Some(ProofFailure::PathInvalid { .. })
+            ),
+            "expected PathInvalid for malformed audit path"
+        );
+    }
+}
+
+#[test]
 fn e2e_transparency_inclusion_single_leaf_tree_round_trip() {
     let h = Harness::new("e2e_transparency_inclusion_single_leaf_tree_round_trip");
 
