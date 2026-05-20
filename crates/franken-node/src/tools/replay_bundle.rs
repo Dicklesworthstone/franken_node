@@ -652,6 +652,7 @@ fn validate_relative_evidence_ref(reference: &str) -> Result<(), ReplayBundleErr
         || reference.starts_with('/')
         || reference.contains('\\')
         || reference.contains('\0')
+        || reference.chars().any(char::is_control)
         || path.is_absolute()
         || path
             .components()
@@ -3241,6 +3242,7 @@ mod tests {
             "/tmp/secrets.json",
             r"refs\logs\event-001.json",
             "refs/logs/event-001.json\0",
+            "refs/logs/event\n001.json",
         ] {
             let mut package = fixture_evidence_package("INC-EVID-VAL-REFS");
             package.evidence_refs = vec![reference.to_string()];
