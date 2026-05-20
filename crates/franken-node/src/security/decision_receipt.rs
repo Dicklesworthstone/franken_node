@@ -95,6 +95,7 @@ pub const DECISION_RECEIPT_SIGNATURE_VERSION: &str = "ed25519-v1";
 /// Maximum age in seconds for receipt freshness validation (fail-closed).
 /// Receipts older than this are rejected to prevent replay attacks via clock skew.
 pub const MAX_RECEIPT_AGE_SECS: u64 = 3600; // 1 hour
+const MAX_RECEIPT_ID_BYTES: usize = 128;
 
 /// High-impact decision classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -934,8 +935,9 @@ fn validate_confidence(confidence: f64) -> Result<(), ReceiptError> {
 }
 
 fn validate_receipt_payload_fields(receipt: &Receipt) -> Result<(), ReceiptError> {
+    validate_receipt_id(&receipt.receipt_id)?;
+
     for (field, value) in [
-        ("receipt_id", receipt.receipt_id.as_str()),
         ("action_name", receipt.action_name.as_str()),
         ("actor_identity", receipt.actor_identity.as_str()),
         ("timestamp", receipt.timestamp.as_str()),
@@ -959,6 +961,27 @@ fn validate_receipt_payload_fields(receipt: &Receipt) -> Result<(), ReceiptError
     }
     for policy_rule in &receipt.policy_rule_chain {
         validate_receipt_text_field("policy_rule_chain", policy_rule)?;
+    }
+
+    Ok(())
+}
+
+fn validate_receipt_id(value: &str) -> Result<(), ReceiptError> {
+    validate_receipt_text_field("receipt_id", value)?;
+
+    let trimmed = value.trim();
+    if trimmed.is_empty() || value != trimmed {
+        return Err(ReceiptError::UnsafeReceiptField {
+            field: "receipt_id",
+            reason: "is empty or contains leading/trailing whitespace",
+        });
+    }
+
+    if value.len() > MAX_RECEIPT_ID_BYTES {
+        return Err(ReceiptError::UnsafeReceiptField {
+            field: "receipt_id",
+            reason: "exceeds maximum receipt_id length",
+        });
     }
 
     Ok(())
@@ -1910,17 +1933,30 @@ mod tests {
         assert_eq!(entries, vec![std::ffi::OsString::from("receipts.json")]);
     }
 
-    /// Negative path: empty receipt ID accepted but may cause lookup issues
+    /// Negative path: malformed receipt IDs fail closed before signing.
     #[test]
-    fn receipt_with_empty_id_field_constructed_successfully() {
-        let mut receipt = make_receipt("quarantine", Decision::Approved);
-        receipt.receipt_id = String::new();
-
+    fn receipt_with_empty_padded_or_oversized_id_rejected_before_signing() {
         let key = demo_signing_key();
-        let signed = sign_receipt(&receipt, &key).expect("empty receipt_id should be signable");
 
-        assert_eq!(signed.receipt.receipt_id, "");
-        assert!(!signed.signature.is_empty());
+        for bad_id in [
+            String::new(),
+            " receipt-id ".to_string(),
+            "r".repeat(MAX_RECEIPT_ID_BYTES + 1),
+        ] {
+            let mut receipt = make_receipt("quarantine", Decision::Approved);
+            receipt.receipt_id = bad_id;
+
+            let err = sign_receipt(&receipt, &key)
+                .expect_err("unsafe receipt_id must fail closed before signing");
+
+            assert!(matches!(
+                err,
+                ReceiptError::UnsafeReceiptField {
+                    field: "receipt_id",
+                    ..
+                }
+            ));
+        }
     }
 
     /// Negative path: unicode and special characters in action names
