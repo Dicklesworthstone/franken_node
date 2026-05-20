@@ -46,6 +46,7 @@ const MAX_TELEMETRY: usize = 4096;
 const MAX_CARD_VERSIONS: usize = 512;
 const MAX_AUDIT_HISTORY: usize = 256;
 const MAX_TRUST_CARD_CAMOUFLAGE_HINTS: usize = 64;
+const MAX_TRUST_CARD_EVIDENCE_REFS: usize = 4096;
 /// Maximum number of camouflage hint records persisted on a single TrustCard.
 ///
 /// Sub-task 4 of bd-35m7.1 wires the trajectory-gaming detector into the
@@ -111,6 +112,15 @@ fn validate_extension_id(extension_id: &str) -> Result<(), TrustCardError> {
 fn ensure_evidence_refs_present(refs: &[VerifiedEvidenceRef]) -> Result<(), TrustCardError> {
     if refs.is_empty() {
         return Err(TrustCardError::EvidenceMissing);
+    }
+    if refs.len() > MAX_TRUST_CARD_EVIDENCE_REFS {
+        return Err(TrustCardError::InvalidInput {
+            reason: format!(
+                "evidence_refs length {} exceeds maximum {}",
+                refs.len(),
+                MAX_TRUST_CARD_EVIDENCE_REFS
+            ),
+        });
     }
     Ok(())
 }
@@ -3220,14 +3230,15 @@ mod tests {
         AuditRecord, BehavioralProfile, CamouflageHintRecord, CapabilityDeclaration,
         CapabilityRisk, CertificationLevel, DEFAULT_REGISTRY_KEY, DependencyTrustStatus,
         DerivationMetadata, ExtensionIdentity, MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS,
-        MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES, MAX_CAMOUFLAGE_HINTS_ON_CARD, ProvenanceSummary,
-        PublisherIdentity, ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel,
-        SnapshotSourceContext, TRUST_CARD_CAMOUFLAGE_SUSPECTED, TRUST_CARD_CREATED,
-        TRUST_CARD_QUERIED, TrustCard, TrustCardComparison, TrustCardDiffEntry, TrustCardError,
-        TrustCardInput, TrustCardListFilter, TrustCardMutation, TrustCardRegistry,
-        VerifiedEvidenceRef, apply_camouflage_assessment, canonicalize_value,
-        compute_trust_card_derivation_hash, render_comparison_human, render_trust_card_human,
-        sign_card_in_place, to_canonical_json, update_card_hash, verify_card_signature,
+        MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES, MAX_CAMOUFLAGE_HINTS_ON_CARD,
+        MAX_TRUST_CARD_EVIDENCE_REFS, ProvenanceSummary, PublisherIdentity, ReputationTrend,
+        RevocationStatus, RiskAssessment, RiskLevel, SnapshotSourceContext,
+        TRUST_CARD_CAMOUFLAGE_SUSPECTED, TRUST_CARD_CREATED, TRUST_CARD_QUERIED, TrustCard,
+        TrustCardComparison, TrustCardDiffEntry, TrustCardError, TrustCardInput,
+        TrustCardListFilter, TrustCardMutation, TrustCardRegistry, VerifiedEvidenceRef,
+        apply_camouflage_assessment, canonicalize_value, compute_trust_card_derivation_hash,
+        render_comparison_human, render_trust_card_human, sign_card_in_place, to_canonical_json,
+        update_card_hash, verify_card_signature,
     };
     use crate::security::trajectory_gaming::{CamouflageHint, CamouflageKind};
     use base64::Engine as _;
@@ -3251,6 +3262,18 @@ mod tests {
                 verification_receipt_hash: "d".repeat(64),
             },
         ]
+    }
+
+    fn oversized_evidence_refs() -> Vec<VerifiedEvidenceRef> {
+        use super::super::certification::EvidenceType;
+        (0..=MAX_TRUST_CARD_EVIDENCE_REFS)
+            .map(|idx| VerifiedEvidenceRef {
+                evidence_id: format!("ev-over-cap-{idx}"),
+                evidence_type: EvidenceType::ProvenanceChain,
+                verified_at_epoch: 900_u64.saturating_add(u64::try_from(idx).unwrap_or(u64::MAX)),
+                verification_receipt_hash: "f".repeat(64),
+            })
+            .collect()
     }
 
     fn sample_input() -> TrustCardInput {
@@ -4203,6 +4226,28 @@ mod tests {
             .create(input, 1_000, "trace")
             .expect_err("must fail");
         assert!(matches!(err, TrustCardError::EvidenceMissing));
+    }
+
+    #[test]
+    fn create_rejects_oversized_evidence_refs_before_hashing() {
+        let mut registry = TrustCardRegistry::default();
+        let mut input = sample_input();
+        input.evidence_refs = oversized_evidence_refs();
+
+        let err = registry
+            .create(input, 1_000, "trace")
+            .expect_err("oversized evidence refs must fail closed");
+
+        assert!(matches!(
+            err,
+            TrustCardError::InvalidInput { reason }
+                if reason.contains("evidence_refs length")
+                    && reason.contains(&MAX_TRUST_CARD_EVIDENCE_REFS.to_string())
+        ));
+        let cards = registry
+            .list(&TrustCardListFilter::empty(), "trace", 1_000)
+            .expect("failed create must not mutate registry");
+        assert!(cards.is_empty());
     }
 
     #[test]
