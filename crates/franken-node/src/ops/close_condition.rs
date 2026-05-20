@@ -275,8 +275,16 @@ pub fn verify_close_condition_receipt_signature(
     hex::decode_to_slice(&signature.signature_hex, &mut signature_bytes)
         .context("close-condition receipt signature must be 64 bytes of hex")?;
     let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
+    // Use `verify_strict` (not `verify`) to reject malleable / non-canonical-s
+    // signatures. The aca68213 / 71eee3b2 / fa77136c sweep hardened every
+    // other Ed25519 verification seam in the crate to `verify_strict`; this
+    // close-condition receipt site was missed by those passes. Signatures
+    // produced by `Ed25519Scheme` / canonical signing helpers are always
+    // canonical and continue to verify; only malleated duplicates (a
+    // signature-forgery / replay-equivalence class — RFC 8032 §5.1.7) are
+    // now rejected.
     verifying_key
-        .verify(&signed_preimage, &signature)
+        .verify_strict(&signed_preimage, &signature)
         .context("close-condition receipt signature verification failed")
 }
 
