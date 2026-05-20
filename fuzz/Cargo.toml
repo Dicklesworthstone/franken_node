@@ -334,3 +334,9 @@ name = "fuzz_decision_receipt_verify"
 path = "fuzz_targets/fuzz_decision_receipt_verify.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_contagion_graph_validate"
+path = "fuzz_targets/fuzz_contagion_graph_validate.rs"
+test = false
+doc = false
