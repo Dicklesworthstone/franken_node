@@ -35,6 +35,8 @@ const MAX_SOURCE_FINGERPRINTS: usize = 4_096;
 const MAX_REDACTED_ENV_KEYS: usize = 256;
 /// Maximum argv elements in an RCH invocation.
 const MAX_INVOCATION_ARGV: usize = 128;
+/// Maximum environment entries in an RCH invocation.
+const MAX_INVOCATION_ENV_ENTRIES: usize = 256;
 
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
@@ -500,6 +502,13 @@ pub fn build_rch_attested_proof_receipt(
             field: "invocation.argv",
             max: MAX_INVOCATION_ARGV,
             actual: invocation.argv.len(),
+        });
+    }
+    if invocation.env.len() > MAX_INVOCATION_ENV_ENTRIES {
+        return Err(RchAdapterError::CollectionTooLarge {
+            field: "invocation.env",
+            max: MAX_INVOCATION_ENV_ENTRIES,
+            actual: invocation.env.len(),
         });
     }
     if input.env_allowlist.len() > MAX_ENV_ALLOWLIST_ENTRIES {
@@ -1887,6 +1896,61 @@ mod tests {
             RchAdapterError::CollectionTooLarge {
                 field: "invocation.argv",
                 max: MAX_INVOCATION_ARGV,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_invocation_env_before_attestation_hashing() {
+        let mut cmd = invocation(&["cargo", "check", "-p", "frankenengine-node"]);
+        for i in 0..MAX_INVOCATION_ENV_ENTRIES {
+            cmd.env.insert(format!("KEY_{i}"), "value".to_string());
+        }
+
+        let outcome = RchAdapterOutcome {
+            schema_version: RCH_ADAPTER_SCHEMA_VERSION.to_string(),
+            command_digest: "0".repeat(64),
+            action: Some(RchValidationAction::Check),
+            package: Some("frankenengine-node".to_string()),
+            outcome: RchOutcomeClass::Passed,
+            execution_mode: RchExecutionMode::Remote,
+            worker_id: Some("worker-1".to_string()),
+            timeout_class: RchTimeoutClass::None,
+            exit_code: Some(0),
+            retryable: false,
+            product_failure: false,
+            reason_code: "RCH-S000".to_string(),
+            detail: "passed".to_string(),
+            stdout_digest: RchArtifactDigest::from_output(""),
+            stderr_digest: RchArtifactDigest::from_output(""),
+            duration_ms: 1,
+        };
+        let input = RchProofAttestationInput {
+            env_allowlist: vec!["RCH_REQUIRE_REMOTE".to_string()],
+            toolchain: RchToolchainFingerprintInput {
+                cargo_version: "cargo 1.0.0".to_string(),
+                rustc_version: "rustc 1.0.0".to_string(),
+                toolchain_channel: "stable".to_string(),
+            },
+            sync_root: Some("/data/projects/franken_node".to_string()),
+            target_dir: Some("/tmp/franken-tgt-test".to_string()),
+            source_fingerprints: vec![InputDigest {
+                path: "Cargo.toml".to_string(),
+                algorithm: "sha256".to_string(),
+                hex: "a".repeat(64),
+                source: "git".to_string(),
+            }],
+        };
+
+        let err = build_rch_attested_proof_receipt(&cmd, outcome, input)
+            .expect_err("oversized invocation env must fail closed before hashing");
+
+        assert!(matches!(
+            err,
+            RchAdapterError::CollectionTooLarge {
+                field: "invocation.env",
+                max: MAX_INVOCATION_ENV_ENTRIES,
                 ..
             }
         ));
