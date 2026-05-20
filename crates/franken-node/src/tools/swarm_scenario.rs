@@ -205,6 +205,8 @@ pub enum SwarmScenarioError {
     ArtifactAlreadyExists { path: PathBuf },
     #[error("scenario artifact path is not relative and safe: {path}")]
     UnsafeArtifactPath { path: String },
+    #[error("scenario `{scenario_id}` operator evidence ref is not a generated artifact: {path}")]
+    MissingOperatorEvidenceRef { scenario_id: String, path: String },
     #[error("fleet transport error: {0}")]
     FleetTransport(#[from] FleetTransportError),
     #[error("replay bundle error: {0}")]
@@ -663,7 +665,14 @@ pub fn run_deterministic_swarm_scenario(
         });
     }
 
-    record_operator_incidents(spec, &package, base_timestamp, &mut logs, &mut assertions)?;
+    record_operator_incidents(
+        spec,
+        &package,
+        &artifacts,
+        base_timestamp,
+        &mut logs,
+        &mut assertions,
+    )?;
 
     let artifact_paths = artifacts
         .iter()
@@ -971,12 +980,23 @@ fn expected_gap_for_fault(fault: SwarmScenarioFault) -> &'static str {
 fn record_operator_incidents(
     spec: &SwarmScenarioSpec,
     package: &IncidentEvidencePackage,
+    artifacts: &[SwarmScenarioArtifact],
     base_timestamp: DateTime<Utc>,
     logs: &mut Vec<SwarmScenarioLog>,
     assertions: &mut Vec<SwarmScenarioAssertion>,
 ) -> Result<(), SwarmScenarioError> {
+    let generated_artifacts = artifacts
+        .iter()
+        .map(|artifact| artifact.artifact_path.as_str())
+        .collect::<BTreeSet<_>>();
     for incident in &spec.operator_incidents {
         let artifact_path = incident.evidence_ref.clone();
+        if !generated_artifacts.contains(artifact_path.as_str()) {
+            return Err(SwarmScenarioError::MissingOperatorEvidenceRef {
+                scenario_id: spec.scenario_id.clone(),
+                path: artifact_path,
+            });
+        }
         let success = !incident.reason_code.trim().is_empty()
             && !incident.operator_action.trim().is_empty()
             && validate_relative_path(Path::new(&incident.evidence_ref)).is_ok();

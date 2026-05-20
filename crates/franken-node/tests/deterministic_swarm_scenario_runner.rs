@@ -259,3 +259,28 @@ fn high_contention_scenario_rejects_unsafe_operator_evidence_ref() -> TestResult
         )),
     }
 }
+
+#[test]
+fn high_contention_scenario_rejects_missing_operator_evidence_ref() -> TestResult {
+    let mut spec = high_contention_swarm_scenario_specs()
+        .into_iter()
+        .next()
+        .ok_or_else(|| "high-contention scenario pack was empty".to_string())?;
+    let incident = spec
+        .operator_incidents
+        .get_mut(0)
+        .ok_or_else(|| "high-contention scenario omitted operator incident".to_string())?;
+    incident.evidence_ref = "scenario_artifacts/missing/operator-evidence.json".to_string();
+    let root = tempfile::tempdir().map_err(|err| format!("failed creating tempdir: {err}"))?;
+
+    match run_deterministic_swarm_scenario(&spec, root.path()) {
+        Err(SwarmScenarioError::MissingOperatorEvidenceRef { path, .. })
+            if path == "scenario_artifacts/missing/operator-evidence.json" =>
+        {
+            Ok(())
+        }
+        other => Err(format!(
+            "expected missing generated artifact rejection for operator evidence ref, got {other:?}"
+        )),
+    }
+}
