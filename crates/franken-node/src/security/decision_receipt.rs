@@ -16,10 +16,14 @@ use std::sync::Mutex;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use serde::{Deserialize, Serialize};
+// `SigningKey` and `VerifyingKey` remain as the public decision-receipt key
+// types and for deterministic test fixtures. Signing and verification route
+// through the crate crypto trait surface below.
+use ed25519_dalek::{SigningKey, VerifyingKey};
 
+use frankenengine_node::crypto::{Ed25519Scheme, SignatureScheme};
 use frankenengine_node::runtime::clock;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -461,8 +465,15 @@ pub fn sign_receipt(
     validate_confidence(receipt.confidence)?;
     validate_signature_version(&receipt.signature_version)?;
     let payload = canonical_json(receipt)?;
-    let signature = signing_key.sign(payload.as_bytes());
-    let signature_b64 = BASE64_STANDARD.encode(signature.to_bytes());
+
+    // Use the raw trait path because the receipt's canonical JSON is already
+    // the stable signed preimage for `ed25519-v1` receipts.
+    let secret_key_bytes = signing_key.to_bytes();
+    let signature_bytes =
+        Ed25519Scheme::sign_raw(&secret_key_bytes, payload.as_bytes()).map_err(|source| {
+            ReceiptError::Internal(format!("failed to sign decision receipt: {source}"))
+        })?;
+    let signature_b64 = BASE64_STANDARD.encode(signature_bytes);
     let chain_hash = compute_chain_hash(receipt.previous_receipt_hash.as_deref(), &payload);
     let signer_key_id = signing_key_id(&signing_key.verifying_key());
 
@@ -523,12 +534,14 @@ pub fn verify_receipt_with_audience(
     let sig_bytes = BASE64_STANDARD
         .decode(&signed.signature)
         .map_err(ReceiptError::SignatureDecode)?;
-    let signature = Signature::from_slice(&sig_bytes).map_err(|_| ReceiptError::SignatureBytes)?;
 
-    if public_key
-        .verify_strict(payload.as_bytes(), &signature)
-        .is_err()
-    {
+    // Verify the same raw canonical preimage used by legacy direct Ed25519
+    // decision-receipt signatures.
+    let signature_array = Ed25519Scheme::signature_from_bytes(&sig_bytes)
+        .map_err(|_| ReceiptError::SignatureBytes)?;
+    let public_key_bytes = public_key.to_bytes();
+
+    if !Ed25519Scheme::verify_raw(&public_key_bytes, payload.as_bytes(), &signature_array) {
         return Ok(false);
     }
 
@@ -896,7 +909,8 @@ fn validate_confidence(confidence: f64) -> Result<(), ReceiptError> {
 }
 
 fn validate_signature_version(signature_version: &str) -> Result<(), ReceiptError> {
-    if signature_version == DECISION_RECEIPT_SIGNATURE_VERSION {
+    if crate::security::constant_time::ct_eq(signature_version, DECISION_RECEIPT_SIGNATURE_VERSION)
+    {
         return Ok(());
     }
 

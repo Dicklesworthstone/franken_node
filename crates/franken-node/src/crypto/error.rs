@@ -25,10 +25,18 @@ impl fmt::Display for Ed25519Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidKeyLength { expected, actual } => {
-                write!(f, "Invalid key length: expected {}, got {}", expected, actual)
+                write!(
+                    f,
+                    "Invalid key length: expected {}, got {}",
+                    expected, actual
+                )
             }
             Self::InvalidSignatureLength { expected, actual } => {
-                write!(f, "Invalid signature length: expected {}, got {}", expected, actual)
+                write!(
+                    f,
+                    "Invalid signature length: expected {}, got {}",
+                    expected, actual
+                )
             }
             Self::VerificationFailed => write!(f, "Signature verification failed"),
             Self::SerializationFailed(msg) => write!(f, "Serialization failed: {}", msg),

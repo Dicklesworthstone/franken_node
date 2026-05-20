@@ -24,14 +24,14 @@
 //! - [`Ed25519Signer`]: Ed25519-specific signer with security patterns
 
 mod error;
+mod key_material;
 mod schemes;
 mod signer;
-mod key_material;
 
 pub use error::*;
+pub use key_material::*;
 pub use schemes::*;
 pub use signer::*;
-pub use key_material::*;
 
 // Re-export for convenience
 pub use ed25519_dalek;

@@ -27,6 +27,15 @@ const RCH_COMMAND_DIGEST_DOMAIN: &str = "franken-node/rch-command-digest/v1";
 const RCH_ATTESTATION_DIGEST_DOMAIN: &str = "franken-node/rch-attestation-digest/v1";
 const SNIPPET_MAX_BYTES: usize = 4_096;
 
+/// Maximum entries in env_allowlist to prevent DoS via oversized deserialized input.
+const MAX_ENV_ALLOWLIST_ENTRIES: usize = 256;
+/// Maximum source fingerprints to prevent DoS via oversized deserialized input.
+const MAX_SOURCE_FINGERPRINTS: usize = 4_096;
+/// Maximum redacted env keys to prevent DoS via oversized deserialized input.
+const MAX_REDACTED_ENV_KEYS: usize = 256;
+/// Maximum argv elements in an RCH invocation.
+const MAX_INVOCATION_ARGV: usize = 128;
+
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
@@ -425,6 +434,23 @@ impl RchProofAttestation {
                 schema_version: self.schema_version.clone(),
             });
         }
+
+        // Bound checks to prevent DoS via oversized deserialized input.
+        if self.source_fingerprints.len() > MAX_SOURCE_FINGERPRINTS {
+            return Err(RchAdapterError::CollectionTooLarge {
+                field: "source_fingerprints",
+                max: MAX_SOURCE_FINGERPRINTS,
+                actual: self.source_fingerprints.len(),
+            });
+        }
+        if self.redacted_env_keys.len() > MAX_REDACTED_ENV_KEYS {
+            return Err(RchAdapterError::CollectionTooLarge {
+                field: "redacted_env_keys",
+                max: MAX_REDACTED_ENV_KEYS,
+                actual: self.redacted_env_keys.len(),
+            });
+        }
+
         for (field, digest) in [
             ("command_digest", &self.command_digest),
             ("env_allowlist_fingerprint", &self.env_allowlist_fingerprint),
@@ -466,6 +492,29 @@ pub fn build_rch_attested_proof_receipt(
 ) -> Result<RchAttestedProofReceipt, RchAdapterError> {
     if outcome.execution_mode == RchExecutionMode::Remote && outcome.worker_id.is_none() {
         return Err(RchAdapterError::MissingWorkerMetadata);
+    }
+
+    // Bound checks on input collections to prevent DoS via oversized input.
+    if invocation.argv.len() > MAX_INVOCATION_ARGV {
+        return Err(RchAdapterError::CollectionTooLarge {
+            field: "invocation.argv",
+            max: MAX_INVOCATION_ARGV,
+            actual: invocation.argv.len(),
+        });
+    }
+    if input.env_allowlist.len() > MAX_ENV_ALLOWLIST_ENTRIES {
+        return Err(RchAdapterError::CollectionTooLarge {
+            field: "env_allowlist",
+            max: MAX_ENV_ALLOWLIST_ENTRIES,
+            actual: input.env_allowlist.len(),
+        });
+    }
+    if input.source_fingerprints.len() > MAX_SOURCE_FINGERPRINTS {
+        return Err(RchAdapterError::CollectionTooLarge {
+            field: "source_fingerprints",
+            max: MAX_SOURCE_FINGERPRINTS,
+            actual: input.source_fingerprints.len(),
+        });
     }
 
     let (_, inferred_target_dir) = normalize_cargo_argv(invocation)?;
@@ -768,12 +817,27 @@ pub enum RchAdapterError {
     InvalidSourceFingerprint { path: String },
     #[error("RCH attestation field `{field}` does not match adapter outcome")]
     AttestationMismatch { field: &'static str },
+    #[error("{field} exceeds maximum size {max} (got {actual})")]
+    CollectionTooLarge {
+        field: &'static str,
+        max: usize,
+        actual: usize,
+    },
 }
 
 pub fn validate_allowed_rch_command(
     invocation: &RchInvocation,
     policy: &RchCommandPolicy,
 ) -> Result<AllowedRchCommand, RchAdapterError> {
+    // Bound check to prevent DoS via oversized argv.
+    if invocation.argv.len() > MAX_INVOCATION_ARGV {
+        return Err(RchAdapterError::CollectionTooLarge {
+            field: "invocation.argv",
+            max: MAX_INVOCATION_ARGV,
+            actual: invocation.argv.len(),
+        });
+    }
+
     let (cargo_argv, target_dir) = normalize_cargo_argv(invocation)?;
     let mut cursor = cargo_argv.iter();
 
@@ -1695,5 +1759,100 @@ mod tests {
         assert!(compile_outcome.product_failure);
         assert_eq!(test_outcome.outcome, RchOutcomeClass::TestFailed);
         assert!(test_outcome.product_failure);
+    }
+
+    #[test]
+    fn rejects_oversized_argv_in_validate_allowed_rch_command() {
+        let oversized_argv: Vec<String> = (0..MAX_INVOCATION_ARGV + 1)
+            .map(|i| format!("arg{i}"))
+            .collect();
+        let cmd = RchInvocation {
+            argv: oversized_argv,
+            env: BTreeMap::new(),
+            cwd: "/repo".to_string(),
+        };
+
+        let err = validate_allowed_rch_command(&cmd, &policy()).expect_err("oversized argv");
+
+        assert!(matches!(
+            err,
+            RchAdapterError::CollectionTooLarge {
+                field: "invocation.argv",
+                max: MAX_INVOCATION_ARGV,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_source_fingerprints_in_attestation_validate() {
+        let oversized_fingerprints: Vec<InputDigest> = (0..MAX_SOURCE_FINGERPRINTS + 1)
+            .map(|i| InputDigest {
+                path: format!("file{i}.rs"),
+                algorithm: "sha256".to_string(),
+                hex: "a".repeat(64),
+                source: "test".to_string(),
+            })
+            .collect();
+
+        let attestation = RchProofAttestation {
+            schema_version: RCH_PROOF_ATTESTATION_SCHEMA_VERSION.to_string(),
+            command_digest: DigestRef::sha256(b"test"),
+            env_allowlist_fingerprint: DigestRef::sha256(b"env"),
+            toolchain_fingerprint: DigestRef::sha256(b"toolchain"),
+            worker_id: Some("worker".to_string()),
+            worker_fingerprint: Some(DigestRef::sha256(b"worker")),
+            sync_root_fingerprint: None,
+            target_dir_fingerprint: DigestRef::sha256(b"target"),
+            source_fingerprints: oversized_fingerprints,
+            redacted_env_keys: Vec::new(),
+        };
+
+        let err = attestation.validate().expect_err("oversized source_fingerprints");
+
+        assert!(matches!(
+            err,
+            RchAdapterError::CollectionTooLarge {
+                field: "source_fingerprints",
+                max: MAX_SOURCE_FINGERPRINTS,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_redacted_env_keys_in_attestation_validate() {
+        let oversized_keys: Vec<String> = (0..MAX_REDACTED_ENV_KEYS + 1)
+            .map(|i| format!("KEY{i}"))
+            .collect();
+
+        let attestation = RchProofAttestation {
+            schema_version: RCH_PROOF_ATTESTATION_SCHEMA_VERSION.to_string(),
+            command_digest: DigestRef::sha256(b"test"),
+            env_allowlist_fingerprint: DigestRef::sha256(b"env"),
+            toolchain_fingerprint: DigestRef::sha256(b"toolchain"),
+            worker_id: Some("worker".to_string()),
+            worker_fingerprint: Some(DigestRef::sha256(b"worker")),
+            sync_root_fingerprint: None,
+            target_dir_fingerprint: DigestRef::sha256(b"target"),
+            source_fingerprints: vec![InputDigest {
+                path: "src/main.rs".to_string(),
+                algorithm: "sha256".to_string(),
+                hex: "a".repeat(64),
+                source: "test".to_string(),
+            }],
+            redacted_env_keys: oversized_keys,
+        };
+
+        let err = attestation.validate().expect_err("oversized redacted_env_keys");
+
+        assert!(matches!(
+            err,
+            RchAdapterError::CollectionTooLarge {
+                field: "redacted_env_keys",
+                max: MAX_REDACTED_ENV_KEYS,
+                ..
+            }
+        ));
     }
 }

@@ -263,7 +263,7 @@ The ergonomics proof-of-concept lives in the `tests.rs` test suite. No other mod
 
 | Module | Bead | Status |
 |---|---|---|
-| `security/decision_receipt.rs` | [`bd-dwx4l`](../../.beads/) | open |
+| `security/decision_receipt.rs` | [`bd-dwx4l`](../../.beads/) | closed 2026-05-20 |
 | `security/remote_cap.rs` (single-signer paths only; threshold-sig stays in `security::threshold_sig`) | [`bd-acvur`](../../.beads/) | open, blocked-by `bd-dwx4l` |
 | `tools/replay_bundle.rs` (the tool side; the SDK side at `sdk/verifier/src/bundle.rs` stays independent per the engine-split contract) | [`bd-lbnkf`](../../.beads/) | open, blocked-by `bd-dwx4l` |
 
@@ -368,7 +368,7 @@ This design phase created the foundation. Filed beads:
 | Phase | Item | Bead | Status |
 |---|---|---|---|
 | 1 | Implement core crypto traits module | (rolled into `bd-18dd1`) | ✅ closed 2026-05-01 |
-| 2 | Migrate `security::decision_receipt` to traits | `bd-dwx4l` | open |
+| 2 | Migrate `security::decision_receipt` to traits | `bd-dwx4l` | closed 2026-05-20 |
 | 2 | Migrate `security::remote_cap` single-signer paths to traits | `bd-acvur` | open, blocked-by `bd-dwx4l` |
 | 2 | Migrate `tools::replay_bundle` tool-side to traits | `bd-lbnkf` | open, blocked-by `bd-dwx4l` |
 | 3 | Crypto audit + fuzz + Criterion bench | `bd-rcscw` | open, blocked-by Phase 2 |

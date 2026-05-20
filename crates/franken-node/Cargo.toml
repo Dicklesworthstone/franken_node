@@ -879,6 +879,10 @@ name = "decision_receipt_round_trip_metamorphic"
 path = "tests/decision_receipt_round_trip_metamorphic.rs"
 
 [[test]]
+name = "decision_receipt_crypto_trait_adoption"
+path = "tests/decision_receipt_crypto_trait_adoption.rs"
+
+[[test]]
 name = "artifact_signing_metamorphic"
 path = "tests/artifact_signing_metamorphic.rs"
 

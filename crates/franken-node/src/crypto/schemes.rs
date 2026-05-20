@@ -66,6 +66,42 @@ pub trait SignatureScheme: Send + Sync + 'static {
         signature: &Self::Signature,
     ) -> bool;
 
+    /// Sign the exact bytes provided, without any wrapper domain or length framing.
+    ///
+    /// Use this when the caller has already constructed a canonical preimage that
+    /// embeds its own domain separator and length-prefix scheme (e.g. signed
+    /// receipts that prepend `DECISION_RECEIPT_SIGNATURE_VERSION` and a sorted
+    /// JSON body, or replay bundles with their own header). Calling
+    /// [`sign_with_domain`](Self::sign_with_domain) on those preimages would
+    /// double-wrap the bytes and break on-the-wire signature compatibility with
+    /// existing artifacts.
+    ///
+    /// # Security
+    /// - The caller is responsible for cryptographic domain separation.
+    /// - Output bytes are bit-for-bit identical to a direct Ed25519 sign over
+    ///   `message` for [`Ed25519Scheme`].
+    fn sign_raw(
+        secret_key: &Self::SecretKey,
+        message: &[u8],
+    ) -> Result<Self::Signature, Self::Error>;
+
+    /// Verify a signature over the exact bytes provided, without any wrapper
+    /// domain or length framing.
+    ///
+    /// Mirror of [`sign_raw`](Self::sign_raw). Returns `false` on any failure
+    /// (malformed key, malformed signature, or verification mismatch) so that
+    /// callers can branch in constant time.
+    ///
+    /// # Security
+    /// - Uses strict verification (rejects malleable / non-canonical signatures)
+    ///   for schemes that support it.
+    #[must_use]
+    fn verify_raw(
+        public_key: &Self::PublicKey,
+        message: &[u8],
+        signature: &Self::Signature,
+    ) -> bool;
+
     /// Parse public key from raw bytes with validation.
     fn public_key_from_bytes(bytes: &[u8]) -> Result<Self::PublicKey, Self::Error>;
 
@@ -195,6 +231,42 @@ impl SignatureScheme for Ed25519Scheme {
         verifying_key.verify(digest_bytes, &sig).is_ok()
     }
 
+    fn sign_raw(
+        secret_key: &Self::SecretKey,
+        message: &[u8],
+    ) -> Result<Self::Signature, Self::Error> {
+        // Construct a SigningKey directly from the 32-byte seed.
+        // `SigningKey::from_bytes` for ed25519-dalek 2.x is infallible for any
+        // 32-byte input, but we keep the Result return type to match the trait
+        // contract so other schemes (RSA / ECDSA) can fail.
+        let signing_key = SigningKey::from_bytes(secret_key);
+        let signature = signing_key.sign(message);
+        Ok(signature.to_bytes())
+    }
+
+    fn verify_raw(
+        public_key: &Self::PublicKey,
+        message: &[u8],
+        signature: &Self::Signature,
+    ) -> bool {
+        // Parse keys and signature; any parse failure means "not valid".
+        // Return false without leaking which step failed.
+        let verifying_key = match VerifyingKey::from_bytes(public_key) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
+
+        let sig = match Signature::try_from(&signature[..]) {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
+
+        // verify_strict rejects malleable / non-canonical-s signatures.
+        // decision_receipt and other consumers historically rely on strict
+        // verification for replay/forgery hardening; keep that contract here.
+        verifying_key.verify_strict(message, &sig).is_ok()
+    }
+
     fn public_key_from_bytes(bytes: &[u8]) -> Result<Self::PublicKey, Self::Error> {
         if bytes.len() != 32 {
             return Err(Ed25519Error::InvalidKeyLength {
@@ -268,6 +340,29 @@ mod tests {
         assert!(!Ed25519Scheme::verify_with_domain(
             &pk, b"domain2", message, &sig1
         ));
+    }
+
+    #[test]
+    fn test_ed25519_raw_signature_preserves_caller_preimage() {
+        let (pk, sk) = Ed25519Scheme::generate_keypair().unwrap();
+        let message = b"caller-owned canonical preimage";
+        let direct_key = SigningKey::from_bytes(&sk);
+        let direct_signature = direct_key.sign(message).to_bytes();
+
+        let raw_signature = Ed25519Scheme::sign_raw(&sk, message).unwrap();
+
+        assert_eq!(raw_signature, direct_signature);
+        assert!(Ed25519Scheme::verify_raw(&pk, message, &raw_signature));
+        assert!(!Ed25519Scheme::verify_with_domain(
+            &pk,
+            b"decision_receipt",
+            message,
+            &raw_signature
+        ));
+
+        let wrapped_signature =
+            Ed25519Scheme::sign_with_domain(&sk, b"decision_receipt", message).unwrap();
+        assert!(!Ed25519Scheme::verify_raw(&pk, message, &wrapped_signature));
     }
 
     #[test]

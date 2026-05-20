@@ -200,6 +200,10 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
 - Dropped vendored `transplant/` (pi_agent_rust snapshot) and surrounding
   drift-detect infrastructure once cross-repo drift validation
   (bd-7vk3p) shipped.
+- Decision receipts now sign and verify through the shared
+  `crypto::Ed25519Scheme` raw trait path. This deliberately preserves the
+  existing `ed25519-v1` canonical preimage and signature bytes instead of
+  double-wrapping receipts with the new domain-framed trait path (bd-dwx4l).
 
 ### Fixed
 

@@ -1568,6 +1568,7 @@ pub mod config;
 pub mod conformance;
 pub mod connector;
 pub mod control_plane;
+pub mod crypto;
 pub mod dgis;
 #[cfg(feature = "advanced-features")]
 pub mod encoding;
