@@ -1023,6 +1023,13 @@ fn validate_safe_path(path: &Path) -> Result<(), ReceiptError> {
         });
     }
 
+    if path_str.chars().any(char::is_control) {
+        return Err(ReceiptError::UnsafePath {
+            path: path_str.to_string(),
+            reason: "contains control characters".to_string(),
+        });
+    }
+
     // Reject absolute paths (leading /)
     if path.is_absolute() {
         return Err(ReceiptError::UnsafePath {
@@ -1942,6 +1949,16 @@ mod tests {
 
         assert!(
             matches!(err, ReceiptError::UnsafePath { reason, .. } if reason.contains("null bytes"))
+        );
+    }
+
+    #[test]
+    fn validate_safe_path_rejects_control_characters() {
+        let err = validate_safe_path(std::path::Path::new("receipts\nshadow.json"))
+            .expect_err("control characters should be rejected");
+
+        assert!(
+            matches!(err, ReceiptError::UnsafePath { reason, .. } if reason.contains("control characters"))
         );
     }
 
