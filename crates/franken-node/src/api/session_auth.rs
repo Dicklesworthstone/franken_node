@@ -43,6 +43,25 @@ const HANDSHAKE_HMAC_PREFIX: &[u8] = b"session_auth_handshake_v1:";
 /// HMAC prefix for per-message transcript binding.
 const MESSAGE_HMAC_PREFIX: &[u8] = b"session_auth_message_v1:";
 
+/// Maximum length for session identifiers. Prevents DoS via oversized strings
+/// and ensures session IDs fit in reasonable log output.
+const MAX_SESSION_ID_BYTES: usize = 256;
+
+/// Validate a session identifier: rejects empty, overlong, or control-char-containing IDs.
+/// Returns an error message if invalid, None if valid.
+fn invalid_session_id_reason(session_id: &str) -> Option<&'static str> {
+    if session_id.is_empty() {
+        return Some("session_id cannot be empty");
+    }
+    if session_id.len() > MAX_SESSION_ID_BYTES {
+        return Some("session_id exceeds maximum length");
+    }
+    if session_id.chars().any(char::is_control) {
+        return Some("session_id contains control characters");
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -76,6 +95,7 @@ pub mod error_codes {
     pub const ERR_SCC_ROLE_MISMATCH: &str = "ERR_SCC_ROLE_MISMATCH";
     pub const ERR_SCC_AUTH_FAILED: &str = "ERR_SCC_AUTH_FAILED";
     pub const ERR_SCC_MAX_SESSIONS: &str = "ERR_SCC_MAX_SESSIONS";
+    pub const ERR_SCC_INVALID_SESSION_ID: &str = "ERR_SCC_INVALID_SESSION_ID";
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +625,9 @@ pub enum SessionError {
         direction: MessageDirection,
         sequence: u64,
     },
+    InvalidSessionId {
+        reason: &'static str,
+    },
 }
 
 impl SessionError {
@@ -620,6 +643,7 @@ impl SessionError {
             Self::AuthFailed { .. } => error_codes::ERR_SCC_AUTH_FAILED,
             Self::MaxSessionsReached { .. } => error_codes::ERR_SCC_MAX_SESSIONS,
             Self::ReplayDetected { .. } => error_codes::ERR_SCC_SEQUENCE_VIOLATION,
+            Self::InvalidSessionId { .. } => error_codes::ERR_SCC_INVALID_SESSION_ID,
         }
     }
 }
@@ -687,6 +711,9 @@ impl std::fmt::Display for SessionError {
                     "replay detected: session={session_id} direction={} seq={sequence}",
                     direction.label()
                 )
+            }
+            Self::InvalidSessionId { reason } => {
+                write!(f, "invalid session id: {reason}")
             }
         }
     }
@@ -1230,6 +1257,18 @@ impl SessionManager {
         handshake_mac: [u8; SIGNATURE_LEN],
     ) -> Result<&AuthenticatedSession, SessionError> {
         self.expire_stale_sessions(timestamp, &trace_id);
+
+        // Validate session_id before using it in logs or storage.
+        if let Some(reason) = invalid_session_id_reason(&session_id) {
+            self.push_event(SessionEvent {
+                event_code: event_codes::SCC_MESSAGE_REJECTED.to_string(),
+                session_id: "[INVALID]".to_string(),
+                trace_id,
+                detail: format!("session establishment rejected: {reason}"),
+                timestamp,
+            });
+            return Err(SessionError::InvalidSessionId { reason });
+        }
 
         // INV-SCC-HANDSHAKE-BIND: verify handshake transcript MAC.
         let preimage = build_handshake_preimage(
@@ -2014,6 +2053,100 @@ mod tests {
             mac,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn establish_session_rejects_control_chars_in_session_id() {
+        let mut mgr = default_manager();
+        let malicious_sid = "sess\r\nINJECTED: fake\ttab";
+        let rs = test_root_secret();
+        let epoch = test_epoch();
+        let mac = sign_handshake(
+            malicious_sid,
+            "client-a",
+            "server-1",
+            "enc-key",
+            "sign-key",
+            epoch,
+            1_000_000,
+            &rs,
+        );
+
+        let result = mgr.establish_session(
+            malicious_sid.to_string(),
+            "client-a".into(),
+            "server-1".into(),
+            "enc-key".into(),
+            "sign-key".into(),
+            1_000_000,
+            "trace-control-char".into(),
+            mac,
+        );
+
+        assert!(
+            matches!(result, Err(SessionError::InvalidSessionId { .. })),
+            "expected InvalidSessionId error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn establish_session_rejects_empty_session_id() {
+        let mut mgr = default_manager();
+        let rs = test_root_secret();
+        let epoch = test_epoch();
+        let mac = sign_handshake(
+            "", "client-a", "server-1", "enc-key", "sign-key", epoch, 1_000_000, &rs,
+        );
+
+        let result = mgr.establish_session(
+            String::new(),
+            "client-a".into(),
+            "server-1".into(),
+            "enc-key".into(),
+            "sign-key".into(),
+            1_000_000,
+            "trace-empty-sid".into(),
+            mac,
+        );
+
+        assert!(
+            matches!(result, Err(SessionError::InvalidSessionId { .. })),
+            "expected InvalidSessionId error for empty session_id"
+        );
+    }
+
+    #[test]
+    fn establish_session_rejects_overlong_session_id() {
+        let mut mgr = default_manager();
+        let overlong_sid = "x".repeat(MAX_SESSION_ID_BYTES + 1);
+        let rs = test_root_secret();
+        let epoch = test_epoch();
+        let mac = sign_handshake(
+            &overlong_sid,
+            "client-a",
+            "server-1",
+            "enc-key",
+            "sign-key",
+            epoch,
+            1_000_000,
+            &rs,
+        );
+
+        let result = mgr.establish_session(
+            overlong_sid,
+            "client-a".into(),
+            "server-1".into(),
+            "enc-key".into(),
+            "sign-key".into(),
+            1_000_000,
+            "trace-overlong-sid".into(),
+            mac,
+        );
+
+        assert!(
+            matches!(result, Err(SessionError::InvalidSessionId { .. })),
+            "expected InvalidSessionId error for overlong session_id"
+        );
     }
 
     /// Sign a message for a test session (retrieves handshake_mac from the session).
