@@ -459,7 +459,7 @@ impl RchAttestedProofReceipt {
         ) {
             return Err(RchAdapterError::AttestationMismatch { field: "worker_id" });
         }
-        if self.outcome.execution_mode == RchExecutionMode::Remote
+        if matches!(self.outcome.execution_mode, RchExecutionMode::Remote)
             && self.attestation.worker_fingerprint.is_none()
         {
             return Err(RchAdapterError::MissingWorkerMetadata);
@@ -536,7 +536,7 @@ pub fn build_rch_attested_proof_receipt(
 ) -> Result<RchAttestedProofReceipt, RchAdapterError> {
     if let Some(worker_id) = outcome.worker_id.as_deref() {
         ensure_worker_id_safe("outcome.worker_id", worker_id)?;
-    } else if outcome.execution_mode == RchExecutionMode::Remote {
+    } else if matches!(outcome.execution_mode, RchExecutionMode::Remote) {
         return Err(RchAdapterError::MissingWorkerMetadata);
     }
 
@@ -1088,7 +1088,7 @@ pub fn classify_rch_queue_snapshot(
             false,
             "Track the sibling dependency drift as the blocker instead of rerunning identical proof work.",
         )
-    } else if input.worker_reachable == Some(false)
+    } else if input.worker_reachable.is_some_and(|reachable| !reachable)
         || input
             .heartbeat_age_seconds
             .is_some_and(|age| age >= policy.min_heartbeat_stale_seconds)
@@ -1284,6 +1284,7 @@ fn classify_worker_failure(normalized: &str) -> Option<ClassifiedOutcome> {
             "failed to read /dp/",
         ],
     ) || is_worker_missing_dependency_path(normalized)
+        || is_worker_target_metadata_loss(normalized)
     {
         return Some(ClassifiedOutcome {
             outcome: RchOutcomeClass::WorkerFilesystemError,
@@ -1300,6 +1301,13 @@ fn classify_worker_failure(normalized: &str) -> Option<ClassifiedOutcome> {
 
 fn is_worker_missing_dependency_path(normalized: &str) -> bool {
     normalized.contains("/dp/") && normalized.contains("no such file or directory (os error 2)")
+}
+
+fn is_worker_target_metadata_loss(normalized: &str) -> bool {
+    normalized.contains("extern location for")
+        && normalized.contains("does not exist")
+        && normalized.contains(".rch-target")
+        && normalized.contains(".rmeta")
 }
 
 fn normalize_cargo_argv(

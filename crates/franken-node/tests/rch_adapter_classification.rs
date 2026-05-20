@@ -299,6 +299,37 @@ fn worker_missing_dp_path_dependency_is_infrastructure_failure() {
 }
 
 #[test]
+fn worker_rmeta_loss_is_infrastructure_failure() {
+    let cmd = invocation(&[
+        "cargo",
+        "test",
+        "-p",
+        "frankenengine-node",
+        "--test",
+        "validation_proof_cache",
+    ]);
+    let output = command_output(
+        101,
+        "",
+        "error: extern location for pin_project_lite does not exist: \
+         /data/projects/franken_node/.rch-target-vmi1264463-job-29843600204366467/debug/deps/libpin_project_lite.rmeta\n\
+         error: could not compile `tokio` (lib) due to 1 previous error\n",
+    );
+
+    let outcome = classify_rch_output(
+        &cmd,
+        &output,
+        &RchProcessSnapshot::quiet(),
+        &RchCommandPolicy::default(),
+    );
+
+    assert_eq!(outcome.outcome, RchOutcomeClass::WorkerFilesystemError);
+    assert_eq!(outcome.reason_code, "RCH-WORKER-FILESYSTEM");
+    assert!(outcome.retryable);
+    assert!(!outcome.product_failure);
+}
+
+#[test]
 fn product_missing_source_file_remains_compile_failure() {
     let cmd = invocation(&["cargo", "check", "-p", "frankenengine-node"]);
     let output = command_output(
