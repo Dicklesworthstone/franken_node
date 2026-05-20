@@ -39,6 +39,10 @@ pub type NodeId = String;
 /// Rejecting control characters at the graph boundary prevents downstream path
 /// and display layers from seeing split identifiers or injected output lines.
 pub fn validate_node_id(node: &NodeId) -> Result<(), GraphError> {
+    // Length check first to bound memory before any other operations
+    if node.len() > MAX_NODE_ID_LEN {
+        return Err(GraphError::InvalidNodeId(node.clone()));
+    }
     let trimmed = node.trim();
     if trimmed.is_empty() || node != trimmed || node.chars().any(char::is_control) {
         return Err(GraphError::InvalidNodeId(node.clone()));
@@ -130,6 +134,11 @@ pub struct ContagionGraph {
 /// Cap on per-node out-edges to bound memory in the long-running batch
 /// sweep that sub-task 4 will exercise.
 const MAX_EDGES_PER_NODE: usize = 4096;
+
+/// Maximum length of a node ID string in bytes. Real package names and
+/// identifiers are far shorter; the cap prevents DoS via multi-megabyte
+/// node ID strings that would exhaust memory or slow string operations.
+const MAX_NODE_ID_LEN: usize = 512;
 
 /// Cap on total nodes in a single graph. Matches
 /// `dgis::contagion_profiles::MAX_PROFILE_NODES` (the only non-test consumer
@@ -560,6 +569,32 @@ mod tests {
         g.nodes.push(bad.clone());
         g.edges.insert(bad.clone(), Vec::new());
         assert_eq!(g.validate(), Err(GraphError::InvalidNodeId(bad)));
+    }
+
+    #[test]
+    fn node_ids_reject_overlong_identifiers() {
+        // Node IDs exceeding MAX_NODE_ID_LEN must be rejected to prevent DoS
+        // via multi-megabyte strings exhausting memory or slowing operations.
+        let overlong = "x".repeat(MAX_NODE_ID_LEN + 1);
+        assert_eq!(
+            validate_node_id(&overlong),
+            Err(GraphError::InvalidNodeId(overlong.clone()))
+        );
+
+        // Edge construction must also reject overlong target IDs
+        assert_eq!(
+            ContagionEdge::new(overlong.clone(), 0.5, EdgeKind::DependencyImport).err(),
+            Some(GraphError::InvalidNodeId(overlong.clone()))
+        );
+
+        // Graph add_node must silently reject overlong IDs
+        let mut g = ContagionGraph::new(31);
+        g.add_node(overlong.clone());
+        assert!(g.nodes().is_empty(), "overlong node id must not enter graph");
+
+        // Exactly MAX_NODE_ID_LEN should be accepted
+        let at_limit = "y".repeat(MAX_NODE_ID_LEN);
+        assert!(validate_node_id(&at_limit).is_ok());
     }
 
     #[test]
