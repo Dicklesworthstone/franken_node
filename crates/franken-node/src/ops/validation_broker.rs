@@ -406,7 +406,7 @@ impl ValidationReadinessRef {
                 "readiness_ref freshness_expires_at cannot predate generated_at",
             );
         }
-        if self.freshness_expires_at < now {
+        if self.freshness_expires_at <= now {
             return contract_err(stale_code, "readiness_ref freshness has expired");
         }
         Ok(())
@@ -468,7 +468,7 @@ impl ValidationFlightRecorderRef {
                 "flight_recorder_ref freshness_expires_at cannot predate generated_at",
             );
         }
-        if self.freshness_expires_at < now {
+        if self.freshness_expires_at <= now {
             return contract_err(stale_code, "flight_recorder_ref freshness has expired");
         }
         Ok(())
@@ -1285,7 +1285,7 @@ impl ValidationFlightRecorderRecovery {
                 "recovery decision cannot predate attempt creation",
             );
         }
-        if self.freshness_expires_at < now {
+        if self.freshness_expires_at <= now {
             return flight_recorder_err(
                 error_codes::ERR_VFR_STALE_ATTEMPT,
                 "recovery decision freshness has expired",
@@ -2370,7 +2370,7 @@ impl ValidationReceipt {
                 detail: "finished_at must not be before started_at".to_string(),
             });
         }
-        if self.timing.freshness_expires_at < now {
+        if self.timing.freshness_expires_at <= now {
             return Err(ValidationBrokerError::ContractViolation {
                 code: error_codes::ERR_VB_STALE_RECEIPT,
                 detail: "receipt freshness has expired".to_string(),
@@ -3009,7 +3009,7 @@ fn validate_attempt_timestamps(
     attempt: &ValidationFlightRecorderAttempt,
     now: DateTime<Utc>,
 ) -> Result<(), ValidationBrokerError> {
-    if attempt.freshness_expires_at < now {
+    if attempt.freshness_expires_at <= now {
         return flight_recorder_err(
             error_codes::ERR_VFR_STALE_ATTEMPT,
             "flight recorder attempt freshness has expired",

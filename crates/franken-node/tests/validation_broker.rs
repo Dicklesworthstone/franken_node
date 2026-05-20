@@ -886,6 +886,19 @@ fn stale_cache_reuse_cannot_satisfy_closeout() {
 }
 
 #[test]
+fn receipt_freshness_boundary_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let receipt = receipt();
+
+    assert_broker_contract_code(
+        receipt.validate_at(ts(10)),
+        error_codes::ERR_VB_STALE_RECEIPT,
+    )?;
+    receipt.validate_at(ts(9))?;
+
+    Ok(())
+}
+
+#[test]
 fn malformed_receipts_fail_closed() {
     let stale = receipt();
     let stale_error = stale.validate_at(ts(11)).expect_err("stale receipt");
@@ -1922,14 +1935,31 @@ fn validation_flight_recorder_ref_from_rch_adapter_outcome()
         generated_at + Duration::seconds(ttl_secs as i64)
     );
 
-    // Validate the created reference
-    flight_ref.validate_at(ts(200))?;
+    // Validate the created reference before the TTL boundary.
+    flight_ref.validate_at(generated_at + Duration::seconds(100))?;
 
     Ok(())
 }
 
 #[test]
-fn validation_flight_recorder_ref_validation_fails_when_stale()
+fn readiness_ref_freshness_boundary_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let mut boundary_ref = readiness_ref(readiness_ref_reason_codes::WORKER_AUTH_FAILED);
+    boundary_ref.freshness_expires_at = ts(3);
+    let boundary = proof_lane_source_only_receipt(
+        SourceOnlyReason::ProofLaneWorkerAuthFailed,
+        Some(boundary_ref),
+    );
+
+    assert_broker_contract_code(
+        boundary.validate_at(ts(3)),
+        error_codes::ERR_VB_STALE_READINESS_REF,
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn validation_flight_recorder_ref_freshness_boundary_fails_closed()
 -> Result<(), Box<dyn std::error::Error>> {
     use frankenengine_node::ops::validation_broker::{
         FlightRecorderAdapterOutcome, FlightRecorderAdapterOutcomeClass, RchMode, TimeoutClass,
@@ -1948,29 +1978,52 @@ fn validation_flight_recorder_ref_validation_fails_when_stale()
         detail: "worker ssh connection timeout".to_string(),
     };
 
+    let generated_at = ts(10);
     let flight_ref = ValidationFlightRecorderRef::from_rch_adapter_outcome(
         &adapter_outcome,
         "attempt-789".to_string(),
         "artifacts/flight-recorder/attempt-789.json".to_string(),
         DigestRef {
             algorithm: "sha256".to_string(),
-            hex: "abcdef0123456789deadbeefcafebabe".to_string(),
+            hex: "abcdef0123456789deadbeefcafebabeabcdef0123456789deadbeefcafebabe".to_string(),
         },
-        ts(100),
+        generated_at,
         300, // 5 minutes TTL
     );
 
     // Should validate when fresh
-    flight_ref.validate_at(ts(200))?;
+    flight_ref.validate_at(generated_at + Duration::seconds(100))?;
 
-    // Should fail when stale (after TTL expires)
-    let stale_result = flight_ref.validate_at(ts(500));
-    assert!(stale_result.is_err());
-    if let Err(ValidationBrokerError::ContractViolation { code, .. }) = stale_result {
-        assert_eq!(code, "ERR_VFR_STALE_FLIGHT_RECORDER_REF");
-    } else {
-        return Err("Expected stale flight recorder ref error".into());
-    }
+    // Should fail at the exact freshness boundary.
+    let boundary = generated_at + Duration::seconds(300);
+    assert_flight_recorder_contract_code(
+        flight_ref.validate_at(boundary),
+        error_codes::ERR_VFR_STALE_FLIGHT_RECORDER_REF,
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn flight_recorder_attempt_and_recovery_freshness_boundary_fail_closed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let now = flight_recorder_now();
+
+    let mut attempt = base_flight_recorder_attempt()?;
+    attempt.freshness_expires_at = now;
+    assert_flight_recorder_contract_code(
+        attempt.validate_at(now),
+        error_codes::ERR_VFR_STALE_ATTEMPT,
+    )?;
+
+    let mut fresh_attempt = base_flight_recorder_attempt()?;
+    fresh_attempt.freshness_expires_at = now + Duration::seconds(1);
+    let mut recovery = writer_flight_recorder_recovery(&fresh_attempt);
+    recovery.freshness_expires_at = now;
+    assert_flight_recorder_contract_code(
+        recovery.validate_for_attempt(&fresh_attempt, now),
+        error_codes::ERR_VFR_STALE_ATTEMPT,
+    )?;
 
     Ok(())
 }
