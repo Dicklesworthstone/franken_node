@@ -480,6 +480,12 @@ fn validate_signature(signature: &ManifestSignature) -> Result<(), ManifestSchem
                     reason: "signer_key_ids must not contain empty entries".to_string(),
                 });
             }
+            for (idx, signer_key_id) in policy.signer_key_ids.iter().enumerate() {
+                ensure_manifest_text(
+                    signer_key_id,
+                    &format!("signature.threshold.signer_key_ids[{idx}]"),
+                )?;
+            }
             let unique_keys: std::collections::BTreeSet<&str> =
                 policy.signer_key_ids.iter().map(|s| s.as_str()).collect();
             if unique_keys.len() != policy.signer_key_ids.len() {
@@ -1687,7 +1693,8 @@ mod tests {
 
         // signature.signed_at overlong
         let mut manifest = valid_manifest();
-        manifest.signature.signed_at = "2026-01-01T00:00:00Z".to_string() + &"0".repeat(MAX_MANIFEST_FIELD_BYTES);
+        manifest.signature.signed_at =
+            "2026-01-01T00:00:00Z".to_string() + &"0".repeat(MAX_MANIFEST_FIELD_BYTES);
         let error = validate_signed_manifest(&manifest).expect_err("overlong signed_at");
         assert_eq!(error.code(), "EMS_INVALID_FIELD");
     }

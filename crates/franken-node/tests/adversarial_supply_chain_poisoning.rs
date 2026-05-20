@@ -607,6 +607,46 @@ fn adversarial_signed_manifest_rejects_control_chars_and_huge_vector_fields() {
 }
 
 #[test]
+fn adversarial_signed_manifest_rejects_threshold_signer_key_id_payloads() {
+    let mut manifest = valid_signed_manifest();
+    manifest
+        .signature
+        .threshold
+        .as_mut()
+        .expect("baseline manifest uses threshold policy")
+        .signer_key_ids[1] = "k".repeat(MAX_MANIFEST_FIELD_BYTES + 1);
+
+    let error =
+        validate_signed_manifest(&manifest).expect_err("overlong signer key must fail closed");
+
+    assert_eq!(error.code(), "EMS_INVALID_FIELD");
+    assert!(matches!(
+        error,
+        ManifestSchemaError::InvalidField { ref field, .. }
+            if field == "signature.threshold.signer_key_ids[1]"
+    ));
+
+    let mut manifest = valid_signed_manifest();
+    manifest
+        .signature
+        .threshold
+        .as_mut()
+        .expect("baseline manifest uses threshold policy")
+        .signer_key_ids[2] = "key-c\r\nINJECTED".to_string();
+
+    let error =
+        validate_signed_manifest(&manifest).expect_err("control-char signer key must fail closed");
+
+    assert_eq!(error.code(), "EMS_INVALID_FIELD");
+    assert!(matches!(
+        error,
+        ManifestSchemaError::InvalidField { ref field, .. }
+            if field == "signature.threshold.signer_key_ids[2]"
+    ));
+    assert!(!error.to_string().contains("INJECTED"));
+}
+
+#[test]
 fn adversarial_supply_chain_rejects_oversized_provenance_custom_claim_count_before_projection() {
     let signing_key = legitimate_signing_key();
     let mut registry = registry_with_trusted_key(signing_key.verifying_key());
