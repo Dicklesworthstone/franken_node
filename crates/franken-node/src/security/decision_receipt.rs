@@ -176,6 +176,12 @@ impl ReplayTracker {
     /// Check if nonce was already used and mark it as used.
     /// Returns Ok(()) if nonce is fresh, Err if replayed.
     pub fn check_and_mark(&self, nonce: &str) -> Result<(), ReceiptError> {
+        if self.max_tracked == 0 {
+            return Err(ReceiptError::Internal(
+                "replay tracker capacity must be greater than zero".to_string(),
+            ));
+        }
+
         let mut used = lock_utils::safe_lock(&self.used_nonces).map_err(|e| {
             ReceiptError::Internal(format!("Failed to acquire replay tracker lock: {}", e))
         })?;
@@ -2227,5 +2233,16 @@ mod tests {
             }
             other => panic!("expected ReplayAttack error, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn replay_tracker_zero_capacity_fails_closed() {
+        let tracker = ReplayTracker::with_capacity(0);
+
+        let err = tracker
+            .check_and_mark("nonce-that-would-otherwise-evict-immediately")
+            .expect_err("zero-capacity replay tracker must not accept nonces");
+
+        assert!(matches!(err, ReceiptError::Internal(message) if message.contains("capacity")));
     }
 }
