@@ -59,6 +59,12 @@ pub const MAX_PROFILE_EDGES: usize = 4096;
 /// safe against malformed fixtures that try to inject huge seed lists.
 pub const MAX_INITIAL_INFECTED: usize = 256;
 
+/// Maximum bytes accepted for a profile name.
+pub const MAX_PROFILE_NAME_BYTES: usize = 128;
+
+/// Maximum bytes accepted for operator-facing profile descriptions.
+pub const MAX_PROFILE_DESCRIPTION_BYTES: usize = 1024;
+
 /// Serde-friendly mirror of [`EdgeKind`].
 ///
 /// Kept identical to the simulator enum so JSON authoring is "obvious":
@@ -220,6 +226,8 @@ pub enum ProfileError {
     InvalidExpected,
     /// Simulator config fields were finite but outside the accepted range.
     InvalidConfig,
+    /// Profile metadata contained unsafe control characters or exceeded caps.
+    InvalidMetadata,
     /// The simulator surfaced an error while running the profile (config
     /// out of range, exposure went non-finite, etc.).
     SimulatorFailure(SimulatorError),
@@ -255,6 +263,8 @@ pub fn load_profile_from_json(json: &str) -> Result<ContagionProfile, ProfileErr
     if profile.initial_infected.is_empty() {
         return Err(ProfileError::EmptyProfile);
     }
+
+    validate_profile_metadata(&profile)?;
 
     if profile.graph.nodes.len() > MAX_PROFILE_NODES {
         return Err(ProfileError::BoundedGrowthExceeded);
@@ -301,6 +311,19 @@ pub fn load_profile_from_json(json: &str) -> Result<ContagionProfile, ProfileErr
     }
 
     Ok(profile)
+}
+
+fn validate_profile_metadata(profile: &ContagionProfile) -> Result<(), ProfileError> {
+    if profile.name.is_empty()
+        || profile.name.len() > MAX_PROFILE_NAME_BYTES
+        || profile.name.chars().any(char::is_control)
+        || profile.description.len() > MAX_PROFILE_DESCRIPTION_BYTES
+        || profile.description.chars().any(char::is_control)
+    {
+        return Err(ProfileError::InvalidMetadata);
+    }
+
+    Ok(())
 }
 
 /// Build the in-memory [`ContagionGraph`] for a profile, performing the
@@ -673,6 +696,32 @@ mod tests {
             err,
             ProfileError::GraphFailure(GraphError::InvalidNodeId(_))
         ));
+    }
+
+    #[test]
+    fn loader_rejects_control_character_profile_name() {
+        let bad = r#"{
+            "name":"bad\u001fprofile","description":"control char name",
+            "graph":{"nodes":["a","b"],"edges":[{"from":"a","to":"b","weight":0.5,"edge_kind":"DependencyImport"}],"seed":1},
+            "initial_infected":["a"],
+            "config":{"max_steps":4,"infection_threshold":0.5,"decay_factor":0.5,"seed":1},
+            "expected":{"termination_reason":"Converged","min_infected_count":0,"max_infected_count":2,"terminated_by_step":4}
+        }"#;
+        let err = load_profile_from_json(bad).expect_err("control-char name must reject");
+        assert_eq!(err, ProfileError::InvalidMetadata);
+    }
+
+    #[test]
+    fn loader_rejects_control_character_profile_description() {
+        let bad = r#"{
+            "name":"bad","description":"control\u001fchar description",
+            "graph":{"nodes":["a","b"],"edges":[{"from":"a","to":"b","weight":0.5,"edge_kind":"DependencyImport"}],"seed":1},
+            "initial_infected":["a"],
+            "config":{"max_steps":4,"infection_threshold":0.5,"decay_factor":0.5,"seed":1},
+            "expected":{"termination_reason":"Converged","min_infected_count":0,"max_infected_count":2,"terminated_by_step":4}
+        }"#;
+        let err = load_profile_from_json(bad).expect_err("control-char description must reject");
+        assert_eq!(err, ProfileError::InvalidMetadata);
     }
 
     #[test]
