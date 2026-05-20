@@ -39,9 +39,10 @@ pub type NodeId = String;
 /// Rejecting control characters at the graph boundary prevents downstream path
 /// and display layers from seeing split identifiers or injected output lines.
 pub fn validate_node_id(node: &NodeId) -> Result<(), GraphError> {
-    // Length check first to bound memory before any other operations
+    // Length check first and avoid cloning the attacker-controlled payload into
+    // the error, otherwise overlong rejection still preserves an O(N) path.
     if node.len() > MAX_NODE_ID_LEN {
-        return Err(GraphError::InvalidNodeId(node.clone()));
+        return Err(overlong_node_id_error());
     }
     let trimmed = node.trim();
     if trimmed.is_empty() || node != trimmed || node.chars().any(char::is_control) {
@@ -139,6 +140,10 @@ const MAX_EDGES_PER_NODE: usize = 4096;
 /// identifiers are far shorter; the cap prevents DoS via multi-megabyte
 /// node ID strings that would exhaust memory or slow string operations.
 const MAX_NODE_ID_LEN: usize = 512;
+
+fn overlong_node_id_error() -> GraphError {
+    GraphError::InvalidNodeId(format!("node id exceeds {MAX_NODE_ID_LEN} bytes"))
+}
 
 /// Cap on total nodes in a single graph. Matches
 /// `dgis::contagion_profiles::MAX_PROFILE_NODES` (the only non-test consumer
@@ -572,19 +577,31 @@ mod tests {
     }
 
     #[test]
-    fn node_ids_reject_overlong_identifiers() {
+    fn node_ids_reject_overlong_identifiers() -> Result<(), String> {
         // Node IDs exceeding MAX_NODE_ID_LEN must be rejected to prevent DoS
         // via multi-megabyte strings exhausting memory or slowing operations.
         let overlong = "x".repeat(MAX_NODE_ID_LEN + 1);
         assert_eq!(
             validate_node_id(&overlong),
-            Err(GraphError::InvalidNodeId(overlong.clone()))
+            Err(overlong_node_id_error())
+        );
+        let rejected = match validate_node_id(&overlong) {
+            Err(GraphError::InvalidNodeId(rejected)) => rejected,
+            other => {
+                return Err(format!(
+                    "expected overlong InvalidNodeId rejection, got {other:?}"
+                ));
+            }
+        };
+        assert!(
+            rejected.len() < overlong.len(),
+            "overlong rejection must not clone the attacker-controlled payload"
         );
 
         // Edge construction must also reject overlong target IDs
         assert_eq!(
             ContagionEdge::new(overlong.clone(), 0.5, EdgeKind::DependencyImport).err(),
-            Some(GraphError::InvalidNodeId(overlong.clone()))
+            Some(overlong_node_id_error())
         );
 
         // Graph add_node must silently reject overlong IDs
@@ -595,6 +612,7 @@ mod tests {
         // Exactly MAX_NODE_ID_LEN should be accepted
         let at_limit = "y".repeat(MAX_NODE_ID_LEN);
         assert!(validate_node_id(&at_limit).is_ok());
+        Ok(())
     }
 
     #[test]

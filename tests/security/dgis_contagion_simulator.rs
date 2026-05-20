@@ -25,7 +25,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use frankenengine_node::dgis::contagion_graph::{
-    ContagionEdge, ContagionGraph, EdgeKind, GraphError, NodeId,
+    ContagionEdge, ContagionGraph, EdgeKind, GraphError, NodeId, validate_node_id,
 };
 use frankenengine_node::dgis::contagion_profiles::{
     ContagionProfile, ExpectedOutcome, ProfileEdgeSpec, ProfileError, ProfileGraphSpec,
@@ -438,6 +438,48 @@ fn contagion_graph_add_node_caps_memory_below_max_nodes_plus_overflow() -> TestR
     let last_count = g.nodes().len();
     g.add_node("n00000000".to_string());
     assert_eq!(g.nodes().len(), last_count);
+    Ok(())
+}
+
+#[test]
+fn overlong_node_id_rejection_does_not_clone_payload() -> TestResult {
+    let overlong = "x".repeat(600);
+    match validate_node_id(&overlong) {
+        Err(GraphError::InvalidNodeId(rejected)) => {
+            assert!(
+                rejected.len() < overlong.len(),
+                "overlong rejection must not clone attacker-controlled payload"
+            );
+            assert!(
+                rejected.contains("exceeds"),
+                "bounded rejection should explain the length cap: {rejected}"
+            );
+        }
+        other => {
+            return Err(format!(
+                "expected overlong InvalidNodeId rejection, got {other:?}"
+            ));
+        }
+    }
+
+    match ContagionEdge::new(overlong.clone(), 0.5, EdgeKind::DependencyImport) {
+        Err(GraphError::InvalidNodeId(rejected)) => assert!(
+            rejected.len() < overlong.len(),
+            "edge construction must not clone overlong target id"
+        ),
+        other => {
+            return Err(format!(
+                "expected overlong target rejection from ContagionEdge::new, got {other:?}"
+            ));
+        }
+    }
+
+    let mut graph = ContagionGraph::new(31);
+    graph.add_node(overlong);
+    assert!(
+        graph.nodes().is_empty(),
+        "overlong node id must not enter graph"
+    );
     Ok(())
 }
 

@@ -17,7 +17,7 @@
 //!   risk requires approval; de-escalating is auto-approved but audited.
 
 use chrono::{DateTime, Duration, Utc};
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

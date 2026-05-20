@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use ed25519_dalek::{Signature, Verifier};
+use ed25519_dalek::Signature;
 use hex::FromHex;
 
 use crate::capacity_defaults::bounded_input::{
