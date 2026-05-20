@@ -182,6 +182,11 @@ pub enum SwarmScenarioError {
     EmptyScenarioId,
     #[error("invalid scenario id `{scenario_id}`: use only letters, numbers, '.', '_', and '-'")]
     InvalidScenarioId { scenario_id: String },
+    #[error("scenario `{scenario_id}` field `{field}` contains a control character")]
+    ScenarioFieldContainsControl {
+        scenario_id: String,
+        field: &'static str,
+    },
     #[error("scenario `{scenario_id}` must declare at least one node")]
     EmptyNodeSet { scenario_id: String },
     #[error("scenario `{scenario_id}` operator incident field `{field}` cannot be empty")]
@@ -770,6 +775,18 @@ fn validate_spec(spec: &SwarmScenarioSpec) -> Result<(), SwarmScenarioError> {
             scenario_id: spec.scenario_id.clone(),
         });
     }
+    validate_scenario_text(spec, "base_timestamp", &spec.base_timestamp)?;
+    for node in &spec.nodes {
+        validate_scenario_text(spec, "nodes.node_id", &node.node_id)?;
+        validate_scenario_text(spec, "nodes.zone_id", &node.zone_id)?;
+    }
+    for event_code in &spec.expected_event_codes {
+        validate_scenario_text(spec, "expected_event_codes", event_code)?;
+    }
+    for artifact_path in &spec.expected_artifact_paths {
+        validate_scenario_text(spec, "expected_artifact_paths", artifact_path)?;
+        validate_relative_path(Path::new(artifact_path))?;
+    }
     validate_operator_incidents(spec)?;
     Ok(())
 }
@@ -788,6 +805,20 @@ fn is_safe_component(value: &str) -> bool {
     value
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn validate_scenario_text(
+    spec: &SwarmScenarioSpec,
+    field: &'static str,
+    value: &str,
+) -> Result<(), SwarmScenarioError> {
+    if value.chars().any(char::is_control) {
+        return Err(SwarmScenarioError::ScenarioFieldContainsControl {
+            scenario_id: spec.scenario_id.clone(),
+            field,
+        });
+    }
+    Ok(())
 }
 
 /// Fail closed on empty or control-character content in operator-incident

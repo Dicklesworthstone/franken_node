@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use frankenengine_node::tools::swarm_scenario::{
     EVENT_ASSERTION_FAILED, EVENT_COMPLETED, EVENT_FAIL_CLOSED_CONFIRMED,
     EVENT_FLEET_ACTION_PUBLISHED, EVENT_OPERATOR_RECOMMENDATION_RECORDED, EVENT_REPLAY_BUILT,
-    SwarmScenarioError, SwarmScenarioOperatorIncident, SwarmScenarioVerdict,
+    SwarmScenarioError, SwarmScenarioOperatorIncident, SwarmScenarioSpec, SwarmScenarioVerdict,
     all_green_fleet_replay_scenario_spec, high_contention_swarm_scenario_specs,
     recovery_fail_closed_scenario_spec, registered_swarm_scenarios, render_swarm_scenario_jsonl,
     run_deterministic_swarm_scenario,
@@ -331,5 +331,51 @@ fn high_contention_scenario_rejects_control_characters_in_operator_incident_text
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn swarm_scenario_rejects_control_characters_in_spec_strings() -> TestResult {
+    let mutators: [(&str, fn(&mut SwarmScenarioSpec)); 5] = [
+        ("base_timestamp", |spec| {
+            spec.base_timestamp = "2026-05-05T10:00:00Z\nfake-row".to_string();
+        }),
+        ("nodes.node_id", |spec| {
+            spec.nodes[0].node_id = "node-a\nfake-row".to_string();
+        }),
+        ("nodes.zone_id", |spec| {
+            spec.nodes[0].zone_id = "zone-a\rfake-row".to_string();
+        }),
+        ("expected_event_codes", |spec| {
+            spec.expected_event_codes
+                .push("SWARM_SCENARIO_COMPLETED\nfake-row".to_string());
+        }),
+        ("expected_artifact_paths", |spec| {
+            spec.expected_artifact_paths
+                .push("scenario_artifacts/fake\nrow.json".to_string());
+        }),
+    ];
+
+    for (field, mutate) in mutators {
+        let mut spec = high_contention_swarm_scenario_specs()
+            .into_iter()
+            .next()
+            .ok_or_else(|| "high-contention scenario pack was empty".to_string())?;
+        mutate(&mut spec);
+        let root = tempfile::tempdir().map_err(|err| format!("failed creating tempdir: {err}"))?;
+
+        match run_deterministic_swarm_scenario(&spec, root.path()) {
+            Err(SwarmScenarioError::ScenarioFieldContainsControl {
+                field: rejected_field,
+                ..
+            }) if rejected_field == field => {}
+            other => {
+                return Err(format!(
+                    "expected control-character rejection for scenario field `{field}`, got {other:?}"
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
