@@ -14,6 +14,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, Once};
 
 use ed25519_dalek::{Signer, SigningKey};
+use frankenengine_node::crypto::{Ed25519Scheme, SignatureScheme};
 use frankenengine_node::security::impossible_default::{
     CapabilityEnforcer, CapabilityToken, ERR_IBD_SUBJECT_MISMATCH, ImpossibleCapability,
 };
@@ -21,8 +22,8 @@ use frankenengine_node::security::network_guard::{
     Action, EgressPolicy, EgressRule, NetworkGuard, Protocol,
 };
 use frankenengine_node::security::remote_cap::{
-    CapabilityGate, CapabilityProvider, ConnectivityMode, RemoteCapError, RemoteOperation,
-    RemoteScope,
+    CapabilityGate, CapabilityProvider, ConnectivityMode, RemoteCap, RemoteCapError,
+    RemoteOperation, RemoteScope,
 };
 use frankenengine_node::security::ssrf_policy::{SsrfError, SsrfPolicyTemplate};
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
@@ -38,6 +39,80 @@ static TEST_TRACING_INIT: Once = Once::new();
 fn provider() -> CapabilityProvider {
     CapabilityProvider::new("remote-cap-test-secret")
         .expect("remote cap test signing secret should be valid")
+}
+
+fn encode_remote_cap_scope_entries<'a>(entries: impl IntoIterator<Item = &'a str>) -> String {
+    entries
+        .into_iter()
+        .map(|entry| format!("{}:{entry}|", entry.len()))
+        .collect()
+}
+
+fn canonical_remote_cap_payload(
+    token_id: &str,
+    issuer_identity: &str,
+    issued_at_epoch_secs: u64,
+    expires_at_epoch_secs: u64,
+    scope: &RemoteScope,
+    single_use: bool,
+) -> String {
+    let operations =
+        encode_remote_cap_scope_entries(scope.operations().iter().map(|entry| entry.as_str()));
+    let endpoints =
+        encode_remote_cap_scope_entries(scope.endpoint_prefixes().iter().map(String::as_str));
+
+    format!(
+        "v1|{}:{}|{}:{}|issued={}|expires={}|ops={}|endpoints={}|single_use={}",
+        token_id.len(),
+        token_id,
+        issuer_identity.len(),
+        issuer_identity,
+        issued_at_epoch_secs,
+        expires_at_epoch_secs,
+        operations,
+        endpoints,
+        single_use
+    )
+}
+
+fn ed25519_remote_cap_for_gate(signing_key: &SigningKey) -> RemoteCap {
+    let token_id = "ed25519-raw-remote-cap-token";
+    let issuer_identity = "remote-cap-ed25519-issuer";
+    let issued_at_epoch_secs = 1_700_000_000;
+    let expires_at_epoch_secs = 1_700_000_300;
+    let scope = RemoteScope::new(
+        vec![RemoteOperation::TelemetryExport],
+        vec!["https://telemetry.example.com".to_string()],
+    );
+    let payload = canonical_remote_cap_payload(
+        token_id,
+        issuer_identity,
+        issued_at_epoch_secs,
+        expires_at_epoch_secs,
+        &scope,
+        false,
+    );
+    let mut message = Vec::with_capacity(b"remote_cap_ed25519_v1:".len() + payload.len());
+    message.extend_from_slice(b"remote_cap_ed25519_v1:");
+    message.extend_from_slice(payload.as_bytes());
+    let direct_signature = signing_key.sign(&message).to_bytes();
+    let trait_signature =
+        Ed25519Scheme::sign_raw(&signing_key.to_bytes(), &message).expect("raw remote cap sign");
+    assert_eq!(
+        trait_signature, direct_signature,
+        "Ed25519Scheme::sign_raw must remain byte-compatible with direct remote_cap signing"
+    );
+
+    serde_json::from_value(serde_json::json!({
+        "token_id": token_id,
+        "issuer_identity": issuer_identity,
+        "issued_at_epoch_secs": issued_at_epoch_secs,
+        "expires_at_epoch_secs": expires_at_epoch_secs,
+        "scope": scope,
+        "signature": hex::encode(direct_signature),
+        "single_use": false,
+    }))
+    .expect("fixture remote cap should deserialize")
 }
 
 fn init_test_tracing() {
@@ -643,6 +718,27 @@ fn all_network_operations_require_token() {
         assert_eq!(err.code(), "REMOTECAP_MISSING");
         assert_eq!(err.compatibility_code(), Some("ERR_REMOTE_CAP_REQUIRED"));
     }
+}
+
+#[test]
+fn remote_cap_ed25519_gate_accepts_raw_crypto_trait_preimage() {
+    let signing_key = SigningKey::from_bytes(&[0x42; 32]);
+    let cap = ed25519_remote_cap_for_gate(&signing_key);
+    let mut gate = CapabilityGate::with_ed25519_verifying_key(signing_key.verifying_key());
+
+    gate.authorize_network(
+        Some(&cap),
+        RemoteOperation::TelemetryExport,
+        "https://telemetry.example.com/v1",
+        1_700_000_001,
+        "trace-ed25519-raw-gate",
+    )
+    .expect("raw Ed25519 remote capability signature should verify through crypto trait path");
+
+    let allowed_event = gate.audit_log().last().expect("allowed audit event");
+    assert_eq!(allowed_event.event_code, "REMOTECAP_CONSUMED");
+    assert!(allowed_event.allowed);
+    assert_eq!(allowed_event.token_id.as_deref(), Some(cap.token_id()));
 }
 
 #[test]
