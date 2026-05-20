@@ -1223,9 +1223,8 @@ fn classify_worker_failure(normalized: &str) -> Option<ClassifiedOutcome> {
             "failed to create directory",
             "could not create temp dir",
             "failed to read /dp/",
-            "no such file or directory (os error 2)",
         ],
-    ) {
+    ) || is_worker_missing_dependency_path(normalized) {
         return Some(ClassifiedOutcome {
             outcome: RchOutcomeClass::WorkerFilesystemError,
             timeout_class: RchTimeoutClass::None,
@@ -1237,6 +1236,10 @@ fn classify_worker_failure(normalized: &str) -> Option<ClassifiedOutcome> {
     }
 
     None
+}
+
+fn is_worker_missing_dependency_path(normalized: &str) -> bool {
+    normalized.contains("/dp/") && normalized.contains("no such file or directory (os error 2)")
 }
 
 fn normalize_cargo_argv(

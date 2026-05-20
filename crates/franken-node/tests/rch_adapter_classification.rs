@@ -299,6 +299,31 @@ fn worker_missing_dp_path_dependency_is_infrastructure_failure() {
 }
 
 #[test]
+fn product_missing_source_file_remains_compile_failure() {
+    let cmd = invocation(&["cargo", "check", "-p", "frankenengine-node"]);
+    let output = command_output(
+        101,
+        "",
+        "error: couldn't read `crates/franken-node/src/generated/missing.rs`: \
+         No such file or directory (os error 2)\n\
+         error: could not compile `frankenengine-node` (lib) due to previous error\n\
+         [RCH] remote ts2 (1.0s)\n",
+    );
+
+    let outcome = classify_rch_output(
+        &cmd,
+        &output,
+        &RchProcessSnapshot::quiet(),
+        &RchCommandPolicy::default(),
+    );
+
+    assert_eq!(outcome.outcome, RchOutcomeClass::CompileFailed);
+    assert_eq!(outcome.reason_code, "RCH-COMPILE-FAILED");
+    assert!(!outcome.retryable);
+    assert!(outcome.product_failure);
+}
+
+#[test]
 fn fixture_local_fallback_is_not_green_even_with_exit_zero() {
     let cmd = invocation(&["cargo", "check", "-p", "frankenengine-node", "--tests"]);
     let output = command_output(0, "[RCH] local fallback\nFinished `dev` profile\n", "");
