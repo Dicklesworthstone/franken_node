@@ -346,3 +346,9 @@ name = "fuzz_vef_policy_constraints_compile"
 path = "fuzz_targets/fuzz_vef_policy_constraints_compile.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_repair_proof_verify"
+path = "fuzz_targets/fuzz_repair_proof_verify.rs"
+test = false
+doc = false
