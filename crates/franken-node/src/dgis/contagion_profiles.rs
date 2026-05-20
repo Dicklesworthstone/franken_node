@@ -267,7 +267,7 @@ pub fn load_profile_from_json(json: &str) -> Result<ContagionProfile, ProfileErr
     }
 
     for edge in &profile.graph.edges {
-        if !edge.weight.is_finite() || edge.weight < 0.0 {
+        if !edge.weight.is_finite() || edge.weight < 0.0 || edge.weight > 1.0 {
             return Err(ProfileError::InvalidWeight);
         }
     }
@@ -314,7 +314,7 @@ pub fn build_graph_from_spec(spec: &ProfileGraphSpec) -> Result<ContagionGraph, 
 
     let mut edge_count: usize = 0;
     for spec_edge in &spec.edges {
-        if !spec_edge.weight.is_finite() || spec_edge.weight < 0.0 {
+        if !spec_edge.weight.is_finite() || spec_edge.weight < 0.0 || spec_edge.weight > 1.0 {
             return Err(ProfileError::InvalidWeight);
         }
         validate_node_id(&spec_edge.from)?;
@@ -592,6 +592,22 @@ mod tests {
             seed: 0,
         };
         let err = build_graph_from_spec(&spec).expect_err("negative weight must reject");
+        assert_eq!(err, ProfileError::InvalidWeight);
+    }
+
+    #[test]
+    fn loader_rejects_weight_above_one() {
+        let spec = ProfileGraphSpec {
+            nodes: vec!["a".to_string(), "b".to_string()],
+            edges: vec![ProfileEdgeSpec {
+                from: "a".to_string(),
+                to: "b".to_string(),
+                weight: 1.001,
+                edge_kind: WireEdgeKind::DependencyImport,
+            }],
+            seed: 0,
+        };
+        let err = build_graph_from_spec(&spec).expect_err("over-one weight must reject");
         assert_eq!(err, ProfileError::InvalidWeight);
     }
 

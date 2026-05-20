@@ -85,6 +85,9 @@ impl ContagionEdge {
         if weight < 0.0 {
             return Err(GraphError::NegativeWeight);
         }
+        if weight > 1.0 {
+            return Err(GraphError::WeightAboveOne);
+        }
         Ok(Self {
             target,
             weight,
@@ -100,6 +103,8 @@ pub enum GraphError {
     NonFiniteWeight,
     /// A weight was negative; propagation probabilities must be >= 0.
     NegativeWeight,
+    /// A weight was greater than 1.0; propagation probabilities must be <= 1.
+    WeightAboveOne,
     /// An edge points at a node that is not in the node set.
     UnknownTarget(NodeId),
     /// A node id contained an embedded NUL byte.
@@ -180,6 +185,9 @@ impl ContagionGraph {
         if edge.weight < 0.0 {
             return Err(GraphError::NegativeWeight);
         }
+        if edge.weight > 1.0 {
+            return Err(GraphError::WeightAboveOne);
+        }
         if !self.edges.contains_key(source) {
             return Err(GraphError::UnknownTarget(source.clone()));
         }
@@ -228,6 +236,9 @@ impl ContagionGraph {
                 }
                 if edge.weight < 0.0 {
                     return Err(GraphError::NegativeWeight);
+                }
+                if edge.weight > 1.0 {
+                    return Err(GraphError::WeightAboveOne);
                 }
                 if !known.contains(&edge.target) {
                     return Err(GraphError::UnknownTarget(edge.target.clone()));
@@ -564,8 +575,30 @@ mod tests {
             ContagionEdge::new("x".to_string(), -0.001, EdgeKind::OrgOverlap).err(),
             Some(GraphError::NegativeWeight)
         );
+        assert_eq!(
+            ContagionEdge::new("x".to_string(), 1.001, EdgeKind::OrgOverlap).err(),
+            Some(GraphError::WeightAboveOne)
+        );
         assert!(ContagionEdge::new("x".to_string(), 0.0, EdgeKind::OrgOverlap).is_ok());
         assert!(ContagionEdge::new("x".to_string(), 1.0, EdgeKind::OrgOverlap).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_corrupted_weight_above_one() -> Result<(), String> {
+        let mut g = ContagionGraph::new(7);
+        g.add_node("a".to_string());
+        g.add_node("b".to_string());
+        let bucket = g
+            .edges
+            .get_mut("a")
+            .ok_or_else(|| "expected node `a` bucket".to_string())?;
+        bucket.push(ContagionEdge {
+            target: "b".to_string(),
+            weight: 1.001,
+            edge_kind: EdgeKind::DependencyImport,
+        });
+        assert_eq!(g.validate(), Err(GraphError::WeightAboveOne));
+        Ok(())
     }
 
     #[test]
