@@ -1078,11 +1078,12 @@ pub fn verify_replay_bundle_signature(
         }
     })?;
     // Validate the public-key bytes by parsing them; failure means malformed.
-    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes).map_err(
-        |err| ReplayBundleError::SignaturePublicKeyMalformed {
-            detail: err.to_string(),
-        },
-    )?;
+    let verifying_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes).map_err(|err| {
+            ReplayBundleError::SignaturePublicKeyMalformed {
+                detail: err.to_string(),
+            }
+        })?;
     let derived_key_id =
         crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key)
             .to_string();
@@ -1166,10 +1167,7 @@ pub fn verify_replay_bundle_signature_with_trust_set(
     if trusted_key_ids.is_empty() {
         return Err(ReplayBundleError::SignatureTrustAnchorMissing);
     }
-    if !trusted_key_ids
-        .iter()
-        .any(|trusted_key_id| constant_time::ct_eq(trusted_key_id, &signature.key_id))
-    {
+    if !trusted_key_id_present(trusted_key_ids, &signature.key_id) {
         tracing::warn!(
             actual_key_id = %signature.key_id,
             trusted_key_count = trusted_key_ids.len(),
@@ -1179,6 +1177,14 @@ pub fn verify_replay_bundle_signature_with_trust_set(
     }
 
     verify_replay_bundle_signature(bundle, Some(&signature.key_id))
+}
+
+fn trusted_key_id_present(trusted_key_ids: &[String], key_id: &str) -> bool {
+    let mut found = false;
+    for trusted_key_id in trusted_key_ids {
+        found |= constant_time::ct_eq(trusted_key_id, key_id);
+    }
+    found
 }
 
 pub fn replay_bundle(bundle: &ReplayBundle) -> Result<ReplayOutcome, ReplayBundleError> {
@@ -2831,6 +2837,22 @@ mod tests {
         let err = verify_replay_bundle_signature(&bundle, Some("keyid:untrusted"))
             .expect_err("must reject untrusted key");
         assert!(matches!(err, ReplayBundleError::SignatureKeyUntrusted));
+    }
+
+    #[test]
+    fn replay_bundle_trust_set_lookup_checks_full_key_set() {
+        let bundle = signed_fixture_bundle("INC-RPL-SIG-TRUSTSET");
+        let trusted_key_id = fixture_trusted_key_id();
+        let trusted_keys = vec![
+            "keyid:untrusted-before".to_string(),
+            trusted_key_id.clone(),
+            "keyid:untrusted-after".to_string(),
+        ];
+
+        assert!(trusted_key_id_present(&trusted_keys, &trusted_key_id));
+        assert!(!trusted_key_id_present(&trusted_keys, "keyid:missing"));
+        verify_replay_bundle_signature_with_trust_set(&bundle, &trusted_keys)
+            .expect("trusted key can appear anywhere in the trust set");
     }
 
     #[test]
