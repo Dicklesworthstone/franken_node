@@ -344,8 +344,18 @@ fn invalid_task_id_reason(task_id: &str) -> Option<&'static str> {
     if task_id.trim() != task_id {
         return Some("task_id must not contain leading or trailing whitespace");
     }
-    if task_id.contains('\0') {
-        return Some("task_id must not contain NUL bytes");
+    // Reject every control character, not just NUL. `RegionError::TaskNotFound`
+    // at line 315 renders `task_id` via `{}` (Display, not Debug), so a
+    // poisoned id like "valid\nforged" would emit a forged second log line
+    // in the operator pane when complete_task / cancel_task fall through to
+    // the not-found path. `trim() != task_id` above only catches leading or
+    // trailing whitespace — internal `\n` / `\r` / `\t` slip through. Same
+    // hardening pattern as `validate_rehydration_text`,
+    // `validate_artifact_string::StringContainsControl`, `validate_identifier`,
+    // audience_token, swarm_scenario operator_incident, and
+    // swarm_scheduler_field_is_safe.
+    if task_id.chars().any(char::is_control) {
+        return Some("task_id must not contain control characters");
     }
     None
 }
@@ -1305,6 +1315,35 @@ mod tests {
 
         assert!(matches!(err, RegionError::InvalidTaskId { .. }));
         assert!(err.to_string().contains("leading or trailing whitespace"));
+        assert!(region.tasks.is_empty());
+    }
+
+    /// Regression: `invalid_task_id_reason` previously rejected leading/trailing
+    /// whitespace and NUL bytes, but accepted internal control characters
+    /// (`\n`, `\r`, `\t`, the rest of the C0/C1 ranges). `RegionError::TaskNotFound`
+    /// at line 315 renders `task_id` via Display (not Debug), so a poisoned
+    /// id like "valid\nforged-event" would emit a forged second log line in
+    /// the operator pane on the not-found path. This pins the rejection
+    /// at registration time for both an internal `\n` (the common
+    /// log-injection case) and a `\t` (matches the C0 range exhaustively).
+    #[test]
+    fn register_task_rejects_task_id_with_internal_control_characters() {
+        let mut region = Region::new_root(test_cx(), 5000).unwrap();
+
+        let err = region.register_task("valid\nforged-event").unwrap_err();
+        assert!(matches!(err, RegionError::InvalidTaskId { .. }));
+        assert!(
+            err.to_string().contains("control characters"),
+            "newline injection must surface the control-char reason: {err}",
+        );
+        assert!(region.tasks.is_empty());
+
+        let err = region.register_task("valid\tinjection").unwrap_err();
+        assert!(matches!(err, RegionError::InvalidTaskId { .. }));
+        assert!(
+            err.to_string().contains("control characters"),
+            "tab injection must surface the control-char reason: {err}",
+        );
         assert!(region.tasks.is_empty());
     }
 
