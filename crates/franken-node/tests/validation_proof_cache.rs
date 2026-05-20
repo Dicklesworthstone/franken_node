@@ -4126,6 +4126,55 @@ fn blocked_proof_rehydration_fails_closed_for_missing_paths_and_closed_blockers(
 }
 
 #[test]
+fn blocked_proof_rehydration_stale_duplicate_does_not_hide_fail_closed_review() {
+    let command = "rch exec -- cargo test -p frankenengine-node validation_proof_cache";
+    let mut missing = blocked_rehydration_bead(
+        "bd-missing-duplicate",
+        1,
+        REHYDRATION_NOW_MS - 20_000,
+        command,
+    );
+    let missing_path = missing
+        .referenced_paths
+        .first_mut()
+        .expect("fixture includes a referenced path");
+    missing_path.exists = false;
+    missing_path.path = "crates/franken-node/tests/deleted_validation_test.rs".to_string();
+
+    let valid = blocked_rehydration_bead(
+        "bd-valid-duplicate",
+        2,
+        REHYDRATION_NOW_MS - 10_000,
+        command,
+    );
+
+    let plan =
+        build_blocked_proof_rehydration_plan(&blocked_rehydration_input(vec![missing, valid]))
+            .expect("rehydration plan");
+
+    let missing_candidate = plan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.bead_id == "bd-missing-duplicate")
+        .expect("missing duplicate candidate");
+    let valid_candidate = plan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.bead_id == "bd-valid-duplicate")
+        .expect("valid duplicate candidate");
+
+    assert_eq!(
+        missing_candidate.reason_code,
+        rehydration_reason_codes::STALE_COMMAND_MISSING_PATH
+    );
+    assert!(missing_candidate.fail_closed);
+    assert_eq!(
+        valid_candidate.action,
+        BlockedProofRehydrationAction::ReadyForReproof
+    );
+}
+
+#[test]
 fn blocked_proof_rehydration_keeps_source_only_lane_when_rch_capacity_is_hot() {
     let mut source_only = blocked_rehydration_bead(
         "bd-source-only",

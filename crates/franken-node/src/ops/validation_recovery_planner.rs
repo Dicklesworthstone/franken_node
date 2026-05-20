@@ -447,7 +447,9 @@ pub fn build_blocked_proof_rehydration_plan(
             coalesced_command,
             u32::try_from(candidates.len().saturating_add(1)).unwrap_or(u32::MAX),
         )?;
-        seen_commands.insert(normalized_command);
+        if !candidate.fail_closed {
+            seen_commands.insert(normalized_command);
+        }
         candidates.push(candidate);
     }
 
@@ -546,27 +548,7 @@ fn classify_blocked_proof_rehydration_candidate(
         status_recommendation,
         fail_closed,
         evidence,
-    ) = if duplicate_command || coalesced_command {
-        (
-            BlockedProofRehydrationAction::WaitForExistingProof,
-            rehydration_reason_codes::WAIT_FOR_EXISTING_PROOF,
-            Some(DEFAULT_REHYDRATION_RETRY_AFTER_MS),
-            "wait for existing proof receipt".to_string(),
-            "remain_blocked".to_string(),
-            false,
-            "equivalent proof work already in flight".to_string(),
-        )
-    } else if cache_hit {
-        (
-            BlockedProofRehydrationAction::ReuseCacheReceipt,
-            rehydration_reason_codes::REUSE_CACHE_RECEIPT,
-            None,
-            "verify cached receipt freshness".to_string(),
-            "ready_to_close_with_receipt".to_string(),
-            false,
-            "fresh proof-cache receipt is available".to_string(),
-        )
-    } else if let Some(path) = missing_path {
+    ) = if let Some(path) = missing_path {
         (
             BlockedProofRehydrationAction::FailClosedReview,
             rehydration_reason_codes::STALE_COMMAND_MISSING_PATH,
@@ -595,6 +577,26 @@ fn classify_blocked_proof_rehydration_candidate(
             "remain_blocked".to_string(),
             true,
             "blocker evidence is older than freshness window".to_string(),
+        )
+    } else if duplicate_command || coalesced_command {
+        (
+            BlockedProofRehydrationAction::WaitForExistingProof,
+            rehydration_reason_codes::WAIT_FOR_EXISTING_PROOF,
+            Some(DEFAULT_REHYDRATION_RETRY_AFTER_MS),
+            "wait for existing proof receipt".to_string(),
+            "remain_blocked".to_string(),
+            false,
+            "equivalent proof work already in flight".to_string(),
+        )
+    } else if cache_hit {
+        (
+            BlockedProofRehydrationAction::ReuseCacheReceipt,
+            rehydration_reason_codes::REUSE_CACHE_RECEIPT,
+            None,
+            "verify cached receipt freshness".to_string(),
+            "ready_to_close_with_receipt".to_string(),
+            false,
+            "fresh proof-cache receipt is available".to_string(),
         )
     } else if !input.rch_snapshot.validation_lane_is_safe() {
         if bead.source_only_allowed {
