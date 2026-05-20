@@ -18,6 +18,15 @@ const MAX_COMPUTATION_TEXT_FIELD_BYTES: usize = 16 * 1024;
 /// Maximum retained bytes across registered descriptions and schemas.
 const MAX_COMPUTATION_REGISTRY_TEXT_BYTES: usize = 1024 * 1024;
 
+/// Sanitize untrusted strings for error Display output: replace control characters
+/// with U+FFFD to prevent log injection when malformed names are included in error
+/// messages before validation.
+fn sanitize_for_display(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect()
+}
+
 // Event codes required by bead acceptance criteria.
 pub const CR_REGISTRY_LOADED: &str = "CR_REGISTRY_LOADED";
 pub const CR_LOOKUP_SUCCESS: &str = "CR_LOOKUP_SUCCESS";
@@ -126,7 +135,11 @@ impl fmt::Display for ComputationRegistryError {
                 write!(f, "{ERR_UNKNOWN_COMPUTATION}: `{name}`")
             }
             Self::MalformedComputationName { name } => {
-                write!(f, "{ERR_MALFORMED_COMPUTATION_NAME}: `{name}`")
+                write!(
+                    f,
+                    "{ERR_MALFORMED_COMPUTATION_NAME}: `{}`",
+                    sanitize_for_display(name)
+                )
             }
             Self::DuplicateComputation { name } => {
                 write!(f, "{ERR_DUPLICATE_COMPUTATION}: `{name}`")
@@ -1327,6 +1340,28 @@ mod tests {
             .expect("malformed lookup should record audit event");
         assert_eq!(event.event_code, CR_LOOKUP_MALFORMED);
         assert_eq!(event.trace_id, "trace-lookup-malformed");
+    }
+
+    #[test]
+    fn malformed_name_with_control_chars_is_sanitized_in_error_display() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        let malicious_name = "bad\r\nINJECTED: fake_event\ttab";
+
+        let err = registry
+            .validate_computation_name(malicious_name, "trace-control-char")
+            .expect_err("malformed name should fail");
+
+        let display = format!("{err}");
+        assert!(
+            !display.contains('\r'),
+            "carriage return should be sanitized"
+        );
+        assert!(!display.contains('\n'), "newline should be sanitized");
+        assert!(!display.contains('\t'), "tab should be sanitized");
+        assert!(
+            display.contains('\u{FFFD}'),
+            "control chars should be replaced with U+FFFD"
+        );
     }
 
     #[test]
