@@ -18,6 +18,21 @@ pub(crate) fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
 }
 
+fn len_to_u64_saturating(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+fn file_too_large_error(actual_bytes: u64, max_bytes: u64) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("File too large: {actual_bytes} bytes (limit: {max_bytes} bytes)"),
+    )
+}
+
+fn read_len_exceeds_limit(len: usize, max_bytes: u64) -> bool {
+    len_to_u64_saturating(len) > max_bytes
+}
+
 /// Read file with size limits to prevent DoS via parser bombs.
 /// Returns file content as String if within size limit, error otherwise.
 pub fn bounded_read_to_string(path: &std::path::Path, max_bytes: u64) -> std::io::Result<String> {
@@ -28,18 +43,15 @@ pub fn bounded_read_to_string(path: &std::path::Path, max_bytes: u64) -> std::io
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
     if metadata.len() > max_bytes {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "File too large: {} bytes (limit: {} bytes)",
-                metadata.len(),
-                max_bytes
-            ),
-        ));
+        return Err(file_too_large_error(metadata.len(), max_bytes));
     }
 
     let mut content = String::new();
     file.read_to_string(&mut content)?;
+    let actual_bytes = len_to_u64_saturating(content.len());
+    if actual_bytes > max_bytes {
+        return Err(file_too_large_error(actual_bytes, max_bytes));
+    }
     Ok(content)
 }
 
@@ -53,18 +65,15 @@ pub fn bounded_read(path: &std::path::Path, max_bytes: u64) -> std::io::Result<V
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
     if metadata.len() > max_bytes {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "File too large: {} bytes (limit: {} bytes)",
-                metadata.len(),
-                max_bytes
-            ),
-        ));
+        return Err(file_too_large_error(metadata.len(), max_bytes));
     }
 
     let mut content = Vec::new();
     file.read_to_end(&mut content)?;
+    let actual_bytes = len_to_u64_saturating(content.len());
+    if actual_bytes > max_bytes {
+        return Err(file_too_large_error(actual_bytes, max_bytes));
+    }
     Ok(content)
 }
 
@@ -186,7 +195,10 @@ pub mod lock_utils {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionableError, MAX_HELP_URLS, lock_utils, push_bounded};
+    use super::{
+        ActionableError, MAX_HELP_URLS, bounded_read, lock_utils, push_bounded,
+        read_len_exceeds_limit,
+    };
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -1452,6 +1464,31 @@ mod tests {
         // Test with u64::MAX limit (should not overflow)
         let result = bounded_read_to_string(empty_file.path(), u64::MAX);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn bounded_read_post_read_size_guard_rejects_actual_bytes_over_limit() {
+        assert!(!read_len_exceeds_limit(0, 0));
+        assert!(!read_len_exceeds_limit(8, 8));
+        assert!(read_len_exceeds_limit(9, 8));
+        assert!(read_len_exceeds_limit(usize::MAX, 0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_read_rechecks_procfs_size_after_read() {
+        let path = std::path::Path::new("/proc/self/cmdline");
+        let metadata = std::fs::metadata(path).expect("procfs cmdline metadata");
+        assert_eq!(
+            metadata.len(),
+            0,
+            "procfs cmdline should report a zero metadata size fixture"
+        );
+
+        let err = bounded_read(path, 0).expect_err("actual procfs bytes exceed zero-byte cap");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("File too large:"));
+        assert!(err.to_string().contains("limit: 0 bytes"));
     }
 
     proptest! {
