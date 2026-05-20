@@ -536,6 +536,22 @@ fn queue_snapshot_catalog_covers_required_real_world_classes() {
 }
 
 #[test]
+fn queue_snapshot_target_debug_path_alone_is_not_artifact_retrieval_failure() {
+    let policy = RchQueueSnapshotPolicy::default();
+    let mut input = queue_snapshot("fresh-target-debug-path");
+    input.target_dir = Some("/data/projects/franken_node/target/debug".to_string());
+    input.heartbeat_age_seconds = Some(2);
+    input.progress_age_seconds = Some(3);
+
+    let classified = classify_rch_queue_snapshot(&input, &policy);
+
+    assert_eq!(classified.class, RchQueueSnapshotClass::FreshRunning);
+    assert_eq!(classified.reason_code, "RCH-SNAPSHOT-FRESH-RUNNING");
+    assert!(!classified.product_failure);
+    assert!(!classified.infrastructure_failure);
+}
+
+#[test]
 fn queue_snapshot_worker_unreachable_and_missing_identity_fail_closed() {
     let policy = RchQueueSnapshotPolicy::default();
     let mut unreachable = queue_snapshot("worker-unreachable");

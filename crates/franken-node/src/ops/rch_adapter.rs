@@ -998,7 +998,6 @@ pub fn classify_rch_queue_snapshot(
             "artifact retrieval failed",
             "failed to retrieve artifact",
             "could not copy artifact",
-            "target/debug",
         ],
     ) {
         (
