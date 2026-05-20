@@ -33,6 +33,18 @@ use std::collections::{BTreeMap, BTreeSet};
 /// later JSON campaign profiles will use.
 pub type NodeId = String;
 
+/// Validate a node id before it enters the graph.
+///
+/// Node ids are surfaced in fixture paths, reports, and operator output.
+/// Rejecting embedded NULs at the graph boundary prevents downstream path
+/// and display layers from seeing split identifiers.
+pub fn validate_node_id(node: &NodeId) -> Result<(), GraphError> {
+    if node.contains('\0') {
+        return Err(GraphError::InvalidNodeId(node.clone()));
+    }
+    Ok(())
+}
+
 /// Kind of relationship represented by an edge.
 ///
 /// The four variants line up with the supply-chain compromise vectors that
@@ -68,6 +80,7 @@ impl ContagionEdge {
     /// Per project conventions, every `f64` is `is_finite()`-guarded before
     /// it can enter the system.
     pub fn new(target: NodeId, weight: f64, edge_kind: EdgeKind) -> Result<Self, GraphError> {
+        validate_node_id(&target)?;
         if !weight.is_finite() {
             return Err(GraphError::NonFiniteWeight);
         }
@@ -91,6 +104,8 @@ pub enum GraphError {
     NegativeWeight,
     /// An edge points at a node that is not in the node set.
     UnknownTarget(NodeId),
+    /// A node id contained an embedded NUL byte.
+    InvalidNodeId(NodeId),
     /// Graph contains zero nodes; the simulator cannot run on an empty graph.
     EmptyGraph,
 }
@@ -145,6 +160,9 @@ impl ContagionGraph {
     /// this preserves the fire-and-forget API while bounding memory against
     /// callers that bypass the profile loader's check.
     pub fn add_node(&mut self, node: NodeId) {
+        if validate_node_id(&node).is_err() {
+            return;
+        }
         if !self.edges.contains_key(&node) {
             if self.nodes.len() >= MAX_NODES {
                 return;
@@ -156,6 +174,8 @@ impl ContagionGraph {
 
     /// Add an edge, validating weight finiteness and target existence.
     pub fn add_edge(&mut self, source: &NodeId, edge: ContagionEdge) -> Result<(), GraphError> {
+        validate_node_id(source)?;
+        validate_node_id(&edge.target)?;
         if !edge.weight.is_finite() {
             return Err(GraphError::NonFiniteWeight);
         }
@@ -198,9 +218,14 @@ impl ContagionGraph {
         if self.nodes.is_empty() {
             return Err(GraphError::EmptyGraph);
         }
+        for node in &self.nodes {
+            validate_node_id(node)?;
+        }
         let known: BTreeSet<&NodeId> = self.edges.keys().collect();
-        for bucket in self.edges.values() {
+        for (source, bucket) in &self.edges {
+            validate_node_id(source)?;
             for edge in bucket {
+                validate_node_id(&edge.target)?;
                 if !edge.weight.is_finite() {
                     return Err(GraphError::NonFiniteWeight);
                 }
@@ -416,6 +441,50 @@ mod tests {
             other => return Err(format!("expected UnknownTarget, got {other:?}")),
         }
         Ok(())
+    }
+
+    #[test]
+    fn node_ids_reject_embedded_nuls() -> Result<(), String> {
+        let bad = "pkg\0shadow".to_string();
+        assert_eq!(
+            ContagionEdge::new(bad.clone(), 0.5, EdgeKind::DependencyImport).err(),
+            Some(GraphError::InvalidNodeId(bad.clone()))
+        );
+
+        let mut g = ContagionGraph::new(17);
+        g.add_node(bad.clone());
+        assert!(g.nodes().is_empty(), "invalid node id must not enter graph");
+
+        g.add_node("a".to_string());
+        g.add_node("b".to_string());
+        let valid_edge = ContagionEdge::new("b".to_string(), 0.5, EdgeKind::DependencyImport)
+            .map_err(|e| format!("valid edge rejected: {e:?}"))?;
+        assert_eq!(
+            g.add_edge(&bad, valid_edge).err(),
+            Some(GraphError::InvalidNodeId(bad.clone()))
+        );
+        assert_eq!(
+            g.add_edge(
+                &"a".to_string(),
+                ContagionEdge {
+                    target: bad.clone(),
+                    weight: 0.5,
+                    edge_kind: EdgeKind::DependencyImport,
+                },
+            )
+            .err(),
+            Some(GraphError::InvalidNodeId(bad))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validate_rejects_corrupted_null_byte_node_ids() {
+        let bad = "pkg\0shadow".to_string();
+        let mut g = ContagionGraph::new(19);
+        g.nodes.push(bad.clone());
+        g.edges.insert(bad.clone(), Vec::new());
+        assert_eq!(g.validate(), Err(GraphError::InvalidNodeId(bad)));
     }
 
     #[test]

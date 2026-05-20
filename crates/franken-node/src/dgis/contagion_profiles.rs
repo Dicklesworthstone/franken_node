@@ -34,7 +34,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::contagion_graph::{ContagionEdge, ContagionGraph, EdgeKind, GraphError, NodeId};
+use super::contagion_graph::{
+    ContagionEdge, ContagionGraph, EdgeKind, GraphError, NodeId, validate_node_id,
+};
 use super::contagion_simulator::{
     SimulationTrace, SimulatorConfig, SimulatorError, TerminationReason, simulate,
 };
@@ -297,6 +299,7 @@ pub fn build_graph_from_spec(spec: &ProfileGraphSpec) -> Result<ContagionGraph, 
 
     let mut graph = ContagionGraph::new(spec.seed);
     for node in &spec.nodes {
+        validate_node_id(node)?;
         graph.add_node(node.clone());
     }
     let known: std::collections::BTreeSet<&NodeId> = spec.nodes.iter().collect();
@@ -306,6 +309,8 @@ pub fn build_graph_from_spec(spec: &ProfileGraphSpec) -> Result<ContagionGraph, 
         if !spec_edge.weight.is_finite() || spec_edge.weight < 0.0 {
             return Err(ProfileError::InvalidWeight);
         }
+        validate_node_id(&spec_edge.from)?;
+        validate_node_id(&spec_edge.to)?;
         if !known.contains(&spec_edge.from) || !known.contains(&spec_edge.to) {
             return Err(ProfileError::UnknownNode);
         }

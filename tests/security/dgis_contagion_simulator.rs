@@ -24,7 +24,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use frankenengine_node::dgis::contagion_graph::{ContagionEdge, ContagionGraph, EdgeKind, NodeId};
+use frankenengine_node::dgis::contagion_graph::{
+    ContagionEdge, ContagionGraph, EdgeKind, GraphError, NodeId,
+};
 use frankenengine_node::dgis::contagion_profiles::{
     ContagionProfile, ExpectedOutcome, ProfileEdgeSpec, ProfileError, ProfileGraphSpec,
     ProfileSimulatorConfig, WireEdgeKind, WireTerminationReason, build_graph_from_spec,
@@ -189,6 +191,36 @@ fn test_profile_with_missing_node_fails_evaluation() -> TestResult {
     let err = build_graph_from_spec(&bad_spec).expect_err("dangling edge must reject");
     assert_eq!(err, ProfileError::UnknownNode);
     Ok(())
+}
+
+#[test]
+fn test_profile_with_null_byte_node_id_rejected_at_graph_boundary() {
+    let bad_spec = ProfileGraphSpec {
+        nodes: vec!["pkg\0shadow".to_string()],
+        edges: Vec::new(),
+        seed: 0,
+    };
+    let err = build_graph_from_spec(&bad_spec).expect_err("NUL node id must reject");
+    assert_eq!(
+        err,
+        ProfileError::GraphFailure(GraphError::InvalidNodeId("pkg\0shadow".to_string()))
+    );
+
+    let bad_edge_spec = ProfileGraphSpec {
+        nodes: vec!["a".to_string(), "b".to_string()],
+        edges: vec![ProfileEdgeSpec {
+            from: "a".to_string(),
+            to: "b\0shadow".to_string(),
+            weight: 0.5,
+            edge_kind: WireEdgeKind::DependencyImport,
+        }],
+        seed: 0,
+    };
+    let err = build_graph_from_spec(&bad_edge_spec).expect_err("NUL edge id must reject");
+    assert_eq!(
+        err,
+        ProfileError::GraphFailure(GraphError::InvalidNodeId("b\0shadow".to_string()))
+    );
 }
 
 #[test]
