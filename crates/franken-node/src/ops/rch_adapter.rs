@@ -937,6 +937,15 @@ pub fn classify_rch_output(
         }
     } else if let Some(worker_failure) = classify_worker_failure(&normalized) {
         worker_failure
+    } else if execution_mode == RchExecutionMode::Remote && worker_id.is_none() {
+        ClassifiedOutcome {
+            outcome: RchOutcomeClass::BrokerInternalError,
+            timeout_class: RchTimeoutClass::None,
+            retryable: false,
+            reason_code: "RCH-REMOTE-WORKER-ID-INVALID".to_string(),
+            detail: "remote RCH completion marker had missing or unsafe worker metadata"
+                .to_string(),
+        }
     } else if policy.require_remote && execution_mode != RchExecutionMode::Remote {
         ClassifiedOutcome {
             outcome: RchOutcomeClass::LocalFallbackRefused,
@@ -1224,7 +1233,8 @@ fn classify_worker_failure(normalized: &str) -> Option<ClassifiedOutcome> {
             "could not create temp dir",
             "failed to read /dp/",
         ],
-    ) || is_worker_missing_dependency_path(normalized) {
+    ) || is_worker_missing_dependency_path(normalized)
+    {
         return Some(ClassifiedOutcome {
             outcome: RchOutcomeClass::WorkerFilesystemError,
             timeout_class: RchTimeoutClass::None,
@@ -1344,15 +1354,22 @@ fn execution_mode_from_output(output: &str) -> RchExecutionMode {
 }
 
 fn worker_id_from_output(output: &str) -> Option<String> {
-    output.lines().find_map(|line| {
+    let worker = output.lines().find_map(|line| {
         let marker = "[RCH] remote ";
         let start = line.find(marker)? + marker.len();
         let rest = line.get(start..)?;
-        let worker = rest
-            .split(|ch: char| ch.is_whitespace() || ch == '(')
-            .find(|token| !token.is_empty())?;
+        rest.split(|ch: char| ch.is_whitespace() || ch == '(')
+            .find(|token| !token.is_empty())
+    })?;
+    if worker_id_is_safe(worker) {
         Some(worker.to_string())
-    })
+    } else {
+        None
+    }
+}
+
+fn worker_id_is_safe(worker: &str) -> bool {
+    !worker.is_empty() && !worker.chars().any(char::is_control)
 }
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
@@ -1706,6 +1723,30 @@ mod tests {
         assert_eq!(outcome.execution_mode, RchExecutionMode::Remote);
         assert_eq!(outcome.worker_id.as_deref(), Some("vmi1293453"));
         assert!(outcome.is_green());
+    }
+
+    #[test]
+    fn remote_success_rejects_control_character_worker_id() {
+        let cmd = invocation(&[
+            "cargo",
+            "check",
+            "-p",
+            "frankenengine-node",
+            "--all-targets",
+        ]);
+        let result = output(
+            0,
+            "Finished `dev` profile\n[RCH] remote vmi1293453\x1b[31m (803.3s)\n",
+            "",
+        );
+
+        let outcome = classify_rch_output(&cmd, &result, &RchProcessSnapshot::quiet(), &policy());
+
+        assert_eq!(outcome.execution_mode, RchExecutionMode::Remote);
+        assert_eq!(outcome.worker_id, None);
+        assert_eq!(outcome.outcome, RchOutcomeClass::BrokerInternalError);
+        assert_eq!(outcome.reason_code, "RCH-REMOTE-WORKER-ID-INVALID");
+        assert!(!outcome.is_green());
     }
 
     #[test]
