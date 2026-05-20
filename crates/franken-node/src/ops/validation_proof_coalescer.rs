@@ -1212,7 +1212,7 @@ pub fn validation_capacity_market_bid_from_decision(
 #[must_use]
 pub fn render_validation_capacity_market_bid_human(bid: &ValidationCapacityMarketBid) -> String {
     format!(
-        "capacity_market_bid bead={} bid={} reason_code={} queue_rank={} retry_after_ms={} capacity_source={} action={}",
+        "capacity_market_bid bead={} bid={} reason_code={} queue_rank={} retry_after_ms={} command_digest={} proof_work_key={} capacity_source={} action={}",
         bid.bead_id,
         bid.bid.as_str(),
         bid.reason_code,
@@ -1220,6 +1220,8 @@ pub fn render_validation_capacity_market_bid_human(bid: &ValidationCapacityMarke
         bid.retry_after_ms
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
+        bid.command_digest_hex,
+        bid.proof_work_key_hex,
         bid.capacity_evidence_source,
         bid.operator_message
     )

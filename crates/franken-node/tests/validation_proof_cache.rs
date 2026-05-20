@@ -1983,6 +1983,8 @@ fn capacity_market_bids_cover_contention_actions_and_render_stable_output()
         assert!(human.contains("capacity_market_bid"));
         assert!(human.contains(bid.bid.as_str()));
         assert!(human.contains(&bid.reason_code));
+        assert!(human.contains(&bid.command_digest_hex));
+        assert!(human.contains(&bid.proof_work_key_hex));
     }
 
     Ok(())
