@@ -489,24 +489,40 @@ fn replay_fingerprint(
     deltas: &[PlannedRiskDelta],
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(RISK_SURFACE_SCHEMA_VERSION.as_bytes());
-    hasher.update(input.extension_id.as_bytes());
-    hasher.update(input.trace_id.as_bytes());
+    update_str_len_prefixed(&mut hasher, RISK_SURFACE_SCHEMA_VERSION);
+    update_str_len_prefixed(&mut hasher, &input.extension_id);
+    update_str_len_prefixed(&mut hasher, &input.trace_id);
     update_f64(&mut hasher, context.aggregate_risk_score);
     update_f64(&mut hasher, posterior.base_posterior);
     update_f64(&mut hasher, posterior.topology_adjusted_posterior);
+    update_len(&mut hasher, posterior.attribution_percentages.len());
     for (feature, share) in &posterior.attribution_percentages {
-        hasher.update(feature.as_bytes());
+        update_str_len_prefixed(&mut hasher, feature);
         update_f64(&mut hasher, *share);
     }
+    update_len(&mut hasher, deltas.len());
     for delta in deltas {
-        hasher.update(format!("{:?}", delta.change_kind).as_bytes());
-        hasher.update(delta.package_name.as_bytes());
-        hasher.update(delta.from_version.as_bytes());
-        hasher.update(delta.to_version.as_bytes());
+        update_str_len_prefixed(&mut hasher, &format!("{:?}", delta.change_kind));
+        update_str_len_prefixed(&mut hasher, &delta.package_name);
+        update_str_len_prefixed(&mut hasher, &delta.from_version);
+        update_str_len_prefixed(&mut hasher, &delta.to_version);
         update_f64(&mut hasher, delta.risk_delta);
     }
     format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn update_len(hasher: &mut Sha256, len: usize) {
+    let len = u64::try_from(len).unwrap_or(u64::MAX);
+    hasher.update(len.to_le_bytes());
+}
+
+fn update_bytes_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    update_len(hasher, bytes.len());
+    hasher.update(bytes);
+}
+
+fn update_str_len_prefixed(hasher: &mut Sha256, value: &str) {
+    update_bytes_len_prefixed(hasher, value.as_bytes());
 }
 
 fn update_f64(hasher: &mut Sha256, value: f64) {

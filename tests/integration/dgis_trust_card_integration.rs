@@ -129,6 +129,78 @@ fn posterior_attribution_is_deterministic_and_sums_to_one() {
 }
 
 #[test]
+fn replay_fingerprint_length_prefixes_extension_and_trace_fields() {
+    let mut left = sample_input();
+    left.extension_id = "npm:@acme/ab".to_string();
+    left.trace_id = "c".to_string();
+
+    let mut right = sample_input();
+    right.extension_id = "npm:@acme/a".to_string();
+    right.trace_id = "bc".to_string();
+
+    assert_eq!(
+        format!("{}{}", left.extension_id, left.trace_id),
+        format!("{}{}", right.extension_id, right.trace_id),
+        "test inputs must alias under unprefixed concatenation"
+    );
+
+    let left = build_risk_surface_snapshot(left).expect("left snapshot");
+    let right = build_risk_surface_snapshot(right).expect("right snapshot");
+
+    assert_ne!(
+        left.replay_fingerprint, right.replay_fingerprint,
+        "length-prefixed identifiers must not alias the replay fingerprint"
+    );
+}
+
+#[test]
+fn replay_fingerprint_length_prefixes_planned_delta_fields() {
+    let mut left = sample_input();
+    left.planned_changes = vec![PlannedTopologyChange {
+        change_kind: PlannedChangeKind::UpdateVersion,
+        package_name: "npm:@acme/ab".to_string(),
+        from_version: "c".to_string(),
+        to_version: "1.3.0".to_string(),
+        post_update_metrics: metrics(95.0, 0.80, true, 0.74, 2050, 10),
+    }];
+
+    let mut right = sample_input();
+    right.planned_changes = vec![PlannedTopologyChange {
+        change_kind: PlannedChangeKind::UpdateVersion,
+        package_name: "npm:@acme/a".to_string(),
+        from_version: "bc".to_string(),
+        to_version: "1.3.0".to_string(),
+        post_update_metrics: metrics(95.0, 0.80, true, 0.74, 2050, 10),
+    }];
+
+    assert_eq!(
+        format!(
+            "{:?}{}{}{}",
+            left.planned_changes[0].change_kind,
+            left.planned_changes[0].package_name,
+            left.planned_changes[0].from_version,
+            left.planned_changes[0].to_version
+        ),
+        format!(
+            "{:?}{}{}{}",
+            right.planned_changes[0].change_kind,
+            right.planned_changes[0].package_name,
+            right.planned_changes[0].from_version,
+            right.planned_changes[0].to_version
+        ),
+        "test inputs must alias under unprefixed planned-delta concatenation"
+    );
+
+    let left = build_risk_surface_snapshot(left).expect("left snapshot");
+    let right = build_risk_surface_snapshot(right).expect("right snapshot");
+
+    assert_ne!(
+        left.replay_fingerprint, right.replay_fingerprint,
+        "length-prefixed planned-delta fields must not alias the replay fingerprint"
+    );
+}
+
+#[test]
 fn malformed_topology_metric_fails_closed_before_ui_snapshot() {
     let mut input = sample_input();
     input.planned_changes[0]
