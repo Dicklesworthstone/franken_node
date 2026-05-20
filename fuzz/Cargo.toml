@@ -304,3 +304,9 @@ name = "fuzz_crypto_signer_chain"
 path = "fuzz_targets/fuzz_crypto_signer_chain.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_audience_token_deserialize"
+path = "fuzz_targets/fuzz_audience_token_deserialize.rs"
+test = false
+doc = false
