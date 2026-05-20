@@ -39,6 +39,8 @@ const MAX_INVOCATION_ARGV: usize = 128;
 const MAX_INVOCATION_ENV_ENTRIES: usize = 256;
 /// Maximum worker-id bytes accepted from remote RCH output or attestations.
 const MAX_WORKER_ID_LEN: usize = 128;
+/// Maximum bytes copied from queue snapshots into operator-facing fields.
+const MAX_QUEUE_SNAPSHOT_FIELD_BYTES: usize = 512;
 
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
@@ -73,6 +75,24 @@ fn ensure_worker_id_safe(field: &'static str, worker: &str) -> Result<(), RchAda
         return Err(RchAdapterError::MissingWorkerMetadata);
     }
     Ok(())
+}
+
+fn sanitize_operator_field(value: &str, max_bytes: usize) -> String {
+    let mut sanitized = String::new();
+    for ch in value.chars() {
+        let ch = if ch.is_control() { '?' } else { ch };
+        if sanitized.len().saturating_add(ch.len_utf8()) > max_bytes {
+            break;
+        }
+        sanitized.push(ch);
+    }
+    sanitized
+}
+
+fn sanitize_operator_option(value: &Option<String>, max_bytes: usize) -> Option<String> {
+    value
+        .as_deref()
+        .map(|value| sanitize_operator_field(value, max_bytes))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1137,17 +1157,23 @@ pub fn classify_rch_queue_snapshot(
 
     RchQueueSnapshotClassification {
         schema_version: RCH_QUEUE_SNAPSHOT_CLASSIFICATION_SCHEMA_VERSION.to_string(),
-        command_digest: input.command_digest.clone(),
+        command_digest: sanitize_operator_field(
+            &input.command_digest,
+            MAX_QUEUE_SNAPSHOT_FIELD_BYTES,
+        ),
         class,
         reason_code: reason_code.to_string(),
         retryable,
         product_failure,
         infrastructure_failure,
-        worker_id: input.worker_id.clone(),
-        target_dir: input.target_dir.clone(),
-        package: input.package.clone(),
-        test_target: input.test_target.clone(),
-        evidence_snippet: redact_snapshot_evidence(&evidence),
+        worker_id: sanitize_operator_option(&input.worker_id, MAX_WORKER_ID_LEN),
+        target_dir: sanitize_operator_option(&input.target_dir, MAX_QUEUE_SNAPSHOT_FIELD_BYTES),
+        package: sanitize_operator_option(&input.package, MAX_QUEUE_SNAPSHOT_FIELD_BYTES),
+        test_target: sanitize_operator_option(&input.test_target, MAX_QUEUE_SNAPSHOT_FIELD_BYTES),
+        evidence_snippet: sanitize_operator_field(
+            &redact_snapshot_evidence(&evidence),
+            SNIPPET_MAX_BYTES,
+        ),
         recommended_action: action.to_string(),
     }
 }
@@ -1624,6 +1650,55 @@ mod tests {
         assert!(right_material.contains("env_key:3:A=B\0env_value:1:C\0"));
         assert_ne!(left_material, right_material);
         assert_ne!(left.command_digest(), right.command_digest());
+    }
+
+    #[test]
+    fn queue_snapshot_classification_sanitizes_operator_fields() {
+        let mut input = RchQueueSnapshotInput::for_command(format!(
+            "digest\n{}",
+            "x".repeat(MAX_QUEUE_SNAPSHOT_FIELD_BYTES.saturating_mul(2))
+        ));
+        input.worker_id = Some("worker\nid\0".to_string());
+        input.target_dir = Some(format!(
+            "/tmp/franken-tgt\r{}",
+            "y".repeat(MAX_QUEUE_SNAPSHOT_FIELD_BYTES.saturating_mul(2))
+        ));
+        input.package = Some("frankenengine-node\t".to_string());
+        input.test_target = Some("suite\x1b[31m".to_string());
+        input.stdout_tail = "TOKEN=secret\nregular output".to_string();
+        input.stderr_tail = "stderr\0tail".to_string();
+
+        let classification =
+            classify_rch_queue_snapshot(&input, &RchQueueSnapshotPolicy::default());
+
+        assert!(!classification.command_digest.chars().any(char::is_control));
+        assert!(classification.command_digest.len() <= MAX_QUEUE_SNAPSHOT_FIELD_BYTES);
+        for field in [
+            classification.worker_id.as_deref(),
+            classification.target_dir.as_deref(),
+            classification.package.as_deref(),
+            classification.test_target.as_deref(),
+            Some(classification.evidence_snippet.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(!field.chars().any(char::is_control), "field={field:?}");
+        }
+        assert!(
+            classification
+                .worker_id
+                .as_ref()
+                .is_some_and(|id| id.len() <= MAX_WORKER_ID_LEN)
+        );
+        assert!(
+            classification
+                .target_dir
+                .as_ref()
+                .is_some_and(|target_dir| target_dir.len() <= MAX_QUEUE_SNAPSHOT_FIELD_BYTES)
+        );
+        assert!(classification.evidence_snippet.len() <= SNIPPET_MAX_BYTES);
+        assert!(classification.evidence_snippet.contains("TOKEN=<redacted>"));
     }
 
     #[test]
