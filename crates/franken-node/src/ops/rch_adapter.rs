@@ -1287,10 +1287,26 @@ fn requires_remote(invocation: &RchInvocation) -> bool {
         .env
         .get("RCH_REQUIRE_REMOTE")
         .is_some_and(|value| remote_required_value_enabled(value))
-        || invocation.argv.iter().any(|arg| {
-            arg.strip_prefix("RCH_REQUIRE_REMOTE=")
-                .is_some_and(remote_required_value_enabled)
-        })
+        || env_wrapped_remote_requirement(invocation)
+}
+
+fn env_wrapped_remote_requirement(invocation: &RchInvocation) -> bool {
+    if !invocation.argv.first().is_some_and(|arg| arg == "env") {
+        return false;
+    }
+
+    for arg in invocation.argv.iter().skip(1) {
+        if !looks_like_env_assignment(arg) {
+            return false;
+        }
+        if arg
+            .strip_prefix("RCH_REQUIRE_REMOTE=")
+            .is_some_and(remote_required_value_enabled)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn remote_required_value_enabled(value: &str) -> bool {
@@ -1569,6 +1585,29 @@ mod tests {
     }
 
     #[test]
+    fn rejects_remote_requirement_smuggled_as_cargo_argument() {
+        let cmd = RchInvocation {
+            argv: [
+                "cargo",
+                "check",
+                "-p",
+                "frankenengine-node",
+                "RCH_REQUIRE_REMOTE=1",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+            env: BTreeMap::new(),
+            cwd: "/data/projects/franken_node".to_string(),
+        };
+
+        let err = validate_allowed_rch_command(&cmd, &policy())
+            .expect_err("cargo argv must not satisfy remote requirement");
+
+        assert!(matches!(err, RchAdapterError::MissingRemoteRequirement));
+    }
+
+    #[test]
     fn rejects_commands_without_remote_requirement() {
         let cmd = RchInvocation::cargo(["cargo", "check", "-p", "frankenengine-node"]);
 
@@ -1808,7 +1847,9 @@ mod tests {
             redacted_env_keys: Vec::new(),
         };
 
-        let err = attestation.validate().expect_err("oversized source_fingerprints");
+        let err = attestation
+            .validate()
+            .expect_err("oversized source_fingerprints");
 
         assert!(matches!(
             err,
@@ -1844,7 +1885,9 @@ mod tests {
             redacted_env_keys: oversized_keys,
         };
 
-        let err = attestation.validate().expect_err("oversized redacted_env_keys");
+        let err = attestation
+            .validate()
+            .expect_err("oversized redacted_env_keys");
 
         assert!(matches!(
             err,
