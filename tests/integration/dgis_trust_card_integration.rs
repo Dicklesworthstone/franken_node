@@ -154,6 +154,22 @@ fn replay_fingerprint_length_prefixes_extension_and_trace_fields() {
 }
 
 #[test]
+fn risk_surface_rejects_control_char_identifiers_before_ui_snapshot() {
+    let mut input = sample_input();
+    input.trace_id = "trace-dgis-risk-ui\npoison".to_string();
+
+    let err = build_risk_surface_snapshot(input).expect_err("control character trace must reject");
+
+    assert!(matches!(
+        err,
+        RiskSurfaceError::InvalidIdentifier {
+            field: "trace_id",
+            reason: "control_char",
+        }
+    ));
+}
+
+#[test]
 fn replay_fingerprint_length_prefixes_planned_delta_fields() {
     let mut left = sample_input();
     left.planned_changes = vec![PlannedTopologyChange {

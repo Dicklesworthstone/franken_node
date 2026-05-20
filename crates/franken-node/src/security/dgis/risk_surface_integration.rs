@@ -410,6 +410,12 @@ fn validate_identifier(field: &'static str, value: &str) -> Result<(), RiskSurfa
             reason: "nul_byte",
         });
     }
+    if value.chars().any(char::is_control) {
+        return Err(RiskSurfaceError::InvalidIdentifier {
+            field,
+            reason: "control_char",
+        });
+    }
     Ok(())
 }
 
