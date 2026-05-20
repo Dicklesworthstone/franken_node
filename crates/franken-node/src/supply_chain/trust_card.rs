@@ -2842,7 +2842,7 @@ fn validate_snapshot_history(
             && !card
                 .previous_version_hash
                 .as_deref()
-                .eq(&Some(prev_hash.as_str()))
+                .is_some_and(|actual| constant_time::ct_eq(actual, prev_hash))
         {
             return Err(TrustCardError::InvalidSnapshot(format!(
                 "extension `{extension_id}` broke previous_version_hash linkage"
