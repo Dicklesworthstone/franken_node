@@ -1012,7 +1012,7 @@ conformance tests under `tests/` and `crates/franken-node/tests/`.
 | **Audience tokens** | `control_plane::audience_token` | Expiry, attenuation, domain separation, token chains with depth/root/leaf accessors, replay-resistant nonce window |
 | **Fork detection** | `control_plane::fork_detection` | State-vector hashing, rollback proofs, marker-proof verifier, `DetectionResult` (`Converged`/`Forked`/`GapDetected`/`RollbackDetected`) |
 | **Control epoch barriers** | `control_plane::control_epoch`, `epoch_transition_barrier` | Validity-window policy, `EpochRejectionReason` enum, fail-closed artifact rejection |
-| **Evidence ledger** | `observability::evidence_ledger` | Append-only signed decision log, witness tracing, timestamp queries |
+| **Evidence ledger** | `observability::evidence_ledger` | Append-only Ed25519-signed decision log, hash-chain prev-entry linkage, replay-attack detection, bounded capacity with eviction, optional spill-to-disk |
 | **Remote capability tokens** | `security::remote_cap`, `remote::*` | Scope-bound, single-use-optional Ed25519 tokens with endpoint binding |
 | **DGIS adversarial topology** | `security::dgis`, `dgis::*` | Dependency contagion simulator, fragility model, SPOF detection, immunization planner |
 | **BPET evolution risk scorer** | `security::bpet`, `migration::bpet_migration_gate` | Phenotype feature extraction, topology risk delta during rollout |
