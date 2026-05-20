@@ -37,7 +37,8 @@ pub type NodeId = String;
 /// Rejecting control characters at the graph boundary prevents downstream path
 /// and display layers from seeing split identifiers or injected output lines.
 pub fn validate_node_id(node: &NodeId) -> Result<(), GraphError> {
-    if node.chars().any(char::is_control) {
+    let trimmed = node.trim();
+    if trimmed.is_empty() || node != trimmed || node.chars().any(char::is_control) {
         return Err(GraphError::InvalidNodeId(node.clone()));
     }
     Ok(())
@@ -518,6 +519,34 @@ mod tests {
             g.add_edge(&bad, valid_edge).err(),
             Some(GraphError::InvalidNodeId(bad.clone()))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn node_ids_reject_empty_and_padded_identifiers() -> Result<(), String> {
+        for bad in ["", " ", " pkg", "pkg "] {
+            let bad = bad.to_string();
+            assert_eq!(
+                ContagionEdge::new(bad.clone(), 0.5, EdgeKind::DependencyImport).err(),
+                Some(GraphError::InvalidNodeId(bad.clone()))
+            );
+
+            let mut g = ContagionGraph::new(24);
+            g.add_node(bad.clone());
+            assert!(
+                g.nodes().is_empty(),
+                "empty or padded node id must not enter graph"
+            );
+
+            g.add_node("a".to_string());
+            g.add_node("b".to_string());
+            let valid_edge = ContagionEdge::new("b".to_string(), 0.5, EdgeKind::DependencyImport)
+                .map_err(|e| format!("valid edge rejected: {e:?}"))?;
+            assert_eq!(
+                g.add_edge(&bad, valid_edge).err(),
+                Some(GraphError::InvalidNodeId(bad.clone()))
+            );
+        }
         Ok(())
     }
 
