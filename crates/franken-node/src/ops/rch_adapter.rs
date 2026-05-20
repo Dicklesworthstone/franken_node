@@ -1277,10 +1277,14 @@ fn parse_action(action: &str) -> Result<RchValidationAction, RchAdapterError> {
 }
 
 fn package_from_args(argv: &[String]) -> Option<String> {
-    argv.windows(2).find_map(|window| match window {
-        [flag, value] if flag == "-p" || flag == "--package" => Some(value.clone()),
-        _ => None,
-    })
+    argv.iter()
+        .enumerate()
+        .find_map(|(index, arg)| match arg.as_str() {
+            "-p" | "--package" => argv.get(index + 1).cloned(),
+            _ => arg
+                .strip_prefix("--package=")
+                .map(std::string::ToString::to_string),
+        })
 }
 
 fn requires_remote(invocation: &RchInvocation) -> bool {
@@ -1591,6 +1595,16 @@ mod tests {
             allowed.target_dir.as_deref(),
             Some("/data/tmp/franken_node-test-target")
         );
+    }
+
+    #[test]
+    fn accepts_equals_form_package_flag() {
+        let cmd = invocation(&["cargo", "check", "--package=frankenengine-node"]);
+
+        let allowed = validate_allowed_rch_command(&cmd, &policy()).expect("allowed command");
+
+        assert_eq!(allowed.action, RchValidationAction::Check);
+        assert_eq!(allowed.package.as_deref(), Some("frankenengine-node"));
     }
 
     #[test]
