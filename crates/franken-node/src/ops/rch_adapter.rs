@@ -71,7 +71,7 @@ fn ensure_worker_id_safe(field: &'static str, worker: &str) -> Result<(), RchAda
             actual: worker.len(),
         });
     }
-    if worker.is_empty() || worker.chars().any(char::is_control) {
+    if worker.is_empty() || worker.trim() != worker || worker.chars().any(char::is_control) {
         return Err(RchAdapterError::MissingWorkerMetadata);
     }
     Ok(())
@@ -2230,6 +2230,33 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn rejects_padded_worker_id_in_attestation_validate() {
+        let attestation = RchProofAttestation {
+            schema_version: RCH_PROOF_ATTESTATION_SCHEMA_VERSION.to_string(),
+            command_digest: DigestRef::sha256(b"test"),
+            env_allowlist_fingerprint: DigestRef::sha256(b"env"),
+            toolchain_fingerprint: DigestRef::sha256(b"toolchain"),
+            worker_id: Some(" worker ".to_string()),
+            worker_fingerprint: Some(DigestRef::sha256(b"worker")),
+            sync_root_fingerprint: None,
+            target_dir_fingerprint: DigestRef::sha256(b"target"),
+            source_fingerprints: vec![InputDigest {
+                path: "src/main.rs".to_string(),
+                algorithm: "sha256".to_string(),
+                hex: "a".repeat(64),
+                source: "test".to_string(),
+            }],
+            redacted_env_keys: Vec::new(),
+        };
+
+        let err = attestation
+            .validate()
+            .expect_err("padded worker_id must fail closed");
+
+        assert!(matches!(err, RchAdapterError::MissingWorkerMetadata));
     }
 
     #[test]
