@@ -178,8 +178,10 @@ impl ProofBundle {
     /// Check if the bundle satisfies a given requirement.
     pub fn satisfies(&self, requirement: ProofRequirement) -> bool {
         match requirement {
-            ProofRequirement::FullProofChain => self.has_proof_chain,
-            ProofRequirement::IntegrityProof => self.has_integrity_proof,
+            ProofRequirement::FullProofChain => {
+                self.has_proof_chain && self.has_integrity_proof && self.has_integrity_hash
+            }
+            ProofRequirement::IntegrityProof => self.has_integrity_proof && self.has_integrity_hash,
             ProofRequirement::IntegrityHash => self.has_integrity_hash,
             ProofRequirement::SchemaProof => self.has_schema_proof,
         }
@@ -730,6 +732,48 @@ mod tests {
     }
 
     #[test]
+    fn state_object_rejects_integrity_proof_without_hash() {
+        let mut gate = HighAssuranceGate::high_assurance();
+        let bundle = ProofBundle {
+            has_proof_chain: false,
+            has_integrity_proof: true,
+            has_integrity_hash: false,
+            has_schema_proof: false,
+        };
+
+        let result = gate.evaluate("state-1", ObjectClass::StateObject, Some(&bundle));
+
+        assert!(matches!(
+            result,
+            Err(PromotionDenialReason::ProofBundleInsufficient {
+                required: ProofRequirement::IntegrityProof,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn critical_marker_rejects_chain_without_integrity_components() {
+        let mut gate = HighAssuranceGate::high_assurance();
+        let bundle = ProofBundle {
+            has_proof_chain: true,
+            has_integrity_proof: false,
+            has_integrity_hash: false,
+            has_schema_proof: false,
+        };
+
+        let result = gate.evaluate("critical-1", ObjectClass::CriticalMarker, Some(&bundle));
+
+        assert!(matches!(
+            result,
+            Err(PromotionDenialReason::ProofBundleInsufficient {
+                required: ProofRequirement::FullProofChain,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn config_object_rejects_full_chain_without_schema_proof() {
         let mut gate = HighAssuranceGate::high_assurance();
         let bundle = ProofBundle {
@@ -1108,7 +1152,13 @@ mod tests {
             ObjectClass::CriticalMarker,
             Some(&contradictory_bundle),
         );
-        assert!(result.is_ok()); // has_proof_chain=true satisfies FullProofChain
+        assert!(matches!(
+            result,
+            Err(PromotionDenialReason::ProofBundleInsufficient {
+                required: ProofRequirement::FullProofChain,
+                ..
+            })
+        ));
 
         // Test edge case: all proofs false but claim to be "full"
         let fake_full_bundle = ProofBundle {
@@ -1635,7 +1685,7 @@ mod tests {
         };
 
         // Each requirement should be checked independently
-        assert!(contradictory_bundle.satisfies(ProofRequirement::FullProofChain));
+        assert!(!contradictory_bundle.satisfies(ProofRequirement::FullProofChain));
         assert!(!contradictory_bundle.satisfies(ProofRequirement::IntegrityProof));
         assert!(!contradictory_bundle.satisfies(ProofRequirement::IntegrityHash));
         assert!(!contradictory_bundle.satisfies(ProofRequirement::SchemaProof));
