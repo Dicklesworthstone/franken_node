@@ -13068,6 +13068,11 @@ mod registry_command_tests {
         assert!(verification.detail.contains("unsafe"));
     }
 
+    #[test]
+    fn registry_artifact_file_name_rejects_nul_byte() {
+        assert!(!registry_artifact_file_name_is_safe("plugin\0.fnext"));
+    }
+
     fn temp_name_leftovers<F>(dir: &Path, mut predicate: F) -> Vec<String>
     where
         F: FnMut(&str) -> bool,
@@ -17330,7 +17335,7 @@ fn registry_should_skip_dir(path: &Path) -> bool {
 }
 
 fn registry_artifact_file_name_is_safe(file_name: &str) -> bool {
-    if file_name.is_empty() {
+    if file_name.is_empty() || file_name.contains('\0') {
         return false;
     }
     let path = Path::new(file_name);
