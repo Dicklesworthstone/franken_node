@@ -2425,10 +2425,9 @@ impl CapabilityGate {
         verifying_key: &VerifyingKey,
     ) -> Result<bool, RemoteCapError> {
         // Decode hex signature
-        let signature_bytes =
-            hex::decode(signature_hex).map_err(|_| RemoteCapError::CryptoEngineUnavailable {
-                detail: "invalid hex signature format".to_string(),
-            })?;
+        let Ok(signature_bytes) = hex::decode(signature_hex) else {
+            return Ok(false);
+        };
 
         if signature_bytes.len() != 64 {
             return Ok(false); // Invalid signature length

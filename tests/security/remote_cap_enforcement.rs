@@ -780,6 +780,36 @@ fn remote_cap_ed25519_gate_rejects_tampered_raw_crypto_trait_signature() {
 }
 
 #[test]
+fn remote_cap_ed25519_gate_rejects_malformed_hex_signature_with_invalid_audit() {
+    let signing_key = SigningKey::from_bytes(&[0x42; 32]);
+    let cap = ed25519_remote_cap_for_gate(&signing_key);
+    let mut cap_json = serde_json::to_value(&cap).expect("serialize remote cap");
+    cap_json["signature"] = serde_json::Value::String("not-hex-signature".to_string());
+    let malformed_cap: RemoteCap =
+        serde_json::from_value(cap_json).expect("malformed remote cap fixture");
+    let mut gate = CapabilityGate::with_ed25519_verifying_key(signing_key.verifying_key());
+
+    let err = gate
+        .authorize_network(
+            Some(&malformed_cap),
+            RemoteOperation::TelemetryExport,
+            "https://telemetry.example.com/v1",
+            1_700_000_001,
+            "trace-ed25519-malformed-hex-gate",
+        )
+        .expect_err("malformed Ed25519 signature encoding must fail closed");
+
+    assert_eq!(err.code(), "REMOTECAP_INVALID");
+    let denied_event = gate.audit_log().last().expect("denial audit event");
+    assert_eq!(denied_event.event_code, "REMOTECAP_DENIED");
+    assert!(!denied_event.allowed);
+    assert_eq!(
+        denied_event.denial_code.as_deref(),
+        Some("REMOTECAP_INVALID")
+    );
+}
+
+#[test]
 fn remote_cap_signed_subject_mismatch_is_rejected() {
     let signing_key = SigningKey::from_bytes(&[0x42; 32]);
     let capability = ImpossibleCapability::OutboundNetwork;
