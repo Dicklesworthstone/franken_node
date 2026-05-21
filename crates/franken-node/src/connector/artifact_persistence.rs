@@ -26,6 +26,9 @@ fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
     if artifact_id.contains('\0') {
         return Some("artifact_id must not contain null bytes".to_string());
     }
+    if artifact_id.chars().any(char::is_control) {
+        return Some("artifact_id must not contain control characters".to_string());
+    }
     None
 }
 
@@ -1394,6 +1397,32 @@ mod tests {
         assert_eq!(ArtifactType::from_label("invoke\u{200b}"), None);
         assert_eq!(ArtifactType::from_label("response\0audit"), None);
         assert_eq!(ArtifactType::from_label("\u{200b}receipt"), None);
+    }
+
+    #[test]
+    fn persist_rejects_artifact_id_with_control_chars() {
+        let mut store = ArtifactStore::new();
+        let malicious_ids = [
+            "art\nFAKE_LOG: injected",
+            "art\rcarriage_return",
+            "art\x1b[31mred_escape",
+            "tab\there",
+        ];
+        for bad_id in malicious_ids {
+            let result = store.persist(
+                bad_id,
+                ArtifactType::Audit,
+                ControlEpoch::GENESIS,
+                "hash",
+                "trace",
+                1000,
+            );
+            assert!(
+                matches!(result, Err(PersistenceError::InvalidArtifact { .. })),
+                "expected InvalidArtifact for id with control chars: {:?}",
+                bad_id
+            );
+        }
     }
 
     #[test]
