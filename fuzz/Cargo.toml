@@ -364,3 +364,9 @@ name = "fuzz_threshold_sig_parity"
 path = "fuzz_targets/threshold_sig_parity.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_canonical_encoder_parity"
+path = "fuzz_targets/canonical_encoder_parity.rs"
+test = false
+doc = false
