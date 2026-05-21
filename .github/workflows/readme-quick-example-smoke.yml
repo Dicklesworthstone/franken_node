@@ -1,0 +1,60 @@
+name: README Quick Example Smoke
+
+# Runs the README's documented Day-0 operator workflow end-to-end against the
+# freshly-built binary. Catches the class of operator-on-ramp regressions
+# fixed in the 2026-05-20 reality-check bridge plan (init bootstrap deadlock,
+# trust-card high-water signature mismatch, trust-scan config discovery,
+# registry-publish clap panic, --json/--input/--readiness-input doc drift).
+#
+# Triggered on every PR that touches:
+#   - the franken-node crate sources (src + tests + Cargo.toml)
+#   - the README itself (the document whose contract this guards)
+#   - the smoke script
+#   - this workflow file
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    paths:
+      - crates/franken-node/**
+      - README.md
+      - scripts/check_readme_quick_example.sh
+      - .github/workflows/readme-quick-example-smoke.yml
+  workflow_dispatch: {}
+
+jobs:
+  smoke:
+    name: README Quick Example smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The crate depends on `franken_engine` as a sibling path dependency.
+      # Without it, the workspace build fails at link time.
+      - name: Checkout sibling franken_engine
+        uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/franken_engine
+          path: ../franken_engine
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Build franken-node binary
+        run: cargo build -p frankenengine-node --bin franken-node --locked
+
+      - name: Run README Quick Example smoke
+        run: scripts/check_readme_quick_example.sh ./target/debug/franken-node
+
+      - name: Upload smoke tempdir on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-tempdir-artifacts
+          path: /tmp/franken-node-quick-example.*
+          if-no-files-found: ignore
+          retention-days: 7

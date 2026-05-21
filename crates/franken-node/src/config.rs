@@ -469,6 +469,23 @@ impl Config {
         cli_overrides: CliOverrides,
         env_lookup: &impl Fn(&str) -> Option<String>,
     ) -> Result<ResolvedConfig, ConfigError> {
+        let resolved =
+            Self::resolve_without_validation_with_env(explicit_path, cli_overrides, env_lookup)?;
+        resolved.config.validate()?;
+        Ok(resolved)
+    }
+
+    /// Resolve configuration through the file/profile/env merge pipeline WITHOUT
+    /// running [`Config::validate`]. Callers that intend to subsequently mutate
+    /// the resolved config (for example, [`Config::resolve_with_bootstrap_env`]
+    /// synthesizing first-run security defaults during `franken-node init`) use
+    /// this entry point and are responsible for invoking `validate()` themselves
+    /// once the config is in its final shape.
+    pub fn resolve_without_validation_with_env(
+        explicit_path: Option<&Path>,
+        cli_overrides: CliOverrides,
+        env_lookup: &impl Fn(&str) -> Option<String>,
+    ) -> Result<ResolvedConfig, ConfigError> {
         let source_path = if let Some(path) = explicit_path {
             Some(path.to_path_buf())
         } else {
@@ -531,7 +548,6 @@ impl Config {
             config.apply_overrides(profile_block, MergeStage::Profile, &mut decisions);
         }
         config.apply_env_overrides(env_lookup, &mut decisions)?;
-        config.validate()?;
 
         Ok(ResolvedConfig {
             config,
@@ -539,6 +555,81 @@ impl Config {
             source_path,
             decisions,
         })
+    }
+
+    /// Resolve configuration for first-run bootstrap flows (specifically
+    /// `franken-node init`).
+    ///
+    /// Behaves identically to [`Config::resolve`] except that two specific
+    /// fail-closed security boundaries — `trust.registry_signing_key` and
+    /// `security.authorized_api_keys` — are auto-populated with freshly
+    /// generated values when (and only when) they are absent from the merged
+    /// configuration. The returned [`BootstrapSynthesis`] records exactly what
+    /// was synthesized so the init report can surface it to the operator (the
+    /// generated registry signing key appears in plain text inside the written
+    /// `franken_node.toml`; the operator must protect that file like a private
+    /// key).
+    ///
+    /// All other validation failures bubble up unchanged: synthesis fires only
+    /// for the missing-required-defaults case, never as a catch-all "validation
+    /// off" switch.
+    pub fn resolve_with_bootstrap(
+        explicit_path: Option<&Path>,
+        cli_overrides: CliOverrides,
+    ) -> Result<(ResolvedConfig, BootstrapSynthesis), ConfigError> {
+        Self::resolve_with_bootstrap_env(explicit_path, cli_overrides, &|key| {
+            std::env::var(key).ok()
+        })
+    }
+
+    /// Environment-injectable variant of [`Config::resolve_with_bootstrap`].
+    pub fn resolve_with_bootstrap_env(
+        explicit_path: Option<&Path>,
+        cli_overrides: CliOverrides,
+        env_lookup: &impl Fn(&str) -> Option<String>,
+    ) -> Result<(ResolvedConfig, BootstrapSynthesis), ConfigError> {
+        let mut resolved =
+            Self::resolve_without_validation_with_env(explicit_path, cli_overrides, env_lookup)?;
+        let synthesis = resolved.config.synthesize_init_security_defaults();
+        resolved.config.validate()?;
+        Ok((resolved, synthesis))
+    }
+
+    /// Synthesize fresh fail-closed security defaults for first-run bootstrap.
+    ///
+    /// - If `trust.registry_signing_key` is absent, generate a fresh 32-byte
+    ///   random key (the minimum length [`validate_registry_signing_key`]
+    ///   accepts) and store it base64-encoded.
+    /// - If `security.authorized_api_keys` is empty, generate a single fresh
+    ///   API key (a 32-character lowercase hex string derived from 16 random
+    ///   bytes) and insert it.
+    ///
+    /// Returns a [`BootstrapSynthesis`] describing exactly what was synthesized.
+    /// Idempotent on an already-configured `Config`: calling it on a config
+    /// that already has both fields populated is a no-op.
+    pub fn synthesize_init_security_defaults(&mut self) -> BootstrapSynthesis {
+        use rand::RngCore;
+
+        let mut synthesis = BootstrapSynthesis::default();
+        let mut rng = rand::thread_rng();
+
+        if self.trust.registry_signing_key.is_none() {
+            let mut key_bytes = [0u8; MIN_REGISTRY_SIGNING_KEY_BYTES];
+            rng.fill_bytes(&mut key_bytes);
+            let encoded = base64::engine::general_purpose::STANDARD.encode(key_bytes);
+            self.trust.registry_signing_key = Some(encoded);
+            synthesis.registry_signing_key_generated = true;
+        }
+
+        if self.security.authorized_api_keys.is_empty() {
+            let mut id_bytes = [0u8; 16];
+            rng.fill_bytes(&mut id_bytes);
+            let api_key = format!("fnode-bootstrap-{}", hex::encode(id_bytes));
+            self.security.authorized_api_keys.insert(api_key.clone());
+            synthesis.authorized_api_keys_generated.push(api_key);
+        }
+
+        synthesis
     }
 
     /// Serialize this configuration to TOML.
@@ -1037,6 +1128,24 @@ impl Config {
                     stage.clone(),
                     "security.authorized_api_keys",
                     format!("[{} keys configured]", value.len()),
+                ),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(section) = &overrides.security
+            && let Some(value) = &section.network_policy
+        {
+            self.security.network_policy = value.clone();
+            push_bounded(
+                decisions,
+                MergeDecision::new(
+                    stage.clone(),
+                    "security.network_policy",
+                    format!(
+                        "ssrf_enforcement={:?} allowlist_len={}",
+                        value.ssrf_enforcement,
+                        value.allowlist.len()
+                    ),
                 ),
                 MAX_MERGE_DECISIONS,
             );
@@ -2267,6 +2376,31 @@ pub struct ResolvedConfig {
     pub decisions: Vec<MergeDecision>,
 }
 
+/// Records which fail-closed security defaults were synthesized by
+/// [`Config::resolve_with_bootstrap`] during first-run init.
+///
+/// Synthesis is reported in plain text via the init report so an operator
+/// can see exactly what was auto-generated and protect the resulting
+/// configuration file accordingly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BootstrapSynthesis {
+    /// `true` if `trust.registry_signing_key` was absent and a fresh 32-byte
+    /// key was synthesized.
+    pub registry_signing_key_generated: bool,
+    /// API keys synthesized into `security.authorized_api_keys` because the
+    /// configured set was empty. Entries are returned verbatim (they appear in
+    /// the written config TOML, so they are not secret to the operator who can
+    /// read that file).
+    pub authorized_api_keys_generated: Vec<String>,
+}
+
+impl BootstrapSynthesis {
+    /// True when no defaults were synthesized.
+    pub fn is_empty(&self) -> bool {
+        !self.registry_signing_key_generated && self.authorized_api_keys_generated.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MergeDecision {
     pub stage: MergeStage,
@@ -2482,6 +2616,12 @@ struct SecurityOverrides {
     pub max_merge_decisions: Option<usize>,
     pub decision_receipt_signing_key_path: Option<PathBuf>,
     pub authorized_api_keys: Option<BTreeSet<String>>,
+    /// Optional override for the security network egress policy. Required so
+    /// the TOML written by `franken-node init` (which serializes the full
+    /// [`SecurityConfig`] including `[security.network_policy]`) round-trips
+    /// cleanly through this loader. Without this field, every config file
+    /// emitted by `init` fails to re-load with `unknown field network_policy`.
+    pub network_policy: Option<NetworkPolicyConfig>,
 }
 
 impl std::fmt::Debug for SecurityOverrides {
@@ -2497,6 +2637,7 @@ impl std::fmt::Debug for SecurityOverrides {
                 &self.decision_receipt_signing_key_path,
             )
             .field("authorized_api_keys", &"[REDACTED]")
+            .field("network_policy", &self.network_policy)
             .finish()
     }
 }

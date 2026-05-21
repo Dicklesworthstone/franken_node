@@ -1,0 +1,26 @@
+{
+  "$schema": "../../docs/specs/section_13/bd-28sz_contract.md",
+  "gate": "compat_corpus_pass_gate",
+  "verdict": "pending",
+  "timestamp": "2026-05-21T00:00:00Z",
+  "owner_track": "10.2",
+  "metric": {
+    "name": "targeted_compatibility_corpus_pass_rate",
+    "target_pct": 95.0,
+    "observed_pct": null,
+    "passed": null,
+    "details_ref": "scripts/check_compat_corpus_gate.py"
+  },
+  "families": [],
+  "evidence": {
+    "lockstep_runner_release_gate": "tests/conformance/lockstep_runner_release_gate.rs",
+    "canonical_vector_gate": ".github/workflows/canonical-vector-gate.yml",
+    "compat_corpus_gate_self_test": "scripts/check_compat_corpus_gate.py --self-test"
+  },
+  "notes": [
+    "Backfilled 2026-05-21 from the reality-check bridge plan.",
+    "Marked verdict=pending because no signed corpus run with a real observed_pct has been emitted yet. The lockstep harness can produce one with `franken-node verify lockstep <corpus> --runtimes node,bun,franken-node --emit-fixtures`, but Node and Bun must both be installed on the runner.",
+    "Once the first real corpus run lands, populate observed_pct, set passed accordingly, and flip verdict to GREEN/RED. The gate-tier (G0..G4) ratcheting model lives in docs/specs/section_13/bd-28sz_contract.md.",
+    "This file is the README-referenced artifact at docs/CLAIMS_REGISTRY.md::CLAIM-001 and docs/PRODUCT_CHARTER.md §5."
+  ]
+}

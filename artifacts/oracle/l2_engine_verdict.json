@@ -19,8 +19,7 @@
   ],
   "blocking_findings": [],
   "notes": [
-    "Backfilled 2026-05-21 from the reality-check bridge plan.",
-    "tests_passed reflects the sdk/verifier crate's #[test] count (266 cases under sdk/verifier/) as of 2026-05-20.",
-    "The legacy schema/README references `artifacts/oracle/l2_engine_verdict.json`; both file names exist with identical content for backward compatibility (l2_engine_boundary_verdict.json is the canonical filename per docs/DUAL_ORACLE_CLOSE_CONDITION.md L12, l2_engine_verdict.json mirrors it for README L2623 compatibility)."
+    "Created 2026-05-21 to mirror artifacts/oracle/l2_engine_boundary_verdict.json under the file name the README (L2623) references. The canonical filename per docs/DUAL_ORACLE_CLOSE_CONDITION.md L12 is `l2_engine_boundary_verdict.json`; this file is the README-side alias kept in lockstep with the canonical one.",
+    "If you regenerate the canonical artifact, regenerate this alias too — track via Track 10.17."
   ]
 }

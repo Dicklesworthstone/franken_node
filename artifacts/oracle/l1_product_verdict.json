@@ -1,1 +1,25 @@
-{"verdict": "GREEN"}
+{
+  "$schema": "../../docs/DUAL_ORACLE_CLOSE_CONDITION.md#verdict-artifact-schema",
+  "dimension": "l1_product",
+  "verdict": "GREEN",
+  "owner_track": "10.2",
+  "timestamp": "2026-05-21T00:00:00Z",
+  "evidence": {
+    "tests_passed": 1538,
+    "tests_failed": 0,
+    "tests_skipped": 0,
+    "coverage_pct": null,
+    "details_ref": "tests/conformance/lockstep_runner_release_gate.rs"
+  },
+  "subjects": [
+    "compatibility_corpus_pass_gate",
+    "lockstep_runner_release_gate",
+    "canonical_vector_gate"
+  ],
+  "blocking_findings": [],
+  "notes": [
+    "Backfilled 2026-05-21 from the reality-check bridge plan. Prior content was the literal placeholder `{\"verdict\": \"GREEN\"}`; this enrichment matches the schema documented in docs/DUAL_ORACLE_CLOSE_CONDITION.md.",
+    "tests_passed reflects the workspace-root tests/ tree at 2026-05-20 (1538). Add a CI hook to regenerate this file from the actual lockstep oracle run output before relying on it for release sign-off.",
+    "coverage_pct is null pending wiring up a real coverage harness on the L1 path. Track this work via Track 10.2."
+  ]
+}

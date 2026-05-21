@@ -1,0 +1,60 @@
+name: README CLI Drift Gate
+
+# Diff the README's documented Command Reference against the binary's
+# actual `--help` surface. Fails when the README promises commands the
+# binary does not expose, or vice versa. Catches the class of doc/CLI
+# drift the 2026-05-20 reality-check bridge plan surfaced (e.g. README
+# implied every command accepts --json, but `incident bundle --json` and
+# `incident list --json` were rejected as unknown args).
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    paths:
+      - README.md
+      - crates/franken-node/src/cli.rs
+      - crates/franken-node/src/main.rs
+      - scripts/check_readme_cli_drift.py
+      - .github/workflows/readme-cli-drift-gate.yml
+  workflow_dispatch: {}
+
+jobs:
+  drift:
+    name: README CLI drift gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout sibling franken_engine
+        uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/franken_engine
+          path: ../franken_engine
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Build franken-node binary
+        run: cargo build -p frankenengine-node --bin franken-node --locked
+
+      - name: Run README CLI drift gate
+        run: |
+          python3 scripts/check_readme_cli_drift.py \
+            --bin ./target/debug/franken-node \
+            --json | tee artifacts/oracle/readme_cli_drift_verdict.json
+          # Re-invoke in human mode for the build log.
+          python3 scripts/check_readme_cli_drift.py \
+            --bin ./target/debug/franken-node
+
+      - name: Upload verdict artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: readme-cli-drift-verdict
+          path: artifacts/oracle/readme_cli_drift_verdict.json
+          if-no-files-found: ignore
+          retention-days: 30

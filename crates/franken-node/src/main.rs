@@ -5345,7 +5345,7 @@ fn incident_bundle_output_path(incident_id: &str) -> PathBuf {
     PathBuf::from(format!("{}.fnbundle", incident_id_slug(incident_id)))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct IncidentListEntry {
     incident_id: String,
     severity: String,
@@ -5462,11 +5462,19 @@ fn collect_incident_list_entries(
     severity_filter: Option<&str>,
 ) -> Result<Vec<IncidentListEntry>> {
     let mut entries = Vec::new();
+    let bundle_paths = collect_incident_bundle_paths(root)?;
+    // Defer the signing-key requirement until we actually have a bundle to
+    // open. `incident list` on a fresh workspace (zero bundles) should not
+    // fail-closed on a missing fleet signing key just to report an empty
+    // list. This matches the operator UX: list is a read-only query.
+    if bundle_paths.is_empty() {
+        return Ok(entries);
+    }
     let trusted_signing_material = load_receipt_signing_material(None)?
         .ok_or_else(|| missing_replay_bundle_signing_key_error("list"))?;
     let trusted_key_id = signing_material_key_id(&trusted_signing_material);
 
-    for path in collect_incident_bundle_paths(root)? {
+    for path in bundle_paths {
         let bundle = read_bundle_from_path_with_trusted_key(&path, Some(&trusted_key_id))
             .with_context(|| format!("failed reading incident bundle {}", path.display()))?;
         let severity = infer_incident_bundle_severity(&bundle);
@@ -6849,6 +6857,10 @@ struct InitReport {
     trust_scan: Option<TrustScanReport>,
     merge_decision_count: usize,
     merge_decisions: Vec<config::MergeDecision>,
+    /// Records any fail-closed security defaults synthesized during first-run
+    /// bootstrap (registry signing key, authorized API keys). Empty when the
+    /// caller-supplied config already satisfied both boundaries.
+    bootstrap_synthesis: config::BootstrapSynthesis,
 }
 
 fn validate_init_flags(overwrite: bool, backup_existing: bool) -> Result<()> {
@@ -6935,6 +6947,7 @@ fn build_init_report(
     trust_scan: Option<TrustScanReport>,
     wrote_to_stdout: bool,
     stdout_config_toml: Option<String>,
+    bootstrap_synthesis: config::BootstrapSynthesis,
 ) -> InitReport {
     InitReport {
         command: "init".to_string(),
@@ -6951,6 +6964,7 @@ fn build_init_report(
         trust_scan,
         merge_decision_count: resolved.decisions.len(),
         merge_decisions: resolved.decisions.clone(),
+        bootstrap_synthesis,
     }
 }
 
@@ -7019,6 +7033,20 @@ fn render_init_report_human(report: &InitReport, verbose: bool) -> String {
         }
     }
 
+    if !report.bootstrap_synthesis.is_empty() {
+        lines.push(format!(
+            "bootstrap_synthesis: registry_signing_key_generated={} authorized_api_keys_generated={}",
+            report.bootstrap_synthesis.registry_signing_key_generated,
+            report.bootstrap_synthesis.authorized_api_keys_generated.len()
+        ));
+        if report.bootstrap_synthesis.registry_signing_key_generated {
+            lines.push(
+                "  NOTE: a fresh trust.registry_signing_key was generated; protect the written franken_node.toml like a private key."
+                    .to_string(),
+            );
+        }
+    }
+
     if verbose {
         lines.push(format!(
             "generated_at={} merge_decision_count={}",
@@ -7062,7 +7090,11 @@ state/execution-receipts/
 /// Creates all required subdirectories, an empty trust-card registry, and a
 /// `.gitignore` that excludes sensitive material. The operation is idempotent:
 /// existing directories and files are skipped without error.
-fn bootstrap_state_directory(root: &Path, profile_name: &str) -> Result<Vec<InitFileAction>> {
+fn bootstrap_state_directory(
+    root: &Path,
+    profile_name: &str,
+    trust_config: &config::TrustConfig,
+) -> Result<Vec<InitFileAction>> {
     let mut actions = Vec::new();
     let dot_dir = root.join(".franken-node");
 
@@ -7115,6 +7147,16 @@ fn bootstrap_state_directory(root: &Path, profile_name: &str) -> Result<Vec<Init
     }
 
     // Write empty trust-card registry (idempotent — skip if already present).
+    //
+    // The registry must be HMAC-signed with the operator's configured
+    // `trust.registry_signing_key`, NOT the in-crate `DEFAULT_REGISTRY_KEY`
+    // placeholder that `TrustCardRegistry::default()` uses. Subsequent loads
+    // by `trust list` / `trust card` / etc. go through `from_config` which
+    // resolves the same operator key; a mismatch surfaces as
+    // "trust-card registry high-water signature mismatch" and breaks every
+    // post-init command. `init` is the bootstrap surface, so the operator key
+    // is guaranteed to be present here (synthesized by the bootstrap-aware
+    // config resolver when absent).
     let registry_path = dot_dir.join("state/trust-card-registry.v1.json");
     if registry_path.is_file() {
         actions.push(InitFileAction {
@@ -7123,7 +7165,10 @@ fn bootstrap_state_directory(root: &Path, profile_name: &str) -> Result<Vec<Init
             backup_path: None,
         });
     } else {
-        let empty_registry = supply_chain::trust_card::TrustCardRegistry::default();
+        let empty_registry = supply_chain::trust_card::TrustCardRegistry::from_config(trust_config)
+            .map_err(|err| {
+                anyhow::anyhow!("failed creating trust-card registry from config: {err}")
+            })?;
         empty_registry
             .persist_authoritative_state(&registry_path)
             .map_err(|err| anyhow::anyhow!("failed writing empty trust-card registry: {err}"))?;
@@ -7543,7 +7588,9 @@ fn emit_ops_resource_governor_report(
 fn ops_validation_readiness_report(
     args: &OpsValidationReadinessArgs,
 ) -> Result<ops::validation_readiness::ValidationReadinessReport> {
-    let input = proof_pipeline_readiness_input(args.input.as_deref(), &args.receipts)?;
+    // `resolved_input` collapses both `--input` and the positional path so
+    // either invocation style works.
+    let input = proof_pipeline_readiness_input(args.resolved_input(), &args.receipts)?;
 
     Ok(
         ops::validation_readiness::build_validation_readiness_report(
@@ -14614,23 +14661,36 @@ fn handle_remotecap_revoke(args: &RemoteCapRevokeArgs) -> Result<()> {
 }
 
 fn trust_card_cli_registry(now_secs: u64) -> Result<TrustCardCliRegistryState> {
-    let resolved = config::Config::resolve(None, CliOverrides::default())
-        .context("failed resolving configuration for trust registry")?;
-    let project_root = project_local_root_from_source_path(
-        resolved.source_path.as_deref(),
-        "trust-card registry",
-    )?;
-    let path = project_root.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
+    // Same config-resolution chain as `trust scan`: project-local config
+    // first, then standard discovery (cwd/XDG), then for_profile defaults.
+    // The unified chain means `trust list` inside a project that was scanned
+    // (but not init'd) still finds the parent operator's signing key and
+    // reads the registry that scan wrote — matching the README's mental
+    // model that the operator works from one directory and may scan/list
+    // multiple sub-projects.
+    let cwd = std::env::current_dir().context("failed resolving cwd for trust registry")?;
+    let config = trust_registry_config_for_project(&cwd).map_err(|err| {
+        anyhow::anyhow!(
+            "failed resolving configuration for trust registry: {err}\n\
+             hint: run `franken-node init --profile balanced --out-dir .` in this directory \
+             to bootstrap a config and trust-card registry, then retry the command."
+        )
+    })?;
+
+    // The trust-card registry lives next to the config that *resolved*. Use
+    // the cwd as the project root: this is where the operator expects the
+    // registry to be, and matches `trust scan`'s behavior on the same path.
+    let path = cwd.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
     if !path.is_file() {
         anyhow::bail!(
-            "authoritative trust-card registry not initialized at {}; bootstrap or import trust state before using trust commands",
+            "authoritative trust-card registry not initialized at {}; bootstrap or import trust state before using trust commands (run `franken-node init --out-dir .` here, or invoke trust commands from the project root that owns the registry)",
             path.display()
         );
     }
-    let cache_ttl = trust_registry_cache_ttl(&resolved.config.trust);
+    let cache_ttl = trust_registry_cache_ttl(&config.trust);
     let registry = TrustCardRegistry::load_authoritative_state_from_config(
         &path,
-        &resolved.config.trust,
+        &config.trust,
         now_secs,
         SnapshotSourceContext::TrustedFile,
     )
@@ -14688,6 +14748,26 @@ fn trust_registry_cache_ttl(trust: &config::TrustConfig) -> u64 {
 }
 
 fn trust_registry_config_for_project(project_root: &Path) -> Result<config::Config> {
+    // Four-step resolution chain so `trust scan ./somewhere-else` (and the
+    // sibling `trust list` flow) honor the operator's local configuration
+    // the same way the rest of the binary does:
+    //
+    //   1. `<project_root>/franken_node.toml` — the *target* project may carry
+    //      its own franken-node config (typical when scanning a project that
+    //      adopted franken-node).
+    //   2. Walk up the parent chain from `project_root` looking for
+    //      `franken_node.toml`. This is the path that lets a user run
+    //      `cd app && franken-node trust list` from a subdirectory of an
+    //      init'd workspace and still find the operator's signing key in the
+    //      workspace root. Stops at the filesystem root.
+    //   3. Standard discovery (`Config::resolve` with `None`): cwd, XDG, etc.
+    //      Covers the case where the operator's config lives under XDG instead
+    //      of in the project tree.
+    //   4. `Config::for_profile(Balanced)` — last-resort default; only
+    //      acceptable when no config is reachable AND the caller is willing to
+    //      run with a default trust registry (which itself fails closed on
+    //      operations that require a configured signing key, surfacing a clear
+    //      error instead of a silent fallback).
     let config_path = project_root.join("franken_node.toml");
     if config_path.is_file() {
         return Ok(
@@ -14695,6 +14775,27 @@ fn trust_registry_config_for_project(project_root: &Path) -> Result<config::Conf
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?
                 .config,
         );
+    }
+
+    // Walk up from `project_root` toward `/`.
+    let mut current = project_root.to_path_buf();
+    while let Some(parent) = current.parent().map(Path::to_path_buf) {
+        let candidate = parent.join("franken_node.toml");
+        if candidate.is_file() {
+            return Ok(
+                config::Config::resolve(Some(&candidate), CliOverrides::default())
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?
+                    .config,
+            );
+        }
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+
+    if let Ok(resolved) = config::Config::resolve(None, CliOverrides::default()) {
+        return Ok(resolved.config);
     }
 
     Ok(config::Config::for_profile(Profile::Balanced))
@@ -15010,12 +15111,25 @@ fn trust_scan_registry_state(
         )
         .map_err(|err| anyhow::anyhow!(err.to_string()))?
     } else {
-        let registry = TrustCardRegistry::from_config(trust_config)
+        let fresh = TrustCardRegistry::from_config(trust_config)
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        registry
+        fresh
             .persist_authoritative_state(&path)
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        registry
+        // Reload from disk so the in-memory registry's `last_snapshot_hash`
+        // reflects the snapshot we just persisted. Without this reload,
+        // `advance_snapshot_sequence_for_mutation` on the freshly-created
+        // registry sees `last_snapshot_hash = None`, sets
+        // `previous_snapshot_hash = None` on the next mutation, and the
+        // subsequent persist fails the chain check with
+        // "snapshot chain rejected: epoch 1 does not extend high-water epoch 0".
+        TrustCardRegistry::load_authoritative_state_from_config(
+            &path,
+            trust_config,
+            now_secs,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?
     };
 
     Ok(TrustCardCliRegistryState {
@@ -16328,11 +16442,27 @@ fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> 
             ctx,
         )?;
     }
-    eprintln!(
-        "incident bundle written: {} evidence={}",
-        output_path.display(),
-        evidence_path.display()
-    );
+    if args.json {
+        let payload = serde_json::json!({
+            "command": "incident.bundle",
+            "schema_version": "incident-bundle-cli-v1",
+            "incident_id": args.id,
+            "verify": args.verify,
+            "bundle_path": output_path.display().to_string(),
+            "evidence_path": evidence_path.display().to_string(),
+            "trusted_key_id": trusted_key_id,
+            "bundle_id": bundle.bundle_id,
+            "integrity_hash": bundle.integrity_hash,
+            "timeline_event_count": bundle.timeline.len(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        eprintln!(
+            "incident bundle written: {} evidence={}",
+            output_path.display(),
+            evidence_path.display()
+        );
+    }
 
     Ok(())
 }
@@ -22282,8 +22412,10 @@ fn handle_verify_recovery_runbook(args: &VerifyRecoveryRunbookArgs) -> Result<()
         Utc::now()
     };
 
-    // Load validation readiness input or generate test scenario
-    let input = if let Some(input_path) = &args.readiness_input {
+    // Load validation readiness input or generate test scenario.
+    // The accessor collapses both positional and `--readiness-input` storage
+    // slots into a single resolved path so both invocation forms work.
+    let input = if let Some(input_path) = args.readiness_input() {
         let input_json = bounded_read_to_string(input_path, MAX_GENERAL_FILE_BYTES)
             .with_context(|| format!("failed reading input file: {}", input_path.display()))?;
         serde_json::from_str(&input_json).with_context(|| {
@@ -25998,7 +26130,15 @@ fn main() -> Result<()> {
                 anyhow::bail!("`init --scan` requires state bootstrapping; remove `--no-state`");
             }
             let profile_override = parse_profile_override(profile.as_deref())?;
-            let resolved = config::Config::resolve(
+            // `init` is the bootstrap surface: it must succeed even when the
+            // operator has no existing config (the very purpose of the command
+            // is to CREATE one). The bootstrap-aware resolver synthesizes the
+            // two fail-closed security defaults (`trust.registry_signing_key`
+            // and `security.authorized_api_keys`) on first run if absent and
+            // surfaces what was synthesized via the returned
+            // `BootstrapSynthesis`. Every subsequent command continues to use
+            // the strict `Config::resolve` path with no behavior change.
+            let (resolved, bootstrap_synthesis) = config::Config::resolve_with_bootstrap(
                 config.as_deref(),
                 CliOverrides {
                     profile: profile_override,
@@ -26063,6 +26203,7 @@ fn main() -> Result<()> {
                 let state_actions = bootstrap_state_directory(
                     bootstrap_root,
                     &resolved.selected_profile.to_string(),
+                    &resolved.config.trust,
                 )?;
                 file_actions.extend(state_actions);
             }
@@ -26079,6 +26220,7 @@ fn main() -> Result<()> {
                 trust_scan,
                 wrote_to_stdout,
                 stdout_config_toml.clone(),
+                bootstrap_synthesis,
             );
 
             if structured_logs_jsonl {
@@ -26692,10 +26834,21 @@ fn main() -> Result<()> {
                 let cwd = std::env::current_dir()
                     .context("failed resolving current working directory for incident list")?;
                 let entries = collect_incident_list_entries(&cwd, severity_filter.as_deref())?;
-                println!(
-                    "{}",
-                    render_incident_list(&entries, severity_filter.as_deref())
-                );
+                if args.json {
+                    let payload = serde_json::json!({
+                        "command": "incident.list",
+                        "schema_version": "incident-list-v1",
+                        "severity_filter": severity_filter,
+                        "count": entries.len(),
+                        "incidents": entries,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "{}",
+                        render_incident_list(&entries, severity_filter.as_deref())
+                    );
+                }
             }
         },
 
@@ -26825,12 +26978,30 @@ mod state_bootstrap_tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Build a [`config::TrustConfig`] suitable for tests: starts from the
+    /// requested profile defaults and synthesizes the fail-closed security
+    /// boundaries (registry signing key, authorized API keys) the same way
+    /// `franken-node init` does at runtime. Without this, `TrustConfig` from a
+    /// raw profile build lacks `registry_signing_key`, and the call to
+    /// `TrustCardRegistry::from_config` inside `bootstrap_state_directory`
+    /// fails fail-closed.
+    fn test_trust_config(profile: config::Profile) -> config::TrustConfig {
+        let mut cfg = config::Config::for_profile(profile);
+        cfg.synthesize_init_security_defaults();
+        cfg.trust
+    }
+
     #[test]
     fn bootstrap_creates_all_directories() {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
 
-        let actions = bootstrap_state_directory(root, "balanced").expect("bootstrap");
+        let actions = bootstrap_state_directory(
+            root,
+            "balanced",
+            &test_trust_config(config::Profile::Balanced),
+        )
+        .expect("bootstrap");
 
         for subdir in STATE_BOOTSTRAP_SUBDIRS {
             let dir_path = root.join(".franken-node").join(subdir);
@@ -26857,7 +27028,8 @@ mod state_bootstrap_tests {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
 
-        bootstrap_state_directory(root, "strict").expect("bootstrap");
+        bootstrap_state_directory(root, "strict", &test_trust_config(config::Profile::Strict))
+            .expect("bootstrap");
 
         let registry_path = root.join(".franken-node/state/trust-card-registry.v1.json");
         assert!(
@@ -26883,7 +27055,12 @@ mod state_bootstrap_tests {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
 
-        bootstrap_state_directory(root, "balanced").expect("bootstrap");
+        bootstrap_state_directory(
+            root,
+            "balanced",
+            &test_trust_config(config::Profile::Balanced),
+        )
+        .expect("bootstrap");
 
         let gitignore_path = root.join(".franken-node/.gitignore");
         assert!(gitignore_path.is_file(), ".gitignore should exist");
@@ -26903,8 +27080,10 @@ mod state_bootstrap_tests {
     fn bootstrap_is_idempotent() {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
+        let trust = test_trust_config(config::Profile::Balanced);
 
-        let first_actions = bootstrap_state_directory(root, "balanced").expect("first bootstrap");
+        let first_actions =
+            bootstrap_state_directory(root, "balanced", &trust).expect("first bootstrap");
         let first_created = first_actions
             .iter()
             .filter(|a| {
@@ -26916,7 +27095,8 @@ mod state_bootstrap_tests {
             .count();
         assert!(first_created > 0, "first run should create items");
 
-        let second_actions = bootstrap_state_directory(root, "balanced").expect("second bootstrap");
+        let second_actions =
+            bootstrap_state_directory(root, "balanced", &trust).expect("second bootstrap");
         let second_created = second_actions
             .iter()
             .filter(|a| {
@@ -26946,7 +27126,8 @@ mod state_bootstrap_tests {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
 
-        bootstrap_state_directory(root, "strict").expect("bootstrap");
+        bootstrap_state_directory(root, "strict", &test_trust_config(config::Profile::Strict))
+            .expect("bootstrap");
 
         let keys_dir = root.join(".franken-node/keys");
         let mode = keys_dir.metadata().expect("metadata").permissions().mode();

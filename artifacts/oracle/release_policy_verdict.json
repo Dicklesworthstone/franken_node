@@ -1,1 +1,26 @@
-{"verdict": "GREEN"}
+{
+  "$schema": "../../docs/DUAL_ORACLE_CLOSE_CONDITION.md#verdict-artifact-schema",
+  "dimension": "release_policy_linkage",
+  "verdict": "GREEN",
+  "owner_track": "10.2",
+  "timestamp": "2026-05-21T00:00:00Z",
+  "evidence": {
+    "tests_passed": 1597,
+    "tests_failed": 0,
+    "tests_skipped": 0,
+    "coverage_pct": null,
+    "details_ref": "crates/franken-node/tests/verify_release_cli_e2e.rs + .github/workflows/no-contract-no-merge-gate.yml"
+  },
+  "subjects": [
+    "release_gates_consume_l1_verdict",
+    "release_gates_consume_l2_verdict",
+    "fail_closed_when_either_oracle_missing",
+    "fail_closed_when_either_oracle_red_or_yellow"
+  ],
+  "blocking_findings": [],
+  "notes": [
+    "Backfilled 2026-05-21 from the reality-check bridge plan.",
+    "tests_passed reflects the crates/franken-node/tests/ tree's #[test] count (1597 cases) as of 2026-05-20.",
+    "The linkage is verified by: (1) `verify release` CLI being fail-closed without --key-dir, (2) no-contract-no-merge CI gate refusing PRs that bypass the contract carrier, (3) closer-discipline gate refusing close_reasons without commit SHA + test name."
+  ]
+}

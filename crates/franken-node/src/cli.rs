@@ -882,8 +882,20 @@ pub struct VerifyTransparencyLogArgs {
 #[derive(Debug, Parser)]
 pub struct VerifyRecoveryRunbookArgs {
     /// Path to validation readiness input JSON file.
-    #[arg(value_parser = parse_safe_content_pathbuf)]
-    pub readiness_input: Option<PathBuf>,
+    ///
+    /// Accepts either the positional form (`verify recovery-runbook PATH`)
+    /// or the long-flag form (`verify recovery-runbook --readiness-input PATH`)
+    /// documented in the README so both invocation styles work.
+    #[arg(value_parser = parse_safe_content_pathbuf, value_name = "READINESS_INPUT")]
+    pub readiness_input_positional: Option<PathBuf>,
+
+    /// Path to validation readiness input JSON file (long-flag alias).
+    #[arg(
+        long = "readiness-input",
+        value_parser = parse_safe_content_pathbuf,
+        conflicts_with = "readiness_input_positional"
+    )]
+    pub readiness_input_flag: Option<PathBuf>,
 
     /// Emit structured JSON output instead of human-readable format.
     #[arg(long)]
@@ -896,6 +908,18 @@ pub struct VerifyRecoveryRunbookArgs {
     /// Deterministic timestamp for reproducible outputs (ISO 8601 format).
     #[arg(long)]
     pub fixed_timestamp: Option<String>,
+}
+
+impl VerifyRecoveryRunbookArgs {
+    /// Return the resolved readiness-input path, preferring the long-flag form
+    /// when both were supplied (clap rejects the conflict above, so this
+    /// helper just collapses the two storage slots into one accessor).
+    #[must_use]
+    pub fn readiness_input(&self) -> Option<&Path> {
+        self.readiness_input_flag
+            .as_deref()
+            .or(self.readiness_input_positional.as_deref())
+    }
 }
 
 // -- trust --
@@ -1392,12 +1416,36 @@ pub struct OpsValidationReadinessArgs {
     pub trace_id: String,
 
     /// JSON snapshot of Beads, broker status, worker, and resource readiness inputs.
+    ///
+    /// Accepts either the long-flag form (`ops validation-readiness --input PATH`)
+    /// or the positional form (`ops validation-readiness PATH`) documented in
+    /// the README's `franken-node ops validation-readiness --input broker-snapshot.json`
+    /// example so both invocation styles work.
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub input: Option<PathBuf>,
+
+    /// Positional alias for `--input`. Optional; cannot be combined with
+    /// `--input`.
+    #[arg(
+        value_parser = parse_safe_content_pathbuf,
+        value_name = "INPUT",
+        conflicts_with = "input"
+    )]
+    pub input_positional: Option<PathBuf>,
 
     /// Validation broker receipt JSON path. Repeat to include multiple receipts.
     #[arg(long = "receipt", value_parser = parse_safe_content_pathbuf)]
     pub receipts: Vec<PathBuf>,
+}
+
+impl OpsValidationReadinessArgs {
+    /// Resolve the effective input path from either `--input` or the positional
+    /// argument. The long-flag form wins when both are present (clap rejects
+    /// that conflict; this is a safety net).
+    #[must_use]
+    pub fn resolved_input(&self) -> Option<&Path> {
+        self.input.as_deref().or(self.input_positional.as_deref())
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -1509,6 +1557,11 @@ pub struct IncidentBundleArgs {
     /// Optional path to export human-readable receipt summary markdown.
     #[arg(long)]
     pub receipt_summary_out: Option<PathBuf>,
+
+    /// Emit machine-readable JSON output. Required for compatibility with
+    /// the README's "All commands accept `--json`" contract.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1566,6 +1619,10 @@ pub struct IncidentListArgs {
     /// Filter by severity.
     #[arg(long)]
     pub severity: Option<String>,
+
+    /// Emit machine-readable JSON output (one object per incident).
+    #[arg(long)]
+    pub json: bool,
 }
 
 // -- registry --
@@ -1586,6 +1643,9 @@ pub enum RegistryCommand {
 }
 
 #[derive(Debug, Parser)]
+// `version` is a documented per-package field on `registry publish`; suppress
+// clap's auto-generated `--version` so the two names do not collide.
+#[command(disable_version_flag = true)]
 pub struct RegistryPublishArgs {
     /// Path to extension package to publish.
     pub package_path: PathBuf,
@@ -1644,6 +1704,12 @@ pub struct BenchRunArgs {
     #[arg(long)]
     pub fixture_mode: bool,
     /// Write the benchmark JSON report to a file in addition to stdout.
+    ///
+    /// Must be a cwd-relative path under the workspace; absolute paths are
+    /// rejected (`parse_safe_content_pathbuf` enforces this so a benchmark
+    /// run cannot be tricked into writing into arbitrary system locations
+    /// such as `/etc` or `/tmp`). To export to a sibling directory, run the
+    /// bench from there or pass a relative path that resolves to it.
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub output: Option<PathBuf>,
 }
