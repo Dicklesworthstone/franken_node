@@ -156,19 +156,35 @@ pub struct SignerKey {
     pub public_key_hex: String,
 }
 
-/// Cached threshold configuration with pre-parsed verifying keys for performance.
-/// Eliminates repeated hex decoding and VerifyingKey construction during verification.
+/// Preparsed threshold configuration with parsed `VerifyingKey` handles.
+///
+/// Lifts the bench-only `PreparsedThresholdConfig` helper at
+/// `crates/franken-node/benches/threshold_sig_verify_bench.rs:87-108` into
+/// production: hex decoding + Edwards-point decompression happens once at
+/// construction, after which `verify_threshold_preparsed` re-uses the
+/// parsed key per verify call.
+///
+/// Round-1 perf evidence
+/// (`tests/artifacts/perf/20260520T214003Z_franken_node_perf/criterion_raw/threshold_sig_verify.txt`):
+/// at 32 signers, the preparsed path runs 1.611 ms vs the per-call
+/// hex-decode path at 1.778 ms — a flat ~10 % speedup that scales with
+/// quorum size.
+///
+/// Implementation note: backing store is `HashMap` rather than the bench's
+/// `BTreeMap` because the production hot path is keyed-lookup-by-`key_id`
+/// (O(1) vs O(log N)); the bench used `BTreeMap` for deterministic
+/// iteration ordering which we don't need.
 #[derive(Debug)]
-pub struct CachedThresholdConfig {
+pub struct PreparsedThresholdConfig {
     pub config: ThresholdConfig,
     /// Pre-parsed VerifyingKey objects indexed by key_id for O(1) lookup
     verifying_keys: HashMap<String, VerifyingKey>,
 }
 
-impl CachedThresholdConfig {
-    /// Create a cached config from a validated ThresholdConfig.
+impl PreparsedThresholdConfig {
+    /// Construct a preparsed config from a validated `ThresholdConfig`.
     /// Pre-parses all public keys to avoid repeated hex decoding during verification.
-    pub fn new(config: ThresholdConfig) -> Result<Self, ThresholdError> {
+    pub fn from_config(config: ThresholdConfig) -> Result<Self, ThresholdError> {
         // Validate config first
         config.validate()?;
 
@@ -195,7 +211,7 @@ impl CachedThresholdConfig {
             verifying_keys.insert(signer.key_id.clone(), verifying_key);
         }
 
-        Ok(CachedThresholdConfig {
+        Ok(PreparsedThresholdConfig {
             config,
             verifying_keys,
         })
@@ -296,7 +312,7 @@ enum VerifyingKeyLookupResult<'a> {
     Valid(&'a VerifyingKey),
 }
 
-impl VerifyingKeyLookup for CachedThresholdConfig {
+impl VerifyingKeyLookup for PreparsedThresholdConfig {
     fn lookup_verifying_key(&self, key_id: &str) -> VerifyingKeyLookupResult<'_> {
         match self.verifying_keys.get(key_id) {
             Some(verifying_key) => VerifyingKeyLookupResult::Valid(verifying_key),
@@ -740,7 +756,7 @@ pub fn sign(
 ///
 /// PERFORMANCE: This path validates the config once and prepares a borrowed
 /// key lookup table for the current call. For repeated verifications of the
-/// same config, `CachedThresholdConfig` still avoids the per-call key parse.
+/// same config, `PreparsedThresholdConfig` still avoids the per-call key parse.
 pub fn verify_threshold(
     config: &ThresholdConfig,
     artifact: &PublicationArtifact,
@@ -789,17 +805,17 @@ pub fn verify_threshold(
     }
 }
 
-/// Optimized threshold verification using cached pre-parsed keys.
+/// Optimized threshold verification using preparsed `VerifyingKey` handles.
 /// Eliminates repeated hex decoding and linear scans for better performance.
-pub fn verify_threshold_cached(
-    cached_config: &CachedThresholdConfig,
+pub fn verify_threshold_preparsed(
+    preparsed_config: &PreparsedThresholdConfig,
     artifact: &PublicationArtifact,
     trace_id: &str,
     timestamp: &str,
 ) -> VerificationResult {
     if let Some(failure_reason) = artifact_identifier_failure(artifact) {
         return failed_verification_result(
-            cached_config.config.threshold,
+            preparsed_config.config.threshold,
             artifact,
             trace_id,
             timestamp,
@@ -809,7 +825,7 @@ pub fn verify_threshold_cached(
 
     if artifact.signatures.is_empty() {
         return below_threshold_result(
-            cached_config.config.threshold,
+            preparsed_config.config.threshold,
             artifact,
             trace_id,
             timestamp,
@@ -818,8 +834,8 @@ pub fn verify_threshold_cached(
     }
 
     verify_threshold_with_validated_artifact(
-        cached_config.config.threshold,
-        cached_config,
+        preparsed_config.config.threshold,
+        preparsed_config,
         artifact,
         trace_id,
         timestamp,
@@ -1173,15 +1189,16 @@ mod tests {
     }
 
     #[test]
-    fn cached_verification_matches_verify_threshold_for_valid_artifact() {
+    fn preparsed_verification_matches_verify_threshold_for_valid_artifact() {
         let (sks, config) = test_config(2, 3);
         let artifact = signed_artifact(&sks, &config, "hash-abc", 2);
-        let cached_config = CachedThresholdConfig::new(config.clone()).unwrap();
+        let preparsed_config = PreparsedThresholdConfig::from_config(config.clone()).unwrap();
 
-        let baseline = verify_threshold(&config, &artifact, "t2-cache", "ts");
-        let cached = verify_threshold_cached(&cached_config, &artifact, "t2-cache", "ts");
+        let baseline = verify_threshold(&config, &artifact, "t2-preparsed", "ts");
+        let preparsed =
+            verify_threshold_preparsed(&preparsed_config, &artifact, "t2-preparsed", "ts");
 
-        assert_eq!(cached, baseline);
+        assert_eq!(preparsed, baseline);
     }
 
     #[test]
@@ -1390,7 +1407,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_verification_matches_verify_threshold_for_invalid_signature() {
+    fn preparsed_verification_matches_verify_threshold_for_invalid_signature() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
         push_bounded(
@@ -1402,12 +1419,51 @@ mod tests {
             },
             MAX_SIGNATURES,
         );
-        let cached_config = CachedThresholdConfig::new(config.clone()).unwrap();
+        let preparsed_config = PreparsedThresholdConfig::from_config(config.clone()).unwrap();
 
-        let baseline = verify_threshold(&config, &artifact, "t6-cache", "ts");
-        let cached = verify_threshold_cached(&cached_config, &artifact, "t6-cache", "ts");
+        let baseline = verify_threshold(&config, &artifact, "t6-preparsed", "ts");
+        let preparsed =
+            verify_threshold_preparsed(&preparsed_config, &artifact, "t6-preparsed", "ts");
 
-        assert_eq!(cached, baseline);
+        assert_eq!(preparsed, baseline);
+    }
+
+    /// Parity regression for bd-98xo5.1.1: a fresh 3-of-5 quorum with a
+    /// mixed-validity signature set must produce byte-identical
+    /// `VerificationResult` between the per-call hex-decode path
+    /// (`verify_threshold`) and the preparsed-key path
+    /// (`verify_threshold_preparsed`). Pins the contract that the
+    /// promoted public API never diverges from the baseline path so the
+    /// 10 % preparsed-keys win at 32 signers
+    /// (`tests/artifacts/perf/20260520T214003Z_franken_node_perf/criterion_raw/threshold_sig_verify.txt`)
+    /// can be claimed without affecting accept/reject decisions.
+    #[test]
+    fn preparsed_threshold_config_parity_for_three_of_five_mixed_validity_bd98xo5_1_1() {
+        let (sks, config) = test_config(3, 5);
+        // Two valid quorum signatures: just short of threshold on the
+        // baseline path, exercising the below-threshold accounting.
+        let mut artifact = signed_artifact(&sks, &config, "hash-bd98xo5", 2);
+        // Append an entry whose signer_id != key_id so the bind check
+        // rejects it without touching the verify_strict path; this
+        // exercises a different failure_reason than the previous test.
+        push_bounded(
+            &mut artifact.signatures,
+            PartialSignature {
+                signer_id: "signer-2".into(),
+                key_id: "signer-3".into(),
+                signature_hex: "ab".repeat(64),
+            },
+            MAX_SIGNATURES,
+        );
+        let preparsed_config = PreparsedThresholdConfig::from_config(config.clone()).unwrap();
+
+        let baseline = verify_threshold(&config, &artifact, "bd98xo5", "ts");
+        let preparsed = verify_threshold_preparsed(&preparsed_config, &artifact, "bd98xo5", "ts");
+
+        assert_eq!(
+            preparsed, baseline,
+            "preparsed path must agree with baseline on every field of VerificationResult"
+        );
     }
 
     // === Duplicate signer ===

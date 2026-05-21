@@ -183,15 +183,16 @@ fn signer_identity_must_match_key_id() {
 }
 
 #[test]
-fn cached_verifier_matches_standard_verifier() {
+fn preparsed_verifier_matches_standard_verifier() {
     let (sks, cfg) = config(2, 3);
     let art = artifact_with_sigs(&sks, &cfg, "h12", 2);
-    let cached = CachedThresholdConfig::new(cfg.clone()).expect("valid threshold config");
+    let preparsed =
+        PreparsedThresholdConfig::from_config(cfg.clone()).expect("valid threshold config");
     let standard = verify_threshold(&cfg, &art, "t12", "ts");
-    let cached_result = verify_threshold_cached(&cached, &art, "t12", "ts");
-    assert_eq!(standard.verified, cached_result.verified);
-    assert_eq!(standard.valid_signatures, cached_result.valid_signatures);
-    assert_eq!(standard.failure_reason, cached_result.failure_reason);
+    let preparsed_result = verify_threshold_preparsed(&preparsed, &art, "t12", "ts");
+    assert_eq!(standard.verified, preparsed_result.verified);
+    assert_eq!(standard.valid_signatures, preparsed_result.valid_signatures);
+    assert_eq!(standard.failure_reason, preparsed_result.failure_reason);
 }
 
 #[test]
