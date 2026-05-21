@@ -32,6 +32,8 @@ pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
 const MAX_REGISTERED_ALGORITHMS: usize = 4096;
 /// Maximum length for algorithm ID strings (bytes).
 const MAX_ALGORITHM_ID_BYTES: usize = 256;
+/// Maximum length for object ID strings (bytes).
+const MAX_OBJECT_ID_BYTES: usize = 512;
 
 #[cfg(test)]
 fn test_push_bounded() {
@@ -1434,6 +1436,22 @@ impl ProofCarryingDecoder {
         now_epoch_secs: u64,
         trace_id: &str,
     ) -> Result<DecodeResult, ProofCarryingDecodeError> {
+        if object_id.len() > MAX_OBJECT_ID_BYTES {
+            return Err(ProofCarryingDecodeError::ReconstructionFailed {
+                object_id: "<invalid>".to_string(),
+                reason: format!(
+                    "object_id exceeds maximum length of {} bytes",
+                    MAX_OBJECT_ID_BYTES
+                ),
+            });
+        }
+        if object_id.chars().any(char::is_control) {
+            return Err(ProofCarryingDecodeError::ReconstructionFailed {
+                object_id: "<invalid>".to_string(),
+                reason: "object_id must not contain control characters".to_string(),
+            });
+        }
+
         if !self.registered_algorithms.contains(algorithm_id) {
             return Err(ProofCarryingDecodeError::ReconstructionFailed {
                 object_id: object_id.to_string(),
@@ -6561,6 +6579,40 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
                 "Entry {}: Timestamp should be positive",
                 entry_idx
             );
+        }
+    }
+
+    #[test]
+    fn decode_rejects_object_id_with_control_chars() {
+        let mut decoder = ProofCarryingDecoder::new(ProofMode::Advisory, "signer", "key");
+        decoder.register_algorithm(AlgorithmId::from(RepairAlgorithm::XorRecovery)).unwrap();
+
+        let fragments = vec![Fragment::new(b"data".to_vec())];
+        let malicious_ids = [
+            "obj\nFAKE_LOG: injected",
+            "obj\rcarriage_return",
+            "obj\x1b[31mred_escape",
+            "tab\there",
+        ];
+
+        for bad_id in malicious_ids {
+            let result = decoder.decode(
+                bad_id,
+                &fragments,
+                &AlgorithmId::from(RepairAlgorithm::XorRecovery),
+                1000,
+                "trace",
+            );
+            assert!(
+                matches!(result, Err(ProofCarryingDecodeError::ReconstructionFailed { .. })),
+                "expected ReconstructionFailed for object_id with control chars: {:?}",
+                bad_id
+            );
+            if let Err(ProofCarryingDecodeError::ReconstructionFailed { object_id, reason }) = result
+            {
+                assert_eq!(object_id, "<invalid>");
+                assert!(reason.contains("control characters"));
+            }
         }
     }
 }
