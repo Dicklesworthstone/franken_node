@@ -42,7 +42,12 @@ fn transparency_verify_inclusion_path64(c: &mut Criterion) {
         leaf_hash: "a".repeat(64),
         audit_path: (0..64).map(|i| format!("{:064x}", i)).collect(),
     };
-    let root_hash = recompute_root(&proof);
+    // `recompute_root` returns Result<String, ProofFailure> as of the strict
+    // Ed25519/transparency hardening pass; benches construct deterministic
+    // proofs so a Result::Err here would indicate a bench-fixture bug, not a
+    // production-path failure.
+    let root_hash =
+        recompute_root(&proof).expect("bench fixture must produce valid inclusion proof");
     let policy = TransparencyPolicy {
         required: true,
         pinned_roots: vec![LogRoot {
