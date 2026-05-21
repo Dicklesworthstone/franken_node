@@ -32,3 +32,20 @@ fsqlite = { path = "../frankensqlite/crates/fsqlite" }
 fsqlite-core = { path = "../frankensqlite/crates/fsqlite-core" }
 fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
 fsqlite-error = { path = "../frankensqlite/crates/fsqlite-error" }
+
+# Profiling-only build profile. DO NOT REMOVE this section without first
+# reading docs/dev/profiling.md (canonical reference) and
+# tests/artifacts/perf/HISTORY.md. Every fingerprint.json under
+# tests/artifacts/perf/<run-id>/ was built against this exact profile;
+# removing it silently invalidates every historical hotspot table in
+# this repo and breaks future profile_round handoffs. Concurrent-agent
+# reverts of this section are tracked by bd-98xo5.11;
+# scripts/check_release_perf_profile.py + a CI workflow gate
+# (bd-98xo5.11.2) back-stop the docs at runtime.
+[profile.release-perf]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+strip = false
