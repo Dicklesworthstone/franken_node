@@ -1,0 +1,37 @@
+name: release-perf-profile-gate
+
+# Back-stop for bd-98xo5.11 — the workspace [profile.release-perf]
+# section has been silently reverted by concurrent swarm agents during
+# perf rounds. Every fingerprint.json under tests/artifacts/perf/<run-id>/
+# was built against this exact profile; this gate asserts the block
+# stays intact on any PR that touches Cargo.toml, the docs, the
+# checker itself, or the perf artifact tree.
+#
+# See docs/dev/profiling.md for the canonical block and per-key rationale.
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'tests/artifacts/perf/**'
+      - 'docs/dev/profiling.md'
+      - 'scripts/check_release_perf_profile.py'
+  push:
+    branches: [main, master]
+    paths:
+      - 'Cargo.toml'
+      - 'tests/artifacts/perf/**'
+      - 'docs/dev/profiling.md'
+      - 'scripts/check_release_perf_profile.py'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python (tomllib needs >= 3.11)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Assert [profile.release-perf] block is canonical
+        run: python3 scripts/check_release_perf_profile.py --ci
