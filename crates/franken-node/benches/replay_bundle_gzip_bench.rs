@@ -7,34 +7,19 @@
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use frankenengine_node::tools::replay_bundle::{
-    EventType, RawEvent, TimelineEvent, generate_replay_bundle,
+    EventType, RawEvent, ReplayBundleError, TimelineEvent, canonical_json_len,
+    generate_replay_bundle,
 };
 use serde_json::{Map, Value};
-use std::io::Write;
 
-#[derive(Default)]
-struct ByteCounter {
-    len: usize,
-}
-
-impl Write for ByteCounter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.len = self
-            .len
-            .checked_add(buf.len())
-            .ok_or_else(|| std::io::Error::other("canonical JSON length exceeds usize"))?;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn canonical_json_len_streaming(value: &Value) -> Result<usize, serde_json::Error> {
-    let mut counter = ByteCounter::default();
-    serde_json::to_writer(&mut counter, value)?;
-    Ok(counter.len)
+// The `streaming_counter` benchmark variant invokes the production
+// `canonical_json_len` (which delegates through the production `ByteCounter`
+// in `tools::replay_bundle`); the `vec_len` variant retains the
+// `serde_json::to_vec(value)?.len()` shape as the regression target. Bench
+// numbers therefore reflect what production code actually does, not a
+// divergent local reimplementation.
+fn canonical_json_len_streaming(value: &Value) -> Result<usize, ReplayBundleError> {
+    canonical_json_len(value)
 }
 
 fn canonical_json_len_via_vec(value: &Value) -> Result<usize, serde_json::Error> {

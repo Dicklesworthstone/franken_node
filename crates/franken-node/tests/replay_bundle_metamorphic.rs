@@ -8,9 +8,9 @@
 //! If this relation fails, it indicates a serialization bug that could cause data loss.
 
 use frankenengine_node::tools::replay_bundle::{
-    EventType, RawEvent, ReplayBundle, ReplayBundleSigningMaterial, generate_replay_bundle,
-    read_bundle_from_path_with_trusted_key, sign_replay_bundle, to_canonical_json,
-    write_bundle_to_path_with_trusted_key,
+    EventType, RawEvent, ReplayBundle, ReplayBundleSigningMaterial, canonical_json_len,
+    generate_replay_bundle, read_bundle_from_path_with_trusted_key, sign_replay_bundle,
+    to_canonical_json, write_bundle_to_path_with_trusted_key,
 };
 use proptest::prelude::{ProptestConfig, any};
 use rand::distributions::{Alphanumeric, DistString};
@@ -675,6 +675,49 @@ fn metamorphic_replay_bundle_stress_test() {
             orig.payload, recovered.payload,
             "Event {}: payload mismatch",
             i
+        );
+    }
+}
+
+/// Regression for bd-98xo5.6.1 (T6.1): the production streaming
+/// `canonical_json_len` must return the exact byte count that
+/// `serde_json::to_vec(value)?.len()` would return — bench claims the
+/// streaming variant is 1.83-2.07× faster than the buffered variant, but the
+/// chunk-planner relies on the two paths agreeing byte-for-byte. A future
+/// patch that swaps the underlying counter or changes how serde writes
+/// numbers would silently break chunk-size accounting; this test pins the
+/// invariant across a representative spread of timeline-event shapes
+/// (single-key, nested-object, integer-list payload, unicode escapes,
+/// nested-array deeply, empty-object, signed-integer with mixed types).
+#[test]
+fn canonical_json_len_matches_buffered_serialization() {
+    let fixtures = [
+        serde_json::json!({}),
+        serde_json::json!({"k": "v"}),
+        serde_json::json!({"signal": "anomaly", "severity": "critical"}),
+        serde_json::json!({"nested": {"inner": {"depth": 3, "leaf": true}}}),
+        serde_json::json!({"list": [0, 1, 2, 3, 5, 8, 13, 21]}),
+        serde_json::json!({"unicode": "café — naïve façade", "emoji": "🌩️"}),
+        serde_json::json!({"array_of_arrays": [[1, 2], [3, 4], [5, 6]]}),
+        serde_json::json!({"mixed": [1, "two", null, true, {"k": 4}]}),
+        serde_json::json!({"escapes": "line1\nline2\ttab\"quote\\backslash"}),
+        serde_json::json!({"large_int": -9_223_372_036_854_775_808_i64, "small_int": 1_u8}),
+        serde_json::json!([
+            {"sequence_number": 1, "event_type": "external_signal"},
+            {"sequence_number": 2, "event_type": "policy_eval", "causal_parent": 1}
+        ]),
+    ];
+
+    for (idx, value) in fixtures.iter().enumerate() {
+        let streaming = canonical_json_len(value).unwrap_or_else(|e| {
+            panic!("fixture {idx}: streaming canonical_json_len errored: {e:?}")
+        });
+        let buffered = serde_json::to_vec(value)
+            .unwrap_or_else(|e| panic!("fixture {idx}: to_vec errored: {e:?}"))
+            .len();
+        assert_eq!(
+            streaming, buffered,
+            "fixture {idx}: streaming canonical_json_len returned {streaming} but buffered to_vec().len() returned {buffered} — chunk-planner relies on byte-identical agreement"
         );
     }
 }
