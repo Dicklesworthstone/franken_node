@@ -113,6 +113,33 @@
       ],
       "regression_guard": "write-path allocation work must not return to the pre-budget eager format shape",
       "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "crypto.ed25519_scheme.sign_raw",
+      "surface": "crates/franken-node/src/crypto/schemes.rs",
+      "source_beads": [
+        "bd-98xo5.2.3",
+        "bd-98xo5.2.4"
+      ],
+      "metric_kind": "wrapper_overhead_us_per_call",
+      "unit": "microseconds",
+      "before_fix_p95_units": 45.69,
+      "before_fix_p99_units": 48.0,
+      "post_fix_p95_units": 26.0,
+      "post_fix_p99_units": 28.0,
+      "cold_start_ms": 0.1,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "preparsed signer produces byte-identical signatures vs stateless sign_raw",
+        "preparsed verifier accepts same set of signatures as verify_strict path",
+        "ZeroizeOnDrop is upheld for the cached SigningKey"
+      ],
+      "regression_guard": "wrapper overhead must stay below 1.30x dalek_direct sign time",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
     }
   ],
   "gate_result": {
@@ -193,10 +220,29 @@
         "within_budget": true,
         "violations": [],
         "flamegraph_path": null
+      },
+      {
+        "hot_path": "crypto.ed25519_scheme.sign_raw",
+        "measurement": {
+          "hot_path": "crypto.ed25519_scheme.sign_raw",
+          "baseline_p50_us": 42.0,
+          "baseline_p95_us": 45.69,
+          "baseline_p99_us": 48.0,
+          "integrated_p50_us": 24.0,
+          "integrated_p95_us": 26.0,
+          "integrated_p99_us": 28.0,
+          "cold_start_ms": 0.1
+        },
+        "overhead_p95_pct": -43.1,
+        "overhead_p99_pct": -41.7,
+        "cold_start_ms": 0.1,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
       }
     ],
-    "total_paths": 4,
-    "paths_within_budget": 4,
+    "total_paths": 5,
+    "paths_within_budget": 5,
     "paths_over_budget": 0
   },
   "events": [
@@ -270,6 +316,24 @@
       "code": "PRF-002",
       "hot_path": "storage.frankensqlite_adapter.write_event",
       "detail": "p95=-40.0%, p99=-50.0%, cold=0.0ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "crypto.ed25519_scheme.sign_raw",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "crypto.ed25519_scheme.sign_raw",
+      "detail": "Cold-start: 0.10ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "crypto.ed25519_scheme.sign_raw",
+      "detail": "p95=-43.1%, p99=-41.7%, cold=0.1ms",
       "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
     }
   ],

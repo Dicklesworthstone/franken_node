@@ -49,10 +49,16 @@ fn hot_path_budget_smoke_pairs_every_metric_with_correctness_assertions()
     let report = run_default_hot_path_budget_smoke()?;
 
     assert!(report.overall_pass);
-    assert_eq!(report.cases.len(), 4);
+    assert_eq!(report.cases.len(), 5);
     for case in &report.cases {
         assert!(!case.hot_path.is_empty());
-        assert_eq!(case.unit, "deterministic_work_units");
+        // Ed25519 case uses microseconds; others use deterministic_work_units
+        assert!(
+            case.unit == "deterministic_work_units" || case.unit == "microseconds",
+            "unexpected unit {} for {}",
+            case.unit,
+            case.hot_path
+        );
         assert!(!case.source_beads.is_empty());
         assert!(
             case.correctness_assertions.len() >= 3,
@@ -103,7 +109,7 @@ fn hot_path_budget_smoke_skip_mode_reports_explicit_blocker()
     );
     assert!(report.gate_result.is_none());
     assert!(report.events.is_empty());
-    assert_eq!(report.cases.len(), 4);
+    assert_eq!(report.cases.len(), 5);
 
     Ok(())
 }

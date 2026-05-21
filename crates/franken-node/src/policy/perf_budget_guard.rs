@@ -929,7 +929,7 @@ pub fn default_hot_path_budget_smoke_cases() -> Vec<HotPathBudgetSmokeCase> {
             post_fix_p95_units: 6.0,
             post_fix_p99_units: 7.0,
             cold_start_ms: 0.0,
-            budget,
+            budget: budget.clone(),
             correctness_assertions: vec![
                 "write authorization is checked before persistence".to_string(),
                 "audit-log class writes retain deterministic keys".to_string(),
@@ -937,6 +937,30 @@ pub fn default_hot_path_budget_smoke_cases() -> Vec<HotPathBudgetSmokeCase> {
             ],
             regression_guard:
                 "write-path allocation work must not return to the pre-budget eager format shape"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "crypto.ed25519_scheme.sign_raw".to_string(),
+            surface: "crates/franken-node/src/crypto/schemes.rs".to_string(),
+            source_beads: vec!["bd-98xo5.2.3".to_string(), "bd-98xo5.2.4".to_string()],
+            metric_kind: "wrapper_overhead_us_per_call".to_string(),
+            unit: "microseconds".to_string(),
+            before_fix_p95_units: 45.69,
+            before_fix_p99_units: 48.0,
+            post_fix_p95_units: 26.0,
+            post_fix_p99_units: 28.0,
+            cold_start_ms: 0.1,
+            budget,
+            correctness_assertions: vec![
+                "preparsed signer produces byte-identical signatures vs stateless sign_raw".to_string(),
+                "preparsed verifier accepts same set of signatures as verify_strict path".to_string(),
+                "ZeroizeOnDrop is upheld for the cached SigningKey".to_string(),
+            ],
+            regression_guard:
+                "wrapper overhead must stay below 1.30x dalek_direct sign time"
                     .to_string(),
             skip_policy:
                 "skip only when no rch worker is available; emit skip_blocker instead of PASS"
