@@ -955,13 +955,14 @@ pub fn default_hot_path_budget_smoke_cases() -> Vec<HotPathBudgetSmokeCase> {
             cold_start_ms: 0.1,
             budget,
             correctness_assertions: vec![
-                "preparsed signer produces byte-identical signatures vs stateless sign_raw".to_string(),
-                "preparsed verifier accepts same set of signatures as verify_strict path".to_string(),
+                "preparsed signer produces byte-identical signatures vs stateless sign_raw"
+                    .to_string(),
+                "preparsed verifier accepts same set of signatures as verify_strict path"
+                    .to_string(),
                 "ZeroizeOnDrop is upheld for the cached SigningKey".to_string(),
             ],
-            regression_guard:
-                "wrapper overhead must stay below 1.30x dalek_direct sign time"
-                    .to_string(),
+            regression_guard: "wrapper overhead must stay below 1.30x dalek_direct sign time"
+                .to_string(),
             skip_policy:
                 "skip only when no rch worker is available; emit skip_blocker instead of PASS"
                     .to_string(),

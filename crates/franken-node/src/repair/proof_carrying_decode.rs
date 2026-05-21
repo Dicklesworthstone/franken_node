@@ -6585,7 +6585,9 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
     #[test]
     fn decode_rejects_object_id_with_control_chars() {
         let mut decoder = ProofCarryingDecoder::new(ProofMode::Advisory, "signer", "key");
-        decoder.register_algorithm(AlgorithmId::from(RepairAlgorithm::XorRecovery)).unwrap();
+        decoder
+            .register_algorithm(AlgorithmId::from(RepairAlgorithm::XorRecovery))
+            .unwrap();
 
         let fragments = vec![Fragment::new(b"data".to_vec())];
         let malicious_ids = [
@@ -6604,11 +6606,15 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
                 "trace",
             );
             assert!(
-                matches!(result, Err(ProofCarryingDecodeError::ReconstructionFailed { .. })),
+                matches!(
+                    result,
+                    Err(ProofCarryingDecodeError::ReconstructionFailed { .. })
+                ),
                 "expected ReconstructionFailed for object_id with control chars: {:?}",
                 bad_id
             );
-            if let Err(ProofCarryingDecodeError::ReconstructionFailed { object_id, reason }) = result
+            if let Err(ProofCarryingDecodeError::ReconstructionFailed { object_id, reason }) =
+                result
             {
                 assert_eq!(object_id, "<invalid>");
                 assert!(reason.contains("control characters"));

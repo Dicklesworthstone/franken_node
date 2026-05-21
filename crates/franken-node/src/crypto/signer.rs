@@ -1,6 +1,6 @@
 //! High-level cryptographic signer trait and implementations.
 
-use crate::crypto::{SignatureScheme, Ed25519Scheme, Ed25519Error};
+use crate::crypto::{Ed25519Error, Ed25519Scheme, SignatureScheme};
 use serde::Serialize;
 use serde_json::Value;
 use std::marker::PhantomData;
@@ -38,7 +38,10 @@ pub trait CryptoSigner {
         key: &Self::SigningKey,
         context: &str,
         message: &[u8],
-    ) -> Result<<Self::Scheme as SignatureScheme>::Signature, <Self::Scheme as SignatureScheme>::Error>;
+    ) -> Result<
+        <Self::Scheme as SignatureScheme>::Signature,
+        <Self::Scheme as SignatureScheme>::Error,
+    >;
 
     /// Sign structured data with type-safe domain separation.
     ///
@@ -60,7 +63,10 @@ pub trait CryptoSigner {
         key: &Self::SigningKey,
         context: &str,
         data: &T,
-    ) -> Result<<Self::Scheme as SignatureScheme>::Signature, <Self::Scheme as SignatureScheme>::Error>;
+    ) -> Result<
+        <Self::Scheme as SignatureScheme>::Signature,
+        <Self::Scheme as SignatureScheme>::Error,
+    >;
 }
 
 /// Ed25519-specific signer with franken_node security patterns.
@@ -165,7 +171,12 @@ mod tests {
 
         // Verify using the underlying scheme with the expected domain
         let expected_domain = b"franken_node_test_context:";
-        assert!(Ed25519Scheme::verify_with_domain(&pk, expected_domain, message, &signature));
+        assert!(Ed25519Scheme::verify_with_domain(
+            &pk,
+            expected_domain,
+            message,
+            &signature
+        ));
     }
 
     #[test]
@@ -185,7 +196,12 @@ mod tests {
         // Verify by serializing the same data and checking against the expected domain
         let serialized = serde_json::to_vec(&test_data).unwrap();
         let expected_domain = b"franken_node_test_struct:";
-        assert!(Ed25519Scheme::verify_with_domain(&pk, expected_domain, &serialized, &signature));
+        assert!(Ed25519Scheme::verify_with_domain(
+            &pk,
+            expected_domain,
+            &serialized,
+            &signature
+        ));
     }
 
     #[test]
@@ -205,10 +221,18 @@ mod tests {
         let domain1 = b"franken_node_context1:";
         let domain2 = b"franken_node_context2:";
 
-        assert!(Ed25519Scheme::verify_with_domain(&pk, domain1, message, &sig1));
-        assert!(Ed25519Scheme::verify_with_domain(&pk, domain2, message, &sig2));
-        assert!(!Ed25519Scheme::verify_with_domain(&pk, domain1, message, &sig2));
-        assert!(!Ed25519Scheme::verify_with_domain(&pk, domain2, message, &sig1));
+        assert!(Ed25519Scheme::verify_with_domain(
+            &pk, domain1, message, &sig1
+        ));
+        assert!(Ed25519Scheme::verify_with_domain(
+            &pk, domain2, message, &sig2
+        ));
+        assert!(!Ed25519Scheme::verify_with_domain(
+            &pk, domain1, message, &sig2
+        ));
+        assert!(!Ed25519Scheme::verify_with_domain(
+            &pk, domain2, message, &sig1
+        ));
     }
 
     #[test]
@@ -223,8 +247,12 @@ mod tests {
         };
 
         // Sign the same data multiple times
-        let sig1 = signer.sign_structured(&sk, "deterministic", &test_data).unwrap();
-        let sig2 = signer.sign_structured(&sk, "deterministic", &test_data).unwrap();
+        let sig1 = signer
+            .sign_structured(&sk, "deterministic", &test_data)
+            .unwrap();
+        let sig2 = signer
+            .sign_structured(&sk, "deterministic", &test_data)
+            .unwrap();
 
         // Should produce identical signatures (deterministic serialization)
         assert_eq!(sig1, sig2);
@@ -236,6 +264,9 @@ mod tests {
         let signer2 = Ed25519Signer::default();
 
         // Both should be equivalent
-        assert_eq!(std::mem::discriminant(&signer1), std::mem::discriminant(&signer2));
+        assert_eq!(
+            std::mem::discriminant(&signer1),
+            std::mem::discriminant(&signer2)
+        );
     }
 }

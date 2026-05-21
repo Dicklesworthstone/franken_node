@@ -634,7 +634,12 @@ mod tests {
 
     #[test]
     fn restart_rejects_control_chars_in_operator_id() {
-        for bad_id in ["ops\n-injected", "ops\r-cr", "ops\x1b[31m-ansi", "ops\t-tab"] {
+        for bad_id in [
+            "ops\n-injected",
+            "ops\r-cr",
+            "ops\x1b[31m-ansi",
+            "ops\t-tab",
+        ] {
             let request = ProofWorkerRestartRequest {
                 operator_id: bad_id.to_string(),
                 operator_roles: vec!["pipeline_admin".to_string()],

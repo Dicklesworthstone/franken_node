@@ -851,7 +851,8 @@ mod tests {
     fn test_path_traversal_rejected_in_index() {
         let temp_dir = TempDir::new().expect("temp dir");
         let storage_path = temp_dir.path().to_path_buf();
-        let mut storage = CleanupReceiptsStorage::with_directory(storage_path.clone()).expect("storage");
+        let mut storage =
+            CleanupReceiptsStorage::with_directory(storage_path.clone()).expect("storage");
 
         // Store a valid receipt first
         let receipt = create_test_receipt("test_traversal", "test_actor", CleanupMode::Execute);
@@ -860,14 +861,13 @@ mod tests {
         // Manually corrupt the index to point outside storage directory
         let index_path = storage_path.join("index.json");
         let index_data = std::fs::read_to_string(&index_path).expect("read index");
-        let corrupted_index = index_data.replace(
-            &storage_path.to_string_lossy().to_string(),
-            "/etc"
-        );
+        let corrupted_index =
+            index_data.replace(&storage_path.to_string_lossy().to_string(), "/etc");
         std::fs::write(&index_path, corrupted_index).expect("write corrupted index");
 
         // Reload storage with corrupted index
-        let storage2 = CleanupReceiptsStorage::with_directory(storage_path).expect("storage reload");
+        let storage2 =
+            CleanupReceiptsStorage::with_directory(storage_path).expect("storage reload");
 
         // Attempt to retrieve receipt should fail due to path traversal protection
         let result = storage2.get_receipt("test_traversal");

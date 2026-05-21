@@ -252,8 +252,7 @@ mod tests {
         for s in ["c", "a", "b"] {
             interner.intern(s).unwrap();
         }
-        let collected: Vec<(u32, &str)> =
-            interner.iter().map(|(id, s)| (id.as_u32(), s)).collect();
+        let collected: Vec<(u32, &str)> = interner.iter().map(|(id, s)| (id.as_u32(), s)).collect();
         // Insertion order: c=0, a=1, b=2 (NOT alphabetical, NOT BTreeMap order).
         assert_eq!(collected, vec![(0, "c"), (1, "a"), (2, "b")]);
     }

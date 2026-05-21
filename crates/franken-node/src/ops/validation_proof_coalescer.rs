@@ -1554,9 +1554,7 @@ fn swarm_scheduler_field_is_safe(value: &str, max_bytes: usize) -> bool {
     // mitigation as `validate_rehydration_text` / `validate_artifact_string`
     // / `validate_identifier` / the swarm_scenario operator-incident
     // validator.
-    !value.trim().is_empty()
-        && value.len() <= max_bytes
-        && !value.chars().any(char::is_control)
+    !value.trim().is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
 }
 
 fn build_swarm_scheduler_decision(

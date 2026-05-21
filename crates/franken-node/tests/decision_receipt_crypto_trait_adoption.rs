@@ -10,15 +10,15 @@
 //!
 //! Bead: bd-dwx4l (parent design: docs/specs/crypto_trait_abstraction.md).
 
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use ed25519_dalek::{Signature, Signer as _, SigningKey};
 use frankenengine_node::crypto::{Ed25519Scheme, SignatureScheme};
 use frankenengine_node::security::decision_receipt::{
-    sign_receipt, verify_receipt, Decision, Receipt,
+    Decision, Receipt, sign_receipt, verify_receipt,
 };
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const PRE_MIGRATION_CANONICAL_RECEIPT_JSON: &str = concat!(
     r#"{"action_name":"quarantine_extension","actor_identity":"security-admin@franken-node.prod","#,

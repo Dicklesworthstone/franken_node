@@ -27,9 +27,8 @@ const REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN: &[u8] = b"replay_bundle_sig_v1:";
 
 fn signature_payload_for(bundle: &ReplayBundle) -> Vec<u8> {
     let integrity_hash = bundle.integrity_hash.as_bytes();
-    let mut payload = Vec::with_capacity(
-        REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN.len() + 8 + integrity_hash.len(),
-    );
+    let mut payload =
+        Vec::with_capacity(REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN.len() + 8 + integrity_hash.len());
     payload.extend_from_slice(REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN);
     payload.extend_from_slice(&(integrity_hash.len() as u64).to_le_bytes());
     payload.extend_from_slice(integrity_hash);
@@ -68,10 +67,11 @@ fn signed_fixture_bundle(seed: u8) -> (ReplayBundle, SigningKey, String) {
         signing_identity: "incident-control-plane",
     };
     sign_replay_bundle(&mut bundle, &signing_material).expect("sign through trait-routed path");
-    let trusted_key_id = frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
-        &signing_key.verifying_key(),
-    )
-    .to_string();
+    let trusted_key_id =
+        frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
+            &signing_key.verifying_key(),
+        )
+        .to_string();
     (bundle, signing_key, trusted_key_id)
 }
 
@@ -146,12 +146,9 @@ fn verify_replay_bundle_signature_rejects_wrapper_domain_signatures() {
     let payload = signature_payload_for(&bundle);
 
     // Sign through the WRAPPING surface (the bug we are guarding against).
-    let wrapped_sig_bytes = Ed25519Scheme::sign_with_domain(
-        &signing_key.to_bytes(),
-        b"replay_bundle",
-        &payload,
-    )
-    .expect("sign_with_domain must succeed");
+    let wrapped_sig_bytes =
+        Ed25519Scheme::sign_with_domain(&signing_key.to_bytes(), b"replay_bundle", &payload)
+            .expect("sign_with_domain must succeed");
 
     // The wrapper-signed bytes must NOT verify under the trait verifier
     // path that `sign_replay_bundle` uses.
@@ -167,20 +164,23 @@ fn verify_replay_bundle_signature_rejects_wrapper_domain_signatures() {
 
     // Hand-install the forged signature on the bundle and confirm the
     // public verify surface rejects it.
-    let trusted_key_id = frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
-        &signing_key.verifying_key(),
-    )
-    .to_string();
-    bundle.signature = Some(frankenengine_node::tools::replay_bundle::ReplayBundleSignature {
-        algorithm: "ed25519".to_string(),
-        public_key_hex: hex::encode(signing_key.verifying_key().to_bytes()),
-        key_id: trusted_key_id.clone(),
-        key_source: "env".to_string(),
-        signing_identity: "incident-control-plane".to_string(),
-        trust_scope: "incident_replay_bundle".to_string(),
-        signed_payload_sha256: hex::encode(sha2::Sha256::digest(&payload)),
-        signature_hex: hex::encode(wrapped_sig_bytes),
-    });
+    let trusted_key_id =
+        frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
+            &signing_key.verifying_key(),
+        )
+        .to_string();
+    bundle.signature = Some(
+        frankenengine_node::tools::replay_bundle::ReplayBundleSignature {
+            algorithm: "ed25519".to_string(),
+            public_key_hex: hex::encode(signing_key.verifying_key().to_bytes()),
+            key_id: trusted_key_id.clone(),
+            key_source: "env".to_string(),
+            signing_identity: "incident-control-plane".to_string(),
+            trust_scope: "incident_replay_bundle".to_string(),
+            signed_payload_sha256: hex::encode(sha2::Sha256::digest(&payload)),
+            signature_hex: hex::encode(wrapped_sig_bytes),
+        },
+    );
 
     let err = verify_replay_bundle_signature(&bundle, Some(&trusted_key_id))
         .expect_err("wrapper-domain signature must be rejected");

@@ -34,17 +34,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use frankenengine_node::connector::vef_execution_receipt::{
-    ExecutionActionType, ExecutionReceipt,
-};
-use frankenengine_node::vef::proof_generator::{
-    ProofBackend, ProofRequest, TestProofBackend,
-};
+use frankenengine_node::connector::vef_execution_receipt::{ExecutionActionType, ExecutionReceipt};
+use frankenengine_node::vef::proof_generator::{ProofBackend, ProofRequest, TestProofBackend};
 use frankenengine_node::vef::proof_scheduler::{ProofWindow, WorkloadTier};
 use frankenengine_node::vef::receipt_chain::{ReceiptChain, ReceiptChainConfig};
 
 const BENCH_SEED_SCHEMA: &str = "franken-node/execution-receipt/v1";
-const BENCH_POLICY_HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const BENCH_POLICY_HASH: &str =
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// Build a deterministic `ExecutionReceipt` for the bench's fixed-seed
 /// fixture. The chain machinery (`ReceiptChain::append`) computes the

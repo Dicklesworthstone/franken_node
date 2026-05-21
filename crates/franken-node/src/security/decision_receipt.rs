@@ -564,10 +564,12 @@ pub fn verify_receipt_with_audience(
 
     // Verify directly with the pre-parsed VerifyingKey to avoid re-parsing
     // overhead (~6µs Edwards point decompression per call).
-    let signature = Signature::from_slice(&sig_bytes)
-        .map_err(|_| ReceiptError::SignatureBytes)?;
+    let signature = Signature::from_slice(&sig_bytes).map_err(|_| ReceiptError::SignatureBytes)?;
 
-    if public_key.verify_strict(payload.as_bytes(), &signature).is_err() {
+    if public_key
+        .verify_strict(payload.as_bytes(), &signature)
+        .is_err()
+    {
         return Ok(false);
     }
 
