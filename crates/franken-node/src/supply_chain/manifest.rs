@@ -223,6 +223,10 @@ impl SignedExtensionManifest {
 pub fn validate_signed_manifest(
     manifest: &SignedExtensionManifest,
 ) -> Result<(), ManifestSchemaError> {
+    // Validate schema_version BEFORE using it in error messages to prevent log injection.
+    // schema_version comes from untrusted manifest JSON and could contain control characters.
+    ensure_manifest_text(&manifest.schema_version, "schema_version")?;
+
     if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
         return Err(ManifestSchemaError::InvalidSchemaVersion {
             expected: MANIFEST_SCHEMA_VERSION.to_string(),
@@ -754,6 +758,29 @@ mod tests {
 
         let error = validate_signed_manifest(&manifest).expect_err("should fail");
         assert_eq!(error.code(), "EMS_SCHEMA_VERSION");
+    }
+
+    #[test]
+    fn schema_version_with_control_chars_rejected() {
+        let malicious_versions = [
+            "1.0\nFAKE_LOG: injected",
+            "1.0\rcarriage_return",
+            "1.0\x1b[31mred_escape",
+            "1.0\ttab",
+        ];
+
+        for bad_version in malicious_versions {
+            let mut manifest = valid_manifest();
+            manifest.schema_version = bad_version.to_string();
+
+            let error = validate_signed_manifest(&manifest).expect_err("should fail");
+            assert_eq!(
+                error.code(),
+                "EMS_INVALID_FIELD",
+                "expected EMS_INVALID_FIELD for schema_version with control chars: {:?}",
+                bad_version
+            );
+        }
     }
 
     #[test]
