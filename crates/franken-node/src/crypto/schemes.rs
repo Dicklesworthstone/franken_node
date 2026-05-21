@@ -757,4 +757,52 @@ mod tests {
 
         assert!(!verifier.verify_raw(message, &bad_signature), "zero signature should fail");
     }
+
+    #[test]
+    fn preparsed_signer_sign_raw_multiple_payload_sizes() {
+        let (_, sk) = Ed25519Scheme::generate_keypair().unwrap();
+        let signer = Ed25519PreparsedSigner::from_secret_bytes(&sk);
+
+        let payloads: &[&[u8]] = &[
+            &[],                        // 0 B
+            &[0x42],                    // 1 B
+            &[0xAA; 64],                // 64 B
+            &[0xBB; 512],               // 512 B
+            &[0xCC; 4096],              // 4096 B
+        ];
+
+        for payload in payloads {
+            let scheme_sig = Ed25519Scheme::sign_raw(&sk, payload).unwrap();
+            let preparsed_sig = signer.sign_raw(payload);
+            assert_eq!(
+                scheme_sig, preparsed_sig,
+                "sign_raw must be bit-identical for payload of {} bytes",
+                payload.len()
+            );
+        }
+    }
+
+    #[test]
+    fn preparsed_verifier_uses_strict_verification() {
+        let (pk, sk) = Ed25519Scheme::generate_keypair().unwrap();
+        let signer = Ed25519PreparsedSigner::from_secret_bytes(&sk);
+        let verifier = Ed25519PreparsedVerifier::from_public_bytes(&pk).unwrap();
+        let message = b"strict verification test";
+
+        let sig = signer.sign_raw(message);
+        assert!(verifier.verify_raw(message, &sig), "valid signature should pass");
+
+        let mut tampered_sig = sig;
+        tampered_sig[63] ^= 0x80;
+        assert!(
+            !verifier.verify_raw(message, &tampered_sig),
+            "tampered signature should fail strict verification"
+        );
+    }
+
+    #[test]
+    fn preparsed_signer_zeroize_on_drop_compile_check() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<ed25519_dalek::SigningKey>();
+    }
 }
