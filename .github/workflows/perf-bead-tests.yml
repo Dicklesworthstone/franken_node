@@ -1,0 +1,103 @@
+name: perf-bead-tests
+
+# CI gate for the bd-98xo5 performance-bead test suites.
+#
+# A PR is mapped to one or more `tests/perf_beads/<bead>.sh` scripts
+# via `scripts/detect_affected_perf_beads.py` (the mapping lives in
+# AFFECTED_MAP inside that script — append a row when you add a new
+# Tx.tests bead). Each touched script runs in its own matrix job; on
+# completion, `scripts/render_perf_test_summary.py --ci` verifies the
+# resulting JSONL is well-formed and the run had zero TEST-FAIL events.
+#
+# See docs/dev/perf_bead_testing.md for the schema and authoring
+# guide. T15 tracking bead: bd-98xo5.15. This workflow: bd-98xo5.15.2.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/franken-node/src/security/threshold_sig.rs'
+      - 'crates/franken-node/src/security/decision_receipt.rs'
+      - 'crates/franken-node/src/crypto/schemes.rs'
+      - 'crates/franken-node/src/connector/canonical_serializer.rs'
+      - 'crates/franken-node/src/supply_chain/trust_card.rs'
+      - 'crates/franken-node/src/control_plane/fleet_transport.rs'
+      - 'crates/franken-node/src/dgis/contagion_graph.rs'
+      - 'crates/franken-node/src/dgis/contagion_simulator.rs'
+      - 'crates/franken-node/src/dgis/node_interner.rs'
+      - 'crates/franken-node/src/tools/replay_bundle.rs'
+      - 'crates/franken-node/src/vef/proof_generator.rs'
+      - 'crates/franken-node/src/vef/receipt_chain.rs'
+      - 'crates/franken-node/benches/crypto_scheme_bench.rs'
+      - 'crates/franken-node/benches/vef_proof_chain_bench.rs'
+      - 'scripts/run_perf_bead_test.sh'
+      - 'scripts/render_perf_test_summary.py'
+      - 'scripts/detect_affected_perf_beads.py'
+      - 'tests/perf_beads/**'
+      - 'docs/dev/perf_bead_testing.md'
+
+jobs:
+  detect-affected:
+    runs-on: ubuntu-latest
+    outputs:
+      scripts: ${{ steps.map.outputs.scripts }}
+      any_scripts: ${{ steps.map.outputs.any_scripts }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: map
+        name: Map changed files to perf-bead test scripts
+        run: |
+          set -euo pipefail
+          python3 scripts/detect_affected_perf_beads.py \
+              --base "${{ github.event.pull_request.base.sha }}" \
+              --head "${{ github.sha }}" \
+            > scripts.txt
+          if [ ! -s scripts.txt ]; then
+            echo "any_scripts=false" >> "$GITHUB_OUTPUT"
+            echo "scripts=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "any_scripts=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "scripts<<__JSON__"
+            python3 -c "import json,sys; print(json.dumps([l.strip() for l in sys.stdin.read().splitlines() if l.strip()]))" < scripts.txt
+            echo "__JSON__"
+          } >> "$GITHUB_OUTPUT"
+
+  run-each:
+    needs: detect-affected
+    if: needs.detect-affected.outputs.any_scripts == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        script: ${{ fromJson(needs.detect-affected.outputs.scripts) }}
+    env:
+      NO_COLOR: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run perf-bead test script
+        run: |
+          set -euo pipefail
+          chmod +x "${{ matrix.script }}"
+          bash "${{ matrix.script }}"
+      - name: Render summary + verify PASS
+        run: |
+          set -euo pipefail
+          LOG=$(find tests/artifacts/perf/test_runs -name test_log.jsonl -type f \
+                  -newer "${{ matrix.script }}" | head -n 1)
+          if [ -z "${LOG:-}" ]; then
+            echo "no test_log.jsonl found after running ${{ matrix.script }}" >&2
+            exit 2
+          fi
+          python3 scripts/render_perf_test_summary.py "$LOG"
+          python3 scripts/render_perf_test_summary.py --ci "$LOG"
