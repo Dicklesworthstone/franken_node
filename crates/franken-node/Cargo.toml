@@ -407,6 +407,10 @@ name = "fleet_transport_canonical_byte_stability"
 path = "tests/fleet_transport_canonical_byte_stability.rs"
 
 [[test]]
+name = "trust_card_streaming_encoder_golden_preservation"
+path = "tests/trust_card_streaming_encoder_golden_preservation.rs"
+
+[[test]]
 name = "spec_derived_fuzz_seeds"
 path = "tests/spec_derived_fuzz_seeds.rs"
 required-features = ["test-support"]
