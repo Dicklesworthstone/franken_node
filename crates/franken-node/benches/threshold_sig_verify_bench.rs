@@ -1,10 +1,10 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+use ed25519_dalek::SigningKey;
 use frankenengine_node::security::threshold_sig::{
-    PartialSignature, PublicationArtifact, SignerKey, ThresholdConfig, sign, verify_threshold,
+    PartialSignature, PreparsedThresholdConfig, PublicationArtifact, SignerKey, ThresholdConfig,
+    sign, verify_threshold, verify_threshold_preparsed,
 };
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 fn extend_len_prefixed_field(msg: &mut Vec<u8>, value: &str) {
@@ -80,83 +80,22 @@ fn build_case(
         signatures,
     };
 
-    let parsed = PreparsedThresholdConfig::new(&config);
+    let parsed = PreparsedThresholdConfig::from_config(config.clone())
+        .expect("PreparsedThresholdConfig should construct from a valid ThresholdConfig");
     (config, artifact, parsed)
 }
 
-struct PreparsedThresholdConfig {
-    threshold: u32,
-    verifying_keys: BTreeMap<String, VerifyingKey>,
-}
-
-impl PreparsedThresholdConfig {
-    fn new(config: &ThresholdConfig) -> Self {
-        let mut verifying_keys = BTreeMap::new();
-        for signer in &config.signer_keys {
-            let bytes = hex::decode(&signer.public_key_hex).expect("public key hex should decode");
-            let array: [u8; 32] = bytes.try_into().expect("ed25519 public key length");
-            let verifying_key =
-                VerifyingKey::from_bytes(&array).expect("public key bytes should parse");
-            verifying_keys.insert(signer.key_id.clone(), verifying_key);
-        }
-
-        Self {
-            threshold: config.threshold,
-            verifying_keys,
-        }
-    }
-}
-
-fn verify_threshold_preparsed(
-    config: &PreparsedThresholdConfig,
-    artifact: &PublicationArtifact,
-) -> bool {
-    let message = build_signing_message(
-        &artifact.artifact_id,
-        &artifact.connector_id,
-        &artifact.content_hash,
-    );
-    let mut valid_count = 0u32;
-    let mut seen_signers: BTreeSet<&str> = BTreeSet::new();
-    let mut seen_key_ids: BTreeSet<&str> = BTreeSet::new();
-
-    for sig in &artifact.signatures {
-        if sig.signer_id != sig.key_id {
-            continue;
-        }
-
-        let Some(verifying_key) = config.verifying_keys.get(sig.key_id.as_str()) else {
-            continue;
-        };
-
-        if sig.signature_hex.len() != 128 {
-            continue;
-        }
-
-        let Ok(sig_bytes) = hex::decode(&sig.signature_hex) else {
-            continue;
-        };
-        let Ok(sig_array) = <[u8; 64]>::try_from(sig_bytes) else {
-            continue;
-        };
-        let signature = Signature::from_bytes(&sig_array);
-        if verifying_key.verify_strict(&message, &signature).is_err() {
-            continue;
-        }
-
-        if !seen_key_ids.insert(sig.key_id.as_str()) {
-            continue;
-        }
-
-        if !seen_signers.insert(sig.signer_id.as_str()) {
-            continue;
-        }
-
-        valid_count = valid_count.saturating_add(1);
-    }
-
-    valid_count >= config.threshold
-}
+// The bench previously carried a bench-local `PreparsedThresholdConfig` +
+// `verify_threshold_preparsed` clone authored before the production public
+// API existed (see bd-98xo5.1.1 → 718af0e4 for the public-API promotion).
+// Per bd-98xo5.1.3 the bench now drives the production
+// `frankenengine_node::security::threshold_sig::{PreparsedThresholdConfig,
+// verify_threshold_preparsed}` so the criterion regression target measures
+// what production actually runs, not a divergent local reimplementation.
+// Round-1 envelope from
+// `tests/artifacts/perf/20260520T214003Z_franken_node_perf/criterion_raw/threshold_sig_verify.txt`:
+// preparsed_keys/8 ≤ 436 µs (was 396.4 µs), preparsed_keys/32 ≤ 1772 µs
+// (was 1611 µs) — both within the ±10 % envelope.
 
 fn bench_verify_threshold(c: &mut Criterion) {
     let mut group = c.benchmark_group("threshold_sig_verify");
@@ -189,6 +128,8 @@ fn bench_verify_threshold(c: &mut Criterion) {
                     black_box(verify_threshold_preparsed(
                         black_box(case.0),
                         black_box(case.1),
+                        "bench-trace",
+                        "2026-04-27T00:00:00Z",
                     ))
                 })
             },
