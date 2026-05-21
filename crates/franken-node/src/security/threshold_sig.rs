@@ -763,6 +763,31 @@ pub fn verify_threshold(
     trace_id: &str,
     timestamp: &str,
 ) -> VerificationResult {
+    // bd-98xo5.12.3 — sentinel + histogram + span instrumentation,
+    // gated by the `profiling` Cargo feature established by
+    // bd-98xo5.12.1 commit 1c72a9f0. Default builds compile none of
+    // this — the cfg block is empty.
+    #[cfg(feature = "profiling")]
+    let _span = tracing::info_span!("threshold_sig_verify", path = "baseline").entered();
+    #[cfg(feature = "profiling")]
+    _profile_threshold_sig_verify();
+    #[cfg(feature = "profiling")]
+    let _start = std::time::Instant::now();
+    let result = verify_threshold_inner(config, artifact, trace_id, timestamp);
+    #[cfg(feature = "profiling")]
+    {
+        let elapsed_us = u64::try_from(_start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        threshold_sig_verify_record_us(elapsed_us);
+    }
+    result
+}
+
+fn verify_threshold_inner(
+    config: &ThresholdConfig,
+    artifact: &PublicationArtifact,
+    trace_id: &str,
+    timestamp: &str,
+) -> VerificationResult {
     match PreparedThresholdKeys::new_validated(config) {
         Ok(prepared_keys) => {
             if let Some(failure_reason) = artifact_identifier_failure(artifact) {
@@ -813,6 +838,31 @@ pub fn verify_threshold_preparsed(
     trace_id: &str,
     timestamp: &str,
 ) -> VerificationResult {
+    // bd-98xo5.12.3 — same instrumentation pattern as verify_threshold;
+    // the span carries `path = "preparsed"` so the perf round can
+    // attribute samples to whichever path production callers exercise
+    // after the bd-98xo5.1 migration.
+    #[cfg(feature = "profiling")]
+    let _span = tracing::info_span!("threshold_sig_verify", path = "preparsed").entered();
+    #[cfg(feature = "profiling")]
+    _profile_threshold_sig_verify();
+    #[cfg(feature = "profiling")]
+    let _start = std::time::Instant::now();
+    let result = verify_threshold_preparsed_inner(preparsed_config, artifact, trace_id, timestamp);
+    #[cfg(feature = "profiling")]
+    {
+        let elapsed_us = u64::try_from(_start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        threshold_sig_verify_record_us(elapsed_us);
+    }
+    result
+}
+
+fn verify_threshold_preparsed_inner(
+    preparsed_config: &PreparsedThresholdConfig,
+    artifact: &PublicationArtifact,
+    trace_id: &str,
+    timestamp: &str,
+) -> VerificationResult {
     if let Some(failure_reason) = artifact_identifier_failure(artifact) {
         return failed_verification_result(
             preparsed_config.config.threshold,
@@ -840,6 +890,87 @@ pub fn verify_threshold_preparsed(
         trace_id,
         timestamp,
     )
+}
+
+// ─────────────────────────────────────────────────────────────────
+// bd-98xo5.12.3: profiling instrumentation for verify_threshold +
+// verify_threshold_preparsed.
+//
+// All gated by the `profiling` Cargo feature (added to
+// crates/franken-node/Cargo.toml by bd-98xo5.12.1 commit 1c72a9f0).
+// Production builds (default features) compile NONE of this code —
+// the cfg gate elides the sentinel call sites, the histogram
+// statics, and the recording function entirely.
+// ─────────────────────────────────────────────────────────────────
+
+/// Sentinel frame so flamegraph attribution shows
+/// `_profile_threshold_sig_verify` self-labelled in profiled binaries.
+/// Always compiled (independent of the `profiling` feature) so the
+/// symbol is in the binary for `objdump` inspection. Under the
+/// default feature set there are zero call sites — LLVM elides via
+/// dead-code elimination at link time.
+#[inline(never)]
+#[allow(dead_code)]
+fn _profile_threshold_sig_verify() {
+    std::hint::black_box(());
+}
+
+#[cfg(feature = "profiling")]
+static THRESHOLD_SIG_VERIFY_HISTOGRAM_US: std::sync::OnceLock<
+    std::sync::Mutex<hdrhistogram::Histogram<u64>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(feature = "profiling")]
+fn threshold_sig_verify_record_us(elapsed_us: u64) {
+    let hist = THRESHOLD_SIG_VERIFY_HISTOGRAM_US.get_or_init(|| {
+        // Bounds: 1 µs (lower) to 60_000_000 µs = 60 s (upper). The
+        // round-1 worst case (verify/32 at 1.78 ms) sits comfortably
+        // in the middle of this range with ~34 000× headroom; the
+        // upper bound exists to swallow pathological-fixture outliers
+        // without losing the histogram to a single-sample tail bucket.
+        // Three significant digits per the bead spec — hdrhistogram
+        // bounds this at ~2 % relative error across the range.
+        std::sync::Mutex::new(
+            hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
+                .expect("HDR histogram bounds (1, 60_000_000, 3) are statically valid"),
+        )
+    });
+    let bounded = elapsed_us.clamp(1, 60_000_000);
+    if let Ok(mut h) = hist.lock() {
+        let _ = h.record(bounded);
+    }
+}
+
+/// Emit the current verify_threshold histogram's p50/p95/p99/cumulative/count
+/// as a `tracing::info!` event matching the profiling skill's
+/// `perf.profile.span_summary` schema. Idempotent and non-destructive
+/// — does NOT reset the histogram. Callers (typically the perf-round
+/// skill or a process-exit Drop hook) trigger this on demand.
+#[cfg(feature = "profiling")]
+pub fn dump_threshold_sig_verify_perf_histogram() {
+    let Some(hist) = THRESHOLD_SIG_VERIFY_HISTOGRAM_US.get() else {
+        return;
+    };
+    let Ok(h) = hist.lock() else {
+        return;
+    };
+    let count = h.len();
+    let cumulative_us: u64 = h.iter_recorded().map(|v| v.value_iterated_to()).sum();
+    let p50_us = h.value_at_quantile(0.50);
+    let p95_us = h.value_at_quantile(0.95);
+    let p99_us = h.value_at_quantile(0.99);
+    tracing::info!(
+        event_code = "perf.profile.span_summary",
+        span_name = "threshold_sig_verify.us",
+        cumulative_us,
+        count,
+        p50_us,
+        p95_us,
+        p99_us,
+        category = "CPU",
+        evidence = "crates/franken-node/src/security/threshold_sig.rs::verify_threshold + verify_threshold_preparsed",
+        "threshold_sig_verify perf span summary"
+    );
 }
 
 /// Runs the verification loop after artifact and connector identifiers have
