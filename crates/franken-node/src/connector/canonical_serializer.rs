@@ -48,6 +48,12 @@ pub mod error_codes {
     pub const ERR_CAN_ROUND_TRIP_DIVERGENCE: &str = "ERR_CAN_ROUND_TRIP_DIVERGENCE";
 }
 
+fn sanitize_for_display(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // TrustObjectType
 // ---------------------------------------------------------------------------
@@ -769,7 +775,10 @@ fn canonicalize_schema_value(
         if !registered_schema.contains_field(field) {
             return Err(SerializerError::NonCanonicalInput {
                 object_type: schema.object_type.label().to_string(),
-                reason: format!("unknown field `{field}` outside canonical schema"),
+                reason: format!(
+                    "unknown field `{}` outside canonical schema",
+                    sanitize_for_display(field)
+                ),
             });
         }
     }
@@ -2988,6 +2997,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_unknown_field_error_sanitizes_control_chars() {
+        let mut serializer = CanonicalSerializer::with_all_schemas();
+        let malicious_field = "evil\nFAKE_LOG: injected\x00null";
+        let json = format!(r#"{{"{malicious_field}": "value"}}"#);
+        let result = serializer.serialize(
+            TrustObjectType::PolicyCheckpoint,
+            json.as_bytes(),
+            "test-trace",
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let display = format!("{err}");
+        assert!(
+            !display.contains('\n'),
+            "error message must not contain newlines: {display:?}"
+        );
+        assert!(
+            !display.contains('\x00'),
+            "error message must not contain NUL: {display:?}"
+        );
+        assert!(
+            display.contains('\u{FFFD}'),
+            "control chars should be replaced with U+FFFD: {display:?}"
+        );
     }
 
     #[test]
