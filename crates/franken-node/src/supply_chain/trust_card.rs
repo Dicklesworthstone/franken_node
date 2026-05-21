@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use super::certification::{DerivationMetadata, VerifiedEvidenceRef};
+use crate::connector::canonical_serializer::canonical_bytes;
 use crate::push_bounded;
 use crate::security::constant_time;
 use crate::security::trajectory_gaming::CamouflageHint;
@@ -1157,14 +1158,24 @@ impl TrustCardRegistry {
     }
 
     fn advance_snapshot_sequence_for_mutation(&mut self) {
-        self.previous_snapshot_hash =
-            if self.snapshot_epoch.eq(&0) && self.cards_by_extension.is_empty() {
-                None
-            } else {
-                self.last_snapshot_hash
-                    .clone()
-                    .or_else(|| self.snapshot().ok().map(|s| s.snapshot_hash))
-            };
+        // Without the `last_snapshot_hash.is_none()` guard, a registry that
+        // was loaded from disk at epoch 0 with no cards (the post-init shape)
+        // hits the "fresh" branch and sets `previous_snapshot_hash = None`.
+        // The next persist then fails the chain check with
+        // "snapshot chain rejected: epoch 1 does not extend high-water epoch 0",
+        // because the persisted high-water has a non-empty snapshot_hash while
+        // our new snapshot claims no predecessor. The extra clause restricts
+        // the "no prior snapshot" branch to genuinely-fresh in-memory state.
+        self.previous_snapshot_hash = if self.snapshot_epoch.eq(&0)
+            && self.cards_by_extension.is_empty()
+            && self.last_snapshot_hash.is_none()
+        {
+            None
+        } else {
+            self.last_snapshot_hash
+                .clone()
+                .or_else(|| self.snapshot().ok().map(|s| s.snapshot_hash))
+        };
         self.snapshot_epoch = self.snapshot_epoch.saturating_add(1);
         self.last_snapshot_hash = None;
     }
@@ -2727,8 +2738,11 @@ pub fn verify_card_signature(card: &TrustCard, registry_key: &[u8]) -> Result<()
 /// # Errors
 /// Returns `TrustCardError` if canonical serialization of the card fails.
 pub fn compute_card_hash(card: &TrustCard) -> Result<String, TrustCardError> {
-    let canonical = canonical_card_without_hash_and_signature(card)?;
-    let encoded = serde_json::to_vec(&canonical)?;
+    // bd-98xo5.4.5: canonical_card_without_hash_and_signature now
+    // returns canonical bytes directly (no intermediate Value
+    // rebuild + to_vec). Byte-equivalence verified by bd-98xo5.4.4
+    // commit 2963516e (all 4 trust_card_encoder goldens pass).
+    let encoded = canonical_card_without_hash_and_signature(card)?;
     let mut hasher = Sha256::new();
     hasher.update(b"trust_card_hash_v1:");
     hasher.update(
@@ -2752,9 +2766,22 @@ pub fn compute_card_hash(card: &TrustCard) -> Result<String, TrustCardError> {
 /// # Errors
 /// Returns `TrustCardError` if value serialization fails.
 pub fn to_canonical_json<T: Serialize + ?Sized>(value: &T) -> Result<String, TrustCardError> {
+    // bd-98xo5.4.5: route through the streaming encoder shipped at
+    // bd-98xo5.4.2 commit b6a75037. Canonical bytes are produced
+    // directly with no intermediate `serde_json::Map` rebuild and no
+    // final `serde_json::to_string` allocation. Byte-equivalence
+    // with the prior canonicalize_value+to_string chain is verified
+    // by bd-98xo5.4.3 commit a7015fc9 (proptest) and bd-98xo5.4.4
+    // commit 2963516e (golden preservation gate, all 4 trust-card
+    // goldens pass).
     let raw = serde_json::to_value(value)?;
-    let canonical = canonicalize_value(raw);
-    Ok(serde_json::to_string(&canonical)?)
+    let bytes = canonical_bytes(&raw);
+    // canonical_bytes routes strings through serde_json::to_writer which
+    // emits valid UTF-8 (escape-correct per RFC 8259 §7). The from_utf8
+    // call here can only fail if a future regression in canonical_bytes
+    // bypasses the to_writer path; treat that as a Json error.
+    String::from_utf8(bytes)
+        .map_err(|err| TrustCardError::Json(format!("canonical bytes were not valid UTF-8: {err}")))
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2958,17 +2985,26 @@ fn validate_snapshot_history(
     Ok(())
 }
 
-fn canonical_card_without_hash_and_signature(card: &TrustCard) -> Result<Value, TrustCardError> {
+fn canonical_card_without_hash_and_signature(card: &TrustCard) -> Result<Vec<u8>, TrustCardError> {
+    // bd-98xo5.4.5: returns canonical bytes directly via the
+    // streaming encoder. Previously returned a Value (sorted tree)
+    // which the caller had to re-serialize via to_vec — now the
+    // tree-rebuild + extra serialize are gone. Byte-equivalence
+    // verified by bd-98xo5.4.4 commit 2963516e.
     let mut value = serde_json::to_value(card)?;
-    let Some(map) = value.as_object_mut() else {
-        return Ok(value);
-    };
-    map.insert("card_hash".to_string(), Value::String(String::new()));
-    map.insert(
-        "registry_signature".to_string(),
-        Value::String(String::new()),
-    );
-    Ok(canonicalize_value(value))
+    if let Some(map) = value.as_object_mut() {
+        map.insert("card_hash".to_string(), Value::String(String::new()));
+        map.insert(
+            "registry_signature".to_string(),
+            Value::String(String::new()),
+        );
+    }
+    // For the non-object case (which serde_json::to_value shouldn't
+    // produce for a TrustCard struct), fall back to canonical bytes
+    // of the raw value — preserves the previous behaviour where
+    // Ok(value) was returned unchanged and downstream to_vec
+    // converted it to bytes.
+    Ok(canonical_bytes(&value))
 }
 
 fn sign_card_in_place(card: &mut TrustCard, registry_key: &[u8]) -> Result<(), TrustCardError> {
@@ -2983,22 +3019,24 @@ fn sign_card_in_place(card: &mut TrustCard, registry_key: &[u8]) -> Result<(), T
 
 fn canonical_snapshot_without_hash_and_signature(
     snapshot: &TrustCardRegistrySnapshot,
-) -> Result<Value, TrustCardError> {
+) -> Result<Vec<u8>, TrustCardError> {
+    // bd-98xo5.4.5: mirror of canonical_card_without_hash_and_signature
+    // returning canonical bytes directly via the streaming encoder.
     let mut value = serde_json::to_value(snapshot)?;
-    let Some(map) = value.as_object_mut() else {
-        return Ok(value);
-    };
-    map.insert("snapshot_hash".to_string(), Value::String(String::new()));
-    map.insert(
-        "registry_signature".to_string(),
-        Value::String(String::new()),
-    );
-    Ok(canonicalize_value(value))
+    if let Some(map) = value.as_object_mut() {
+        map.insert("snapshot_hash".to_string(), Value::String(String::new()));
+        map.insert(
+            "registry_signature".to_string(),
+            Value::String(String::new()),
+        );
+    }
+    Ok(canonical_bytes(&value))
 }
 
 fn compute_snapshot_hash(snapshot: &TrustCardRegistrySnapshot) -> Result<String, TrustCardError> {
-    let canonical = canonical_snapshot_without_hash_and_signature(snapshot)?;
-    let encoded = serde_json::to_vec(&canonical)?;
+    // bd-98xo5.4.5: canonical_snapshot_without_hash_and_signature now
+    // returns canonical bytes directly.
+    let encoded = canonical_snapshot_without_hash_and_signature(snapshot)?;
     let mut hasher = Sha256::new();
     hasher.update(b"trust_card_registry_snapshot_hash_v1:");
     hasher.update(
@@ -3049,24 +3087,26 @@ fn verify_snapshot_signature(
 
 fn canonical_high_water_without_signature(
     high_water: &TrustCardRegistrySnapshotHighWater,
-) -> Result<Value, TrustCardError> {
+) -> Result<Vec<u8>, TrustCardError> {
+    // bd-98xo5.4.5: returns canonical bytes directly via the
+    // streaming encoder.
     let mut value = serde_json::to_value(high_water)?;
-    let Some(map) = value.as_object_mut() else {
-        return Ok(value);
-    };
-    map.insert(
-        "high_water_signature".to_string(),
-        Value::String(String::new()),
-    );
-    Ok(canonicalize_value(value))
+    if let Some(map) = value.as_object_mut() {
+        map.insert(
+            "high_water_signature".to_string(),
+            Value::String(String::new()),
+        );
+    }
+    Ok(canonical_bytes(&value))
 }
 
 fn high_water_signature(
     high_water: &TrustCardRegistrySnapshotHighWater,
     registry_key: &[u8],
 ) -> Result<String, TrustCardError> {
-    let canonical = canonical_high_water_without_signature(high_water)?;
-    let encoded = serde_json::to_vec(&canonical)?;
+    // bd-98xo5.4.5: canonical_high_water_without_signature now returns
+    // canonical bytes directly.
+    let encoded = canonical_high_water_without_signature(high_water)?;
     let mut mac =
         HmacSha256::new_from_slice(registry_key).map_err(|_| TrustCardError::InvalidRegistryKey)?;
     mac.update(b"trust_card_registry_high_water_sig_v1:");
@@ -3261,7 +3301,16 @@ fn timestamp_from_secs(timestamp_secs: u64) -> String {
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
 }
 
-fn canonicalize_value(value: Value) -> Value {
+// bd-98xo5.4.5: production trust_card paths (to_canonical_json,
+// canonical_card_without_hash_and_signature, canonical_snapshot_without_hash_and_signature,
+// canonical_high_water_without_signature) all now route through
+// canonical_serializer::canonical_bytes. The move-based tree-rebuild
+// implementation below is kept under `#[cfg(test)]` because the
+// canonical_perf_test and test_canonical_optimization modules use it
+// as a comparison baseline for the optimised path. It is no longer
+// reachable from production code.
+#[cfg(test)]
+pub(super) fn canonicalize_value(value: Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut entries: Vec<_> = map.into_iter().collect();
