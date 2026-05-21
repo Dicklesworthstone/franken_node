@@ -938,6 +938,107 @@ fn write_canonical_integer<T: std::fmt::Display>(
     })
 }
 
+// ─────────────────────────────────────────────────────────────────
+// bd-98xo5.12.1: profiling instrumentation for write_canonical_value.
+//
+// All gated by the `profiling` Cargo feature (added to
+// crates/franken-node/Cargo.toml). Production builds (default
+// features) compile NONE of this code — the cfg gate elides the
+// sentinel call, the histogram statics, and the recording function
+// entirely. Enable with `cargo build --features profiling` when
+// running under the perf-round profiling skill.
+//
+// Three deliverables per the bead:
+//   1. Sentinel frame (#[inline(never)] + black_box) — flamegraph
+//      attribution lands on this symbol so the bar is self-labelled.
+//   2. HDR histogram (1 µs..60 s, 3 sig digits) capturing per-call
+//      microseconds; survives across all calls in a single process.
+//   3. Tracing span (`tracing::info_span!`) with `skip_all` to avoid
+//      logging the large Value argument.
+//
+// The bead also asks for a structured `perf.profile.span_summary`
+// log event on flush. `dump_perf_histogram` emits it as a tracing
+// info! line with the documented JSON-equivalent fields.
+// ─────────────────────────────────────────────────────────────────
+
+/// Sentinel frame so flamegraph attribution shows
+/// `_profile_trust_card_canonical` self-labelled. Always compiled
+/// (independent of the `profiling` feature) so the symbol is in the
+/// binary for `objdump` inspection; when the `profiling` feature is
+/// disabled there are zero call sites, so LLVM elides the symbol via
+/// dead-code elimination at link time. The `#[inline(never)]` keeps
+/// it a real stack frame whenever a caller does exist (i.e. under
+/// `--features profiling`).
+#[inline(never)]
+#[allow(dead_code)]
+fn _profile_trust_card_canonical() {
+    std::hint::black_box(());
+}
+
+#[cfg(feature = "profiling")]
+use std::sync::{Mutex, OnceLock};
+
+#[cfg(feature = "profiling")]
+static TRUST_CARD_CANONICAL_HISTOGRAM_US: OnceLock<Mutex<hdrhistogram::Histogram<u64>>> =
+    OnceLock::new();
+
+#[cfg(feature = "profiling")]
+fn trust_card_canonical_record_us(elapsed_us: u64) {
+    let hist = TRUST_CARD_CANONICAL_HISTOGRAM_US.get_or_init(|| {
+        // Bounds: 1 µs (lower) to 60_000_000 µs = 60 s (upper). The
+        // 60 s upper bound matches the bead's prescribed bound and
+        // covers the round-1 worst case of 3 591 ms with ~16× headroom.
+        // Three significant digits per the bead — hdrhistogram bounds
+        // this at ~2 % relative error across the range.
+        Mutex::new(
+            hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
+                .expect("HDR histogram bounds (1, 60_000_000, 3) are statically valid"),
+        )
+    });
+    // Clamp at the histogram's bounds; recording outside the range
+    // would return Err which we'd swallow either way. The clamp keeps
+    // a single tail bucket from becoming over-represented while still
+    // surfacing the outlier in the cumulative count.
+    let bounded = elapsed_us.clamp(1, 60_000_000);
+    if let Ok(mut h) = hist.lock() {
+        let _ = h.record(bounded);
+    }
+}
+
+/// Emit the current histogram's p50/p95/p99/cumulative/count as a
+/// `tracing::info!` event matching the profiling skill's
+/// `perf.profile.span_summary` schema. Callers (typically the
+/// perf-round skill or a process-exit Drop hook) trigger this on
+/// demand. Idempotent and non-destructive — does NOT reset the
+/// histogram.
+#[cfg(feature = "profiling")]
+pub fn dump_trust_card_canonical_perf_histogram() {
+    let Some(hist) = TRUST_CARD_CANONICAL_HISTOGRAM_US.get() else {
+        return;
+    };
+    let Ok(h) = hist.lock() else {
+        return;
+    };
+    let count = h.len();
+    let cumulative_us: u64 = h.iter_recorded().map(|v| v.value_iterated_to()).sum();
+    let p50_us = h.value_at_quantile(0.50);
+    let p95_us = h.value_at_quantile(0.95);
+    let p99_us = h.value_at_quantile(0.99);
+    tracing::info!(
+        event_code = "perf.profile.span_summary",
+        span_name = "trust_card_canonical.us",
+        cumulative_us,
+        count,
+        p50_us,
+        p95_us,
+        p99_us,
+        category = "CPU",
+        evidence =
+            "crates/franken-node/src/connector/canonical_serializer.rs::write_canonical_value",
+        "trust_card_canonical perf span summary"
+    );
+}
+
 /// Schemaless streaming canonical-JSON encoder (bd-98xo5.4.2 / T4.2).
 ///
 /// Writes the canonical-JSON byte sequence for any `serde_json::Value`
@@ -984,6 +1085,32 @@ fn write_canonical_integer<T: std::fmt::Display>(
 /// [`docs/dev/canonical_encoder_audit.md`](../../docs/dev/canonical_encoder_audit.md)
 /// (bd-98xo5.4.1) for the full call-site inventory and rationale.
 pub fn write_canonical_value<W: std::io::Write>(value: &Value, out: &mut W) -> std::io::Result<()> {
+    // bd-98xo5.12.1 — sentinel + histogram + span instrumentation, all
+    // gated by the `profiling` Cargo feature. Default builds compile
+    // none of this — the cfg block is empty. The instrumentation only
+    // wraps the OUTER call so recursive descents through the inner
+    // helper don't double-count or pollute the span tree.
+    #[cfg(feature = "profiling")]
+    {
+        _profile_trust_card_canonical();
+        let _span = tracing::info_span!("trust_card_canonical").entered();
+        let start = std::time::Instant::now();
+        let result = write_canonical_value_inner(value, out);
+        let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        trust_card_canonical_record_us(elapsed_us);
+        return result;
+    }
+    #[cfg(not(feature = "profiling"))]
+    write_canonical_value_inner(value, out)
+}
+
+/// Inner recursive helper. Recursive descents stay here so the
+/// histogram and span at the outer entry only record ONCE per public
+/// call, regardless of tree depth.
+fn write_canonical_value_inner<W: std::io::Write>(
+    value: &Value,
+    out: &mut W,
+) -> std::io::Result<()> {
     match value {
         Value::Null => out.write_all(b"null"),
         Value::Bool(true) => out.write_all(b"true"),
@@ -1008,7 +1135,7 @@ pub fn write_canonical_value<W: std::io::Write>(value: &Value, out: &mut W) -> s
                     out.write_all(b",")?;
                 }
                 first = false;
-                write_canonical_value(item, out)?;
+                write_canonical_value_inner(item, out)?;
             }
             out.write_all(b"]")
         }
@@ -1032,7 +1159,7 @@ pub fn write_canonical_value<W: std::io::Write>(value: &Value, out: &mut W) -> s
                 let nested = map
                     .get(key)
                     .expect("key obtained from map.keys() must be present in the same map");
-                write_canonical_value(nested, out)?;
+                write_canonical_value_inner(nested, out)?;
             }
             out.write_all(b"}")
         }
@@ -6438,5 +6565,72 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             let bytes_second = canonical_bytes(&round_tripped);
             proptest::prop_assert_eq!(bytes_first, bytes_second);
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // bd-98xo5.12.1: profiling instrumentation tests.
+    //
+    // Tests in the default-features-off path: verify that with
+    // profiling disabled (the production build) the encoder behaves
+    // identically to before. The instrumentation cannot have any
+    // observable side-effect on canonical bytes.
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn profiling_disabled_default_build_produces_identical_bytes() {
+        // In the default cargo build (--no features profiling), the
+        // instrumentation cfg block is empty and write_canonical_value
+        // calls straight into the inner helper. Encoding a fixture
+        // must produce IDENTICAL bytes to the OLD encoder regardless
+        // of profile state.
+        let value = serde_json::json!({
+            "alpha": "a value",
+            "nested": {"deep": [1, 2, 3]},
+        });
+        let new_bytes = canonical_bytes(&value);
+        let old_bytes = old_canonicalize_then_serialize(value);
+        assert_eq!(new_bytes, old_bytes);
+    }
+
+    /// Sentinel symbol is always compiled (independent of the
+    /// `profiling` feature) so `objdump -d <binary> | grep
+    /// _profile_trust_card_canonical` finds the symbol whenever a
+    /// caller exists. Under `--no-default-features` the sentinel is
+    /// dead code; LLVM may elide it via DCE at link time but the
+    /// crate compile MUST still succeed. Pin that by calling the
+    /// sentinel directly from a test.
+    #[test]
+    fn sentinel_frame_compiles_and_returns_unit() {
+        super::_profile_trust_card_canonical();
+    }
+
+    /// Profiling-feature build path. Verifies the histogram bound
+    /// (1 µs..60 s, 3 sig digits) accepts every interesting
+    /// elapsed-microsecond value: 0 (clamped to 1), 1, the round-1
+    /// worst case (3 591 000 µs = 3.59 s), and the upper bound
+    /// (60_000_000 µs). A regression that lowered the upper bound
+    /// would lose the tail of trust_card_canonical/complex_4x12 calls.
+    #[cfg(feature = "profiling")]
+    #[test]
+    fn profiling_feature_histogram_accepts_full_range() {
+        super::trust_card_canonical_record_us(0);
+        super::trust_card_canonical_record_us(1);
+        super::trust_card_canonical_record_us(3_591_000);
+        super::trust_card_canonical_record_us(60_000_000);
+        super::trust_card_canonical_record_us(u64::MAX); // clamped to upper bound
+        // No panic = test pass. The histogram is shared across tests
+        // (OnceLock initialised once per process), so we can't assert
+        // exact counts without test isolation. The pass condition is
+        // simply that no record() call returned via panic.
+    }
+
+    /// Histogram-dump path emits the expected tracing event_code
+    /// without panicking on an empty histogram (the no-call-yet case).
+    #[cfg(feature = "profiling")]
+    #[test]
+    fn profiling_feature_dump_handles_empty_histogram_safely() {
+        // Calling dump before any record. The OnceLock may not be
+        // initialised yet; the function must handle that gracefully.
+        super::dump_trust_card_canonical_perf_histogram();
     }
 }

@@ -52,6 +52,13 @@ compression = ["dep:flate2"]
 cbor-serialization = ["dep:serde_cbor"]
 engine = ["dep:frankenengine-engine", "dep:frankenengine-extension-host"]
 blake3 = ["dep:blake3"]
+# bd-98xo5.12.1: opt-in profiling feature pulling in the hdrhistogram
+# dependency for per-hot-path latency histograms. Production builds
+# (`cargo build` with default features) DO NOT compile this code path —
+# the #[cfg(feature = "profiling")] gate elides it entirely. Enable
+# explicitly with `cargo build --features profiling` when running
+# under a perf-round measurement skill.
+profiling = ["dep:hdrhistogram"]
 # Default stays limited to features needed for a usable node binary.
 # Heavy product surfaces and optional export formats require explicit opt-in.
 default = ["engine", "http-client", "external-commands"]
@@ -77,6 +84,9 @@ serde_cbor = { version = "0.11.2", optional = true }
 flate2 = { version = "1.0.35", optional = true }
 rand = "0.8.5"
 asupersync = { version = "0.3.1", optional = true }
+# bd-98xo5.12.1: HDR histogram for the `profiling` feature. Optional
+# so default builds pay zero binary cost.
+hdrhistogram = { version = "7.5", default-features = false, optional = true }
 frankentui.workspace = true
 fs2 = "0.4.3"
 frankenengine-engine = { path = "../../../franken_engine/crates/franken-engine", optional = true }

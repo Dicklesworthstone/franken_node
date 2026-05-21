@@ -1709,6 +1709,7 @@ dependencies = [
  "fs2",
  "fsqlite",
  "ftui",
+ "hdrhistogram",
  "hex",
  "hkdf",
  "hmac 0.13.0",
@@ -2436,6 +2437,16 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.2.0",
+]
+
+[[package]]
+name = "hdrhistogram"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "765c9198f173dd59ce26ff9f95ef0aafd0a0fe01fb9d72841bc5066a4c06511d"
+dependencies = [
+ "byteorder",
+ "num-traits",
 ]
 
 [[package]]
