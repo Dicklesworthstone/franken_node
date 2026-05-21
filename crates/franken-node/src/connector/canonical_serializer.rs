@@ -799,7 +799,7 @@ fn canonicalize_schema_value(
         write_canonical_string(&mut canonical, field)?;
         canonical.push(b':');
         let field_path = CanonicalFieldPath::root(field);
-        write_canonical_value(
+        write_canonical_schema_value(
             &mut canonical,
             field_value,
             schema.object_type,
@@ -861,7 +861,7 @@ impl<'a> CanonicalFieldPath<'a> {
     }
 }
 
-fn write_canonical_value(
+fn write_canonical_schema_value(
     out: &mut Vec<u8>,
     value: &Value,
     object_type: TrustObjectType,
@@ -900,7 +900,7 @@ fn write_canonical_value(
                     out.push(b',');
                 }
                 let child_path = CanonicalFieldPath::index(field_path, index);
-                write_canonical_value(out, item, object_type, &child_path, no_float)?;
+                write_canonical_schema_value(out, item, object_type, &child_path, no_float)?;
             }
             out.push(b']');
         }
@@ -915,7 +915,13 @@ fn write_canonical_value(
                 write_canonical_string(out, key)?;
                 out.push(b':');
                 let child_path = CanonicalFieldPath::key(field_path, key);
-                write_canonical_value(out, nested_value, object_type, &child_path, no_float)?;
+                write_canonical_schema_value(
+                    out,
+                    nested_value,
+                    object_type,
+                    &child_path,
+                    no_float,
+                )?;
             }
             out.push(b'}');
         }
@@ -930,6 +936,117 @@ fn write_canonical_integer<T: std::fmt::Display>(
     write!(out, "{value}").map_err(|error| SerializerError::PreimageConstructionFailed {
         reason: format!("failed to encode canonical integer: {error}"),
     })
+}
+
+/// Schemaless streaming canonical-JSON encoder (bd-98xo5.4.2 / T4.2).
+///
+/// Writes the canonical-JSON byte sequence for any `serde_json::Value`
+/// directly to `out`, with NO intermediate `Value::clone()` and NO
+/// intermediate `serde_json::Map` rebuild. Object keys are collected as
+/// `Vec<&str>` (references to the input's owned `String`s), sorted in
+/// place, and used to look up nested values from the original `Map`.
+///
+/// This is the trust-card-style schemaless companion to the
+/// schema-coupled [`write_canonical_schema_value`] above. It serves call
+/// sites that do not register a `CanonicalSchema` and instead canonicalise
+/// an arbitrary `Value` tree (the supply_chain::trust_card paths at
+/// `to_canonical_json`, `compute_card_hash`, `compute_snapshot_hash`).
+///
+/// # Determinism
+///
+/// Serialising the same `Value` twice MUST produce identical bytes. This
+/// is achieved by:
+///   - sorting object keys with `sort_unstable` (deterministic since
+///     `&str` `Ord` is byte-lexicographic, not locale-dependent)
+///   - routing primitives through `serde_json::to_writer` (canonical
+///     for booleans, integers, finite floats, escape-correct strings)
+///   - inserting `,` separators and `:` key/value markers in fixed
+///     positions
+///
+/// # Float handling
+///
+/// `serde_json::Value::Number` is constructed via
+/// `Number::from_f64`, which already rejects non-finite floats at
+/// construction time — there is no way to build a `Value::Number`
+/// holding NaN or ±Inf via the safe API. The serializer routes
+/// finite floats through `serde_json::to_writer` for byte-identical
+/// output to the standard encoder. Callers that need explicit
+/// no-float rejection should pre-validate (see the
+/// schema-coupled path's `no_float` flag).
+///
+/// # Performance
+///
+/// On the bench fixture `complex_4x12` (4-deep × 12-wide) this avoids
+/// the `Vec<(String, Value)>` collect + sort + new `Map` allocation per
+/// object that `supply_chain::trust_card::canonicalize_value` pays, and
+/// the final `serde_json::to_string` allocation that converts the
+/// rebuilt tree back to bytes. See
+/// [`docs/dev/canonical_encoder_audit.md`](../../docs/dev/canonical_encoder_audit.md)
+/// (bd-98xo5.4.1) for the full call-site inventory and rationale.
+pub fn write_canonical_value<W: std::io::Write>(value: &Value, out: &mut W) -> std::io::Result<()> {
+    match value {
+        Value::Null => out.write_all(b"null"),
+        Value::Bool(true) => out.write_all(b"true"),
+        Value::Bool(false) => out.write_all(b"false"),
+        Value::Number(_) | Value::String(_) => {
+            // serde_json::to_writer is canonical for Number and String:
+            // - Number: integers serialize without a decimal point; finite
+            //   floats use serde_json's shortest-round-trip representation.
+            //   Non-finite f64 cannot reach this branch (Value::Number is
+            //   constructed via Number::from_f64 which returns Option, so
+            //   a Value holding NaN/±Inf cannot be built via the safe API).
+            // - String: escape-correct per RFC 8259 § 7 (\", \\, \uXXXX
+            //   for control bytes); matches the existing encoder bit-for-bit.
+            serde_json::to_writer(out, value)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
+        }
+        Value::Array(items) => {
+            out.write_all(b"[")?;
+            let mut first = true;
+            for item in items {
+                if !first {
+                    out.write_all(b",")?;
+                }
+                first = false;
+                write_canonical_value(item, out)?;
+            }
+            out.write_all(b"]")
+        }
+        Value::Object(map) => {
+            // Borrow-based key sort: Vec<&str> holds references to the
+            // input map's owned Strings. No clone of keys, no
+            // BTreeSet<String> allocation, no rebuilt Map.
+            let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            out.write_all(b"{")?;
+            let mut first = true;
+            for key in keys {
+                if !first {
+                    out.write_all(b",")?;
+                }
+                first = false;
+                // Key as a JSON string (escape-correct via serde_json).
+                serde_json::to_writer(&mut *out, key)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+                out.write_all(b":")?;
+                let nested = map
+                    .get(key)
+                    .expect("key obtained from map.keys() must be present in the same map");
+                write_canonical_value(nested, out)?;
+            }
+            out.write_all(b"}")
+        }
+    }
+}
+
+/// Thin `Vec<u8>` wrapper over [`write_canonical_value`] for callers
+/// that don't want to provide their own writer.
+pub fn canonical_bytes(value: &Value) -> Vec<u8> {
+    let mut out = Vec::new();
+    // `Vec<u8>: io::Write` only fails on memory exhaustion (which
+    // aborts), so this never actually returns Err in practice.
+    write_canonical_value(value, &mut out).expect("Vec<u8>::write_all is infallible");
+    out
 }
 
 fn write_canonical_string(out: &mut Vec<u8>, value: &str) -> Result<(), SerializerError> {
@@ -5728,5 +5845,219 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             old_format, new_format,
             "Length-prefixed version should differ from old format"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // bd-98xo5.4.2: schemaless streaming encoder
+    // (write_canonical_value<W: io::Write> + canonical_bytes).
+    //
+    // Acceptance per the bead: byte-identical output vs the
+    // "OLD" reference encoder (the bench's canonicalize_value_current
+    // tree-rebuild followed by serde_json::to_string), across many
+    // randomised Value trees. The OLD reference shape:
+    //
+    //     fn old_canonicalize_then_serialize(value: Value) -> String {
+    //         let rebuilt = canonicalize_value(value);
+    //         serde_json::to_string(&rebuilt).unwrap()
+    //     }
+    //
+    // Where canonicalize_value mirrors supply_chain::trust_card::canonicalize_value:
+    // collect entries via into_iter(), sort by key, rebuild Map. The
+    // new streaming encoder must produce identical bytes without the
+    // intermediate tree rebuild.
+    // ─────────────────────────────────────────────────────────────
+
+    /// Reference encoder: rebuild the Value tree with sorted keys, then
+    /// serde_json::to_string. Mirrors the production
+    /// supply_chain::trust_card::canonicalize_value pattern (move-based,
+    /// no Value::clone). The new streaming encoder MUST produce identical
+    /// bytes.
+    fn old_canonicalize_then_serialize(value: serde_json::Value) -> Vec<u8> {
+        fn canon(value: serde_json::Value) -> serde_json::Value {
+            match value {
+                serde_json::Value::Object(map) => {
+                    let mut entries: Vec<_> = map.into_iter().collect();
+                    entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+                    let mut out = serde_json::Map::with_capacity(entries.len());
+                    for (k, v) in entries {
+                        out.insert(k, canon(v));
+                    }
+                    serde_json::Value::Object(out)
+                }
+                serde_json::Value::Array(items) => {
+                    serde_json::Value::Array(items.into_iter().map(canon).collect())
+                }
+                other => other,
+            }
+        }
+        let rebuilt = canon(value);
+        serde_json::to_vec(&rebuilt).expect("rebuilt canonical value must serialise")
+    }
+
+    #[test]
+    fn streaming_canonical_value_byte_equal_on_simple_object() {
+        let value = serde_json::json!({
+            "zone_id": "us-east",
+            "seq": 42,
+            "nested": {"b": 1, "a": 2, "c": [3, 2, 1]},
+        });
+        let new_bytes = canonical_bytes(&value);
+        let old_bytes = old_canonicalize_then_serialize(value);
+        assert_eq!(new_bytes, old_bytes);
+    }
+
+    #[test]
+    fn streaming_canonical_value_byte_equal_on_unicode_strings() {
+        // Strings with non-ASCII and escape-required characters must
+        // route through serde_json::to_writer identically to to_string.
+        let value = serde_json::json!({
+            "ascii": "hello",
+            "non_ascii": "héllo wörld 🌍",
+            "needs_escape": "tab\there\nand quote\"",
+        });
+        assert_eq!(
+            canonical_bytes(&value),
+            old_canonicalize_then_serialize(value.clone())
+        );
+    }
+
+    #[test]
+    fn streaming_canonical_value_byte_equal_on_empty_collections() {
+        let cases: &[serde_json::Value] = &[
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!([]),
+            serde_json::json!({"empty_obj": {}, "empty_arr": []}),
+        ];
+        for case in cases {
+            assert_eq!(
+                canonical_bytes(case),
+                old_canonicalize_then_serialize(case.clone()),
+                "byte mismatch on {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_canonical_value_sorts_keys_deterministically() {
+        // Insertion order doesn't matter — both encoders must emit
+        // sorted keys.
+        let mut map_a = serde_json::Map::new();
+        map_a.insert("zebra".into(), serde_json::Value::Number(1.into()));
+        map_a.insert("alpha".into(), serde_json::Value::Number(2.into()));
+        map_a.insert("middle".into(), serde_json::Value::Number(3.into()));
+        let value_a = serde_json::Value::Object(map_a);
+
+        let mut map_b = serde_json::Map::new();
+        map_b.insert("alpha".into(), serde_json::Value::Number(2.into()));
+        map_b.insert("middle".into(), serde_json::Value::Number(3.into()));
+        map_b.insert("zebra".into(), serde_json::Value::Number(1.into()));
+        let value_b = serde_json::Value::Object(map_b);
+
+        assert_eq!(canonical_bytes(&value_a), canonical_bytes(&value_b));
+        // Verify the actual byte sequence has keys in lex order.
+        let bytes = canonical_bytes(&value_a);
+        let as_str = std::str::from_utf8(&bytes).expect("ASCII-only test");
+        assert_eq!(as_str, r#"{"alpha":2,"middle":3,"zebra":1}"#);
+    }
+
+    #[test]
+    fn streaming_canonical_value_is_idempotent() {
+        // Serialising → deserialising → re-serialising must yield the
+        // same bytes. This pins determinism in the face of
+        // serde_json::Map's preserve-order behaviour: even when the
+        // intermediate Value's Map iterates in insertion order, the
+        // canonical encoder re-sorts on every emission.
+        let value = serde_json::json!({
+            "outer_b": [1, 2, 3],
+            "outer_a": {"inner_z": true, "inner_a": false},
+        });
+        let bytes1 = canonical_bytes(&value);
+        let round_tripped: serde_json::Value =
+            serde_json::from_slice(&bytes1).expect("canonical bytes must deserialise");
+        let bytes2 = canonical_bytes(&round_tripped);
+        assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn streaming_canonical_value_byte_equal_across_random_trees() {
+        // Acceptance: round-trip 50+ randomised Value trees through both
+        // the OLD encoder and the new streaming encoder and assert byte
+        // equality. We use a deterministic LCG to generate Value trees
+        // so the test is reproducible without an extra rand dep.
+        struct Lcg(u64);
+        impl Lcg {
+            fn next_u64(&mut self) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                self.0
+            }
+            fn pick(&mut self, n: usize) -> usize {
+                (self.next_u64() as usize) % n
+            }
+        }
+        fn build(lcg: &mut Lcg, depth: u8) -> serde_json::Value {
+            if depth == 0 {
+                return match lcg.pick(5) {
+                    0 => serde_json::Value::Null,
+                    1 => serde_json::Value::Bool((lcg.next_u64() & 1) == 0),
+                    2 => serde_json::Value::Number((lcg.next_u64() as i64).into()),
+                    3 => serde_json::Value::String(format!("s_{}", lcg.next_u64() % 1000)),
+                    _ => serde_json::Value::Number(0.into()),
+                };
+            }
+            match lcg.pick(3) {
+                0 => {
+                    let len = lcg.pick(4);
+                    let mut arr = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        arr.push(build(lcg, depth - 1));
+                    }
+                    serde_json::Value::Array(arr)
+                }
+                1 => {
+                    let len = lcg.pick(5);
+                    let mut map = serde_json::Map::new();
+                    for i in 0..len {
+                        let key = format!("k_{:03}_{}", lcg.next_u64() % 1000, i);
+                        map.insert(key, build(lcg, depth - 1));
+                    }
+                    serde_json::Value::Object(map)
+                }
+                _ => build(lcg, 0),
+            }
+        }
+
+        let mut lcg = Lcg(0xCAFE_BABE_DEAD_BEEF);
+        for trial in 0..64 {
+            let value = build(&mut lcg, 3);
+            let new_bytes = canonical_bytes(&value);
+            let old_bytes = old_canonicalize_then_serialize(value);
+            assert_eq!(
+                new_bytes, old_bytes,
+                "byte mismatch on randomised trial {trial}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_canonical_value_non_finite_float_unreachable_via_safe_api() {
+        // The bead asked for a non-finite f64 regression test. The
+        // serde_json::Value::Number constructor route is via
+        // Number::from_f64 which returns Option<Number> and rejects
+        // non-finite — so a Value holding NaN/±Inf CANNOT be built via
+        // the safe API. We pin that contract here: any attempt to
+        // produce a non-finite Number must return None at the source.
+        assert!(serde_json::Number::from_f64(f64::NAN).is_none());
+        assert!(serde_json::Number::from_f64(f64::INFINITY).is_none());
+        assert!(serde_json::Number::from_f64(f64::NEG_INFINITY).is_none());
+        // Finite floats DO succeed and round-trip through canonical_bytes.
+        let finite = serde_json::Value::Number(
+            serde_json::Number::from_f64(1.5).expect("finite f64 builds a Number"),
+        );
+        let bytes = canonical_bytes(&finite);
+        assert_eq!(bytes, b"1.5");
     }
 }
