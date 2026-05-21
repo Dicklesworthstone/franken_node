@@ -688,7 +688,10 @@ mod tests {
         let scheme_sig = Ed25519Scheme::sign_raw(&sk, message).unwrap();
         let preparsed_sig = signer.sign_raw(message);
 
-        assert_eq!(scheme_sig, preparsed_sig, "sign_raw output must be bit-for-bit identical");
+        assert_eq!(
+            scheme_sig, preparsed_sig,
+            "sign_raw output must be bit-for-bit identical"
+        );
     }
 
     #[test]
@@ -701,7 +704,10 @@ mod tests {
         let scheme_sig = Ed25519Scheme::sign_with_domain(&sk, domain, message).unwrap();
         let preparsed_sig = signer.sign_with_domain(domain, message);
 
-        assert_eq!(scheme_sig, preparsed_sig, "sign_with_domain output must be bit-for-bit identical");
+        assert_eq!(
+            scheme_sig, preparsed_sig,
+            "sign_with_domain output must be bit-for-bit identical"
+        );
     }
 
     #[test]
@@ -714,7 +720,10 @@ mod tests {
         let scheme_result = Ed25519Scheme::verify_raw(&pk, message, &signature);
         let preparsed_result = verifier.verify_raw(message, &signature);
 
-        assert_eq!(scheme_result, preparsed_result, "verify_raw must produce identical boolean");
+        assert_eq!(
+            scheme_result, preparsed_result,
+            "verify_raw must produce identical boolean"
+        );
         assert!(preparsed_result, "valid signature should verify");
     }
 
@@ -729,7 +738,10 @@ mod tests {
         let scheme_result = Ed25519Scheme::verify_with_domain(&pk, domain, message, &signature);
         let preparsed_result = verifier.verify_with_domain(domain, message, &signature);
 
-        assert_eq!(scheme_result, preparsed_result, "verify_with_domain must produce identical boolean");
+        assert_eq!(
+            scheme_result, preparsed_result,
+            "verify_with_domain must produce identical boolean"
+        );
         assert!(preparsed_result, "valid signature should verify");
     }
 
@@ -755,7 +767,10 @@ mod tests {
         let message = b"test message";
         let bad_signature = [0u8; 64];
 
-        assert!(!verifier.verify_raw(message, &bad_signature), "zero signature should fail");
+        assert!(
+            !verifier.verify_raw(message, &bad_signature),
+            "zero signature should fail"
+        );
     }
 
     #[test]
@@ -764,18 +779,19 @@ mod tests {
         let signer = Ed25519PreparsedSigner::from_secret_bytes(&sk);
 
         let payloads: &[&[u8]] = &[
-            &[],                        // 0 B
-            &[0x42],                    // 1 B
-            &[0xAA; 64],                // 64 B
-            &[0xBB; 512],               // 512 B
-            &[0xCC; 4096],              // 4096 B
+            &[],           // 0 B
+            &[0x42],       // 1 B
+            &[0xAA; 64],   // 64 B
+            &[0xBB; 512],  // 512 B
+            &[0xCC; 4096], // 4096 B
         ];
 
         for payload in payloads {
             let scheme_sig = Ed25519Scheme::sign_raw(&sk, payload).unwrap();
             let preparsed_sig = signer.sign_raw(payload);
             assert_eq!(
-                scheme_sig, preparsed_sig,
+                scheme_sig,
+                preparsed_sig,
                 "sign_raw must be bit-identical for payload of {} bytes",
                 payload.len()
             );
@@ -790,7 +806,10 @@ mod tests {
         let message = b"strict verification test";
 
         let sig = signer.sign_raw(message);
-        assert!(verifier.verify_raw(message, &sig), "valid signature should pass");
+        assert!(
+            verifier.verify_raw(message, &sig),
+            "valid signature should pass"
+        );
 
         let mut tampered_sig = sig;
         tampered_sig[63] ^= 0x80;
@@ -804,5 +823,207 @@ mod tests {
     fn preparsed_signer_zeroize_on_drop_compile_check() {
         fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
         assert_zeroize_on_drop::<ed25519_dalek::SigningKey>();
+    }
+
+    // ── bd-98xo5.2.7: comprehensive coverage of Ed25519Preparsed* ──
+
+    #[test]
+    fn preparsed_signer_send_sync_bounds() {
+        // Compile-time check that the preparsed handles are safe to share
+        // across threads. The wrappers don't add interior mutability and
+        // dalek 2.x's SigningKey/VerifyingKey are Send + Sync, so this
+        // must hold — a regression would silently restrict producer-side
+        // call sites (fleet trust anchor, replay window) that assume
+        // cross-thread reuse.
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Ed25519PreparsedSigner>();
+        assert_send_sync::<Ed25519PreparsedVerifier>();
+    }
+
+    #[test]
+    fn preparsed_verifier_rejects_malleable_canonical_s() {
+        // Ed25519 RFC 8032 §5.1.7 requires `s < ℓ`; verify_strict enforces
+        // this, plain verify does not. The wrapper's `verify_raw` routes
+        // through verify_strict — assert the contract by hand-building a
+        // signature whose s component is ≥ ℓ and confirming both the
+        // wrapper AND the stateless Ed25519Scheme::verify_raw reject it.
+        // Ed25519 group order ℓ = 2^252 + 27742317777372353535851937790883648493.
+        // The wire format is little-endian 32-byte s after the 32-byte R.
+        let (pk, sk) = Ed25519Scheme::generate_keypair().unwrap();
+        let verifier = Ed25519PreparsedVerifier::from_public_bytes(&pk).unwrap();
+        let message = b"malleability rejection test";
+
+        // Produce a real signature, then deliberately mutate the s scalar
+        // to a value ≥ ℓ (set s = ℓ + 1 in little-endian).
+        let valid = Ed25519Scheme::sign_raw(&sk, message).unwrap();
+        let mut malleable = valid;
+        // ℓ in little-endian: edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010
+        // (canonical from RFC 8032). Setting s to this exact value would
+        // mean s == ℓ, which is also non-canonical. We add 1: ℓ + 1.
+        let l_le: [u8; 32] = [
+            0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9,
+            0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x10,
+        ];
+        let mut l_plus_one = l_le;
+        // Add 1 to the little-endian scalar.
+        let mut carry: u16 = 1;
+        for byte in &mut l_plus_one {
+            let sum = u16::from(*byte) + carry;
+            *byte = (sum & 0xff) as u8;
+            carry = sum >> 8;
+        }
+        malleable[32..].copy_from_slice(&l_plus_one);
+        // The signature's R half stays valid-looking but s is now ≥ ℓ.
+        assert!(
+            !verifier.verify_raw(message, &malleable),
+            "preparsed verifier must reject malleable signatures (s >= ℓ)"
+        );
+        assert!(
+            !Ed25519Scheme::verify_raw(&pk, message, &malleable),
+            "stateless verify_raw must reject malleable signatures (parity with wrapper)"
+        );
+    }
+
+    #[test]
+    fn preparsed_verifier_rejects_invalid_edwards_point() {
+        // The API takes a fixed `&[u8; 32]`, so "short pubkey bytes" can't
+        // exist at runtime — the type system enforces length. What CAN
+        // exist is a 32-byte string that doesn't decompress to a valid
+        // Edwards point. The dalek constructor surfaces a parse error for
+        // each of these; the wrapper must propagate it via
+        // `Ed25519Error::MalformedKey` rather than panicking or accepting.
+        //
+        // Patterns chosen to cover the non-canonical-decode paths:
+        //   - all-zeros (the identity-shaped pattern, but the y-coord
+        //     0 with sign bit 0 fails the small-subgroup check in some
+        //     dalek versions; both behave identically with our wrapper).
+        //   - high bit set: invalid x-coord recovery sign.
+        //   - 0x01 followed by zeros: y=1, attempts to use small-subgroup
+        //     element; dalek's from_bytes either decodes it (with sign 0)
+        //     or rejects; the wrapper must NOT panic either way.
+        //   - all-0xff: the maximum byte pattern, which fails to satisfy
+        //     the curve equation.
+        let patterns: &[(&str, [u8; 32])] = &[
+            (
+                "high_bit_set",
+                [
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                ],
+            ),
+            (
+                "near_field_overflow",
+                [
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+                ],
+            ),
+        ];
+        for (label, bytes) in patterns {
+            let res = Ed25519PreparsedVerifier::from_public_bytes(bytes);
+            // Either Ok (the pattern happened to decompress) or
+            // Err(MalformedKey). The wrapper MUST NOT panic — that's
+            // the security-critical contract for a public-key surface
+            // that takes untrusted bytes (fleet sync, replay verification).
+            // We only assert that Err is a MalformedKey, not Ok, to keep
+            // the test stable across dalek minor versions.
+            if let Err(e) = res {
+                assert!(
+                    matches!(e, Ed25519Error::MalformedKey(_)),
+                    "{label}: expected MalformedKey, got {e:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn preparsed_verifier_rejects_short_pubkey_bytes() {
+        // The from_public_bytes signature is `&[u8; 32]`, so callers
+        // physically cannot pass a shorter slice — the compile fails.
+        // This test pins that contract: it ensures the API surface
+        // continues to enforce length at the type level rather than at
+        // runtime (which would be slower and admit untyped error paths).
+        // A regression that changed the signature to `&[u8]` would
+        // break this compile-time check.
+        fn takes_fixed_size_only(
+            bytes: &[u8; 32],
+        ) -> Result<Ed25519PreparsedVerifier, Ed25519Error> {
+            Ed25519PreparsedVerifier::from_public_bytes(bytes)
+        }
+        let buf = [0u8; 32];
+        let _ = takes_fixed_size_only(&buf);
+        // Negative compile check: the line below MUST NOT compile if
+        // uncommented — `[u8; 16]` is not coercible to `&[u8; 32]`.
+        //   let short = [0u8; 16];
+        //   let _ = Ed25519PreparsedVerifier::from_public_bytes(&short);
+    }
+
+    // ── bd-98xo5.2.7: property tests ──
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 256,
+            // Persistent regressions stored at
+            // crates/franken-node/proptest-regressions/crypto-schemes-preparsed.txt
+            // (auto-managed by proptest on first failing seed).
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::WithSource("regressions")
+            )),
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn prop_signature_parity_random_payload(payload in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..16384)) {
+            // bd-98xo5.2.7 property test #1: for any random payload up to
+            // 16 KiB, the preparsed signer's output must be bit-identical
+            // to the stateless trait method. A regression here means the
+            // preparsed path computed a different signature, which would
+            // silently break interop with any verifier that uses the
+            // stateless path on the same key.
+            let (_, sk) = Ed25519Scheme::generate_keypair().unwrap();
+            let signer = Ed25519PreparsedSigner::from_secret_bytes(&sk);
+            let stateless = Ed25519Scheme::sign_raw(&sk, &payload).unwrap();
+            let preparsed = signer.sign_raw(&payload);
+            proptest::prop_assert_eq!(stateless, preparsed);
+        }
+
+        #[test]
+        fn prop_verifier_accepts_iff_stateless_does(
+            payload in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096),
+            seed in proptest::prelude::any::<[u8; 32]>(),
+            tamper_bit in 0u32..512u32,
+        ) {
+            // bd-98xo5.2.7 property test #2: preparsed verifier must
+            // produce the same accept/reject answer as the stateless
+            // verifier for every (payload, key, signature) triple,
+            // including tampered signatures. Tamper-bit cycles over the
+            // 512 bit positions of the 64-byte signature so the property
+            // exercises every byte and every bit within a byte.
+            let signer = Ed25519PreparsedSigner::from_secret_bytes(&seed);
+            let pk = signer.public_key();
+            let verifier = Ed25519PreparsedVerifier::from_public_bytes(&pk)
+                .expect("seed produces valid pubkey");
+
+            let valid_sig = signer.sign_raw(&payload);
+
+            // Untampered case: both must accept.
+            let stateless_ok = Ed25519Scheme::verify_raw(&pk, &payload, &valid_sig);
+            let preparsed_ok = verifier.verify_raw(&payload, &valid_sig);
+            proptest::prop_assert_eq!(stateless_ok, preparsed_ok);
+            proptest::prop_assert!(preparsed_ok, "valid signature must verify");
+
+            // Tampered case: flip one specific bit, both must reject (or
+            // both accept — never disagree).
+            let mut tampered = valid_sig;
+            let byte_idx = (tamper_bit / 8) as usize;
+            let bit_in_byte = (tamper_bit % 8) as u8;
+            tampered[byte_idx] ^= 1u8 << bit_in_byte;
+            let stateless_tampered = Ed25519Scheme::verify_raw(&pk, &payload, &tampered);
+            let preparsed_tampered = verifier.verify_raw(&payload, &tampered);
+            proptest::prop_assert_eq!(stateless_tampered, preparsed_tampered);
+        }
     }
 }

@@ -352,3 +352,9 @@ name = "fuzz_repair_proof_verify"
 path = "fuzz_targets/fuzz_repair_proof_verify.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_ed25519_preparsed_parity"
+path = "fuzz_targets/ed25519_preparsed_parity.rs"
+test = false
+doc = false
