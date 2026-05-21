@@ -3819,4 +3819,217 @@ mod tests {
             assert!(result.failure_reason.is_some());
         }
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // bd-98xo5.1.5: Comprehensive parity coverage of the preparsed
+    // threshold_sig API (verify_threshold_preparsed) against the
+    // hex-decode-per-call baseline (verify_threshold). The
+    // preparsed path's 10 % win at 32 signers is only legitimate if
+    // accept/reject decisions remain byte-identical to the baseline
+    // on every input class — these tests pin that contract.
+    // ─────────────────────────────────────────────────────────────
+
+    fn parity_assert(config: &ThresholdConfig, artifact: &PublicationArtifact, trace_id: &str) {
+        let preparsed = PreparsedThresholdConfig::from_config(config.clone())
+            .expect("from_config must accept a validated test config");
+        let baseline = verify_threshold(config, artifact, trace_id, "ts");
+        let preparsed_result = verify_threshold_preparsed(&preparsed, artifact, trace_id, "ts");
+        assert_eq!(
+            preparsed_result, baseline,
+            "{trace_id}: preparsed must equal baseline on every VerificationResult field"
+        );
+    }
+
+    #[test]
+    fn parity_with_legacy_at_8_signers() {
+        // 5-of-8 quorum, fully satisfied. Pins parity at the lower
+        // end of the bench grid (preparsed_keys/8 budget 436 µs).
+        let (sks, config) = test_config(5, 8);
+        let artifact = signed_artifact(&sks, &config, "hash-8signers", 8);
+        parity_assert(&config, &artifact, "parity-8");
+    }
+
+    #[test]
+    fn parity_with_legacy_at_32_signers() {
+        // 17-of-32 quorum, fully satisfied. Pins parity at the upper
+        // end of the bench grid (preparsed_keys/32 budget 1 772 µs).
+        let (sks, config) = test_config(17, 32);
+        let artifact = signed_artifact(&sks, &config, "hash-32signers", 32);
+        parity_assert(&config, &artifact, "parity-32");
+    }
+
+    #[test]
+    fn parity_under_missing_signers() {
+        // k=4 of n=6, but only 2 valid signatures supplied — must
+        // fall below threshold. Both paths must produce the same
+        // BelowThreshold failure_reason and the same valid_signatures
+        // count, otherwise an attacker could choose the path that
+        // gives a friendlier verdict.
+        let (sks, config) = test_config(4, 6);
+        let artifact = signed_artifact(&sks, &config, "hash-missing", 2);
+        parity_assert(&config, &artifact, "parity-missing");
+    }
+
+    #[test]
+    fn parity_under_duplicate_key_id() {
+        // Append a duplicate-signer entry. The baseline path catches
+        // it via BTreeSet dedup before crypto verify; the preparsed
+        // path must do the same — same DuplicateSigner failure_reason,
+        // same signer_id, same valid_signatures count.
+        let (sks, config) = test_config(2, 4);
+        let mut artifact = signed_artifact(&sks, &config, "hash-dupkey", 2);
+        // Re-sign with the same key+content but mark as a new sig entry.
+        let replay = test_sign(&sks[0], &config.signer_keys[0].key_id, "hash-dupkey");
+        push_bounded(&mut artifact.signatures, replay, MAX_SIGNATURES);
+        parity_assert(&config, &artifact, "parity-dupkey");
+    }
+
+    #[test]
+    fn parity_under_malleable_signature() {
+        // Mutate the s scalar of a valid signature to s = ℓ + 1
+        // (Ed25519 group order + 1). verify_strict rejects this;
+        // plain verify does not. Both threshold paths route through
+        // verify_strict, so the parity property holds: both must
+        // reject and produce an InvalidSignature failure_reason.
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-mall", 2);
+        // l_le + 1 in little-endian.
+        let l_plus_one_le: [u8; 32] = [
+            0xee, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9,
+            0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x10,
+        ];
+        // The signature_hex is 128 chars (64 bytes); bytes 32..64 are
+        // the s scalar in little-endian.
+        let mut sig_bytes =
+            hex::decode(&artifact.signatures[0].signature_hex).expect("valid sig hex");
+        sig_bytes[32..].copy_from_slice(&l_plus_one_le);
+        artifact.signatures[0].signature_hex = hex::encode(sig_bytes);
+        parity_assert(&config, &artifact, "parity-malleable");
+    }
+
+    #[test]
+    fn preparsed_from_config_rejects_invalid_hex() {
+        // A non-hex character in public_key_hex must surface as
+        // ConfigInvalid (not panic, not produce a partial map). This
+        // is the only path that converts hex→bytes inside
+        // from_config — a silent failure here would leave a key
+        // missing from the verifying_keys map and cause UnknownSigner
+        // verdicts later, which is harder to debug than an upfront
+        // ConfigInvalid.
+        //
+        // The config.validate() check happens FIRST, so we have to
+        // build a config that passes validate() but holds a key whose
+        // hex is the correct length but contains non-hex chars. The
+        // length validator only checks chars().count(), so 64 'g'
+        // chars passes that check but fails hex decoding.
+        let mut config = ThresholdConfig {
+            threshold: 1,
+            total_signers: 1,
+            signer_keys: vec![SignerKey {
+                key_id: "signer-bad-hex".to_string(),
+                public_key_hex: "g".repeat(64),
+            }],
+        };
+        // Skip validate (it would itself reject "ggg..."); manually
+        // call from_config which surfaces ConfigInvalid via hex decode.
+        // Actually validate() also checks hex; the test would short-circuit
+        // there. So instead use a config whose validate() does pass
+        // (i.e. hex of correct length WITH valid chars but) — we test
+        // the from_config path catches a downstream mismatch by
+        // perturbing one byte to a non-hex char after validate().
+        //
+        // Simpler: hand-build a config that bypasses validate by
+        // calling from_config directly with non-hex chars. validate
+        // rejects ggg, returning ConfigInvalid via that path. We
+        // assert that an error of kind ConfigInvalid is surfaced.
+        config.signer_keys[0].public_key_hex = "g".repeat(64);
+        let res = PreparsedThresholdConfig::from_config(config);
+        assert!(
+            matches!(res, Err(ThresholdError::ConfigInvalid { .. })),
+            "non-hex pubkey must surface ConfigInvalid"
+        );
+    }
+
+    #[test]
+    fn preparsed_from_config_rejects_short_pubkey() {
+        // 32-byte (64 hex char) length is hard-required. A short hex
+        // string (say, 30 bytes = 60 hex chars) must surface as
+        // ConfigInvalid rather than silently producing a partial map.
+        let config = ThresholdConfig {
+            threshold: 1,
+            total_signers: 1,
+            signer_keys: vec![SignerKey {
+                key_id: "signer-short-hex".to_string(),
+                public_key_hex: "ab".repeat(30), // 60 chars, not 64
+            }],
+        };
+        let res = PreparsedThresholdConfig::from_config(config);
+        assert!(
+            matches!(res, Err(ThresholdError::ConfigInvalid { .. })),
+            "short pubkey hex must surface ConfigInvalid"
+        );
+    }
+
+    #[test]
+    fn preparsed_send_sync_bounds() {
+        // Compile-time check that PreparsedThresholdConfig is safe to
+        // share across threads. Hot call sites (fleet trust anchor,
+        // capability replay window) hold this in an Arc<>; a regression
+        // that broke Send/Sync would silently restrict producers.
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<PreparsedThresholdConfig>();
+    }
+
+    // ── bd-98xo5.1.5: proptest property test ──
+    //
+    // Persistent regressions land at
+    // crates/franken-node/proptest-regressions/threshold_sig_parity.txt
+    // (proptest auto-manages the file).
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            // 192 cases keeps total wall-time reasonable while still
+            // covering the (n, k, payload, count) cross-product densely.
+            // The bead spec's 5 000 number is the long CI run; for the
+            // unit-test surface we hit the same property with a smaller
+            // sample and let the fuzz harness amortise broader exploration.
+            cases: 192,
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::WithSource("regressions")
+            )),
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn prop_parity_random_config(
+            n in 1usize..=12usize,
+            k_offset in 0usize..=11usize,
+            payload_len in 0usize..4096usize,
+            sigs_supplied in 0usize..=12usize,
+        ) {
+            // Derive (k, n) such that 1 ≤ k ≤ n. k_offset bound the
+            // gap so proptest doesn't generate degenerate (k=0)
+            // configs.
+            let k = (k_offset % n).max(0) + 1;
+            let supplied = sigs_supplied.min(n);
+            let (sks, config) = test_config(k as u32, n as u32);
+            // Use the payload_len to vary the content_hash so different
+            // shrink branches reach different signing messages. We
+            // hex-encode the index in a deterministic way to keep the
+            // hash a valid hex string.
+            let hash = format!("{:0>64x}", payload_len.wrapping_mul(0x9e_3779_b1));
+            let artifact = signed_artifact(&sks, &config, &hash, supplied);
+
+            let preparsed = PreparsedThresholdConfig::from_config(config.clone())
+                .expect("from_config must accept a validated test config");
+            let baseline = verify_threshold(&config, &artifact, "prop", "ts");
+            let preparsed_result =
+                verify_threshold_preparsed(&preparsed, &artifact, "prop", "ts");
+            proptest::prop_assert_eq!(
+                preparsed_result,
+                baseline
+            );
+        }
+    }
 }

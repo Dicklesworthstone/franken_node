@@ -358,3 +358,9 @@ name = "fuzz_ed25519_preparsed_parity"
 path = "fuzz_targets/ed25519_preparsed_parity.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_threshold_sig_parity"
+path = "fuzz_targets/threshold_sig_parity.rs"
+test = false
+doc = false
