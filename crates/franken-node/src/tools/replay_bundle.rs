@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::crypto::{Ed25519Scheme, SignatureScheme};
 use crate::security::constant_time;
+use ed25519_dalek::Signer;
 
 pub(crate) const MAX_BUNDLE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_REPLAY_BUNDLE_BYTES: u64 = 64 * 1024 * 1024; // 64 MB limit for replay bundle JSON parsing
@@ -1043,14 +1044,11 @@ pub fn sign_replay_bundle(
     }
 
     let payload = replay_bundle_signature_payload(bundle);
-    // Route through `Ed25519Scheme::sign_raw`: `replay_bundle_signature_payload`
-    // already prepends `REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN` and
-    // length-prefixes every contributing field, so the wrapper domain on
-    // `sign_with_domain` would double-wrap and invalidate every `.fnbundle`
-    // golden plus every issued bundle in the wild.
-    let secret_key_bytes = signing_material.signing_key.to_bytes();
-    let signature_bytes = Ed25519Scheme::sign_raw(&secret_key_bytes, &payload)
-        .expect("Ed25519Scheme::sign_raw is infallible for a valid SigningKey seed");
+    // Sign directly with the pre-parsed SigningKey. The payload already has
+    // domain separation via `REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN` and
+    // length-prefixed fields from `replay_bundle_signature_payload`, so we
+    // bypass `sign_with_domain` to avoid double-wrapping.
+    let signature_bytes = signing_material.signing_key.sign(&payload).to_bytes();
     let verifying_key = signing_material.signing_key.verifying_key();
     bundle.signature = Some(ReplayBundleSignature {
         algorithm: "ed25519".to_string(),
