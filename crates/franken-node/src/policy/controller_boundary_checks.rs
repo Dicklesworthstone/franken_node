@@ -153,6 +153,30 @@ impl ControllerBoundaryChecker {
         envelope: &CorrectnessEnvelope,
         timestamp: u64,
     ) -> Result<(), BoundaryViolation> {
+        // INV-BOUNDARY-FAIL-CLOSED: reject proposals with control characters in IDs
+        // to prevent log injection attacks when these fields are formatted into
+        // audit messages and eprintln! output.
+        if proposal.proposal_id.chars().any(char::is_control) {
+            let violation = BoundaryViolation {
+                violated_invariant: InvariantId::new("PROPOSAL_SHAPE"),
+                proposal_summary: "<redacted: control chars>".to_string(),
+                rejection_reason: "proposal_id must not contain control characters".to_string(),
+                stable_error_class: ErrorClass::EnvelopeBypass,
+            };
+            self.record_rejection(proposal, &violation, timestamp);
+            return Err(violation);
+        }
+        if proposal.controller_id.chars().any(char::is_control) {
+            let violation = BoundaryViolation {
+                violated_invariant: InvariantId::new("PROPOSAL_SHAPE"),
+                proposal_summary: "<redacted: control chars>".to_string(),
+                rejection_reason: "controller_id must not contain control characters".to_string(),
+                stable_error_class: ErrorClass::EnvelopeBypass,
+            };
+            self.record_rejection(proposal, &violation, timestamp);
+            return Err(violation);
+        }
+
         // INV-BOUNDARY-FAIL-CLOSED: reject empty proposals
         if proposal.changes.is_empty() {
             let violation = BoundaryViolation {
@@ -1063,5 +1087,54 @@ mod tests {
         push_bounded(&mut items, 4, 3);
 
         assert_eq!(items, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn check_proposal_rejects_control_chars_in_proposal_id() {
+        let env = envelope();
+        let mut c = checker();
+        for bad_id in [
+            "proposal\n-injected",
+            "proposal\r-cr",
+            "proposal\x1b[31m-ansi",
+            "proposal\t-tab",
+        ] {
+            let proposal = PolicyProposal {
+                proposal_id: bad_id.to_string(),
+                controller_id: "controller-alpha".to_string(),
+                epoch_id: 1,
+                changes: vec![PolicyChange {
+                    field: "scoring.risk_threshold".to_string(),
+                    old_value: serde_json::json!(0.5),
+                    new_value: serde_json::json!(0.6),
+                }],
+            };
+            let err = c.check_proposal(&proposal, &env, 99_000).unwrap_err();
+            assert_eq!(
+                err.stable_error_class,
+                ErrorClass::EnvelopeBypass,
+                "expected EnvelopeBypass for proposal_id with control char: {bad_id:?}"
+            );
+            assert!(err.rejection_reason.contains("proposal_id"));
+        }
+    }
+
+    #[test]
+    fn check_proposal_rejects_control_chars_in_controller_id() {
+        let env = envelope();
+        let mut c = checker();
+        let proposal = PolicyProposal {
+            proposal_id: "proposal-valid".to_string(),
+            controller_id: "controller\nHTTP/1.1 200 OK".to_string(),
+            epoch_id: 1,
+            changes: vec![PolicyChange {
+                field: "scoring.risk_threshold".to_string(),
+                old_value: serde_json::json!(0.5),
+                new_value: serde_json::json!(0.6),
+            }],
+        };
+        let err = c.check_proposal(&proposal, &env, 99_001).unwrap_err();
+        assert_eq!(err.stable_error_class, ErrorClass::EnvelopeBypass);
+        assert!(err.rejection_reason.contains("controller_id"));
     }
 }

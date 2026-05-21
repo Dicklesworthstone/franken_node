@@ -1,13 +1,54 @@
 //! Determinism property tests for proof-carrying decode repair artifacts.
 
 use frankenengine_node::repair::proof_carrying_decode::{
-    AlgorithmId, Fragment, ProofCarryingDecoder, ProofMode,
+    AlgorithmId, Fragment, ProofCarryingDecodeError, ProofCarryingDecoder, ProofMode,
 };
 use proptest::prelude::*;
 use proptest::string::string_regex;
 
+const MAX_ALGORITHM_ID_BYTES: usize = 256;
+
 fn deterministic_decoder() -> ProofCarryingDecoder {
     ProofCarryingDecoder::new(ProofMode::Mandatory, "test-signer", "test-secret")
+}
+
+#[test]
+fn register_algorithm_rejects_overlong_and_control_ids() {
+    let mut decoder = deterministic_decoder();
+    let overlong_id = "x".repeat(MAX_ALGORITHM_ID_BYTES + 1);
+    let overlong_err = decoder
+        .register_algorithm(AlgorithmId::new(&overlong_id))
+        .expect_err("overlong algorithm_id must fail closed");
+
+    assert!(matches!(
+        overlong_err,
+        ProofCarryingDecodeError::ReconstructionFailed { .. }
+    ));
+    assert!(overlong_err.to_string().contains("exceeds maximum length"));
+
+    let mut decoder = deterministic_decoder();
+    let control_err = decoder
+        .register_algorithm(AlgorithmId::new("algo\r\nINJECT"))
+        .expect_err("control-character algorithm_id must fail closed");
+
+    assert!(matches!(
+        control_err,
+        ProofCarryingDecodeError::ReconstructionFailed { .. }
+    ));
+    assert!(control_err.to_string().contains("control characters"));
+    assert!(!control_err.to_string().contains("INJECT"));
+
+    let mut decoder = deterministic_decoder();
+    let at_limit_id = "y".repeat(MAX_ALGORITHM_ID_BYTES);
+    decoder
+        .register_algorithm(AlgorithmId::new(&at_limit_id))
+        .expect("algorithm_id at length limit should be accepted");
+    assert!(
+        decoder
+            .registered_algorithms()
+            .iter()
+            .any(|algorithm| algorithm.as_str() == at_limit_id)
+    );
 }
 
 proptest! {

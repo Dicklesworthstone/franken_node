@@ -841,6 +841,7 @@ impl ComputationRegistry {
         computation_name: Option<String>,
         detail: String,
     ) {
+        let computation_name = computation_name.map(|name| sanitize_for_display(&name));
         push_bounded(
             &mut self.audit_events,
             RegistryAuditEvent {
@@ -1361,6 +1362,22 @@ mod tests {
         assert!(
             display.contains('\u{FFFD}'),
             "control chars should be replaced with U+FFFD"
+        );
+        let event = registry
+            .audit_events()
+            .last()
+            .expect("malformed lookup must record an audit event");
+        let audit_name = event
+            .computation_name
+            .as_deref()
+            .expect("malformed lookup audit should retain a display-safe name");
+        assert!(
+            !audit_name.contains('\r') && !audit_name.contains('\n') && !audit_name.contains('\t'),
+            "audit event computation_name must not retain control characters"
+        );
+        assert!(
+            audit_name.contains('\u{FFFD}'),
+            "audit event computation_name should preserve a sanitized marker"
         );
     }
 

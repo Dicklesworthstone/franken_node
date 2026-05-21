@@ -36,6 +36,7 @@
 //! - INV-CART-AUDIT-COMPLETE: Every decision is audited with stable codes.
 
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 
@@ -206,7 +207,8 @@ impl ArtifactIdentity {
 impl fmt::Display for ArtifactIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let display_id = display_artifact_id(&self.artifact_id);
-        write!(f, "{}@{}", display_id, self.author)
+        let display_author_value = display_author(&self.author);
+        write!(f, "{}@{}", display_id, display_author_value)
     }
 }
 
@@ -674,6 +676,21 @@ fn display_artifact_id(artifact_id: &str) -> &str {
     }
 }
 
+fn display_author(author: &str) -> Cow<'_, str> {
+    if author.trim().is_empty() {
+        Cow::Borrowed(RESERVED_ARTIFACT_ID)
+    } else if author.chars().any(char::is_control) {
+        Cow::Owned(
+            author
+                .chars()
+                .map(|ch| if ch.is_control() { '\u{FFFD}' } else { ch })
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(author)
+    }
+}
+
 impl fmt::Display for ArtifactError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -872,8 +889,7 @@ impl AdmissionGate {
         // Control characters in artifact_id enable log injection since the ID
         // appears in log_rejection() and AuditEntry via format!/write!.
         if aid.chars().any(char::is_control) {
-            let detail =
-                "artifact identity artifact_id contains control characters".to_string();
+            let detail = "artifact identity artifact_id contains control characters".to_string();
             self.log_rejection(aid, timestamp, &detail);
             self.push_audit(AuditEntry {
                 event_code: event_codes::CART_005.to_string(),
@@ -1684,6 +1700,17 @@ mod tests {
     }
 
     #[test]
+    fn test_artifact_identity_display_sanitizes_author_control_chars() {
+        let id = ArtifactIdentity::new("ext-1", "alice\r\nINJECTED", "2026-01-01T00:00:00Z");
+
+        let display = format!("{id}");
+
+        assert!(!display.contains('\r'));
+        assert!(!display.contains('\n'));
+        assert!(display.contains('\u{FFFD}'));
+    }
+
+    #[test]
     fn test_artifact_identity_serde() {
         let id = ArtifactIdentity::new("ext-1", "alice", "2026-01-01T00:00:00Z");
         let json = serde_json::to_string(&id).unwrap();
@@ -1983,19 +2010,17 @@ mod tests {
         let err = gate
             .admit(&artifact, "2026-02-21T00:00:00Z")
             .expect_err("control-character artifact_id must fail closed");
-        assert_eq!(
-            err.code(),
-            error_codes::ERR_CART_INVALID_ENVELOPE
-        );
+        assert_eq!(err.code(), error_codes::ERR_CART_INVALID_ENVELOPE);
         assert!(!err.to_string().contains('\r'));
         assert!(!err.to_string().contains('\n'));
         assert!(gate.audit_log().iter().all(|entry| {
             !entry.artifact_id.contains('\r') && !entry.artifact_id.contains('\n')
         }));
-        assert!(gate
-            .audit_log()
-            .iter()
-            .any(|entry| entry.artifact_id == RESERVED_ARTIFACT_ID));
+        assert!(
+            gate.audit_log()
+                .iter()
+                .any(|entry| entry.artifact_id == RESERVED_ARTIFACT_ID)
+        );
     }
 
     #[test]

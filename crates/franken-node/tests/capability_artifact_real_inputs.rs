@@ -46,6 +46,21 @@ fn builds_artifact_from_signed_caller_supplied_metadata() {
 }
 
 #[test]
+fn artifact_identity_display_sanitizes_author_control_chars() {
+    let identity = ArtifactIdentity::new(
+        "ext-real-builder",
+        "publisher\r\nINJECTED",
+        "2026-02-21T00:00:00Z",
+    );
+
+    let display = format!("{identity}");
+
+    assert!(!display.contains('\r'));
+    assert!(!display.contains('\n'));
+    assert!(display.contains('\u{FFFD}'));
+}
+
+#[test]
 fn capability_artifact_length_prefixed_hashes_match_golden_vectors() {
     let identity = ArtifactIdentity::new(
         "ext-real-builder",

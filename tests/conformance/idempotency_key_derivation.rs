@@ -63,6 +63,33 @@ fn demo_registry() -> ComputationRegistry {
 }
 
 #[test]
+fn malformed_computation_name_audit_output_sanitizes_control_chars() {
+    let mut registry = demo_registry();
+    let malicious_name = "bad\r\nINJECTED: fake_event\ttab";
+
+    let err = registry
+        .validate_computation_name(malicious_name, "trace-control-char")
+        .expect_err("malformed computation name must fail");
+    assert_eq!(err.code(), "ERR_MALFORMED_COMPUTATION_NAME");
+    assert!(!err.to_string().contains('\r'));
+    assert!(!err.to_string().contains('\n'));
+    assert!(!err.to_string().contains('\t'));
+
+    let event = registry
+        .audit_events()
+        .last()
+        .expect("malformed lookup must be audited");
+    let audit_name = event
+        .computation_name
+        .as_deref()
+        .expect("malformed lookup audit should retain a display-safe name");
+    assert!(!audit_name.contains('\r'));
+    assert!(!audit_name.contains('\n'));
+    assert!(!audit_name.contains('\t'));
+    assert!(audit_name.contains('\u{FFFD}'));
+}
+
+#[test]
 fn published_idempotency_vectors_match_derivation() {
     let raw = fs::read_to_string(vector_path()).expect("idempotency vectors artifact must exist");
     let bundle: VectorBundle = serde_json::from_str(&raw).expect("vector json must parse");
