@@ -101,6 +101,63 @@ append-only: never edit a past run's BASELINE.md or fingerprint.json.
 If a follow-up round invalidates a hotspot, file the rationale in
 HISTORY.md and start a fresh run-id.
 
+## Reading the profiles
+
+Every `*.perf.flat.txt` produced by a Criterion-driven bench in this repo
+has the SAME top-symbol cluster — and it is NOT user code. Criterion's
+bootstrap-resampling estimator computes confidence intervals in parallel
+via rayon's work-stealing queue; the inner Welford-style accumulator hits
+`exp()` repeatedly, the work-stealing scheduler hits crossbeam, and the
+combined band routinely accounts for **25–30 % of total cycles** before
+the function being benched contributes anything.
+
+The symbol band is identical across rounds 1 and 2 of perf work (see
+`tests/artifacts/perf/20260520T214003Z_franken_node_perf/profiles/*.perf.flat.txt`
+and `tests/artifacts/perf/20260520T231041Z_franken_node_perf_r2/profiles/*.perf.flat.txt`):
+
+| Symbol                                              | % cycles  |
+|-----------------------------------------------------|----------:|
+| `__ieee754_exp_fma`                                 | 27–36 %   |
+| `exp@@GLIBC_2.29`                                   | 7–10 %    |
+| `rayon::iter::plumbing::bridge_producer_consumer`   | 3–7 %     |
+| `crossbeam_deque::Stealer::steal`                   | 1–2 %     |
+| `crossbeam_epoch::Global::try_advance`              | 1–2 %     |
+
+**Always exclude this band before ranking user-code hotspots.** A naive
+top-10 of any Criterion bench profile flags `exp()` as the hottest
+function — that conclusion is wrong every time.
+
+The same problem manifests on the alloc side under heaptrack. In the
+round-2 evidence_ledger bench, **1 005 881 of 1 158 614 allocations
+(87 %) came from `criterion::stats::univariate::bootstrap`** — not from
+the evidence_ledger code under measurement. Filter the bootstrap band
+before reading any heaptrack alloc count off a Criterion-driven run.
+
+### awk filter for `*.perf.flat.txt`
+
+The canonical filter used by both round 1 and round 2 to strip the
+bootstrap band before printing the user-code top-N:
+
+```bash
+awk '/^\s+[0-9]+\.[0-9]+%/ {
+    sym=$0
+    sub(/^.*\] /, "", sym)
+    if (sym !~ /^(__ieee754_exp_fma|exp@@GLIBC|__exp_finite|rayon::|crossbeam_)/)
+        printf "%6s %s\n", $1, substr(sym,1,100)
+}' profiles/<bench>.perf.flat.txt | head -20
+```
+
+The five symbol prefixes (`__ieee754_exp_fma`, `exp@@GLIBC`,
+`__exp_finite`, `rayon::`, `crossbeam_`) cover the full bootstrap band
+in the round-1+2 evidence — extend only if a future round adds a new
+scheduler / numeric library to the mix.
+
+Bead [`bd-98xo5.14`](https://github.com/Dicklesworthstone/franken_node/issues)
+captured this pattern as a project-local note plus a named entry in
+`~/.claude/skills/profiling-software-performance/references/PATTERNS-ENCYCLOPEDIA.md`
+under "Criterion (Rust benchmarking)" so future profiling agents see the
+warning before re-deriving the same misreading.
+
 ## Profile-removal protection
 
 [`bd-98xo5.11.2`](https://github.com/Dicklesworthstone/franken_node/issues)
