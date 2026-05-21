@@ -1810,6 +1810,7 @@ can pin directly against the names. Current names emitted by the CLI:
 | `franken_node_execution_receipts` | counter | — | Execution receipts emitted |
 | `franken_node_fleet_active_quarantines` | counter | `zone` | Active quarantines per fleet zone |
 | `franken_node_fleet_node_records` | gauge | — | Tracked fleet node records |
+| `franken_node_revocation_filter_entries` | gauge | — | Current entries in the cuckoo revocation filter |
 
 The evidence ledger is a stronger consistency surface than metrics:
 every signed decision lives there with witness traces and is queryable

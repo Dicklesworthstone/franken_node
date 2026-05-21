@@ -7,6 +7,19 @@
 
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Global gauge for revocation filter entries. Exported as
+/// `franken_node_revocation_filter_entries` in metrics scrape.
+/// Updated atomically on every insert/remove/clear operation.
+static REVOCATION_FILTER_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+
+/// Get the current revocation filter entry count for metrics export.
+/// Returns the total number of entries across all CuckooFilter instances
+/// that have telemetry enabled.
+pub fn revocation_filter_entries_gauge() -> usize {
+    REVOCATION_FILTER_ENTRIES.load(Ordering::Relaxed)
+}
 
 /// Maximum number of cuckoo evictions before declaring filter full
 const MAX_CUCKOO_EVICTIONS: usize = 500;
@@ -32,6 +45,8 @@ pub struct CuckooFilter {
     num_items: usize,
     max_items: usize,
     hash_builder: RandomState,
+    /// When true, mutations update the global `REVOCATION_FILTER_ENTRIES` gauge.
+    telemetry_enabled: bool,
 }
 
 impl CuckooFilter {
@@ -49,6 +64,31 @@ impl CuckooFilter {
             num_items: 0,
             max_items,
             hash_builder: RandomState::new(),
+            telemetry_enabled: false,
+        }
+    }
+
+    /// Enable telemetry for this filter instance.
+    ///
+    /// When enabled, insert/remove/clear operations update the global
+    /// `franken_node_revocation_filter_entries` gauge via atomic increment/decrement.
+    /// Call this on the production revocation filter instance.
+    pub fn enable_telemetry(&mut self) {
+        if !self.telemetry_enabled {
+            self.telemetry_enabled = true;
+            // Sync current count to the global gauge
+            REVOCATION_FILTER_ENTRIES.fetch_add(self.num_items, Ordering::Relaxed);
+        }
+    }
+
+    /// Update the global gauge after a mutation (internal helper).
+    fn emit_gauge_delta(&self, delta: isize) {
+        if self.telemetry_enabled {
+            if delta > 0 {
+                REVOCATION_FILTER_ENTRIES.fetch_add(delta as usize, Ordering::Relaxed);
+            } else if delta < 0 {
+                REVOCATION_FILTER_ENTRIES.fetch_sub((-delta) as usize, Ordering::Relaxed);
+            }
         }
     }
 
@@ -117,6 +157,7 @@ impl CuckooFilter {
         if let Some(pos) = self.buckets[i1].iter().position(|&x| x == 0) {
             self.buckets[i1][pos] = fingerprint;
             self.num_items = self.num_items.saturating_add(1);
+            self.emit_gauge_delta(1);
             return true;
         }
 
@@ -124,6 +165,7 @@ impl CuckooFilter {
         if let Some(pos) = self.buckets[i2].iter().position(|&x| x == 0) {
             self.buckets[i2][pos] = fingerprint;
             self.num_items = self.num_items.saturating_add(1);
+            self.emit_gauge_delta(1);
             return true;
         }
 
@@ -151,6 +193,7 @@ impl CuckooFilter {
             if let Some(pos) = self.buckets[bucket_idx].iter().position(|&x| x == 0) {
                 self.buckets[bucket_idx][pos] = fingerprint;
                 self.num_items = self.num_items.saturating_add(1);
+                self.emit_gauge_delta(1);
                 return true;
             }
         }
@@ -184,6 +227,7 @@ impl CuckooFilter {
         if let Some(pos) = self.buckets[i1].iter().position(|&x| x == fingerprint) {
             self.buckets[i1][pos] = 0;
             self.num_items = self.num_items.saturating_sub(1);
+            self.emit_gauge_delta(-1);
             return true;
         }
 
@@ -191,6 +235,7 @@ impl CuckooFilter {
         if let Some(pos) = self.buckets[i2].iter().position(|&x| x == fingerprint) {
             self.buckets[i2][pos] = 0;
             self.num_items = self.num_items.saturating_sub(1);
+            self.emit_gauge_delta(-1);
             return true;
         }
 
@@ -231,10 +276,14 @@ impl CuckooFilter {
 
     /// Clear all items from the filter, resetting to empty state.
     pub fn clear(&mut self) {
+        let cleared_count = self.num_items;
         for bucket in &mut self.buckets {
             *bucket = [0u16; BUCKET_SIZE];
         }
         self.num_items = 0;
+        if cleared_count > 0 {
+            self.emit_gauge_delta(-(cleared_count as isize));
+        }
     }
 
     /// Get memory usage in bytes.
@@ -251,8 +300,9 @@ impl Default for CuckooFilter {
 
 #[cfg(test)]
 mod tests {
-    use super::CuckooFilter;
+    use super::{CuckooFilter, REVOCATION_FILTER_ENTRIES, revocation_filter_entries_gauge};
     use std::collections::BTreeSet;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn test_basic_operations() {
@@ -441,5 +491,42 @@ mod tests {
         assert!(inserted < 20, "Filter should reject some items when full");
 
         println!("Inserted {} out of 20 items with capacity 10", inserted);
+    }
+
+    #[test]
+    fn test_telemetry_gauge_insert_remove_clear() {
+        // Reset global gauge to known state for this test
+        REVOCATION_FILTER_ENTRIES.store(0, Ordering::SeqCst);
+
+        let mut filter = CuckooFilter::new(100);
+        filter.enable_telemetry();
+
+        // Gauge starts at 0 (filter was empty when telemetry enabled)
+        assert_eq!(revocation_filter_entries_gauge(), 0);
+
+        // Single insert advances gauge by 1
+        assert!(filter.insert("token_a"));
+        assert_eq!(revocation_filter_entries_gauge(), 1);
+
+        // Second insert advances gauge to 2
+        assert!(filter.insert("token_b"));
+        assert_eq!(revocation_filter_entries_gauge(), 2);
+
+        // Remove decrements gauge by 1
+        assert!(filter.remove("token_a"));
+        assert_eq!(revocation_filter_entries_gauge(), 1);
+
+        // Insert more tokens to simulate OSV refresh batch
+        const OSV_BATCH_SIZE: usize = 32;
+        for i in 0..OSV_BATCH_SIZE {
+            assert!(filter.insert(&format!("osv_token_{}", i)));
+        }
+        // 1 remaining + OSV_BATCH_SIZE = 33
+        assert_eq!(revocation_filter_entries_gauge(), 1 + OSV_BATCH_SIZE);
+
+        // Clear resets gauge to 0
+        filter.clear();
+        assert_eq!(revocation_filter_entries_gauge(), 0);
+        assert_eq!(filter.len(), 0);
     }
 }

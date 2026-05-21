@@ -1076,6 +1076,11 @@ required-features = ["advanced-features"]
 name = "dgis_contagion_simulator"
 path = "../../tests/security/dgis_contagion_simulator.rs"
 
+# bd-98xo5.3.1: CuckooFilter telemetry gauge integration test
+[[test]]
+name = "cuckoo_filter_telemetry_gauge"
+path = "tests/cuckoo_filter_telemetry_gauge.rs"
+
 [[bench]]
 name = "cuckoo_revocation_bench"
 harness = false
