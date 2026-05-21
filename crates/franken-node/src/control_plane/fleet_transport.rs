@@ -118,7 +118,7 @@ pub fn canonical_fleet_convergence_receipt_payload<T: Serialize>(
 ) -> Result<Vec<u8>, FleetTransportError> {
     let value = serde_json::to_value(payload)
         .map_err(|err| FleetTransportError::serialization(err.to_string()))?;
-    let canonical = canonicalize_json_value(value, "$")?;
+    let canonical = canonicalize_json_value(value, &mut Vec::new())?;
     serde_json::to_vec(&canonical)
         .map_err(|err| FleetTransportError::serialization(err.to_string()))
 }
@@ -151,30 +151,67 @@ pub fn sign_fleet_convergence_receipt_payload<T: Serialize>(
     })
 }
 
-fn canonicalize_json_value(value: Value, path: &str) -> Result<Value, FleetTransportError> {
+/// Path segment in the recursive canonicalize walk. Stored as a stack and
+/// only rendered to a `String` on the float-error branch — the happy path
+/// never builds a path string at all (per bd-98xo5.7.1). The previous
+/// implementation `format!`-allocated `"$.foo.bar[3]"` on every descent.
+enum PathSeg {
+    Index(usize),
+    Key(String),
+}
+
+fn render_path(segments: &[PathSeg]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from("$");
+    for seg in segments {
+        match seg {
+            PathSeg::Index(i) => {
+                // write! into a String is infallible.
+                let _ = write!(out, "[{i}]");
+            }
+            PathSeg::Key(k) => {
+                out.push('.');
+                out.push_str(k);
+            }
+        }
+    }
+    out
+}
+
+fn canonicalize_json_value(
+    value: Value,
+    path: &mut Vec<PathSeg>,
+) -> Result<Value, FleetTransportError> {
     match value {
-        Value::Array(items) => items
-            .into_iter()
-            .enumerate()
-            .map(|(index, item)| canonicalize_json_value(item, &format!("{path}[{index}]")))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array),
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for (index, item) in items.into_iter().enumerate() {
+                path.push(PathSeg::Index(index));
+                let canonical_item = canonicalize_json_value(item, path)?;
+                path.pop();
+                out.push(canonical_item);
+            }
+            Ok(Value::Array(out))
+        }
         Value::Object(map) => {
             let mut entries = map.into_iter().collect::<Vec<_>>();
             entries.sort_by(|left, right| left.0.cmp(&right.0));
 
-            let mut canonical = serde_json::Map::new();
+            let mut canonical = serde_json::Map::with_capacity(entries.len());
             for (key, item) in entries {
-                canonical.insert(
-                    key.clone(),
-                    canonicalize_json_value(item, &format!("{path}.{key}"))?,
-                );
+                path.push(PathSeg::Key(key.clone()));
+                let canonical_item = canonicalize_json_value(item, path)?;
+                path.pop();
+                canonical.insert(key, canonical_item);
             }
             Ok(Value::Object(canonical))
         }
-        Value::Number(number) if number.is_f64() => Err(FleetTransportError::serialization(
-            format!("fleet convergence receipt contains non-deterministic float at {path}"),
-        )),
+        Value::Number(number) if number.is_f64() => {
+            Err(FleetTransportError::serialization(format!(
+                "fleet convergence receipt contains non-deterministic float at {}",
+                render_path(path),
+            )))
+        }
         other => Ok(other),
     }
 }
@@ -3442,6 +3479,38 @@ mod tests {
         assert_eq!(
             receipt.signed_payload_sha256, receipt2.signed_payload_sha256,
             "Hash should be deterministic for same input"
+        );
+    }
+
+    /// Regression for bd-98xo5.7.1: `canonicalize_json_value` previously
+    /// `format!`-allocated a fresh path string on every recursive descent
+    /// even though the path is only used on the float-error branch. The
+    /// refactored implementation builds a `Vec<PathSeg>` stack and renders
+    /// the path string only when emitting the error. This test pins the
+    /// rendered path format on a realistic nested payload so a future
+    /// refactor of `render_path` cannot silently change the operator-
+    /// facing error string.
+    #[test]
+    fn canonicalize_json_value_float_error_path_matches_legacy_format() {
+        use serde_json::json;
+        let payload = json!({
+            "zones": [
+                {
+                    "id": "zone-a",
+                    "timestamp": 1.5,
+                },
+            ],
+        });
+        let err = canonical_fleet_convergence_receipt_payload(&payload)
+            .expect_err("float at $.zones[0].timestamp must surface a serialization error");
+        let detail = err.to_string();
+        assert!(
+            detail.contains("$.zones[0].timestamp"),
+            "rendered float-error path must equal the legacy `$.zones[0].timestamp` format; got: {detail}",
+        );
+        assert!(
+            detail.contains("non-deterministic float"),
+            "error message must keep the legacy `non-deterministic float` prefix; got: {detail}",
         );
     }
 
