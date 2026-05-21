@@ -198,6 +198,10 @@ name = "cli_arg_validation"
 path = "tests/cli_arg_validation.rs"
 
 [[test]]
+name = "init_bootstrap_smoke"
+path = "tests/init_bootstrap_smoke.rs"
+
+[[test]]
 name = "replay_import_anchor"
 path = "tests/replay_import_anchor.rs"
 
@@ -1109,3 +1113,17 @@ harness = false
 [[bench]]
 name = "perf_wins"
 harness = false
+
+# Round 2 of the profiling skill registered this previously-unlisted bench.
+[[bench]]
+name = "evidence_ledger_performance"
+harness = false
+
+# bd-98xo5.8.1 — round-3 Criterion bench covering compute_proof_bytes +
+# verify_integrity. See docs/dev/profiling.md for the canonical build
+# invocation (RUSTFLAGS=-C force-frame-pointers=yes ... cargo build
+# --profile release-perf -p frankenengine-node --bench vef_proof_chain_bench).
+[[bench]]
+name = "vef_proof_chain_bench"
+harness = false
+required-features = ["test-support"]
