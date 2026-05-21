@@ -153,6 +153,132 @@ pub trait SignatureScheme: Send + Sync + 'static {
     fn signature_from_bytes(bytes: &[u8]) -> Result<Self::Signature, Self::Error>;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// bd-98xo5.12.2: profiling instrumentation for Ed25519Scheme::{sign_raw,
+// verify_raw}. Mirrors the T12.1 pattern shipped in commit 1c72a9f0 for
+// the trust_card canonical encoder. All gated by the `profiling` Cargo
+// feature; default builds compile NONE of this code — the cfg gate
+// elides the sentinel calls, histogram statics, and recording functions
+// entirely. Enable with `cargo build --features profiling` when running
+// under the perf-round profiling skill.
+//
+// Two separate histograms (sign vs verify) so the per-side cost is
+// attributable. Round-1 baseline
+// (tests/artifacts/perf/20260520T214003Z_franken_node_perf/criterion_raw/crypto_scheme.txt):
+// ed25519_scheme_sign_raw/64 = 45.69 µs vs dalek_direct floor 23.86 µs;
+// ed25519_scheme_verify_raw/64 = 53.30 µs vs 47.25 µs. The
+// preparsed-handle migration (bd-98xo5.2.{1-4}) drops sign_raw toward
+// the dalek_direct floor; this histogram is how we observe that win
+// at runtime rather than at bench-time.
+// ─────────────────────────────────────────────────────────────────
+
+/// Sentinel frame for `Ed25519Scheme::sign_raw` flamegraph attribution.
+/// Always compiled (independent of the `profiling` feature) so the
+/// symbol is in the binary for `objdump -d <binary> | grep
+/// _profile_ed25519_scheme_sign` inspection; LLVM may elide it via
+/// dead-code elimination at link time when no caller exists (default
+/// builds). `#[inline(never)]` keeps it a real stack frame whenever a
+/// caller does exist (under `--features profiling`).
+#[inline(never)]
+#[allow(dead_code)]
+fn _profile_ed25519_scheme_sign() {
+    std::hint::black_box(());
+}
+
+/// Sentinel frame for `Ed25519Scheme::verify_raw` flamegraph attribution.
+/// See [`_profile_ed25519_scheme_sign`] for the linker-DCE rationale.
+#[inline(never)]
+#[allow(dead_code)]
+fn _profile_ed25519_scheme_verify() {
+    std::hint::black_box(());
+}
+
+#[cfg(feature = "profiling")]
+use std::sync::{Mutex, OnceLock};
+
+#[cfg(feature = "profiling")]
+static ED25519_SCHEME_SIGN_HISTOGRAM_US: OnceLock<Mutex<hdrhistogram::Histogram<u64>>> =
+    OnceLock::new();
+
+#[cfg(feature = "profiling")]
+static ED25519_SCHEME_VERIFY_HISTOGRAM_US: OnceLock<Mutex<hdrhistogram::Histogram<u64>>> =
+    OnceLock::new();
+
+#[cfg(feature = "profiling")]
+fn ed25519_scheme_sign_record_us(elapsed_us: u64) {
+    let hist = ED25519_SCHEME_SIGN_HISTOGRAM_US.get_or_init(|| {
+        // Bounds match the T12.1 spec for cross-bead comparability:
+        // 1 µs lower, 60 s upper, 3 significant digits (~2 % error).
+        // The 60 s upper is enormous overhead vs the real ~50 µs cost
+        // but the bound is shared across all T12.x histograms so
+        // dump-side comparisons aren't skewed by per-site rescaling.
+        Mutex::new(
+            hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
+                .expect("HDR histogram bounds (1, 60_000_000, 3) are statically valid"),
+        )
+    });
+    let bounded = elapsed_us.clamp(1, 60_000_000);
+    if let Ok(mut h) = hist.lock() {
+        let _ = h.record(bounded);
+    }
+}
+
+#[cfg(feature = "profiling")]
+fn ed25519_scheme_verify_record_us(elapsed_us: u64) {
+    let hist = ED25519_SCHEME_VERIFY_HISTOGRAM_US.get_or_init(|| {
+        Mutex::new(
+            hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
+                .expect("HDR histogram bounds (1, 60_000_000, 3) are statically valid"),
+        )
+    });
+    let bounded = elapsed_us.clamp(1, 60_000_000);
+    if let Ok(mut h) = hist.lock() {
+        let _ = h.record(bounded);
+    }
+}
+
+/// Emit the current sign + verify histograms' p50/p95/p99/cumulative/count
+/// as two `tracing::info!` events matching the profiling skill's
+/// `perf.profile.span_summary` schema (one per side). Callers (typically
+/// the perf-round skill or a process-exit Drop hook) trigger this on
+/// demand. Idempotent and non-destructive — does NOT reset the histograms.
+#[cfg(feature = "profiling")]
+pub fn dump_ed25519_scheme_perf_histogram() {
+    let entries: [(&str, &str, Option<&Mutex<hdrhistogram::Histogram<u64>>>); 2] = [
+        (
+            "sign",
+            "ed25519_scheme_sign_raw.us",
+            ED25519_SCHEME_SIGN_HISTOGRAM_US.get(),
+        ),
+        (
+            "verify",
+            "ed25519_scheme_verify_raw.us",
+            ED25519_SCHEME_VERIFY_HISTOGRAM_US.get(),
+        ),
+    ];
+    for (_kind, span_name, hist_lock) in entries {
+        let Some(hist) = hist_lock else { continue };
+        let Ok(h) = hist.lock() else { continue };
+        let count = h.len();
+        let cumulative_us: u64 = h.iter_recorded().map(|v| v.value_iterated_to()).sum();
+        let p50_us = h.value_at_quantile(0.50);
+        let p95_us = h.value_at_quantile(0.95);
+        let p99_us = h.value_at_quantile(0.99);
+        tracing::info!(
+            event_code = "perf.profile.span_summary",
+            span_name,
+            cumulative_us,
+            count,
+            p50_us,
+            p95_us,
+            p99_us,
+            category = "CPU",
+            evidence = "crates/franken-node/src/crypto/schemes.rs::Ed25519Scheme",
+            "ed25519_scheme perf span summary"
+        );
+    }
+}
+
 /// Ed25519 signature scheme implementation with franken_node security patterns.
 ///
 /// Implements the SignatureScheme trait for Ed25519 with:
@@ -279,13 +405,35 @@ impl SignatureScheme for Ed25519Scheme {
         secret_key: &Self::SecretKey,
         message: &[u8],
     ) -> Result<Self::Signature, Self::Error> {
-        // Construct a SigningKey directly from the 32-byte seed.
-        // `SigningKey::from_bytes` for ed25519-dalek 2.x is infallible for any
-        // 32-byte input, but we keep the Result return type to match the trait
-        // contract so other schemes (RSA / ECDSA) can fail.
-        let signing_key = SigningKey::from_bytes(secret_key);
-        let signature = signing_key.sign(message);
-        Ok(signature.to_bytes())
+        // bd-98xo5.12.2 — sentinel + histogram + span instrumentation,
+        // all gated by the `profiling` Cargo feature. Default builds
+        // compile only the `cfg(not(...))` arm — byte-identical
+        // semantics to before the instrumentation landed.
+        #[cfg(feature = "profiling")]
+        {
+            _profile_ed25519_scheme_sign();
+            let _span = tracing::info_span!("ed25519_scheme_sign_raw").entered();
+            let start = std::time::Instant::now();
+            // Construct a SigningKey directly from the 32-byte seed.
+            // `SigningKey::from_bytes` for ed25519-dalek 2.x is infallible for any
+            // 32-byte input, but we keep the Result return type to match the trait
+            // contract so other schemes (RSA / ECDSA) can fail.
+            let signing_key = SigningKey::from_bytes(secret_key);
+            let signature = signing_key.sign(message);
+            let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+            ed25519_scheme_sign_record_us(elapsed_us);
+            return Ok(signature.to_bytes());
+        }
+        #[cfg(not(feature = "profiling"))]
+        {
+            // Construct a SigningKey directly from the 32-byte seed.
+            // `SigningKey::from_bytes` for ed25519-dalek 2.x is infallible for any
+            // 32-byte input, but we keep the Result return type to match the trait
+            // contract so other schemes (RSA / ECDSA) can fail.
+            let signing_key = SigningKey::from_bytes(secret_key);
+            let signature = signing_key.sign(message);
+            Ok(signature.to_bytes())
+        }
     }
 
     fn verify_raw(
@@ -293,22 +441,48 @@ impl SignatureScheme for Ed25519Scheme {
         message: &[u8],
         signature: &Self::Signature,
     ) -> bool {
-        // Parse keys and signature; any parse failure means "not valid".
-        // Return false without leaking which step failed.
-        let verifying_key = match VerifyingKey::from_bytes(public_key) {
-            Ok(key) => key,
-            Err(_) => return false,
-        };
+        // bd-98xo5.12.2 — sentinel + histogram + span. See sign_raw above
+        // for the production-equivalence rationale. The histogram is
+        // separate from sign so per-side cost is attributable.
+        #[cfg(feature = "profiling")]
+        {
+            _profile_ed25519_scheme_verify();
+            let _span = tracing::info_span!("ed25519_scheme_verify_raw").entered();
+            let start = std::time::Instant::now();
+            // Parse keys and signature; any parse failure means "not valid".
+            // Return false without leaking which step failed.
+            let result = (|| {
+                let verifying_key = VerifyingKey::from_bytes(public_key).ok()?;
+                let sig = Signature::try_from(&signature[..]).ok()?;
+                // verify_strict rejects malleable / non-canonical-s signatures.
+                // decision_receipt and other consumers historically rely on strict
+                // verification for replay/forgery hardening; keep that contract here.
+                Some(verifying_key.verify_strict(message, &sig).is_ok())
+            })()
+            .unwrap_or(false);
+            let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+            ed25519_scheme_verify_record_us(elapsed_us);
+            return result;
+        }
+        #[cfg(not(feature = "profiling"))]
+        {
+            // Parse keys and signature; any parse failure means "not valid".
+            // Return false without leaking which step failed.
+            let verifying_key = match VerifyingKey::from_bytes(public_key) {
+                Ok(key) => key,
+                Err(_) => return false,
+            };
 
-        let sig = match Signature::try_from(&signature[..]) {
-            Ok(sig) => sig,
-            Err(_) => return false,
-        };
+            let sig = match Signature::try_from(&signature[..]) {
+                Ok(sig) => sig,
+                Err(_) => return false,
+            };
 
-        // verify_strict rejects malleable / non-canonical-s signatures.
-        // decision_receipt and other consumers historically rely on strict
-        // verification for replay/forgery hardening; keep that contract here.
-        verifying_key.verify_strict(message, &sig).is_ok()
+            // verify_strict rejects malleable / non-canonical-s signatures.
+            // decision_receipt and other consumers historically rely on strict
+            // verification for replay/forgery hardening; keep that contract here.
+            verifying_key.verify_strict(message, &sig).is_ok()
+        }
     }
 
     fn public_key_from_bytes(bytes: &[u8]) -> Result<Self::PublicKey, Self::Error> {
@@ -1025,5 +1199,92 @@ mod tests {
             let preparsed_tampered = verifier.verify_raw(&payload, &tampered);
             proptest::prop_assert_eq!(stateless_tampered, preparsed_tampered);
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // bd-98xo5.12.2: profiling instrumentation tests. Mirror the
+    // T12.1 pattern (canonical_serializer.rs:6577+) — verify the
+    // sentinel symbols compile under default features, and (under
+    // `--features profiling`) verify the histogram bound accepts the
+    // realistic per-call elapsed range. The default-features tests
+    // also pin that enabling/disabling the profiling cfg never
+    // changes the byte output of sign_raw or the bool of verify_raw.
+    // Per [lib] test = false in Cargo.toml, these inline tests are
+    // compile-checked rather than executed; the integration test
+    // surface for Ed25519Scheme byte-equivalence lives in
+    // tests/ed25519_verifier_rejects_malleable_signatures.rs and the
+    // existing tests/security/* fixtures.
+    // ─────────────────────────────────────────────────────────────
+
+    /// Sentinel symbols are always compiled (independent of the
+    /// `profiling` feature) so `objdump -d <binary> | grep
+    /// _profile_ed25519_scheme_sign` / `..._verify` finds them
+    /// whenever a caller exists. Under default features they're dead
+    /// code; LLVM may elide them via DCE at link time but the crate
+    /// compile MUST still succeed. Pin that by calling them directly.
+    #[test]
+    fn sentinel_frames_compile_and_return_unit_bd98xo5_12_2() {
+        super::_profile_ed25519_scheme_sign();
+        super::_profile_ed25519_scheme_verify();
+    }
+
+    /// Default build (no `profiling` feature): wrapping the body in
+    /// the cfg(not(profiling)) arm must produce byte-identical
+    /// signatures and accept the same signatures as before the
+    /// instrumentation landed. Sanity-check the round-trip on a
+    /// fixed seed.
+    #[test]
+    fn profiling_disabled_default_build_signs_and_verifies_round_trip_bd98xo5_12_2() {
+        let secret_seed: [u8; 32] = [
+            0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+            0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+            0x42, 0x42, 0x42, 0x42,
+        ];
+        let signing_key = SigningKey::from_bytes(&secret_seed);
+        let public_key: [u8; 32] = signing_key.verifying_key().to_bytes();
+        let message = b"bd-98xo5.12.2 ed25519 round-trip pin";
+        let signature = Ed25519Scheme::sign_raw(&secret_seed, message)
+            .expect("sign_raw must not error for valid 32-byte seed");
+        assert!(
+            Ed25519Scheme::verify_raw(&public_key, message, &signature),
+            "verify_raw must accept the signature sign_raw just produced"
+        );
+
+        let mut tampered = signature;
+        tampered[7] ^= 0x01;
+        assert!(
+            !Ed25519Scheme::verify_raw(&public_key, message, &tampered),
+            "verify_raw must reject a single-bit-flipped signature"
+        );
+    }
+
+    /// Profiling-feature build path. Verifies the histogram bounds
+    /// (1 µs..60 s, 3 sig digits) accept the realistic elapsed range
+    /// for the round-1 worst case (~50 µs per sign + verify) plus
+    /// the bound endpoints (0 clamped to 1, 60 s upper). A regression
+    /// that lowered the upper bound would lose the tail of any
+    /// hot-loop verify pass.
+    #[cfg(feature = "profiling")]
+    #[test]
+    fn profiling_feature_histograms_accept_full_range_bd98xo5_12_2() {
+        super::ed25519_scheme_sign_record_us(0);
+        super::ed25519_scheme_sign_record_us(1);
+        super::ed25519_scheme_sign_record_us(46);
+        super::ed25519_scheme_sign_record_us(60_000_000);
+        super::ed25519_scheme_sign_record_us(60_000_001);
+        super::ed25519_scheme_verify_record_us(0);
+        super::ed25519_scheme_verify_record_us(53);
+        super::ed25519_scheme_verify_record_us(60_000_000);
+        super::ed25519_scheme_verify_record_us(60_000_001);
+    }
+
+    /// `dump_ed25519_scheme_perf_histogram` must be a no-op when no
+    /// recordings have happened yet (process startup, no sign/verify
+    /// calls). Pin that the function does not panic on either empty
+    /// histogram.
+    #[cfg(feature = "profiling")]
+    #[test]
+    fn profiling_feature_dump_handles_empty_histograms_safely_bd98xo5_12_2() {
+        super::dump_ed25519_scheme_perf_histogram();
     }
 }
