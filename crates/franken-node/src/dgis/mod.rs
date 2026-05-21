@@ -18,4 +18,8 @@ pub mod fragility_fixtures;
 pub mod fragility_model;
 pub mod graph_ingestion;
 pub mod graph_seeds;
+// bd-98xo5.5.1 — skeleton for u32 node-id interning. Migration of
+// contagion_graph internals lands in bd-98xo5.5.2; this module is the
+// design + API surface only.
+pub mod node_interner;
 pub mod spof_detection;
