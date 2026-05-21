@@ -26,6 +26,31 @@ const MAX_RECALL_RECEIPTS: usize = 4096;
 /// Maximum state history entries per quarantine record before oldest are evicted.
 const MAX_STATE_HISTORY: usize = 256;
 
+/// Maximum length for ID strings (order_id, node_id, etc.) in bytes.
+const MAX_ID_BYTES: usize = 512;
+
+fn invalid_id_reason(id: &str, field_name: &str) -> Option<QuarantineError> {
+    if id.is_empty() {
+        return Some(QuarantineError {
+            code: ERR_QUARANTINE_INVALID_ID.to_owned(),
+            message: format!("{field_name} must not be empty"),
+        });
+    }
+    if id.len() > MAX_ID_BYTES {
+        return Some(QuarantineError {
+            code: ERR_QUARANTINE_INVALID_ID.to_owned(),
+            message: format!("{field_name} exceeds maximum length of {MAX_ID_BYTES} bytes"),
+        });
+    }
+    if id.chars().any(char::is_control) {
+        return Some(QuarantineError {
+            code: ERR_QUARANTINE_INVALID_ID.to_owned(),
+            message: format!("{field_name} must not contain control characters"),
+        });
+    }
+    None
+}
+
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
@@ -82,6 +107,7 @@ pub const ERR_QUARANTINE_DUPLICATE_ORDER_ID: &str = "ERR_QUARANTINE_DUPLICATE_OR
 pub const ERR_RECALL_RECEIPT_MISMATCH: &str = "ERR_RECALL_RECEIPT_MISMATCH";
 pub const ERR_AUDIT_CHAIN_BROKEN: &str = "ERR_AUDIT_CHAIN_BROKEN";
 pub const ERR_QUARANTINE_INVALID_AUDIT_TIMESTAMP: &str = "ERR_QUARANTINE_INVALID_AUDIT_TIMESTAMP";
+pub const ERR_QUARANTINE_INVALID_ID: &str = "ERR_QUARANTINE_INVALID_ID";
 
 // ── Quarantine mode ─────────────────────────────────────────────────────────
 
@@ -699,6 +725,13 @@ impl QuarantineRegistry {
         node_id: &str,
         timestamp: &str,
     ) -> Result<(), QuarantineError> {
+        if let Some(err) = invalid_id_reason(order_id, "order_id") {
+            return Err(err);
+        }
+        if let Some(err) = invalid_id_reason(node_id, "node_id") {
+            return Err(err);
+        }
+
         let (ext_id, severity, trace_id) = {
             let record = self.records.get(order_id).ok_or_else(|| QuarantineError {
                 code: ERR_QUARANTINE_NOT_FOUND.to_owned(),
@@ -1453,11 +1486,12 @@ fn parse_audit_timestamp(raw: &str) -> Result<QuarantineAuditTimestamp, Quaranti
 mod tests {
     use super::{
         ERR_AUDIT_CHAIN_BROKEN, ERR_LIFT_REQUIRES_CLEARANCE, ERR_QUARANTINE_ALREADY_ACTIVE,
-        MAX_AUDIT_TRAIL, MAX_PROPAGATION_STATUS, MAX_STATE_HISTORY, QuarantineAuditEntry,
-        QuarantineAuditId, QuarantineAuditTimestamp, QuarantineClearance, QuarantineError,
-        QuarantineImpactReport, QuarantineMode, QuarantineOrder, QuarantineReason,
-        QuarantineRecord, QuarantineRegistry, QuarantineScope, QuarantineSeverity, QuarantineState,
-        RecallOrder, RecallReceipt, constant_time,
+        ERR_QUARANTINE_INVALID_ID, ERR_QUARANTINE_NOT_FOUND, MAX_AUDIT_TRAIL,
+        MAX_PROPAGATION_STATUS, MAX_STATE_HISTORY, QuarantineAuditEntry, QuarantineAuditId,
+        QuarantineAuditTimestamp, QuarantineClearance, QuarantineError, QuarantineImpactReport,
+        QuarantineMode, QuarantineOrder, QuarantineReason, QuarantineRecord, QuarantineRegistry,
+        QuarantineScope, QuarantineSeverity, QuarantineState, RecallOrder, RecallReceipt,
+        constant_time,
     };
 
     const QUARANTINE_ORDER_FIXTURE_SIGNATURE: &str =
@@ -1701,6 +1735,36 @@ mod tests {
 
         assert_eq!(err.code, ERR_QUARANTINE_NOT_FOUND);
         assert!(reg.propagation_status.is_empty());
+    }
+
+    #[test]
+    fn test_record_propagation_rejects_control_chars_in_ids() {
+        let mut reg = QuarantineRegistry::new();
+        let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
+        reg.initiate_quarantine(order).expect("should succeed");
+
+        let malicious_ids = [
+            "id\nFAKE_LOG: injected",
+            "id\rcarriage_return",
+            "id\x1b[31mred_escape",
+            "tab\there",
+        ];
+
+        for bad_id in malicious_ids {
+            let result = reg.record_propagation(bad_id, "node-1", "2026-01-15T00:01:00Z");
+            assert!(
+                matches!(result, Err(QuarantineError { ref code, .. }) if code == ERR_QUARANTINE_INVALID_ID),
+                "expected ERR_QUARANTINE_INVALID_ID for order_id with control chars: {:?}",
+                bad_id
+            );
+
+            let result = reg.record_propagation("q-001", bad_id, "2026-01-15T00:01:00Z");
+            assert!(
+                matches!(result, Err(QuarantineError { ref code, .. }) if code == ERR_QUARANTINE_INVALID_ID),
+                "expected ERR_QUARANTINE_INVALID_ID for node_id with control chars: {:?}",
+                bad_id
+            );
+        }
     }
 
     #[test]
