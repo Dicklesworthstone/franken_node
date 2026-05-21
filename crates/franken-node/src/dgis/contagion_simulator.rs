@@ -24,8 +24,31 @@
 //!   returns a typed [`SimulatorError`].
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::contagion_graph::{ContagionGraph, NodeId};
+
+/// Process-wide counter incremented every time
+/// [`step`] runs to completion (successfully or not, but only after
+/// `config.validate()` passes — we count attempted simulation work,
+/// not rejected configs). Exposed via [`simulation_steps_total`].
+///
+/// Per bd-98xo5.5.5, the ratio
+/// `franken_node_dgis_simulation_steps_total /
+/// franken_node_dgis_graph_constructions_total` tells the perf team
+/// whether construction or simulation dominates production load. A
+/// ratio near 1 means construction dominates (matching the round-2
+/// integration-test reading); a ratio above 100 means simulation
+/// dominates and the NodeId interning work proposed under bd-98xo5.5
+/// is well-targeted.
+static SIMULATION_STEPS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Read the process-wide DGIS simulation-step counter. Used by the ops
+/// metric renderer to emit `franken_node_dgis_simulation_steps_total`.
+#[must_use]
+pub fn simulation_steps_total() -> u64 {
+    SIMULATION_STEPS_TOTAL.load(Ordering::Relaxed)
+}
 
 /// Hard ceiling on `SimulatorConfig.max_steps`. Empirically the campaigns we
 /// care about (xz-style, dependency-confusion, typosquat) converge in well
@@ -238,6 +261,10 @@ pub fn step(
     config: &SimulatorConfig,
 ) -> Result<InfectionState, SimulatorError> {
     config.validate()?;
+    // Count attempted simulation work for bd-98xo5.5.5 perf-budget telemetry.
+    // Placed AFTER `config.validate()` so we don't count rejected-config
+    // calls that never touched graph state.
+    SIMULATION_STEPS_TOTAL.fetch_add(1, Ordering::Relaxed);
 
     // Pre-compute the in-edges for each node so we can scan "infected sources
     // pointing at me" in a single pass per node. Building this map per step
@@ -436,6 +463,47 @@ mod tests {
 
     fn id(s: &str) -> NodeId {
         s.to_string()
+    }
+
+    /// Regression for bd-98xo5.5.5: every successful `step` invocation
+    /// (i.e. one whose `config.validate()` passes) MUST increment
+    /// `franken_node_dgis_simulation_steps_total` by exactly 1. A
+    /// rejected-config call must NOT increment the counter, so the
+    /// ratio against the graph-construction counter stays a faithful
+    /// measure of attempted simulation work. Snapshot before/after to
+    /// stay robust against parallel test schedulers.
+    #[test]
+    fn simulation_steps_total_increments_only_on_validated_step_bd98xo5_5_5() {
+        let graph = linear_chain(7, 3, 0.5);
+        let state = InfectionState::new(&[id("n0")]);
+        let valid_config = SimulatorConfig {
+            max_steps: 4,
+            infection_threshold: 0.5,
+            decay_factor: 0.5,
+            seed: 11,
+        };
+
+        let baseline = simulation_steps_total();
+        let _ = step(&graph, &state, &valid_config).expect("validated step succeeds");
+        let after_valid = simulation_steps_total();
+        assert!(
+            after_valid >= baseline + 1,
+            "validated step must bump counter; baseline={baseline}, after={after_valid}"
+        );
+
+        let invalid_config = SimulatorConfig {
+            // NaN infection_threshold is rejected by validate().
+            max_steps: 4,
+            infection_threshold: f64::NAN,
+            decay_factor: 0.5,
+            seed: 11,
+        };
+        let _ = step(&graph, &state, &invalid_config).expect_err("validate rejects NaN");
+        let after_invalid = simulation_steps_total();
+        assert_eq!(
+            after_invalid, after_valid,
+            "rejected-config step must NOT bump counter; after_valid={after_valid}, after_invalid={after_invalid}"
+        );
     }
 
     fn linear_chain(seed: u64, n: usize, weight: f64) -> ContagionGraph {

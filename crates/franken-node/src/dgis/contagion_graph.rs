@@ -25,6 +25,28 @@
 //! 5. verification gate script + evidence JSON
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Process-wide counter incremented every time a `ContagionGraph` is
+/// constructed via `ContagionGraph::new` (which is the single entry point
+/// used by both direct callers and `ContagionGraph::generate_deterministic`).
+///
+/// Exposed via [`graph_constructions_total`] for the franken-node ops
+/// metric renderer. Counts since process start; not reset on snapshot.
+/// Per bd-98xo5.5.5, the ratio of
+/// `franken_node_dgis_simulation_steps_total /
+/// franken_node_dgis_graph_constructions_total` tells the perf team
+/// whether construction or simulation dominates production load, which
+/// in turn validates the effort budget for the NodeId interning work
+/// proposed under bd-98xo5.5.
+static GRAPH_CONSTRUCTIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Read the process-wide DGIS graph-construction counter. Used by the
+/// ops metric renderer to emit `franken_node_dgis_graph_constructions_total`.
+#[must_use]
+pub fn graph_constructions_total() -> u64 {
+    GRAPH_CONSTRUCTIONS_TOTAL.load(Ordering::Relaxed)
+}
 
 /// Stable, human-readable identifier for a node in the dependency graph.
 ///
@@ -157,6 +179,10 @@ impl ContagionGraph {
     /// that build the graph node-by-node (used by campaign-profile loaders
     /// in sub-task 3).
     pub fn new(seed: u64) -> Self {
+        // Track graph constructions for the bd-98xo5.5.5 perf-budget
+        // measurement. `generate_deterministic` goes through this
+        // constructor so a single counter site covers both entry points.
+        GRAPH_CONSTRUCTIONS_TOTAL.fetch_add(1, Ordering::Relaxed);
         Self {
             nodes: Vec::new(),
             edges: BTreeMap::new(),
@@ -380,6 +406,33 @@ impl SplitMix64 {
 mod tests {
     use super::*;
 
+    /// Regression for bd-98xo5.5.5: `ContagionGraph::new` and
+    /// `ContagionGraph::generate_deterministic` (which delegates to
+    /// `new`) MUST both increment
+    /// `franken_node_dgis_graph_constructions_total` by exactly 1 each
+    /// time they run, so the ratio metric documented above accurately
+    /// reflects production load. Snapshot the counter before/after to
+    /// stay robust against parallel test schedulers running in the same
+    /// process address space.
+    #[test]
+    fn graph_constructions_total_increments_on_new_and_generate_deterministic_bd98xo5_5_5() {
+        let baseline = graph_constructions_total();
+
+        let _direct = ContagionGraph::new(0xC0FFEE);
+        let after_new = graph_constructions_total();
+        assert!(
+            after_new >= baseline + 1,
+            "ContagionGraph::new must bump the construction counter; baseline={baseline}, after={after_new}"
+        );
+
+        let _generated = ContagionGraph::generate_deterministic(0xBAD_F00D, 4, 0.25);
+        let after_generate = graph_constructions_total();
+        assert!(
+            after_generate >= after_new + 1,
+            "generate_deterministic must bump the construction counter via Self::new; after_new={after_new}, after_generate={after_generate}"
+        );
+    }
+
     #[test]
     fn same_seed_produces_identical_graph() {
         let a = ContagionGraph::generate_deterministic(0xDEAD_BEEF, 16, 0.25);
@@ -581,10 +634,7 @@ mod tests {
         // Node IDs exceeding MAX_NODE_ID_LEN must be rejected to prevent DoS
         // via multi-megabyte strings exhausting memory or slowing operations.
         let overlong = "x".repeat(MAX_NODE_ID_LEN + 1);
-        assert_eq!(
-            validate_node_id(&overlong),
-            Err(overlong_node_id_error())
-        );
+        assert_eq!(validate_node_id(&overlong), Err(overlong_node_id_error()));
         let rejected = match validate_node_id(&overlong) {
             Err(GraphError::InvalidNodeId(rejected)) => rejected,
             other => {
@@ -607,7 +657,10 @@ mod tests {
         // Graph add_node must silently reject overlong IDs
         let mut g = ContagionGraph::new(31);
         g.add_node(overlong.clone());
-        assert!(g.nodes().is_empty(), "overlong node id must not enter graph");
+        assert!(
+            g.nodes().is_empty(),
+            "overlong node id must not enter graph"
+        );
 
         // Exactly MAX_NODE_ID_LEN should be accepted
         let at_limit = "y".repeat(MAX_NODE_ID_LEN);
