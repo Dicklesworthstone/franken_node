@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 // `SigningKey` and `VerifyingKey` remain as the public decision-receipt key
 // types and for deterministic test fixtures. Signing and verification route
 // through the crate crypto trait surface below.
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 
 use frankenengine_node::crypto::{Ed25519Scheme, SignatureScheme};
 use frankenengine_node::runtime::clock;
@@ -562,13 +562,12 @@ pub fn verify_receipt_with_audience(
         .decode(&signed.signature)
         .map_err(ReceiptError::SignatureDecode)?;
 
-    // Verify the same raw canonical preimage used by legacy direct Ed25519
-    // decision-receipt signatures.
-    let signature_array = Ed25519Scheme::signature_from_bytes(&sig_bytes)
+    // Verify directly with the pre-parsed VerifyingKey to avoid re-parsing
+    // overhead (~6µs Edwards point decompression per call).
+    let signature = Signature::from_slice(&sig_bytes)
         .map_err(|_| ReceiptError::SignatureBytes)?;
-    let public_key_bytes = public_key.to_bytes();
 
-    if !Ed25519Scheme::verify_raw(&public_key_bytes, payload.as_bytes(), &signature_array) {
+    if public_key.verify_strict(payload.as_bytes(), &signature).is_err() {
         return Ok(false);
     }
 

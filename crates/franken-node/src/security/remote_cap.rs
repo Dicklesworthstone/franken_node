@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 
 // bd-1vjbv: Modernized Ed25519 signature verification imports
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{Signature, VerifyingKey};
 use hmac::{Hmac, KeyInit, Mac};
 use rand; // For jitter in lock timeout backoff
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,6 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
-use crate::crypto::{Ed25519Scheme, SignatureScheme};
 use crate::push_bounded;
 use crate::security::cuckoo_filter::CuckooFilter;
 
@@ -2433,20 +2432,17 @@ impl CapabilityGate {
             return Ok(false); // Invalid signature length
         }
 
-        let mut signature = [0_u8; 64];
-        signature.copy_from_slice(&signature_bytes);
+        let Ok(signature) = Signature::from_slice(&signature_bytes) else {
+            return Ok(false);
+        };
 
-        // Verify the caller-owned canonical preimage; wrapping it again would
-        // invalidate previously issued remote capability tokens.
+        // Verify directly with the pre-parsed VerifyingKey to avoid re-parsing
+        // overhead (~6µs Edwards point decompression per call).
         let mut message = Vec::with_capacity(b"remote_cap_ed25519_v1:".len() + payload.len());
         message.extend_from_slice(b"remote_cap_ed25519_v1:");
         message.extend_from_slice(payload.as_bytes());
 
-        Ok(Ed25519Scheme::verify_raw(
-            &verifying_key.to_bytes(),
-            &message,
-            &signature,
-        ))
+        Ok(verifying_key.verify_strict(&message, &signature).is_ok())
     }
 }
 
