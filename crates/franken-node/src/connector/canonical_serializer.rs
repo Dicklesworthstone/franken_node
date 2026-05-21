@@ -6060,4 +6060,200 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         let bytes = canonical_bytes(&finite);
         assert_eq!(bytes, b"1.5");
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // bd-98xo5.4.3: proptest property — streaming encoder MUST be
+    // byte-equal to the reference (old) encoder for every random
+    // Value tree AND for every targeted edge-case category the bead
+    // enumerated. A divergence here invalidates the bd-98xo5.4.2
+    // optimisation: trust_card hashes computed downstream would
+    // mismatch their stored golden values.
+    //
+    // Persistent regressions land at
+    // crates/franken-node/proptest-regressions/connector/canonical_serializer.txt.
+    // ─────────────────────────────────────────────────────────────
+
+    fn json_leaf_strategy() -> proptest::strategy::BoxedStrategy<serde_json::Value> {
+        use proptest::prelude::*;
+        // Mix of leaf types that exercise the canonical primitive paths.
+        // i64/u64 boundary integers are covered by any::<i64>() +
+        // any::<u64>() which include MAX / MIN. Strings include control
+        // bytes, ASCII, non-ASCII, and escape-required characters.
+        prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::Bool),
+            any::<i64>().prop_map(|n| serde_json::Value::Number(n.into())),
+            any::<u64>().prop_map(|n| serde_json::Value::Number(n.into())),
+            "[a-zA-Z0-9 \\\\\"\\t\\n\\r\\x00\\x01\\x1f]{0,64}".prop_map(serde_json::Value::String),
+            // Unicode-heavy strings to exercise multi-byte UTF-8 + RFC 8259
+            // \\uXXXX escape sequences for non-BMP characters.
+            "[\u{4e00}-\u{4eff}\u{ac00}-\u{acff}\u{0600}-\u{06ff}]{0,16}"
+                .prop_map(serde_json::Value::String),
+        ]
+        .boxed()
+    }
+
+    fn json_value_strategy() -> proptest::strategy::BoxedStrategy<serde_json::Value> {
+        use proptest::prelude::*;
+        json_leaf_strategy()
+            .prop_recursive(
+                4,  // depth ≤ 4 per bead spec
+                64, // total nodes per sample
+                12, // branch factor ≤ 12 per bead spec
+                |leaf| {
+                    prop_oneof![
+                        prop::collection::vec(leaf.clone(), 0..12)
+                            .prop_map(serde_json::Value::Array),
+                        // ASCII-keyed objects covering anagram cases like "ab"/"ba".
+                        prop::collection::hash_map("[a-z]{1,12}", leaf.clone(), 0..12).prop_map(
+                            |m| {
+                                let mut obj = serde_json::Map::new();
+                                for (k, v) in m {
+                                    obj.insert(k, v);
+                                }
+                                serde_json::Value::Object(obj)
+                            }
+                        ),
+                        // Non-ASCII-keyed objects covering the bead's
+                        // 确保 / 한국어 / العربية edge case.
+                        prop::collection::hash_map(
+                            "[\u{4e00}-\u{4eff}\u{ac00}-\u{acff}\u{0600}-\u{06ff}]{1,4}",
+                            leaf,
+                            0..6,
+                        )
+                        .prop_map(|m| {
+                            let mut obj = serde_json::Map::new();
+                            for (k, v) in m {
+                                obj.insert(k, v);
+                            }
+                            serde_json::Value::Object(obj)
+                        }),
+                    ]
+                },
+            )
+            .boxed()
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 256,
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::WithSource("regressions")
+            )),
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn prop_streaming_encoder_byte_equal_to_old(value in json_value_strategy()) {
+            let new_bytes = canonical_bytes(&value);
+            let old_bytes = old_canonicalize_then_serialize(value);
+            proptest::prop_assert_eq!(new_bytes, old_bytes);
+        }
+    }
+
+    // Targeted edge-case tests for the bead's enumerated cases. These
+    // pin specific structural shapes that randomised generation may not
+    // reach reliably within 256 cases.
+
+    #[test]
+    fn streaming_canonical_value_handles_nested_empty_objects() {
+        // Bead edge case: {"a":{"b":{}}}.
+        let value = serde_json::json!({"a": {"b": {}}});
+        assert_eq!(
+            canonical_bytes(&value),
+            old_canonicalize_then_serialize(value.clone())
+        );
+    }
+
+    #[test]
+    fn streaming_canonical_value_handles_key_anagrams() {
+        // Bead edge case: anagram keys "ab", "ba" — they sort
+        // differently and must end up at the canonical positions.
+        let mut map = serde_json::Map::new();
+        map.insert("ba".into(), serde_json::Value::Number(1.into()));
+        map.insert("ab".into(), serde_json::Value::Number(2.into()));
+        let value = serde_json::Value::Object(map);
+        assert_eq!(
+            canonical_bytes(&value),
+            old_canonicalize_then_serialize(value.clone())
+        );
+        // Pin the actual bytes — sorted "ab" before "ba".
+        assert_eq!(
+            std::str::from_utf8(&canonical_bytes(&value)).unwrap(),
+            r#"{"ab":2,"ba":1}"#
+        );
+    }
+
+    #[test]
+    fn streaming_canonical_value_handles_unicode_keys() {
+        // Bead edge case: 确保 / 한국어 / العربية.
+        let value = serde_json::json!({
+            "确保": 1,
+            "한국어": 2,
+            "العربية": 3,
+            "ascii": 4,
+        });
+        assert_eq!(
+            canonical_bytes(&value),
+            old_canonicalize_then_serialize(value.clone())
+        );
+    }
+
+    #[test]
+    fn streaming_canonical_value_handles_all_escape_categories() {
+        // Bead edge case: strings covering "all 256 escape categories".
+        // Strictly there are ~8 explicit JSON escapes (\", \\, \/, \b,
+        // \f, \n, \r, \t) plus \\uXXXX for any control byte. We
+        // construct a string covering ASCII control bytes 0x00..=0x1f,
+        // the explicit escapes, and ASCII printable, plus a handful of
+        // non-ASCII characters (BMP + non-BMP).
+        let mut s = String::new();
+        for code in 0u32..=0x7f {
+            if let Some(c) = char::from_u32(code) {
+                s.push(c);
+            }
+        }
+        s.push('\u{00a0}'); // no-break space
+        s.push('\u{2028}'); // line separator (escape per RFC 7159 erratum 4180)
+        s.push('\u{2029}'); // paragraph separator
+        s.push('\u{1f600}'); // emoji (non-BMP)
+        let value = serde_json::Value::String(s);
+        assert_eq!(
+            canonical_bytes(&value),
+            old_canonicalize_then_serialize(value.clone())
+        );
+    }
+
+    #[test]
+    fn streaming_canonical_value_handles_i64_u64_boundary_numbers() {
+        // Bead edge case: numbers at i64 / u64 boundary.
+        let cases: &[serde_json::Value] = &[
+            serde_json::Value::Number(i64::MIN.into()),
+            serde_json::Value::Number(i64::MAX.into()),
+            serde_json::Value::Number(u64::MAX.into()),
+            serde_json::Value::Number(0_i64.into()),
+            serde_json::Value::Number(0_u64.into()),
+            serde_json::Value::Number((-1_i64).into()),
+        ];
+        for case in cases {
+            assert_eq!(
+                canonical_bytes(case),
+                old_canonicalize_then_serialize(case.clone()),
+                "byte mismatch on boundary number {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_canonical_value_handles_deeply_nested_empties() {
+        // Stress: depth-8 nested empty objects + arrays. Pins the
+        // recursion path doesn't accumulate divergence with depth.
+        let value = serde_json::json!({
+            "a": {"a": {"a": {"a": {"a": {"a": {"a": [{}, []]}}}}}}
+        });
+        assert_eq!(
+            canonical_bytes(&value),
+            old_canonicalize_then_serialize(value.clone())
+        );
+    }
 }
