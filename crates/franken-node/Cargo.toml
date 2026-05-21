@@ -399,6 +399,10 @@ name = "replay_bundle_adversarial_fuzz"
 path = "tests/replay_bundle_adversarial_fuzz.rs"
 
 [[test]]
+name = "replay_bundle_byte_counter_no_vec_alloc"
+path = "tests/replay_bundle_byte_counter_no_vec_alloc.rs"
+
+[[test]]
 name = "spec_derived_fuzz_seeds"
 path = "tests/spec_derived_fuzz_seeds.rs"
 required-features = ["test-support"]

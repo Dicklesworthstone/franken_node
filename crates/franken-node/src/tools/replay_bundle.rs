@@ -4369,4 +4369,174 @@ mod tests {
         );
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // bd-98xo5.6.3: Comprehensive coverage of ByteCounter — the
+    // production no-allocation byte counter that backs
+    // canonical_json_len. The 1.83-2.07× speedup the bench reports
+    // (round-1 criterion artefacts) hinges on this struct's
+    // io::Write impl staying allocation-free; the tests below pin
+    // the byte-counting contract and the overflow semantics.
+    // ─────────────────────────────────────────────────────────────
+
+    use std::io::Write as _;
+
+    #[test]
+    fn byte_counter_io_write_returns_correct_size_zero_writes() {
+        // Counter starts at 0 and never increments without a write.
+        let counter = ByteCounter::default();
+        assert_eq!(counter.len, 0);
+        assert_eq!(counter.write_calls, 0);
+    }
+
+    #[test]
+    fn byte_counter_io_write_returns_correct_size_single_write() {
+        // A single 17-byte write must report len == 17 and bump
+        // write_calls to 1. The return value from write() must
+        // equal the input length (io::Write contract).
+        let mut counter = ByteCounter::default();
+        let buf = [0xAB_u8; 17];
+        let written = counter.write(&buf).expect("write must succeed");
+        assert_eq!(written, 17);
+        assert_eq!(counter.len, 17);
+        assert_eq!(counter.write_calls, 1);
+    }
+
+    #[test]
+    fn byte_counter_io_write_returns_correct_size_multiple_writes() {
+        // Three writes summing to 100. Pin the additive semantics —
+        // a regression that overwrote `len` instead of adding would
+        // pass the single-write test but fail here.
+        let mut counter = ByteCounter::default();
+        counter.write(&[0u8; 30]).expect("write 30 must succeed");
+        counter.write(&[0u8; 45]).expect("write 45 must succeed");
+        counter.write(&[0u8; 25]).expect("write 25 must succeed");
+        assert_eq!(counter.len, 100);
+        assert_eq!(counter.write_calls, 3);
+    }
+
+    #[test]
+    fn byte_counter_io_write_overflow_fails_loud() {
+        // bd-98xo5.6.3 spec lists this as
+        // `byte_counter_saturating_add_u64_max_input`, but the
+        // production code intentionally uses `checked_add` (not
+        // saturating) because a clamped byte count would silently
+        // corrupt downstream chunk-size accounting — see the comment
+        // above the ByteCounter struct definition. So the contract
+        // we actually pin is: overflow returns io::Error, not a
+        // saturated count. This matches the project's "fail loud on
+        // boundary-crossing arithmetic" pattern for byte-size fields.
+        let mut counter = ByteCounter {
+            len: usize::MAX - 5,
+            write_calls: 0,
+        };
+        let buf = [0u8; 10]; // 10 bytes > 5 → overflow.
+        let result = counter.write(&buf);
+        assert!(
+            result.is_err(),
+            "write that overflows usize must error, not saturate"
+        );
+        // The counter's internal state remains at the pre-write value
+        // (no partial update), so a caller catching the error can
+        // surface it without corrupted accounting.
+        assert_eq!(counter.len, usize::MAX - 5);
+    }
+
+    #[test]
+    fn byte_counter_io_write_flush_is_noop() {
+        // flush must return Ok and must not reset the counter.
+        // A regression that zeroed `len` on flush would silently
+        // truncate byte counts in code paths that flush before reading.
+        let mut counter = ByteCounter::default();
+        counter.write(&[0u8; 42]).expect("write must succeed");
+        let len_before_flush = counter.len;
+        let calls_before_flush = counter.write_calls;
+        counter.flush().expect("flush must succeed");
+        assert_eq!(counter.len, len_before_flush);
+        assert_eq!(counter.write_calls, calls_before_flush);
+    }
+
+    // ── bd-98xo5.6.3: property test ──
+    //
+    // For any JSON Value, the streaming counter must match the
+    // serialise-then-len value byte-for-byte. A regression in
+    // serde_json's write batching that drops bytes silently would
+    // surface here as a length mismatch on the shrunk failure seed.
+    //
+    // Persistent regressions land at
+    // crates/franken-node/proptest-regressions/replay_bundle/byte_counter.txt.
+
+    fn json_leaf_strategy() -> proptest::strategy::BoxedStrategy<serde_json::Value> {
+        use proptest::prelude::*;
+        prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::Bool),
+            any::<i64>().prop_map(|n| serde_json::Value::Number(n.into())),
+            "[a-zA-Z0-9 _.-]{0,32}".prop_map(serde_json::Value::String),
+        ]
+        .boxed()
+    }
+
+    fn json_value_strategy() -> proptest::strategy::BoxedStrategy<serde_json::Value> {
+        use proptest::prelude::*;
+        json_leaf_strategy()
+            .prop_recursive(
+                3,  // max recursion depth (kept shallow so 192 cases run fast)
+                32, // max total nodes per sample
+                8,  // branch factor at each recursive level
+                |leaf| {
+                    prop_oneof![
+                        prop::collection::vec(leaf.clone(), 0..8)
+                            .prop_map(serde_json::Value::Array),
+                        prop::collection::hash_map("[a-z]{1,8}", leaf, 0..8).prop_map(|m| {
+                            let mut obj = serde_json::Map::new();
+                            for (k, v) in m {
+                                obj.insert(k, v);
+                            }
+                            serde_json::Value::Object(obj)
+                        }),
+                    ]
+                },
+            )
+            .boxed()
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            // 192 cases keeps wall-time bounded while exploring the
+            // recursive JSON shape space densely. The fuzz harness
+            // owns broader exploration if it gets added in a follow-on.
+            cases: 192,
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::WithSource("regressions")
+            )),
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn prop_byte_counter_matches_to_vec_len(value in json_value_strategy()) {
+            // The streaming count MUST equal the materialised-Vec len
+            // for every JSON value. Any divergence here is a silent
+            // length-truncation bug that would corrupt SHA-256 hashes
+            // computed downstream over canonical JSON.
+            let serialised = serde_json::to_vec(&value)
+                .expect("to_vec must succeed for any serde_json::Value");
+            let mut counter = ByteCounter::default();
+            serde_json::to_writer(&mut counter, &value)
+                .expect("to_writer must succeed for any serde_json::Value");
+            proptest::prop_assert_eq!(serialised.len(), counter.len);
+            // write_calls > 1 is a streaming-vs-materialised contract:
+            // a regression to `to_vec(&v).unwrap().len()` would put
+            // write_calls at exactly 1 (the single write of the full
+            // buffer). Skip the assertion on null/single-byte values
+            // where serde_json may legitimately use a single write.
+            if serialised.len() >= 64 {
+                proptest::prop_assert!(
+                    counter.write_calls > 1,
+                    "streaming serialisation should issue multiple writes; got {} writes for {} bytes",
+                    counter.write_calls,
+                    serialised.len()
+                );
+            }
+        }
+    }
 }
