@@ -26,8 +26,8 @@
 
 use ed25519_dalek::SigningKey;
 use frankenengine_node::security::threshold_sig::{
-    FailureReason, PartialSignature, PublicationArtifact, SignerKey, ThresholdConfig, sign,
-    verify_threshold,
+    FailureReason, PartialSignature, PreparsedThresholdConfig, PublicationArtifact, SignerKey,
+    ThresholdConfig, sign, verify_threshold, verify_threshold_preparsed,
 };
 use proptest::prelude::*;
 use sha2::{Digest, Sha256};
@@ -407,6 +407,59 @@ proptest! {
             connector_replay.valid_signatures,
             0,
             "every cross-connector signature must be rejected"
+        );
+    }
+
+    /// Property 8 (bd-98xo5.1.4): verify_threshold and verify_threshold_preparsed
+    /// produce byte-identical VerifyResult for any valid input within the production
+    /// envelope (signers 1..=64, threshold 1..=n, content up to 4 KiB).
+    #[test]
+    fn preparsed_path_returns_identical_verify_result(
+        k in 1_u32..=8_u32,
+        n_offset in 0_u32..=8_u32,
+        m in 0_usize..=10,
+        content_seed in any::<u64>(),
+    ) {
+        let n = k.saturating_add(n_offset).max(k);
+        let quorum = build_quorum(b"preparsed-parity", k, n);
+        let content_hash = format!("parity-{content_seed:016x}");
+        let indices: Vec<usize> = (0..m.min(n as usize)).collect();
+
+        let signatures = sign_with_indices(&quorum, &content_hash, &indices);
+        let artifact = make_artifact(&content_hash, signatures);
+
+        let preparsed = PreparsedThresholdConfig::from_config(quorum.config.clone())
+            .expect("valid config must parse");
+
+        let baseline = verify_threshold(&quorum.config, &artifact, "parity-trace", "ts");
+        let optimized = verify_threshold_preparsed(&preparsed, &artifact, "parity-trace", "ts");
+
+        prop_assert_eq!(
+            baseline.verified,
+            optimized.verified,
+            "verified field must match: baseline={}, preparsed={}",
+            baseline.verified,
+            optimized.verified
+        );
+        prop_assert_eq!(
+            baseline.valid_signatures,
+            optimized.valid_signatures,
+            "valid_signatures must match"
+        );
+        prop_assert_eq!(
+            baseline.failure_reason,
+            optimized.failure_reason,
+            "failure_reason must match"
+        );
+        prop_assert_eq!(
+            baseline.artifact_id,
+            optimized.artifact_id,
+            "artifact_id must match"
+        );
+        prop_assert_eq!(
+            baseline.trace_id,
+            optimized.trace_id,
+            "trace_id must match"
         );
     }
 }
