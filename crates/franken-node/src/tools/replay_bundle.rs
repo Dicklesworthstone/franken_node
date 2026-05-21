@@ -2479,15 +2479,36 @@ pub fn canonical_json_len(value: &Value) -> Result<usize, ReplayBundleError> {
     Ok(counter.len)
 }
 
+/// Diagnostic variant of [`canonical_json_len`] returning
+/// `(byte_count, write_call_count)`. The second value is the number of
+/// `io::Write::write` invocations `serde_json::to_writer` issued against the
+/// internal [`ByteCounter`]; `write_call_count > 1` for non-trivial values
+/// proves the byte count was computed via streaming rather than via an
+/// intermediate `Vec<u8>` materialisation. Used by regression tests to fail
+/// loud if `canonical_json_len` is reverted to
+/// `serde_json::to_vec(v)?.len()` — a naive revert would still pass the
+/// byte-equality invariant but lose the 1.83-2.07× speedup the bench
+/// reports (round-1
+/// `tests/artifacts/perf/20260520T214003Z_franken_node_perf/criterion_raw/`).
+pub fn canonical_json_streaming_stats(value: &Value) -> Result<(usize, usize), ReplayBundleError> {
+    let mut counter = ByteCounter::default();
+    serde_json::to_writer(&mut counter, value)?;
+    Ok((counter.len, counter.write_calls))
+}
+
 /// Production analog of the bench's `streaming_counter` variant in
 /// `benches/replay_bundle_gzip_bench.rs`. `io::Write` impl that counts bytes
 /// without storing them. Uses `checked_add` (fail-loud on overflow) rather
 /// than `saturating_add` because a clamped length here would silently corrupt
 /// downstream chunk-size accounting — overflow is a genuine error, not a
-/// benign counter boundary.
+/// benign counter boundary. The `write_calls` field is bumped via
+/// `saturating_add` because hitting `usize::MAX` write invocations is not a
+/// data-correctness boundary (the byte count would have errored long before
+/// that on `len`'s `checked_add`).
 #[derive(Default)]
 pub(crate) struct ByteCounter {
     pub(crate) len: usize,
+    pub(crate) write_calls: usize,
 }
 
 impl std::io::Write for ByteCounter {
@@ -2496,6 +2517,7 @@ impl std::io::Write for ByteCounter {
             .len
             .checked_add(buf.len())
             .ok_or_else(|| std::io::Error::other("canonical JSON length exceeds usize"))?;
+        self.write_calls = self.write_calls.saturating_add(1);
         Ok(buf.len())
     }
 
@@ -4346,4 +4368,5 @@ mod tests {
             error_msg4
         );
     }
+
 }

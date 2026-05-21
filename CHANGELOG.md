@@ -307,6 +307,20 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
   `crates/franken-node/Cargo.toml`.
 - ~15 dedicated `perf(threshold-sig)` commits and ~12 `perf(replay-bundle)`
   commits sharpened the two highest-volume verification surfaces.
+- **Replay-bundle streaming JSON-size measurement** (bd-98xo5.6.1, T6.1):
+  promoted `canonical_json_len` from internal helper to a public streaming
+  byte-counter that skips the intermediate `Vec<u8>` allocation
+  `serde_json::to_vec(value)?.len()` would have produced. Round-1
+  perf-bench measurements
+  (`tests/artifacts/perf/20260520T214003Z_franken_node_perf/criterion_raw/replay_bundle_gzip.txt`)
+  report a 1.83-2.07× speedup over the `to_vec`-based variant at every
+  event-count (10/100/1000), held across the bench's `streaming_counter`
+  benchmark which now invokes production code directly rather than a
+  divergent local reimplementation. Regression-guarded by
+  `canonical_json_len_streams_rather_than_materialising_a_vec` (bd-98xo5.6.2,
+  T6.2) which inspects the internal `write_calls` counter via
+  `canonical_json_streaming_stats` and fails loud if a future patch reverts
+  the function to the buffered shape.
 
 ### Testing
 

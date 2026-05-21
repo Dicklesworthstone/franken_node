@@ -9,8 +9,8 @@
 
 use frankenengine_node::tools::replay_bundle::{
     EventType, RawEvent, ReplayBundle, ReplayBundleSigningMaterial, canonical_json_len,
-    generate_replay_bundle, read_bundle_from_path_with_trusted_key, sign_replay_bundle,
-    to_canonical_json, write_bundle_to_path_with_trusted_key,
+    canonical_json_streaming_stats, generate_replay_bundle, read_bundle_from_path_with_trusted_key,
+    sign_replay_bundle, to_canonical_json, write_bundle_to_path_with_trusted_key,
 };
 use proptest::prelude::{ProptestConfig, any};
 use rand::distributions::{Alphanumeric, DistString};
@@ -720,4 +720,64 @@ fn canonical_json_len_matches_buffered_serialization() {
             "fixture {idx}: streaming canonical_json_len returned {streaming} but buffered to_vec().len() returned {buffered} — chunk-planner relies on byte-identical agreement"
         );
     }
+}
+
+/// Regression for bd-98xo5.6.2 (T6.2): sentinel guard that fails loud if
+/// `canonical_json_len` is ever reverted to `serde_json::to_vec(v)?.len()`.
+/// The naive revert preserves the byte-equality invariant but loses the
+/// 1.83-2.07× streaming speedup, so this test inspects the internal
+/// `write_call_count` (exposed via `canonical_json_streaming_stats`): for a
+/// non-trivial value `serde_json::to_writer` issues many small writes against
+/// the `ByteCounter`, whereas a `Vec`-materialising revert would either route
+/// no calls through `ByteCounter` at all, or — if someone fed the Vec back
+/// through a single `write_all` — produce a single write equal to the full
+/// payload length. Either failure mode trips this assertion.
+#[test]
+fn canonical_json_len_streams_rather_than_materialising_a_vec() {
+    let payload = json!({
+        "incident_id": "INC-2026-05-20-0001",
+        "scope": "supply_chain",
+        "severity": "critical",
+        "events": (0_u32..32)
+            .map(|i| json!({
+                "sequence_number": i,
+                "timestamp": format!("2026-05-20T22:{:02}:00Z", i % 60),
+                "event_type": "external_signal",
+                "payload": {
+                    "scan_id": format!("scan-{:08x}", i.wrapping_mul(0x1234)),
+                    "indicators": (0_u32..8).map(|j| format!("ioc-{i}-{j}")).collect::<Vec<_>>(),
+                    "metadata": {
+                        "scanner_version": "2.1.0",
+                        "files_scanned": 100 + i,
+                        "duration_ms": 1500 + i,
+                    }
+                },
+            }))
+            .collect::<Vec<_>>(),
+    });
+
+    let (byte_count, write_calls) = canonical_json_streaming_stats(&payload)
+        .expect("streaming stats on representative payload should succeed");
+
+    let buffered_len = serde_json::to_vec(&payload)
+        .expect("to_vec on representative payload should succeed")
+        .len();
+    assert_eq!(
+        byte_count, buffered_len,
+        "streaming byte_count must match buffered to_vec().len()"
+    );
+
+    assert!(
+        write_calls >= 2,
+        "canonical_json_len must stream through serde_json::to_writer — observed {write_calls} \
+         write call(s) for a {byte_count}-byte payload; \
+         a regression to `serde_json::to_vec(v)?.len()` would either bypass ByteCounter entirely \
+         (write_calls == 0) or feed the buffered Vec back through write_all (write_calls == 1)"
+    );
+
+    assert!(
+        write_calls < byte_count,
+        "sanity: serde_json should batch many bytes per write call, \
+         observed write_calls={write_calls} for byte_count={byte_count}"
+    );
 }
