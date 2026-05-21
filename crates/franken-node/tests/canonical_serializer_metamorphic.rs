@@ -8,7 +8,9 @@
 use arbitrary::Arbitrary;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use frankenengine_node::connector::canonical_serializer::{CanonicalSerializer, TrustObjectType};
+use frankenengine_node::connector::canonical_serializer::{
+    CanonicalSerializer, TrustObjectType, canonical_bytes,
+};
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
@@ -699,5 +701,110 @@ proptest! {
                 object_type
             );
         }
+    }
+}
+
+/// Regression for bd-98xo5.4.3 (T4.3): the new streaming encoder
+/// [`canonical_bytes`] (shipped under bd-98xo5.4.2) must be byte-for-byte
+/// identical to the existing buffered encoder [`to_canonical_json`] across
+/// the full spread of representative JSON shapes. The streaming encoder is
+/// the production hot path going forward; the buffered encoder is the
+/// reference whose output every downstream HMAC + signature + replay-bundle
+/// signing operation has been calibrated against, so any drift between the
+/// two byte streams would invalidate canonical artifacts.
+///
+/// Mirrors the structure of `canonical_serializer_idempotence_property`:
+/// `arbitrary::Unstructured` over 200 fixed seeds drives both
+/// `ArbitraryJsonValue` (random JSON Value tree) and
+/// `ArbitraryTrustCardData` (synthetic TrustCard); each surviving fixture is
+/// serialized through both encoders and the resulting bytes are required to
+/// match exactly. Skips fixtures that exceed `serde_json::to_value`'s
+/// recursion budget (well-formed inputs only) so the comparison is between
+/// encoders, not between input validators.
+#[test]
+fn streaming_canonical_bytes_matches_to_canonical_json_byte_equality_bd98xo5_4_3() {
+    for i in 0..200_u64 {
+        let seed_bytes = i.to_le_bytes().repeat(128);
+        let mut unstructured = arbitrary::Unstructured::new(&seed_bytes);
+
+        if let Ok(arbitrary_json) = ArbitraryJsonValue::arbitrary(&mut unstructured) {
+            let json_value = arbitrary_json.into_json_value();
+
+            if let Ok(old_str) = to_canonical_json(&json_value) {
+                let new_bytes = canonical_bytes(&json_value);
+                let new_str = String::from_utf8(new_bytes).unwrap_or_else(|err| {
+                    panic!(
+                        "seed {i}: canonical_bytes produced non-UTF-8 output ({} bytes invalid): {err}",
+                        err.utf8_error().valid_up_to()
+                    )
+                });
+                assert_eq!(
+                    old_str, new_str,
+                    "seed {i}: streaming canonical_bytes diverged from to_canonical_json on JSON Value: {:?}",
+                    json_value
+                );
+            }
+        }
+
+        if let Ok(arbitrary_card_data) = ArbitraryTrustCardData::arbitrary(&mut unstructured) {
+            let trust_card = arbitrary_card_data.to_trust_card();
+            let card_value = match serde_json::to_value(&trust_card) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            if let Ok(old_str) = to_canonical_json(&trust_card) {
+                let new_bytes = canonical_bytes(&card_value);
+                let new_str = String::from_utf8(new_bytes).unwrap_or_else(|err| {
+                    panic!(
+                        "seed {i}: canonical_bytes produced non-UTF-8 output for TrustCard ({} bytes invalid): {err}",
+                        err.utf8_error().valid_up_to()
+                    )
+                });
+                assert_eq!(
+                    old_str, new_str,
+                    "seed {i}: streaming canonical_bytes diverged from to_canonical_json on TrustCard"
+                );
+            }
+        }
+    }
+}
+
+/// Companion regression for bd-98xo5.4.3 (T4.3): explicit edge-case
+/// fixtures covering the categories the bead description called out
+/// (empty objects, deeply-nested emptiness, escape categories, numeric
+/// boundaries, anagram keys, unicode keys). Even if the property loop
+/// above happens to miss one of these shapes for a given seed budget,
+/// these named cases pin them permanently.
+#[test]
+fn streaming_canonical_bytes_matches_to_canonical_json_edge_cases_bd98xo5_4_3() {
+    let fixtures: &[Value] = &[
+        Value::Null,
+        Value::Bool(true),
+        Value::Bool(false),
+        serde_json::json!({}),
+        serde_json::json!([]),
+        serde_json::json!({"a": {"b": {"c": {}}}}),
+        serde_json::json!({"escape": "\\\"\n\t\r\u{0000}\u{001f}backslash"}),
+        serde_json::json!({"emoji": "🌩️⚡🛡️", "cjk": "确保 한국어", "rtl": "العربية"}),
+        serde_json::json!({"ab": 1, "ba": 2, "aa": 3, "bb": 4}),
+        serde_json::json!({"i64_min": -9_223_372_036_854_775_808_i64, "u64_max_safe_in_i64": 9_223_372_036_854_775_807_i64}),
+        serde_json::json!([1, 2.5, "three", null, true, {"nested": [false, []]}]),
+        serde_json::json!({"deeply": {"nested": {"object": {"with": {"primitive": "leaf"}}}}}),
+        serde_json::json!({"확인": "한국어 key", "🔑": "emoji key", "العربية": "rtl key"}),
+    ];
+
+    for (idx, value) in fixtures.iter().enumerate() {
+        let old_str = to_canonical_json(value)
+            .unwrap_or_else(|err| panic!("fixture {idx}: to_canonical_json errored: {err:?}"));
+        let new_bytes = canonical_bytes(value);
+        let new_str = String::from_utf8(new_bytes).unwrap_or_else(|err| {
+            panic!("fixture {idx}: canonical_bytes produced non-UTF-8: {err}")
+        });
+        assert_eq!(
+            old_str, new_str,
+            "fixture {idx}: streaming canonical_bytes diverged from to_canonical_json on {:?}",
+            value
+        );
     }
 }
