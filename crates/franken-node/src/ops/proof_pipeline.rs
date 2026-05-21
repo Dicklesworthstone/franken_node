@@ -468,14 +468,22 @@ fn worker_is_degraded(worker: &RchWorkerReadiness) -> bool {
 }
 
 fn invalid_restart_request_reason(request: &ProofWorkerRestartRequest) -> Option<&'static str> {
-    if request.operator_id.trim().is_empty() || request.operator_id.contains('\0') {
+    if request.operator_id.trim().is_empty()
+        || request.operator_id.contains('\0')
+        || request.operator_id.chars().any(char::is_control)
+    {
         return Some("ERR_PROOF_RESTART_OPERATOR_REQUIRED");
     }
-    if request.reason.trim().is_empty() || request.reason.contains('\0') {
+    if request.reason.trim().is_empty()
+        || request.reason.contains('\0')
+        || request.reason.chars().any(char::is_control)
+    {
         return Some("ERR_PROOF_RESTART_REASON_REQUIRED");
     }
     if let ProofWorkerRestartTarget::WorkerId(worker_id) = &request.target
-        && (worker_id.trim().is_empty() || worker_id.contains('\0'))
+        && (worker_id.trim().is_empty()
+            || worker_id.contains('\0')
+            || worker_id.chars().any(char::is_control))
     {
         return Some("ERR_PROOF_RESTART_WORKER_REQUIRED");
     }
@@ -622,5 +630,73 @@ mod tests {
 
         assert!(!report.ok);
         assert_eq!(report.reason_code, "ERR_PROOF_RESTART_PERMISSION_DENIED");
+    }
+
+    #[test]
+    fn restart_rejects_control_chars_in_operator_id() {
+        for bad_id in ["ops\n-injected", "ops\r-cr", "ops\x1b[31m-ansi", "ops\t-tab"] {
+            let request = ProofWorkerRestartRequest {
+                operator_id: bad_id.to_string(),
+                operator_roles: vec!["pipeline_admin".to_string()],
+                target: ProofWorkerRestartTarget::AllWorkers,
+                reason: "outage drill".to_string(),
+                confirm: true,
+            };
+
+            let report = evaluate_worker_restart_request(
+                &input_with_running_proof(),
+                &request,
+                "trace-control-char",
+                now(),
+            );
+
+            assert!(
+                !report.ok,
+                "accepted operator_id with control char: {bad_id:?}"
+            );
+            assert_eq!(report.reason_code, "ERR_PROOF_RESTART_OPERATOR_REQUIRED");
+        }
+    }
+
+    #[test]
+    fn restart_rejects_control_chars_in_reason() {
+        let request = ProofWorkerRestartRequest {
+            operator_id: "ops-1".to_string(),
+            operator_roles: vec!["pipeline_admin".to_string()],
+            target: ProofWorkerRestartTarget::AllWorkers,
+            reason: "drill\nINJECTED_LOG_ENTRY".to_string(),
+            confirm: true,
+        };
+
+        let report = evaluate_worker_restart_request(
+            &input_with_running_proof(),
+            &request,
+            "trace-reason-injection",
+            now(),
+        );
+
+        assert!(!report.ok);
+        assert_eq!(report.reason_code, "ERR_PROOF_RESTART_REASON_REQUIRED");
+    }
+
+    #[test]
+    fn restart_rejects_control_chars_in_worker_id() {
+        let request = ProofWorkerRestartRequest {
+            operator_id: "ops-1".to_string(),
+            operator_roles: vec!["pipeline_admin".to_string()],
+            target: ProofWorkerRestartTarget::WorkerId("vmi\n-proof-1".to_string()),
+            reason: "outage drill".to_string(),
+            confirm: true,
+        };
+
+        let report = evaluate_worker_restart_request(
+            &input_with_running_proof(),
+            &request,
+            "trace-worker-injection",
+            now(),
+        );
+
+        assert!(!report.ok);
+        assert_eq!(report.reason_code, "ERR_PROOF_RESTART_WORKER_REQUIRED");
     }
 }
