@@ -24,8 +24,9 @@ use frankenengine_node::federation::atc_signal_extractor::{
     AtcLocalSignal, ExtractionAuditLog, ExtractionError, ExtractionPolicy, SignalKind, event_codes,
     extract_signal,
 };
-use serde_json::json;
-use std::collections::BTreeSet;
+use proptest::prelude::*;
+use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -59,6 +60,88 @@ fn sample_event(kind: &str, trace: &str, epoch: u64) -> serde_json::Value {
             "secret_token": "REDACT-ME",
         }
     })
+}
+
+fn fuzz_signal_kind(tag: u8) -> SignalKind {
+    match tag % 4 {
+        0 => SignalKind::AnomalyObservation,
+        1 => SignalKind::TrustCardDelta,
+        2 => SignalKind::RevocationHint,
+        _ => SignalKind::QuarantineEvent,
+    }
+}
+
+fn field_name_strategy() -> BoxedStrategy<String> {
+    proptest::string::string_regex("[a-z][a-z0-9_]{0,15}")
+        .expect("field-name regex is valid")
+        .boxed()
+}
+
+fn scalar_value_strategy() -> impl Strategy<Value = Value> {
+    prop_oneof![
+        Just(Value::Null),
+        any::<bool>().prop_map(Value::Bool),
+        (-1_000_000_i64..=1_000_000_i64).prop_map(|n| json!(n)),
+        "[A-Za-z0-9_:@./ -]{0,48}".prop_map(Value::String),
+    ]
+}
+
+fn policy_allowing(kind: SignalKind, redact_fields: Vec<String>) -> ExtractionPolicy {
+    let mut allowed_kinds = BTreeSet::new();
+    allowed_kinds.insert(kind);
+    ExtractionPolicy {
+        redact_fields,
+        max_payload_bytes: 4096,
+        allowed_kinds,
+    }
+}
+
+fn event_from_payload(
+    kind: SignalKind,
+    trace_id: &str,
+    source_epoch: u64,
+    contributor_pubkey_hex: &str,
+    payload: &BTreeMap<String, Value>,
+    reverse_payload_order: bool,
+) -> Value {
+    let mut payload_entries: Vec<_> = payload.iter().collect();
+    if reverse_payload_order {
+        payload_entries.reverse();
+    }
+    let mut payload_obj = Map::new();
+    for (field, value) in payload_entries {
+        payload_obj.insert(field.clone(), value.clone());
+    }
+
+    json!({
+        "event_type": kind.as_str(),
+        "trace_id": trace_id,
+        "source_epoch": source_epoch,
+        "contributor_pubkey_hex": contributor_pubkey_hex,
+        "payload": Value::Object(payload_obj),
+    })
+}
+
+fn scalar_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => Some("null".to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::String(value) => Some(value.clone()),
+        Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn expected_redacted_payload(
+    payload: &BTreeMap<String, Value>,
+    redact_fields: &[String],
+) -> BTreeMap<String, String> {
+    let redact: BTreeSet<&str> = redact_fields.iter().map(String::as_str).collect();
+    payload
+        .iter()
+        .filter(|(field, _)| !redact.contains(field.as_str()))
+        .filter_map(|(field, value)| scalar_to_string(value).map(|value| (field.clone(), value)))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +218,86 @@ fn public_extract_enforces_max_payload_bytes_fail_closed() {
     .expect_err("must reject");
     assert!(matches!(err, ExtractionError::PayloadTooLarge { .. }));
     assert_eq!(err.code(), event_codes::PAYLOAD_TOO_LARGE);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn fuzz_structured_signal_events_are_canonical_and_private(
+        kind_tag in any::<u8>(),
+        trace_id in "[A-Za-z0-9_:@./-]{1,64}",
+        source_epoch in any::<u64>(),
+        contributor_pubkey_hex in "[a-f0-9]{0,64}",
+        payload in prop::collection::btree_map(field_name_strategy(), scalar_value_strategy(), 0..=16),
+        generated_redactions in prop::collection::vec(field_name_strategy(), 0..=12),
+    ) {
+        let kind = fuzz_signal_kind(kind_tag);
+        let mut redact_fields = generated_redactions;
+        if let Some(first_payload_field) = payload.keys().next() {
+            redact_fields.push(first_payload_field.clone());
+        }
+
+        let policy = policy_allowing(kind, redact_fields.clone());
+        let event = event_from_payload(
+            kind,
+            &trace_id,
+            source_epoch,
+            &contributor_pubkey_hex,
+            &payload,
+            false,
+        );
+        let reordered_event = event_from_payload(
+            kind,
+            &trace_id,
+            source_epoch,
+            &contributor_pubkey_hex,
+            &payload,
+            true,
+        );
+
+        let signal = extract_signal(&event, &policy)
+            .map_err(|err| TestCaseError::fail(format!("extract failed: {err:?}")))?;
+        let repeated = extract_signal(&event, &policy)
+            .map_err(|err| TestCaseError::fail(format!("repeat extract failed: {err:?}")))?;
+        let reordered = extract_signal(&reordered_event, &policy)
+            .map_err(|err| TestCaseError::fail(format!("reordered extract failed: {err:?}")))?;
+        let mut reversed_policy = policy.clone();
+        reversed_policy.redact_fields.reverse();
+        let redaction_reordered = extract_signal(&event, &reversed_policy)
+            .map_err(|err| TestCaseError::fail(format!("redaction-order extract failed: {err:?}")))?;
+
+        prop_assert_eq!(&signal, &repeated);
+        prop_assert_eq!(&signal, &reordered);
+        prop_assert_eq!(&signal, &redaction_reordered);
+        prop_assert_eq!(signal.kind, kind);
+        prop_assert_eq!(signal.trace_id.as_str(), trace_id.as_str());
+        prop_assert_eq!(signal.source_epoch, source_epoch);
+        prop_assert_eq!(
+            signal.contributor_pubkey_hex.as_str(),
+            contributor_pubkey_hex.as_str()
+        );
+        let expected_payload = expected_redacted_payload(&payload, &redact_fields);
+        prop_assert_eq!(&signal.redacted_payload, &expected_payload);
+        for field in &redact_fields {
+            prop_assert!(!signal.redacted_payload.contains_key(field));
+        }
+        prop_assert_eq!(signal.signal_id.len(), 64);
+        prop_assert!(signal.signal_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        prop_assert_eq!(signal.payload_hash.len(), 64);
+        prop_assert!(signal.payload_hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+        let mut log = ExtractionAuditLog::new();
+        log.record_ok(&signal);
+        let entries = log.entries();
+        prop_assert_eq!(entries.len(), 1);
+        prop_assert_eq!(entries[0].signal_id.as_str(), signal.signal_id.as_str());
+        prop_assert_eq!(entries[0].trace_id.as_str(), signal.trace_id.as_str());
+        prop_assert_eq!(
+            entries[0].event_code.as_str(),
+            event_codes::SIGNAL_EXTRACTED
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
