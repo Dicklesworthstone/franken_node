@@ -1963,6 +1963,94 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_uniform_epoch_shift_preserves_reconciliation_shape() {
+        let epoch_shift = 10;
+        let time_shift = 10_000;
+        let mut baseline_local = TrustState::new(5);
+        let mut shifted_local = TrustState::new(5 + epoch_shift);
+        let mut baseline_remote = TrustState::new(5);
+        let mut shifted_remote = TrustState::new(5 + epoch_shift);
+
+        let (baseline_retained, _) = make_record_with_meta("retained", 5, 5_000, "node-a");
+        let (shifted_retained, _) =
+            make_record_with_meta("retained", 5 + epoch_shift, 5_000 + time_shift, "node-a");
+        let (baseline_incumbent, _) = make_record_with_meta("replace-me", 4, 4_000, "node-a");
+        let (shifted_incumbent, _) =
+            make_record_with_meta("replace-me", 4 + epoch_shift, 4_000 + time_shift, "node-a");
+        let (baseline_fresh, baseline_root) = make_record_with_meta("fresh", 5, 5_100, "node-b");
+        let (shifted_fresh, shifted_root) =
+            make_record_with_meta("fresh", 5 + epoch_shift, 5_100 + time_shift, "node-b");
+        let (baseline_replacement, _) = make_record_with_meta("replace-me", 6, 6_000, "node-z");
+        let (shifted_replacement, _) =
+            make_record_with_meta("replace-me", 6 + epoch_shift, 6_000 + time_shift, "node-z");
+        let (baseline_future, _) = make_record_with_meta("future", 7, 7_000, "node-c");
+        let (shifted_future, _) =
+            make_record_with_meta("future", 7 + epoch_shift, 7_000 + time_shift, "node-c");
+
+        assert!(baseline_local.insert(baseline_retained));
+        assert!(baseline_local.insert(baseline_incumbent));
+        assert!(shifted_local.insert(shifted_retained));
+        assert!(shifted_local.insert(shifted_incumbent));
+        for record in [baseline_fresh, baseline_replacement, baseline_future] {
+            assert!(baseline_remote.insert(record));
+        }
+        for record in [shifted_fresh, shifted_replacement, shifted_future] {
+            assert!(shifted_remote.insert(record));
+        }
+
+        let config = ReconciliationConfig {
+            max_delta_batch: 3,
+            epoch_tolerance: 1,
+            proof_required: false,
+            ..ReconciliationConfig::default()
+        };
+        let cancel = no_cancel();
+        let mut baseline_reconciler =
+            AntiEntropyReconciler::new(config.clone()).expect("baseline config should be valid");
+        let mut shifted_reconciler =
+            AntiEntropyReconciler::new(config).expect("shifted config should be valid");
+
+        let baseline_result = baseline_reconciler
+            .reconcile(
+                &mut baseline_local,
+                &baseline_remote,
+                &baseline_root,
+                &cancel,
+            )
+            .expect("baseline reconciliation should complete");
+        let shifted_result = shifted_reconciler
+            .reconcile(&mut shifted_local, &shifted_remote, &shifted_root, &cancel)
+            .expect("shifted reconciliation should complete");
+
+        assert_eq!(shifted_result.delta_size, baseline_result.delta_size);
+        assert_eq!(
+            shifted_result.records_accepted,
+            baseline_result.records_accepted
+        );
+        assert_eq!(
+            shifted_result.records_rejected,
+            baseline_result.records_rejected
+        );
+        assert_eq!(
+            sorted_record_ids(&shifted_local),
+            sorted_record_ids(&baseline_local)
+        );
+        for id in ["fresh", "replace-me", "retained"] {
+            let baseline = baseline_local
+                .get(id)
+                .expect("baseline record should be present");
+            let shifted = shifted_local
+                .get(id)
+                .expect("shifted record should be present");
+            assert_eq!(shifted.epoch, baseline.epoch + epoch_shift);
+            assert_eq!(shifted.recorded_at_ms, baseline.recorded_at_ms + time_shift);
+            assert_eq!(shifted.origin_node_id, baseline.origin_node_id);
+        }
+        assert!(baseline_local.get("future").is_none());
+        assert!(shifted_local.get("future").is_none());
+    }
+
+    #[test]
     fn test_epoch_tolerance_boundary_accepts_equal_limit_and_rejects_above() {
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
             epoch_tolerance: 2,
