@@ -766,6 +766,78 @@ fn run_queue_lifecycle_after_optional_preserving_reload(
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_drained_queue_lifecycle_after_optional_terminal_preserving_reload(
+    with_terminal_reload: bool,
+) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(
+            &task_classes::log_rotation(),
+            11_100,
+            "meta-terminal-active",
+        )
+        .expect("first task should occupy the lane");
+    let queued = queued_task_id_from(
+        scheduler
+            .assign_task(
+                &task_classes::log_rotation(),
+                11_101,
+                "meta-terminal-queued",
+            )
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    scheduler
+        .complete_task(
+            &active.task_id.to_string(),
+            11_110,
+            "meta-terminal-complete-active",
+        )
+        .expect("completion should promote queued task before terminal reload");
+    assert_eq!(
+        scheduler.active_task_ids(SchedulerLane::Background),
+        vec![queued.clone()]
+    );
+
+    scheduler
+        .complete_task(&queued, 11_120, "meta-terminal-complete-promoted")
+        .expect("promoted task should complete before terminal reload");
+
+    if with_terminal_reload {
+        let before_terminal_reload = queue_lifecycle_digest(&scheduler);
+        let audit_len = scheduler.audit_log().len();
+        scheduler
+            .reload_policy(reweighted_single_background_lane_policy())
+            .expect("terminal preserving reload should keep drained background lane");
+        assert_eq!(
+            scheduler
+                .policy()
+                .lane_configs
+                .get(SchedulerLane::Background.as_str())
+                .expect("background lane must survive reload")
+                .priority_weight,
+            25
+        );
+        assert!(
+            scheduler
+                .active_task_ids(SchedulerLane::Background)
+                .is_empty()
+        );
+        assert!(
+            scheduler
+                .queued_task_ids(SchedulerLane::Background)
+                .is_empty()
+        );
+        assert_eq!(scheduler.audit_log().len(), audit_len);
+        assert_eq!(queue_lifecycle_digest(&scheduler), before_terminal_reload);
+    }
+
+    queue_lifecycle_digest(&scheduler)
+}
+
 fn run_starvation_latch_lifecycle_with_probes(
     with_duplicate_starvation_check: bool,
     with_terminal_starvation_probes: bool,
@@ -1513,6 +1585,28 @@ fn metamorphic_aborted_queued_task_replay_is_terminal_lifecycle_idempotent() {
 fn metamorphic_preserving_hot_reload_keeps_background_queue_identity_and_promotion() {
     let baseline = run_queue_lifecycle_after_optional_preserving_reload(false);
     let reloaded = run_queue_lifecycle_after_optional_preserving_reload(true);
+
+    assert_eq!(reloaded, baseline);
+    assert_eq!(reloaded.active_count, 0);
+    assert_eq!(reloaded.queued_count, 0);
+    assert_eq!(reloaded.first_queued_at_ms, None);
+    assert_eq!(reloaded.completed_total, 2);
+    assert_eq!(reloaded.rejected_total, 1);
+    assert_eq!(reloaded.starvation_events, 0);
+    assert_eq!(
+        reloaded
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn metamorphic_terminal_preserving_hot_reload_retains_drained_lifecycle() {
+    let baseline = run_drained_queue_lifecycle_after_optional_terminal_preserving_reload(false);
+    let reloaded = run_drained_queue_lifecycle_after_optional_terminal_preserving_reload(true);
 
     assert_eq!(reloaded, baseline);
     assert_eq!(reloaded.active_count, 0);
