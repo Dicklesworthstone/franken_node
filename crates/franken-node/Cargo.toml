@@ -333,6 +333,11 @@ name = "connector_lifecycle_transitions"
 path = "../../tests/conformance/connector_lifecycle_transitions.rs"
 
 [[test]]
+name = "lease_coordinator_selection"
+path = "../../tests/conformance/lease_coordinator_selection.rs"
+required-features = ["control-plane"]
+
+[[test]]
 name = "connector_runtime_integration"
 path = "../../tests/integration/connector_runtime_integration.rs"
 
