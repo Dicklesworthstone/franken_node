@@ -508,3 +508,9 @@ name = "fuzz_witness_ref_validation"
 path = "fuzz_targets/fuzz_witness_ref_validation.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_validation_proof_economics"
+path = "fuzz_targets/fuzz_validation_proof_economics.rs"
+test = false
+doc = false
