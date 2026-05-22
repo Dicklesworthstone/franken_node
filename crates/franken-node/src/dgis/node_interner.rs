@@ -118,6 +118,12 @@ impl NodeInterner {
         Ok(NodeId::from_raw(id))
     }
 
+    /// Return the already-interned id for `s` without inserting it.
+    #[must_use]
+    pub fn get(&self, s: &str) -> Option<NodeId> {
+        self.from_str.get(s).copied().map(NodeId::from_raw)
+    }
+
     /// Look up the original string for a previously interned `NodeId`.
     /// Returns `None` if the id was not produced by this interner.
     #[must_use]
@@ -198,6 +204,16 @@ mod tests {
         let mut interner = NodeInterner::new();
         let id = interner.intern("pkg-foo").unwrap();
         assert_eq!(interner.resolve(id), Some("pkg-foo"));
+    }
+
+    #[test]
+    fn get_returns_existing_id_without_inserting() {
+        let mut interner = NodeInterner::new();
+        assert_eq!(interner.get("pkg-foo"), None);
+        let id = interner.intern("pkg-foo").unwrap();
+        assert_eq!(interner.get("pkg-foo"), Some(id));
+        assert_eq!(interner.get("pkg-bar"), None);
+        assert_eq!(interner.len(), 1);
     }
 
     #[test]

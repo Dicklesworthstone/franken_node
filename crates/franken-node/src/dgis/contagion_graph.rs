@@ -24,6 +24,7 @@
 //! 4. integration test in `tests/security/dgis_contagion_simulator.rs`
 //! 5. verification gate script + evidence JSON
 
+use super::node_interner::{NodeId as InternedNodeId, NodeInterner};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -48,11 +49,11 @@ pub fn graph_constructions_total() -> u64 {
     GRAPH_CONSTRUCTIONS_TOTAL.load(Ordering::Relaxed)
 }
 
-/// Stable, human-readable identifier for a node in the dependency graph.
+/// Stable, human-readable identifier used at public API boundaries.
 ///
-/// Using `String` (rather than a numeric id) keeps the simulator output
-/// directly auditable against package names and matches the format the
-/// later JSON campaign profiles will use.
+/// `ContagionGraph` stores membership and edge buckets as interned `u32` ids
+/// internally, but simulator/profile callers still pass and receive the
+/// original string form until the sibling DGIS migration beads move them.
 pub type NodeId = String;
 
 /// Validate a node id before it enters the graph.
@@ -60,7 +61,7 @@ pub type NodeId = String;
 /// Node ids are surfaced in fixture paths, reports, and operator output.
 /// Rejecting control characters at the graph boundary prevents downstream path
 /// and display layers from seeing split identifiers or injected output lines.
-pub fn validate_node_id(node: &NodeId) -> Result<(), GraphError> {
+pub fn validate_node_id(node: &str) -> Result<(), GraphError> {
     // Length check first and avoid cloning the attacker-controlled payload into
     // the error, otherwise overlong rejection still preserves an O(N) path.
     if node.len() > MAX_NODE_ID_LEN {
@@ -68,7 +69,7 @@ pub fn validate_node_id(node: &NodeId) -> Result<(), GraphError> {
     }
     let trimmed = node.trim();
     if trimmed.is_empty() || node != trimmed || node.chars().any(char::is_control) {
-        return Err(GraphError::InvalidNodeId(node.clone()));
+        return Err(GraphError::InvalidNodeId(node.to_string()));
     }
     Ok(())
 }
@@ -126,6 +127,13 @@ impl ContagionEdge {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct InternedContagionEdge {
+    target: InternedNodeId,
+    weight: f64,
+    edge_kind: EdgeKind,
+}
+
 /// Errors that the contagion graph can produce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphError {
@@ -149,8 +157,11 @@ pub enum GraphError {
 /// fed to [`ContagionGraph::generate_deterministic`]).
 #[derive(Debug, Clone)]
 pub struct ContagionGraph {
+    interner: NodeInterner,
     nodes: Vec<NodeId>,
-    edges: BTreeMap<NodeId, Vec<ContagionEdge>>,
+    nodes_internal: BTreeSet<InternedNodeId>,
+    edges: BTreeMap<InternedNodeId, Vec<InternedContagionEdge>>,
+    neighbor_views: BTreeMap<InternedNodeId, Vec<ContagionEdge>>,
     seed: u64,
 }
 
@@ -184,8 +195,11 @@ impl ContagionGraph {
         // constructor so a single counter site covers both entry points.
         GRAPH_CONSTRUCTIONS_TOTAL.fetch_add(1, Ordering::Relaxed);
         Self {
+            interner: NodeInterner::new(),
             nodes: Vec::new(),
+            nodes_internal: BTreeSet::new(),
             edges: BTreeMap::new(),
+            neighbor_views: BTreeMap::new(),
             seed,
         }
     }
@@ -201,6 +215,21 @@ impl ContagionGraph {
         &self.nodes
     }
 
+    fn member_id_for(&self, node: &str) -> Option<InternedNodeId> {
+        self.interner
+            .get(node)
+            .filter(|id| self.nodes_internal.contains(id))
+    }
+
+    fn unknown_target_for(&self, id: InternedNodeId) -> GraphError {
+        GraphError::UnknownTarget(
+            self.interner
+                .resolve(id)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("<interned-node:{}>", id.as_u32())),
+        )
+    }
+
     /// Add a node. Idempotent: re-adding an existing id is a no-op.
     /// Also a no-op once the graph already holds `MAX_NODES` distinct nodes —
     /// this preserves the fire-and-forget API while bounding memory against
@@ -209,12 +238,19 @@ impl ContagionGraph {
         if validate_node_id(&node).is_err() {
             return;
         }
-        if !self.edges.contains_key(&node) {
-            if self.nodes.len() >= MAX_NODES {
-                return;
-            }
-            self.nodes.push(node.clone());
-            self.edges.insert(node, Vec::new());
+        if self.member_id_for(&node).is_some() {
+            return;
+        }
+        if self.nodes.len() >= MAX_NODES {
+            return;
+        }
+        let Ok(node_id) = self.interner.intern(&node) else {
+            return;
+        };
+        if self.nodes_internal.insert(node_id) {
+            self.nodes.push(node);
+            self.edges.insert(node_id, Vec::new());
+            self.neighbor_views.insert(node_id, Vec::new());
         }
     }
 
@@ -231,14 +267,22 @@ impl ContagionGraph {
         if edge.weight > 1.0 {
             return Err(GraphError::WeightAboveOne);
         }
-        if !self.edges.contains_key(source) {
-            return Err(GraphError::UnknownTarget(source.clone()));
-        }
-        if !self.edges.contains_key(&edge.target) {
-            return Err(GraphError::UnknownTarget(edge.target.clone()));
-        }
-        let bucket = self.edges.entry(source.clone()).or_default();
-        crate::push_bounded(bucket, edge, MAX_EDGES_PER_NODE);
+        let source_id = self
+            .member_id_for(source)
+            .ok_or_else(|| GraphError::UnknownTarget(source.clone()))?;
+        let target_id = self
+            .member_id_for(&edge.target)
+            .ok_or_else(|| GraphError::UnknownTarget(edge.target.clone()))?;
+
+        let internal_edge = InternedContagionEdge {
+            target: target_id,
+            weight: edge.weight,
+            edge_kind: edge.edge_kind,
+        };
+        let bucket = self.edges.entry(source_id).or_default();
+        crate::push_bounded(bucket, internal_edge, MAX_EDGES_PER_NODE);
+        let view_bucket = self.neighbor_views.entry(source_id).or_default();
+        crate::push_bounded(view_bucket, edge, MAX_EDGES_PER_NODE);
         Ok(())
     }
 
@@ -246,7 +290,10 @@ impl ContagionGraph {
     /// nodes — callers should `validate()` first if they require strict
     /// membership semantics.
     pub fn neighbors(&self, node: &NodeId) -> &[ContagionEdge] {
-        self.edges.get(node).map(Vec::as_slice).unwrap_or(&[])
+        self.member_id_for(node)
+            .and_then(|node_id| self.neighbor_views.get(&node_id))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Total directed edge count.
@@ -269,12 +316,28 @@ impl ContagionGraph {
         }
         for node in &self.nodes {
             validate_node_id(node)?;
+            if self.member_id_for(node).is_none() {
+                return Err(GraphError::UnknownTarget(node.clone()));
+            }
         }
-        let known: BTreeSet<&NodeId> = self.edges.keys().collect();
-        for (source, bucket) in &self.edges {
+        let known = &self.nodes_internal;
+        for source_id in known {
+            let source = self
+                .interner
+                .resolve(*source_id)
+                .ok_or_else(|| self.unknown_target_for(*source_id))?;
+            validate_node_id(source)?;
+        }
+        for (source_id, bucket) in &self.edges {
+            if !known.contains(source_id) {
+                return Err(self.unknown_target_for(*source_id));
+            }
+            let source = self
+                .interner
+                .resolve(*source_id)
+                .ok_or_else(|| self.unknown_target_for(*source_id))?;
             validate_node_id(source)?;
             for edge in bucket {
-                validate_node_id(&edge.target)?;
                 if !edge.weight.is_finite() {
                     return Err(GraphError::NonFiniteWeight);
                 }
@@ -284,8 +347,20 @@ impl ContagionGraph {
                 if edge.weight > 1.0 {
                     return Err(GraphError::WeightAboveOne);
                 }
+                debug_assert!(matches!(
+                    edge.edge_kind,
+                    EdgeKind::DependencyImport
+                        | EdgeKind::MaintainerOverlap
+                        | EdgeKind::OrgOverlap
+                        | EdgeKind::NamespaceShadow
+                ));
+                let target = self
+                    .interner
+                    .resolve(edge.target)
+                    .ok_or_else(|| self.unknown_target_for(edge.target))?;
+                validate_node_id(target)?;
                 if !known.contains(&edge.target) {
-                    return Err(GraphError::UnknownTarget(edge.target.clone()));
+                    return Err(GraphError::UnknownTarget(target.to_string()));
                 }
             }
         }
@@ -354,8 +429,12 @@ impl ContagionGraph {
                     2 => EdgeKind::OrgOverlap,
                     _ => EdgeKind::NamespaceShadow,
                 };
-                let src = graph.nodes[src_idx].clone();
-                let target = graph.nodes[dst_idx].clone();
+                let Some(src) = graph.nodes.get(src_idx).cloned() else {
+                    continue;
+                };
+                let Some(target) = graph.nodes.get(dst_idx).cloned() else {
+                    continue;
+                };
                 // Both endpoints came from `graph.nodes`, so add_edge can
                 // only fail on the (already filtered) weight checks.
                 let _ = graph.add_edge(
@@ -405,6 +484,35 @@ impl SplitMix64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn push_corrupted_internal_edge(
+        graph: &mut ContagionGraph,
+        source: &str,
+        target: &str,
+        weight: f64,
+        edge_kind: EdgeKind,
+    ) -> Result<(), String> {
+        let source_id = graph
+            .member_id_for(source)
+            .ok_or_else(|| format!("expected source node `{source}`"))?;
+        let target_id = match graph.member_id_for(target) {
+            Some(id) => id,
+            None => graph
+                .interner
+                .intern(target)
+                .map_err(|err| format!("failed to intern target `{target}`: {err}"))?,
+        };
+        let bucket = graph
+            .edges
+            .get_mut(&source_id)
+            .ok_or_else(|| format!("expected node `{source}` bucket"))?;
+        bucket.push(InternedContagionEdge {
+            target: target_id,
+            weight,
+            edge_kind,
+        });
+        Ok(())
+    }
 
     /// Regression for bd-98xo5.5.5: `ContagionGraph::new` and
     /// `ContagionGraph::generate_deterministic` (which delegates to
@@ -489,15 +597,7 @@ mod tests {
         g.add_node("a".to_string());
         g.add_node("b".to_string());
         // Bypass the constructor to inject a NaN and ensure validate() catches it.
-        let bucket = g
-            .edges
-            .get_mut("a")
-            .ok_or_else(|| "expected node `a` bucket".to_string())?;
-        bucket.push(ContagionEdge {
-            target: "b".to_string(),
-            weight: f64::NAN,
-            edge_kind: EdgeKind::DependencyImport,
-        });
+        push_corrupted_internal_edge(&mut g, "a", "b", f64::NAN, EdgeKind::DependencyImport)?;
         assert_eq!(g.validate(), Err(GraphError::NonFiniteWeight));
         Ok(())
     }
@@ -506,15 +606,7 @@ mod tests {
     fn validate_rejects_unknown_target() -> Result<(), String> {
         let mut g = ContagionGraph::new(7);
         g.add_node("a".to_string());
-        let bucket = g
-            .edges
-            .get_mut("a")
-            .ok_or_else(|| "expected node `a` bucket".to_string())?;
-        bucket.push(ContagionEdge {
-            target: "ghost".to_string(),
-            weight: 0.5,
-            edge_kind: EdgeKind::OrgOverlap,
-        });
+        push_corrupted_internal_edge(&mut g, "a", "ghost", 0.5, EdgeKind::OrgOverlap)?;
         match g.validate() {
             Err(GraphError::UnknownTarget(t)) => assert_eq!(t, "ghost"),
             other => return Err(format!("expected UnknownTarget, got {other:?}")),
@@ -562,7 +654,6 @@ mod tests {
         let bad = "pkg\0shadow".to_string();
         let mut g = ContagionGraph::new(19);
         g.nodes.push(bad.clone());
-        g.edges.insert(bad.clone(), Vec::new());
         assert_eq!(g.validate(), Err(GraphError::InvalidNodeId(bad)));
     }
 
@@ -625,7 +716,6 @@ mod tests {
         let bad = "pkg\nshadow".to_string();
         let mut g = ContagionGraph::new(29);
         g.nodes.push(bad.clone());
-        g.edges.insert(bad.clone(), Vec::new());
         assert_eq!(g.validate(), Err(GraphError::InvalidNodeId(bad)));
     }
 
@@ -761,15 +851,7 @@ mod tests {
         let mut g = ContagionGraph::new(7);
         g.add_node("a".to_string());
         g.add_node("b".to_string());
-        let bucket = g
-            .edges
-            .get_mut("a")
-            .ok_or_else(|| "expected node `a` bucket".to_string())?;
-        bucket.push(ContagionEdge {
-            target: "b".to_string(),
-            weight: 1.001,
-            edge_kind: EdgeKind::DependencyImport,
-        });
+        push_corrupted_internal_edge(&mut g, "a", "b", 1.001, EdgeKind::DependencyImport)?;
         assert_eq!(g.validate(), Err(GraphError::WeightAboveOne));
         Ok(())
     }

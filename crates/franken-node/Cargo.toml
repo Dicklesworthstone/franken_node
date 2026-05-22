@@ -421,6 +421,10 @@ name = "trust_card_streaming_encoder_golden_preservation"
 path = "tests/trust_card_streaming_encoder_golden_preservation.rs"
 
 [[test]]
+name = "instrumentation_zero_cost_audit"
+path = "tests/instrumentation_zero_cost_audit.rs"
+
+[[test]]
 name = "spec_derived_fuzz_seeds"
 path = "tests/spec_derived_fuzz_seeds.rs"
 required-features = ["test-support"]
