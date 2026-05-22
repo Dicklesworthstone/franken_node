@@ -6986,4 +6986,71 @@ mod tests {
         assert!(debug_output.contains("test-signer"));
         assert!(debug_output.contains("fleet_decision"));
     }
+
+    // Frozen SHA-256 hex over the canonical byte layout produced by
+    // `canonical_decision_receipt_payload_hash` (fleet_quarantine.rs:657).
+    // Any drift in the domain separator, length-prefix encoding, field order,
+    // or the `Option<…>` framing inside `DecisionReceiptPayload::append_framed`
+    // and `DecisionReceiptScope::append_framed` flips these hashes and fails
+    // this test — which is the contract: every fleet node MUST hash an
+    // identical logical receipt to identical bytes, otherwise cross-node
+    // payload_hash verification breaks silently.
+    //
+    // Goldens were derived from the canonical-byte spec, not captured from a
+    // prior run: `b"fleet_receipt_v1:" || LE64-len-prefixed(op_id, principal,
+    // zone_id, timestamp) || payload.append_framed(…)`. If you intentionally
+    // change the canonical layout, recompute both hashes and update them
+    // together (a one-sided update means the layout split per branch — Option
+    // None vs Option Some — and that is a real bug, not a churn fix).
+    #[test]
+    fn canonical_decision_receipt_payload_hash_frozen_layout_golden() {
+        // Reconcile fixture exercises the all-None branches of every Option
+        // (extension_id, incident_id, tenant_id, affected_nodes, severity).
+        let reconcile_hash = canonical_decision_receipt_payload_hash(
+            "op-golden-1",
+            "fleet-admin",
+            "all",
+            "2026-04-24T00:00:00Z",
+            &DecisionReceiptPayload::reconcile(),
+        );
+        assert_eq!(
+            reconcile_hash,
+            "66eb701efca443842beed029db6b67ef524fee415806173288de7cacc5bcea93",
+            "canonical bytes for a reconcile receipt drifted — \
+             either a Option=None framing byte changed or the domain \
+             separator / field order moved"
+        );
+        assert_eq!(reconcile_hash.len(), 64);
+
+        // Quarantine fixture exercises the Some(_) branches: extension_id,
+        // tenant_id, and affected_nodes are populated, so this golden locks
+        // the `1u8 + LE64-len + bytes` (Option<&str>) and `1u8 + LE32-value`
+        // (Option<u32>) framings the all-None reconcile case cannot reach.
+        let quarantine_hash = canonical_decision_receipt_payload_hash(
+            "op-golden-2",
+            "fleet-admin",
+            "prod-us-east",
+            "2026-04-24T00:00:00Z",
+            &DecisionReceiptPayload::quarantine(
+                "ext.audit",
+                &QuarantineScope {
+                    zone_id: "prod-us-east".to_string(),
+                    tenant_id: Some("tenant-a".to_string()),
+                    affected_nodes: 12,
+                    reason: "suspicious extension activity".to_string(),
+                },
+            ),
+        );
+        assert_eq!(
+            quarantine_hash,
+            "43b1728d1ba2a39567545882ca2862f362e551446fddf383e271aad37a015378",
+            "canonical bytes for a quarantine receipt drifted — \
+             check the Option=Some framing (1u8 prefix + payload)"
+        );
+        assert_eq!(quarantine_hash.len(), 64);
+        assert_ne!(
+            reconcile_hash, quarantine_hash,
+            "reconcile and quarantine fixtures must hash differently"
+        );
+    }
 }
