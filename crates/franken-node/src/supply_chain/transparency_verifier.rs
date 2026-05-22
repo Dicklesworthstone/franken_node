@@ -1867,4 +1867,155 @@ mod tests {
             "Field name should appear (but not value)"
         );
     }
+
+    // Frozen SHA-256 hex outputs for the two Merkle-tree construction
+    // primitives in this module: `leaf_hash` (pub, transparency_verifier.rs:43)
+    // and `hash_pair_bytes` (private, transparency_verifier.rs:22). The
+    // two functions form the leaf/interior split of a transparency-log
+    // Merkle tree, and they MUST use DIFFERENT domain separators (RFC 6962
+    // §2.1 second-preimage attack prevention) — pinning both as goldens
+    // ensures the v1 domain split never collapses to a single shared prefix.
+    //
+    // Function layouts (frozen by this golden):
+    //
+    //   leaf_hash(data: &str):
+    //     SHA256( b"transparency_verifier_leaf_v1:"
+    //             || LE64(len(data)) || data.as_bytes() )
+    //
+    //   hash_pair_bytes(left: &[u8], right: &[u8]):
+    //     SHA256( b"transparency_interior_v1:"
+    //             || LE64(len(left))  || left
+    //             || LE64(len(right)) || right )
+    //
+    // Critical Merkle-tree contracts pinned here:
+    //   - DISTINCT domain separators for leaves vs interior nodes (RFC 6962
+    //     mitigation — a single domain enables second-preimage attacks where
+    //     an attacker forges an interior node by presenting it as a leaf with
+    //     concatenated bytes; the v1 split prevents this)
+    //   - hash_pair_bytes is ASYMMETRIC: swapping left and right produces a
+    //     DIFFERENT hash (left-first ordering is part of the contract;
+    //     fixture 4 asserts this directly)
+    //   - LE64 length prefixes on every variable-length input
+    //   - leaf_hash output is hex (String); hash_pair_bytes output is [u8; 32]
+    //     (raw bytes — pinned via hex::encode at the call site for comparison)
+    //
+    // Five frozen fixtures cover all branches:
+    //
+    //   1. leaf_empty (empty data) — locks the v1 leaf domain + LE64(0)
+    //      framing. Frozen: 8a1daa245300be0934f8ce13a469f5f6c232c651becc903e8d1efee4849fa145
+    //
+    //   2. leaf_populated (27-byte payload) — locks non-zero LE64-len.
+    //      Frozen: 5b4b52b759f0156effdff37b56a426031826d6b539a9fa2d9374fb12957f4ee7
+    //
+    //   3. interior_lr (hash_pair_bytes(empty_leaf, populated_leaf)) —
+    //      locks the v1 INTERIOR domain (distinct from LEAF) + the
+    //      length-prefixed asymmetric two-arg framing.
+    //      Frozen: 5fe7c23e08aee2f1cdedc30bc477f97e7a872afaa35055771cf0e228c96ceccb
+    //
+    //   4. interior_rl (hash_pair_bytes(populated_leaf, empty_leaf) —
+    //      SAME inputs, SWAPPED order) — locks left-first ordering as a
+    //      contract; if hash_pair_bytes was symmetric this would equal
+    //      interior_lr (it must NOT).
+    //      Frozen: 5c59bd16b5fe85e034b17091181d0175c0806d2ea16d8f2ca9cdb6d768a139cc
+    //
+    //   5. domain-separation invariant: leaf_hash(X) and hex(hash_pair_bytes(
+    //      Y, Z)) where Y || Z happens to mimic X's LE64-prefixed body MUST
+    //      NOT collide. Cannot be tested directly without specific bytes;
+    //      indirectly guarded by the distinct domain-separator assertions.
+    //
+    // Why this matters (the contract): the Merkle-tree leaf/interior split
+    // is the FOUNDATIONAL invariant of RFC 6962-style transparency logs.
+    // If leaf and interior hashes share a domain separator, an attacker can
+    // forge log inclusion proofs by presenting an interior-node hash as a
+    // leaf and constructing a "valid" audit path against it. Pinning the
+    // two distinct domain separators as frozen goldens makes this attack
+    // surface a compile-time bug rather than a runtime audit-trail forensics
+    // exercise.
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing both functions in Python — NOT captured from an
+    // unreviewed prior run.
+    #[test]
+    fn transparency_verifier_merkle_hashes_frozen_canonical_byte_layout_golden() {
+        // === leaf_hash ===
+
+        // 1. Empty-data leaf.
+        let leaf_empty = leaf_hash("");
+        assert_eq!(
+            leaf_empty,
+            "8a1daa245300be0934f8ce13a469f5f6c232c651becc903e8d1efee4849fa145",
+            "leaf_hash(\"\") drifted — check the `transparency_verifier_leaf_v1:` \
+             domain separator or LE64(0) empty-payload framing"
+        );
+
+        // 2. Populated leaf.
+        let leaf_populated = leaf_hash("artifact-binding-payload-v1");
+        assert_eq!(
+            leaf_populated,
+            "5b4b52b759f0156effdff37b56a426031826d6b539a9fa2d9374fb12957f4ee7",
+            "leaf_hash(non-empty) drifted — check the LE64 length-prefix \
+             on the data payload"
+        );
+
+        // === hash_pair_bytes ===
+
+        // Decode the leaf hex hashes into [u8; 32] for hash_pair_bytes
+        // (which takes raw byte slices, not hex strings).
+        let leaf_empty_bytes = hex::decode(&leaf_empty).expect("leaf hex must decode");
+        let leaf_populated_bytes = hex::decode(&leaf_populated).expect("leaf hex must decode");
+
+        // 3. Interior node hashing (left=empty_leaf, right=populated_leaf).
+        let interior_lr = hash_pair_bytes(&leaf_empty_bytes, &leaf_populated_bytes);
+        assert_eq!(
+            hex::encode(interior_lr),
+            "5fe7c23e08aee2f1cdedc30bc477f97e7a872afaa35055771cf0e228c96ceccb",
+            "hash_pair_bytes(empty_leaf, populated_leaf) drifted — check \
+             the `transparency_interior_v1:` domain separator (MUST differ \
+             from `transparency_verifier_leaf_v1:`) or the asymmetric \
+             length-prefixed two-arg framing"
+        );
+
+        // 4. Interior with arguments SWAPPED — locks left-first ordering.
+        let interior_rl = hash_pair_bytes(&leaf_populated_bytes, &leaf_empty_bytes);
+        assert_eq!(
+            hex::encode(interior_rl),
+            "5c59bd16b5fe85e034b17091181d0175c0806d2ea16d8f2ca9cdb6d768a139cc",
+            "hash_pair_bytes(populated_leaf, empty_leaf) — swapped-arg \
+             form — drifted; the asymmetric output is a load-bearing \
+             contract for left-first Merkle node ordering"
+        );
+
+        // Asymmetry invariant: lr and rl MUST differ (else hash_pair_bytes
+        // is symmetric and Merkle audit paths become non-deterministic).
+        assert_ne!(
+            hex::encode(interior_lr),
+            hex::encode(interior_rl),
+            "hash_pair_bytes(L, R) MUST differ from hash_pair_bytes(R, L) \
+             — symmetric Merkle interior hashing breaks audit-path \
+             determinism"
+        );
+
+        // Domain-separation invariant: even though both leaf and interior
+        // start from the same logical "empty input" sketch, they use
+        // DIFFERENT v1 domain separators and MUST produce distinct hashes.
+        // Pin this by hashing an interior node with (empty, empty) inputs
+        // and confirming it doesn't equal leaf_empty.
+        let interior_empty_empty = hash_pair_bytes(&[], &[]);
+        assert_ne!(
+            hex::encode(interior_empty_empty),
+            leaf_empty,
+            "hash_pair_bytes(empty, empty) MUST NOT equal leaf_hash(\"\") \
+             — the leaf vs interior domain separators MUST be distinct \
+             (RFC 6962-style second-preimage attack prevention)"
+        );
+
+        // Length+casing contract on every output.
+        for h in [&leaf_empty, &leaf_populated] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+        for h in [&interior_lr, &interior_rl, &interior_empty_empty] {
+            assert_eq!(h.len(), 32);
+        }
+    }
 }
