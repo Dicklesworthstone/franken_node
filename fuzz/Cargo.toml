@@ -616,3 +616,9 @@ name = "fuzz_frame_parser_guardrails"
 path = "fuzz_targets/fuzz_frame_parser_guardrails.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_cli_path_validation"
+path = "fuzz_targets/fuzz_cli_path_validation.rs"
+test = false
+doc = false
