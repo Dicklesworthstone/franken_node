@@ -442,3 +442,57 @@ name = "fuzz_fork_detection_state_hash"
 path = "fuzz_targets/fuzz_fork_detection_state_hash.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_metrics_registry_record"
+path = "fuzz_targets/fuzz_metrics_registry_record.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_perf_budget_guard_evaluate"
+path = "fuzz_targets/fuzz_perf_budget_guard_evaluate.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_hardening_state_machine_escalate"
+path = "fuzz_targets/fuzz_hardening_state_machine_escalate.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_degraded_mode_audit_validate"
+path = "fuzz_targets/fuzz_degraded_mode_audit_validate.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_network_guard_egress_rule_match"
+path = "fuzz_targets/fuzz_network_guard_egress_rule_match.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_connector_method_validator_contract"
+path = "fuzz_targets/fuzz_connector_method_validator_contract.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_lease_coordinator_select"
+path = "fuzz_targets/fuzz_lease_coordinator_select.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_quarantine_controller_action"
+path = "fuzz_targets/fuzz_quarantine_controller_action.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_frankensqlite_adapter_auth_ops"
+path = "fuzz_targets/fuzz_frankensqlite_adapter_auth_ops.rs"
+test = false
+doc = false
