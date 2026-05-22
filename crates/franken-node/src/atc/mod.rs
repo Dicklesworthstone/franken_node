@@ -7092,4 +7092,120 @@ mod atc_extreme_adversarial_negative_tests {
             }
         }
     }
+
+    // Frozen SHA-256 hex outputs of the ATC surface-fingerprint hash
+    // primitives `surface_fingerprint_hex` (atc/mod.rs:1109) and the
+    // public wrapper `module_surface_fingerprint_hex` (atc/mod.rs:377)
+    // that hashes the constant ATC_MODULE_SURFACE list.
+    //
+    // The function builds the surface fingerprint as:
+    //
+    //   SHA256(
+    //     b"atc_module_surface_v1:"
+    //     || update_len_prefixed(b"field:module_count")   # LE64(len) || bytes
+    //     || update_count(modules.len())                  # raw LE64 — NO domain prefix
+    //     || for module in modules:
+    //          update_len_prefixed(b"field:module_name")  # LE64(len) || bytes
+    //       || update_len_prefixed(module.as_bytes())     # LE64(len) || bytes
+    //   )
+    //
+    // Three frozen fixtures cover all branches:
+    //
+    //   1. production — hashes the actual ATC_MODULE_SURFACE constant
+    //      (8 module names: aggregation, federation, global_priors,
+    //      privacy_envelope, signal_extraction, signal_schema,
+    //      sketch_system, urgent_routing). Pins the fingerprint that
+    //      bd-2zip downstream verifier surfaces consume — a silent
+    //      change to ATC_MODULE_SURFACE (adding, removing, or renaming
+    //      ANY entry) flips this hash.
+    //
+    //   2. empty — hashes an empty modules slice. Locks the v1 domain
+    //      separator + b"field:module_count" length-prefix framing +
+    //      LE64(0) count + zero-iteration per-module loop.
+    //
+    //   3. single — one module entry. Locks the per-module
+    //      (b"field:module_name" + module_bytes) framing.
+    //
+    // Critical layout invariants this golden pins:
+    //   - the v1 domain separator
+    //   - the b"field:module_count" interior domain bytes (length-
+    //     prefixed) BEFORE the LE64 count
+    //   - the count is raw LE64 with NO domain prefix (update_count
+    //     vs update_field asymmetry)
+    //   - per-module: b"field:module_name" is length-prefixed, then
+    //     the module string is length-prefixed (both via update_field
+    //     which composes two update_len_prefixed calls)
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing the function in Python — NOT captured from an
+    // unreviewed prior run. Recompute together if ATC_MODULE_SURFACE
+    // changes (the production fixture is the canonical fingerprint
+    // for the current 8-module surface; bumping requires updating
+    // every downstream consumer that pins the same hash).
+    #[test]
+    fn surface_fingerprint_hex_frozen_canonical_byte_layout_golden() {
+        // 1. Production fixture: hashes the actual ATC_MODULE_SURFACE
+        // constant. Pinning this hex CATCHES any silent edit to the
+        // module surface (the 8-entry list at atc/mod.rs:15-24).
+        let production = module_surface_fingerprint_hex();
+        assert_eq!(
+            production,
+            "5f142e34c001368344015b663e1c88139f59f1b98e916faacdc80e37c66c0b42",
+            "ATC_MODULE_SURFACE fingerprint drifted — either an entry was \
+             added/removed/renamed in the 8-module list at atc/mod.rs:15-24, \
+             or the canonical byte layout of surface_fingerprint_hex \
+             changed. Both require updating downstream consumers that pin \
+             this hash."
+        );
+
+        // 2. Empty-modules fixture: locks v1 domain + module_count framing
+        // + LE64(0) count + zero per-module iterations.
+        let empty = surface_fingerprint_hex(&[]);
+        assert_eq!(
+            empty,
+            "0b50f159303136a952f27380ac8d9ec6f4da2ba45b6cfc46be921b7988de6f09",
+            "empty-modules fingerprint drifted — check the v1 domain \
+             separator, the b\"field:module_count\" interior domain bytes, \
+             or the raw LE64(0) count framing"
+        );
+
+        // 3. Single-module fixture: locks the per-module
+        // (b"field:module_name" + module_bytes) framing on a 11-byte
+        // module name.
+        let single = surface_fingerprint_hex(&["only_module"]);
+        assert_eq!(
+            single,
+            "d9a1f064c2fc5ab8d39309319c18ec00166c01b5483ef27e97423e1f665eb7f8",
+            "single-module fingerprint drifted — check the b\"field:module_name\" \
+             interior domain or the per-module length-prefix framing"
+        );
+
+        // Count-sensitivity invariant: empty vs single MUST differ. The
+        // count is fed into the hasher as raw LE64; if a future refactor
+        // accidentally dropped it, both would collide.
+        assert_ne!(
+            empty, single,
+            "empty modules and single-module fingerprints MUST differ — \
+             update_count(modules.len()) MUST be fed into the hasher"
+        );
+
+        // Pub-wrapper agreement invariant: module_surface_fingerprint_hex()
+        // MUST equal surface_fingerprint_hex(ATC_MODULE_SURFACE) — the pub
+        // wrapper at L377 is a thin call into the helper. A refactor that
+        // diverged these would silently break downstream consumers that
+        // call only the pub API.
+        assert_eq!(
+            production,
+            surface_fingerprint_hex(ATC_MODULE_SURFACE),
+            "module_surface_fingerprint_hex (L377) MUST agree with \
+             surface_fingerprint_hex(ATC_MODULE_SURFACE) — the wrapper is \
+             a thin delegate"
+        );
+
+        // Length+casing contract.
+        for h in [&production, &empty, &single] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
