@@ -16,6 +16,12 @@ path = "src/bin/test_engine.rs"
 test = false
 required-features = ["test-support"]
 
+[[bin]]
+name = "bd-21fo-governor-conformance"
+path = "src/bin/bd_21fo_governor_conformance.rs"
+test = false
+required-features = ["advanced-features"]
+
 [lib]
 path = "src/lib.rs"
 test = false
@@ -1189,3 +1195,16 @@ required-features = ["test-support"]
 [[bench]]
 name = "migrate_tree_sitter_bench"
 harness = false
+
+# bd-98xo5.10 — DGIS large-graph contagion_simulator::step benchmark.
+# Measures fixed step loops after the T5 NodeId interning migration.
+[[bench]]
+name = "dgis_large_graph_bench"
+harness = false
+required-features = ["advanced-features"]
+
+# bd-21fo Governor Conformance Test Suite
+[[test]]
+name = "bd_21fo_governor_conformance"
+path = "../../tests/conformance/bd_21fo_governor_conformance.rs"
+required-features = ["advanced-features"]
