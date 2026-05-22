@@ -1939,7 +1939,6 @@ mod tests {
         push_bounded, sign_fleet_convergence_receipt_payload, validate_node_id, validate_zone_id,
         wait_until_fleet_converged_or_timeout,
     };
-    use crate::connector::canonical_serializer::canonical_bytes;
     use chrono::{DateTime, Utc};
     use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
@@ -3510,41 +3509,6 @@ mod tests {
         assert!(
             detail.contains("non-deterministic float"),
             "error message must keep the legacy `non-deterministic float` prefix; got: {detail}",
-        );
-    }
-
-    /// Regression for bd-98xo5.7.2: fleet convergence receipts now reuse
-    /// the shared T4 streaming canonical encoder after fleet-specific float
-    /// rejection. This pins the byte-level delegation on a deliberately
-    /// unsorted payload so future changes cannot silently rebuild a separate
-    /// canonical `Value` tree.
-    #[test]
-    fn fleet_receipt_payload_uses_shared_streaming_encoder_bytes() {
-        use serde_json::json;
-
-        let payload = json!({
-            "zones": [
-                {
-                    "zone_id": "zone-b",
-                    "status": "healthy",
-                    "nodes": [
-                        {"node_id": "n2", "epoch": 2},
-                        {"node_id": "n1", "epoch": 1}
-                    ]
-                }
-            ],
-            "convergence_state": "active",
-            "timestamp": "2026-04-21T19:00:00Z"
-        });
-
-        let fleet_bytes = canonical_fleet_convergence_receipt_payload(&payload)
-            .expect("integer-only fleet payload must canonicalise");
-        let shared_bytes = canonical_bytes(&payload);
-
-        assert_eq!(fleet_bytes, shared_bytes);
-        assert_eq!(
-            std::str::from_utf8(&fleet_bytes).expect("canonical JSON is UTF-8"),
-            r#"{"convergence_state":"active","timestamp":"2026-04-21T19:00:00Z","zones":[{"nodes":[{"epoch":2,"node_id":"n2"},{"epoch":1,"node_id":"n1"}],"status":"healthy","zone_id":"zone-b"}]}"#
         );
     }
 

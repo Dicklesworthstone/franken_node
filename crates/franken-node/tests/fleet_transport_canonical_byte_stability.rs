@@ -30,6 +30,7 @@
 //! class (any silent change in canonical byte output → hash mismatch)
 //! without coupling to fixture rotation in other beads.
 
+use frankenengine_node::connector::canonical_serializer::canonical_bytes;
 use frankenengine_node::control_plane::fleet_transport::{
     canonical_fleet_convergence_receipt_payload, sign_fleet_convergence_receipt_payload,
 };
@@ -72,6 +73,19 @@ fn canonical_bytes_are_deterministic_across_invocations() {
     assert_eq!(
         first_bytes, second_bytes,
         "canonical bytes must be byte-identical across invocations"
+    );
+}
+
+#[test]
+fn fleet_payload_bytes_match_shared_streaming_encoder_after_float_preflight() {
+    let payload = realistic_convergence_payload();
+    let fleet_bytes =
+        canonical_fleet_convergence_receipt_payload(&payload).expect("canonicalise must succeed");
+    let shared_bytes = canonical_bytes(&payload);
+
+    assert_eq!(
+        fleet_bytes, shared_bytes,
+        "fleet convergence receipts must delegate byte emission to the shared streaming encoder"
     );
 }
 
