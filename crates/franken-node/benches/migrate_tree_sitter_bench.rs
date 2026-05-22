@@ -85,8 +85,6 @@ fn bench_js_analysis(c: &mut Criterion) {
 /// Micro-benchmark just the tree-sitter parsing component for hotspot analysis.
 /// This isolates parser cost from visitor traversal and rewrite logic.
 fn bench_tree_sitter_parse_only(c: &mut Criterion) {
-    use tree_sitter::{Language, Parser as JsParser};
-
     let mut group = c.benchmark_group("migrate_tree_sitter_parse_only");
 
     for &(name, corpus_path, _) in CORPORA {
@@ -108,7 +106,7 @@ fn bench_tree_sitter_parse_only(c: &mut Criterion) {
                         .parse(black_box(source), None)
                         .expect("Parser produces syntax tree");
 
-                    black_box(tree.root_node())
+                    black_box(tree)
                 })
             },
         );
