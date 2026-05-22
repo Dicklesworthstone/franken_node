@@ -1894,4 +1894,175 @@ mod tests {
             assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
         }
     }
+
+    // Frozen SHA-256 hex outputs of WorkflowSnapshot::compute_integrity_digest
+    // (time_travel.rs:254). The method derives the snapshot-level
+    // integrity digest as:
+    //
+    //   SHA256(
+    //     b"time_travel_integrity_v1:"
+    //     || LE64(frames.len())
+    //     || for f in frames:
+    //          f.frame_index.to_le_bytes()       # raw u64 LE
+    //       || f.clock_tick.to_le_bytes()        # raw u64 LE
+    //       || LE64(len(input_hash)) || input_hash.as_bytes()
+    //       || LE64(len(decision_digest)) || decision_digest.as_bytes()
+    //       # decision_digest = f.decision.digest() (64 hex chars)
+    //   ).hex()
+    //
+    // *** DISTINCTIVE FEATURE pinned by this golden ***
+    //
+    // This is the FIRST golden in the suite to pin a TWO-LEVEL HASH
+    // CHAIN — compute_integrity_digest invokes ControlDecision::digest
+    // (r75 commit b62ddb5e) for each frame, and the resulting hex
+    // string is fed back into the OUTER hash with its own LE64-len
+    // prefix. The integrity digest is therefore content-addressed by
+    // every nested decision digest. A future refactor that changed
+    // either (a) ControlDecision::digest layout OR (b) the integrity
+    // digest wrapping would silently flip the result. The two-level
+    // dependency makes this golden the canary for BOTH r75 and r76
+    // simultaneously.
+    //
+    // Also: this is the FIRST golden to pin that event_code is
+    // INTENTIONALLY EXCLUDED from the integrity hash. CaptureFrame
+    // has five fields (frame_index, clock_tick, input_hash, decision,
+    // event_code) but the integrity digest only hashes the first four.
+    //
+    // Two frozen fixtures + structural invariants:
+    //
+    //   1. empty frames. Locks v1 domain + LE64(0) zero-frames
+    //      framing.
+    //      Frozen: 8b512b4009ea19f4e1d31fabfffd1bf649d2d6cd114f8cac7ff39823c1fb85cf
+    //
+    //   2. two-frame snapshot: frame 0 with empty metadata, frame 1
+    //      with single-entry metadata. Locks per-frame framing AND
+    //      the two-level hash chain through ControlDecision::digest.
+    //      Frozen: 90613d092d96460e1811672c9518a0dc59f72da378beb74dd53e86a170e897dd
+    //
+    //   3. EVENT-CODE-EXCLUSION INVARIANT: changing only event_code
+    //      on a frame MUST NOT change the integrity digest. Pins
+    //      that event_code is intentionally excluded from the hash
+    //      (the function at L258 iterates only frame_index, clock_tick,
+    //      input_hash, decision — NOT event_code).
+    //
+    //   4. NESTED-DIGEST-DEPENDENCY: changing only the decision
+    //      payload (which flows through ControlDecision::digest as
+    //      a nested hash) MUST flip the outer integrity digest.
+    //
+    //   5. FRAME-COUNT-SENSITIVITY: a snapshot with 1 frame MUST
+    //      hash differently from a snapshot with 0 frames (catches
+    //      a bug where the LE64 count is dropped).
+    //
+    //   6. 64-lowercase-hex length+casing contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python (reimplementing BOTH ControlDecision::digest AND
+    // compute_integrity_digest) — NOT captured from an unreviewed
+    // prior run.
+    //
+    // Why this matters (the contract): compute_integrity_digest is
+    // the snapshot-level tamper-evidence primitive (per
+    // WorkflowSnapshot::verify_integrity at L271). If two snapshot
+    // verifiers compute different digests for the same logical
+    // frames — because someone reordered fields, swapped LE64
+    // widths, accidentally included event_code in the hash, or
+    // changed the nested ControlDecision::digest layout — snapshot
+    // verification fails opaquely AND legitimate snapshots get
+    // rejected as tampered.
+    #[test]
+    fn workflow_snapshot_compute_integrity_digest_frozen_canonical_byte_layout_golden() {
+        use std::collections::BTreeMap;
+
+        // 1. Empty frames.
+        assert_eq!(
+            WorkflowSnapshot::compute_integrity_digest(&[]),
+            "8b512b4009ea19f4e1d31fabfffd1bf649d2d6cd114f8cac7ff39823c1fb85cf",
+            "empty compute_integrity_digest drifted — check the v1 \
+             domain separator `time_travel_integrity_v1:` or LE64(0) \
+             zero-frames framing"
+        );
+
+        // 2. Two-frame snapshot.
+        let frame0 = CaptureFrame {
+            frame_index: 0,
+            clock_tick: 0,
+            input_hash:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+            decision: ControlDecision {
+                decision_id: "dec-0".to_string(),
+                payload: b"payload-a".to_vec(),
+                metadata: BTreeMap::new(),
+            },
+            event_code: "EVENT-ALPHA".to_string(),
+        };
+        let mut frame1_meta = BTreeMap::new();
+        frame1_meta.insert("k".to_string(), "v".to_string());
+        let frame1 = CaptureFrame {
+            frame_index: 1,
+            clock_tick: 1,
+            input_hash:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            decision: ControlDecision {
+                decision_id: "dec-1".to_string(),
+                payload: b"payload-b".to_vec(),
+                metadata: frame1_meta,
+            },
+            event_code: "EVENT-BETA".to_string(),
+        };
+        let frames = vec![frame0.clone(), frame1.clone()];
+        assert_eq!(
+            WorkflowSnapshot::compute_integrity_digest(&frames),
+            "90613d092d96460e1811672c9518a0dc59f72da378beb74dd53e86a170e897dd",
+            "two-frame compute_integrity_digest drifted — check per-\
+             frame framing, raw u64 LE on frame_index/clock_tick, OR \
+             the nested ControlDecision::digest layout (which is also \
+             pinned in r75 commit b62ddb5e)"
+        );
+
+        // 3. EVENT-CODE-EXCLUSION INVARIANT: changing only event_code
+        // on a frame MUST NOT change the integrity digest.
+        let mut frame0_diff_event = frame0.clone();
+        frame0_diff_event.event_code = "EVENT-DIFFERENT-LABEL".to_string();
+        let frames_diff_event = vec![frame0_diff_event, frame1.clone()];
+        assert_eq!(
+            WorkflowSnapshot::compute_integrity_digest(&frames_diff_event),
+            WorkflowSnapshot::compute_integrity_digest(&frames),
+            "changing event_code on a frame MUST NOT change the \
+             integrity digest — event_code is INTENTIONALLY EXCLUDED \
+             from the hash (per L258-266 of the function)"
+        );
+
+        // 4. NESTED-DIGEST-DEPENDENCY: changing only the decision
+        // payload (which flows through ControlDecision::digest) MUST
+        // flip the outer integrity digest.
+        let mut frame0_diff_payload = frame0.clone();
+        frame0_diff_payload.decision.payload = b"DIFFERENT-PAYLOAD".to_vec();
+        let frames_diff_payload = vec![frame0_diff_payload, frame1.clone()];
+        assert_ne!(
+            WorkflowSnapshot::compute_integrity_digest(&frames_diff_payload),
+            WorkflowSnapshot::compute_integrity_digest(&frames),
+            "changing a frame's decision payload MUST flip the outer \
+             integrity digest — pins the two-level hash chain through \
+             ControlDecision::digest"
+        );
+
+        // 5. FRAME-COUNT-SENSITIVITY: 1 frame vs 0 frames MUST flip.
+        assert_ne!(
+            WorkflowSnapshot::compute_integrity_digest(&[frame0.clone()]),
+            WorkflowSnapshot::compute_integrity_digest(&[]),
+            "a 1-frame snapshot MUST hash differently from a 0-frame \
+             snapshot — pins the LE64 count framing"
+        );
+
+        // 6. 64-lowercase-hex length+casing contract.
+        for h in [
+            WorkflowSnapshot::compute_integrity_digest(&[]),
+            WorkflowSnapshot::compute_integrity_digest(&frames),
+        ] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
