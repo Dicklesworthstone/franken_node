@@ -1,6 +1,6 @@
 # Crypto Trait Abstraction Design
 
-**Status**: Design Phase (bd-18dd1)  
+**Status**: Implemented through Phase 3 (bd-18dd1 / bd-rcscw)
 **Author**: CrimsonCrane  
 **Date**: 2026-04-27
 
@@ -143,7 +143,7 @@ impl SignatureScheme for Ed25519Scheme {
         message: &[u8],
     ) -> Result<Self::Signature, Self::Error> {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"ed25519_sign_v1:");
+        hasher.update(b"ed25519_signature_v1:");
         hasher.update(&(domain.len() as u64).to_le_bytes());
         hasher.update(domain);
         hasher.update(&(message.len() as u64).to_le_bytes());
@@ -161,7 +161,7 @@ impl SignatureScheme for Ed25519Scheme {
         signature: &Self::Signature,
     ) -> bool {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"ed25519_verify_v1:");
+        hasher.update(b"ed25519_signature_v1:");
         hasher.update(&(domain.len() as u64).to_le_bytes());
         hasher.update(domain);
         hasher.update(&(message.len() as u64).to_le_bytes());
@@ -279,9 +279,10 @@ Tracked as [`bd-rcscw`](../../.beads/) (blocked-by `bd-dwx4l`, `bd-acvur`, `bd-l
 - New fuzz targets under `fuzz/fuzz_targets/`: `fuzz_crypto_scheme_roundtrip`, `fuzz_crypto_scheme_cross_domain`, `fuzz_crypto_signer_chain`.
 - Criterion benchmark `crypto_scheme_bench` proving the zero-cost-abstraction claim within 5% of direct `ed25519_dalek` calls.
 
-Evidence landed for `bd-rcscw` on 2026-05-20:
+Evidence landed for `bd-rcscw` on 2026-05-20 through 2026-05-22:
 - Invariant regression coverage in `crates/franken-node/src/crypto/tests.rs` and `crates/franken-node/src/crypto/schemes.rs` covers constant-time/fail-closed verification, wrapper-domain separation, length-prefixed collision resistance, and saturating length counters.
 - Fuzz harnesses are registered in `fuzz/Cargo.toml` at `fuzz_crypto_scheme_roundtrip`, `fuzz_crypto_scheme_cross_domain`, and `fuzz_crypto_signer_chain`.
+- `fuzz_crypto_scheme_cross_domain` also asserts raw/domain replay rejection and same-concatenation split resistance so both wrapper-domain separation and length-prefix framing are continuously exercised by libFuzzer.
 - `crates/franken-node/benches/crypto_scheme_bench.rs` compares direct `ed25519_dalek` raw signing/verifying with `Ed25519Scheme::sign_raw` and `Ed25519Scheme::verify_raw` over identical caller-owned preimages.
 
 ### Phase 4: Advanced Features — deferred
