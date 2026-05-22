@@ -13,10 +13,11 @@
 #   integration — trust_card_streaming_encoder_golden_preservation +
 #                 supply_chain_trust_card_golden_bytes
 #   fuzz        — fuzz_canonical_encoder_parity 60-second smoke
-#   baseline    — Criterion re-measure against the T4.7 budgets:
-#                   current/simple_1x5    ≤ 30 µs   (was 79.81 µs)
-#                   current/medium_3x8    ≤ 5 ms    (was 33.23 ms)
-#                   current/complex_4x12  ≤ 300 ms  (was 3 591 ms)
+#   baseline    — Criterion re-measure against the T4.7 budgets on the
+#                 shipped streaming encoder:
+#                   streaming/simple_1x5    ≤ 30 µs   (was 79.81 µs)
+#                   streaming/medium_3x8    ≤ 5 ms    (was 33.23 ms)
+#                   streaming/complex_4x12  ≤ 300 ms  (was 3 591 ms)
 #   heaptrack   — alloc-count gate (SKIP if heaptrack absent):
 #                   medium_3x8 allocs ≤ 5 M   (was 21.5 M)
 #                   medium_3x8 peak   ≤ 100 MiB (was 430 MiB)
@@ -176,10 +177,12 @@ assert_under_budget() {
     fi
 }
 
-# T4.7 perf budgets:
-assert_under_budget "current_simple_1x5" "current/simple_1x5" 30000
-assert_under_budget "current_medium_3x8" "current/medium_3x8" 5000000
-assert_under_budget "current_complex_4x12" "current/complex_4x12" 300000000
+# T4.7 perf budgets for the production streaming encoder. The
+# historical `current/*` Criterion entries remain in the bench as the
+# round-1 deep-clone baseline; gating them would fail by design.
+assert_under_budget "streaming_simple_1x5" "streaming/simple_1x5" 30000
+assert_under_budget "streaming_medium_3x8" "streaming/medium_3x8" 5000000
+assert_under_budget "streaming_complex_4x12" "streaming/complex_4x12" 300000000
 perf_test_summary || exit 1
 
 # ---------------------------------------------------------------------

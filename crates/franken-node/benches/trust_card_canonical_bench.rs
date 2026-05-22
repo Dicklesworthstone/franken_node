@@ -7,13 +7,13 @@
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use frankenengine_node::connector::canonical_serializer::{
-    CanonicalSchema, CanonicalSerializer, TrustObjectType,
+    CanonicalSchema, CanonicalSerializer, TrustObjectType, canonical_bytes,
 };
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::io::Write;
 
-/// Current implementation - creates BTreeSet and clones keys
+/// Historical baseline - creates BTreeSet and clones subtrees.
 fn canonicalize_value_current(value: Value) -> Value {
     match value {
         Value::Object(map) => {
@@ -138,6 +138,19 @@ fn bench_canonical_encoding(c: &mut Criterion) {
                 })
             },
         );
+
+        let current_bytes = serde_json::to_vec(&canonicalize_value_current(data.clone())).unwrap();
+        assert_eq!(
+            canonical_bytes(data),
+            current_bytes,
+            "streaming encoder must preserve canonical bytes for {name}"
+        );
+
+        // Production path: direct streaming canonical bytes with no
+        // recursive Value clone or intermediate rebuilt Value tree.
+        group.bench_with_input(BenchmarkId::new("streaming", name), data, |b, data| {
+            b.iter(|| black_box(canonical_bytes(black_box(data))))
+        });
     }
 
     group.finish();
