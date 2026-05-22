@@ -3165,4 +3165,165 @@ mod tests {
 
         assert_eq!(items, vec![4, 5, 6]);
     }
+
+    // Frozen SHA-256 hex outputs of the module-private function
+    // compute_admission_digest (extension_registry.rs:812). The
+    // function binds five admission-critical fields into a single
+    // digest:
+    //
+    //   SHA256(
+    //     b"extension_registry_admission_v1:"
+    //     || LE64(len(manifest_bytes))            || manifest_bytes
+    //     || LE64(len(publisher_key_id))          || publisher_key_id
+    //     || LE64(len(vcs_commit_sha))            || vcs_commit_sha
+    //     || LE64(len(build_system_identifier))   || build_system_identifier
+    //     || LE64(len(output_hash))               || output_hash
+    //   ).hex()
+    //
+    // The five fields come from (manifest_bytes, publisher_key_id,
+    // provenance.vcs_commit_sha, provenance.build_system_identifier,
+    // provenance.output_hash) per the source at L818-828.
+    //
+    // *** DISTINCTIVE FEATURE pinned by this golden ***
+    //
+    // This is the FIRST golden in the suite to pin an extension-
+    // admission digest that binds a SUBSET of provenance fields
+    // (vcs_commit_sha, build_system_identifier, output_hash) — NOT
+    // the full ProvenanceAttestation. The full ProvenanceAttestation
+    // struct has 14 fields; admission only authenticates 3 of them.
+    // A future refactor that "bound the full provenance" would
+    // catastrophically flip every existing admission digest AND
+    // would over-constrain re-admission (any non-critical provenance
+    // field change would invalidate).
+    //
+    // Two frozen fixtures + structural invariants:
+    //
+    //   1. minimal (all-empty inputs). Locks v1 domain + 5 LE64(0)
+    //      empty-field framings.
+    //      Frozen: fc834811b65e0b59d7101b19d23f8d96be3f06d397a7ae070808ea6764814bb5
+    //
+    //   2. typical (32-byte manifest JSON + populated provenance fields).
+    //      Frozen: eefdd20557495db33791455e7e8c64162d02a853b089d6de976bd7d9be71a335
+    //
+    //   3. FIELD-ORDER-SENSITIVITY: swapping publisher_key_id and
+    //      vcs_commit_sha (otherwise-identical inputs) MUST flip the
+    //      digest.
+    //
+    //   4. PROVENANCE-SUBSET INVARIANT: changing only a NON-bound
+    //      provenance field (e.g., builder_identity) MUST NOT change
+    //      the digest. This is implicitly tested by the fact that
+    //      the function only takes 3 provenance fields; if extra
+    //      fields were silently bound, my Python goldens would not
+    //      match.
+    //
+    //   5. 64-lowercase-hex length+casing contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): compute_admission_digest is
+    // the integrity-binding primitive for extension registry
+    // admission. If two registry nodes compute different digests for
+    // the same logical (manifest, key_id, vcs+buildsys+output) tuple
+    // — because someone reordered fields, swapped LE64 widths, or
+    // accidentally bound additional provenance fields — admission
+    // verification fails opaquely AND legitimate extensions get
+    // rejected at registry boundaries.
+    #[test]
+    fn compute_admission_digest_frozen_canonical_byte_layout_golden() {
+        // Build a ProvenanceAttestation; only 3 of its 14 fields
+        // contribute to the admission digest.
+        let make_provenance = |vcs: &str, build_sys: &str, output: &str| {
+            crate::supply_chain::provenance::ProvenanceAttestation {
+                schema_version: "unused-by-admission".to_string(),
+                source_repository_url: "unused".to_string(),
+                build_system_identifier: build_sys.to_string(),
+                builder_identity: "unused".to_string(),
+                builder_version: "unused".to_string(),
+                vcs_commit_sha: vcs.to_string(),
+                build_timestamp_epoch: 0,
+                reproducibility_hash: "unused".to_string(),
+                input_hash: "unused".to_string(),
+                output_hash: output.to_string(),
+                slsa_level_claim: 0,
+                envelope_format:
+                    crate::supply_chain::provenance::AttestationEnvelopeFormat::default(),
+                links: Vec::new(),
+                custom_claims: std::collections::BTreeMap::new(),
+            }
+        };
+
+        // 1. Minimal.
+        let minimal_prov = make_provenance("", "", "");
+        assert_eq!(
+            compute_admission_digest(b"", "", &minimal_prov),
+            "fc834811b65e0b59d7101b19d23f8d96be3f06d397a7ae070808ea6764814bb5",
+            "minimal compute_admission_digest drifted — check the v1 \
+             domain separator `extension_registry_admission_v1:` or \
+             the 5 LE64(0) empty-field framings"
+        );
+
+        // 2. Typical.
+        let typical_prov =
+            make_provenance("abc123def456", "buildsystem-1.2",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000");
+        assert_eq!(
+            compute_admission_digest(
+                br#"{"name":"ext-x","version":"1.0"}"#,
+                "pubkey-7-abc",
+                &typical_prov,
+            ),
+            "eefdd20557495db33791455e7e8c64162d02a853b089d6de976bd7d9be71a335"
+        );
+
+        // 3. FIELD-ORDER-SENSITIVITY: swap publisher_key_id and
+        // vcs_commit_sha contents — MUST flip the digest.
+        let swap_prov =
+            make_provenance("pubkey-7-abc", "buildsystem-1.2",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000");
+        let swap_digest = compute_admission_digest(
+            br#"{"name":"ext-x","version":"1.0"}"#,
+            "abc123def456", // was vcs
+            &swap_prov,
+        );
+        assert_ne!(
+            swap_digest,
+            "eefdd20557495db33791455e7e8c64162d02a853b089d6de976bd7d9be71a335",
+            "swapping publisher_key_id and vcs_commit_sha MUST flip \
+             the admission digest"
+        );
+
+        // 4. PROVENANCE-SUBSET INVARIANT: changing a NON-bound
+        // provenance field (e.g., builder_identity) MUST NOT change
+        // the digest.
+        let mut variant_prov = typical_prov.clone();
+        variant_prov.builder_identity = "DIFFERENT-builder".to_string();
+        variant_prov.schema_version = "DIFFERENT-schema".to_string();
+        variant_prov.builder_version = "DIFFERENT-version".to_string();
+        assert_eq!(
+            compute_admission_digest(
+                br#"{"name":"ext-x","version":"1.0"}"#,
+                "pubkey-7-abc",
+                &variant_prov,
+            ),
+            "eefdd20557495db33791455e7e8c64162d02a853b089d6de976bd7d9be71a335",
+            "changing non-bound provenance fields (builder_identity, \
+             schema_version, builder_version) MUST NOT change the \
+             admission digest — only vcs_commit_sha, \
+             build_system_identifier, output_hash are bound"
+        );
+
+        // 5. 64-lowercase-hex length+casing contract.
+        for digest in [
+            compute_admission_digest(b"", "", &minimal_prov),
+            compute_admission_digest(
+                br#"{"name":"ext-x","version":"1.0"}"#,
+                "pubkey-7-abc",
+                &typical_prov,
+            ),
+        ] {
+            assert_eq!(digest.len(), 64);
+            assert!(digest.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
