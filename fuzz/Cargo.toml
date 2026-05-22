@@ -418,3 +418,15 @@ name = "fuzz_reputation_deterministic_score"
 path = "fuzz_targets/fuzz_reputation_deterministic_score.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_adversary_graph_replay"
+path = "fuzz_targets/fuzz_adversary_graph_replay.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_fleet_canonical_payload_float_rejection"
+path = "fuzz_targets/fuzz_fleet_canonical_payload_float_rejection.rs"
+test = false
+doc = false
