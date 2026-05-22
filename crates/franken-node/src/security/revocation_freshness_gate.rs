@@ -2605,4 +2605,202 @@ mod tests {
             "Should have exactly 10 successful operations (one per unique nonce)"
         );
     }
+
+    // Frozen SHA-256 hex outputs of the public method
+    // `FreshnessProof::canonical_payload` (revocation_freshness_gate.rs:119).
+    // The function builds the canonical signature-input bytes as:
+    //
+    //   SHA256(
+    //     b"rfg_freshness_proof_v1:"
+    //     || LE64(timestamp)                          # raw u64
+    //     || LE64(credentials_checked.len())          # raw u64 count
+    //     || for cred in credentials_checked:
+    //          LE64(len(cred)) || cred.as_bytes()
+    //     || LE64(len(nonce)) || nonce.as_bytes()
+    //     || LE64(len(tier.to_string())) || tier.to_string().as_bytes()
+    //     || LE64(epoch)                              # raw u64
+    //   ).finalize().to_vec()
+    //
+    // Output is Vec<u8> (raw 32-byte SHA-256 digest), NOT hex — the test
+    // hex-encodes the result for comparison against the frozen pins.
+    //
+    // Three frozen fixtures + four structural invariants:
+    //
+    //   1. minimal (timestamp=0, no creds, empty nonce, Critical tier,
+    //      epoch=0) — locks the v1 domain + LE64 framings on every empty
+    //      field + SafetyTier::Critical's Display ("Critical", 8 bytes).
+    //      Frozen: 92e949fa78b788b89effd00ed60b90b23e3978a44d149f092d611897a599f12e
+    //
+    //   2. realistic (timestamp=1.7e9, 3 distinct creds, 14-byte nonce,
+    //      Standard tier, epoch=42) — locks the per-cred LE64-len framing
+    //      across multiple non-empty credentials, plus SafetyTier::Standard
+    //      Display ("Standard", 8 bytes).
+    //      Frozen: d846f055441b9b990168f44c795606b9c11562476e5908564a6ce83e9c514955
+    //
+    //   3. advisory (timestamp=1.7e9+1, single cred, 1-byte nonce,
+    //      Advisory tier, epoch=100) — locks SafetyTier::Advisory Display
+    //      ("Advisory", 8 bytes); same byte length as Critical/Standard,
+    //      so the difference is encoded purely through the field BYTES
+    //      not the LE64 length prefix (3-way distinction is load-bearing).
+    //      Frozen: 09e5cdde52aeb9223011982f2c437fda69b875d0774591300da6424749afbbc5
+    //
+    // Critical layout invariants this golden pins:
+    //   - the v1 domain separator string `rfg_freshness_proof_v1:`
+    //   - LE64 width on raw counters (timestamp, epoch, credentials.len())
+    //   - LE64 length-prefix per credential (NOT a single concatenated
+    //     blob — the per-cred framing prevents the "concatenate two
+    //     credentials with a delimiter to forge a third" attack)
+    //   - SafetyTier::Display mapping: Critical/Standard/Advisory all
+    //     happen to be 8 chars long (and three of those distinct three-
+    //     way labels are pinned through fixtures 1/2/3 respectively)
+    //   - field order: timestamp → creds_count → creds → nonce → tier → epoch
+    //   - tier is FORMATTED VIA Display (.to_string()), NOT via a raw
+    //     enum discriminant — a future refactor that pinned a u8 instead
+    //     of the Display string would silently flip all three hashes
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing the function in Python — NOT captured from an
+    // unreviewed prior run.
+    //
+    // Why this matters (the contract): canonical_payload feeds the HMAC
+    // signature path (signature: String field at L107 of FreshnessProof).
+    // If two nodes compute different canonical bytes for the same logical
+    // FreshnessProof — because someone reordered fields, swapped LE64
+    // widths, dropped the per-credential length-prefix in favour of a
+    // delimiter, or changed SafetyTier::Display — signature verification
+    // breaks silently across the revocation-freshness gate AND the gate
+    // starts denying legitimate verified actions.
+    #[test]
+    fn freshness_proof_canonical_payload_frozen_byte_layout_golden() {
+        // 1. Minimal: all zero/empty + Critical tier.
+        let minimal = FreshnessProof {
+            timestamp: 0,
+            credentials_checked: Vec::new(),
+            nonce: String::new(),
+            signature: String::new(), // signature is NOT in canonical_payload
+            tier: SafetyTier::Critical,
+            epoch: 0,
+        };
+        assert_eq!(
+            hex::encode(minimal.canonical_payload()),
+            "92e949fa78b788b89effd00ed60b90b23e3978a44d149f092d611897a599f12e",
+            "minimal canonical_payload drifted — check the v1 domain \
+             separator, LE64(0)-on-empty-string framing, OR \
+             SafetyTier::Critical Display mapping (\"Critical\", 8 bytes)"
+        );
+
+        // 2. Realistic: populated with three distinct credentials, Standard.
+        let realistic = FreshnessProof {
+            timestamp: 1_700_000_000,
+            credentials_checked: vec![
+                "cred-1".to_string(),
+                "cred-2".to_string(),
+                "cred-bd-1xwz".to_string(),
+            ],
+            nonce: "nonce-golden-7".to_string(),
+            signature: String::new(),
+            tier: SafetyTier::Standard,
+            epoch: 42,
+        };
+        assert_eq!(
+            hex::encode(realistic.canonical_payload()),
+            "d846f055441b9b990168f44c795606b9c11562476e5908564a6ce83e9c514955",
+            "realistic canonical_payload drifted — check per-credential \
+             LE64-len framing, credential iteration order (Vec order MUST \
+             be preserved), or SafetyTier::Standard Display mapping"
+        );
+
+        // 3. Advisory tier with single-cred + single-char nonce.
+        let advisory = FreshnessProof {
+            timestamp: 1_700_000_001,
+            credentials_checked: vec!["cred-only".to_string()],
+            nonce: "n".to_string(),
+            signature: String::new(),
+            tier: SafetyTier::Advisory,
+            epoch: 100,
+        };
+        assert_eq!(
+            hex::encode(advisory.canonical_payload()),
+            "09e5cdde52aeb9223011982f2c437fda69b875d0774591300da6424749afbbc5",
+            "advisory canonical_payload drifted — check SafetyTier::Advisory \
+             Display mapping (\"Advisory\", 8 bytes — same length as \
+             Critical/Standard, so the 3-way distinction is purely bytewise)"
+        );
+
+        // Cross-fixture distinctness: all three MUST produce distinct hashes.
+        let minimal_hex = hex::encode(minimal.canonical_payload());
+        let realistic_hex = hex::encode(realistic.canonical_payload());
+        let advisory_hex = hex::encode(advisory.canonical_payload());
+        assert_ne!(minimal_hex, realistic_hex);
+        assert_ne!(realistic_hex, advisory_hex);
+        assert_ne!(minimal_hex, advisory_hex);
+
+        // SAFETY-TIER DISTINGUISHABILITY INVARIANT: cloning `minimal` and
+        // changing only the tier MUST flip the hash. Pins the contract
+        // that SafetyTier is fed into the hasher; a future refactor that
+        // dropped tier (e.g. "tier is policy-only, not authenticated")
+        // would catastrophically allow Advisory proofs to authorize
+        // Critical actions.
+        let mut minimal_advisory = minimal.clone();
+        minimal_advisory.tier = SafetyTier::Advisory;
+        assert_ne!(
+            hex::encode(minimal_advisory.canonical_payload()),
+            minimal_hex,
+            "changing only SafetyTier from Critical to Advisory MUST flip \
+             the canonical_payload; if it does not, tier is not being \
+             authenticated and Advisory proofs could authorize Critical \
+             actions"
+        );
+
+        // SIGNATURE-EXCLUSION INVARIANT: the `signature` field is NOT
+        // fed into canonical_payload (the payload IS what gets signed,
+        // so including the signature would be circular). Mutating
+        // signature MUST NOT change the payload.
+        let mut minimal_with_sig = minimal.clone();
+        minimal_with_sig.signature = "hmac-sha256:dead-beef".to_string();
+        assert_eq!(
+            hex::encode(minimal_with_sig.canonical_payload()),
+            minimal_hex,
+            "signature field MUST be EXCLUDED from canonical_payload \
+             (the payload IS what gets signed; including the signature \
+             would be circular and prevent any signature from verifying)"
+        );
+
+        // PER-CREDENTIAL FRAMING INVARIANT: a credential list of
+        // ["a", "b"] MUST hash differently from a list of ["ab"]. The
+        // LE64-per-credential length prefix is what prevents the
+        // "two credentials concatenated" forgery; if dropped, an
+        // attacker could craft a single credential containing other
+        // credentials' bytes and trick the gate into validating
+        // multiple revocations from a single check.
+        let two_creds = FreshnessProof {
+            timestamp: 0,
+            credentials_checked: vec!["a".to_string(), "b".to_string()],
+            nonce: String::new(),
+            signature: String::new(),
+            tier: SafetyTier::Critical,
+            epoch: 0,
+        };
+        let one_concat_cred = FreshnessProof {
+            timestamp: 0,
+            credentials_checked: vec!["ab".to_string()],
+            nonce: String::new(),
+            signature: String::new(),
+            tier: SafetyTier::Critical,
+            epoch: 0,
+        };
+        assert_ne!(
+            hex::encode(two_creds.canonical_payload()),
+            hex::encode(one_concat_cred.canonical_payload()),
+            "[\"a\", \"b\"] and [\"ab\"] MUST hash DIFFERENTLY — the \
+             per-credential LE64 length-prefix prevents the \
+             concatenation-forgery attack on the credentials list"
+        );
+
+        // Length+casing contract.
+        for h in [&minimal_hex, &realistic_hex, &advisory_hex] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
