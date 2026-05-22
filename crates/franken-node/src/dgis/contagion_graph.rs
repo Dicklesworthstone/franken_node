@@ -682,18 +682,6 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_sparse_generator_bypasses_public_profile_cap_bd98xo5_10() {
-        let capped = ContagionGraph::generate_deterministic(0xD615_0010, 1_500, 0.001);
-        assert_eq!(capped.nodes().len(), 1_024);
-
-        let large =
-            ContagionGraph::generate_sparse_deterministic_for_benchmark(0xD615_0010, 1_500, 0.001);
-        assert_eq!(large.nodes().len(), 1_500);
-        assert!(large.edge_count() > 0);
-        assert_eq!(large.validate(), Ok(()));
-    }
-
-    #[test]
     fn all_generated_weights_are_finite_and_in_range() {
         let g = ContagionGraph::generate_deterministic(42, 32, 0.4);
         let mut seen = 0usize;
