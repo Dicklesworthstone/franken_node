@@ -761,6 +761,71 @@ fn run_queue_lifecycle_after_optional_expanding_reload(
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_queue_lifecycle_after_optional_expand_reduce_churn(
+    with_expand_reduce_churn: bool,
+) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(&task_classes::log_rotation(), 9_500, "meta-churn-active")
+        .expect("first task should occupy the lane");
+    let queued = queued_task_id_from(
+        scheduler
+            .assign_task(&task_classes::log_rotation(), 9_501, "meta-churn-queued")
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    if with_expand_reduce_churn {
+        scheduler
+            .reload_policy(expanded_background_with_idle_maintenance_policy())
+            .expect("idle lane expansion should preserve queued background work");
+        assert_eq!(
+            scheduler.queued_task_ids(SchedulerLane::Background),
+            vec![queued.clone()]
+        );
+        assert!(
+            scheduler.lane_counter(SchedulerLane::Maintenance).is_some(),
+            "expanded idle maintenance counter should be visible before reduction"
+        );
+    }
+
+    scheduler
+        .complete_task(
+            &active.task_id.to_string(),
+            9_510,
+            "meta-churn-complete-active",
+        )
+        .expect("completion should promote queued task after optional expansion");
+    scheduler
+        .complete_task(&queued, 9_520, "meta-churn-complete-promoted")
+        .expect("promoted task should complete before optional reduction");
+
+    if with_expand_reduce_churn {
+        scheduler
+            .reload_policy(single_background_lane_policy())
+            .expect("idle expanded lane should be removable after background drain");
+        assert!(
+            scheduler.lane_counter(SchedulerLane::Maintenance).is_none(),
+            "idle maintenance counter should be removed after reduction"
+        );
+        assert_eq!(scheduler.lane_counters().len(), 1);
+        assert_eq!(
+            scheduler
+                .policy()
+                .resolve(&task_classes::garbage_collection()),
+            None
+        );
+        assert_eq!(
+            scheduler.policy().resolve(&task_classes::log_rotation()),
+            Some(SchedulerLane::Background)
+        );
+    }
+
+    queue_lifecycle_digest(&scheduler)
+}
+
 #[test]
 fn metamorphic_queue_lifecycle_invariants_survive_observation_interleavings() {
     let baseline = run_queue_lifecycle(false);
@@ -894,6 +959,28 @@ fn metamorphic_expanding_hot_reload_preserves_existing_queue_lifecycle() {
     assert_eq!(expanded.starvation_events, 0);
     assert_eq!(
         expanded
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn metamorphic_expand_then_reduce_policy_churn_preserves_queue_lifecycle() {
+    let baseline = run_queue_lifecycle_after_optional_expand_reduce_churn(false);
+    let churned = run_queue_lifecycle_after_optional_expand_reduce_churn(true);
+
+    assert_eq!(churned, baseline);
+    assert_eq!(churned.active_count, 0);
+    assert_eq!(churned.queued_count, 0);
+    assert_eq!(churned.first_queued_at_ms, None);
+    assert_eq!(churned.completed_total, 2);
+    assert_eq!(churned.rejected_total, 1);
+    assert_eq!(churned.starvation_events, 0);
+    assert_eq!(
+        churned
             .audit_codes
             .iter()
             .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
