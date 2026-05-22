@@ -5258,4 +5258,118 @@ mod tests {
             assert_eq!(validation_capsule.expected_outputs.len(), 1);
         }
     }
+
+    // Frozen SHA-256 hex over the canonical byte layout produced by
+    // `try_compute_inputs_hash` (replay_capsule.rs:210, delegates to L214
+    // `try_compute_inputs_hash_with_prefix_limit` with limit = u64::MAX).
+    // The function builds the deterministic replay-capsule inputs hash as:
+    //
+    //   SHA256(
+    //     b"replay_capsule_inputs_v1:"
+    //     || LE64(inputs.len())
+    //     || for inp in inputs:
+    //          LE64(inp.seq)              # raw u64 LE — sequence is hashed
+    //       || LE64(inp.data.len())       # data length-prefix
+    //       || inp.data                   # raw data bytes
+    //   )
+    //
+    // Three frozen fixtures + one structural invariant assertion. Critical
+    // layout invariants this golden pins:
+    //   - the v1 domain separator string
+    //   - the LE64 count-of-inputs prefix
+    //   - the LE64 per-input seq encoding (not LE32, not big-endian)
+    //   - the LE64 per-input data length prefix BEFORE the raw data bytes
+    //   - metadata (BTreeMap<String, String> on each CapsuleInput) is
+    //     INTENTIONALLY EXCLUDED from the hash — the function only walks
+    //     seq + data
+    //
+    // Goldens were derived offline from the canonical-byte spec — NOT
+    // captured from an unreviewed prior run — by reimplementing the function
+    // in Python and hashing the resulting byte stream. Recompute all three
+    // together if the layout intentionally changes.
+    #[test]
+    fn try_compute_inputs_hash_frozen_canonical_byte_layout_golden() {
+        // Empty fixture: locks the v1 domain + LE64(0) no-inputs framing.
+        let empty_hash = super::try_compute_inputs_hash(&[]).expect("empty inputs encode");
+        assert_eq!(
+            empty_hash,
+            "c518e59d6911021a40ba3d6bb3e67799c4a1c533f57eccaa820f64a9902b9c7a",
+            "empty-inputs hash drifted — check the v1 domain separator or \
+             the LE64(0) no-inputs framing"
+        );
+
+        // Single fixture: one input with seq=0 and a 5-byte payload b"hello".
+        // Locks the per-input {LE64(seq), LE64(data.len), data} framing.
+        let single = vec![CapsuleInput {
+            seq: 0,
+            data: b"hello".to_vec(),
+            metadata: std::collections::BTreeMap::new(),
+        }];
+        let single_hash = super::try_compute_inputs_hash(&single).expect("single input encodes");
+        assert_eq!(
+            single_hash,
+            "2ac37f96f8ee0eac2b0f314c43abc9c8a7e22446037489a2a5c510762e1f6cc1",
+            "single-input hash drifted — check LE64(seq) encoding or \
+             LE64(data.len) prefix"
+        );
+
+        // Multi fixture: three inputs covering edge cases — (a) empty data
+        // (LE64(0) data-length + no bytes), (b) ascii data, (c) binary
+        // 0x00..0x0f bytes at a large seq. Locks ordering: inputs feed the
+        // hasher in slice order, NOT reordered.
+        let multi = vec![
+            CapsuleInput {
+                seq: 0,
+                data: Vec::new(),
+                metadata: std::collections::BTreeMap::new(),
+            },
+            CapsuleInput {
+                seq: 42,
+                data: b"intermediate".to_vec(),
+                metadata: std::collections::BTreeMap::new(),
+            },
+            CapsuleInput {
+                seq: 1_000_000,
+                data: (0_u8..16).collect(),
+                metadata: std::collections::BTreeMap::new(),
+            },
+        ];
+        let multi_hash = super::try_compute_inputs_hash(&multi).expect("multi inputs encode");
+        assert_eq!(
+            multi_hash,
+            "ecbdeabb0a2e25a11d23997c4a54079cc07106bee4cf74e7961b567ad53bbcbf",
+            "multi-input hash drifted — check input-iteration order or \
+             empty-data LE64(0)+zero-bytes framing"
+        );
+
+        // Cross-fixture distinctness + length contract.
+        for h in [&empty_hash, &single_hash, &multi_hash] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+        assert_ne!(empty_hash, single_hash);
+        assert_ne!(single_hash, multi_hash);
+
+        // Metadata-exclusion invariant: cloning `single` and populating
+        // metadata with arbitrary key-value pairs MUST NOT change the hash.
+        // The contract at L225-233 walks ONLY seq + data; metadata is
+        // intentionally not fed into the hasher (a refactor that re-
+        // introduces it would silently fork hashes across capsules that
+        // carry different sidecar metadata for the same logical input).
+        let mut single_with_metadata = single.clone();
+        single_with_metadata[0]
+            .metadata
+            .insert("source".to_string(), "node-1".to_string());
+        single_with_metadata[0]
+            .metadata
+            .insert("region".to_string(), "us-east-1".to_string());
+        let metadata_variant_hash =
+            super::try_compute_inputs_hash(&single_with_metadata).expect("metadata variant encodes");
+        assert_eq!(
+            metadata_variant_hash, single_hash,
+            "CapsuleInput.metadata MUST be excluded from the hash; adding \
+             metadata to an otherwise-identical input must NOT change the \
+             inputs_hash result"
+        );
+    }
 }
