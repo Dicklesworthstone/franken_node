@@ -1,0 +1,18 @@
+{
+  "applied_at_utc": "2026-05-20T21:48:30Z",
+  "approved_by": "Jeffrey Emanuel (AskUserQuestion answer: 'Tune more aggressively')",
+  "applied": [
+    { "knob": "kernel.perf_event_paranoid", "before": 4, "after": 1, "revert": "sudo sysctl -w kernel.perf_event_paranoid=4" },
+    { "knob": "kernel.kptr_restrict",      "before": 1, "after": 0, "revert": "sudo sysctl -w kernel.kptr_restrict=1" },
+    { "knob": "kernel.nmi_watchdog",       "before": 1, "after": 0, "revert": "sudo sysctl -w kernel.nmi_watchdog=1" },
+    { "knob": "page_caches",               "before": "180 GiB buff/cache", "after": "3.5 GiB buff/cache",
+      "revert": "(no revert needed; OS will repopulate cache as workloads touch files)",
+      "command": "sync && echo 3 | sudo tee /proc/sys/vm/drop_caches" }
+  ],
+  "not_applied": [
+    { "knob": "cpufreq governor", "reason": "AMD EPYC under amd_pstate; per-cpu governor not exposed under /sys/devices/system/cpu/cpu0/cpufreq (the path is empty). No safe runtime override available without a reboot." },
+    { "knob": "intel_pstate.no_turbo", "reason": "Not an Intel pstate platform; file does not exist." },
+    { "knob": "isolcpus / taskset",  "reason": "Would require reboot for isolcpus boot flag. Run sticks to default scheduler with vacant host."}
+  ],
+  "revert_block": "sudo sysctl -w kernel.perf_event_paranoid=4 kernel.kptr_restrict=1 kernel.nmi_watchdog=1"
+}

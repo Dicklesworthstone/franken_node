@@ -1,0 +1,87 @@
+{
+  "run_id": "20260520T214003Z_franken_node_perf",
+  "captured_at_utc": "2026-05-20T21:49:42Z",
+  "git_sha": "aa3b1c9a82a6aaa14ebd94f7bc5edb1d83884a07",
+  "git_dirty": true,
+  "git_dirty_note": "Working tree has uncommitted edits from concurrent agent swarm (AGENTS.md says treat as ours).",
+  "cargo_lock_sha256": "a211ae51de1e29b9c2e0678ea088aff38d70812e8343acd5d02b6ccf63dfd4df",
+  "hardware": {
+    "cpu_model": "AMD EPYC 7282 16-Core Processor",
+    "sockets": 2,
+    "cores_per_socket": 16,
+    "threads_per_core": 2,
+    "logical_cpus": 64,
+    "numa_nodes": 2,
+    "numa_node0_cpus": "0-15,32-47",
+    "numa_node1_cpus": "16-31,48-63",
+    "ram_total": "251 GiB (263 828 632 KiB)",
+    "swap_total": "71 GiB (75 497 460 KiB)",
+    "swap_used_at_capture": "31 GiB (pre-existing; from older sessions, not active pressure during the run)"
+  },
+  "storage": {
+    "device": "/dev/nvme0n1p4",
+    "mount_point": "/",
+    "filesystem": "ext4",
+    "mount_options": "rw,noatime,errors=remount-ro",
+    "disk_free_at_capture": "176 GiB / 906 GiB (81 % used)"
+  },
+  "os": {
+    "distribution": "Ubuntu",
+    "kernel": "6.17.0-22-generic",
+    "uname": "Linux sensedemobox 6.17.0-22-generic #22-Ubuntu SMP PREEMPT_DYNAMIC Fri Mar 13 12:04:44 UTC 2026 x86_64 GNU/Linux",
+    "hostname": "sensedemobox"
+  },
+  "toolchain": {
+    "rustup_active": "nightly-x86_64-unknown-linux-gnu",
+    "rustc": "rustc 1.97.0-nightly (f53b654a8 2026-04-30)",
+    "rustc_host": "x86_64-unknown-linux-gnu",
+    "rustc_llvm": "22.1.4",
+    "go": null,
+    "node": null,
+    "python": null
+  },
+  "build_profile": {
+    "name": "release-perf",
+    "inherits": "release",
+    "opt_level": 3,
+    "lto": "thin",
+    "codegen_units": 1,
+    "debug": "line-tables-only",
+    "panic": "default (unwind)",
+    "strip": false,
+    "RUSTFLAGS": "-C force-frame-pointers=yes",
+    "note": "Workspace had NO [profile.*] override prior to this run. Profile added under crates/franken-node/Cargo.toml [profile.release-perf]."
+  },
+  "workload_isolation": {
+    "taskset": null,
+    "cgroup": null,
+    "rch": false,
+    "rch_note": "Criterion benches and samply runs are CPU/IO-bound on the local host; `rch exec -- cargo bench` would marshal artifacts over the network and contaminate timings. Build offload (cargo build) is fine via rch; bench execution is local.",
+    "bare": true
+  },
+  "tuning_applied": {
+    "perf_event_paranoid": 1,
+    "kptr_restrict": 0,
+    "nmi_watchdog": 0,
+    "governor": "(amd_pstate; per-cpu governor not exposed under /sys/devices/system/cpu/cpu0/cpufreq on this kernel — no change applied)",
+    "no_turbo": "(intel_pstate not present on AMD; no change applied)",
+    "smt_active": "on",
+    "transparent_hugepages": "madvise",
+    "vm_swappiness": 10,
+    "page_caches_dropped_pre_run": true
+  },
+  "tools": {
+    "samply": "installing in background (cargo install samply --locked)",
+    "perf": "/usr/bin/perf (kernel 6.17 baseline)",
+    "cargo_flamegraph": "/home/ubuntu/.cargo/bin/cargo-flamegraph",
+    "heaptrack": "/usr/bin/heaptrack 1.5.0",
+    "valgrind": "/usr/bin/valgrind",
+    "hyperfine": "/home/ubuntu/.cargo/bin/hyperfine"
+  },
+  "cache_state": "warm",
+  "notes": [
+    "Page caches dropped pre-run to start each scenario from a known state.",
+    "Host load average at fingerprint: 2.59 (1 m), 2.54 (5 m), 21.73 (15 m) — recent contention. Benches were run after a quiet window confirmed via uptime.",
+    "Pre-existing 31 GiB swap is older idle pages, not active pressure (MemAvailable = 223 GiB, Dirty = 28 MB)."
+  ]
+}

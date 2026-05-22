@@ -3375,4 +3375,312 @@ mod tests {
                 .any(|failure| is_invalid_for(failure, "s1"))
         );
     }
+
+    #[test]
+    fn lease_coordinator_structure_aware_state_machine_fuzz_seeds() {
+        let selection_cases = vec![
+            (
+                "baseline-replay",
+                candidates(),
+                "lease-fuzz-baseline",
+                "trace-fuzz-baseline",
+                &["node-a", "node-b", "node-c"][..],
+            ),
+            (
+                "filtered-candidates",
+                vec![
+                    CoordinatorCandidate {
+                        node_id: "node-valid".to_string(),
+                        weight: 3,
+                    },
+                    CoordinatorCandidate {
+                        node_id: String::new(),
+                        weight: u64::MAX,
+                    },
+                    CoordinatorCandidate {
+                        node_id: "node-zero".to_string(),
+                        weight: 0,
+                    },
+                    CoordinatorCandidate {
+                        node_id: "node\0shadow".to_string(),
+                        weight: u64::MAX,
+                    },
+                ],
+                "lease-fuzz-filtered",
+                "trace-fuzz-filtered",
+                &["node-valid"][..],
+            ),
+            (
+                "max-weight-boundary",
+                vec![
+                    CoordinatorCandidate {
+                        node_id: "node-low".to_string(),
+                        weight: 1,
+                    },
+                    CoordinatorCandidate {
+                        node_id: "node-max".to_string(),
+                        weight: u64::MAX,
+                    },
+                    CoordinatorCandidate {
+                        node_id: "node-mid".to_string(),
+                        weight: u64::from(u32::MAX),
+                    },
+                ],
+                "lease-fuzz-max-weight",
+                "trace-fuzz-max-weight",
+                &["node-low", "node-max", "node-mid"][..],
+            ),
+        ];
+
+        for (label, case_candidates, lease_id, trace_id, expected_candidates) in selection_cases {
+            let selection = select_coordinator(&case_candidates, lease_id, trace_id)
+                .unwrap_or_else(|err| panic!("{label}: selection failed: {}", err.code()));
+            let replay = select_coordinator(&case_candidates, lease_id, trace_id)
+                .unwrap_or_else(|err| panic!("{label}: replay selection failed: {}", err.code()));
+            let expected_candidates: Vec<String> = expected_candidates
+                .iter()
+                .map(|candidate| (*candidate).to_string())
+                .collect();
+
+            assert_eq!(selection.selected, replay.selected, "{label}");
+            assert_eq!(selection.candidates, replay.candidates, "{label}");
+            assert_eq!(selection.candidates, expected_candidates, "{label}");
+            assert_eq!(selection.lease_id, lease_id, "{label}");
+            assert_eq!(selection.trace_id, trace_id, "{label}");
+
+            let mut permuted_candidates = case_candidates.clone();
+            permuted_candidates.reverse();
+            let permuted = select_coordinator(&permuted_candidates, lease_id, trace_id)
+                .unwrap_or_else(|err| panic!("{label}: permuted selection failed: {}", err.code()));
+
+            assert_eq!(selection.selected, permuted.selected, "{label}");
+            assert_eq!(selection.candidates, permuted.candidates, "{label}");
+            assert!(
+                selection.candidates.contains(&selection.selected),
+                "{label}"
+            );
+
+            let known_signers = vec![selection.selected.clone()];
+            let signatures = vec![valid_sig(&selection.selected, "payload-selected")];
+            let verification = verify_quorum(
+                &qconfig(),
+                lease_id,
+                "Standard",
+                &signatures,
+                &known_signers,
+                "payload-selected",
+                trace_id,
+                "ts-state-fuzz",
+            );
+
+            assert!(verification.passed, "{label}");
+            assert_eq!(verification.required, 1, "{label}");
+            assert_eq!(verification.received, 1, "{label}");
+            assert!(verification.failures.is_empty(), "{label}");
+        }
+
+        let rejected_selection_cases = vec![
+            ("empty-candidates", Vec::new(), "lease-empty", "trace-empty"),
+            (
+                "all-ineligible-candidates",
+                vec![
+                    CoordinatorCandidate {
+                        node_id: "node-zero".to_string(),
+                        weight: 0,
+                    },
+                    CoordinatorCandidate {
+                        node_id: String::new(),
+                        weight: u64::MAX,
+                    },
+                    CoordinatorCandidate {
+                        node_id: "node\0shadow".to_string(),
+                        weight: u64::MAX,
+                    },
+                ],
+                "lease-no-candidates",
+                "trace-no-candidates",
+            ),
+            (
+                "malformed-lease",
+                candidates(),
+                "lease fuzz whitespace",
+                "trace-bad-lease",
+            ),
+            (
+                "malformed-trace",
+                candidates(),
+                "lease-bad-trace",
+                "trace\nbad",
+            ),
+        ];
+
+        for (label, case_candidates, lease_id, trace_id) in rejected_selection_cases {
+            let err = select_coordinator(&case_candidates, lease_id, trace_id)
+                .expect_err("malformed coordinator selection fuzz seed must fail closed");
+
+            assert_eq!(err.code(), "LC_NO_CANDIDATES", "{label}");
+        }
+
+        struct QuorumSeed {
+            label: &'static str,
+            config: QuorumConfig,
+            lease_id: &'static str,
+            tier: &'static str,
+            signatures: Vec<QuorumSignature>,
+            known_signers: Vec<String>,
+            content_hash: &'static str,
+            trace_id: &'static str,
+            timestamp: &'static str,
+            expected_passed: bool,
+            expected_required: u32,
+            expected_received: u32,
+            expected_codes: &'static [&'static str],
+        }
+
+        let quorum_cases = vec![
+            QuorumSeed {
+                label: "standard-pass",
+                config: qconfig(),
+                lease_id: "lease-quorum-pass",
+                tier: "Standard",
+                signatures: vec![valid_sig("s1", "payload-a")],
+                known_signers: vec!["s1".to_string()],
+                content_hash: "payload-a",
+                trace_id: "trace-quorum-pass",
+                timestamp: "ts",
+                expected_passed: true,
+                expected_required: 1,
+                expected_received: 1,
+                expected_codes: &[],
+            },
+            QuorumSeed {
+                label: "risky-below-quorum",
+                config: qconfig(),
+                lease_id: "lease-risky-below",
+                tier: "Risky",
+                signatures: vec![valid_sig("s1", "payload-a")],
+                known_signers: vec!["s1".to_string(), "s2".to_string()],
+                content_hash: "payload-a",
+                trace_id: "trace-risky-below",
+                timestamp: "ts",
+                expected_passed: false,
+                expected_required: 2,
+                expected_received: 1,
+                expected_codes: &["LC_BELOW_QUORUM"],
+            },
+            QuorumSeed {
+                label: "valid-quorum-plus-unknown-fails-closed",
+                config: qconfig(),
+                lease_id: "lease-valid-plus-unknown",
+                tier: "Risky",
+                signatures: vec![
+                    valid_sig("s1", "payload-a"),
+                    valid_sig("s2", "payload-a"),
+                    valid_sig("intruder", "payload-a"),
+                ],
+                known_signers: vec!["s1".to_string(), "s2".to_string()],
+                content_hash: "payload-a",
+                trace_id: "trace-valid-plus-unknown",
+                timestamp: "ts",
+                expected_passed: false,
+                expected_required: 2,
+                expected_received: 2,
+                expected_codes: &["LC_UNKNOWN_SIGNER"],
+            },
+            QuorumSeed {
+                label: "duplicate-valid-and-invalid-fails-closed",
+                config: qconfig(),
+                lease_id: "lease-duplicate-valid-invalid",
+                tier: "Standard",
+                signatures: vec![
+                    valid_sig("s1", "payload-a"),
+                    QuorumSignature {
+                        signer_id: "s1".to_string(),
+                        signature: "not-valid".to_string(),
+                    },
+                ],
+                known_signers: vec!["s1".to_string()],
+                content_hash: "payload-a",
+                trace_id: "trace-duplicate-valid-invalid",
+                timestamp: "ts",
+                expected_passed: false,
+                expected_required: 1,
+                expected_received: 1,
+                expected_codes: &["LC_INVALID_SIGNATURE"],
+            },
+            QuorumSeed {
+                label: "malformed-metadata-invalidates-known-signature",
+                config: qconfig(),
+                lease_id: " lease-padded",
+                tier: "Standard",
+                signatures: vec![valid_sig("s1", "payload-a")],
+                known_signers: vec!["s1".to_string()],
+                content_hash: "payload-a",
+                trace_id: "trace-padded-lease",
+                timestamp: "ts",
+                expected_passed: false,
+                expected_required: 1,
+                expected_received: 0,
+                expected_codes: &["LC_INVALID_SIGNATURE", "LC_BELOW_QUORUM"],
+            },
+            QuorumSeed {
+                label: "zero-threshold-unknown-tier-still-requires-one",
+                config: QuorumConfig {
+                    standard_threshold: 0,
+                    risky_threshold: 0,
+                    dangerous_threshold: 0,
+                },
+                lease_id: "lease-zero-threshold",
+                tier: "UnknownTier",
+                signatures: Vec::new(),
+                known_signers: Vec::new(),
+                content_hash: "payload-a",
+                trace_id: "trace-zero-threshold",
+                timestamp: "ts",
+                expected_passed: false,
+                expected_required: 1,
+                expected_received: 0,
+                expected_codes: &["LC_BELOW_QUORUM"],
+            },
+        ];
+
+        for seed in quorum_cases {
+            let verification = verify_quorum(
+                &seed.config,
+                seed.lease_id,
+                seed.tier,
+                &seed.signatures,
+                &seed.known_signers,
+                seed.content_hash,
+                seed.trace_id,
+                seed.timestamp,
+            );
+            let actual_codes: Vec<&str> = verification
+                .failures
+                .iter()
+                .map(VerificationFailure::code)
+                .collect();
+
+            assert_eq!(verification.passed, seed.expected_passed, "{}", seed.label);
+            assert_eq!(
+                verification.required, seed.expected_required,
+                "{}",
+                seed.label
+            );
+            assert_eq!(
+                verification.received, seed.expected_received,
+                "{}",
+                seed.label
+            );
+            assert_eq!(
+                actual_codes.as_slice(),
+                seed.expected_codes,
+                "{}",
+                seed.label
+            );
+            assert_eq!(verification.lease_id, seed.lease_id, "{}", seed.label);
+            assert_eq!(verification.trace_id, seed.trace_id, "{}", seed.label);
+            assert_eq!(verification.timestamp, seed.timestamp, "{}", seed.label);
+        }
+    }
 }

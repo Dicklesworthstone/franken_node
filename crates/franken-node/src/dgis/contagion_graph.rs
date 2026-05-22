@@ -255,13 +255,17 @@ impl ContagionGraph {
     /// this preserves the fire-and-forget API while bounding memory against
     /// callers that bypass the profile loader's check.
     pub fn add_node(&mut self, node: NodeId) {
+        self.add_node_with_limit(node, MAX_NODES);
+    }
+
+    fn add_node_with_limit(&mut self, node: NodeId, max_nodes: usize) {
         if validate_node_id(&node).is_err() {
             return;
         }
         if self.member_id_for(&node).is_some() {
             return;
         }
-        if self.nodes.len() >= MAX_NODES {
+        if self.nodes.len() >= max_nodes {
             return;
         }
         let Ok(node_id) = self.interner.intern(&node) else {
@@ -469,6 +473,94 @@ impl ContagionGraph {
         }
         graph
     }
+
+    /// Generate a large sparse graph for performance harnesses that need to
+    /// measure simulator behavior above the production profile-loader cap.
+    ///
+    /// This intentionally does not change [`ContagionGraph::add_node`] or
+    /// [`ContagionGraph::generate_deterministic`], which remain capped at
+    /// `MAX_NODES` for untrusted product inputs.
+    #[doc(hidden)]
+    pub fn generate_sparse_deterministic_for_benchmark(
+        seed: u64,
+        n_nodes: usize,
+        edge_density: f64,
+    ) -> Self {
+        const MAX_BENCH_NODES: usize = 50_000;
+
+        let density = if edge_density.is_finite() {
+            edge_density.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let n_nodes = n_nodes.min(MAX_BENCH_NODES);
+        let mut graph = Self::new(seed);
+        for i in 0..n_nodes {
+            graph.add_node_with_limit(format!("n{:08}", i), MAX_BENCH_NODES);
+        }
+
+        if n_nodes < 2 || density == 0.0 {
+            return graph;
+        }
+
+        let max_pairs = n_nodes.saturating_mul(n_nodes.saturating_sub(1));
+        let target_edges = ((max_pairs as f64) * density).ceil().min(max_pairs as f64) as usize;
+        if target_edges == 0 {
+            return graph;
+        }
+
+        let mut rng = SplitMix64::new(seed ^ 0x4447_4953_4C47_4248); // "DGISLGBH"
+        let Ok(n_nodes_u64) = u64::try_from(n_nodes) else {
+            return graph;
+        };
+        let mut seen_edges = BTreeSet::new();
+        let max_attempts = target_edges
+            .saturating_mul(8)
+            .saturating_add(n_nodes)
+            .max(target_edges);
+
+        for _ in 0..max_attempts {
+            if seen_edges.len() >= target_edges {
+                break;
+            }
+            let Ok(source_idx) = usize::try_from(rng.next_u64() % n_nodes_u64) else {
+                continue;
+            };
+            let Ok(mut target_idx) = usize::try_from(rng.next_u64() % n_nodes_u64) else {
+                continue;
+            };
+            if source_idx == target_idx {
+                target_idx = target_idx.saturating_add(1) % n_nodes;
+            }
+            if !seen_edges.insert((source_idx, target_idx)) {
+                continue;
+            }
+
+            let Some(source) = graph.nodes.get(source_idx).cloned() else {
+                continue;
+            };
+            let Some(target) = graph.nodes.get(target_idx).cloned() else {
+                continue;
+            };
+            let weight = (0.05_f64 + (rng.next_unit_f64() * 0.95_f64)).clamp(0.05, 1.0);
+            let edge_kind = match rng.next_u64() & 0b11 {
+                0 => EdgeKind::DependencyImport,
+                1 => EdgeKind::MaintainerOverlap,
+                2 => EdgeKind::OrgOverlap,
+                _ => EdgeKind::NamespaceShadow,
+            };
+            let _ = graph.add_edge(
+                &source,
+                ContagionEdge {
+                    target,
+                    weight,
+                    edge_kind,
+                },
+            );
+        }
+
+        graph
+    }
 }
 
 /// SplitMix64 deterministic PRNG. Tiny, dependency-free, well-distributed
@@ -587,6 +679,18 @@ mod tests {
             }
         }
         assert!(any_diff, "seed change must perturb edge structure");
+    }
+
+    #[test]
+    fn benchmark_sparse_generator_bypasses_public_profile_cap_bd98xo5_10() {
+        let capped = ContagionGraph::generate_deterministic(0xD615_0010, 1_500, 0.001);
+        assert_eq!(capped.nodes().len(), 1_024);
+
+        let large =
+            ContagionGraph::generate_sparse_deterministic_for_benchmark(0xD615_0010, 1_500, 0.001);
+        assert_eq!(large.nodes().len(), 1_500);
+        assert!(large.edge_count() > 0);
+        assert_eq!(large.validate(), Ok(()));
     }
 
     #[test]

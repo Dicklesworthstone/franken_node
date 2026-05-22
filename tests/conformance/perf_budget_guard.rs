@@ -4,8 +4,8 @@
 //! against budget policy, emits correct events, and enforces invariants.
 
 use frankenengine_node::connector::perf_budget_guard::{
-    event_codes, BudgetPolicy, GateDecision, HotPath, HotPathBudget, MeasurementResult,
-    OverheadGate, INV_PBG_BUDGET, INV_PBG_COLD_START, INV_PBG_FLAMEGRAPH, INV_PBG_GATE,
+    BudgetPolicy, GateDecision, HotPath, HotPathBudget, INV_PBG_BUDGET, INV_PBG_COLD_START,
+    INV_PBG_FLAMEGRAPH, INV_PBG_GATE, MeasurementResult, OverheadGate, event_codes,
 };
 
 fn make_budget(hp: HotPath) -> HotPathBudget {
@@ -19,8 +19,12 @@ fn within_budget(hp: HotPath) -> MeasurementResult {
     let budget = make_budget(hp);
     MeasurementResult::from_measurements(
         hp,
-        100.0, 110.0, 120.0,
-        105.0, 118.0, 130.0,
+        100.0,
+        110.0,
+        120.0,
+        105.0,
+        118.0,
+        130.0,
         15.0,
         &budget,
         Some("flamegraph.svg".into()),
@@ -31,8 +35,12 @@ fn over_budget(hp: HotPath) -> MeasurementResult {
     let budget = make_budget(hp);
     MeasurementResult::from_measurements(
         hp,
-        100.0, 100.0, 100.0,
-        200.0, 200.0, 200.0,
+        100.0,
+        100.0,
+        100.0,
+        200.0,
+        200.0,
+        200.0,
         100.0,
         &budget,
         Some("flamegraph.svg".into()),
@@ -102,8 +110,12 @@ fn test_cold_start_over_budget_fails() {
     };
     let r = MeasurementResult::from_measurements(
         HotPath::FencingTokenOp,
-        100.0, 100.0, 100.0,
-        100.0, 100.0, 100.0,
+        100.0,
+        100.0,
+        100.0,
+        100.0,
+        100.0,
+        100.0,
         10.0, // cold-start over budget
         &budget,
         None,
@@ -153,7 +165,10 @@ fn test_event_codes_emitted() {
 fn test_over_budget_emits_prf003() {
     let mut gate = OverheadGate::with_default_policy();
     gate.evaluate(over_budget(HotPath::HealthGateEvaluation));
-    let has_prf003 = gate.events().iter().any(|e| e.code == event_codes::PRF_003_OVER_BUDGET);
+    let has_prf003 = gate
+        .events()
+        .iter()
+        .any(|e| e.code == event_codes::PRF_003_OVER_BUDGET);
     assert!(has_prf003);
 }
 
@@ -161,7 +176,10 @@ fn test_over_budget_emits_prf003() {
 fn test_flamegraph_emits_prf004() {
     let mut gate = OverheadGate::with_default_policy();
     gate.evaluate(within_budget(HotPath::HealthGateEvaluation));
-    let has_prf004 = gate.events().iter().any(|e| e.code == event_codes::PRF_004_FLAMEGRAPH_CAPTURED);
+    let has_prf004 = gate
+        .events()
+        .iter()
+        .any(|e| e.code == event_codes::PRF_004_FLAMEGRAPH_CAPTURED);
     assert!(has_prf004);
 }
 
@@ -246,8 +264,12 @@ fn test_deterministic_overhead_calculation() {
         .map(|_| {
             MeasurementResult::from_measurements(
                 HotPath::HealthGateEvaluation,
-                100.0, 100.0, 100.0,
-                110.0, 110.0, 110.0,
+                100.0,
+                100.0,
+                100.0,
+                110.0,
+                110.0,
+                110.0,
                 10.0,
                 &budget,
                 None,

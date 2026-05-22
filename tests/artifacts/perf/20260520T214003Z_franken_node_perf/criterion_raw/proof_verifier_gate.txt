@@ -1,0 +1,13 @@
+Gnuplot not found, using plotters backend
+Benchmarking verification_gate_batch_allow
+Benchmarking verification_gate_batch_allow: Warming up for 3.0000 s
+Benchmarking verification_gate_batch_allow: Collecting 100 samples in estimated 6.7206 s (15k iterations)
+Benchmarking verification_gate_batch_allow: Analyzing
+verification_gate_batch_allow
+                        time:   [462.19 µs 465.36 µs 470.40 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) low severe
+  5 (5.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+

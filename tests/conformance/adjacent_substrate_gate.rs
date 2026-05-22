@@ -77,7 +77,11 @@ fn summary_counts_match_check_statuses() {
     let report = load_gate_report();
     let passed = report.checks.iter().filter(|c| c.status == "pass").count();
     let failed = report.checks.iter().filter(|c| c.status == "fail").count();
-    let waived = report.checks.iter().filter(|c| c.status == "waived").count();
+    let waived = report
+        .checks
+        .iter()
+        .filter(|c| c.status == "waived")
+        .count();
 
     assert_eq!(report.summary.total_checks, report.checks.len());
     assert_eq!(report.summary.passed, passed);
@@ -90,7 +94,10 @@ fn failure_and_waiver_records_have_required_fields() {
     let report = load_gate_report();
     for check in &report.checks {
         assert!(!check.module.trim().is_empty(), "module field is required");
-        assert!(!check.substrate.trim().is_empty(), "substrate field is required");
+        assert!(
+            !check.substrate.trim().is_empty(),
+            "substrate field is required"
+        );
         assert!(!check.rule.trim().is_empty(), "rule field is required");
         assert!(
             matches!(check.status.as_str(), "pass" | "fail" | "waived"),

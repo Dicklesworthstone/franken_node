@@ -1,0 +1,48 @@
+{
+  "run_id": "20260522T152118Z_migrate_tree_sitter_bench",
+  "date": "2026-05-22T15:21:18Z",
+  "scope": "Tree-sitter migration audit performance analysis (bd-98xo5.9.3)",
+  "target": {
+    "bench_name": "migrate_tree_sitter_bench",
+    "crate": "frankenengine-node",
+    "profile": "release-perf",
+    "rustflags": ["-C", "force-frame-pointers=yes"]
+  },
+  "corpora": {
+    "small": {
+      "name": "commander_command_v12_1_0.js",
+      "size_bytes": 76000,
+      "lines_approx": 2509,
+      "description": "CommonJS library module with option parsing and event handling"
+    },
+    "large": {
+      "name": "babel_standalone_v7_12_0.js",
+      "size_bytes": 3000000,
+      "lines_approx": 102253,
+      "description": "Browser bundle with parser, transform, traversal, and code-generation"
+    }
+  },
+  "measurement_tools": [
+    "criterion (built-in benchmarking)",
+    "perf record (call-graph sampling)",
+    "heaptrack (memory allocation profiling)"
+  ],
+  "decision_criteria": [
+    "A) Parse-bound: tree-sitter dominates → log SLO expectation",
+    "B) Visitor-bound: traversal/analysis dominates → file optimization bead",
+    "C) Allocation-bound: memory allocation dominates → file allocation-reduction bead"
+  ],
+  "toolchain": {
+    "rust_version": "nightly",
+    "edition": "2024",
+    "lto": "thin",
+    "codegen_units": 1,
+    "opt_level": 3,
+    "debug": "line-tables-only"
+  },
+  "environment": {
+    "disk_space_resolved": "Disk space issue from previous round resolved, 34% usage (594GB free)",
+    "build_system": "rch (remote compilation)",
+    "worker": "ts2"
+  }
+}

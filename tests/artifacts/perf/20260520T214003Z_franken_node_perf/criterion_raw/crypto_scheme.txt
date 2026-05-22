@@ -1,0 +1,112 @@
+Gnuplot not found, using plotters backend
+Benchmarking crypto_scheme_raw_sign/ed25519_dalek_direct/64
+Benchmarking crypto_scheme_raw_sign/ed25519_dalek_direct/64: Warming up for 3.0000 s
+Benchmarking crypto_scheme_raw_sign/ed25519_dalek_direct/64: Collecting 100 samples in estimated 5.0885 s (217k iterations)
+Benchmarking crypto_scheme_raw_sign/ed25519_dalek_direct/64: Analyzing
+crypto_scheme_raw_sign/ed25519_dalek_direct/64
+                        time:   [23.559 µs 23.863 µs 24.222 µs]
+Found 17 outliers among 100 measurements (17.00%)
+  1 (1.00%) high mild
+  16 (16.00%) high severe
+Benchmarking crypto_scheme_raw_sign/ed25519_scheme_sign_raw/64
+Benchmarking crypto_scheme_raw_sign/ed25519_scheme_sign_raw/64: Warming up for 3.0000 s
+Benchmarking crypto_scheme_raw_sign/ed25519_scheme_sign_raw/64: Collecting 100 samples in estimated 5.0337 s (111k iterations)
+Benchmarking crypto_scheme_raw_sign/ed25519_scheme_sign_raw/64: Analyzing
+crypto_scheme_raw_sign/ed25519_scheme_sign_raw/64
+                        time:   [45.324 µs 45.686 µs 46.130 µs]
+Found 20 outliers among 100 measurements (20.00%)
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  16 (16.00%) high severe
+Benchmarking crypto_scheme_raw_sign/ed25519_dalek_direct/512
+Benchmarking crypto_scheme_raw_sign/ed25519_dalek_direct/512: Warming up for 3.0000 s
+Benchmarking crypto_scheme_raw_sign/ed25519_dalek_direct/512: Collecting 100 samples in estimated 5.0405 s (197k iterations)
+Benchmarking crypto_scheme_raw_sign/ed25519_dalek_direct/512: Analyzing
+crypto_scheme_raw_sign/ed25519_dalek_direct/512
+                        time:   [26.374 µs 26.684 µs 27.013 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking crypto_scheme_raw_sign/ed25519_scheme_sign_raw/512
+Benchmarking crypto_scheme_raw_sign/ed25519_scheme_sign_raw/512: Warming up for 3.0000 s
+Benchmarking crypto_scheme_raw_sign/ed25519_scheme_sign_raw/512: Collecting 100 samples in estimated 5.0031 s (106k iterations)
+Benchmarking crypto_scheme_raw_sign/ed25519_scheme_sign_raw/512: Analyzing
+crypto_scheme_raw_sign/ed25519_scheme_sign_raw/512
+                        time:   [46.952 µs 47.298 µs 47.790 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) high mild
+  7 (7.00%) high severe
+Benchmarking crypto_scheme_raw_sign/ed25519_dalek_direct/4096
+Benchmarking crypto_scheme_raw_sign/ed25519_dalek_direct/4096: Warming up for 3.0000 s
+Benchmarking crypto_scheme_raw_sign/ed25519_dalek_direct/4096: Collecting 100 samples in estimated 5.0469 s (121k iterations)
+Benchmarking crypto_scheme_raw_sign/ed25519_dalek_direct/4096: Analyzing
+crypto_scheme_raw_sign/ed25519_dalek_direct/4096
+                        time:   [41.646 µs 41.696 µs 41.746 µs]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking crypto_scheme_raw_sign/ed25519_scheme_sign_raw/4096
+Benchmarking crypto_scheme_raw_sign/ed25519_scheme_sign_raw/4096: Warming up for 3.0000 s
+Benchmarking crypto_scheme_raw_sign/ed25519_scheme_sign_raw/4096: Collecting 100 samples in estimated 5.1224 s (81k iterations)
+Benchmarking crypto_scheme_raw_sign/ed25519_scheme_sign_raw/4096: Analyzing
+crypto_scheme_raw_sign/ed25519_scheme_sign_raw/4096
+                        time:   [63.458 µs 63.600 µs 63.779 µs]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+
+Benchmarking crypto_scheme_raw_verify/ed25519_dalek_direct/64
+Benchmarking crypto_scheme_raw_verify/ed25519_dalek_direct/64: Warming up for 3.0000 s
+Benchmarking crypto_scheme_raw_verify/ed25519_dalek_direct/64: Collecting 100 samples in estimated 5.0004 s (106k iterations)
+Benchmarking crypto_scheme_raw_verify/ed25519_dalek_direct/64: Analyzing
+crypto_scheme_raw_verify/ed25519_dalek_direct/64
+                        time:   [47.180 µs 47.251 µs 47.332 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking crypto_scheme_raw_verify/ed25519_scheme_verify_raw/64
+Benchmarking crypto_scheme_raw_verify/ed25519_scheme_verify_raw/64: Warming up for 3.0000 s
+Benchmarking crypto_scheme_raw_verify/ed25519_scheme_verify_raw/64: Collecting 100 samples in estimated 5.0789 s (96k iterations)
+Benchmarking crypto_scheme_raw_verify/ed25519_scheme_verify_raw/64: Analyzing
+crypto_scheme_raw_verify/ed25519_scheme_verify_raw/64
+                        time:   [53.109 µs 53.304 µs 53.545 µs]
+Found 15 outliers among 100 measurements (15.00%)
+  2 (2.00%) high mild
+  13 (13.00%) high severe
+Benchmarking crypto_scheme_raw_verify/ed25519_dalek_direct/512
+Benchmarking crypto_scheme_raw_verify/ed25519_dalek_direct/512: Warming up for 3.0000 s
+Benchmarking crypto_scheme_raw_verify/ed25519_dalek_direct/512: Collecting 100 samples in estimated 5.1307 s (106k iterations)
+Benchmarking crypto_scheme_raw_verify/ed25519_dalek_direct/512: Analyzing
+crypto_scheme_raw_verify/ed25519_dalek_direct/512
+                        time:   [48.180 µs 48.276 µs 48.386 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking crypto_scheme_raw_verify/ed25519_scheme_verify_raw/512
+Benchmarking crypto_scheme_raw_verify/ed25519_scheme_verify_raw/512: Warming up for 3.0000 s
+Benchmarking crypto_scheme_raw_verify/ed25519_scheme_verify_raw/512: Collecting 100 samples in estimated 5.1835 s (96k iterations)
+Benchmarking crypto_scheme_raw_verify/ed25519_scheme_verify_raw/512: Analyzing
+crypto_scheme_raw_verify/ed25519_scheme_verify_raw/512
+                        time:   [53.909 µs 54.023 µs 54.160 µs]
+Found 11 outliers among 100 measurements (11.00%)
+  6 (6.00%) high mild
+  5 (5.00%) high severe
+Benchmarking crypto_scheme_raw_verify/ed25519_dalek_direct/4096
+Benchmarking crypto_scheme_raw_verify/ed25519_dalek_direct/4096: Warming up for 3.0000 s
+Benchmarking crypto_scheme_raw_verify/ed25519_dalek_direct/4096: Collecting 100 samples in estimated 5.1649 s (91k iterations)
+Benchmarking crypto_scheme_raw_verify/ed25519_dalek_direct/4096: Analyzing
+crypto_scheme_raw_verify/ed25519_dalek_direct/4096
+                        time:   [56.704 µs 56.751 µs 56.816 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) low mild
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking crypto_scheme_raw_verify/ed25519_scheme_verify_raw/4096
+Benchmarking crypto_scheme_raw_verify/ed25519_scheme_verify_raw/4096: Warming up for 3.0000 s
+Benchmarking crypto_scheme_raw_verify/ed25519_scheme_verify_raw/4096: Collecting 100 samples in estimated 5.0746 s (81k iterations)
+Benchmarking crypto_scheme_raw_verify/ed25519_scheme_verify_raw/4096: Analyzing
+crypto_scheme_raw_verify/ed25519_scheme_verify_raw/4096
+                        time:   [62.537 µs 62.617 µs 62.700 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+

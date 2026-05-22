@@ -1,0 +1,98 @@
+Gnuplot not found, using plotters backend
+Benchmarking replay_bundle_event_size/vec_len/small_10_events
+Benchmarking replay_bundle_event_size/vec_len/small_10_events: Warming up for 3.0000 s
+Benchmarking replay_bundle_event_size/vec_len/small_10_events: Collecting 100 samples in estimated 5.0107 s (1.0M iterations)
+Benchmarking replay_bundle_event_size/vec_len/small_10_events: Analyzing
+replay_bundle_event_size/vec_len/small_10_events
+                        time:   [4.9753 µs 4.9818 µs 4.9888 µs]
+Benchmarking replay_bundle_event_size/streaming_counter/small_10_events
+Benchmarking replay_bundle_event_size/streaming_counter/small_10_events: Warming up for 3.0000 s
+Benchmarking replay_bundle_event_size/streaming_counter/small_10_events: Collecting 100 samples in estimated 5.0092 s (1.8M iterations)
+Benchmarking replay_bundle_event_size/streaming_counter/small_10_events: Analyzing
+replay_bundle_event_size/streaming_counter/small_10_events
+                        time:   [2.6903 µs 2.7074 µs 2.7238 µs]
+Benchmarking replay_bundle_event_size/vec_len/medium_100_events
+Benchmarking replay_bundle_event_size/vec_len/medium_100_events: Warming up for 3.0000 s
+Benchmarking replay_bundle_event_size/vec_len/medium_100_events: Collecting 100 samples in estimated 5.2502 s (91k iterations)
+Benchmarking replay_bundle_event_size/vec_len/medium_100_events: Analyzing
+replay_bundle_event_size/vec_len/medium_100_events
+                        time:   [57.533 µs 57.603 µs 57.683 µs]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+Benchmarking replay_bundle_event_size/streaming_counter/medium_100_events
+Benchmarking replay_bundle_event_size/streaming_counter/medium_100_events: Warming up for 3.0000 s
+Benchmarking replay_bundle_event_size/streaming_counter/medium_100_events: Collecting 100 samples in estimated 5.0409 s (182k iterations)
+Benchmarking replay_bundle_event_size/streaming_counter/medium_100_events: Analyzing
+replay_bundle_event_size/streaming_counter/medium_100_events
+                        time:   [27.686 µs 27.797 µs 27.903 µs]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking replay_bundle_event_size/vec_len/large_1000_events
+Benchmarking replay_bundle_event_size/vec_len/large_1000_events: Warming up for 3.0000 s
+Benchmarking replay_bundle_event_size/vec_len/large_1000_events: Collecting 100 samples in estimated 6.0475 s (10k iterations)
+Benchmarking replay_bundle_event_size/vec_len/large_1000_events: Analyzing
+replay_bundle_event_size/vec_len/large_1000_events
+                        time:   [614.69 µs 622.19 µs 628.47 µs]
+Found 18 outliers among 100 measurements (18.00%)
+  18 (18.00%) high mild
+Benchmarking replay_bundle_event_size/streaming_counter/large_1000_events
+Benchmarking replay_bundle_event_size/streaming_counter/large_1000_events: Warming up for 3.0000 s
+Benchmarking replay_bundle_event_size/streaming_counter/large_1000_events: Collecting 100 samples in estimated 5.8222 s (20k iterations)
+Benchmarking replay_bundle_event_size/streaming_counter/large_1000_events: Analyzing
+replay_bundle_event_size/streaming_counter/large_1000_events
+                        time:   [331.20 µs 335.03 µs 338.19 µs]
+
+Benchmarking replay_bundle_generation/generate/small_10_events
+Benchmarking replay_bundle_generation/generate/small_10_events: Warming up for 3.0000 s
+Benchmarking replay_bundle_generation/generate/small_10_events: Collecting 100 samples in estimated 6.5586 s (20k iterations)
+Benchmarking replay_bundle_generation/generate/small_10_events: Analyzing
+replay_bundle_generation/generate/small_10_events
+                        time:   [322.94 µs 323.44 µs 324.09 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  7 (7.00%) high mild
+  2 (2.00%) high severe
+Benchmarking replay_bundle_generation/generate/medium_100_events
+Benchmarking replay_bundle_generation/generate/medium_100_events: Warming up for 3.0000 s
+Benchmarking replay_bundle_generation/generate/medium_100_events: Collecting 100 samples in estimated 5.2869 s (1800 iterations)
+Benchmarking replay_bundle_generation/generate/medium_100_events: Analyzing
+replay_bundle_generation/generate/medium_100_events
+                        time:   [2.9225 ms 2.9370 ms 2.9567 ms]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) high mild
+  6 (6.00%) high severe
+Benchmarking replay_bundle_generation/generate/large_1000_events
+Benchmarking replay_bundle_generation/generate/large_1000_events: Warming up for 3.0000 s
+Benchmarking replay_bundle_generation/generate/large_1000_events: Collecting 100 samples in estimated 6.1108 s (200 iterations)
+Benchmarking replay_bundle_generation/generate/large_1000_events: Analyzing
+replay_bundle_generation/generate/large_1000_events
+                        time:   [29.337 ms 29.470 ms 29.620 ms]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking replay_bundle_gzip/no_compression_fallback/small_10_events
+Benchmarking replay_bundle_gzip/no_compression_fallback/small_10_events: Warming up for 3.0000 s
+Benchmarking replay_bundle_gzip/no_compression_fallback/small_10_events: Collecting 100 samples in estimated 5.0000 s (7.9B iterations)
+Benchmarking replay_bundle_gzip/no_compression_fallback/small_10_events: Analyzing
+replay_bundle_gzip/no_compression_fallback/small_10_events
+                        time:   [633.38 ps 634.25 ps 635.39 ps]
+Found 9 outliers among 100 measurements (9.00%)
+  1 (1.00%) high mild
+  8 (8.00%) high severe
+Benchmarking replay_bundle_gzip/no_compression_fallback/medium_100_events
+Benchmarking replay_bundle_gzip/no_compression_fallback/medium_100_events: Warming up for 3.0000 s
+Benchmarking replay_bundle_gzip/no_compression_fallback/medium_100_events: Collecting 100 samples in estimated 5.0000 s (7.9B iterations)
+Benchmarking replay_bundle_gzip/no_compression_fallback/medium_100_events: Analyzing
+replay_bundle_gzip/no_compression_fallback/medium_100_events
+                        time:   [635.21 ps 635.69 ps 636.17 ps]
+Benchmarking replay_bundle_gzip/no_compression_fallback/large_1000_events
+Benchmarking replay_bundle_gzip/no_compression_fallback/large_1000_events: Warming up for 3.0000 s
+Benchmarking replay_bundle_gzip/no_compression_fallback/large_1000_events: Collecting 100 samples in estimated 5.0000 s (7.9B iterations)
+Benchmarking replay_bundle_gzip/no_compression_fallback/large_1000_events: Analyzing
+replay_bundle_gzip/no_compression_fallback/large_1000_events
+                        time:   [638.24 ps 640.59 ps 643.39 ps]
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+

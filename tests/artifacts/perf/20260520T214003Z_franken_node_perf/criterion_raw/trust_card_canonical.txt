@@ -1,0 +1,96 @@
+Gnuplot not found, using plotters backend
+Benchmarking trust_card_canonical/current/simple_1x5
+Benchmarking trust_card_canonical/current/simple_1x5: Warming up for 3.0000 s
+Benchmarking trust_card_canonical/current/simple_1x5: Collecting 100 samples in estimated 5.2581 s (66k iterations)
+Benchmarking trust_card_canonical/current/simple_1x5: Analyzing
+trust_card_canonical/current/simple_1x5
+                        time:   [79.527 µs 79.805 µs 80.212 µs]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
+Benchmarking trust_card_canonical/optimized/simple_1x5
+Benchmarking trust_card_canonical/optimized/simple_1x5: Warming up for 3.0000 s
+Benchmarking trust_card_canonical/optimized/simple_1x5: Collecting 100 samples in estimated 5.2200 s (66k iterations)
+Benchmarking trust_card_canonical/optimized/simple_1x5: Analyzing
+trust_card_canonical/optimized/simple_1x5
+                        time:   [78.852 µs 79.191 µs 79.655 µs]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+Benchmarking trust_card_canonical/serialize_current/simple_1x5
+Benchmarking trust_card_canonical/serialize_current/simple_1x5: Warming up for 3.0000 s
+Benchmarking trust_card_canonical/serialize_current/simple_1x5: Collecting 100 samples in estimated 5.1564 s (40k iterations)
+Benchmarking trust_card_canonical/serialize_current/simple_1x5: Analyzing
+trust_card_canonical/serialize_current/simple_1x5
+                        time:   [127.55 µs 128.35 µs 129.30 µs]
+Found 15 outliers among 100 measurements (15.00%)
+  9 (9.00%) high mild
+  6 (6.00%) high severe
+Benchmarking trust_card_canonical/serialize_optimized/simple_1x5
+Benchmarking trust_card_canonical/serialize_optimized/simple_1x5: Warming up for 3.0000 s
+Benchmarking trust_card_canonical/serialize_optimized/simple_1x5: Collecting 100 samples in estimated 5.2971 s (45k iterations)
+Benchmarking trust_card_canonical/serialize_optimized/simple_1x5: Analyzing
+trust_card_canonical/serialize_optimized/simple_1x5
+                        time:   [117.07 µs 117.39 µs 117.85 µs]
+Found 5 outliers among 100 measurements (5.00%)
+  5 (5.00%) high severe
+Benchmarking trust_card_canonical/current/medium_3x8
+Benchmarking trust_card_canonical/current/medium_3x8: Warming up for 3.0000 s
+Benchmarking trust_card_canonical/current/medium_3x8: Collecting 100 samples in estimated 6.6853 s (200 iterations)
+Benchmarking trust_card_canonical/current/medium_3x8: Analyzing
+trust_card_canonical/current/medium_3x8
+                        time:   [33.005 ms 33.225 ms 33.491 ms]
+Found 9 outliers among 100 measurements (9.00%)
+  4 (4.00%) high mild
+  5 (5.00%) high severe
+Benchmarking trust_card_canonical/optimized/medium_3x8
+Benchmarking trust_card_canonical/optimized/medium_3x8: Warming up for 3.0000 s
+Benchmarking trust_card_canonical/optimized/medium_3x8: Collecting 100 samples in estimated 6.2751 s (200 iterations)
+Benchmarking trust_card_canonical/optimized/medium_3x8: Analyzing
+trust_card_canonical/optimized/medium_3x8
+                        time:   [30.916 ms 31.209 ms 31.532 ms]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking trust_card_canonical/serialize_current/medium_3x8
+Benchmarking trust_card_canonical/serialize_current/medium_3x8: Warming up for 3.0000 s
+Benchmarking trust_card_canonical/serialize_current/medium_3x8: Collecting 100 samples in estimated 7.0597 s (200 iterations)
+Benchmarking trust_card_canonical/serialize_current/medium_3x8: Analyzing
+trust_card_canonical/serialize_current/medium_3x8
+                        time:   [34.936 ms 35.063 ms 35.203 ms]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking trust_card_canonical/serialize_optimized/medium_3x8
+Benchmarking trust_card_canonical/serialize_optimized/medium_3x8: Warming up for 3.0000 s
+Benchmarking trust_card_canonical/serialize_optimized/medium_3x8: Collecting 100 samples in estimated 6.7045 s (200 iterations)
+Benchmarking trust_card_canonical/serialize_optimized/medium_3x8: Analyzing
+trust_card_canonical/serialize_optimized/medium_3x8
+                        time:   [32.204 ms 32.355 ms 32.529 ms]
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking trust_card_canonical/current/complex_4x12
+Benchmarking trust_card_canonical/current/complex_4x12: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 487.4s, or reduce sample count to 10.
+Benchmarking trust_card_canonical/current/complex_4x12: Collecting 100 samples in estimated 487.42 s (100 iterations)
+Benchmarking trust_card_canonical/current/complex_4x12: Analyzing
+trust_card_canonical/current/complex_4x12
+                        time:   [3.5207 s 3.5910 s 3.6610 s]
+Benchmarking trust_card_canonical/optimized/complex_4x12
+Benchmarking trust_card_canonical/optimized/complex_4x12: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 342.2s, or reduce sample count to 10.
+Benchmarking trust_card_canonical/optimized/complex_4x12: Collecting 100 samples in estimated 342.17 s (100 iterations)
+Benchmarking trust_card_canonical/optimized/complex_4x12: Analyzing
+trust_card_canonical/optimized/complex_4x12
+                        time:   [3.4128 s 3.4366 s 3.4598 s]
+Found 12 outliers among 100 measurements (12.00%)
+  3 (3.00%) low severe
+  4 (4.00%) high mild
+  5 (5.00%) high severe
+Benchmarking trust_card_canonical/serialize_current/complex_4x12
+Benchmarking trust_card_canonical/serialize_current/complex_4x12: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 385.7s, or reduce sample count to 10.
+Benchmarking trust_card_canonical/serialize_current/complex_4x12: Collecting 100 samples in estimated 385.67 s (100 iterations)

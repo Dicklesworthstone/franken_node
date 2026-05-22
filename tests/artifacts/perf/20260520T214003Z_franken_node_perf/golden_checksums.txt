@@ -1,0 +1,12 @@
+# Golden checksums — bench binaries profiled in this run
+# Use these to verify the next skill is changing the same binary that was measured.
+eef75f264abe77d7e440e704dab56fe8f2263ea7dcb9e1ec968e652d204d7081  /data/projects/franken_node/target/release-perf/deps/crypto_scheme_bench-90965d480c7171d5
+b7c852370bd24fab1c8568370d762405261db8b280007df4af206037bbe30165  /data/projects/franken_node/target/release-perf/deps/cuckoo_revocation_bench-e4e2fba3dbf7808b
+c5ba76014631a360c52eb7592e9e9b3dfa917ec46e0515900114315f0bd965e6  /data/projects/franken_node/target/release-perf/deps/evidence_ledger_performance-fbaa100a1996b8cd
+a6f017d9195c0a8f70edec74143440271a46cb7bd9873ad606214fc8e5aeeb8b  /data/projects/franken_node/target/release-perf/deps/proof_verifier_gate_bench-0cf44d65e573f1f3
+bbe1e08d342f2983512223080cdc176bed92180c14bf7795b8b5cdb257ab1c21  /data/projects/franken_node/target/release-perf/deps/replay_bundle_gzip_bench-70de9d221134b540
+55cddd8e59233fa43adb21367bfdbc2b39cc6a9a02d61d170b71a6d77c1a7ecc  /data/projects/franken_node/target/release-perf/deps/threshold_sig_verify_bench-3f11bf2109fa14b1
+6f71e86ead78d818113cbed1bd509bbe32087e941a19f30047b7116279eda4cd  /data/projects/franken_node/target/release-perf/deps/trust_card_canonical_bench-430b84888a6a207d
+
+# Cargo.lock at run-start
+a211ae51de1e29b9c2e0678ea088aff38d70812e8343acd5d02b6ccf63dfd4df  /data/projects/franken_node/Cargo.lock

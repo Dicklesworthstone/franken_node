@@ -1,0 +1,49 @@
+{
+  "run_id": "20260520T231041Z_franken_node_perf_r2",
+  "captured_at_utc": "2026-05-20T23:11:00Z",
+  "iteration_of": "20260520T214003Z_franken_node_perf",
+  "git_sha": "aa3b1c9a82a6aaa14ebd94f7bc5edb1d83884a07",
+  "git_dirty": true,
+  "cargo_lock_sha256": "a211ae51de1e29b9c2e0678ea088aff38d70812e8343acd5d02b6ccf63dfd4df",
+  "host_diff_from_round1": "same host, same toolchain, same tuning. Re-added [profile.release-perf] to workspace Cargo.toml and added [[bench]] entry for evidence_ledger_performance in crates/franken-node/Cargo.toml (concurrent agents had removed both).",
+  "hardware": {
+    "cpu_model": "AMD EPYC 7282 16-Core Processor",
+    "logical_cpus": 64
+  },
+  "os": {
+    "kernel": "6.17.0-22-generic"
+  },
+  "toolchain": {
+    "rustc": "rustc 1.97.0-nightly (f53b654a8 2026-04-30)"
+  },
+  "build_profile": {
+    "name": "release-perf",
+    "inherits": "release",
+    "opt_level": 3,
+    "lto": "thin",
+    "codegen_units": 1,
+    "debug": "line-tables-only",
+    "strip": false,
+    "RUSTFLAGS": "-C force-frame-pointers=yes"
+  },
+  "tuning_applied": {
+    "perf_event_paranoid": 1,
+    "kptr_restrict": 0,
+    "nmi_watchdog": 0,
+    "perf_event_mlock_kb": 32768,
+    "note": "carried over from round 1"
+  },
+  "tools": {
+    "samply": "0.13.1",
+    "perf": "/usr/bin/perf",
+    "heaptrack": "1.5.0",
+    "hyperfine": "(unused this round)"
+  },
+  "cache_state": "warm",
+  "notes": [
+    "Round-2 of /profiling-software-performance — covers the deferred items from the round-1 hand-off.",
+    "Compiled three additional release-perf artifacts: evidence_ledger_performance (bench, finally registered), dgis_contagion_simulator (test bin), proof_generator_timeout_race (test bin).",
+    "vef::proof_generator profiling via proof_generator_timeout_race did not yield user-code samples: each test invocation completes in ≤ 0 ms, so 1000-loop perf runs sampled mostly fork/exec overhead. Marked as 'measurement gap', noted as round-3 work item.",
+    "fleet_transport canonicalize_json_value confirmed via source inspection only (no Criterion bench exists; writing one would create a new file — declined per AGENTS.md no-file-proliferation rule). The function does NOT share the trust_card deep-clone pattern."
+  ]
+}

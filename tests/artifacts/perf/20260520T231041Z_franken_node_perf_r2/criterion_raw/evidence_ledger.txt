@@ -1,0 +1,8 @@
+Gnuplot not found, using plotters backend
+Benchmarking entry_with_server_computed_size
+Benchmarking entry_with_server_computed_size: Warming up for 3.0000 s
+Benchmarking entry_with_server_computed_size: Collecting 100 samples in estimated 5.0668 s (146k iterations)
+Benchmarking entry_with_server_computed_size: Analyzing
+entry_with_server_computed_size
+                        time:   [15.758 µs 16.206 µs 16.622 µs]
+

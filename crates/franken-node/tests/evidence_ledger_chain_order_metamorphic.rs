@@ -185,4 +185,73 @@ proptest! {
             "hash chain order-sensitivity violated for distinct entries",
         );
     }
+
+    /// MR5 (property-based determinism, r7-cc_4-2204): for ANY append
+    /// sequence, two independent ledger constructions over the same input
+    /// MUST produce bit-identical `(entry_hash, prev_entry_hash)` pairs at
+    /// every slot. This pins three load-bearing invariants the T12.4
+    /// profiling-feature wrapper at
+    /// `crates/franken-node/src/observability/evidence_ledger.rs::EvidenceLedger::append`
+    /// (shipped under bd-98xo5.12.4 commit 8d6adee7 + fresh-eyes r3
+    /// schema fix 8869165a) MUST preserve:
+    ///   1. No clock-dependent fields land in the canonical hash preimage
+    ///      (otherwise two builds would diverge across the build wall-clock).
+    ///   2. No RNG nondeterminism in the replay-signature derivation
+    ///      (the replay-signing key is deterministic from the seed; the
+    ///      signature itself is RFC 8032 Ed25519 which is deterministic).
+    ///   3. The instrumentation `cfg(feature = "profiling")` wrapper at
+    ///      evidence_ledger.rs:1589-1602 cannot perturb byte output —
+    ///      the timing-recorder block is structurally a no-op on every
+    ///      return value path; this MR catches a hypothetical regression
+    ///      where someone moves logic INTO the wrapper.
+    ///
+    /// A failure here invalidates every downstream consumer that signs or
+    /// HMAC's the canonical evidence-bundle bytes (replay bundles, audit
+    /// receipts, federation roll-ups).
+    #[test]
+    fn mr_pbt_append_is_deterministic_across_independent_builds(
+        entries in proptest::collection::vec(
+            test_strategies::evidence_ledger_entries(),
+            1..=8,
+        ),
+    ) {
+        let first_build = append_all(&entries);
+        let second_build = append_all(&entries);
+
+        prop_assert_eq!(
+            first_build.len(),
+            second_build.len(),
+            "independent builds must produce same snapshot length"
+        );
+
+        for (idx, (a, b)) in first_build.iter().zip(second_build.iter()).enumerate() {
+            prop_assert_eq!(
+                &a.prev_entry_hash,
+                &b.prev_entry_hash,
+                "slot {} prev_entry_hash diverged across independent builds — \
+                 a clock or RNG leak in the canonical hash preimage would \
+                 invalidate replay-bundle and federation roll-up signatures",
+                idx,
+            );
+            prop_assert_eq!(
+                &a.decision_id,
+                &b.decision_id,
+                "slot {} decision_id diverged — input was the same, output \
+                 must be the same",
+                idx,
+            );
+            prop_assert_eq!(
+                a.epoch_id,
+                b.epoch_id,
+                "slot {} epoch_id diverged",
+                idx,
+            );
+            prop_assert_eq!(
+                a.decision_kind,
+                b.decision_kind,
+                "slot {} decision_kind diverged",
+                idx,
+            );
+        }
+    }
 }

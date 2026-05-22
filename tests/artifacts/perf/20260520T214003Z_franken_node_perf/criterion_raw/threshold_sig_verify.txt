@@ -1,0 +1,46 @@
+=== threshold_sig_verify ===
+Gnuplot not found, using plotters backend
+Benchmarking threshold_sig_verify/current/8
+Benchmarking threshold_sig_verify/current/8: Warming up for 3.0000 s
+Benchmarking threshold_sig_verify/current/8: Collecting 40 samples in estimated 5.3154 s (12k iterations)
+Benchmarking threshold_sig_verify/current/8: Analyzing
+threshold_sig_verify/current/8
+                        time:   [430.40 µs 433.62 µs 438.98 µs]
+                        change: [+0.1019% +0.9148% +2.0072%] (p = 0.04 < 0.05)
+                        Change within noise threshold.
+Found 3 outliers among 40 measurements (7.50%)
+  1 (2.50%) high mild
+  2 (5.00%) high severe
+Benchmarking threshold_sig_verify/preparsed_keys/8
+Benchmarking threshold_sig_verify/preparsed_keys/8: Warming up for 3.0000 s
+Benchmarking threshold_sig_verify/preparsed_keys/8: Collecting 40 samples in estimated 5.1019 s (13k iterations)
+Benchmarking threshold_sig_verify/preparsed_keys/8: Analyzing
+threshold_sig_verify/preparsed_keys/8
+                        time:   [389.73 µs 396.37 µs 405.97 µs]
+                        change: [+0.7543% +1.6846% +2.7422%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 4 outliers among 40 measurements (10.00%)
+  1 (2.50%) high mild
+  3 (7.50%) high severe
+Benchmarking threshold_sig_verify/current/32
+Benchmarking threshold_sig_verify/current/32: Warming up for 3.0000 s
+Benchmarking threshold_sig_verify/current/32: Collecting 40 samples in estimated 5.9112 s (3280 iterations)
+Benchmarking threshold_sig_verify/current/32: Analyzing
+threshold_sig_verify/current/32
+                        time:   [1.7710 ms 1.7777 ms 1.7848 ms]
+                        change: [+0.4408% +1.4495% +2.7624%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+Found 5 outliers among 40 measurements (12.50%)
+  5 (12.50%) high severe
+Benchmarking threshold_sig_verify/preparsed_keys/32
+Benchmarking threshold_sig_verify/preparsed_keys/32: Warming up for 3.0000 s
+Benchmarking threshold_sig_verify/preparsed_keys/32: Collecting 40 samples in estimated 5.2943 s (3280 iterations)
+Benchmarking threshold_sig_verify/preparsed_keys/32: Analyzing
+threshold_sig_verify/preparsed_keys/32
+                        time:   [1.5997 ms 1.6105 ms 1.6227 ms]
+                        change: [-0.3916% +0.3069% +0.9451%] (p = 0.39 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 40 measurements (5.00%)
+  1 (2.50%) high mild
+  1 (2.50%) high severe
+

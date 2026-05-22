@@ -22,6 +22,12 @@ path = "src/bin/bd_21fo_governor_conformance.rs"
 test = false
 required-features = ["advanced-features"]
 
+[[bin]]
+name = "bd-20uo-proof-carrying-decode-conformance"
+path = "src/bin/bd_20uo_proof_carrying_decode_conformance.rs"
+test = false
+required-features = ["advanced-features"]
+
 [lib]
 path = "src/lib.rs"
 test = false
@@ -1207,4 +1213,10 @@ required-features = ["advanced-features"]
 [[test]]
 name = "bd_21fo_governor_conformance"
 path = "../../tests/conformance/bd_21fo_governor_conformance.rs"
+required-features = ["advanced-features"]
+
+# bd-20uo Proof-Carrying Decode Conformance Test Suite
+[[test]]
+name = "bd_20uo_proof_carrying_decode_conformance"
+path = "../../tests/conformance/bd_20uo_proof_carrying_decode_conformance.rs"
 required-features = ["advanced-features"]

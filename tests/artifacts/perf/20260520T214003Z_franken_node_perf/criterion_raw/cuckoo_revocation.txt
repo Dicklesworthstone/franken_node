@@ -1,0 +1,117 @@
+Gnuplot not found, using plotters backend
+Benchmarking revocation_checking/cuckoo_filter_lookup/1000
+Benchmarking revocation_checking/cuckoo_filter_lookup/1000: Warming up for 3.0000 s
+Benchmarking revocation_checking/cuckoo_filter_lookup/1000: Collecting 50 samples in estimated 10.000 s (173M iterations)
+Benchmarking revocation_checking/cuckoo_filter_lookup/1000: Analyzing
+revocation_checking/cuckoo_filter_lookup/1000
+                        time:   [57.459 ns 57.517 ns 57.585 ns]
+Found 3 outliers among 50 measurements (6.00%)
+  1 (2.00%) low mild
+  2 (4.00%) high mild
+Benchmarking revocation_checking/btree_lookup/1000
+Benchmarking revocation_checking/btree_lookup/1000: Warming up for 3.0000 s
+Benchmarking revocation_checking/btree_lookup/1000: Collecting 50 samples in estimated 10.000 s (162M iterations)
+Benchmarking revocation_checking/btree_lookup/1000: Analyzing
+revocation_checking/btree_lookup/1000
+                        time:   [60.995 ns 61.149 ns 61.314 ns]
+Found 2 outliers among 50 measurements (4.00%)
+  1 (2.00%) high mild
+  1 (2.00%) high severe
+Size 1000: CuckooFilter 2KB, BTreeSet 46KB, ratio 22.7x
+Benchmarking revocation_checking/cuckoo_filter_lookup/10000
+Benchmarking revocation_checking/cuckoo_filter_lookup/10000: Warming up for 3.0000 s
+Benchmarking revocation_checking/cuckoo_filter_lookup/10000: Collecting 50 samples in estimated 10.000 s (182M iterations)
+Benchmarking revocation_checking/cuckoo_filter_lookup/10000: Analyzing
+revocation_checking/cuckoo_filter_lookup/10000
+                        time:   [54.903 ns 54.930 ns 54.960 ns]
+Found 3 outliers among 50 measurements (6.00%)
+  3 (6.00%) high mild
+Benchmarking revocation_checking/btree_lookup/10000
+Benchmarking revocation_checking/btree_lookup/10000: Warming up for 3.0000 s
+Benchmarking revocation_checking/btree_lookup/10000: Collecting 50 samples in estimated 10.000 s (117M iterations)
+Benchmarking revocation_checking/btree_lookup/10000: Analyzing
+revocation_checking/btree_lookup/10000
+                        time:   [85.529 ns 85.650 ns 85.779 ns]
+Found 4 outliers among 50 measurements (8.00%)
+  1 (2.00%) low mild
+  3 (6.00%) high mild
+Size 10000: CuckooFilter 32KB, BTreeSet 468KB, ratio 14.6x
+Benchmarking revocation_checking/cuckoo_filter_lookup/100000
+Benchmarking revocation_checking/cuckoo_filter_lookup/100000: Warming up for 3.0000 s
+Benchmarking revocation_checking/cuckoo_filter_lookup/100000: Collecting 50 samples in estimated 10.000 s (182M iterations)
+Benchmarking revocation_checking/cuckoo_filter_lookup/100000: Analyzing
+revocation_checking/cuckoo_filter_lookup/100000
+                        time:   [54.880 ns 54.933 ns 54.993 ns]
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) high severe
+Benchmarking revocation_checking/btree_lookup/100000
+Benchmarking revocation_checking/btree_lookup/100000: Warming up for 3.0000 s
+Benchmarking revocation_checking/btree_lookup/100000: Collecting 50 samples in estimated 10.000 s (72M iterations)
+Benchmarking revocation_checking/btree_lookup/100000: Analyzing
+revocation_checking/btree_lookup/100000
+                        time:   [138.20 ns 138.43 ns 138.64 ns]
+Found 3 outliers among 50 measurements (6.00%)
+  2 (4.00%) high mild
+  1 (2.00%) high severe
+Size 100000: CuckooFilter 256KB, BTreeSet 4687KB, ratio 18.3x
+Benchmarking revocation_checking/cuckoo_filter_lookup/500000
+Benchmarking revocation_checking/cuckoo_filter_lookup/500000: Warming up for 3.0000 s
+Benchmarking revocation_checking/cuckoo_filter_lookup/500000: Collecting 50 samples in estimated 10.000 s (182M iterations)
+Benchmarking revocation_checking/cuckoo_filter_lookup/500000: Analyzing
+revocation_checking/cuckoo_filter_lookup/500000
+                        time:   [54.931 ns 54.962 ns 54.989 ns]
+Benchmarking revocation_checking/btree_lookup/500000
+Benchmarking revocation_checking/btree_lookup/500000: Warming up for 3.0000 s
+Benchmarking revocation_checking/btree_lookup/500000: Collecting 50 samples in estimated 10.000 s (56M iterations)
+Benchmarking revocation_checking/btree_lookup/500000: Analyzing
+revocation_checking/btree_lookup/500000
+                        time:   [178.05 ns 178.29 ns 178.51 ns]
+Found 1 outliers among 50 measurements (2.00%)
+  1 (2.00%) high severe
+Size 500000: CuckooFilter 1024KB, BTreeSet 23437KB, ratio 22.9x
+
+Benchmarking revocation_insertion/cuckoo_filter_insert/10000
+Benchmarking revocation_insertion/cuckoo_filter_insert/10000: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.4s, enable flat sampling, or reduce sample count to 50.
+Benchmarking revocation_insertion/cuckoo_filter_insert/10000: Collecting 100 samples in estimated 8.4205 s (5050 iterations)
+Benchmarking revocation_insertion/cuckoo_filter_insert/10000: Analyzing
+revocation_insertion/cuckoo_filter_insert/10000
+                        time:   [1.6630 ms 1.6675 ms 1.6722 ms]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+Benchmarking revocation_insertion/btree_insert/10000
+Benchmarking revocation_insertion/btree_insert/10000: Warming up for 3.0000 s
+Benchmarking revocation_insertion/btree_insert/10000: Collecting 100 samples in estimated 5.1827 s (2100 iterations)
+Benchmarking revocation_insertion/btree_insert/10000: Analyzing
+revocation_insertion/btree_insert/10000
+                        time:   [2.4642 ms 2.4690 ms 2.4763 ms]
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) high mild
+  5 (5.00%) high severe
+Benchmarking revocation_insertion/cuckoo_filter_insert/50000
+Benchmarking revocation_insertion/cuckoo_filter_insert/50000: Warming up for 3.0000 s
+Benchmarking revocation_insertion/cuckoo_filter_insert/50000: Collecting 100 samples in estimated 7.4399 s (300 iterations)
+Benchmarking revocation_insertion/cuckoo_filter_insert/50000: Analyzing
+revocation_insertion/cuckoo_filter_insert/50000
+                        time:   [24.704 ms 24.778 ms 24.852 ms]
+Benchmarking revocation_insertion/btree_insert/50000
+Benchmarking revocation_insertion/btree_insert/50000: Warming up for 3.0000 s
+Benchmarking revocation_insertion/btree_insert/50000: Collecting 100 samples in estimated 5.3643 s (400 iterations)
+Benchmarking revocation_insertion/btree_insert/50000: Analyzing
+revocation_insertion/btree_insert/50000
+                        time:   [13.431 ms 13.468 ms 13.511 ms]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking revocation_deletion/cuckoo_filter_delete
+Benchmarking revocation_deletion/cuckoo_filter_delete: Warming up for 3.0000 s
+Benchmarking revocation_deletion/cuckoo_filter_delete: Collecting 100 samples in estimated 5.0275 s (91k iterations)
+Benchmarking revocation_deletion/cuckoo_filter_delete: Analyzing
+revocation_deletion/cuckoo_filter_delete
+                        time:   [55.238 µs 55.292 µs 55.351 µs]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+
