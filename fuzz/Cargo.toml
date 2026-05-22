@@ -652,3 +652,9 @@ name = "fuzz_deterministic_seed_encoding"
 path = "fuzz_targets/fuzz_deterministic_seed_encoding.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_crypto_signature_verification"
+path = "fuzz_targets/fuzz_crypto_signature_verification.rs"
+test = false
+doc = false
