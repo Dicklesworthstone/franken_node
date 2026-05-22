@@ -180,3 +180,4 @@ target_*/
 
 # Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
 /beads_compliance_audit/
+.swarm_tick_prompt.md

@@ -1606,6 +1606,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "franken-engine-deterministic-derive"
+version = "0.1.0"
+dependencies = [
+ "franken-engine-deterministic-trait",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "franken-engine-deterministic-trait"
+version = "0.1.0"
+
+[[package]]
 name = "franken-evidence"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1649,6 +1663,8 @@ dependencies = [
  "fp-io",
  "fp-types",
  "franken-decision",
+ "franken-engine-deterministic-derive",
+ "franken-engine-deterministic-trait",
  "franken-evidence",
  "franken-kernel",
  "frankenengine-extension-host",

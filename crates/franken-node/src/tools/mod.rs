@@ -19,6 +19,7 @@ pub mod external_replication_claims;
 #[cfg(feature = "advanced-features")]
 pub mod frontier_demo_gate;
 pub mod incident_timeline;
+pub mod metrics_collection;
 #[cfg(feature = "admin-tools")]
 pub mod migration_incident_datasets;
 #[cfg(feature = "admin-tools")]

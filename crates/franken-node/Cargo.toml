@@ -1158,3 +1158,10 @@ harness = false
 name = "vef_proof_chain_bench"
 harness = false
 required-features = ["test-support"]
+
+# bd-98xo5.9.2 — Tree-sitter migration audit performance benchmark.
+# Measures tree-sitter JavaScript parsing cost on real corpora (commander: ~2.5k LOC,
+# babel: ~102k LOC). See docs/dev/profiling.md for canonical build invocation.
+[[bench]]
+name = "migrate_tree_sitter_bench"
+harness = false
