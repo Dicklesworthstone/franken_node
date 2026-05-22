@@ -58,6 +58,15 @@ fn single_control_critical_lane_policy() -> LaneMappingPolicy {
     policy
 }
 
+fn zero_cap_background_lane_policy() -> LaneMappingPolicy {
+    let mut policy = LaneMappingPolicy::new();
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::Background, 10, 0))
+        .expect("test lane should be unique");
+    policy.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+    policy
+}
+
 fn two_slot_background_lane_policy() -> LaneMappingPolicy {
     let mut policy = LaneMappingPolicy::new();
     let mut config = LaneConfig::new(SchedulerLane::Background, 10, 2);
@@ -894,6 +903,75 @@ fn run_queue_lifecycle_after_optional_rejected_lane_removal(
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_queue_lifecycle_after_optional_invalid_policy_reload(
+    with_invalid_reload: bool,
+) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(
+            &task_classes::log_rotation(),
+            9_900,
+            "meta-invalid-reload-active",
+        )
+        .expect("first task should occupy the lane");
+    let queued = queued_task_id_from(
+        scheduler
+            .assign_task(
+                &task_classes::log_rotation(),
+                9_901,
+                "meta-invalid-reload-queued",
+            )
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    if with_invalid_reload {
+        let before_invalid_reload = queue_lifecycle_digest(&scheduler);
+        let error = scheduler
+            .reload_policy(zero_cap_background_lane_policy())
+            .expect_err("invalid replacement policy must fail closed");
+        assert_eq!(error.code(), error_codes::ERR_LANE_INVALID_POLICY);
+        let detail = match error {
+            LaneSchedulerError::InvalidPolicy { detail } => detail,
+            _ => String::new(),
+        };
+        assert!(detail.contains("zero concurrency cap"));
+        assert_eq!(
+            scheduler
+                .policy()
+                .lane_configs
+                .get(SchedulerLane::Background.as_str())
+                .expect("background lane must remain configured")
+                .concurrency_cap,
+            1
+        );
+        assert_eq!(
+            scheduler.policy().resolve(&task_classes::log_rotation()),
+            Some(SchedulerLane::Background)
+        );
+        assert_eq!(
+            scheduler.queued_task_ids(SchedulerLane::Background),
+            vec![queued.clone()]
+        );
+        assert_eq!(queue_lifecycle_digest(&scheduler), before_invalid_reload);
+    }
+
+    scheduler
+        .complete_task(
+            &active.task_id.to_string(),
+            9_910,
+            "meta-invalid-reload-complete-active",
+        )
+        .expect("completion should promote queued task after invalid reload");
+    scheduler
+        .complete_task(&queued, 9_920, "meta-invalid-reload-complete-promoted")
+        .expect("promoted task should complete after invalid reload");
+
+    queue_lifecycle_digest(&scheduler)
+}
+
 #[test]
 fn metamorphic_queue_lifecycle_invariants_survive_observation_interleavings() {
     let baseline = run_queue_lifecycle(false);
@@ -1061,6 +1139,28 @@ fn metamorphic_expand_then_reduce_policy_churn_preserves_queue_lifecycle() {
 fn metamorphic_rejected_hot_reload_is_queue_lifecycle_idempotent() {
     let baseline = run_queue_lifecycle_after_optional_rejected_lane_removal(false);
     let rejected = run_queue_lifecycle_after_optional_rejected_lane_removal(true);
+
+    assert_eq!(rejected, baseline);
+    assert_eq!(rejected.active_count, 0);
+    assert_eq!(rejected.queued_count, 0);
+    assert_eq!(rejected.first_queued_at_ms, None);
+    assert_eq!(rejected.completed_total, 2);
+    assert_eq!(rejected.rejected_total, 1);
+    assert_eq!(rejected.starvation_events, 0);
+    assert_eq!(
+        rejected
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn metamorphic_invalid_policy_reload_is_queue_lifecycle_idempotent() {
+    let baseline = run_queue_lifecycle_after_optional_invalid_policy_reload(false);
+    let rejected = run_queue_lifecycle_after_optional_invalid_policy_reload(true);
 
     assert_eq!(rejected, baseline);
     assert_eq!(rejected.active_count, 0);
