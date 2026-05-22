@@ -1,0 +1,17 @@
+Command:
+heaptrack -o tests/artifacts/perf/20260522T1740Z_migrate_tree_sitter_bench_cod2/profiles/migrate_tree_sitter_large.heaptrack -- /tmp/franken-tgt-cod2-r27-bd98xo593/release-perf/deps/migrate_tree_sitter_bench-58f219a6ceb4237a large --profile-time 5 --noplot
+
+heaptrack runtime summary:
+total runtime: 4.58s
+calls to allocation functions: 2210742 (482694/s)
+temporary memory allocations: 222817 (48650/s)
+peak heap memory consumption: 83.23M
+peak RSS including heaptrack overhead: 100.48M
+total memory leaked: 560B
+
+dominant allocator path:
+2202002 calls to allocation functions with 79.98M peak consumption from ts_malloc_default
+849338 calls with 79.06M peak consumption under tree-sitter stack__iter/_array__reserve
+
+classification:
+Allocator traffic is material but belongs to tree-sitter parse stack construction. The CPU flat profile is still parser/lexer led, with libc allocator symbols below the tree-sitter parse and lex symbols.

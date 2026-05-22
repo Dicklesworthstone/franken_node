@@ -10,6 +10,7 @@ rounds append; never overwrite.
 | 1     | 2026-05-20    | `20260520T214003Z_franken_node_perf`      | All 10 Criterion benches; full DEFINE→HAND OFF; baselines + perf + samply + heaptrack for top-3 candidates | n/a (first profile) |
 | 2     | 2026-05-20    | `20260520T231041Z_franken_node_perf_r2`   | Round-1 deferred items: evidence_ledger (now registered as `[[bench]]`), dgis::contagion_simulator integration test, vef::proof_generator test, fleet_transport static read | confirmed 2 round-1 candidates as non-hotspots; raised 2 new candidates |
 | 3     | 2026-05-21    | `20260521T214316Z_franken_node_t46_rebaseline` | T4.6 re-baseline trust_card_canonical_bench post-T4.5; validated performance targets NOT met | **REGRESSION DETECTED**: all T4 targets missed by 2.66×-6.98×; requires heaptrack analysis |
+| 4     | 2026-05-22    | `20260522T1740Z_migrate_tree_sitter_bench_cod2` | bd-98xo5.9.3 large-corpus tree-sitter profile; Criterion p50/p95/p99, perf top 30 symbols, heaptrack allocation summary | resolved migration tree-sitter parsing as parse-bound non-optimization finding; no new bead |
 
 ## Unified cross-round hotspot ranking (current)
 
@@ -31,7 +32,8 @@ rounds append; never overwrite.
   as non-hotspot** by bd-98xo5.8.2 on 2026-05-21; see decision row below.
 - `vef::receipt_chain::verify_integrity` chain-length sweep — **resolved
   as non-hotspot** by bd-98xo5.8.2 on 2026-05-21; see decision row below.
-- `migration` tree-sitter parsing on real npm corpora.
+- `migration` tree-sitter parsing on real npm corpora — **resolved
+  as non-hotspot** by bd-98xo5.9.3 on 2026-05-22; see decision row below.
 - `contagion_simulator::step` on a *large* graph (10k nodes, 100 steps) to confirm or reject at scale.
 
 ## Non-hotspot decisions (bd-98xo5 epic)
@@ -44,6 +46,7 @@ perf round is the gate to re-classify.
 | Surface | Date / source run | Per-call cost | Reopen if | Tracking bead |
 |---------|-------------------|---------------|-----------|---------------|
 | `vef::proof_generator::compute_proof_bytes` + `vef::receipt_chain::verify_integrity` | 2026-05-21 / `20260520T231041Z_franken_node_perf_r2` (proof_generator.perf.flat.txt) | R2 profile: `proof_generator_timeout_race` 1000-loop test finishes in 30 ms total (≈ 30 µs per invocation incl. fixture setup); user-code symbols ≥ 0.3 % flat share = **0** (kernel page-table init dominates at 10.50 %); 926 allocs / 1000 invocations ≈ 1 alloc per call. Per source-level prediction in `crates/franken-node/benches/vef_proof_chain_bench.rs:20-30` (shipped at bd-98xo5.8.1 commit `3471198b`): generate/N=4096 ≈ 1 ms, verify/N=4096 ≈ 10 ms — three orders of magnitude below the rank-1 hotspot (`trust_card_canonical complex_4x12` at 3591 ms) and same order as the already-promoted rank-3 hotspot (`threshold_sig_verify_threshold/32` at 1.78 ms). | Production sustains > 1 000 proof windows / sec across the fleet, OR a real perf round on `vef_proof_chain_bench` measures N=4096 verify above 30 ms (3× the predicted ceiling) | bd-98xo5.8.2 (closed 2026-05-21) |
+| `migration` tree-sitter large-corpus audit | 2026-05-22 / `20260522T1740Z_migrate_tree_sitter_bench_cod2` | `migrate_tree_sitter/analyze_js/large_3099814bytes`: p50 590.9579 ms, p95 603.1711 ms, p99 603.1711 ms for a 3,099,814-byte / 102,253-line corpus. `migrate_tree_sitter_parse_only/parse/large_3099814bytes`: p50 513.1815 ms, p95/p99 657.2693 ms. Perf top self symbols are tree-sitter parser/lexer led (`ts_parser_parse` 12.95 %, `ts_lex` 11.22 %, `ts_language_table_entry` 6.87 %); visitor count is 1.11 % self and 7.09 % call-graph child. Heaptrack records 2,210,742 allocation calls and 83.23M peak heap, dominated by `ts_malloc_default` in tree-sitter stack growth, so allocator traffic is part of parse rather than a separate product-layer allocator hotspot. SLO: 102k-line corpus `analyze_js` p99 <= 750 ms on `release-perf`; current p99 is 603.1711 ms. | Production corpora exceed 250k LOC, OR `migrate_tree_sitter/analyze_js/large_*` p99 exceeds 750 ms in a fresh `release-perf` run, OR visitor/output formatting exceeds 20 % of perf samples | bd-98xo5.9.3 (closed 2026-05-22) |
 
 ## Δ per scenario across rounds
 

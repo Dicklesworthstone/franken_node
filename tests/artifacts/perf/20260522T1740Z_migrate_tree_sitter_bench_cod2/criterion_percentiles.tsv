@@ -1,0 +1,5 @@
+scenario	corpus_bytes	corpus_lines	samples	p50_ms	p95_ms	p99_ms	max_ms
+migrate_tree_sitter/analyze_js/small_78147bytes	78147	2509	20	9.5067	10.1456	10.1456	10.1456
+migrate_tree_sitter/analyze_js/large_3099814bytes	3099814	102253	20	590.9579	603.1711	603.1711	603.1711
+migrate_tree_sitter_parse_only/parse/small_78147bytes	78147	2509	20	8.4045	8.8130	8.8130	8.8130
+migrate_tree_sitter_parse_only/parse/large_3099814bytes	3099814	102253	20	513.1815	657.2693	657.2693	657.2693
