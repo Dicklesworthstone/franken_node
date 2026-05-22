@@ -34,6 +34,12 @@ path = "src/bin/bd_w0jq_degraded_mode_audit_conformance.rs"
 test = false
 required-features = ["advanced-features"]
 
+[[bin]]
+name = "bd-1xwz-perf-budget-guard-conformance"
+path = "src/bin/bd_1xwz_perf_budget_guard_conformance.rs"
+test = false
+required-features = ["advanced-features"]
+
 [lib]
 path = "src/lib.rs"
 test = false
@@ -1231,4 +1237,10 @@ required-features = ["advanced-features"]
 [[test]]
 name = "bd_w0jq_degraded_mode_audit_conformance"
 path = "../../tests/conformance/bd_w0jq_degraded_mode_audit_conformance.rs"
+required-features = ["advanced-features"]
+
+# bd-1xwz Performance Budget Guard Conformance Test Suite
+[[test]]
+name = "bd_1xwz_perf_budget_guard_conformance"
+path = "../../tests/conformance/bd_1xwz_perf_budget_guard_conformance.rs"
 required-features = ["advanced-features"]
