@@ -1833,4 +1833,218 @@ mod tests {
             RetentionTier::Hot
         );
     }
+
+    // Frozen SHA-256 hex outputs of `compute_integrity_hash`
+    // (incident_bundle_retention.rs:297). The function is the
+    // INV-IBR-INTEGRITY canonical-serialization primitive backing
+    // the IncidentBundle integrity-hash field; pinning its byte
+    // layout prevents silent drift in incident audit trails.
+    //
+    // The function builds the canonical integrity hash as:
+    //
+    //   SHA256(
+    //     b"incident_bundle_retention_hash_v1:"
+    //     || LE64(len(bundle_id))   || bundle_id.as_bytes()
+    //     || LE64(len(incident_id)) || incident_id.as_bytes()
+    //     || LE64(len(created_at))  || created_at.as_bytes()
+    //     || severity.label().as_bytes()         # NO length prefix — fixed enum
+    //     || retention_tier.label().as_bytes()   # NO length prefix — fixed enum
+    //     || LE64(len(title))       || title.as_bytes()
+    //     || LE64(len(detected_by)) || detected_by.as_bytes()
+    //     || LE64(component_ids.len())
+    //     || for cid: LE64(len(cid)) || cid.as_bytes()
+    //     || LE64(tags.len())
+    //     || for tag: LE64(len(tag)) || tag.as_bytes()
+    //     || log_count.to_le_bytes()             # usize LE — 8 bytes
+    //     || trace_count.to_le_bytes()           # usize LE
+    //     || metric_snapshot_count.to_le_bytes() # usize LE
+    //     || evidence_ref_count.to_le_bytes()    # usize LE
+    //     || export_format_version.to_le_bytes() # u32 LE — 4 bytes
+    //     || size_bytes.to_le_bytes()            # u64 LE
+    //     || created_at_epoch.to_le_bytes()      # u64 LE
+    //     || last_tier_change_epoch.to_le_bytes() # u64 LE
+    //   ).hex()
+    //
+    // *** DISTINCTIVE FEATURE pinned by this golden ***
+    //
+    // This is the FIRST golden in the suite to pin a function that
+    // uses an ASYMMETRIC enum-label-NO-prefix design: Severity::label()
+    // and RetentionTier::label() are fed as raw bytes WITHOUT a length
+    // prefix (per L321-323 of the function, the comment explicitly
+    // documents "Enum labels are from a fixed set (no attacker control),
+    // no length-prefix needed"). This optimisation is load-bearing —
+    // a future refactor that "uniformly length-prefixed all strings"
+    // would silently flip every existing integrity hash AND a future
+    // change that added a NEW Severity/RetentionTier variant whose
+    // label was a PREFIX of an existing label (e.g. "criti" prefix
+    // of "critical") would create an ambiguity that the missing
+    // length prefix cannot detect — this golden catches both classes
+    // of drift.
+    //
+    // Two frozen fixtures + three structural invariants:
+    //
+    //   1. minimal (Severity::Low, RetentionTier::Hot, empty metadata
+    //      strings, zero counters except export_format_version=1).
+    //      Locks the v1 domain + LE64(0) framing on every empty
+    //      variable-length field + zero-counter encoding.
+    //      Frozen: 4f8452f709be5d5346019a2313446f39c8c606f7e980dedbd953a7cfd7edb9e0
+    //
+    //   2. populated (Severity::Critical, RetentionTier::Archive,
+    //      populated metadata + 3 component_ids + 2 tags + non-zero
+    //      counters). Locks per-component_id / per-tag LE64-len
+    //      framing AND the asymmetric enum-label-NO-prefix design.
+    //      Frozen: b285b6c4032b2262298e4784b4bcc1f734b6797e00cae82bdbdeebd216d03e6a
+    //
+    //   3. SEVERITY-DISTINGUISHABILITY INVARIANT: cloning `minimal`
+    //      and changing only Severity (Low → Critical) MUST flip the
+    //      hash. Pins that severity IS fed into the hasher; a future
+    //      bug that dropped it would let Low/Critical incidents
+    //      share integrity hashes — breaking audit-trail forensics.
+    //
+    //   4. ASYMMETRIC-USIZE/u32-WIDTH INVARIANT: changing only
+    //      export_format_version (u32, 4 bytes LE) MUST flip the
+    //      hash. Pins that export_format_version is NOT cast to u64
+    //      — a future "uniformly use u64 for all counters" refactor
+    //      would silently shift every byte after the u32 field by
+    //      4 positions, invalidating every existing integrity hash.
+    //
+    //   5. COMPONENT-ID-ORDERING INVARIANT: cloning `populated` and
+    //      reordering the component_ids Vec MUST flip the hash.
+    //      Pins that the Vec<String> iteration order IS canonical
+    //      (component_ids is NOT sorted — this is opposite to the
+    //      BTreeMap-sorted invariants in r37 staking_governance,
+    //      r39 verifier_benchmark_releases, etc.). Callers MUST
+    //      construct component_ids in a deterministic order.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): compute_integrity_hash is the
+    // tamper-evidence primitive for incident bundle audit trails. If
+    // two nodes compute different integrity hashes for the same
+    // logical IncidentBundle — because someone swapped the enum-label-
+    // no-prefix design for uniform length-prefixing, dropped severity
+    // from the hasher, or muddled the u32 export_format_version
+    // encoding — bundle verification fails opaquely AND attackers can
+    // rewrite incident history without detection.
+    #[test]
+    fn compute_integrity_hash_frozen_canonical_byte_layout_golden() {
+        // 1. Minimal fixture: Low severity, Hot tier, empty metadata.
+        let minimal = IncidentBundle {
+            bundle_id: "bundle-001".to_string(),
+            incident_id: "inc-001".to_string(),
+            created_at: "2026-04-24T00:00:00Z".to_string(),
+            severity: Severity::Low,
+            retention_tier: RetentionTier::Hot,
+            metadata: BundleMetadata {
+                title: String::new(),
+                detected_by: String::new(),
+                component_ids: Vec::new(),
+                tags: Vec::new(),
+            },
+            log_count: 0,
+            trace_count: 0,
+            metric_snapshot_count: 0,
+            evidence_ref_count: 0,
+            export_format_version: 1,
+            integrity_hash: String::new(), // NOT in the hash
+            size_bytes: 0,
+            created_at_epoch: 0,
+            last_tier_change_epoch: 0,
+        };
+        assert_eq!(
+            compute_integrity_hash(&minimal),
+            "4f8452f709be5d5346019a2313446f39c8c606f7e980dedbd953a7cfd7edb9e0",
+            "minimal IncidentBundle integrity_hash drifted — check the \
+             v1 domain separator, the LE64(0)-on-empty-string framing, \
+             OR the asymmetric enum-label-NO-prefix design (severity \
+             & retention_tier labels are fed as raw bytes)"
+        );
+
+        // 2. Populated fixture: Critical severity, Archive tier, full metadata.
+        let populated = IncidentBundle {
+            bundle_id: "bundle-prod-7".to_string(),
+            incident_id: "inc-2026-001".to_string(),
+            created_at: "2026-04-24T12:34:56Z".to_string(),
+            severity: Severity::Critical,
+            retention_tier: RetentionTier::Archive,
+            metadata: BundleMetadata {
+                title: "fleet-wide credential rotation incident".to_string(),
+                detected_by: "security-bot".to_string(),
+                component_ids: vec![
+                    "frontend".to_string(),
+                    "auth-service".to_string(),
+                    "session-cache".to_string(),
+                ],
+                tags: vec!["p0".to_string(), "credential-rotation".to_string()],
+            },
+            log_count: 12345,
+            trace_count: 678,
+            metric_snapshot_count: 90,
+            evidence_ref_count: 5,
+            export_format_version: 2,
+            integrity_hash: String::new(),
+            size_bytes: 1_048_576, // 1 MiB
+            created_at_epoch: 1_700_000_000,
+            last_tier_change_epoch: 1_700_086_400, // +1 day
+        };
+        assert_eq!(
+            compute_integrity_hash(&populated),
+            "b285b6c4032b2262298e4784b4bcc1f734b6797e00cae82bdbdeebd216d03e6a",
+            "populated IncidentBundle integrity_hash drifted — check \
+             per-component_id LE64-len framing, per-tag LE64-len framing, \
+             OR the u32-LE encoding of export_format_version (4 bytes, \
+             NOT 8)"
+        );
+
+        // 3. SEVERITY-DISTINGUISHABILITY INVARIANT.
+        let mut sev_critical = minimal.clone();
+        sev_critical.severity = Severity::Critical;
+        assert_ne!(
+            compute_integrity_hash(&sev_critical),
+            compute_integrity_hash(&minimal),
+            "changing only Severity from Low to Critical MUST flip the \
+             integrity_hash; if it does not, severity is not being \
+             fed into the hasher and Low/Critical incidents could share \
+             integrity hashes"
+        );
+
+        // 4. ASYMMETRIC-USIZE/u32-WIDTH INVARIANT: changing
+        // export_format_version (u32) MUST flip the hash.
+        let mut export_bumped = minimal.clone();
+        export_bumped.export_format_version = 2;
+        assert_ne!(
+            compute_integrity_hash(&export_bumped),
+            compute_integrity_hash(&minimal),
+            "incrementing export_format_version (u32) from 1 to 2 MUST \
+             flip the hash; if it does not, the u32-LE 4-byte encoding \
+             may have silently widened to u64-LE 8 bytes"
+        );
+
+        // 5. COMPONENT-ID-ORDERING INVARIANT: Vec<String> iteration
+        // order IS canonical (NOT sorted). Reordering MUST flip the hash.
+        let mut reordered = populated.clone();
+        reordered.metadata.component_ids = vec![
+            "session-cache".to_string(), // was [2]
+            "frontend".to_string(),      // was [0]
+            "auth-service".to_string(),  // was [1]
+        ];
+        assert_ne!(
+            compute_integrity_hash(&reordered),
+            compute_integrity_hash(&populated),
+            "reordering component_ids MUST flip the integrity_hash — \
+             this Vec<String> is NOT sorted before hashing (opposite \
+             to BTreeMap surfaces); callers MUST construct \
+             component_ids in a deterministic order"
+        );
+
+        // Length+casing contract.
+        for h in [
+            &compute_integrity_hash(&minimal),
+            &compute_integrity_hash(&populated),
+        ] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
