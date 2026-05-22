@@ -134,6 +134,7 @@ Current crate features:
 | `compression` | opt-in | Gzip/deflate support via `flate2`. |
 | `cbor-serialization` | opt-in | CBOR encoding support via `serde_cbor`. |
 | `blake3` | opt-in | Optional BLAKE3 hashing support. |
+| `profiling` | opt-in | Pulls in `hdrhistogram` for per-hot-path latency histograms behind `#[cfg(feature = "profiling")]` gates (bd-98xo5.12.x sentinel + span instrumentation). Default builds elide the code path entirely. Enable with `cargo build --features profiling` under a perf-round measurement skill. |
 
 ---
 
