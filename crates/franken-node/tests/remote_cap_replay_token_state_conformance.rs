@@ -4,11 +4,12 @@ use frankenengine_node::security::remote_cap::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 const REMOTE_CAP_REPLAY_TOKEN_STATE_VECTORS_JSON: &str =
     include_str!("../../../artifacts/conformance/remote_cap_replay_token_state_vectors.json");
-const SHARED_SECRET: &str = "conformance-remote-cap-replay-secret";
+const CONFORMANCE_SIGNING_MATERIAL: &str = "remote-cap-replay-conformance-fixture";
 const ISSUER: &str = "ops@example";
 
 type TestResult = Result<(), String>;
@@ -77,7 +78,7 @@ struct ReplayHarness {
 
 impl ReplayHarness {
     fn new(store_mode: ReplayStoreMode) -> Result<Self, String> {
-        let provider = CapabilityProvider::new(SHARED_SECRET)
+        let provider = CapabilityProvider::new(CONFORMANCE_SIGNING_MATERIAL)
             .map_err(|err| format!("provider setup failed: {err}"))?;
         let durable_store = match store_mode {
             ReplayStoreMode::Memory => None,
@@ -95,12 +96,13 @@ impl ReplayHarness {
 
     fn gate(&self) -> Result<CapabilityGate, String> {
         match (&self.store_mode, &self.durable_store) {
-            (ReplayStoreMode::Memory, _) => CapabilityGate::new(SHARED_SECRET)
+            (ReplayStoreMode::Memory, _) => CapabilityGate::new(CONFORMANCE_SIGNING_MATERIAL)
                 .map_err(|err| format!("memory replay gate setup failed: {err}")),
-            (ReplayStoreMode::Durable, Some(store)) => {
-                CapabilityGate::with_durable_replay_store(SHARED_SECRET, store.path())
-                    .map_err(|err| format!("durable replay gate setup failed: {err}"))
-            }
+            (ReplayStoreMode::Durable, Some(store)) => CapabilityGate::with_durable_replay_store(
+                CONFORMANCE_SIGNING_MATERIAL,
+                store.path(),
+            )
+            .map_err(|err| format!("durable replay gate setup failed: {err}")),
             (ReplayStoreMode::Durable, None) => {
                 Err("durable replay mode requires a durable store".to_string())
             }
@@ -242,7 +244,12 @@ fn execute_vector(
                         now_epoch_secs,
                         trace_id,
                     ),
-                    TranscriptKind::RestartGate => unreachable!(),
+                    TranscriptKind::RestartGate => {
+                        return Err(format!(
+                            "{} restart action reached token branch",
+                            action.step
+                        ));
+                    }
                 };
 
                 let event = last_audit_event(&gate)?;
@@ -274,6 +281,25 @@ fn execute_vector(
     Ok(actual)
 }
 
+fn durable_marker_paths(store: &TempDir) -> Result<Vec<PathBuf>, String> {
+    let consumed_dir = store.path().join("consumed");
+    if !consumed_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut markers = Vec::new();
+    for entry in std::fs::read_dir(&consumed_dir)
+        .map_err(|err| format!("reading durable replay marker dir failed: {err}"))?
+    {
+        markers.push(
+            entry
+                .map_err(|err| format!("reading durable replay marker entry failed: {err}"))?
+                .path(),
+        );
+    }
+    markers.sort();
+    Ok(markers)
+}
+
 #[test]
 fn remote_cap_replay_token_state_vectors_cover_required_invariants() -> TestResult {
     let (schema_version, coverage, vectors) = load_vectors()?;
@@ -303,6 +329,133 @@ fn remote_cap_replay_token_state_vectors_cover_required_invariants() -> TestResu
             "{required} must be covered by the replay-token state conformance matrix"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn durable_replay_marker_contract_uses_length_prefixes_and_redacts_signature() -> TestResult {
+    let harness = ReplayHarness::new(ReplayStoreMode::Durable)?;
+    let vector = IssuedTokenVector {
+        label: "marker-contract".to_string(),
+        trace_id: "trace-durable-marker-contract-issue".to_string(),
+        issued_at_epoch_secs: 1_700_203_000,
+        ttl_secs: 300,
+        single_use: true,
+        operations: vec![RemoteOperation::TelemetryExport],
+        endpoint_prefixes: vec!["https://telemetry.example.com/v1".to_string()],
+    };
+    let cap = harness.issue_token(&vector)?;
+    let mut gate = harness.gate()?;
+
+    gate.authorize_network(
+        Some(&cap),
+        RemoteOperation::TelemetryExport,
+        "https://telemetry.example.com/v1/export",
+        1_700_203_005,
+        "trace-durable-marker-contract-consume",
+    )
+    .map_err(|err| format!("initial durable authorization failed: {err}"))?;
+
+    let store = harness
+        .durable_store
+        .as_ref()
+        .ok_or_else(|| "durable marker contract requires a durable store".to_string())?;
+    let markers = durable_marker_paths(store)?;
+    assert_eq!(
+        markers.len(),
+        1,
+        "single durable consume must create exactly one replay marker"
+    );
+
+    let marker_path = markers
+        .first()
+        .ok_or_else(|| "durable marker list unexpectedly empty".to_string())?;
+    let marker_name = marker_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "durable marker path is not UTF-8: {}",
+                marker_path.display()
+            )
+        })?;
+    let replay_key = marker_name
+        .strip_suffix(".seen")
+        .ok_or_else(|| format!("durable marker name must end with .seen: {marker_name}"))?;
+    assert_eq!(
+        replay_key.len(),
+        64,
+        "replay key must be a SHA-256 hex digest"
+    );
+    assert!(
+        replay_key.chars().all(|ch| ch.is_ascii_hexdigit()),
+        "replay key filename must be hex-only"
+    );
+
+    let marker_body = std::fs::read_to_string(marker_path).map_err(|err| {
+        format!(
+            "read durable replay marker {}: {err}",
+            marker_path.display()
+        )
+    })?;
+    assert!(
+        marker_body.starts_with("remote_cap_replay_marker_v1\n"),
+        "durable marker must carry the replay marker schema header"
+    );
+    assert!(
+        marker_body.contains(&format!("replay_key={replay_key}\n")),
+        "durable marker body must bind itself to the filename replay key"
+    );
+    assert!(
+        marker_body.contains(&format!(
+            "token_id_len={}:{}\n",
+            cap.token_id().len(),
+            cap.token_id()
+        )),
+        "token id must be length-prefixed to avoid delimiter ambiguity"
+    );
+    assert!(
+        marker_body.contains(&format!(
+            "issuer_len={}:{}\n",
+            cap.issuer_identity().len(),
+            cap.issuer_identity()
+        )),
+        "issuer identity must be length-prefixed to avoid delimiter ambiguity"
+    );
+    assert!(
+        marker_body.contains(&format!("issued_at={}\n", cap.issued_at_epoch_secs())),
+        "marker must persist the issued-at boundary"
+    );
+    assert!(
+        marker_body.contains(&format!("expires_at={}\n", cap.expires_at_epoch_secs())),
+        "marker must persist the expiry boundary"
+    );
+    assert!(
+        marker_body.contains("single_use=true\n"),
+        "marker must record that a single-use token was consumed"
+    );
+    assert!(
+        !marker_body.contains(cap.signature()),
+        "durable replay markers must not persist signature material"
+    );
+
+    let mut restarted_gate = harness.gate()?;
+    let replay_error = restarted_gate
+        .recheck_network(
+            Some(&cap),
+            RemoteOperation::TelemetryExport,
+            "https://telemetry.example.com/v1/export",
+            1_700_203_006,
+            "trace-durable-marker-contract-restart",
+        )
+        .expect_err("restart must preserve the consumed single-use denial");
+    assert_eq!(
+        replay_error,
+        RemoteCapError::ReplayDetected {
+            token_id: cap.token_id().to_string()
+        }
+    );
 
     Ok(())
 }
