@@ -58,6 +58,12 @@ path = "src/bin/bd_tg2_fleet_quarantine_conformance.rs"
 test = false
 required-features = ["advanced-features"]
 
+[[bin]]
+name = "bd-137-policy-compatibility-gate-conformance"
+path = "src/bin/bd_137_policy_compatibility_gate_conformance.rs"
+test = false
+required-features = ["advanced-features"]
+
 [lib]
 path = "src/lib.rs"
 test = false
@@ -1292,6 +1298,16 @@ required-features = ["advanced-features"]
 [[test]]
 name = "bd_tg2_fleet_quarantine_conformance"
 path = "../../tests/conformance/bd_tg2_fleet_quarantine_conformance.rs"
+required-features = ["advanced-features"]
+
+[[test]]
+name = "bd_137_policy_compatibility_gate_conformance"
+path = "../../tests/conformance/bd_137_policy_compatibility_gate_conformance.rs"
+required-features = ["advanced-features"]
+
+[[test]]
+name = "bd_ncwlf_hot_path_budget_smoke_conformance"
+path = "../../tests/conformance/bd_ncwlf_hot_path_budget_smoke_conformance.rs"
 required-features = ["advanced-features"]
 
 [[test]]
