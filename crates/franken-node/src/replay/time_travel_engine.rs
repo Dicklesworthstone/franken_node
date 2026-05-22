@@ -5210,4 +5210,148 @@ mod tests {
             "WorkflowTrace compute_digest should be bit-identical"
         );
     }
+
+    // Frozen SHA-256 hex outputs of TraceStep::output_digest_bytes
+    // (time_travel_engine.rs:602) / output_digest (L610). The function
+    // is the per-step content-addressed fingerprint used at replay
+    // verification to compare expected vs actual outputs.
+    //
+    // The function builds the canonical output digest as:
+    //
+    //   SHA256(
+    //     b"replay_step_output_v1:"
+    //     || LE64(len(output)) || output
+    //   ).hex()
+    //
+    // The output field is `Vec<u8>` (raw bytes, NOT a String) — this
+    // golden is the FIRST in the suite to exercise the binary-bytes
+    // input case via the `binary` fixture (bytes 0x00..0x1f), proving
+    // the digest handles control characters and high-bit bytes the
+    // same way as printable ASCII.
+    //
+    // Four frozen fixtures + structural invariants:
+    //
+    //   1. empty output (locks v1 domain + LE64(0) framing).
+    //      Frozen: a2718171b188e25e96eea83111db8c4dbea816b155bae7523af39397e3e33c1b
+    //
+    //   2. ascii (24 bytes of typical replay output).
+    //      Frozen: e1efddc8eef42b17d11fed8e43aa5be797cf5150259cab042f6e47a87e3ab707
+    //
+    //   3. binary (32 bytes 0x00..0x1f — control chars + null bytes).
+    //      Locks that the digest treats binary data identically to
+    //      text. A future refactor that "validated UTF-8 before
+    //      hashing" or "escaped non-printable chars" would flip this
+    //      fixture immediately.
+    //      Frozen: 7554c4cc896b5d6e0839073a633ce735193b1a92f832cbb72c08c3a9750210ed
+    //
+    //   4. large (1024 bytes of repeated 'x'). Locks the LE64-length
+    //      prefix at a length that exceeds the typical short-string
+    //      regime (1024 = 0x0400, encoded as `00 04 00 00 00 00 00 00`
+    //      in LE — distinct from the short-string fixtures whose
+    //      length bytes start with non-zero).
+    //      Frozen: ec353861b285412739b04974d77606d5761714b549505682c2545d586b514ba6
+    //
+    //   5. BYTES-AS-OUTPUT INVARIANT: output_digest_bytes returns the
+    //      raw [u8; 32] and output_digest is hex::encode of those
+    //      bytes. The two MUST agree byte-for-byte.
+    //
+    //   6. STEP-OUTPUT-ONLY INVARIANT: TraceStep has five fields (seq,
+    //      input, output, side_effects, timestamp_ns) but
+    //      output_digest hashes ONLY output. Mutating seq/input/
+    //      side_effects/timestamp_ns MUST NOT change the output_digest.
+    //      Pins the contract that the per-step output is independently
+    //      addressable for diff replay.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): TraceStep::output_digest is
+    // the per-step replay-verification primitive. If two nodes
+    // compute different output_digests for the same logical output
+    // bytes — because someone swapped LE64 width, dropped the v1
+    // prefix, or escaped binary input bytes before hashing — replay
+    // verification fails opaquely AND the same logical workflow
+    // appears as TWO different traces in the time-travel store.
+    #[test]
+    fn trace_step_output_digest_frozen_canonical_byte_layout_golden() {
+        // Helper to construct a TraceStep with only output populated
+        // (other fields all zero/empty so the output_digest is
+        // determined purely by the output bytes).
+        let mk = |output: Vec<u8>| TraceStep::new(0, Vec::new(), output, Vec::new(), 0);
+
+        // 1. Empty output.
+        let empty = mk(Vec::new());
+        assert_eq!(
+            empty.output_digest(),
+            "a2718171b188e25e96eea83111db8c4dbea816b155bae7523af39397e3e33c1b",
+            "empty output_digest drifted — check the v1 domain \
+             separator `replay_step_output_v1:` or LE64(0) framing"
+        );
+        assert_eq!(
+            empty.output_digest_bytes(),
+            hex::decode(empty.output_digest()).unwrap().as_slice(),
+            "output_digest_bytes and hex::encode(output_digest) MUST \
+             agree byte-for-byte (output_digest is hex-of-bytes)"
+        );
+
+        // 2. ASCII output.
+        let ascii = mk(b"replay-output-payload-v1".to_vec());
+        assert_eq!(
+            ascii.output_digest(),
+            "e1efddc8eef42b17d11fed8e43aa5be797cf5150259cab042f6e47a87e3ab707"
+        );
+
+        // 3. Binary output (control chars + null bytes). Pins the
+        // contract that the digest treats binary data identically to
+        // text — no UTF-8 validation or non-printable escaping.
+        let binary_output: Vec<u8> = (0_u8..32).collect();
+        let binary = mk(binary_output);
+        assert_eq!(
+            binary.output_digest(),
+            "7554c4cc896b5d6e0839073a633ce735193b1a92f832cbb72c08c3a9750210ed",
+            "binary output_digest drifted — the function MUST hash \
+             raw bytes including control chars + null bytes WITHOUT \
+             escaping or UTF-8 validation"
+        );
+
+        // 4. Large output (1024 bytes — locks LE64 prefix at a length
+        // that exceeds the short-string regime).
+        let large_output = vec![b'x'; 1024];
+        let large = mk(large_output);
+        assert_eq!(
+            large.output_digest(),
+            "ec353861b285412739b04974d77606d5761714b549505682c2545d586b514ba6"
+        );
+
+        // 5. STEP-OUTPUT-ONLY INVARIANT: mutating non-output fields
+        // (seq, input, side_effects, timestamp_ns) MUST NOT change
+        // the output_digest. Pins that output is the SOLE input to
+        // this digest function.
+        let varied = TraceStep::new(
+            99,                        // different seq
+            b"different input".to_vec(),  // different input
+            b"replay-output-payload-v1".to_vec(), // same output as `ascii`
+            Vec::new(),
+            1_700_000_000,             // different timestamp_ns
+        );
+        assert_eq!(
+            varied.output_digest(),
+            ascii.output_digest(),
+            "TraceStep::output_digest MUST depend ONLY on the output \
+             field — varying seq, input, side_effects, or timestamp_ns \
+             with the same output MUST produce identical digests \
+             (per-step output is independently addressable for diff replay)"
+        );
+
+        // 6. 64-lowercase-hex length+casing contract.
+        for h in [
+            &empty.output_digest(),
+            &ascii.output_digest(),
+            &binary.output_digest(),
+            &large.output_digest(),
+        ] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
