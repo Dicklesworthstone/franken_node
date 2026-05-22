@@ -30,6 +30,22 @@ fn fast_starving_background_lane_policy() -> LaneMappingPolicy {
     policy
 }
 
+fn expanded_background_with_idle_maintenance_policy() -> LaneMappingPolicy {
+    let mut policy = LaneMappingPolicy::new();
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::Background, 10, 1))
+        .expect("background lane should be unique");
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::Maintenance, 20, 2))
+        .expect("maintenance lane should be unique");
+    policy.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+    policy.add_rule(
+        &task_classes::garbage_collection(),
+        SchedulerLane::Maintenance,
+    );
+    policy
+}
+
 fn single_control_critical_lane_policy() -> LaneMappingPolicy {
     let mut policy = LaneMappingPolicy::new();
     policy
@@ -682,6 +698,69 @@ fn run_starvation_latch_lifecycle(with_duplicate_starvation_check: bool) -> Queu
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_queue_lifecycle_after_optional_expanding_reload(
+    with_expanding_reload: bool,
+) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(&task_classes::log_rotation(), 9_000, "meta-expand-active")
+        .expect("first task should occupy the lane");
+    let queued = queued_task_id_from(
+        scheduler
+            .assign_task(&task_classes::log_rotation(), 9_001, "meta-expand-queued")
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    if with_expanding_reload {
+        scheduler
+            .reload_policy(expanded_background_with_idle_maintenance_policy())
+            .expect("expanding reload should preserve active background lane");
+        assert_eq!(
+            scheduler
+                .policy()
+                .resolve(&task_classes::garbage_collection()),
+            Some(SchedulerLane::Maintenance)
+        );
+        assert_eq!(
+            scheduler.queued_task_ids(SchedulerLane::Background),
+            vec![queued.clone()]
+        );
+        let maintenance_counters = scheduler
+            .lane_counter(SchedulerLane::Maintenance)
+            .expect("expanded policy should initialize maintenance counters");
+        assert_eq!(maintenance_counters.active_count, 0);
+        assert_eq!(maintenance_counters.queued_count, 0);
+        assert_eq!(maintenance_counters.completed_total, 0);
+        assert_eq!(maintenance_counters.rejected_total, 0);
+    }
+
+    scheduler
+        .complete_task(
+            &active.task_id.to_string(),
+            9_010,
+            "meta-expand-complete-active",
+        )
+        .expect("completion should promote queued task after expanding reload");
+    assert_eq!(
+        scheduler.active_task_ids(SchedulerLane::Background),
+        vec![queued.clone()]
+    );
+    assert!(
+        scheduler
+            .queued_task_ids(SchedulerLane::Background)
+            .is_empty()
+    );
+
+    scheduler
+        .complete_task(&queued, 9_020, "meta-expand-complete-promoted")
+        .expect("promoted task should complete after expanding reload");
+
+    queue_lifecycle_digest(&scheduler)
+}
+
 #[test]
 fn metamorphic_queue_lifecycle_invariants_survive_observation_interleavings() {
     let baseline = run_queue_lifecycle(false);
@@ -793,6 +872,28 @@ fn metamorphic_repeated_starvation_checks_are_lifecycle_idempotent() {
     );
     assert_eq!(
         repeated
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn metamorphic_expanding_hot_reload_preserves_existing_queue_lifecycle() {
+    let baseline = run_queue_lifecycle_after_optional_expanding_reload(false);
+    let expanded = run_queue_lifecycle_after_optional_expanding_reload(true);
+
+    assert_eq!(expanded, baseline);
+    assert_eq!(expanded.active_count, 0);
+    assert_eq!(expanded.queued_count, 0);
+    assert_eq!(expanded.first_queued_at_ms, None);
+    assert_eq!(expanded.completed_total, 2);
+    assert_eq!(expanded.rejected_total, 1);
+    assert_eq!(expanded.starvation_events, 0);
+    assert_eq!(
+        expanded
             .audit_codes
             .iter()
             .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
