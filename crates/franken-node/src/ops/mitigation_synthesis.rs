@@ -2047,4 +2047,136 @@ mod tests {
             "Should deserialize boundary data safely"
         );
     }
+
+    // Frozen SHA-256 hex outputs of the module-private function
+    // `sign_structured` (mitigation_synthesis.rs:666). The function
+    // produces a structured "signature" over (secret, domain, fields):
+    //
+    //   SHA256(
+    //     domain
+    //     || LE64(len(secret)) || secret.as_bytes()
+    //     || for each field:
+    //          LE64(len(field)) || field
+    //   ).hex()
+    //
+    // *** DISTINCTIVE FEATURE pinned by this golden ***
+    //
+    // sign_structured uses a plain SHA-256 with the secret embedded
+    // INSIDE the hash via length-prefixed framing — NOT a proper HMAC.
+    // While this isn't cryptographically equivalent to HMAC-SHA256
+    // (length-extension attacks could theoretically apply if an
+    // attacker has control over later fields), the function provides
+    // domain-separated structural binding for non-adversarial
+    // signing use cases. Pinning the byte layout documents this
+    // design choice — a future "upgrade to HMAC" refactor would
+    // catastrophically flip every existing signature AND require
+    // coordinated rollout across all signing/verifying nodes.
+    //
+    // Three frozen fixtures + structural invariants:
+    //
+    //   1. minimal (empty secret + arbitrary domain + no fields).
+    //      Locks the domain + LE64(0) empty-secret framing + zero-
+    //      iterations of the field loop.
+    //      Frozen: 194193d7211b26eda8e1b1fe2c2c5ac7a025df7d001aa08bad232d40ef014c4e
+    //
+    //   2. typical (10-byte secret + production-shaped domain + 3
+    //      structured fields). Locks per-field LE64-prefix framing.
+    //      Frozen: 7b5c4ca16c9e024704d3559c184950b8070e35a27321a8a2752786087c518d7c
+    //
+    //   3. empty-field (single empty-bytes field) — locks the LE64(0)
+    //      empty-field framing (NOT skipped). Critical: an empty
+    //      field is still length-prefixed, so this fixture's hash
+    //      differs from the no-fields case.
+    //      Frozen: 00f4963a07f9a94be6be6ef572ac0de6f3b8767547c8f493cc0e045a932965c2
+    //
+    //   4. SECRET-IN-HASH INVARIANT: changing only the secret MUST
+    //      flip the signature. Pins that secret IS authenticated.
+    //
+    //   5. FIELD-ORDER-SENSITIVITY: reordering fields MUST flip.
+    //
+    //   6. EMPTY-FIELD-NOT-SKIPPED: signing [b""] MUST differ from
+    //      signing [] (empty fields list). Pins LE64(0) emission
+    //      for empty-bytes fields.
+    //
+    //   7. 64-lowercase-hex length+casing contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): sign_structured is the
+    // structured-signing primitive for mitigation synthesis records.
+    // If two synthesis nodes compute different signatures for the
+    // same logical (secret, domain, fields) tuple — because someone
+    // swapped LE64 widths, dropped the per-field length prefix, or
+    // changed the secret-embedded design to HMAC — mitigation
+    // signature verification fails across the synthesis lab AND
+    // legitimate mitigations get rejected.
+    #[test]
+    fn sign_structured_frozen_canonical_byte_layout_golden() {
+        // 1. Minimal: empty secret + no fields.
+        assert_eq!(
+            super::sign_structured("", b"test-domain-v1:", &[]),
+            "194193d7211b26eda8e1b1fe2c2c5ac7a025df7d001aa08bad232d40ef014c4e",
+            "minimal sign_structured drifted — check the domain bytes \
+             passed through verbatim (NO length-prefix on domain itself), \
+             the LE64(0) empty-secret framing, OR the zero-iterations \
+             field loop"
+        );
+
+        // 2. Typical: production-shaped inputs.
+        assert_eq!(
+            super::sign_structured(
+                "secret-123",
+                b"mitigation_sig_v1:",
+                &[
+                    &b"mit-id-7"[..],
+                    &b"loss=100"[..],
+                    &b"epoch=42"[..],
+                ],
+            ),
+            "7b5c4ca16c9e024704d3559c184950b8070e35a27321a8a2752786087c518d7c"
+        );
+
+        // 3. Empty-field: single empty-bytes field. Locks LE64(0)
+        // emission for empty fields (NOT skipped).
+        assert_eq!(
+            super::sign_structured("k", b"d:", &[&b""[..]]),
+            "00f4963a07f9a94be6be6ef572ac0de6f3b8767547c8f493cc0e045a932965c2"
+        );
+
+        // 4. SECRET-IN-HASH INVARIANT.
+        let base = super::sign_structured("secret-A", b"d:", &[&b"f"[..]]);
+        let diff_secret = super::sign_structured("secret-B", b"d:", &[&b"f"[..]]);
+        assert_ne!(
+            base, diff_secret,
+            "changing only the secret MUST flip the signature — the \
+             secret IS embedded in the hash via length-prefixed framing"
+        );
+
+        // 5. FIELD-ORDER-SENSITIVITY.
+        let order_a = super::sign_structured("k", b"d:", &[&b"a"[..], &b"b"[..]]);
+        let order_b = super::sign_structured("k", b"d:", &[&b"b"[..], &b"a"[..]]);
+        assert_ne!(
+            order_a, order_b,
+            "field order MUST matter — reordering fields with the \
+             same secret/domain MUST flip the signature"
+        );
+
+        // 6. EMPTY-FIELD-NOT-SKIPPED INVARIANT: [b""] hashes
+        // differently from [] because the empty field still emits
+        // LE64(0) into the hasher.
+        let no_fields = super::sign_structured("k", b"d:", &[]);
+        let one_empty_field = super::sign_structured("k", b"d:", &[&b""[..]]);
+        assert_ne!(
+            no_fields, one_empty_field,
+            "signing with NO fields MUST differ from signing with one \
+             empty-bytes field — the empty field still emits LE64(0)"
+        );
+
+        // 7. 64-lowercase-hex length+casing contract.
+        for h in [&base, &diff_secret, &order_a, &order_b, &no_fields, &one_empty_field] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
