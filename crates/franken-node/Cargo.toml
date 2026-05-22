@@ -40,6 +40,12 @@ path = "src/bin/bd_1xwz_perf_budget_guard_conformance.rs"
 test = false
 required-features = ["advanced-features"]
 
+[[bin]]
+name = "bd-1nfu-remote-capability-gate-conformance"
+path = "src/bin/bd_1nfu_remote_capability_gate_conformance.rs"
+test = false
+required-features = ["advanced-features"]
+
 [lib]
 path = "src/lib.rs"
 test = false
@@ -1247,4 +1253,10 @@ required-features = ["advanced-features"]
 [[test]]
 name = "bd_1xwz_perf_budget_guard_conformance"
 path = "../../tests/conformance/bd_1xwz_perf_budget_guard_conformance.rs"
+required-features = ["advanced-features"]
+
+# bd-1nfu Remote Capability Gate Conformance Test Suite
+[[test]]
+name = "bd_1nfu_remote_capability_gate_conformance"
+path = "../../tests/conformance/bd_1nfu_remote_capability_gate_conformance.rs"
 required-features = ["advanced-features"]
