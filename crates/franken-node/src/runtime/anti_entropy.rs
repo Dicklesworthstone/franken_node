@@ -1888,6 +1888,81 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_disjoint_partition_order_commutes_with_combined_reconciliation() {
+        let (alpha_0, root) = make_record_with_meta("alpha-0", 2, 2_000, "node-a");
+        let (alpha_1, _) = make_record_with_meta("alpha-1", 2, 2_001, "node-a");
+        let (beta_0, _) = make_record_with_meta("beta-0", 2, 2_100, "node-b");
+        let (beta_1, _) = make_record_with_meta("beta-1", 2, 2_101, "node-b");
+
+        let mut remote_alpha = TrustState::new(2);
+        for record in [alpha_0.clone(), alpha_1.clone()] {
+            assert!(remote_alpha.insert(record));
+        }
+
+        let mut remote_beta = TrustState::new(2);
+        for record in [beta_0.clone(), beta_1.clone()] {
+            assert!(remote_beta.insert(record));
+        }
+
+        let mut remote_all = TrustState::new(2);
+        for record in [alpha_0, alpha_1, beta_0, beta_1] {
+            assert!(remote_all.insert(record));
+        }
+
+        let config = ReconciliationConfig {
+            max_delta_batch: 4,
+            proof_required: false,
+            ..ReconciliationConfig::default()
+        };
+        let cancel = no_cancel();
+        let mut combined = TrustState::new(2);
+        let mut alpha_then_beta = TrustState::new(2);
+        let mut beta_then_alpha = TrustState::new(2);
+        let mut combined_reconciler =
+            AntiEntropyReconciler::new(config.clone()).expect("combined config should be valid");
+        let mut alpha_first_reconciler =
+            AntiEntropyReconciler::new(config.clone()).expect("alpha-first config should be valid");
+        let mut beta_first_reconciler =
+            AntiEntropyReconciler::new(config).expect("beta-first config should be valid");
+
+        let combined_result = combined_reconciler
+            .reconcile(&mut combined, &remote_all, &root, &cancel)
+            .expect("combined reconciliation should converge");
+        let alpha_first = alpha_first_reconciler
+            .reconcile(&mut alpha_then_beta, &remote_alpha, &root, &cancel)
+            .expect("alpha partition should converge");
+        let alpha_second = alpha_first_reconciler
+            .reconcile(&mut alpha_then_beta, &remote_all, &root, &cancel)
+            .expect("beta partition should converge after alpha");
+        let beta_first = beta_first_reconciler
+            .reconcile(&mut beta_then_alpha, &remote_beta, &root, &cancel)
+            .expect("beta partition should converge");
+        let beta_second = beta_first_reconciler
+            .reconcile(&mut beta_then_alpha, &remote_all, &root, &cancel)
+            .expect("alpha partition should converge after beta");
+
+        assert_eq!(combined_result.records_accepted, 4);
+        assert_eq!(
+            alpha_first.records_accepted + alpha_second.records_accepted,
+            4
+        );
+        assert_eq!(
+            beta_first.records_accepted + beta_second.records_accepted,
+            4
+        );
+        assert_eq!(
+            sorted_record_ids(&alpha_then_beta),
+            sorted_record_ids(&combined)
+        );
+        assert_eq!(
+            sorted_record_ids(&beta_then_alpha),
+            sorted_record_ids(&combined)
+        );
+        assert_digest_eq(alpha_then_beta.root_digest(), combined.root_digest());
+        assert_digest_eq(beta_then_alpha.root_digest(), combined.root_digest());
+    }
+
+    #[test]
     fn test_epoch_tolerance_boundary_accepts_equal_limit_and_rejects_above() {
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
             epoch_tolerance: 2,
