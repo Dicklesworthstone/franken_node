@@ -1,0 +1,37 @@
+{
+  "campaign": "xz_style",
+  "terminated_at": 5,
+  "termination_reason": "Converged",
+  "states": [
+    {
+      "step": 0,
+      "infected": ["pkg:maintainer_xz"],
+      "exposure": []
+    },
+    {
+      "step": 1,
+      "infected": ["pkg:liblzma", "pkg:maintainer_xz", "pkg:xz_utils"],
+      "exposure": []
+    },
+    {
+      "step": 2,
+      "infected": ["pkg:apt_archive", "pkg:cmake_artifact", "pkg:deb_xz_user", "pkg:dpkg_compressor", "pkg:liblzma", "pkg:liblzma_dev_app1", "pkg:liblzma_dev_app2", "pkg:libsystemd_consumer", "pkg:maintainer_xz", "pkg:openssh_consumer", "pkg:rpm_lzma_user", "pkg:xz_utils", "pkg:zstd_optional"],
+      "exposure": []
+    },
+    {
+      "step": 3,
+      "infected": ["pkg:apt_archive", "pkg:cmake_artifact", "pkg:deb_xz_user", "pkg:dpkg_compressor", "pkg:liblzma", "pkg:liblzma_dev_app1", "pkg:liblzma_dev_app2", "pkg:libsystemd_consumer", "pkg:maintainer_xz", "pkg:openssh_consumer", "pkg:rpm_lzma_user", "pkg:xz_consumer_app3", "pkg:xz_consumer_app4", "pkg:xz_consumer_app5", "pkg:xz_utils", "pkg:zstd_optional"],
+      "exposure": []
+    },
+    {
+      "step": 4,
+      "infected": ["pkg:apt_archive", "pkg:cmake_artifact", "pkg:deb_xz_user", "pkg:dpkg_compressor", "pkg:liblzma", "pkg:liblzma_dev_app1", "pkg:liblzma_dev_app2", "pkg:libsystemd_consumer", "pkg:maintainer_xz", "pkg:openssh_consumer", "pkg:rpm_lzma_user", "pkg:secondary_user_a", "pkg:secondary_user_b", "pkg:secondary_user_c", "pkg:xz_consumer_app3", "pkg:xz_consumer_app4", "pkg:xz_consumer_app5", "pkg:xz_utils", "pkg:zstd_optional"],
+      "exposure": []
+    },
+    {
+      "step": 5,
+      "infected": ["pkg:apt_archive", "pkg:cmake_artifact", "pkg:deb_xz_user", "pkg:dpkg_compressor", "pkg:liblzma", "pkg:liblzma_dev_app1", "pkg:liblzma_dev_app2", "pkg:libsystemd_consumer", "pkg:maintainer_xz", "pkg:openssh_consumer", "pkg:rpm_lzma_user", "pkg:secondary_user_a", "pkg:secondary_user_b", "pkg:secondary_user_c", "pkg:xz_consumer_app3", "pkg:xz_consumer_app4", "pkg:xz_consumer_app5", "pkg:xz_utils", "pkg:zstd_optional"],
+      "exposure": []
+    }
+  ]
+}

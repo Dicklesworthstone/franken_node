@@ -1,0 +1,35 @@
+{
+  "campaign": "typosquat",
+  "terminated_at": 3,
+  "termination_reason": "Converged",
+  "states": [
+    {
+      "step": 0,
+      "infected": ["typo:expres", "typo:jqueryui", "typo:lodahs", "typo:reactjs", "typo:requets"],
+      "exposure": []
+    },
+    {
+      "step": 1,
+      "infected": ["legit:express", "legit:jquery", "legit:lodash", "legit:react", "legit:requests", "typo:expres", "typo:jqueryui", "typo:lodahs", "typo:reactjs", "typo:requets"],
+      "exposure": []
+    },
+    {
+      "step": 2,
+      "infected": ["legit:express", "legit:jquery", "legit:lodash", "legit:react", "legit:requests", "typo:expres", "typo:jqueryui", "typo:lodahs", "typo:reactjs", "typo:requets"],
+      "exposure": [
+        {"node": "legit:express_session", "value": "0.100000000000"},
+        {"node": "legit:lodash_es", "value": "0.100000000000"},
+        {"node": "legit:requests_oauthlib", "value": "0.100000000000"}
+      ]
+    },
+    {
+      "step": 3,
+      "infected": ["legit:express", "legit:jquery", "legit:lodash", "legit:react", "legit:requests", "typo:expres", "typo:jqueryui", "typo:lodahs", "typo:reactjs", "typo:requets"],
+      "exposure": [
+        {"node": "legit:express_session", "value": "0.100000000000"},
+        {"node": "legit:lodash_es", "value": "0.100000000000"},
+        {"node": "legit:requests_oauthlib", "value": "0.100000000000"}
+      ]
+    }
+  ]
+}

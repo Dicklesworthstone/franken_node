@@ -1,0 +1,38 @@
+{
+  "campaign": "dependency_confusion",
+  "terminated_at": 4,
+  "termination_reason": "Converged",
+  "states": [
+    {
+      "step": 0,
+      "infected": ["public:typosquat_corp_auth"],
+      "exposure": []
+    },
+    {
+      "step": 1,
+      "infected": ["internal:corp_api", "internal:corp_auth", "internal:corp_cache", "internal:corp_db", "public:typosquat_corp_auth"],
+      "exposure": []
+    },
+    {
+      "step": 2,
+      "infected": ["internal:corp_api", "internal:corp_auth", "internal:corp_cache", "internal:corp_db", "internal:corp_logger", "internal:corp_metrics", "internal:corp_queue", "internal:corp_tracing", "public:typosquat_corp_auth"],
+      "exposure": []
+    },
+    {
+      "step": 3,
+      "infected": ["internal:corp_api", "internal:corp_auth", "internal:corp_cache", "internal:corp_db", "internal:corp_logger", "internal:corp_metrics", "internal:corp_queue", "internal:corp_tracing", "public:typosquat_corp_auth"],
+      "exposure": [
+        {"node": "public:lodash_pinned", "value": "0.100000000000"},
+        {"node": "public:react_pinned", "value": "0.100000000000"}
+      ]
+    },
+    {
+      "step": 4,
+      "infected": ["internal:corp_api", "internal:corp_auth", "internal:corp_cache", "internal:corp_db", "internal:corp_logger", "internal:corp_metrics", "internal:corp_queue", "internal:corp_tracing", "public:typosquat_corp_auth"],
+      "exposure": [
+        {"node": "public:lodash_pinned", "value": "0.100000000000"},
+        {"node": "public:react_pinned", "value": "0.100000000000"}
+      ]
+    }
+  ]
+}

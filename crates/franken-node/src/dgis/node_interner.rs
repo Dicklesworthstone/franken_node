@@ -59,6 +59,9 @@ impl NodeId {
 /// Errors surfaced by `NodeInterner::intern`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InternError {
+    /// Empty, whitespace-padded, or control-character-containing node id.
+    #[error("invalid node id")]
+    InvalidNodeId,
     /// `intern` was called for the `(NODE_INTERNER_MAX_NODES + 1)`th
     /// distinct node id. The cap mirrors the simulator's existing
     /// `MAX_NODES` (see `dgis::contagion_graph`).
@@ -99,6 +102,7 @@ impl NodeInterner {
     /// inserts of an already-interned string never count against the
     /// cap.
     pub fn intern(&mut self, s: &str) -> Result<NodeId, InternError> {
+        validate_intern_node_id(s)?;
         if let Some(&existing) = self.from_str.get(s) {
             return Ok(NodeId::from_raw(existing));
         }
@@ -153,6 +157,13 @@ impl NodeInterner {
     }
 }
 
+fn validate_intern_node_id(s: &str) -> Result<(), InternError> {
+    if s.trim().is_empty() || s != s.trim() || s.chars().any(char::is_control) {
+        return Err(InternError::InvalidNodeId);
+    }
+    Ok(())
+}
+
 /// Operator-facing render helper. See Decision 1 in the design note:
 /// `NodeId` deliberately does NOT implement `fmt::Display` itself — the
 /// interner must be threaded through render sites so a caller cannot
@@ -181,7 +192,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn intern_returns_same_id_for_same_string() {
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn intern_same_string_returns_same_id() {
         let mut interner = NodeInterner::new();
         let a = interner.intern("npm:@scope/pkg").unwrap();
         let b = interner.intern("npm:@scope/pkg").unwrap();
@@ -190,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn intern_assigns_distinct_ids_to_distinct_strings() {
+    fn intern_different_strings_return_distinct_ids() {
         let mut interner = NodeInterner::new();
         let a = interner.intern("a").unwrap();
         let b = interner.intern("b").unwrap();
@@ -199,10 +213,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_returns_original_string() {
+    fn resolve_round_trip() {
         let mut interner = NodeInterner::new();
-        let id = interner.intern("pkg-foo").unwrap();
-        assert_eq!(interner.resolve(id), Some("pkg-foo"));
+        for node in ["pkg-foo", "pkg-bar", "pkg-baz"] {
+            let id = interner.intern(node).unwrap();
+            assert_eq!(interner.resolve(id), Some(node));
+        }
     }
 
     #[test]
@@ -237,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn intern_caps_at_node_interner_max_nodes() {
+    fn intern_capacity_bound() {
         let mut interner = NodeInterner::new();
         for i in 0..NODE_INTERNER_MAX_NODES {
             interner
@@ -263,14 +279,45 @@ mod tests {
     }
 
     #[test]
+    fn intern_empty_string() {
+        let mut interner = NodeInterner::new();
+        assert_eq!(interner.intern("").unwrap_err(), InternError::InvalidNodeId);
+        assert_eq!(
+            interner.intern("   ").unwrap_err(),
+            InternError::InvalidNodeId
+        );
+        assert_eq!(
+            interner.intern("pkg\nsplit").unwrap_err(),
+            InternError::InvalidNodeId
+        );
+        assert!(interner.is_empty());
+    }
+
+    #[test]
+    fn intern_order_drives_node_id_assignment() {
+        let mut interner = NodeInterner::new();
+        let a = interner.intern("a").unwrap();
+        let b = interner.intern("b").unwrap();
+        assert_eq!(a.as_u32(), 0);
+        assert_eq!(b.as_u32(), 1);
+        let collected: Vec<(u32, &str)> = interner.iter().map(|(id, s)| (id.as_u32(), s)).collect();
+        assert_eq!(collected, vec![(0, "a"), (1, "b")]);
+    }
+
+    #[test]
     fn iter_returns_pairs_in_insertion_order() {
         let mut interner = NodeInterner::new();
         for s in ["c", "a", "b"] {
             interner.intern(s).unwrap();
         }
         let collected: Vec<(u32, &str)> = interner.iter().map(|(id, s)| (id.as_u32(), s)).collect();
-        // Insertion order: c=0, a=1, b=2 (NOT alphabetical, NOT BTreeMap order).
         assert_eq!(collected, vec![(0, "c"), (1, "a"), (2, "b")]);
+    }
+
+    #[test]
+    fn interner_send_sync_bounds() {
+        assert_send_sync::<NodeInterner>();
+        assert_send_sync::<NodeId>();
     }
 
     #[test]

@@ -615,6 +615,77 @@ mod tests {
     }
 
     #[test]
+    fn graph_nodes_iter_matches_legacy_string_view() {
+        let mut graph = ContagionGraph::new(31);
+        for node in ["pkg:root", "pkg:dep-a", "pkg:dep-b"] {
+            graph.add_node(node.to_string());
+        }
+
+        assert_eq!(
+            graph.nodes(),
+            &[
+                "pkg:root".to_string(),
+                "pkg:dep-a".to_string(),
+                "pkg:dep-b".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn graph_add_edge_with_intern_creates_correct_adjacency() -> Result<(), String> {
+        let mut graph = ContagionGraph::new(37);
+        graph.add_node("pkg:root".to_string());
+        graph.add_node("pkg:dep-a".to_string());
+        graph.add_node("pkg:dep-b".to_string());
+
+        graph
+            .add_edge(
+                &"pkg:root".to_string(),
+                ContagionEdge::new("pkg:dep-a".to_string(), 0.75, EdgeKind::DependencyImport)
+                    .map_err(|err| format!("edge rejected: {err:?}"))?,
+            )
+            .map_err(|err| format!("add edge dep-a failed: {err:?}"))?;
+        graph
+            .add_edge(
+                &"pkg:root".to_string(),
+                ContagionEdge::new("pkg:dep-b".to_string(), 0.25, EdgeKind::MaintainerOverlap)
+                    .map_err(|err| format!("edge rejected: {err:?}"))?,
+            )
+            .map_err(|err| format!("add edge dep-b failed: {err:?}"))?;
+
+        let root = "pkg:root".to_string();
+        let neighbors = graph.neighbors(&root);
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(neighbors[0].target, "pkg:dep-a");
+        assert_eq!(neighbors[0].weight, 0.75);
+        assert_eq!(neighbors[0].edge_kind, EdgeKind::DependencyImport);
+        assert_eq!(neighbors[1].target, "pkg:dep-b");
+        assert_eq!(neighbors[1].weight, 0.25);
+        assert_eq!(neighbors[1].edge_kind, EdgeKind::MaintainerOverlap);
+        assert_eq!(graph.edge_count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_validate_rejects_dangling_edge() -> Result<(), String> {
+        let mut graph = ContagionGraph::new(41);
+        graph.add_node("pkg:root".to_string());
+        push_corrupted_internal_edge(
+            &mut graph,
+            "pkg:root",
+            "pkg:ghost",
+            0.5,
+            EdgeKind::NamespaceShadow,
+        )?;
+
+        assert_eq!(
+            graph.validate(),
+            Err(GraphError::UnknownTarget("pkg:ghost".to_string()))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn node_ids_reject_embedded_nuls() -> Result<(), String> {
         let bad = "pkg\0shadow".to_string();
         assert_eq!(

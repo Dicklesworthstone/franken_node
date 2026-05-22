@@ -33,8 +33,13 @@ use frankenengine_node::dgis::contagion_profiles::{
     evaluate_profile, load_profile_from_json,
 };
 use frankenengine_node::dgis::contagion_simulator::{
-    InfectionState, SimulatorConfig, TerminationReason, detect_termination, simulate,
+    InfectionState, SimulationTrace, SimulatorConfig, TerminationReason, detect_termination,
+    simulate,
 };
+use frankenengine_node::dgis::node_interner::{InternError, NODE_INTERNER_MAX_NODES, NodeInterner};
+use proptest::prelude::*;
+use proptest::test_runner::{Config as ProptestConfig, TestRunner};
+use serde::Deserialize;
 
 type TestResult = Result<(), String>;
 
@@ -62,6 +67,226 @@ fn load_profile(name: &str) -> Result<ContagionProfile, String> {
     let json =
         fs::read_to_string(&path).map_err(|e| format!("read fixture {}: {e}", path.display()))?;
     load_profile_from_json(&json).map_err(|e| format!("load profile {name}: {e:?}"))
+}
+
+fn golden_trace_path(name: &str) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    PathBuf::from(manifest_dir)
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("golden")
+        .join("dgis_traces")
+        .join(format!("{name}.golden.json"))
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct GoldenTrace {
+    campaign: String,
+    terminated_at: u32,
+    termination_reason: String,
+    states: Vec<GoldenState>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct GoldenState {
+    step: u32,
+    infected: Vec<String>,
+    exposure: Vec<GoldenExposure>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct GoldenExposure {
+    node: String,
+    value: String,
+}
+
+fn golden_trace(name: &str) -> Result<GoldenTrace, String> {
+    let path = golden_trace_path(name);
+    let json =
+        fs::read_to_string(&path).map_err(|e| format!("read golden {}: {e}", path.display()))?;
+    serde_json::from_str(&json).map_err(|e| format!("parse golden {name}: {e}"))
+}
+
+fn trace_projection(name: &str, trace: &SimulationTrace) -> GoldenTrace {
+    GoldenTrace {
+        campaign: name.to_string(),
+        terminated_at: trace.terminated_at,
+        termination_reason: format!("{:?}", trace.termination_reason),
+        states: trace
+            .states_per_step
+            .iter()
+            .map(|state| GoldenState {
+                step: state.step(),
+                infected: state.infected().iter().cloned().collect(),
+                exposure: state
+                    .exposure_level()
+                    .iter()
+                    .map(|(node, value)| GoldenExposure {
+                        node: node.clone(),
+                        value: format!("{value:.12}"),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn campaign_trace(name: &str) -> Result<SimulationTrace, String> {
+    let profile = load_profile(name)?;
+    let graph = build_graph_from_spec(&profile.graph)
+        .map_err(|e| format!("{name}: build_graph_from_spec failed {e:?}"))?;
+    let cfg: SimulatorConfig = profile.config.into();
+    simulate(&graph, &profile.initial_infected, &cfg)
+        .map_err(|e| format!("{name}: simulate failed {e:?}"))
+}
+
+fn assert_send_sync<T: Send + Sync>() {}
+
+#[test]
+fn intern_same_string_returns_same_id() {
+    let mut interner = NodeInterner::new();
+    let a = interner.intern("npm:@scope/pkg").unwrap();
+    let b = interner.intern("npm:@scope/pkg").unwrap();
+
+    assert_eq!(a, b);
+    assert_eq!(interner.len(), 1);
+}
+
+#[test]
+fn intern_different_strings_return_distinct_ids() {
+    let mut interner = NodeInterner::new();
+    let a = interner.intern("foo").unwrap();
+    let b = interner.intern("bar").unwrap();
+
+    assert_ne!(a, b);
+    assert_eq!(interner.len(), 2);
+}
+
+#[test]
+fn resolve_round_trip() {
+    let mut interner = NodeInterner::new();
+    for node in ["foo", "bar", "baz"] {
+        let id = interner.intern(node).unwrap();
+        assert_eq!(interner.resolve(id), Some(node));
+    }
+}
+
+#[test]
+fn intern_capacity_bound() {
+    let mut interner = NodeInterner::new();
+    for i in 0..NODE_INTERNER_MAX_NODES {
+        interner
+            .intern(&format!("node-{i}"))
+            .expect("under cap must succeed");
+    }
+
+    assert_eq!(
+        interner.intern("one-too-many").unwrap_err(),
+        InternError::CapacityExceeded {
+            max: NODE_INTERNER_MAX_NODES,
+        }
+    );
+}
+
+#[test]
+fn intern_empty_string() {
+    let mut interner = NodeInterner::new();
+
+    assert_eq!(interner.intern("").unwrap_err(), InternError::InvalidNodeId);
+    assert_eq!(
+        interner.intern(" \t ").unwrap_err(),
+        InternError::InvalidNodeId
+    );
+    assert_eq!(
+        interner.intern("pkg\nsplit").unwrap_err(),
+        InternError::InvalidNodeId
+    );
+    assert!(interner.is_empty());
+}
+
+#[test]
+fn intern_order_drives_node_id_assignment() {
+    let mut interner = NodeInterner::new();
+    let a = interner.intern("a").unwrap();
+    let b = interner.intern("b").unwrap();
+
+    assert_eq!(a.as_u32(), 0);
+    assert_eq!(b.as_u32(), 1);
+}
+
+#[test]
+fn interner_send_sync_bounds() {
+    assert_send_sync::<NodeInterner>();
+}
+
+#[test]
+fn graph_nodes_iter_matches_legacy_string_view() {
+    let mut graph = ContagionGraph::new(101);
+    for node in ["pkg:root", "pkg:dep-a", "pkg:dep-b"] {
+        graph.add_node(node.to_string());
+    }
+
+    assert_eq!(
+        graph.nodes(),
+        &[
+            "pkg:root".to_string(),
+            "pkg:dep-a".to_string(),
+            "pkg:dep-b".to_string()
+        ]
+    );
+}
+
+#[test]
+fn graph_add_edge_with_intern_creates_correct_adjacency() -> TestResult {
+    let mut graph = ContagionGraph::new(102);
+    graph.add_node("pkg:root".to_string());
+    graph.add_node("pkg:dep-a".to_string());
+    graph.add_node("pkg:dep-b".to_string());
+
+    graph
+        .add_edge(
+            &"pkg:root".to_string(),
+            ContagionEdge::new("pkg:dep-a".to_string(), 0.75, EdgeKind::DependencyImport)
+                .map_err(|e| format!("edge rejected: {e:?}"))?,
+        )
+        .map_err(|e| format!("add edge dep-a failed: {e:?}"))?;
+    graph
+        .add_edge(
+            &"pkg:root".to_string(),
+            ContagionEdge::new("pkg:dep-b".to_string(), 0.25, EdgeKind::MaintainerOverlap)
+                .map_err(|e| format!("edge rejected: {e:?}"))?,
+        )
+        .map_err(|e| format!("add edge dep-b failed: {e:?}"))?;
+
+    let neighbors = graph.neighbors(&"pkg:root".to_string());
+    assert_eq!(neighbors.len(), 2);
+    assert_eq!(neighbors[0].target, "pkg:dep-a");
+    assert_eq!(neighbors[0].weight, 0.75);
+    assert_eq!(neighbors[0].edge_kind, EdgeKind::DependencyImport);
+    assert_eq!(neighbors[1].target, "pkg:dep-b");
+    assert_eq!(neighbors[1].weight, 0.25);
+    assert_eq!(neighbors[1].edge_kind, EdgeKind::MaintainerOverlap);
+    Ok(())
+}
+
+#[test]
+fn graph_validate_rejects_dangling_edge() -> TestResult {
+    let mut graph = ContagionGraph::new(103);
+    graph.add_node("pkg:root".to_string());
+
+    let dangling = ContagionEdge::new("pkg:ghost".to_string(), 0.5, EdgeKind::NamespaceShadow)
+        .map_err(|e| format!("edge rejected: {e:?}"))?;
+
+    assert_eq!(
+        graph
+            .add_edge(&"pkg:root".to_string(), dangling)
+            .unwrap_err(),
+        GraphError::UnknownTarget("pkg:ghost".to_string())
+    );
+    graph
+        .validate()
+        .map_err(|e| format!("validate failed: {e:?}"))
 }
 
 #[test]
@@ -162,6 +387,40 @@ fn test_all_profiles_deterministic_across_two_runs() -> TestResult {
         );
     }
     Ok(())
+}
+
+#[test]
+fn prop_simulation_trace_deterministic_under_interning() {
+    let campaigns = ["xz_style", "dependency_confusion", "typosquat"];
+    let goldens = campaigns
+        .iter()
+        .map(|campaign| {
+            (
+                *campaign,
+                golden_trace(campaign).expect("golden trace loads"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut runner = TestRunner::new(ProptestConfig {
+        cases: 1000,
+        ..ProptestConfig::default()
+    });
+
+    runner
+        .run(&any::<u64>(), |seed| {
+            let len = u64::try_from(goldens.len()).expect("campaign count fits u64");
+            let offset = usize::try_from(seed % len).expect("modulo campaign count fits usize");
+            for (campaign, golden) in goldens.iter().cycle().skip(offset).take(goldens.len()) {
+                let first = campaign_trace(campaign).map_err(TestCaseError::fail)?;
+                let second = campaign_trace(campaign).map_err(TestCaseError::fail)?;
+
+                prop_assert_eq!(&first, &second);
+                let projected = trace_projection(campaign, &first);
+                prop_assert_eq!(&projected, golden);
+            }
+            Ok(())
+        })
+        .expect("DGIS campaign traces remain deterministic under interning");
 }
 
 #[test]
