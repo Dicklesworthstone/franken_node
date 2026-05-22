@@ -436,3 +436,9 @@ name = "fuzz_safe_mode_parse_args"
 path = "fuzz_targets/fuzz_safe_mode_parse_args.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_fork_detection_state_hash"
+path = "fuzz_targets/fuzz_fork_detection_state_hash.rs"
+test = false
+doc = false
