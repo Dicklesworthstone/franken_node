@@ -1106,6 +1106,89 @@ fn run_queue_lifecycle_after_optional_missing_task_probes(
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_queue_lifecycle_after_optional_completed_task_replay(
+    with_completed_task_replay: bool,
+) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(
+            &task_classes::log_rotation(),
+            10_700,
+            "meta-completed-replay-active",
+        )
+        .expect("first task should occupy the lane");
+    let active_task_id = active.task_id.to_string();
+    let queued_task_id = queued_task_id_from(
+        scheduler
+            .assign_task(
+                &task_classes::log_rotation(),
+                10_701,
+                "meta-completed-replay-queued",
+            )
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    scheduler
+        .complete_task(
+            &active_task_id,
+            10_710,
+            "meta-completed-replay-complete-active",
+        )
+        .expect("completion should promote queued task before replay probes");
+    scheduler
+        .complete_task(
+            &queued_task_id,
+            10_720,
+            "meta-completed-replay-complete-promoted",
+        )
+        .expect("promoted task should complete before replay probes");
+
+    if with_completed_task_replay {
+        let before_replay = queue_lifecycle_digest(&scheduler);
+        let audit_len = scheduler.audit_log().len();
+        assert_eq!(
+            scheduler
+                .complete_task(
+                    &active_task_id,
+                    10_730,
+                    "meta-completed-replay-complete-active-again"
+                )
+                .expect_err("completed active task id must not complete twice")
+                .code(),
+            error_codes::ERR_LANE_TASK_NOT_FOUND
+        );
+        assert_eq!(
+            scheduler
+                .complete_task(
+                    &queued_task_id,
+                    10_731,
+                    "meta-completed-replay-complete-promoted-again"
+                )
+                .expect_err("completed promoted task id must not complete twice")
+                .code(),
+            error_codes::ERR_LANE_TASK_NOT_FOUND
+        );
+        assert_eq!(
+            scheduler
+                .abort_queued_task_id(
+                    &queued_task_id,
+                    10_732,
+                    "meta-completed-replay-abort-promoted-again"
+                )
+                .expect_err("completed queued task id must not abort after promotion and drain")
+                .code(),
+            error_codes::ERR_LANE_TASK_NOT_FOUND
+        );
+        assert_eq!(scheduler.audit_log().len(), audit_len);
+        assert_eq!(queue_lifecycle_digest(&scheduler), before_replay);
+    }
+
+    queue_lifecycle_digest(&scheduler)
+}
+
 fn run_queue_lifecycle_after_optional_telemetry_export_probes(
     with_export_probes: bool,
 ) -> QueueLifecycleDigest {
@@ -1502,6 +1585,28 @@ fn metamorphic_missing_task_probes_are_queue_lifecycle_idempotent() {
     assert_eq!(probed.starvation_events, 0);
     assert_eq!(
         probed
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn metamorphic_completed_task_replay_is_terminal_lifecycle_idempotent() {
+    let baseline = run_queue_lifecycle_after_optional_completed_task_replay(false);
+    let replayed = run_queue_lifecycle_after_optional_completed_task_replay(true);
+
+    assert_eq!(replayed, baseline);
+    assert_eq!(replayed.active_count, 0);
+    assert_eq!(replayed.queued_count, 0);
+    assert_eq!(replayed.first_queued_at_ms, None);
+    assert_eq!(replayed.completed_total, 2);
+    assert_eq!(replayed.rejected_total, 1);
+    assert_eq!(replayed.starvation_events, 0);
+    assert_eq!(
+        replayed
             .audit_codes
             .iter()
             .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
