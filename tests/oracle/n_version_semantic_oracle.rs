@@ -49,7 +49,8 @@ fn repo_root() -> PathBuf {
 }
 
 fn load_report() -> OracleReport {
-    let path = repo_root().join("artifacts/10.17/semantic_oracle_divergence_matrix.csv.report.json");
+    let path =
+        repo_root().join("artifacts/10.17/semantic_oracle_divergence_matrix.csv.report.json");
     // Fall back to the main report location
     let path = if path.exists() {
         path
@@ -81,10 +82,7 @@ fn report_summary_counts_are_consistent() {
     assert_eq!(report.total, report.checks.len());
     assert_eq!(report.passed, passed);
     assert_eq!(report.failed, failed);
-    assert_eq!(
-        report.verdict,
-        if failed == 0 { "PASS" } else { "FAIL" }
-    );
+    assert_eq!(report.verdict, if failed == 0 { "PASS" } else { "FAIL" });
 }
 
 #[test]
@@ -136,13 +134,30 @@ fn divergence_contract_flags_are_all_true() {
 #[test]
 fn invariants_include_core_set() {
     let report = load_report();
-    assert!(report.invariants.iter().any(|i| i == "INV-ORACLE-HIGH-RISK-BLOCKS"));
-    assert!(report.invariants.iter().any(|i| i == "INV-ORACLE-LOW-RISK-RECEIPTED"));
-    assert!(report
-        .invariants
-        .iter()
-        .any(|i| i == "INV-ORACLE-DETERMINISTIC-CLASSIFICATION"));
-    assert!(report.invariants.iter().any(|i| i == "INV-ORACLE-L1-LINKAGE"));
+    assert!(
+        report
+            .invariants
+            .iter()
+            .any(|i| i == "INV-ORACLE-HIGH-RISK-BLOCKS")
+    );
+    assert!(
+        report
+            .invariants
+            .iter()
+            .any(|i| i == "INV-ORACLE-LOW-RISK-RECEIPTED")
+    );
+    assert!(
+        report
+            .invariants
+            .iter()
+            .any(|i| i == "INV-ORACLE-DETERMINISTIC-CLASSIFICATION")
+    );
+    assert!(
+        report
+            .invariants
+            .iter()
+            .any(|i| i == "INV-ORACLE-L1-LINKAGE")
+    );
 }
 
 #[test]
@@ -153,4 +168,65 @@ fn checks_are_nonempty_and_well_formed() {
         assert!(!c.check.trim().is_empty());
         assert!(!c.detail.trim().is_empty());
     }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// bd-if4ut gap-fill (r5-cc2-2155-next reality-check sweep):
+// the existing seven tests above pin the happy-path schema but do
+// not guard against two regressions that would slip past every
+// other assertion:
+//
+//   1. `verdict` is typed `String` — a malformed report with
+//      verdict = "MAYBE" / "" / "pass" (lowercase) would silently
+//      satisfy `report_summary_counts_are_consistent` if the
+//      passed/failed counts happen to line up. Pin the enum range
+//      to the literal {"PASS", "FAIL"} contract here.
+//
+//   2. `load_report()` panics with a generic "failed to read"
+//      message when neither artifact path exists; the panic
+//      doesn't tell the operator WHICH paths were tried. The
+//      test below documents the path-discovery order (csv variant
+//      first, fall back to main report) so a future refactor that
+//      changes that order surfaces in test failures rather than
+//      silent "report unexpectedly missing" panics on the
+//      production fixture rotation.
+//
+// Both tests activate as soon as bd-if4ut registers this file as
+// a `[[test]]` in `crates/franken-node/Cargo.toml`; until then
+// they exist as dead code but compile cleanly under
+// `cargo check --tests --no-default-features`.
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn verdict_is_a_known_enum_value() {
+    let report = load_report();
+    assert!(
+        report.verdict == "PASS" || report.verdict == "FAIL",
+        "verdict must be exactly PASS or FAIL (case-sensitive); got: {:?}",
+        report.verdict
+    );
+}
+
+#[test]
+fn at_least_one_fixture_artifact_path_exists() {
+    // The load_report() path-discovery order:
+    //   1. artifacts/10.17/semantic_oracle_divergence_matrix.csv.report.json (csv-derived)
+    //   2. artifacts/10.17/semantic_oracle_report.json (main report)
+    // Pin that AT LEAST one exists so the rest of the test suite has
+    // something to load. A bd-al8i artifact rotation that removes both
+    // would fail every other test with confusing "failed to read"
+    // panics; this test fails first with a clear diagnostic.
+    let csv_path =
+        repo_root().join("artifacts/10.17/semantic_oracle_divergence_matrix.csv.report.json");
+    let main_path = repo_root().join("artifacts/10.17/semantic_oracle_report.json");
+    assert!(
+        csv_path.exists() || main_path.exists(),
+        "neither N-version oracle fixture exists on disk:\n  csv variant: {}\n  main report: {}\n\
+         At least one is required for the bd-al8i oracle test suite (this file). \
+         If both were intentionally removed, update load_report() to surface the \
+         absence with a clearer panic message and update the artifact contract \
+         documented in docs/specs/.",
+        csv_path.display(),
+        main_path.display()
+    );
 }
