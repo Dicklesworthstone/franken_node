@@ -526,3 +526,9 @@ name = "fuzz_cleanup_receipts_storage"
 path = "fuzz_targets/fuzz_cleanup_receipts_storage.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_system_metrics_exporter"
+path = "fuzz_targets/fuzz_system_metrics_exporter.rs"
+test = false
+doc = false
