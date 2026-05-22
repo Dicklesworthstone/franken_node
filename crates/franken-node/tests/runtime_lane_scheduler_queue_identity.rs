@@ -972,6 +972,75 @@ fn run_queue_lifecycle_after_optional_invalid_policy_reload(
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_queue_lifecycle_after_optional_missing_task_probes(
+    with_missing_task_probes: bool,
+) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(
+            &task_classes::log_rotation(),
+            10_100,
+            "meta-missing-probe-active",
+        )
+        .expect("first task should occupy the lane");
+    let queued = queued_task_id_from(
+        scheduler
+            .assign_task(
+                &task_classes::log_rotation(),
+                10_101,
+                "meta-missing-probe-queued",
+            )
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    if with_missing_task_probes {
+        let before_missing_probes = queue_lifecycle_digest(&scheduler);
+        assert_eq!(
+            scheduler
+                .complete_task(
+                    "task-99999999",
+                    10_102,
+                    "meta-missing-probe-complete-missing"
+                )
+                .expect_err("missing active task must fail without mutation")
+                .code(),
+            error_codes::ERR_LANE_TASK_NOT_FOUND
+        );
+        assert_eq!(
+            scheduler
+                .abort_queued_task_id("task-99999999", 10_103, "meta-missing-probe-abort-missing")
+                .expect_err("missing queued task must fail without mutation")
+                .code(),
+            error_codes::ERR_LANE_TASK_NOT_FOUND
+        );
+        assert_eq!(
+            scheduler.active_task_ids(SchedulerLane::Background),
+            vec![active.task_id.to_string()]
+        );
+        assert_eq!(
+            scheduler.queued_task_ids(SchedulerLane::Background),
+            vec![queued.clone()]
+        );
+        assert_eq!(queue_lifecycle_digest(&scheduler), before_missing_probes);
+    }
+
+    scheduler
+        .complete_task(
+            &active.task_id.to_string(),
+            10_110,
+            "meta-missing-probe-complete-active",
+        )
+        .expect("completion should promote queued task after missing probes");
+    scheduler
+        .complete_task(&queued, 10_120, "meta-missing-probe-complete-promoted")
+        .expect("promoted task should complete after missing probes");
+
+    queue_lifecycle_digest(&scheduler)
+}
+
 #[test]
 fn metamorphic_queue_lifecycle_invariants_survive_observation_interleavings() {
     let baseline = run_queue_lifecycle(false);
@@ -1171,6 +1240,28 @@ fn metamorphic_invalid_policy_reload_is_queue_lifecycle_idempotent() {
     assert_eq!(rejected.starvation_events, 0);
     assert_eq!(
         rejected
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn metamorphic_missing_task_probes_are_queue_lifecycle_idempotent() {
+    let baseline = run_queue_lifecycle_after_optional_missing_task_probes(false);
+    let probed = run_queue_lifecycle_after_optional_missing_task_probes(true);
+
+    assert_eq!(probed, baseline);
+    assert_eq!(probed.active_count, 0);
+    assert_eq!(probed.queued_count, 0);
+    assert_eq!(probed.first_queued_at_ms, None);
+    assert_eq!(probed.completed_total, 2);
+    assert_eq!(probed.rejected_total, 1);
+    assert_eq!(probed.starvation_events, 0);
+    assert_eq!(
+        probed
             .audit_codes
             .iter()
             .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
