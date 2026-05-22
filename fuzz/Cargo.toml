@@ -430,3 +430,9 @@ name = "fuzz_fleet_canonical_payload_float_rejection"
 path = "fuzz_targets/fuzz_fleet_canonical_payload_float_rejection.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_safe_mode_parse_args"
+path = "fuzz_targets/fuzz_safe_mode_parse_args.rs"
+test = false
+doc = false
