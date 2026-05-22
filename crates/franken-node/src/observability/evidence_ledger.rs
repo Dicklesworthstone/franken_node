@@ -108,15 +108,28 @@ fn record_append_elapsed_us(elapsed_us: u64) {
     if count % HISTOGRAM_FLUSH_INTERVAL == 0 {
         if let Some(h) = EVIDENCE_LEDGER_APPEND_HISTOGRAM.get() {
             if let Ok(h) = h.lock() {
+                // Schema must match the T12.1 contract shipped in commit
+                // 1c72a9f0 (canonical_serializer.rs:1028+): the perf-round
+                // skill filters structured events by the `event_code` FIELD,
+                // not by tracing target. Using `target:` (the original T12.4
+                // emission shape) would have made these flushes invisible to
+                // the consumer; the histogram still records but the round
+                // summary would silently miss the evidence_ledger_append
+                // surface. Schema parity with T12.1/T12.2/T12.3 also gives
+                // cross-bead comparability across the four hot paths.
+                let cumulative_us: u64 = h.iter_recorded().map(|v| v.value_iterated_to()).sum();
                 tracing::info!(
-                    target: "perf.profile.span_summary",
-                    surface = "evidence_ledger_append",
-                    call_count = count,
+                    event_code = "perf.profile.span_summary",
+                    span_name = "evidence_ledger_append.us",
+                    cumulative_us,
+                    count,
                     p50_us = h.value_at_quantile(0.50),
                     p95_us = h.value_at_quantile(0.95),
                     p99_us = h.value_at_quantile(0.99),
                     max_us = h.max(),
-                    "HDR histogram flush"
+                    category = "CPU",
+                    evidence = "crates/franken-node/src/observability/evidence_ledger.rs::EvidenceLedger::append",
+                    "evidence_ledger_append perf span summary"
                 );
             }
         }
