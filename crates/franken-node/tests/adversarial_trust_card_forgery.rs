@@ -24,8 +24,9 @@ use frankenengine_node::supply_chain::{
     artifact_signing::{self, KeyId, KeyRing},
     certification::{EvidenceType, VerifiedEvidenceRef},
     extension_registry::{
-        AdmissionKernel, ExtensionSignature, RegistrationRequest, RegistryConfig,
-        SignedExtensionRegistry, VersionEntry, canonical_registration_manifest_bytes, event_codes,
+        AdmissionKernel, EXTENSION_REGISTRATION_MANIFEST_SCHEMA, ExtensionSignature,
+        RegistrationRequest, RegistryConfig, SignedExtensionRegistry, VersionEntry,
+        canonical_registration_manifest_bytes, event_codes,
     },
     provenance::{
         self as prov, AttestationEnvelopeFormat, AttestationLink, ChainLinkRole,
@@ -41,6 +42,8 @@ use frankenengine_node::supply_chain::{
     },
 };
 use hmac::{Hmac, KeyInit, Mac};
+use proptest::prelude::*;
+use serde_json::{Map, Value};
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use subtle::ConstantTimeEq;
@@ -246,6 +249,248 @@ fn extension_request(name: &str, sk: &SigningKey, now_epoch: u64) -> Registratio
     }
 }
 
+const FUZZ_JSON_BYTES_LIMIT: usize = 4096;
+
+#[derive(Clone, Debug)]
+struct RegistrationManifestFuzzCase {
+    use_valid_schema: bool,
+    schema_fallback: Value,
+    use_request_name: bool,
+    name_fallback: Value,
+    use_request_publisher: bool,
+    publisher_fallback: Value,
+    use_request_version: bool,
+    version_fallback: Value,
+    use_request_tags: bool,
+    tags_fallback: Value,
+    include_embedded_signature: bool,
+    embedded_signature: Value,
+}
+
+impl RegistrationManifestFuzzCase {
+    fn exactly_matches_request(&self) -> bool {
+        self.use_valid_schema
+            && self.use_request_name
+            && self.use_request_publisher
+            && self.use_request_version
+            && self.use_request_tags
+            && !self.include_embedded_signature
+    }
+}
+
+fn fuzz_text(max_len: usize) -> impl Strategy<Value = String> {
+    prop::collection::vec(0_u8..=127, 0..=max_len)
+        .prop_map(|bytes| String::from_utf8(bytes).expect("ASCII fuzz bytes are UTF-8"))
+}
+
+fn fuzz_json_leaf() -> impl Strategy<Value = Value> {
+    prop_oneof![
+        Just(Value::Null),
+        any::<bool>().prop_map(Value::Bool),
+        (-1024_i64..=1024).prop_map(|value| Value::Number(value.into())),
+        fuzz_text(96).prop_map(Value::String),
+    ]
+}
+
+fn fuzz_version_value() -> impl Strategy<Value = Value> {
+    (
+        fuzz_text(32),
+        prop::option::of(fuzz_text(32)),
+        fuzz_text(96),
+        fuzz_text(64),
+        prop::collection::vec(fuzz_text(32), 0..=4),
+        any::<bool>(),
+        fuzz_json_leaf(),
+    )
+        .prop_map(
+            |(
+                version,
+                parent_version,
+                content_hash,
+                registered_at,
+                compatible_with,
+                include_unknown,
+                unknown_value,
+            )| {
+                let mut object = Map::new();
+                object.insert("version".to_string(), Value::String(version));
+                object.insert(
+                    "parent_version".to_string(),
+                    parent_version.map_or(Value::Null, Value::String),
+                );
+                object.insert("content_hash".to_string(), Value::String(content_hash));
+                object.insert("registered_at".to_string(), Value::String(registered_at));
+                object.insert(
+                    "compatible_with".to_string(),
+                    Value::Array(
+                        compatible_with
+                            .into_iter()
+                            .map(Value::String)
+                            .collect::<Vec<_>>(),
+                    ),
+                );
+                if include_unknown {
+                    object.insert("unsigned_version_metadata".to_string(), unknown_value);
+                }
+                Value::Object(object)
+            },
+        )
+}
+
+fn version_value() -> impl Strategy<Value = Value> {
+    prop_oneof![
+        fuzz_version_value(),
+        fuzz_json_leaf(),
+        prop::collection::vec(fuzz_json_leaf(), 0..=4).prop_map(Value::Array),
+    ]
+}
+
+fn tags_value() -> impl Strategy<Value = Value> {
+    prop_oneof![
+        prop::collection::vec(fuzz_text(32), 0..=6).prop_map(|tags| {
+            Value::Array(tags.into_iter().map(Value::String).collect::<Vec<_>>())
+        }),
+        prop::collection::vec(fuzz_json_leaf(), 0..=6).prop_map(Value::Array),
+        fuzz_json_leaf(),
+    ]
+}
+
+fn manifest_field_value() -> impl Strategy<Value = Value> {
+    prop_oneof![
+        fuzz_text(128).prop_map(Value::String),
+        fuzz_json_leaf(),
+        prop::collection::vec(fuzz_json_leaf(), 0..=4).prop_map(Value::Array),
+    ]
+}
+
+fn signed_registration_manifest_case() -> impl Strategy<Value = RegistrationManifestFuzzCase> {
+    (
+        any::<bool>(),
+        manifest_field_value(),
+        any::<bool>(),
+        manifest_field_value(),
+        any::<bool>(),
+        manifest_field_value(),
+        any::<bool>(),
+        version_value(),
+        any::<bool>(),
+        tags_value(),
+        any::<bool>(),
+        fuzz_json_leaf(),
+    )
+        .prop_map(
+            |(
+                use_valid_schema,
+                schema_fallback,
+                use_request_name,
+                name_fallback,
+                use_request_publisher,
+                publisher_fallback,
+                use_request_version,
+                version_fallback,
+                use_request_tags,
+                tags_fallback,
+                include_embedded_signature,
+                embedded_signature,
+            )| RegistrationManifestFuzzCase {
+                use_valid_schema,
+                schema_fallback,
+                use_request_name,
+                name_fallback,
+                use_request_publisher,
+                publisher_fallback,
+                use_request_version,
+                version_fallback,
+                use_request_tags,
+                tags_fallback,
+                include_embedded_signature,
+                embedded_signature,
+            },
+        )
+}
+
+fn exact_registration_manifest_value(request: &RegistrationRequest) -> Value {
+    serde_json::json!({
+        "schema_version": EXTENSION_REGISTRATION_MANIFEST_SCHEMA,
+        "name": &request.name,
+        "publisher_id": &request.publisher_id,
+        "initial_version": &request.initial_version,
+        "tags": &request.tags,
+    })
+}
+
+fn registration_manifest_value(
+    request: &RegistrationRequest,
+    case: &RegistrationManifestFuzzCase,
+) -> Value {
+    let mut object = Map::new();
+    object.insert(
+        "schema_version".to_string(),
+        if case.use_valid_schema {
+            Value::String(EXTENSION_REGISTRATION_MANIFEST_SCHEMA.to_string())
+        } else {
+            case.schema_fallback.clone()
+        },
+    );
+    object.insert(
+        "name".to_string(),
+        if case.use_request_name {
+            Value::String(request.name.clone())
+        } else {
+            case.name_fallback.clone()
+        },
+    );
+    object.insert(
+        "publisher_id".to_string(),
+        if case.use_request_publisher {
+            Value::String(request.publisher_id.clone())
+        } else {
+            case.publisher_fallback.clone()
+        },
+    );
+    object.insert(
+        "initial_version".to_string(),
+        if case.use_request_version {
+            serde_json::to_value(&request.initial_version).expect("version serializes")
+        } else {
+            case.version_fallback.clone()
+        },
+    );
+    object.insert(
+        "tags".to_string(),
+        if case.use_request_tags {
+            serde_json::to_value(&request.tags).expect("tags serialize")
+        } else {
+            case.tags_fallback.clone()
+        },
+    );
+    if case.include_embedded_signature {
+        object.insert("signature".to_string(), case.embedded_signature.clone());
+    }
+    Value::Object(object)
+}
+
+fn register_with_manifest_bytes(
+    sk: &SigningKey,
+    mut request: RegistrationRequest,
+    manifest_bytes: Vec<u8>,
+    trace_suffix: &str,
+) -> (
+    SignedExtensionRegistry,
+    frankenengine_node::supply_chain::extension_registry::RegistryResult,
+) {
+    request.manifest_bytes = manifest_bytes;
+    request.signature.signature_bytes = artifact_signing::sign_bytes(sk, &request.manifest_bytes);
+
+    let mut registry = extension_registry(sk);
+    let result = registry.register(
+        request,
+        &format!("{TRACE_ID}-{trace_suffix}"),
+        EXTENSION_NOW_EPOCH,
+    );
+    (registry, result)
+}
+
 /// Sanity check: a legitimately-minted card must verify under the legitimate
 /// key. If this baseline ever fails, every subsequent rejection assertion is
 /// meaningless.
@@ -254,6 +499,155 @@ fn baseline_legitimate_card_verifies() {
     let card = mint_legitimate_card();
     verify_card_signature(&card, LEGITIMATE_KEY)
         .expect("baseline: legitimately-signed card must verify under legitimate key");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 192,
+        max_shrink_iters: 1024,
+        .. ProptestConfig::default()
+    })]
+
+    #[test]
+    fn signed_extension_registration_manifest_fuzz_rejects_or_admits_only_exact_request(
+        case in signed_registration_manifest_case(),
+    ) {
+        let signing_key = extension_signing_key();
+        let request = extension_request(
+            "signed-extension-manifest-fuzz",
+            &signing_key,
+            EXTENSION_NOW_EPOCH,
+        );
+        let manifest = registration_manifest_value(&request, &case);
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest value serializes");
+
+        let (registry, result) = register_with_manifest_bytes(
+            &signing_key,
+            request,
+            manifest_bytes,
+            "signed-manifest-fuzz-json",
+        );
+
+        if case.exactly_matches_request() {
+            prop_assert!(
+                result.success,
+                "exact signed manifest should admit: {:?} {}",
+                result.error_code,
+                result.detail
+            );
+            prop_assert_eq!(registry.list(None).len(), 1);
+        } else if case.include_embedded_signature {
+            prop_assert!(!result.success, "embedded signature envelope must fail closed");
+            prop_assert_eq!(
+                result.error_code.as_deref(),
+                Some(event_codes::SER_ERR_INVALID_INPUT)
+            );
+            prop_assert!(
+                registry.list(None).is_empty(),
+                "embedded signature envelope must not register an extension"
+            );
+        }
+
+        if result.success {
+            prop_assert!(
+                !case.include_embedded_signature,
+                "embedded signature fields must never be admitted"
+            );
+            prop_assert_eq!(registry.list(None).len(), 1);
+        } else {
+            prop_assert!(
+                registry.list(None).is_empty(),
+                "rejected manifest must not mutate the registry"
+            );
+        }
+    }
+
+    #[test]
+    fn signed_extension_registration_manifest_byte_fuzz_never_panics_or_partially_admits(
+        manifest_bytes in prop::collection::vec(any::<u8>(), 0..=FUZZ_JSON_BYTES_LIMIT),
+    ) {
+        let signing_key = extension_signing_key();
+        let request = extension_request(
+            "signed-extension-manifest-byte-fuzz",
+            &signing_key,
+            EXTENSION_NOW_EPOCH,
+        );
+
+        let (registry, result) = register_with_manifest_bytes(
+            &signing_key,
+            request,
+            manifest_bytes,
+            "signed-manifest-fuzz-bytes",
+        );
+
+        if result.success {
+            prop_assert_eq!(
+                registry.list(None).len(),
+                1,
+                "successful fuzzed manifest admission must create exactly one extension"
+            );
+        } else {
+            prop_assert!(
+                registry.list(None).is_empty(),
+                "failed fuzzed manifest admission must not leave partial registry state"
+            );
+        }
+    }
+}
+
+#[test]
+fn signed_extension_registration_manifest_rejects_embedded_signature_field_after_outer_signature() {
+    let signing_key = extension_signing_key();
+    let request = extension_request(
+        "signed-extension-embedded-signature",
+        &signing_key,
+        EXTENSION_NOW_EPOCH,
+    );
+    let mut manifest = exact_registration_manifest_value(&request);
+    manifest
+        .as_object_mut()
+        .expect("manifest must be an object")
+        .insert(
+            "signature".to_string(),
+            serde_json::json!({
+                "algorithm": "ed25519",
+                "value": "replayed-inner-signature-envelope"
+            }),
+        );
+
+    let (registry, result) = register_with_manifest_bytes(
+        &signing_key,
+        request,
+        serde_json::to_vec(&manifest).expect("manifest value serializes"),
+        "embedded-signature",
+    );
+
+    assert!(!result.success, "embedded signature field must fail closed");
+    assert_eq!(
+        result.error_code.as_deref(),
+        Some(event_codes::SER_ERR_INVALID_INPUT)
+    );
+    assert!(result.extension_id.is_none());
+    assert!(
+        registry.list(None).is_empty(),
+        "embedded signature field must not register an extension"
+    );
+
+    let receipt = registry
+        .admission_receipts()
+        .last()
+        .expect("outer signature evaluation must persist a receipt");
+    assert!(
+        receipt.admitted,
+        "outer signature may verify, but embedded signed-manifest data must still be rejected"
+    );
+
+    let audit = registry
+        .audit_log()
+        .last()
+        .expect("parser rejection must emit an audit record");
+    assert_eq!(audit.event_code, event_codes::SER_ERR_INVALID_INPUT);
+    assert_eq!(audit.details["field"], "manifest_bytes");
 }
 
 #[test]
