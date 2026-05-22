@@ -1776,4 +1776,156 @@ mod interface_hash_advanced_negative_tests {
             assert!(verify_hash(&hash, &format!("test{}.v1", i), adversarial_data).is_ok());
         }
     }
+
+    // Frozen SHA-256 hex outputs of the public function `compute_hash`
+    // (interface_hash.rs:22) which derives via the `secure_hash!` proc-macro
+    // expansion from franken_security_macros. The macro produces canonical
+    // bytes equivalent to (verified against the existing reimplementation
+    // sanity-check at compute_hash_length_prefixes_data_field, L277-312):
+    //
+    //   SHA256(
+    //     b"interface_hash_v1:"
+    //     || LE64(len(domain)) || domain.as_bytes()
+    //     || LE64(len(data))   || data
+    //   )
+    //
+    // This golden COMPLEMENTS the existing L277 reimplementation test by
+    // adding frozen-hex pins — the L277 test catches "my reimplementation
+    // and the macro diverge", but this golden catches "BOTH the macro AND
+    // the reimplementation drift in lockstep" (a coordinated layout change
+    // in franken_security_macros that updates both implementations would
+    // silently pass L277 but flip these hashes).
+    //
+    // Four frozen fixtures cover all branches of the domain × data
+    // (empty | non-empty) matrix:
+    //
+    //   1. populated (domain="connector.v1", data=b"hello") — locks the
+    //      v1 domain separator + LE64-len-prefixed framing for both
+    //      domain and data.
+    //   2. empty_data (domain="connector.v1", data=b"") — locks the
+    //      LE64(0)+zero-bytes trailing data framing.
+    //   3. empty_domain (domain="", data=b"data-only") — locks the
+    //      LE64(0)+zero-bytes domain framing.
+    //   4. both_empty (domain="", data=b"") — locks the all-empty case
+    //      where ONLY the v1 prefix + two LE64(0) fields feed the hasher.
+    //
+    // Critical layout invariants this golden pins:
+    //   - the v1 domain separator string `interface_hash_v1:`
+    //   - LE64 width on BOTH length prefixes (a future swap to LE32 or
+    //     varint would flip every existing interface-hash consumer)
+    //   - field order: domain BEFORE data (swapping them would silently
+    //     invert every hash across the admission telemetry surface)
+    //   - empty-string handling: an empty &str field MUST emit LE64(0)
+    //     into the hasher and stop, rather than being skipped or emitting
+    //     a sentinel
+    //
+    // Goldens were derived offline from the canonical-byte spec — NOT
+    // captured from an unreviewed prior run — by reimplementing the macro
+    // expansion in Python and hashing the resulting byte stream.
+    //
+    // Why this matters (the contract): compute_hash is the gate that bd-3n58
+    // interface admission telemetry uses to detect tampering of
+    // domain-tagged data. If two nodes compute different canonical bytes
+    // for the same logical (domain, data) tuple — because franken_security_
+    // macros silently re-orders fields, swaps LE64 widths, or muddles the
+    // domain separator — interface verification breaks silently across
+    // the fleet, and the RejectionCode::HashMismatch path (L49) starts
+    // firing for legitimate traffic. The InterfaceHash struct serializes
+    // hash_hex into RPC bodies as Vec<u8>/string and is checked at every
+    // admission boundary; pinning the bytes here is the canary.
+    #[test]
+    fn compute_hash_frozen_canonical_byte_layout_golden() {
+        // 1. Populated fixture: most common production case (non-empty
+        // domain, non-empty data). Locks the entire layout in one shot.
+        let populated = compute_hash("connector.v1", b"hello");
+        assert_eq!(
+            populated.hash_hex,
+            "e1c8d7cc7a091aed2a9ccc5be8dd7f7dbab41c78c595c18262df2f5627b4d817",
+            "populated interface_hash drifted — check the `interface_hash_v1:` \
+             domain separator, LE64-len prefix widths, or field order \
+             (domain before data)"
+        );
+        assert_eq!(populated.domain, "connector.v1");
+        assert_eq!(populated.data_len, 5);
+
+        // 2. Empty-data fixture: locks the LE64(0)+zero-bytes trailing
+        // data framing. An empty &[u8] MUST still emit LE64(0) into the
+        // hasher rather than being skipped (skipping would defeat the
+        // length-prefix collision-resistance contract documented at L20).
+        let empty_data = compute_hash("connector.v1", b"");
+        assert_eq!(
+            empty_data.hash_hex,
+            "684ccd19a353f3bede36371dc6359925d20ecec9f1f4e249ab4f5a54a3cae643",
+            "empty-data interface_hash drifted — check that an empty &[u8] \
+             data field still emits LE64(0) into the hasher rather than \
+             being skipped"
+        );
+        assert_eq!(empty_data.data_len, 0);
+
+        // 3. Empty-domain fixture: locks the LE64(0)+zero-bytes domain
+        // framing. Symmetric counterpart to the empty-data case.
+        let empty_domain = compute_hash("", b"data-only");
+        assert_eq!(
+            empty_domain.hash_hex,
+            "9228c70ca9a8e7a25c4cfd5353f6b517675cf47709366773c534198a1ad24087",
+            "empty-domain interface_hash drifted — check that an empty \
+             domain &str still emits LE64(0) into the hasher rather than \
+             being skipped"
+        );
+        assert_eq!(empty_domain.domain, "");
+        assert_eq!(empty_domain.data_len, 9);
+
+        // 4. Both-empty fixture: ONLY the v1 prefix + two LE64(0) fields
+        // feed the hasher. Locks the all-empty baseline.
+        let both_empty = compute_hash("", b"");
+        assert_eq!(
+            both_empty.hash_hex,
+            "7a827ea6a5740edb5783006488f41e6fbdbb9fdf4bf0d467f40869e22c4a6c62",
+            "both-empty interface_hash drifted — the all-empty baseline \
+             should produce SHA256(b\"interface_hash_v1:\" || LE64(0) || \
+             LE64(0)); drift indicates a domain-byte change or LE-width drift"
+        );
+
+        // Cross-fixture distinctness: all four MUST produce distinct
+        // hashes (no accidental collision between empty/non-empty pairs).
+        let all = [
+            &populated.hash_hex,
+            &empty_data.hash_hex,
+            &empty_domain.hash_hex,
+            &both_empty.hash_hex,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                if i < j {
+                    assert_ne!(
+                        *a, *b,
+                        "fixture {i} and fixture {j} MUST produce distinct hashes"
+                    );
+                }
+            }
+            assert_eq!(a.len(), 64);
+            assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+
+        // Field-order-sensitivity invariant: compute_hash(domain, data)
+        // MUST differ from compute_hash(data_as_str, domain_as_bytes)
+        // (i.e., feeding the data string AS THE DOMAIN and the domain
+        // string AS THE DATA must produce a different hash). Pins the
+        // contract that domain and data are NOT interchangeable.
+        let swapped_inputs = compute_hash("hello", b"connector.v1");
+        assert_ne!(
+            swapped_inputs.hash_hex, populated.hash_hex,
+            "swapping domain and data inputs MUST produce a different hash; \
+             if it does not, the canonical layout has lost field-position \
+             distinction"
+        );
+
+        // verify_hash round-trip: every frozen fixture must accept its
+        // canonical (domain, data) inputs. Guards against a future bug
+        // where compute_hash produces bytes that verify_hash rejects.
+        assert!(verify_hash(&populated, "connector.v1", b"hello").is_ok());
+        assert!(verify_hash(&empty_data, "connector.v1", b"").is_ok());
+        assert!(verify_hash(&empty_domain, "", b"data-only").is_ok());
+        assert!(verify_hash(&both_empty, "", b"").is_ok());
+    }
 }
