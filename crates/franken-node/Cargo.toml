@@ -1119,6 +1119,14 @@ path = "../../tests/oracle/n_version_semantic_oracle.rs"
 name = "conformance_adjacent_substrate_gate"
 path = "../../tests/conformance/adjacent_substrate_gate.rs"
 
+# bd-papxh: wire bd-1xwz perf budget guard conformance suite (20 tests
+# at tests/conformance/perf_budget_guard.rs validating the overhead gate
+# decision logic at crates/franken-node/src/connector/perf_budget_guard.rs).
+# In-domain (perf). Part of the bd-9zqcq orphan batch follow-on.
+[[test]]
+name = "conformance_perf_budget_guard"
+path = "../../tests/conformance/perf_budget_guard.rs"
+
 [[bench]]
 name = "cuckoo_revocation_bench"
 harness = false
