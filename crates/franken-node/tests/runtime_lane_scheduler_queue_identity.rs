@@ -1041,6 +1041,91 @@ fn run_queue_lifecycle_after_optional_missing_task_probes(
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_queue_lifecycle_after_optional_telemetry_export_probes(
+    with_export_probes: bool,
+) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(
+            &task_classes::log_rotation(),
+            10_300,
+            "meta-export-probe-active",
+        )
+        .expect("first task should occupy the lane");
+    let queued = queued_task_id_from(
+        scheduler
+            .assign_task(
+                &task_classes::log_rotation(),
+                10_301,
+                "meta-export-probe-queued",
+            )
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    if with_export_probes {
+        let before_export_probes = queue_lifecycle_digest(&scheduler);
+        let audit_len = scheduler.audit_log().len();
+
+        let snapshot = scheduler.telemetry_snapshot(10_302);
+        assert_eq!(snapshot.schema_version.as_str(), "ls-v1.0");
+        assert_eq!(snapshot.timestamp_ms, 10_302);
+        let background = snapshot
+            .counters
+            .iter()
+            .find(|counters| counters.lane == SchedulerLane::Background)
+            .expect("background counters must be present in telemetry");
+        assert_eq!(background.active_count, 1);
+        assert_eq!(background.queued_count, 1);
+        assert_eq!(background.first_queued_at_ms, Some(10_301));
+        assert_eq!(background.rejected_total, 1);
+        assert_eq!(background.starvation_events, 0);
+
+        let exported = scheduler.export_audit_log_jsonl();
+        let exported_lines: Vec<&str> = exported.lines().collect();
+        assert_eq!(exported_lines.len(), audit_len);
+        assert!(
+            exported_lines.iter().any(|line| {
+                line.contains(event_codes::LANE_ASSIGN) && line.contains("meta-export-probe-active")
+            }),
+            "audit export must include the active assignment record"
+        );
+        assert!(
+            exported_lines.iter().any(|line| {
+                line.contains(event_codes::LANE_TASK_QUEUED)
+                    && line.contains("meta-export-probe-queued")
+                    && line.contains(&queued)
+            }),
+            "audit export must include the queued task identity record"
+        );
+        assert_eq!(scheduler.audit_log().len(), audit_len);
+        assert_eq!(
+            scheduler.active_task_ids(SchedulerLane::Background),
+            vec![active.task_id.to_string()]
+        );
+        assert_eq!(
+            scheduler.queued_task_ids(SchedulerLane::Background),
+            vec![queued.clone()]
+        );
+        assert_eq!(queue_lifecycle_digest(&scheduler), before_export_probes);
+    }
+
+    scheduler
+        .complete_task(
+            &active.task_id.to_string(),
+            10_310,
+            "meta-export-probe-complete-active",
+        )
+        .expect("completion should promote queued task after export probes");
+    scheduler
+        .complete_task(&queued, 10_320, "meta-export-probe-complete-promoted")
+        .expect("promoted task should complete after export probes");
+
+    queue_lifecycle_digest(&scheduler)
+}
+
 #[test]
 fn metamorphic_queue_lifecycle_invariants_survive_observation_interleavings() {
     let baseline = run_queue_lifecycle(false);
@@ -1252,6 +1337,28 @@ fn metamorphic_invalid_policy_reload_is_queue_lifecycle_idempotent() {
 fn metamorphic_missing_task_probes_are_queue_lifecycle_idempotent() {
     let baseline = run_queue_lifecycle_after_optional_missing_task_probes(false);
     let probed = run_queue_lifecycle_after_optional_missing_task_probes(true);
+
+    assert_eq!(probed, baseline);
+    assert_eq!(probed.active_count, 0);
+    assert_eq!(probed.queued_count, 0);
+    assert_eq!(probed.first_queued_at_ms, None);
+    assert_eq!(probed.completed_total, 2);
+    assert_eq!(probed.rejected_total, 1);
+    assert_eq!(probed.starvation_events, 0);
+    assert_eq!(
+        probed
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn metamorphic_telemetry_and_audit_exports_preserve_queue_lifecycle() {
+    let baseline = run_queue_lifecycle_after_optional_telemetry_export_probes(false);
+    let probed = run_queue_lifecycle_after_optional_telemetry_export_probes(true);
 
     assert_eq!(probed, baseline);
     assert_eq!(probed.active_count, 0);
