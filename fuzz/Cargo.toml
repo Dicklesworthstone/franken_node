@@ -568,3 +568,9 @@ name = "fuzz_federation_atc_reciprocity"
 path = "fuzz_targets/fuzz_federation_atc_reciprocity.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_remote_idempotency_derivation"
+path = "fuzz_targets/fuzz_remote_idempotency_derivation.rs"
+test = false
+doc = false
