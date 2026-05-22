@@ -1331,5 +1331,10 @@ path = "../../tests/conformance/bd_2gk8_ecosystem_compliance_conformance.rs"
 required-features = ["advanced-features"]
 
 [[test]]
+name = "bd_3h7k_anti_entropy_reconciliation_conformance"
+path = "../../tests/conformance/bd_3h7k_anti_entropy_reconciliation_conformance.rs"
+required-features = ["advanced-features"]
+
+[[test]]
 name = "ambient_authority_gate"
 path = "tests/ambient_authority_gate.rs"
