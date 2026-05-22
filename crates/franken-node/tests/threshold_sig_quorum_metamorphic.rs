@@ -23,6 +23,8 @@
 //! 8. **Publication-context binding** — partial signatures produced for one
 //!    artifact or connector do not count toward quorum for another artifact or
 //!    connector carrying the same content hash.
+//! 9. **Duplicate partial replay rejection** — replaying any already-valid
+//!    partial signature cannot inflate `valid_signatures` or satisfy quorum.
 //!
 //! These are the load-bearing safety properties: if any break, the threshold gate
 //! either lets unauthorised publications through or rejects valid quorums.
@@ -471,7 +473,75 @@ proptest! {
         );
     }
 
-    /// Property 9 (bd-98xo5.1.4): verify_threshold and verify_threshold_preparsed
+    /// Property 9: duplicate partial-signature replay rejection. Replaying one
+    /// valid signer contribution many times must not inflate the quorum count.
+    #[test]
+    fn duplicate_partial_signature_replays_do_not_increase_quorum(
+        n in 2_u32..=8_u32,
+        unique_count in 1_u32..=7_u32,
+        replay_count in 1_usize..=8_usize,
+        replay_position in 0_usize..=8_usize,
+        content_seed in any::<u64>(),
+    ) {
+        let unique_count = unique_count.min(n - 1);
+        let k = unique_count + 1;
+        let quorum = build_quorum(b"duplicate-partial-replay", k, n);
+        let content_hash = format!("dupreplay-{content_seed:016x}");
+        let unique_indices = (0..unique_count as usize).collect::<Vec<_>>();
+        let baseline_signatures = sign_with_indices(&quorum, &content_hash, &unique_indices);
+
+        let baseline = verify_threshold(
+            &quorum.config,
+            &make_artifact(&content_hash, baseline_signatures.clone()),
+            "dup-base",
+            "ts",
+        );
+        prop_assert!(!baseline.verified, "unique signer count is intentionally below quorum");
+        prop_assert_eq!(
+            baseline.valid_signatures,
+            unique_count,
+            "baseline must count exactly the distinct valid signers"
+        );
+
+        let replayed_partial = baseline_signatures[0].clone();
+        let insert_at = replay_position.min(baseline_signatures.len());
+        let mut replayed_signatures =
+            Vec::with_capacity(baseline_signatures.len() + replay_count);
+        replayed_signatures.extend_from_slice(&baseline_signatures[..insert_at]);
+        replayed_signatures.extend(std::iter::repeat(replayed_partial).take(replay_count));
+        replayed_signatures.extend_from_slice(&baseline_signatures[insert_at..]);
+        let replayed_artifact = make_artifact(&content_hash, replayed_signatures);
+        let replayed = verify_threshold(&quorum.config, &replayed_artifact, "dup-replay", "ts");
+        let preparsed = PreparsedThresholdConfig::from_config(quorum.config.clone())
+            .expect("valid config must parse");
+        let preparsed_replayed =
+            verify_threshold_preparsed(&preparsed, &replayed_artifact, "dup-replay", "ts");
+
+        prop_assert_eq!(
+            &replayed,
+            &preparsed_replayed,
+            "duplicate replay handling must be identical on baseline and preparsed paths"
+        );
+        prop_assert!(
+            !replayed.verified,
+            "replayed copies of one signer must not satisfy quorum"
+        );
+        prop_assert_eq!(
+            replayed.valid_signatures,
+            unique_count,
+            "duplicate partial signatures must not increase valid_signatures"
+        );
+        prop_assert!(
+            matches!(
+                replayed.failure_reason,
+                Some(FailureReason::DuplicateSigner { .. })
+            ),
+            "duplicate partial replay must surface as DuplicateSigner; got {:?}",
+            replayed.failure_reason
+        );
+    }
+
+    /// Property 10 (bd-98xo5.1.4): verify_threshold and verify_threshold_preparsed
     /// produce byte-identical VerifyResult for any valid input within the production
     /// envelope (signers 1..=64, threshold 1..=n, content up to 4 KiB).
     #[test]
