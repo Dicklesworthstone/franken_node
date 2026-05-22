@@ -466,24 +466,9 @@ impl CancellationProtocol {
             return Ok(&self.records[idx]);
         }
 
-        // Create new record
-        let mut record =
-            CancellationRecord::new(workflow_id, self.default_drain_config.clone(), trace_id);
-        record.current_phase = CancelPhase::CancelRequested;
-        record.request_timestamp_ms = Some(timestamp_ms);
-        record.in_flight_count = in_flight_count;
-
-        self.record_audit_event(CancelAuditEvent::new(
-            event_codes::CAN_001,
-            workflow_id,
-            CancelPhase::Idle,
-            CancelPhase::CancelRequested,
-            timestamp_ms,
-            trace_id,
-            &format!("cancel requested, {} in-flight", in_flight_count),
-        ));
-
-        // Garbage collect only finalized records if we are at capacity
+        // Garbage collect only finalized records before emitting CAN-001. If
+        // capacity is exhausted by active cancellations, the request must fail
+        // closed without leaving a misleading audit event for a rejected cancel.
         if self.records.len() >= DEFAULT_MAX_RECORDS {
             // Retain active records, and try to make room
             self.records
@@ -500,10 +485,29 @@ impl CancellationProtocol {
                 });
             }
         }
+
+        // Create new record
+        let mut record =
+            CancellationRecord::new(workflow_id, self.default_drain_config.clone(), trace_id);
+        record.current_phase = CancelPhase::CancelRequested;
+        record.request_timestamp_ms = Some(timestamp_ms);
+        record.in_flight_count = in_flight_count;
+
+        let inserted_idx = self.records.len();
         self.records.push(record);
 
+        self.record_audit_event(CancelAuditEvent::new(
+            event_codes::CAN_001,
+            workflow_id,
+            CancelPhase::Idle,
+            CancelPhase::CancelRequested,
+            timestamp_ms,
+            trace_id,
+            &format!("cancel requested, {} in-flight", in_flight_count),
+        ));
+
         self.records
-            .last()
+            .get(inserted_idx)
             .ok_or_else(|| CancelProtocolError::InvariantViolation {
                 detail: "records unexpectedly empty immediately after push".to_string(),
             })

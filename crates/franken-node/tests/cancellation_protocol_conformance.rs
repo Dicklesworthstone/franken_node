@@ -321,4 +321,49 @@ mod control_plane {
 
         Ok(())
     }
+
+    #[test]
+    fn control_plane_cancellation_active_capacity_rejects_without_audit_side_effect()
+    -> Result<(), String> {
+        let mut protocol =
+            cp::CancellationProtocol::with_audit_log_capacity(cp::DrainConfig::default(), 4);
+
+        for idx in 0..cp::DEFAULT_MAX_RECORDS {
+            let workflow_id = format!("wf-active-{idx}");
+            let timestamp_ms =
+                u64::try_from(idx).map_err(|_| "timestamp conversion failed".to_string())?;
+            protocol
+                .request_cancel(&workflow_id, 1, timestamp_ms, "trace-capacity")
+                .map_err(|err| err.to_string())?;
+        }
+
+        let audit_before = protocol.audit_log().to_vec();
+        let overflow = match protocol.request_cancel("wf-overflow", 1, 9_999_999, "trace-overflow")
+        {
+            Ok(_) => return Err("overflow cancellation unexpectedly succeeded".to_string()),
+            Err(err) => err,
+        };
+
+        ensure_eq(
+            overflow.code(),
+            cp::error_codes::ERR_CANCEL_INVARIANT,
+            "all-active record capacity fails closed",
+        )?;
+        ensure_eq(
+            protocol.records().len(),
+            cp::DEFAULT_MAX_RECORDS,
+            "overflow rejection must not append a record",
+        )?;
+        ensure(
+            protocol.get_record("wf-overflow").is_none(),
+            "overflow rejection must leave the rejected workflow untracked",
+        )?;
+        ensure_eq(
+            protocol.audit_log(),
+            audit_before.as_slice(),
+            "overflow rejection must not emit CAN-001 for an untracked cancellation",
+        )?;
+
+        Ok(())
+    }
 }
