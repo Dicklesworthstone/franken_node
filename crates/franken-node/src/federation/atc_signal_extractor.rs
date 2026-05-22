@@ -719,4 +719,200 @@ mod tests {
         let parsed: AtcLocalSignal = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(sig, parsed);
     }
+
+    // Frozen SHA-256 hex outputs of the TWO complementary module-
+    // private hashing functions in this file:
+    //
+    //   compute_signal_id (atc_signal_extractor.rs:495):
+    //     SHA256(
+    //       b"atc_signal_v1:"
+    //       || LE64(len(trace_id))     || trace_id.as_bytes()
+    //       || LE64(len(kind.as_str)) || kind.as_str.as_bytes()
+    //       || source_epoch.to_le_bytes()    # raw u64 LE — NO length prefix
+    //     ).hex()
+    //
+    //   compute_payload_hash (atc_signal_extractor.rs:506):
+    //     SHA256(
+    //       b"atc_signal_payload_v1:"
+    //       || payload.len().to_le_bytes()   # raw u64 count
+    //       || for (k, v) in payload:        # BTreeMap → sorted by k
+    //            LE64(len(k)) || k.as_bytes()
+    //         || LE64(len(v)) || v.as_bytes()
+    //     ).hex()
+    //
+    // *** DISTINCTIVE FEATURE pinned by this golden ***
+    //
+    // The two functions share the same module and serve the same
+    // domain (ATC signal extraction) but use DIFFERENT domain
+    // separators: `atc_signal_v1:` for the signal_id and
+    // `atc_signal_payload_v1:` for the payload content hash. Pinning
+    // both as goldens documents the domain-separation contract — a
+    // future refactor that "consolidated to one domain" (e.g.,
+    // because both functions live in the same module) would silently
+    // enable cross-function hash collisions where a payload hash
+    // could be presented as a signal id.
+    //
+    // Five frozen fixtures (3 signal_id + 2 payload_hash) + three
+    // structural invariants:
+    //
+    // compute_signal_id:
+    //   1. minimal (empty trace_id, AnomalyObservation, epoch=0).
+    //      Locks `atc_signal_v1:` domain + LE64-len framing on
+    //      trace_id/kind + raw u64 epoch.
+    //      Frozen: d563d6f5320378d00a8b37edabab14aca4fde623dc18bcbcbc1774b4d610c619
+    //
+    //   2. typical (trace="trace-golden-1", TrustCardDelta, epoch=42).
+    //      Frozen: 97c04432bfa4bd5ba25ca017e3ae2b05fcdb3b0e40e3235ef19a208cea142af8
+    //
+    //   3. revocation (trace="trace-2", RevocationHint, epoch=100).
+    //      Frozen: ad9b97bc3cd03288984f649dd66e06c1b174966c18242c688677e35bb03e3aaf
+    //
+    // compute_payload_hash:
+    //   4. empty payload (BTreeMap::new). Locks `atc_signal_payload_v1:`
+    //      domain + LE64(0) zero-entries framing.
+    //      Frozen: 2dab140c35e462a2c00518b72347cc67a4cc092260d243cec61a6f63e0572baf
+    //
+    //   5. populated payload (3 entries inserted in NON-sorted order
+    //      to exercise BTreeMap sorted iteration). Locks per-(k,v)
+    //      LE64-prefix framing.
+    //      Frozen: e03bdf679079a25f7225fedd752e078da6b5bbfde0b4c21e65ff4914b6fbfcb3
+    //
+    //   6. CROSS-DOMAIN-DISTINCTNESS INVARIANT: compute_signal_id
+    //      with empty inputs MUST differ from compute_payload_hash
+    //      with empty inputs. Pins that the two domain separators
+    //      are load-bearing distinct — a refactor that unified to
+    //      one domain would enable cross-function collisions.
+    //
+    //   7. BTreeMap-SORT INVARIANT: building the populated payload
+    //      via a different insertion order MUST produce the same
+    //      hash. Catches a HashMap/IndexMap regression that would
+    //      fork payload hashes across hosts.
+    //
+    //   8. SIGNAL-KIND-DISTINGUISHABILITY: changing only the
+    //      SignalKind variant MUST flip the signal_id. Pins that
+    //      kind IS authenticated (drift here would let signals
+    //      reuse ids across kinds).
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): compute_signal_id is the
+    // content-addressed identifier for ATC local signals;
+    // compute_payload_hash binds payload content into the signal
+    // envelope. If two extractors compute different hashes for the
+    // same logical (trace_id, kind, epoch) tuple OR the same
+    // payload BTreeMap — because someone swapped LE64 widths,
+    // muddled the two domains, or sorted payload by insertion order
+    // — signal dedup forks across the federation AND payload
+    // tamper-detection fails opaquely.
+    #[test]
+    fn atc_signal_extractor_hashes_frozen_canonical_byte_layout_golden() {
+        use std::collections::BTreeMap;
+
+        // === compute_signal_id fixtures ===
+
+        let minimal_sid =
+            super::compute_signal_id("", super::SignalKind::AnomalyObservation, 0);
+        assert_eq!(
+            minimal_sid,
+            "d563d6f5320378d00a8b37edabab14aca4fde623dc18bcbcbc1774b4d610c619",
+            "compute_signal_id(minimal) drifted — check the \
+             `atc_signal_v1:` domain separator, LE64-len framing on \
+             trace_id/kind, OR raw u64 LE encoding of source_epoch"
+        );
+
+        let typical_sid = super::compute_signal_id(
+            "trace-golden-1",
+            super::SignalKind::TrustCardDelta,
+            42,
+        );
+        assert_eq!(
+            typical_sid,
+            "97c04432bfa4bd5ba25ca017e3ae2b05fcdb3b0e40e3235ef19a208cea142af8"
+        );
+
+        let revocation_sid =
+            super::compute_signal_id("trace-2", super::SignalKind::RevocationHint, 100);
+        assert_eq!(
+            revocation_sid,
+            "ad9b97bc3cd03288984f649dd66e06c1b174966c18242c688677e35bb03e3aaf"
+        );
+
+        // === compute_payload_hash fixtures ===
+
+        let empty_payload: BTreeMap<String, String> = BTreeMap::new();
+        let empty_ph = super::compute_payload_hash(&empty_payload);
+        assert_eq!(
+            empty_ph,
+            "2dab140c35e462a2c00518b72347cc67a4cc092260d243cec61a6f63e0572baf",
+            "compute_payload_hash(empty) drifted — check the \
+             `atc_signal_payload_v1:` domain separator or LE64(0) \
+             zero-entries framing"
+        );
+
+        // Insertion order != sorted order: BTreeMap will sort by key
+        // → severity, source, trace_id at iteration time.
+        let mut populated_payload: BTreeMap<String, String> = BTreeMap::new();
+        populated_payload.insert("trace_id".to_string(), "trace-golden-1".to_string());
+        populated_payload.insert("severity".to_string(), "high".to_string());
+        populated_payload.insert("source".to_string(), "fleet-node-7".to_string());
+        let populated_ph = super::compute_payload_hash(&populated_payload);
+        assert_eq!(
+            populated_ph,
+            "e03bdf679079a25f7225fedd752e078da6b5bbfde0b4c21e65ff4914b6fbfcb3",
+            "compute_payload_hash(populated) drifted — check per-(k,v) \
+             LE64-prefix framing or BTreeMap sorted-iteration order"
+        );
+
+        // === Structural invariants ===
+
+        // 6. CROSS-DOMAIN-DISTINCTNESS: the two empty-input hashes
+        // MUST differ because the v1 domains differ.
+        let empty_sid =
+            super::compute_signal_id("", super::SignalKind::AnomalyObservation, 0);
+        assert_ne!(
+            empty_sid, empty_ph,
+            "compute_signal_id and compute_payload_hash MUST use \
+             distinct v1 domains — a future refactor that unified \
+             to one domain would enable cross-function collisions"
+        );
+
+        // 7. BTreeMap-SORT INVARIANT: building the same payload via
+        // a different insertion order MUST produce the same hash.
+        let mut reordered_payload: BTreeMap<String, String> = BTreeMap::new();
+        reordered_payload.insert("source".to_string(), "fleet-node-7".to_string());
+        reordered_payload.insert("trace_id".to_string(), "trace-golden-1".to_string());
+        reordered_payload.insert("severity".to_string(), "high".to_string());
+        assert_eq!(
+            super::compute_payload_hash(&reordered_payload),
+            populated_ph,
+            "compute_payload_hash MUST be insertion-order-independent \
+             — payload is a BTreeMap and iterates in sorted key order"
+        );
+
+        // 8. SIGNAL-KIND-DISTINGUISHABILITY INVARIANT: changing only
+        // SignalKind MUST flip the signal_id.
+        let typical_quarantine = super::compute_signal_id(
+            "trace-golden-1",
+            super::SignalKind::QuarantineEvent, // was TrustCardDelta
+            42,
+        );
+        assert_ne!(
+            typical_quarantine, typical_sid,
+            "changing only the SignalKind variant MUST flip the \
+             signal_id — kind MUST be authenticated"
+        );
+
+        // Length+casing contract.
+        for h in [
+            &minimal_sid,
+            &typical_sid,
+            &revocation_sid,
+            &empty_ph,
+            &populated_ph,
+        ] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
