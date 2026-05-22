@@ -179,12 +179,30 @@ fn structure_aware_snapshot_fuzz_corpus() -> Vec<(&'static str, Vec<u8>, bool)> 
 }
 
 fn signed_postparse_invalid_snapshot_fuzz_corpus() -> Vec<(&'static str, Vec<u8>)> {
-    vec![(
-        "signed-empty-history-bucket",
-        snapshot_bytes(signed_snapshot_value_with_empty_history(
-            "npm:@acme/postparse-fuzz",
-        )),
-    )]
+    vec![
+        (
+            "signed-empty-history-bucket",
+            snapshot_bytes(signed_snapshot_value_with_empty_history(
+                "npm:@acme/postparse-fuzz",
+            )),
+        ),
+        (
+            "signed-leading-space-extension-id",
+            snapshot_bytes(signed_snapshot_value_with_empty_history(
+                " npm:@acme/postparse-fuzz",
+            )),
+        ),
+        (
+            "signed-control-char-extension-id",
+            snapshot_bytes(signed_snapshot_value_with_empty_history(
+                "npm:@acme/postparse\u{0007}",
+            )),
+        ),
+        (
+            "signed-oversized-extension-id",
+            snapshot_bytes(signed_snapshot_value_with_empty_history(&"a".repeat(300))),
+        ),
+    ]
 }
 
 /// Structure-aware supply-chain fuzz regression for untrusted trust-card snapshots.

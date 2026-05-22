@@ -611,6 +611,9 @@ fn sanitize_error_for_untrusted(err: TrustCardError) -> TrustCardError {
         TrustCardError::InvalidSnapshot(_) => {
             TrustCardError::InvalidSnapshot("snapshot validation failed".to_string())
         }
+        TrustCardError::InvalidInput { .. } => {
+            TrustCardError::InvalidSnapshot("snapshot validation failed".to_string())
+        }
         // Pass through other errors unchanged
         other => other,
     }
