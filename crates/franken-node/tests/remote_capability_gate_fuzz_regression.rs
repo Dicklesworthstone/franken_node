@@ -18,6 +18,14 @@ struct CapabilityGateFuzzCase {
     expected_error_code: Option<&'static str>,
 }
 
+#[derive(Clone, Copy)]
+struct EndpointBoundaryFuzzCase {
+    label: &'static str,
+    prefix: &'static str,
+    endpoint: &'static str,
+    should_authorize: bool,
+}
+
 fn provider() -> Result<CapabilityProvider, String> {
     CapabilityProvider::new(KEY_MATERIAL).map_err(|err| err.to_string())
 }
@@ -83,6 +91,119 @@ fn assert_gate_case(case: &CapabilityGateFuzzCase) -> Result<(), String> {
             };
             assert!(event.allowed, "{} audit should record an allow", case.label);
             assert_eq!(event.denial_code.as_deref(), None);
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn capability_gate_endpoint_boundary_fuzz_corpus_preserves_prefix_delimiters() -> Result<(), String>
+{
+    let cases = [
+        EndpointBoundaryFuzzCase {
+            label: "path child under exact prefix authorizes",
+            prefix: "https://api.example.com/root",
+            endpoint: "https://api.example.com/root/jobs",
+            should_authorize: true,
+        },
+        EndpointBoundaryFuzzCase {
+            label: "query delimiter under exact prefix authorizes",
+            prefix: "https://api.example.com/root",
+            endpoint: "https://api.example.com/root?job=deploy",
+            should_authorize: true,
+        },
+        EndpointBoundaryFuzzCase {
+            label: "explicit port path child authorizes",
+            prefix: "https://api.example.com:8443/root",
+            endpoint: "https://api.example.com:8443/root/jobs",
+            should_authorize: true,
+        },
+        EndpointBoundaryFuzzCase {
+            label: "encoded slash suffix does not extend prefix",
+            prefix: "https://api.example.com/root",
+            endpoint: "https://api.example.com/root%2fadmin",
+            should_authorize: false,
+        },
+        EndpointBoundaryFuzzCase {
+            label: "sibling path prefix confusion fails closed",
+            prefix: "https://api.example.com/root",
+            endpoint: "https://api.example.com/rooted/admin",
+            should_authorize: false,
+        },
+        EndpointBoundaryFuzzCase {
+            label: "sibling host with explicit port fails closed",
+            prefix: "https://api.example.com:8443/root",
+            endpoint: "https://api.example.com:8443.evil/root/jobs",
+            should_authorize: false,
+        },
+        EndpointBoundaryFuzzCase {
+            label: "fragment continuation fails closed",
+            prefix: "https://api.example.com/root",
+            endpoint: "https://api.example.com/root#admin",
+            should_authorize: false,
+        },
+        EndpointBoundaryFuzzCase {
+            label: "backslash continuation fails closed",
+            prefix: "https://api.example.com/root",
+            endpoint: "https://api.example.com/root\\admin",
+            should_authorize: false,
+        },
+    ];
+
+    for case in cases {
+        let scope = RemoteScope::new(
+            vec![RemoteOperation::NetworkEgress],
+            vec![case.prefix.to_string()],
+        );
+        let predicate_allows = scope.allows_endpoint(case.endpoint);
+        assert_eq!(
+            predicate_allows, case.should_authorize,
+            "{} predicate mismatch",
+            case.label
+        );
+
+        let (cap, _) = provider()?
+            .issue(
+                "r65-capability-boundary-fuzz",
+                scope,
+                ISSUED_AT,
+                300,
+                true,
+                true,
+                case.label,
+            )
+            .map_err(|err| err.to_string())?;
+        let mut gate = CapabilityGate::new(KEY_MATERIAL).map_err(|err| err.to_string())?;
+        let result = gate.authorize_network(
+            Some(&cap),
+            RemoteOperation::NetworkEgress,
+            case.endpoint,
+            ISSUED_AT + 1,
+            case.label,
+        );
+
+        if case.should_authorize {
+            assert!(result.is_ok(), "{} should authorize", case.label);
+            let Some(event) = gate.audit_log().last() else {
+                return Err(format!("{} allow must be audited", case.label));
+            };
+            assert!(event.allowed, "{} audit should record allow", case.label);
+            assert_eq!(event.denial_code.as_deref(), None);
+        } else {
+            let Err(err) = result else {
+                return Err(format!("{} should fail closed", case.label));
+            };
+            assert_eq!(err.code(), "REMOTECAP_SCOPE_DENIED");
+            let Some(event) = gate.audit_log().last() else {
+                return Err(format!("{} denial must be audited", case.label));
+            };
+            assert!(
+                !event.allowed,
+                "{} denial audit must fail closed",
+                case.label
+            );
+            assert_eq!(event.denial_code.as_deref(), Some("REMOTECAP_SCOPE_DENIED"));
         }
     }
 
