@@ -502,6 +502,116 @@ fn prop_simulation_trace_deterministic_under_interning() {
         .expect("DGIS campaign traces remain deterministic under interning");
 }
 
+fn fuzz_edge_kind(tag: u8) -> EdgeKind {
+    match tag % 4 {
+        0 => EdgeKind::DependencyImport,
+        1 => EdgeKind::MaintainerOverlap,
+        2 => EdgeKind::OrgOverlap,
+        _ => EdgeKind::NamespaceShadow,
+    }
+}
+
+#[test]
+fn fuzz_structured_graphs_preserve_simulator_step_invariants() {
+    let mut runner = TestRunner::new(ProptestConfig {
+        cases: 256,
+        ..ProptestConfig::default()
+    });
+    let strategy = (
+        1usize..=12,
+        prop::collection::vec((0u8..12, 0u8..12, 0u16..=1000, any::<u8>()), 0..64),
+        any::<u16>(),
+        any::<u16>(),
+        1u32..=32,
+        any::<u64>(),
+        any::<u16>(),
+    );
+
+    runner
+        .run(
+            &strategy,
+            |(
+                node_count,
+                edges,
+                threshold_raw,
+                decay_raw,
+                max_steps,
+                graph_seed,
+                infected_mask,
+            )| {
+                let nodes: Vec<NodeId> = (0..node_count)
+                    .map(|index| format!("pkg:fuzz-{index}"))
+                    .collect();
+                let graph_nodes = nodes
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
+                let mut graph = ContagionGraph::new(graph_seed);
+                for node in &nodes {
+                    graph.add_node(node.clone());
+                }
+                for (src_raw, dst_raw, weight_raw, kind_raw) in edges {
+                    let src = usize::from(src_raw) % node_count;
+                    let dst = usize::from(dst_raw) % node_count;
+                    let edge = ContagionEdge::new(
+                        nodes[dst].clone(),
+                        f64::from(weight_raw) / 1000.0,
+                        fuzz_edge_kind(kind_raw),
+                    )
+                    .map_err(|err| {
+                        TestCaseError::fail(format!("edge construction failed: {err:?}"))
+                    })?;
+                    graph
+                        .add_edge(&nodes[src], edge)
+                        .map_err(|err| TestCaseError::fail(format!("edge rejected: {err:?}")))?;
+                }
+                prop_assert!(graph.validate().is_ok());
+
+                let mut initial = Vec::new();
+                for (index, node) in nodes.iter().enumerate() {
+                    if ((infected_mask >> index) & 1) == 1 {
+                        initial.push(node.clone());
+                    }
+                }
+                if initial.is_empty() {
+                    initial.push(nodes[usize::from(infected_mask) % node_count].clone());
+                }
+                let config = SimulatorConfig {
+                    max_steps,
+                    infection_threshold: f64::from(threshold_raw % 1001) / 1000.0,
+                    decay_factor: f64::from(decay_raw % 1001) / 1000.0,
+                    seed: graph_seed ^ 0xD617_1549,
+                };
+
+                let trace = simulate(&graph, &initial, &config)
+                    .map_err(|err| TestCaseError::fail(format!("simulate failed: {err:?}")))?;
+                let replay = simulate(&graph, &initial, &config)
+                    .map_err(|err| TestCaseError::fail(format!("replay failed: {err:?}")))?;
+                prop_assert_eq!(&trace, &replay);
+                prop_assert_eq!(
+                    trace.states_per_step.len(),
+                    (trace.terminated_at as usize).saturating_add(1)
+                );
+                prop_assert!(trace.terminated_at <= config.max_steps);
+
+                let mut previous_infected = 0usize;
+                for state in &trace.states_per_step {
+                    prop_assert!(state.step() <= config.max_steps);
+                    prop_assert!(state.infected().is_subset(&graph_nodes));
+                    prop_assert!(state.infected_count() >= previous_infected);
+                    previous_infected = state.infected_count();
+                    for (node, exposure) in state.exposure_level() {
+                        prop_assert!(graph_nodes.contains(node));
+                        prop_assert!(exposure.is_finite());
+                        prop_assert!(*exposure >= 0.0);
+                    }
+                }
+                Ok(())
+            },
+        )
+        .expect("structured DGIS simulator fuzz cases preserve step invariants");
+}
+
 #[test]
 fn test_profile_with_missing_node_fails_evaluation() -> TestResult {
     // Synthesize a profile where `initial_infected` references a node id
