@@ -228,6 +228,10 @@ name = "remote_cap_enforcement"
 path = "tests/remote_cap_enforcement.rs"
 
 [[test]]
+name = "remote_capability_gate_fuzz_regression"
+path = "tests/remote_capability_gate_fuzz_regression.rs"
+
+[[test]]
 name = "remote_cap_jcq1z_real_enforcement"
 path = "tests/remote_cap_jcq1z_real_enforcement.rs"
 required-features = ["remote-ops"]
