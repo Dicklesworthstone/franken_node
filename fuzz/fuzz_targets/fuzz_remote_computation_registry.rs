@@ -281,6 +281,9 @@ fn check_listing(
 ) {
     let listed = registry.list_computations();
     assert_eq!(listed.len(), expected_entries.len());
+    let listed_names: Vec<&str> = listed.iter().map(|entry| entry.name.as_str()).collect();
+    let expected_names: Vec<&str> = expected_entries.keys().map(String::as_str).collect();
+    assert_eq!(listed_names, expected_names);
 
     for entry in &listed {
         let Some(expected) = expected_entries.get(&entry.name) else {
