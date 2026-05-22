@@ -849,6 +849,7 @@ path = "../../tests/security/dgis_graph_ingestion.rs"
 [[test]]
 name = "federation_dgis_atc_bridge_conformance"
 path = "tests/federation_dgis_atc_bridge_conformance.rs"
+required-features = ["advanced-features"]
 
 # bd-cclm.1: DGIS adversarial validation suite artifacts
 [[test]]

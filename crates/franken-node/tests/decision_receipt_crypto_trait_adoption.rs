@@ -14,6 +14,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use ed25519_dalek::{Signature, Signer as _, SigningKey};
 use frankenengine_node::crypto::{Ed25519Scheme, SignatureScheme};
+use frankenengine_node::security::blake3_adapter::{HashProvider, Sha2HmacProvider};
 use frankenengine_node::security::decision_receipt::{
     Decision, Receipt, sign_receipt, verify_receipt,
 };
@@ -108,6 +109,87 @@ fn fresh_receipt() -> Receipt {
         "franken-node trust release --extension npm:@malware/data-stealer --audit-id AUD-2026-001",
     )
     .expect("fresh receipt should build")
+}
+
+fn sha2_domain_keyed_hash(domain: &str, key: &[u8], data: &[u8]) -> [u8; 32] {
+    let provider = Sha2HmacProvider;
+    let domain_key = provider.hash_domain_key_material(domain, key);
+    provider.keyed_hash(&domain_key, data)
+}
+
+#[test]
+fn hash_adapter_domain_key_material_framing_is_metamorphic() {
+    let provider = Sha2HmacProvider;
+    let left_flat = [b"ab".as_slice(), b"c".as_slice()].concat();
+    let right_flat = [b"a".as_slice(), b"bc".as_slice()].concat();
+    assert_eq!(
+        left_flat, right_flat,
+        "test setup must exercise the same unframed byte stream"
+    );
+
+    let left_key = provider.hash_domain_key_material("ab", b"c");
+    let right_key = provider.hash_domain_key_material("a", b"bc");
+    assert_ne!(
+        left_key, right_key,
+        "length-prefixed domain-key material must reject ambiguous framing"
+    );
+
+    let data = b"signed decision receipt transcript";
+    assert_ne!(
+        sha2_domain_keyed_hash("ab", b"c", data),
+        sha2_domain_keyed_hash("a", b"bc", data),
+        "ambiguous domain/key splits must not replay to the same keyed digest"
+    );
+}
+
+#[test]
+fn hash_adapter_domain_keyed_output_binds_each_input_axis_metamorphically() {
+    let cases: &[(&str, &[u8], &[u8])] = &[
+        (
+            "security/decision-receipt",
+            b"primary signing key",
+            b"canonical receipt payload",
+        ),
+        (
+            "security/artifact-manifest",
+            b"artifact signer key",
+            b"artifact manifest bytes",
+        ),
+        (
+            "security/replay-bundle",
+            b"replay verifier key",
+            b"bundle transcript bytes",
+        ),
+    ];
+
+    for (domain, key, data) in cases {
+        let baseline = sha2_domain_keyed_hash(domain, key, data);
+        assert_eq!(
+            baseline,
+            sha2_domain_keyed_hash(domain, key, data),
+            "domain-keyed hash must be deterministic for {domain}"
+        );
+
+        let shifted_domain = format!("{domain}/rotated");
+        let mut shifted_key = key.to_vec();
+        shifted_key.extend_from_slice(b":rotated");
+        let mut shifted_data = data.to_vec();
+        shifted_data.extend_from_slice(b":tampered");
+
+        for (axis, mutated) in [
+            ("domain", sha2_domain_keyed_hash(&shifted_domain, key, data)),
+            ("key", sha2_domain_keyed_hash(domain, &shifted_key, data)),
+            (
+                "payload",
+                sha2_domain_keyed_hash(domain, key, &shifted_data),
+            ),
+        ] {
+            assert_ne!(
+                baseline, mutated,
+                "changing the {axis} axis must change the domain-keyed digest for {domain}"
+            );
+        }
+    }
 }
 
 /// Mirror of the private `decision_receipt::canonical_json`. Drift between
