@@ -1451,4 +1451,149 @@ mod tests {
             "suffixed request should produce different key"
         );
     }
+
+    // Frozen 32-byte IdempotencyKey outputs of
+    // IdempotencyKeyDeriver::derive_key (idempotency.rs:215). The
+    // function derives a content-addressed idempotency key as:
+    //
+    //   canonical = BE64(len(domain_prefix)) || domain_prefix
+    //            || BE64(len(name))          || name.as_bytes()
+    //            || epoch.to_be_bytes()      # raw u64 BIG-ENDIAN
+    //            || BE64(len(request))       || request
+    //
+    //   key = SHA256(
+    //     b"idempotency_key_derive_v1:"      # IDEMPOTENCY_DERIVATION_TAG
+    //     || canonical
+    //   ).finalize()                          # 32 bytes
+    //
+    // *** DISTINCTIVE FEATURE pinned by this golden ***
+    //
+    // This is the SECOND golden in the suite using BIG-ENDIAN
+    // encoding (after r54 policy_checkpoint), BUT it uses UNIFORM BE
+    // — every length prefix AND the epoch counter are BE.
+    // policy_checkpoint mixed BE-counter-with-LE-length-prefix; THIS
+    // function uses BE consistently. Pinning both surfaces documents
+    // that the two mixed-endianness designs are deliberate (not
+    // accidental drift) — a future "canonicalize to one endianness"
+    // refactor would have to flip ONE of the two surfaces.
+    //
+    // Three frozen fixtures + three structural invariants:
+    //
+    //   1. minimal (default domain prefix, name="compute-test",
+    //      epoch=0, empty request). Locks the v1 derivation tag,
+    //      uniform-BE length prefixes, default IDEMPOTENCY_DOMAIN_PREFIX,
+    //      and BE64(0) zero-payload framing.
+    //      Frozen: 9a5376f013388da4b9083c163b1c45061d72505d638c5955f00c2d13cda3cf9d
+    //
+    //   2. typical (name="trust-card-issue", epoch=42, populated
+    //      request "request-payload"). Production-shaped fixture.
+    //      Frozen: 9d25ef79470833441ced7f81880d4b563cd2102799c12df8f4ada15991faba8e
+    //
+    //   3. binary (binary request bytes 0..8, epoch=7). Locks that
+    //      request_bytes is fed RAW (no UTF-8 validation or escape).
+    //      Frozen: b10564a049ca51f38e9e9ef342c89329f62b10f355a012dbc1b23d0fd14b9103
+    //
+    //   4. ENDIANNESS-SENSITIVITY: incrementing epoch from 0 → 1 MUST
+    //      flip the key. The BE encoding means epoch 0 is 8 zero bytes
+    //      and epoch 1 is 0x00..00 0x00..01 (last byte = 1). Under LE
+    //      it would be 0x01 0x00..00 — pinning here implicitly verifies
+    //      BE order.
+    //
+    //   5. DOMAIN-PREFIX-SENSITIVITY: changing only the domain_prefix
+    //      MUST flip the key. Pins that the per-instance domain
+    //      prefix IS part of canonical_input (separate from the
+    //      tag-prefix at the outer hash).
+    //
+    //   6. FULL-32-BYTE-OUTPUT: IdempotencyKey holds 32 bytes (the
+    //      full SHA-256 digest), NOT a truncation. Pinning all 32
+    //      bytes here documents the no-truncation contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python (struct.pack('>Q', ...) for BE u64) — NOT captured from
+    // an unreviewed prior run.
+    //
+    // Why this matters (the contract): derive_key is the idempotency-
+    // key primitive for remote computations. Two requests with the
+    // same (name, epoch, request) tuple MUST derive identical keys
+    // to enable cross-node deduplication. If two nodes compute
+    // different keys for the same logical inputs — because someone
+    // swapped BE for LE on the length prefixes, dropped the
+    // derivation tag, or changed the per-instance domain_prefix
+    // handling — idempotency-dedup fails opaquely AND the same
+    // computation can execute multiple times across the fleet.
+    #[test]
+    fn idempotency_derive_key_frozen_canonical_byte_layout_golden() {
+        let deriver = IdempotencyKeyDeriver::default();
+        assert_eq!(deriver.domain_prefix(), IDEMPOTENCY_DOMAIN_PREFIX);
+
+        // 1. Minimal: empty request, epoch=0.
+        let minimal = deriver
+            .derive_key("compute-test", 0, b"")
+            .expect("minimal derive should succeed");
+        assert_eq!(
+            hex::encode(minimal.as_bytes()),
+            "9a5376f013388da4b9083c163b1c45061d72505d638c5955f00c2d13cda3cf9d",
+            "minimal derive_key drifted — check the v1 derivation tag \
+             `idempotency_key_derive_v1:`, the UNIFORM big-endian \
+             length-prefix + epoch encoding, OR the default \
+             IDEMPOTENCY_DOMAIN_PREFIX (b\"franken_node.idempotency.v1\")"
+        );
+
+        // 2. Typical production case.
+        let typical = deriver
+            .derive_key("trust-card-issue", 42, b"request-payload")
+            .expect("typical derive should succeed");
+        assert_eq!(
+            hex::encode(typical.as_bytes()),
+            "9d25ef79470833441ced7f81880d4b563cd2102799c12df8f4ada15991faba8e"
+        );
+
+        // 3. Binary request bytes 0..8.
+        let binary_req: Vec<u8> = (0_u8..8).collect();
+        let binary = deriver
+            .derive_key("binary-test", 7, &binary_req)
+            .expect("binary derive should succeed");
+        assert_eq!(
+            hex::encode(binary.as_bytes()),
+            "b10564a049ca51f38e9e9ef342c89329f62b10f355a012dbc1b23d0fd14b9103",
+            "binary-bytes derive_key drifted — request_bytes MUST be \
+             fed raw (no UTF-8 validation or escaping)"
+        );
+
+        // 4. ENDIANNESS-SENSITIVITY: bumping epoch by 1 MUST flip the key.
+        let epoch_bumped = deriver
+            .derive_key("compute-test", 1, b"")
+            .expect("epoch-bumped derive should succeed");
+        assert_ne!(
+            hex::encode(epoch_bumped.as_bytes()),
+            hex::encode(minimal.as_bytes()),
+            "incrementing epoch from 0 to 1 MUST flip the key"
+        );
+
+        // 5. DOMAIN-PREFIX-SENSITIVITY INVARIANT: different domain_prefix
+        // MUST flip the key.
+        let alt_deriver = IdempotencyKeyDeriver::new(b"alt.domain.v1")
+            .expect("alt domain prefix must be non-empty");
+        let alt_minimal = alt_deriver
+            .derive_key("compute-test", 0, b"")
+            .expect("alt derive should succeed");
+        assert_ne!(
+            hex::encode(alt_minimal.as_bytes()),
+            hex::encode(minimal.as_bytes()),
+            "different IdempotencyKeyDeriver domain_prefix MUST flip \
+             the key — pins that the per-instance domain_prefix IS \
+             part of canonical_input (separate from the outer-hash tag)"
+        );
+
+        // 6. FULL-32-BYTE-OUTPUT INVARIANT: IdempotencyKey is exactly
+        // 32 bytes (full SHA-256 digest, NOT truncated).
+        for key in [&minimal, &typical, &binary] {
+            assert_eq!(
+                key.as_bytes().len(),
+                IDEMPOTENCY_KEY_LEN,
+                "IdempotencyKey MUST be exactly {IDEMPOTENCY_KEY_LEN} bytes (full SHA-256 digest, NOT truncated)"
+            );
+            assert_eq!(IDEMPOTENCY_KEY_LEN, 32);
+        }
+    }
 }
