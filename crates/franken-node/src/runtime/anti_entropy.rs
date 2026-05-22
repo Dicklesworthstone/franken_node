@@ -1821,6 +1821,73 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_lower_precedence_remote_noise_does_not_affect_convergence() {
+        let mut baseline_local = TrustState::new(3);
+        let mut transformed_local = TrustState::new(3);
+        for idx in 0..2 {
+            let (record, _) = make_record_with_meta(&format!("stable-{idx}"), 3, 3_000 + idx, "z");
+            assert!(baseline_local.insert(record.clone()));
+            assert!(transformed_local.insert(record));
+        }
+
+        let mut baseline_remote = TrustState::new(3);
+        let mut transformed_remote = TrustState::new(3);
+        let (fresh_0, root) = make_record_with_meta("fresh-0", 3, 3_010, "remote");
+        let (fresh_1, _) = make_record_with_meta("fresh-1", 3, 3_011, "remote");
+        for record in [fresh_0, fresh_1] {
+            assert!(baseline_remote.insert(record.clone()));
+            assert!(transformed_remote.insert(record));
+        }
+        for idx in (0..2).rev() {
+            let (mut noise, _) =
+                make_record_with_meta(&format!("stable-{idx}"), 2, 2_000 + idx, "a");
+            noise.payload = format!("lower-precedence-noise-{idx}").into_bytes();
+            assert!(transformed_remote.insert(noise));
+        }
+
+        let config = ReconciliationConfig {
+            max_delta_batch: 2,
+            proof_required: false,
+            ..ReconciliationConfig::default()
+        };
+        let mut baseline_reconciler =
+            AntiEntropyReconciler::new(config.clone()).expect("baseline config should be valid");
+        let mut transformed_reconciler =
+            AntiEntropyReconciler::new(config).expect("transformed config should be valid");
+        let cancel = no_cancel();
+
+        let baseline_result = baseline_reconciler
+            .reconcile(&mut baseline_local, &baseline_remote, &root, &cancel)
+            .expect("baseline reconciliation should converge");
+        let transformed_result = transformed_reconciler
+            .reconcile(&mut transformed_local, &transformed_remote, &root, &cancel)
+            .expect("lower-precedence noise must not consume batch budget");
+
+        assert_eq!(baseline_result.delta_size, 2);
+        assert_eq!(transformed_result.delta_size, baseline_result.delta_size);
+        assert_eq!(
+            transformed_result.records_accepted,
+            baseline_result.records_accepted
+        );
+        assert_eq!(
+            sorted_record_ids(&transformed_local),
+            sorted_record_ids(&baseline_local)
+        );
+        assert_digest_eq(
+            transformed_local.root_digest(),
+            baseline_local.root_digest(),
+        );
+        for idx in 0..2 {
+            let id = format!("stable-{idx}");
+            let retained = transformed_local
+                .get(&id)
+                .expect("stable local record must remain");
+            assert_eq!(retained.epoch, 3);
+            assert_eq!(retained.origin_node_id, "z");
+        }
+    }
+
+    #[test]
     fn test_epoch_tolerance_boundary_accepts_equal_limit_and_rejects_above() {
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
             epoch_tolerance: 2,
