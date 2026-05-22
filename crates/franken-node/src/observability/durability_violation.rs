@@ -1831,4 +1831,99 @@ mod tests {
 
         assert_eq!(items, vec![3, 4, 5]);
     }
+
+    // Frozen SHA-256 hex over the canonical byte layout produced by
+    // `generate_bundle` (durability_violation.rs:693). The function builds the
+    // `bundle_id` from:
+    //
+    //   b"franken_node:observability:durability_violation_bundle:v1"
+    //   || domain-prefixed LE64(epoch_id)
+    //   || domain-prefixed LE64(timestamp_ms)
+    //   || domain-prefixed LE64-len-prefixed(hardening_level)
+    //   || b"durability_violation_bundle_v1:events" || LE64(len(events))
+    //   ||  per-event: domain || event_type || LE64 ts || description ||
+    //                  (evidence_ref_some+payload | evidence_ref_none)
+    //   || b"durability_violation_bundle_v1:artifacts" || LE64(len(artifacts))
+    //   ||  per-artifact: 4 length-prefixed strings (path/expected/actual/reason)
+    //   || domain-prefixed string_list for proofs_failed/missing/passed
+    //
+    // Drift in ANY of: the v1 domain separator, per-field domain bytes, length-
+    // prefix width (LE64), field order, the events/artifacts section markers,
+    // the Some-vs-None evidence_ref distinction, or string-list framing flips
+    // the hash and fails this test — which is the contract: every node that
+    // ingests a ViolationBundle for audit reproduction MUST hash an identical
+    // logical context to identical bundle_id bytes.
+    //
+    // Goldens were derived offline from the canonical-byte spec, not captured
+    // from a prior run. Recompute both together if the layout intentionally
+    // changes (a one-sided update would flag a real split between empty-arrays
+    // and populated-arrays code paths — that is a bug, not churn).
+    #[test]
+    fn generate_bundle_id_frozen_canonical_byte_layout_golden() {
+        // Empty fixture exercises the zero-element branches of every section
+        // (no events, no artifacts, no proofs) and the all-None hardening
+        // baseline. Locks the b"...:v1" domain separator + the three section
+        // headers' (events / artifacts / string_list) zero-length framing.
+        let empty_ctx = ViolationContext {
+            events: Vec::new(),
+            artifacts: Vec::new(),
+            proofs: ProofContext::new(),
+            hardening_level: "minimal".to_string(),
+            epoch_id: 0,
+            timestamp_ms: 0,
+        };
+        let empty_bundle = generate_bundle(&empty_ctx);
+        assert_eq!(
+            empty_bundle.bundle_id.0,
+            "b6918607d8b7943dc65ed97b8e84dfcda6283486b209eb0143aee09bfda2691b",
+            "empty-context bundle_id drifted — \
+             check the v1 domain separator or the events/artifacts/proofs \
+             zero-length section framing"
+        );
+        assert_eq!(empty_bundle.bundle_id.0.len(), 64);
+
+        // Populated fixture exercises the non-empty branches: 1 event with
+        // Some(evidence_ref), 1 artifact (all 4 length-prefixed fields), and
+        // 1 proof in each of failed/missing/passed (locks the string_list
+        // inner framing).
+        let populated_ctx = ViolationContext {
+            events: vec![CausalEvent {
+                event_type: CausalEventType::IntegrityCheckFailed,
+                timestamp_ms: 1_700_000_000_000,
+                description: "manifest sha256 mismatch on artifact bundle.tar.gz".to_string(),
+                evidence_ref: Some("evidence://durability/2026-04-24/run-7".to_string()),
+            }],
+            artifacts: vec![FailedArtifact {
+                artifact_path: "bundle.tar.gz".to_string(),
+                expected_hash:
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_string(),
+                actual_hash:
+                    "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+                        .to_string(),
+                failure_reason: "sha256 digest mismatch".to_string(),
+            }],
+            proofs: ProofContext {
+                failed_proofs: vec!["proof://failed-1".to_string()],
+                missing_proofs: vec!["proof://missing-2".to_string()],
+                passed_proofs: vec!["proof://passed-3".to_string()],
+            },
+            hardening_level: "elevated".to_string(),
+            epoch_id: 7,
+            timestamp_ms: 1_700_000_001_000,
+        };
+        let populated_bundle = generate_bundle(&populated_ctx);
+        assert_eq!(
+            populated_bundle.bundle_id.0,
+            "30e16fd684cc83af35eef42ddfcb2948736552fc747653a14da64ffba1ae5346",
+            "populated-context bundle_id drifted — \
+             check per-event evidence_ref Some/None framing, per-artifact field \
+             ordering, or string_list_item domain bytes"
+        );
+        assert_eq!(populated_bundle.bundle_id.0.len(), 64);
+        assert_ne!(
+            empty_bundle.bundle_id.0, populated_bundle.bundle_id.0,
+            "empty and populated fixtures must produce distinct bundle_id values"
+        );
+    }
 }
