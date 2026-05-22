@@ -1546,4 +1546,132 @@ mod tests {
         assert_eq!(empty_coord.current_epoch(), 1); // Should not change
         assert!(empty_coord.events().is_empty()); // Should not emit events
     }
+
+    // Frozen SHA-256 hex outputs of the module-private function
+    // `manifest_hash_for_transition` (epoch_transition.rs:625). The
+    // function builds the canonical transition manifest hash as:
+    //
+    //   SHA256(
+    //     b"epoch_transition_hash_v1:"
+    //     || LE64(len(transition_id)) || transition_id.as_bytes()
+    //     || LE64(len(initiator))     || initiator.as_bytes()
+    //     || LE64(len(reason))        || reason.as_bytes()
+    //     || target_epoch.to_le_bytes()                # raw u64 LE
+    //   ).hex()
+    //
+    // Three frozen fixtures + structural invariants:
+    //
+    //   1. minimal (all-empty strings + target_epoch=0). Locks the v1
+    //      domain + LE64(0) on three empty string fields + zero-u64
+    //      target_epoch.
+    //      Frozen: be59d75f2e1f67444fefd8eb216393ed6941594ad3cbe0a8a17883554a65c158
+    //
+    //   2. typical (realistic production transition: transition_id +
+    //      operator initiator + scheduled reason + target_epoch=42).
+    //      Frozen: 9e1517330bdaca861b8e8c04b73acae47abad9efc27c42118bcb61c62550ef4d
+    //
+    //   3. epoch_max (target_epoch = u64::MAX = 0xFFFFFFFFFFFFFFFF) —
+    //      locks that target_epoch is fed as a raw u64 LE (NOT cast to
+    //      i64 — under which u64::MAX would wrap to -1 and have a
+    //      different bit pattern under sign-extension). The frozen
+    //      hash here implicitly verifies the unsigned-u64-LE encoding.
+    //      Frozen: d64194c9f4793a81d7538822ebc5850f1abb564263830305c2ffd4021098942e
+    //
+    //   4. FIELD-ORDER-SENSITIVITY: swapping transition_id and
+    //      initiator (otherwise-identical inputs) MUST flip the hash.
+    //      Pins that the three string fields are NOT interchangeable.
+    //
+    //   5. TARGET-EPOCH-SENSITIVITY: bumping target_epoch by 1 MUST
+    //      flip the hash. Catches a refactor that accidentally dropped
+    //      target_epoch from the hasher (would let an attacker forge
+    //      manifest hashes that authenticate WRONG-epoch transitions).
+    //
+    //   6. 64-lowercase-hex length+casing contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): manifest_hash_for_transition is
+    // the canonical fingerprint emitted into the EpochTransition
+    // manifest at every transition proposal/commit. If two coordinator
+    // nodes compute different hashes for the same logical
+    // (transition_id, initiator, reason, target_epoch) tuple, manifest
+    // verification breaks across the epoch barrier AND legitimate
+    // transitions get rejected with opaque "manifest mismatch" errors.
+    #[test]
+    fn manifest_hash_for_transition_frozen_canonical_byte_layout_golden() {
+        // 1. Minimal: all-empty strings + zero target_epoch.
+        let minimal = super::manifest_hash_for_transition("", "", "", 0);
+        assert_eq!(
+            minimal,
+            "be59d75f2e1f67444fefd8eb216393ed6941594ad3cbe0a8a17883554a65c158",
+            "minimal manifest_hash_for_transition drifted — check the \
+             v1 domain separator `epoch_transition_hash_v1:` or the \
+             LE64(0)-on-three-empty-strings + zero-u64-target_epoch \
+             framing"
+        );
+
+        // 2. Typical production transition.
+        let typical = super::manifest_hash_for_transition(
+            "tx-2026-001",
+            "operator-7",
+            "scheduled rotation",
+            42,
+        );
+        assert_eq!(
+            typical,
+            "9e1517330bdaca861b8e8c04b73acae47abad9efc27c42118bcb61c62550ef4d"
+        );
+
+        // 3. target_epoch = u64::MAX (locks unsigned-u64-LE encoding).
+        let epoch_max = super::manifest_hash_for_transition(
+            "tx-2026-001",
+            "operator-7",
+            "scheduled rotation",
+            u64::MAX,
+        );
+        assert_eq!(
+            epoch_max,
+            "d64194c9f4793a81d7538822ebc5850f1abb564263830305c2ffd4021098942e",
+            "target_epoch = u64::MAX manifest_hash drifted — the u64 \
+             LE encoding (0xFF * 8) is being preserved; drift here may \
+             indicate target_epoch was silently cast to i64 (where \
+             u64::MAX wraps to -1 with different sign-extension bits)"
+        );
+
+        // 4. FIELD-ORDER-SENSITIVITY INVARIANT: swap transition_id +
+        // initiator with otherwise-identical inputs MUST flip hash.
+        let swapped = super::manifest_hash_for_transition(
+            "operator-7",         // was initiator
+            "tx-2026-001",        // was transition_id
+            "scheduled rotation",
+            42,
+        );
+        assert_ne!(
+            swapped, typical,
+            "swapping transition_id and initiator MUST flip the manifest \
+             hash; field-position distinction must be preserved"
+        );
+
+        // 5. TARGET-EPOCH-SENSITIVITY INVARIANT: bumping target_epoch
+        // by 1 MUST flip the hash. Catches accidentally-dropped epoch.
+        let epoch_bumped = super::manifest_hash_for_transition(
+            "tx-2026-001",
+            "operator-7",
+            "scheduled rotation",
+            43, // was 42
+        );
+        assert_ne!(
+            epoch_bumped, typical,
+            "incrementing target_epoch by 1 MUST flip the hash; if it \
+             does not, target_epoch is not being authenticated and an \
+             attacker could forge a manifest valid across multiple epochs"
+        );
+
+        // 6. Length+casing contract.
+        for h in [&minimal, &typical, &epoch_max] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
