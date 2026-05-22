@@ -613,6 +613,100 @@ fn run_head_abort_promotion(with_observation_interleavings: bool) -> QueueLifecy
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_tail_abort_after_optional_aborted_task_replay(
+    with_aborted_task_replay: bool,
+) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(
+            &task_classes::log_rotation(),
+            10_900,
+            "meta-aborted-replay-active",
+        )
+        .expect("first task should occupy the lane");
+    let front_queued = queued_task_id_from(
+        scheduler
+            .assign_task(
+                &task_classes::log_rotation(),
+                10_901,
+                "meta-aborted-replay-front",
+            )
+            .expect_err("front task should queue at cap"),
+    )
+    .expect("front cap pressure must expose queued task id");
+    let tail_aborted = queued_task_id_from(
+        scheduler
+            .assign_task(
+                &task_classes::log_rotation(),
+                10_902,
+                "meta-aborted-replay-tail",
+            )
+            .expect_err("tail task should queue at cap"),
+    )
+    .expect("tail cap pressure must expose queued task id");
+
+    let aborted = scheduler
+        .abort_queued_task_id(&tail_aborted, 10_903, "meta-aborted-replay-abort-tail")
+        .expect("tail queued task should abort cleanly");
+    assert_eq!(aborted.task_id.to_string(), tail_aborted);
+    assert_eq!(
+        scheduler.queued_task_ids(SchedulerLane::Background),
+        vec![front_queued.clone()]
+    );
+
+    if with_aborted_task_replay {
+        let before_replay = queue_lifecycle_digest(&scheduler);
+        let audit_len = scheduler.audit_log().len();
+        assert_eq!(
+            scheduler
+                .abort_queued_task_id(
+                    &tail_aborted,
+                    10_904,
+                    "meta-aborted-replay-abort-tail-again"
+                )
+                .expect_err("aborted queued task id must not abort twice")
+                .code(),
+            error_codes::ERR_LANE_TASK_NOT_FOUND
+        );
+        assert_eq!(
+            scheduler
+                .complete_task(
+                    &tail_aborted,
+                    10_905,
+                    "meta-aborted-replay-complete-tail-after-abort"
+                )
+                .expect_err("aborted queued task id must not complete after abort")
+                .code(),
+            error_codes::ERR_LANE_TASK_NOT_FOUND
+        );
+        assert_eq!(scheduler.audit_log().len(), audit_len);
+        assert_eq!(
+            scheduler.queued_task_ids(SchedulerLane::Background),
+            vec![front_queued.clone()]
+        );
+        assert_eq!(queue_lifecycle_digest(&scheduler), before_replay);
+    }
+
+    scheduler
+        .complete_task(
+            &active.task_id.to_string(),
+            10_910,
+            "meta-aborted-replay-complete-active",
+        )
+        .expect("completion should promote front queued task after tail abort");
+    assert_eq!(
+        scheduler.active_task_ids(SchedulerLane::Background),
+        vec![front_queued.clone()]
+    );
+    scheduler
+        .complete_task(&front_queued, 10_920, "meta-aborted-replay-complete-front")
+        .expect("front queued task should complete after promotion");
+
+    queue_lifecycle_digest(&scheduler)
+}
+
 fn run_queue_lifecycle_after_optional_preserving_reload(
     with_preserving_reload: bool,
 ) -> QueueLifecycleDigest {
@@ -1382,6 +1476,36 @@ fn metamorphic_head_queue_abort_rebases_front_and_survives_observation_interleav
         observed
             .audit_codes
             .contains(&event_codes::LANE_TASK_PROMOTED.to_string())
+    );
+}
+
+#[test]
+fn metamorphic_aborted_queued_task_replay_is_terminal_lifecycle_idempotent() {
+    let baseline = run_tail_abort_after_optional_aborted_task_replay(false);
+    let replayed = run_tail_abort_after_optional_aborted_task_replay(true);
+
+    assert_eq!(replayed, baseline);
+    assert_eq!(replayed.active_count, 0);
+    assert_eq!(replayed.queued_count, 0);
+    assert_eq!(replayed.first_queued_at_ms, None);
+    assert_eq!(replayed.completed_total, 2);
+    assert_eq!(replayed.rejected_total, 2);
+    assert_eq!(replayed.starvation_events, 0);
+    assert_eq!(
+        replayed
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_ABORTED)
+            .count(),
+        1
+    );
+    assert_eq!(
+        replayed
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
     );
 }
 
