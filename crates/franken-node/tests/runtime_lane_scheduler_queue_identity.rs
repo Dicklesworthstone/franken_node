@@ -1,5 +1,5 @@
 use frankenengine_node::runtime::lane_scheduler::{
-    LaneConfig, LaneMappingPolicy, LaneScheduler, LaneSchedulerError, SchedulerLane,
+    LaneConfig, LaneMappingPolicy, LaneScheduler, LaneSchedulerError, SchedulerLane, TaskClass,
     default_policy, error_codes, event_codes, task_classes,
 };
 
@@ -9,6 +9,18 @@ fn single_background_lane_policy() -> LaneMappingPolicy {
         .add_lane(LaneConfig::new(SchedulerLane::Background, 10, 1))
         .expect("test lane should be unique");
     policy.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+    policy
+}
+
+fn single_control_critical_lane_policy() -> LaneMappingPolicy {
+    let mut policy = LaneMappingPolicy::new();
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 1))
+        .expect("test lane should be unique");
+    policy.add_rule(
+        &task_classes::epoch_transition(),
+        SchedulerLane::ControlCritical,
+    );
     policy
 }
 
@@ -26,6 +38,67 @@ fn queued_task_id_from(error: LaneSchedulerError) -> Option<String> {
         LaneSchedulerError::CapExceeded { queued_task_id, .. } => queued_task_id,
         _ => None,
     }
+}
+
+struct DefaultPolicyRequirement {
+    name: &'static str,
+    task_class: TaskClass,
+    expected_lane: SchedulerLane,
+}
+
+fn default_policy_requirements() -> Vec<DefaultPolicyRequirement> {
+    vec![
+        DefaultPolicyRequirement {
+            name: "INV-LANE-EXACT-MAP/control/epoch-transition",
+            task_class: task_classes::epoch_transition(),
+            expected_lane: SchedulerLane::ControlCritical,
+        },
+        DefaultPolicyRequirement {
+            name: "INV-LANE-EXACT-MAP/control/barrier-coordination",
+            task_class: task_classes::barrier_coordination(),
+            expected_lane: SchedulerLane::ControlCritical,
+        },
+        DefaultPolicyRequirement {
+            name: "INV-LANE-EXACT-MAP/control/marker-write",
+            task_class: task_classes::marker_write(),
+            expected_lane: SchedulerLane::ControlCritical,
+        },
+        DefaultPolicyRequirement {
+            name: "INV-LANE-EXACT-MAP/remote/computation",
+            task_class: task_classes::remote_computation(),
+            expected_lane: SchedulerLane::RemoteEffect,
+        },
+        DefaultPolicyRequirement {
+            name: "INV-LANE-EXACT-MAP/remote/artifact-upload",
+            task_class: task_classes::artifact_upload(),
+            expected_lane: SchedulerLane::RemoteEffect,
+        },
+        DefaultPolicyRequirement {
+            name: "INV-LANE-EXACT-MAP/remote/artifact-eviction",
+            task_class: task_classes::artifact_eviction(),
+            expected_lane: SchedulerLane::RemoteEffect,
+        },
+        DefaultPolicyRequirement {
+            name: "INV-LANE-EXACT-MAP/maintenance/garbage-collection",
+            task_class: task_classes::garbage_collection(),
+            expected_lane: SchedulerLane::Maintenance,
+        },
+        DefaultPolicyRequirement {
+            name: "INV-LANE-EXACT-MAP/maintenance/compaction",
+            task_class: task_classes::compaction(),
+            expected_lane: SchedulerLane::Maintenance,
+        },
+        DefaultPolicyRequirement {
+            name: "INV-LANE-EXACT-MAP/background/telemetry-export",
+            task_class: task_classes::telemetry_export(),
+            expected_lane: SchedulerLane::Background,
+        },
+        DefaultPolicyRequirement {
+            name: "INV-LANE-EXACT-MAP/background/log-rotation",
+            task_class: task_classes::log_rotation(),
+            expected_lane: SchedulerLane::Background,
+        },
+    ]
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -460,4 +533,130 @@ fn metamorphic_tail_queue_abort_preserves_front_promotion() {
     assert_eq!(baseline.promoted_task_id, baseline.front_queued_id);
     assert_eq!(baseline.active_task_ids, vec![baseline.front_queued_id]);
     assert!(baseline.queued_task_ids.is_empty());
+}
+
+#[test]
+fn conformance_default_policy_exactly_maps_canonical_task_classes() {
+    let requirements = default_policy_requirements();
+    let policy = default_policy();
+    policy
+        .validate()
+        .expect("default lane policy must validate");
+
+    assert_eq!(policy.lane_configs.len(), SchedulerLane::all().len());
+    assert_eq!(
+        policy.mapping_rules.len(),
+        requirements.len(),
+        "default policy must not contain unaccounted task-class rules"
+    );
+
+    let mut seen_task_classes = Vec::new();
+    for requirement in &requirements {
+        assert!(
+            seen_task_classes
+                .iter()
+                .all(|seen: &String| seen.as_str() != requirement.task_class.as_str()),
+            "duplicate conformance requirement for {}",
+            requirement.task_class
+        );
+        seen_task_classes.push(requirement.task_class.as_str().to_string());
+
+        assert_eq!(
+            policy.resolve(&requirement.task_class),
+            Some(requirement.expected_lane),
+            "{}",
+            requirement.name
+        );
+    }
+
+    for lane in SchedulerLane::all() {
+        let config = policy
+            .lane_configs
+            .get(lane.as_str())
+            .expect("every declared lane must have a config");
+        assert!(config.priority_weight > 0, "{} priority", lane);
+        assert!(config.concurrency_cap > 0, "{} cap", lane);
+    }
+
+    let mut scheduler = LaneScheduler::new(policy).expect("default policy should construct");
+    for (offset, requirement) in requirements.iter().enumerate() {
+        let assignment = scheduler
+            .assign_task(
+                &requirement.task_class,
+                10_000 + u64::try_from(offset).expect("small offset fits"),
+                requirement.name,
+            )
+            .expect("canonical class should assign without queueing");
+        assert_eq!(assignment.lane, requirement.expected_lane);
+    }
+
+    let expected_active = [
+        (SchedulerLane::ControlCritical, 3usize),
+        (SchedulerLane::RemoteEffect, 3usize),
+        (SchedulerLane::Maintenance, 2usize),
+        (SchedulerLane::Background, 2usize),
+    ];
+    for (lane, expected_count) in expected_active {
+        let counters = scheduler.lane_counter(lane).expect("lane counters");
+        assert_eq!(counters.active_count, expected_count, "{lane}");
+        assert_eq!(counters.queued_count, 0, "{lane}");
+        assert_eq!(counters.rejected_total, 0, "{lane}");
+    }
+    assert_eq!(scheduler.total_active(), requirements.len());
+    assert!(
+        scheduler
+            .audit_log()
+            .iter()
+            .all(|record| record.event_code == event_codes::LANE_ASSIGN),
+        "canonical policy conformance should only emit assignment audit records"
+    );
+}
+
+#[test]
+fn conformance_hot_reload_rejects_removed_lane_with_queued_work_without_losing_queue() {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+    let active = scheduler
+        .assign_task(&task_classes::log_rotation(), 4_000, "trace-active")
+        .expect("first task should occupy the lane");
+    let queued_task_id = queued_task_id_from(
+        scheduler
+            .assign_task(&task_classes::log_rotation(), 4_001, "trace-queued")
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    let error = scheduler
+        .reload_policy(single_control_critical_lane_policy())
+        .expect_err("removing a lane with queued work must fail closed");
+    assert_eq!(error.code(), error_codes::ERR_LANE_INVALID_POLICY);
+    let detail = match error {
+        LaneSchedulerError::InvalidPolicy { detail } => detail,
+        _ => String::new(),
+    };
+    assert!(detail.contains("background"));
+    assert!(detail.contains("active=1"));
+    assert!(detail.contains("queued=1"));
+
+    assert_eq!(
+        scheduler
+            .policy()
+            .resolve(&task_classes::log_rotation())
+            .expect("rejected reload must preserve old mapping"),
+        SchedulerLane::Background
+    );
+    assert_eq!(
+        scheduler.active_task_ids(SchedulerLane::Background),
+        vec![active.task_id.to_string()]
+    );
+    assert_eq!(
+        scheduler.queued_task_ids(SchedulerLane::Background),
+        vec![queued_task_id]
+    );
+    let counters = scheduler
+        .lane_counter(SchedulerLane::Background)
+        .expect("background counters");
+    assert_eq!(counters.active_count, 1);
+    assert_eq!(counters.queued_count, 1);
+    assert_eq!(counters.first_queued_at_ms, Some(4_001));
 }
