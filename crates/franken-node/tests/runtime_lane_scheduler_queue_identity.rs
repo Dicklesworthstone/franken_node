@@ -318,6 +318,79 @@ fn run_queue_lifecycle(with_observation_interleavings: bool) -> QueueLifecycleDi
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_head_abort_promotion(with_observation_interleavings: bool) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(&task_classes::log_rotation(), 5_000, "meta-head-active")
+        .expect("first task should occupy the lane");
+    let aborted_head = queued_task_id_from(
+        scheduler
+            .assign_task(&task_classes::log_rotation(), 5_001, "meta-head-aborted")
+            .expect_err("head queued task should surface cap pressure"),
+    )
+    .expect("head queued task id");
+    let promoted_tail = queued_task_id_from(
+        scheduler
+            .assign_task(&task_classes::log_rotation(), 5_002, "meta-tail-promoted")
+            .expect_err("tail queued task should surface cap pressure"),
+    )
+    .expect("tail queued task id");
+
+    assert_eq!(
+        scheduler.queued_task_ids(SchedulerLane::Background),
+        vec![aborted_head.clone(), promoted_tail.clone()]
+    );
+
+    if with_observation_interleavings {
+        observe_scheduler_without_lane_mutation(&mut scheduler, 5_003);
+    }
+
+    let aborted = scheduler
+        .abort_queued_task_id(&aborted_head, 5_004, "meta-abort-head")
+        .expect("head queued task should abort cleanly");
+    assert_eq!(aborted.task_id.to_string(), aborted_head);
+    assert_eq!(
+        scheduler.queued_task_ids(SchedulerLane::Background),
+        vec![promoted_tail.clone()]
+    );
+    assert_eq!(
+        scheduler
+            .lane_counter(SchedulerLane::Background)
+            .expect("background counters after head abort")
+            .first_queued_at_ms,
+        Some(5_002)
+    );
+
+    if with_observation_interleavings {
+        observe_scheduler_without_lane_mutation(&mut scheduler, 5_005);
+    }
+
+    scheduler
+        .complete_task(&active.task_id.to_string(), 5_010, "meta-complete-active")
+        .expect("completion should promote replacement queued task");
+    assert_eq!(
+        scheduler.active_task_ids(SchedulerLane::Background),
+        vec![promoted_tail.clone()]
+    );
+    assert!(
+        scheduler
+            .queued_task_ids(SchedulerLane::Background)
+            .is_empty()
+    );
+
+    if with_observation_interleavings {
+        observe_scheduler_without_lane_mutation(&mut scheduler, 5_011);
+    }
+
+    scheduler
+        .complete_task(&promoted_tail, 5_020, "meta-complete-promoted")
+        .expect("promoted replacement task should complete cleanly");
+
+    queue_lifecycle_digest(&scheduler)
+}
+
 #[test]
 fn metamorphic_queue_lifecycle_invariants_survive_observation_interleavings() {
     let baseline = run_queue_lifecycle(false);
@@ -329,6 +402,30 @@ fn metamorphic_queue_lifecycle_invariants_survive_observation_interleavings() {
     assert_eq!(observed.completed_total, 4);
     assert_eq!(observed.rejected_total, 2);
     assert_eq!(observed.starvation_events, 0);
+}
+
+#[test]
+fn metamorphic_head_queue_abort_rebases_front_and_survives_observation_interleavings() {
+    let baseline = run_head_abort_promotion(false);
+    let observed = run_head_abort_promotion(true);
+
+    assert_eq!(observed, baseline);
+    assert_eq!(observed.active_count, 0);
+    assert_eq!(observed.queued_count, 0);
+    assert_eq!(observed.first_queued_at_ms, None);
+    assert_eq!(observed.completed_total, 2);
+    assert_eq!(observed.rejected_total, 2);
+    assert_eq!(observed.starvation_events, 0);
+    assert!(
+        observed
+            .audit_codes
+            .contains(&event_codes::LANE_TASK_ABORTED.to_string())
+    );
+    assert!(
+        observed
+            .audit_codes
+            .contains(&event_codes::LANE_TASK_PROMOTED.to_string())
+    );
 }
 
 #[test]
