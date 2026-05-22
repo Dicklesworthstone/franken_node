@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use frankenengine_node::connector::activation_pipeline::{
-    ActivationInput, ActivationStage, StageExecutor, activate,
+    ActivationInput, ActivationStage, DefaultExecutor, StageExecutor, activate, verify_stage_order,
 };
 
 const TEST_ITERATIONS: usize = 100;
@@ -138,6 +138,177 @@ fn generate_test_input(seed: u64) -> ActivationInput {
     }
 }
 
+struct ActivationConformanceCase {
+    requirement: &'static str,
+    executor: ConfigurableExecutor,
+    expected_completed: bool,
+    expected_stages: &'static [ActivationStage],
+    expected_error_code: Option<&'static str>,
+}
+
+const SANDBOX_ONLY: &[ActivationStage] = &[ActivationStage::SandboxCreate];
+const THROUGH_SECRET_MOUNT: &[ActivationStage] =
+    &[ActivationStage::SandboxCreate, ActivationStage::SecretMount];
+const THROUGH_CAPABILITY_ISSUE: &[ActivationStage] = &[
+    ActivationStage::SandboxCreate,
+    ActivationStage::SecretMount,
+    ActivationStage::CapabilityIssue,
+];
+const FULL_ACTIVATION: &[ActivationStage] = &[
+    ActivationStage::SandboxCreate,
+    ActivationStage::SecretMount,
+    ActivationStage::CapabilityIssue,
+    ActivationStage::HealthReady,
+];
+
+/// Spec-derived conformance matrix for the activation stage contract.
+#[test]
+fn activation_pipeline_stage_contract_conformance_matrix() {
+    let input = generate_test_input(0x5eed);
+    let cases = [
+        ActivationConformanceCase {
+            requirement: "ACT-MUST-001 success visits every stage in canonical order",
+            executor: ConfigurableExecutor::default(),
+            expected_completed: true,
+            expected_stages: FULL_ACTIVATION,
+            expected_error_code: None,
+        },
+        ActivationConformanceCase {
+            requirement: "ACT-MUST-002 sandbox failure stops before secret mount",
+            executor: ConfigurableExecutor {
+                fail_sandbox: true,
+                ..Default::default()
+            },
+            expected_completed: false,
+            expected_stages: SANDBOX_ONLY,
+            expected_error_code: Some("ACT_SANDBOX_FAILED"),
+        },
+        ActivationConformanceCase {
+            requirement: "ACT-MUST-003 secret mount failure stops before capability issue",
+            executor: ConfigurableExecutor {
+                fail_secret_mount: true,
+                ..Default::default()
+            },
+            expected_completed: false,
+            expected_stages: THROUGH_SECRET_MOUNT,
+            expected_error_code: Some("ACT_SECRET_MOUNT_FAILED"),
+        },
+        ActivationConformanceCase {
+            requirement: "ACT-MUST-004 capability failure stops before health readiness",
+            executor: ConfigurableExecutor {
+                fail_capability: true,
+                ..Default::default()
+            },
+            expected_completed: false,
+            expected_stages: THROUGH_CAPABILITY_ISSUE,
+            expected_error_code: Some("ACT_CAPABILITY_FAILED"),
+        },
+        ActivationConformanceCase {
+            requirement: "ACT-MUST-005 health failure is terminal and never completes",
+            executor: ConfigurableExecutor {
+                fail_health: true,
+                ..Default::default()
+            },
+            expected_completed: false,
+            expected_stages: FULL_ACTIVATION,
+            expected_error_code: Some("ACT_HEALTH_FAILED"),
+        },
+        ActivationConformanceCase {
+            requirement: "ACT-MUST-006 mounted secrets must exactly match requested refs",
+            executor: ConfigurableExecutor {
+                secret_mount_behavior: SecretMountBehavior::Extra(vec!["unexpected-secret".into()]),
+                ..Default::default()
+            },
+            expected_completed: false,
+            expected_stages: THROUGH_SECRET_MOUNT,
+            expected_error_code: Some("ACT_SECRET_MOUNT_FAILED"),
+        },
+    ];
+
+    for case in cases {
+        let transcript = activate(&input, &case.executor);
+
+        assert_eq!(
+            transcript.completed, case.expected_completed,
+            "{} completed mismatch",
+            case.requirement
+        );
+        assert!(
+            verify_stage_order(&transcript),
+            "{} violated canonical stage order",
+            case.requirement
+        );
+
+        let actual_stages: Vec<_> = transcript.stages.iter().map(|stage| stage.stage).collect();
+        assert_eq!(
+            actual_stages, case.expected_stages,
+            "{} stage prefix mismatch",
+            case.requirement
+        );
+
+        match case.expected_error_code {
+            Some(expected_code) => {
+                let Some(last) = transcript.stages.last() else {
+                    assert!(
+                        false,
+                        "{} failed conformance cases must record a failed stage",
+                        case.requirement
+                    );
+                    continue;
+                };
+                assert!(!last.success, "{} final stage must fail", case.requirement);
+                let Some(error) = last.error.as_ref() else {
+                    assert!(
+                        false,
+                        "{} failed stage must carry an error",
+                        case.requirement
+                    );
+                    continue;
+                };
+                assert_eq!(
+                    error.code(),
+                    expected_code,
+                    "{} error code mismatch",
+                    case.requirement
+                );
+            }
+            None => assert!(
+                transcript.stages.iter().all(|stage| stage.error.is_none()),
+                "{} successful activation must not emit errors",
+                case.requirement
+            ),
+        }
+    }
+}
+
+/// Production default must fail closed until a real executor is supplied.
+#[test]
+fn activation_pipeline_default_executor_fail_closed_conformance() {
+    let transcript = activate(&generate_test_input(0xdefa_17), &DefaultExecutor);
+
+    assert!(!transcript.completed);
+    assert!(verify_stage_order(&transcript));
+    assert_eq!(transcript.stages.len(), 1);
+
+    let Some(failure) = transcript.stages.first() else {
+        assert!(false, "default executor must record a failed sandbox stage");
+        return;
+    };
+    assert_eq!(failure.stage, ActivationStage::SandboxCreate);
+    assert!(!failure.success);
+    let Some(error) = failure.error.as_ref() else {
+        assert!(false, "default executor failure must record a stage error");
+        return;
+    };
+    assert_eq!(error.code(), "ACT_SANDBOX_FAILED");
+    assert!(
+        error
+            .to_string()
+            .contains("no real activation executor configured"),
+        "default executor must explain the missing production executor: {error}"
+    );
+}
+
 /// MR1: Equivalence - Duplicate inputs should produce identical transcripts (determinism)
 #[test]
 fn mr_duplicate_inputs_identical_transcripts() {
@@ -193,18 +364,21 @@ fn mr_duplicate_inputs_identical_transcripts() {
                 i, seed
             );
 
-            match (&stage1.error, &stage2.error) {
-                (None, None) => {}
-                (Some(e1), Some(e2)) => {
-                    assert_eq!(
-                        e1.code(),
-                        e2.code(),
-                        "Error codes differ at index {} for seed {}",
-                        i,
-                        seed
-                    );
-                }
-                _ => panic!("Error presence differs at index {} for seed {}", i, seed),
+            assert_eq!(
+                stage1.error.is_some(),
+                stage2.error.is_some(),
+                "Error presence differs at index {} for seed {}",
+                i,
+                seed
+            );
+            if let (Some(e1), Some(e2)) = (&stage1.error, &stage2.error) {
+                assert_eq!(
+                    e1.code(),
+                    e2.code(),
+                    "Error codes differ at index {} for seed {}",
+                    i,
+                    seed
+                );
             }
         }
     }
