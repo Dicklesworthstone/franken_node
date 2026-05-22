@@ -670,3 +670,9 @@ name = "fuzz_git_status_parser"
 path = "fuzz_targets/fuzz_git_status_parser.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_replay_signature_decode"
+path = "fuzz_targets/fuzz_replay_signature_decode.rs"
+test = false
+doc = false
