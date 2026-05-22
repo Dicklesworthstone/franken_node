@@ -1,4 +1,5 @@
 #!/usr/bin/env cargo run --bin test-engine
+#![forbid(unsafe_code)]
 
 //! Test engine binary for engine dispatcher integration tests
 //!
