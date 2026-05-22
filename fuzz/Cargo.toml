@@ -382,3 +382,9 @@ name = "fuzz_deterministic_seed_derivation"
 path = "fuzz_targets/fuzz_deterministic_seed_derivation.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_transparency_verifier_inclusion"
+path = "fuzz_targets/fuzz_transparency_verifier_inclusion.rs"
+test = false
+doc = false
