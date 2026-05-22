@@ -4176,4 +4176,183 @@ mod tests {
             );
         }
     }
+
+    // Frozen pins on the canonical byte layout produced by
+    // `build_signing_message` (threshold_sig.rs:444). The function builds
+    // the threshold-signature pre-image as:
+    //
+    //   SIGNING_MESSAGE_DOMAIN (b"threshold_sig_verify_v2:", 24 bytes)
+    //   || LE64(len(artifact_id))   || artifact_id.as_bytes()
+    //   || LE64(len(connector_id))  || connector_id.as_bytes()
+    //   || LE64(len(content_hash))  || content_hash.as_bytes()
+    //
+    // This is the EXACT byte sequence that `sign` (L743) and
+    // `verify_threshold` (L764) feed Ed25519 — every fleet node that
+    // verifies a partial threshold signature MUST hash this same logical
+    // (artifact_id, connector_id, content_hash) triple to identical bytes,
+    // otherwise threshold quorum validation breaks silently across the
+    // signer set.
+    //
+    // Three frozen fixtures pin both the raw bytes (for the empty-all
+    // baseline where output is small enough to embed) and SHA-256 of the
+    // bytes (for fixtures where embedding 100+ bytes of hex would dwarf
+    // the test). The two-layer pinning catches both per-field framing
+    // drift AND domain-prefix drift independently.
+    //
+    //   1. empty-all (all three fields = "") — locks the v1 domain bytes
+    //      and three LE64(0)+zero-bytes framing in 48 bytes total
+    //      (24 domain + 3×(8 + 0) = 48). Both the raw hex AND the SHA-256
+    //      of those bytes are frozen so a 1-bit change in either the
+    //      domain or framing flips at least one assertion.
+    //
+    //   2. populated-short (artifact_id=10, connector_id=11, hash=10) —
+    //      exercises the INLINE code path in SigningMessage::new at L469
+    //      (lengths ≤ INLINE_SIGNING_MESSAGE_IDENTIFIER_BYTES). 79 bytes.
+    //      Raw hex pinned to lock the exact byte sequence; SHA-256 of the
+    //      bytes pinned as a single short canary.
+    //
+    //   3. populated-long (artifact_id=100, connector_id=100, hash=71) —
+    //      forces the HEAP code path (L474 calls build_signing_message
+    //      directly when fields exceed the inline-buffer thresholds).
+    //      SHA-256 of the 319-byte output pinned; raw bytes are too long
+    //      to embed inline without obscuring the assertion intent.
+    //
+    // Critical layout invariants this golden pins:
+    //   - SIGNING_MESSAGE_DOMAIN bytes EXACTLY = b"threshold_sig_verify_v2:"
+    //     (24 bytes, NOT length-prefixed; the constant is fixed-width and
+    //     the prefix is consumed as the first 24 bytes of the pre-image)
+    //   - LE64 width on per-field length prefix
+    //   - Field order: artifact_id, connector_id, content_hash (NOT
+    //     interchangeable; downstream signing/verification depend on the
+    //     ordering)
+    //   - The INLINE (SigningMessage::Inline) and HEAP
+    //     (SigningMessage::Heap → build_signing_message) code paths
+    //     produce byte-identical output for every input shape — this is
+    //     pinned indirectly: the existing
+    //     `inline_signing_message_matches_vec_layout_for_digest_sized_hashes`
+    //     test (L1699) asserts inline == build_signing_message; this
+    //     golden then locks build_signing_message's exact bytes/digest.
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing the function in Python and hashing the resulting
+    // byte stream — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): threshold-signature verification
+    // is the cornerstone of fleet-wide quorum trust. If one signer
+    // produces a partial sig over a different pre-image than the
+    // verifier expects, the quorum fails AND the failure mode is
+    // opaque (no field-level diagnostic — just "signature invalid").
+    // Pinning these bytes is the canary that surfaces silent layout
+    // drift before it ships to production.
+    #[test]
+    fn build_signing_message_frozen_canonical_byte_layout_golden() {
+        // 1. Empty-all fixture: 48 bytes total — 24 domain + 3×(LE64(0))
+        let empty_all = super::build_signing_message("", "", "");
+        assert_eq!(
+            empty_all.len(),
+            48,
+            "empty-all signing message must be 48 bytes (24 domain + 3×LE64(0))"
+        );
+        assert_eq!(
+            hex::encode(&empty_all),
+            "7468726573686f6c645f7369675f7665726966795f76323a\
+             000000000000000000000000000000000000000000000000",
+            "empty-all signing-message bytes drifted — check the \
+             `threshold_sig_verify_v2:` SIGNING_MESSAGE_DOMAIN constant \
+             (must be exactly 24 bytes, NOT length-prefixed) or the \
+             LE64(0) framing on each empty field"
+        );
+        let empty_digest = {
+            let mut h = sha2::Sha256::new();
+            sha2::Digest::update(&mut h, &empty_all);
+            hex::encode(sha2::Digest::finalize(h))
+        };
+        assert_eq!(
+            empty_digest,
+            "1190927be3fd85e3698f0c10b4a34492b6ad1e40dbc624273fea2700dc76a671",
+            "SHA-256 of the empty-all signing message drifted — this is \
+             the second-layer canary that catches drift even if the raw \
+             bytes are not byte-equal to the inlined hex above"
+        );
+
+        // 2. Populated-short fixture: 10/11/10-byte fields trigger the
+        // INLINE SigningMessage code path. 79 bytes total.
+        let populated_short =
+            super::build_signing_message("artifact-x", "connector-y", "sha256:abc");
+        assert_eq!(populated_short.len(), 79);
+        assert_eq!(
+            hex::encode(&populated_short),
+            "7468726573686f6c645f7369675f7665726966795f76323a\
+             0a0000000000000061727469666163742d78\
+             0b00000000000000636f6e6e6563746f722d79\
+             0a000000000000007368613235363a616263",
+            "populated-short signing-message bytes drifted — check per-\
+             field LE64 length prefix or field iteration order \
+             (artifact_id before connector_id before content_hash)"
+        );
+        let populated_short_digest = {
+            let mut h = sha2::Sha256::new();
+            sha2::Digest::update(&mut h, &populated_short);
+            hex::encode(sha2::Digest::finalize(h))
+        };
+        assert_eq!(
+            populated_short_digest,
+            "cdfdb5b8c7ddde4e2d021474b101c810724a98181a11656245af6e2f426dcce1"
+        );
+
+        // 3. Populated-long fixture: 100/100/71-byte fields force the
+        // HEAP code path (build_signing_message direct call). 319 bytes
+        // total; only the SHA-256 of the bytes is pinned (raw hex would
+        // be ~640 chars and obscure the intent).
+        let long_artifact = "a".repeat(100);
+        let long_connector = "b".repeat(100);
+        let long_content_hash = format!("sha256:{}", "f".repeat(64));
+        let populated_long = super::build_signing_message(
+            &long_artifact,
+            &long_connector,
+            &long_content_hash,
+        );
+        assert_eq!(populated_long.len(), 319);
+        let populated_long_digest = {
+            let mut h = sha2::Sha256::new();
+            sha2::Digest::update(&mut h, &populated_long);
+            hex::encode(sha2::Digest::finalize(h))
+        };
+        assert_eq!(
+            populated_long_digest,
+            "97c3d3fcc5bf9aaac3bb27a8644804ad8c5741cf2a12cb633c6478742c96c1d3",
+            "populated-long signing-message digest drifted — this fixture \
+             forces the HEAP code path in SigningMessage::new (L474); \
+             drift here may indicate the inline/heap branches diverged"
+        );
+
+        // Cross-fixture distinctness: all three digests MUST be unique.
+        assert_ne!(empty_digest, populated_short_digest);
+        assert_ne!(populated_short_digest, populated_long_digest);
+        assert_ne!(empty_digest, populated_long_digest);
+
+        // Field-order-sensitivity invariant: swapping artifact_id and
+        // connector_id MUST flip the output. Pins the contract that the
+        // three fields are NOT interchangeable.
+        let swapped =
+            super::build_signing_message("connector-y", "artifact-x", "sha256:abc");
+        assert_ne!(
+            hex::encode(&swapped),
+            hex::encode(&populated_short),
+            "swapping artifact_id and connector_id MUST produce different \
+             signing-message bytes; if it does not, field-position \
+             distinction has been lost"
+        );
+
+        // Domain-prefix-position invariant: every message MUST start with
+        // exactly the 24-byte SIGNING_MESSAGE_DOMAIN constant.
+        for msg in [&empty_all, &populated_short, &populated_long] {
+            assert_eq!(
+                &msg[..24],
+                b"threshold_sig_verify_v2:",
+                "every signing message MUST start with the 24-byte \
+                 SIGNING_MESSAGE_DOMAIN constant"
+            );
+        }
+    }
 }
