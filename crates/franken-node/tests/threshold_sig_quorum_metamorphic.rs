@@ -17,7 +17,10 @@
 //! 6. **Signer-id mismatch rejection** — a partial signature whose `signer_id`
 //!    does not match its configured `key_id` does not count toward quorum
 //!    (prevents label replay).
-//! 7. **Publication-context binding** — partial signatures produced for one
+//! 7. **Unsafe key-id rejection** — mutating one valid signature's `key_id` to
+//!    an unsafe identifier must invalidate only that contribution before lookup,
+//!    keeping baseline and preparsed verdicts byte-identical.
+//! 8. **Publication-context binding** — partial signatures produced for one
 //!    artifact or connector do not count toward quorum for another artifact or
 //!    connector carrying the same content hash.
 //!
@@ -348,7 +351,7 @@ proptest! {
 
         prop_assert!(
             !result.verified,
-            "signer_id != key_id must drop the signature below quorum"
+            "mismatched signer_id and key_id must drop the signature below quorum"
         );
         prop_assert!(
             result.valid_signatures < k,
@@ -356,7 +359,65 @@ proptest! {
         );
     }
 
-    /// Property 7: publication-context binding. Signatures made for one artifact
+    /// Property 7: unsafe key-id rejection. Mutating one otherwise-valid
+    /// signature's key_id to unsafe syntax must fail closed before lookup,
+    /// leaving the other n-1 signatures counted and preserving exact parity
+    /// between the baseline and preparsed verifier paths.
+    #[test]
+    fn unsafe_key_id_transform_fails_closed_before_lookup(
+        n in 2_u32..=6_u32,
+        content_seed in any::<u64>(),
+        unsafe_variant in 0_u8..=4_u8,
+    ) {
+        let k = n;
+        let quorum = build_quorum(b"unsafe-key-id-transform", k, n);
+        let content_hash = format!("ukid-{content_seed:016x}");
+        let indices = (0..n as usize).collect::<Vec<_>>();
+        let mut signatures = sign_with_indices(&quorum, &content_hash, &indices);
+        let baseline_artifact = make_artifact(&content_hash, signatures.clone());
+
+        let baseline = verify_threshold(&quorum.config, &baseline_artifact, "ukid-base", "ts");
+        prop_assert!(baseline.verified, "valid n-of-n quorum must verify before key_id mutation");
+
+        let safe_key_id = &quorum.config.signer_keys[0].key_id;
+        signatures[0].key_id = match unsafe_variant {
+            0 => format!("{safe_key_id} "),
+            1 => format!("{safe_key_id}\nspoof"),
+            2 => format!("/{safe_key_id}"),
+            3 => format!("{safe_key_id}\\alias"),
+            _ => String::new(),
+        };
+        let mutated_artifact = make_artifact(&content_hash, signatures);
+        let mutated = verify_threshold(&quorum.config, &mutated_artifact, "ukid-mut", "ts");
+        let preparsed = PreparsedThresholdConfig::from_config(quorum.config.clone())
+            .expect("valid config must parse");
+        let preparsed_mutated =
+            verify_threshold_preparsed(&preparsed, &mutated_artifact, "ukid-mut", "ts");
+
+        prop_assert_eq!(
+            &mutated,
+            &preparsed_mutated,
+            "unsafe key_id rejection must be identical on baseline and preparsed paths"
+        );
+        prop_assert!(
+            !mutated.verified,
+            "unsafe key_id mutation must drop n-of-n quorum below threshold"
+        );
+        prop_assert_eq!(
+            mutated.valid_signatures,
+            n - 1,
+            "only the unsafe key_id contribution should be rejected"
+        );
+        let rejected_for_unsafe_key_id = match &mutated.failure_reason {
+            Some(FailureReason::InvalidSignature { signer_id }) => {
+                signer_id.contains("unsafe key_id")
+            }
+            _ => false,
+        };
+        prop_assert!(rejected_for_unsafe_key_id);
+    }
+
+    /// Property 8: publication-context binding. Signatures made for one artifact
     /// or connector cannot be replayed onto another artifact or connector with the
     /// same content hash.
     #[test]
@@ -410,7 +471,7 @@ proptest! {
         );
     }
 
-    /// Property 8 (bd-98xo5.1.4): verify_threshold and verify_threshold_preparsed
+    /// Property 9 (bd-98xo5.1.4): verify_threshold and verify_threshold_preparsed
     /// produce byte-identical VerifyResult for any valid input within the production
     /// envelope (signers 1..=64, threshold 1..=n, content up to 4 KiB).
     #[test]
