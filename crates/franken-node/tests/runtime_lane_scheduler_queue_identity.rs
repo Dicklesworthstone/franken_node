@@ -223,6 +223,26 @@ struct QueueLifecycleDigest {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct QueueStateDigest {
+    active_task_ids: Vec<String>,
+    queued_task_ids: Vec<String>,
+    active_count: usize,
+    queued_count: usize,
+    first_queued_at_ms: Option<u64>,
+    completed_total: u64,
+    rejected_total: u64,
+    starvation_events: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AuditCapacityLifecycleDigest {
+    state: QueueStateDigest,
+    audit_capacity: usize,
+    audit_len: usize,
+    audit_codes: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct BackgroundLaneIsolationDigest {
     active_count: usize,
     queued_count: usize,
@@ -251,6 +271,22 @@ fn queue_lifecycle_digest(scheduler: &LaneScheduler) -> QueueLifecycleDigest {
             .iter()
             .map(|record| record.event_code.clone())
             .collect(),
+    }
+}
+
+fn queue_state_digest(scheduler: &LaneScheduler) -> QueueStateDigest {
+    let counters = scheduler
+        .lane_counter(SchedulerLane::Background)
+        .expect("background counters");
+    QueueStateDigest {
+        active_task_ids: scheduler.active_task_ids(SchedulerLane::Background),
+        queued_task_ids: scheduler.queued_task_ids(SchedulerLane::Background),
+        active_count: counters.active_count,
+        queued_count: counters.queued_count,
+        first_queued_at_ms: counters.first_queued_at_ms,
+        completed_total: counters.completed_total,
+        rejected_total: counters.rejected_total,
+        starvation_events: counters.starvation_events,
     }
 }
 
@@ -1126,6 +1162,58 @@ fn run_queue_lifecycle_after_optional_telemetry_export_probes(
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_queue_lifecycle_with_optional_bounded_audit_capacity(
+    bounded_capacity: Option<usize>,
+) -> AuditCapacityLifecycleDigest {
+    let mut scheduler = match bounded_capacity {
+        Some(capacity) => {
+            LaneScheduler::with_audit_log_capacity(single_background_lane_policy(), capacity)
+        }
+        None => LaneScheduler::new(single_background_lane_policy()),
+    }
+    .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(
+            &task_classes::log_rotation(),
+            10_500,
+            "meta-audit-cap-active",
+        )
+        .expect("first task should occupy the lane");
+    let queued = queued_task_id_from(
+        scheduler
+            .assign_task(
+                &task_classes::log_rotation(),
+                10_501,
+                "meta-audit-cap-queued",
+            )
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    scheduler
+        .complete_task(
+            &active.task_id.to_string(),
+            10_510,
+            "meta-audit-cap-complete-active",
+        )
+        .expect("completion should promote queued task under audit capacity");
+    scheduler
+        .complete_task(&queued, 10_520, "meta-audit-cap-complete-promoted")
+        .expect("promoted task should complete under audit capacity");
+
+    AuditCapacityLifecycleDigest {
+        state: queue_state_digest(&scheduler),
+        audit_capacity: scheduler.audit_log_capacity(),
+        audit_len: scheduler.audit_log().len(),
+        audit_codes: scheduler
+            .audit_log()
+            .iter()
+            .map(|record| record.event_code.clone())
+            .collect(),
+    }
+}
+
 #[test]
 fn metamorphic_queue_lifecycle_invariants_survive_observation_interleavings() {
     let baseline = run_queue_lifecycle(false);
@@ -1374,6 +1462,32 @@ fn metamorphic_telemetry_and_audit_exports_preserve_queue_lifecycle() {
             .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
             .count(),
         1
+    );
+}
+
+#[test]
+fn metamorphic_bounded_audit_capacity_preserves_queue_lifecycle() {
+    let baseline = run_queue_lifecycle_with_optional_bounded_audit_capacity(None);
+    let bounded = run_queue_lifecycle_with_optional_bounded_audit_capacity(Some(3));
+
+    assert_eq!(bounded.state, baseline.state);
+    assert_eq!(bounded.state.active_count, 0);
+    assert_eq!(bounded.state.queued_count, 0);
+    assert_eq!(bounded.state.first_queued_at_ms, None);
+    assert_eq!(bounded.state.completed_total, 2);
+    assert_eq!(bounded.state.rejected_total, 1);
+    assert_eq!(bounded.state.starvation_events, 0);
+    assert_eq!(baseline.audit_len, 5);
+    assert_eq!(bounded.audit_capacity, 3);
+    assert_eq!(bounded.audit_len, 3);
+    assert!(bounded.audit_len <= bounded.audit_capacity);
+    assert_eq!(
+        bounded.audit_codes,
+        vec![
+            event_codes::LANE_TASK_COMPLETED.to_string(),
+            event_codes::LANE_TASK_PROMOTED.to_string(),
+            event_codes::LANE_TASK_COMPLETED.to_string(),
+        ]
     );
 }
 
