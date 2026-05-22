@@ -2267,4 +2267,107 @@ mod additional_negative_path_tests {
             "Test hash should match expected value"
         );
     }
+
+    // Frozen SHA-256 hex over the canonical byte layout produced by
+    // `ScheduleConfig::config_hash` (deterministic_seed.rs:182). The
+    // function builds the config hash as:
+    //
+    //   SHA256(
+    //     b"deterministic_seed_config_v1:"
+    //     || LE32(version)                              # u32 LE — 4 bytes, NOT 8
+    //     || for (k, v) in self.parameters.iter():      # BTreeMap → sorted by key
+    //          LE64(len(k)) || k.as_bytes()
+    //       || LE64(len(v)) || v.as_bytes()
+    //   )
+    //
+    // Critical layout invariants this golden pins:
+    //   - the v1 domain separator string
+    //   - version is encoded as LE32 (u32), NOT LE64 (a future refactor to
+    //     u64 version with LE64 would silently shift every existing hash)
+    //   - per-(k, v): each gets its own LE64 length prefix (so a future
+    //     "concat then single-prefix" rewrite would diverge)
+    //   - BTreeMap iteration order: SORTED BY KEY, not insertion order
+    //
+    // config_hash feeds into the deterministic seed derivation (see
+    // `derive_seed` at deterministic_seed.rs:279) — a silent drift here
+    // would cause every node in the fleet to derive a DIFFERENT seed for
+    // the SAME logical config, breaking deterministic replay across nodes.
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing the function in Python — NOT captured from an
+    // unreviewed run. Recompute both together if the layout intentionally
+    // changes (a one-sided update flags a real split between empty/non-
+    // empty parameter branches or a version-width drift — bug, not churn).
+    #[test]
+    fn config_hash_frozen_canonical_byte_layout_golden() {
+        // Minimal fixture: version = 1, empty parameters. Locks the v1
+        // domain separator + u32-LE width on version + zero-iterations of
+        // the param loop. Any reshape of the empty-params framing fails
+        // here first.
+        let minimal = ScheduleConfig::new(1);
+        assert!(
+            minimal.parameters.is_empty(),
+            "minimal fixture should have no params"
+        );
+        let minimal_hex = hex::encode(minimal.config_hash());
+        assert_eq!(
+            minimal_hex,
+            "da4078623685fc932019ad246d6c1af44a469912d72e65b0e7096107a33ff3b8",
+            "minimal config_hash drifted — check the v1 domain separator \
+             or the version-as-u32-LE encoding (must NOT be LE64)"
+        );
+
+        // Populated fixture: version=42 + three (k,v) parameters of
+        // distinct non-zero lengths. The BTreeMap will iterate in sorted
+        // key order: epoch < policy < region.
+        let populated = ScheduleConfig::new(42)
+            .with_param("region", "us-east-1")
+            .with_param("epoch", "7")
+            .with_param("policy", "strict");
+        let populated_hex = hex::encode(populated.config_hash());
+        assert_eq!(
+            populated_hex,
+            "8a4189e63fc8f1e22cce183bac73f166e527c36de659405c7c4ce9b8e5aee6d2",
+            "populated config_hash drifted — check per-(k,v) LE64 length \
+             prefix framing or BTreeMap sorted-iteration assumption"
+        );
+        assert_ne!(
+            minimal_hex, populated_hex,
+            "minimal and populated must produce distinct hashes"
+        );
+
+        // BTreeMap-sorted-iteration invariant: building the same config
+        // via DIFFERENT insertion orders MUST produce identical hashes
+        // (BTreeMap sorts by key on iteration). A future refactor that
+        // accidentally swaps BTreeMap for HashMap or insertion-order
+        // IndexMap would silently fork the hash across hosts based on
+        // build-order; this assertion catches that.
+        let reordered = ScheduleConfig::new(42)
+            .with_param("policy", "strict")
+            .with_param("region", "us-east-1")
+            .with_param("epoch", "7");
+        assert_eq!(
+            hex::encode(reordered.config_hash()),
+            populated_hex,
+            "config_hash MUST be insertion-order-independent — \
+             parameters is a BTreeMap and iterates in sorted key order"
+        );
+
+        // Version-bump sensitivity: incrementing version with the SAME
+        // params MUST flip the hash (the contract documented at L181:
+        // \"Used for version bump detection\"). A future bug that
+        // accidentally excludes version from the hasher would silently
+        // mask schema-version changes from downstream consumers.
+        let bumped = ScheduleConfig::new(2);
+        assert_ne!(
+            hex::encode(bumped.config_hash()),
+            minimal_hex,
+            "version bump from 1 to 2 with empty params MUST flip the hash; \
+             if it does not, version is not being fed into the hasher"
+        );
+
+        // config_hash_hex must equal hex::encode(config_hash) — pins the
+        // String/array variant agreement.
+        assert_eq!(populated.config_hash_hex(), populated_hex);
+    }
 }
