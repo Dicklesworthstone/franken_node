@@ -2620,4 +2620,182 @@ mod tests {
         // With zero capacity, the entire vector should be cleared
         assert!(test_items.is_empty());
     }
+
+    // Frozen SHA-256 hex outputs of the module-private function
+    // `derive_checkpoint_id` (checkpoint.rs:788). The function is the
+    // canonical-serialization primitive backing checkpoint id derivation
+    // for the runtime orchestration hash chain.
+    //
+    // The function builds the canonical checkpoint id as:
+    //
+    //   SHA256(
+    //     b"checkpoint_content_v3:length_prefixed:"
+    //     || labeled_field(b"orchestration_id",       orchestration_id.as_bytes())
+    //     || labeled_field(b"iteration_count",        iteration_count.to_le_bytes())  # 8 bytes
+    //     || labeled_field(b"epoch",                  epoch.to_le_bytes())            # 8 bytes
+    //     || labeled_field(b"progress_state_hash",    progress_state_hash.as_bytes())
+    //     || branch_on_previous_hash:
+    //          Some => labeled_field(b"previous_checkpoint_hash:some", previous.as_bytes())
+    //          None => labeled_field(b"previous_checkpoint_hash:none", b"")
+    //   ).hex()
+    //
+    // where labeled_field(label, value) := LE64(len(label)) || label
+    //                                    || LE64(len(value)) || value
+    //
+    // *** TWO DISTINCTIVE FEATURES (FIRST in suite) ***
+    //
+    // 1. LABELED LENGTH-PREFIXED FIELDS: this is the FIRST golden in
+    //    the suite to pin a function that uses labeled fields (the
+    //    label itself is fed into the hasher with its own LE64 length
+    //    prefix). The labels are static byte strings like
+    //    b"orchestration_id", b"iteration_count". This self-describing
+    //    canonical encoding is MORE robust than just length-prefixing
+    //    the value alone — an attacker CANNOT forge collisions by
+    //    varying which field a value belongs to. A future refactor
+    //    that dropped the label encoding to "save bytes" would
+    //    catastrophically collapse the field-identity distinction.
+    //
+    // 2. LABELED DISCRIMINATOR FOR Option<&str>: the Some/None branch
+    //    uses DIFFERENT LABELS rather than a 0u8/1u8 tag:
+    //      Some => label = b"previous_checkpoint_hash:some" (29 bytes)
+    //      None => label = b"previous_checkpoint_hash:none" (29 bytes)
+    //    Both labels happen to be the SAME length (29 bytes) but their
+    //    BYTES differ (last 4 chars: "some" vs "none"). This is a more
+    //    explicit discriminator than the 0u8/1u8 tag used by other
+    //    functions in the suite (e.g., r28 durability_violation::
+    //    generate_bundle, r41 interface_hash::compute_hash). Pinning
+    //    both branches as goldens documents this design choice.
+    //
+    // Three frozen fixtures + three structural invariants:
+    //
+    //   1. genesis (orch="orch-1", iter=0, epoch=1, progress=zeros,
+    //      previous=None). Locks the v3 domain + labeled-field framing
+    //      + the None branch's distinct label b"...:none" + empty
+    //      value framing.
+    //      Frozen: 3e9be5beb36419983ba7294d48ce989902f2c9442136b73a3c5914529af9faf2
+    //
+    //   2. linked (orch="orch-1", iter=1, epoch=1, progress=as,
+    //      previous=Some(fs)). Locks the Some branch's distinct label
+    //      b"...:some" + the populated-previous value.
+    //      Frozen: 8f1c1054484791cd0bbf623afe6f42571be7865d46e394f160811ed847a79fc9
+    //
+    //   3. diff_orch (orch="orch-2" — only field changed) locks
+    //      orchestration_id-sensitivity.
+    //      Frozen: 2d661ccab9392f65511c4c4f06e8cada80ce81e1bd4b35b497ff13bec3ad670b
+    //
+    //   4. Option-DISCRIMINATOR-LABEL-DISTINCTNESS INVARIANT: a None
+    //      checkpoint MUST hash differently from a Some checkpoint with
+    //      empty-string previous_hash. Pins that the labels
+    //      b"...:none" and b"...:some" are LOAD-BEARING distinct (NOT
+    //      reducible to a single label with content "" vs "").
+    //
+    //   5. ITERATION-COUNT-SENSITIVITY: incrementing iteration_count
+    //      from 0 → 1 MUST flip the hash. Pins that the u64 counter
+    //      is fed into the hasher (drift here would let an attacker
+    //      replay checkpoints from earlier iterations).
+    //
+    //   6. Length+casing contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): derive_checkpoint_id is the
+    // hash-chain link primitive for the runtime checkpoint chain. If
+    // two nodes compute different checkpoint ids for the same logical
+    // (orchestration_id, iteration_count, epoch, progress_state_hash,
+    // previous_checkpoint_hash) tuple — because someone dropped the
+    // labeled-field encoding, swapped the Some/None labels for a 0/1
+    // tag, or muddled the v3 domain — chain hash verification fails
+    // opaquely (FN_CK_003_HASH_CHAIN_FAILURE event at L784 fires
+    // spuriously) AND checkpoint replay forks across the orchestration
+    // fleet.
+    #[test]
+    fn derive_checkpoint_id_frozen_canonical_byte_layout_golden() {
+        // 1. Genesis: no previous checkpoint.
+        let genesis = super::derive_checkpoint_id(
+            "orch-1",
+            0,
+            1,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            None,
+        );
+        assert_eq!(
+            genesis,
+            "3e9be5beb36419983ba7294d48ce989902f2c9442136b73a3c5914529af9faf2",
+            "genesis derive_checkpoint_id drifted — check the v3 \
+             domain separator `checkpoint_content_v3:length_prefixed:`, \
+             the labeled-field encoding (LE64+label||LE64+value), OR \
+             the None branch's distinct label b\"previous_checkpoint_hash:none\""
+        );
+
+        // 2. Linked: with previous checkpoint.
+        let linked = super::derive_checkpoint_id(
+            "orch-1",
+            1,
+            1,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+        );
+        assert_eq!(
+            linked,
+            "8f1c1054484791cd0bbf623afe6f42571be7865d46e394f160811ed847a79fc9",
+            "linked derive_checkpoint_id drifted — check the Some branch's \
+             distinct label b\"previous_checkpoint_hash:some\""
+        );
+
+        // 3. Different orchestration_id (orchestration_id-sensitivity).
+        let diff_orch = super::derive_checkpoint_id(
+            "orch-2", // changed
+            0,
+            1,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            None,
+        );
+        assert_eq!(
+            diff_orch,
+            "2d661ccab9392f65511c4c4f06e8cada80ce81e1bd4b35b497ff13bec3ad670b"
+        );
+        assert_ne!(genesis, diff_orch);
+
+        // 4. OPTION-DISCRIMINATOR-LABEL-DISTINCTNESS INVARIANT: None
+        // MUST hash differently from Some(empty-string). A 0u8/1u8 tag
+        // refactor with empty value could collapse this; the labeled
+        // discriminator prevents that.
+        let some_empty = super::derive_checkpoint_id(
+            "orch-1",
+            0,
+            1,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            Some(""), // Some with empty string — should differ from None
+        );
+        assert_ne!(
+            some_empty, genesis,
+            "Some(\"\") MUST hash differently from None — the labels \
+             b\"previous_checkpoint_hash:some\" and b\"previous_checkpoint_hash:none\" \
+             are LOAD-BEARING distinct, NOT reducible to a single label \
+             with content \"\" vs \"\""
+        );
+
+        // 5. ITERATION-COUNT-SENSITIVITY INVARIANT: bumping
+        // iteration_count from 0 to 1 MUST flip the hash. Catches a
+        // future refactor that accidentally dropped the iteration_count
+        // (which would let an attacker replay earlier checkpoints).
+        let iter_bumped = super::derive_checkpoint_id(
+            "orch-1",
+            1, // bumped from 0
+            1,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            None,
+        );
+        assert_ne!(
+            iter_bumped, genesis,
+            "incrementing iteration_count from 0 to 1 MUST flip the hash"
+        );
+
+        // 6. Length+casing contract.
+        for h in [&genesis, &linked, &diff_orch] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
