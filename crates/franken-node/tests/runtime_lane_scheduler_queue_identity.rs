@@ -21,6 +21,15 @@ fn reweighted_single_background_lane_policy() -> LaneMappingPolicy {
     policy
 }
 
+fn fast_starving_background_lane_policy() -> LaneMappingPolicy {
+    let mut policy = LaneMappingPolicy::new();
+    let mut config = LaneConfig::new(SchedulerLane::Background, 10, 1);
+    config.starvation_window_ms = 100;
+    policy.add_lane(config).expect("test lane should be unique");
+    policy.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+    policy
+}
+
 fn single_control_critical_lane_policy() -> LaneMappingPolicy {
     let mut policy = LaneMappingPolicy::new();
     policy
@@ -602,6 +611,77 @@ fn run_queue_lifecycle_after_optional_preserving_reload(
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_starvation_latch_lifecycle(with_duplicate_starvation_check: bool) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(fast_starving_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(&task_classes::log_rotation(), 8_000, "meta-starve-active")
+        .expect("first task should occupy the lane");
+    let queued = queued_task_id_from(
+        scheduler
+            .assign_task(&task_classes::log_rotation(), 8_001, "meta-starve-queued")
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    let starved = scheduler.check_starvation(8_101, "meta-starve-first");
+    assert_eq!(starved.len(), 1);
+    assert_eq!(starved[0].code(), error_codes::ERR_LANE_STARVATION);
+    {
+        let counters = scheduler
+            .lane_counter(SchedulerLane::Background)
+            .expect("background counters after starvation");
+        assert_eq!(counters.starvation_events, 1);
+        assert!(counters.starvation_active);
+    }
+
+    if with_duplicate_starvation_check {
+        let audit_len = scheduler.audit_log().len();
+        let duplicate = scheduler.check_starvation(8_150, "meta-starve-duplicate");
+        assert_eq!(duplicate.len(), 1);
+        assert_eq!(scheduler.audit_log().len(), audit_len);
+        let counters = scheduler
+            .lane_counter(SchedulerLane::Background)
+            .expect("background counters after duplicate starvation");
+        assert_eq!(counters.starvation_events, 1);
+        assert!(counters.starvation_active);
+    }
+
+    scheduler
+        .complete_task(
+            &active.task_id.to_string(),
+            8_200,
+            "meta-starve-complete-active",
+        )
+        .expect("completion should promote queued task after starvation");
+    assert_eq!(
+        scheduler.active_task_ids(SchedulerLane::Background),
+        vec![queued.clone()]
+    );
+    assert!(
+        scheduler
+            .queued_task_ids(SchedulerLane::Background)
+            .is_empty()
+    );
+
+    let cleared = scheduler.check_starvation(8_201, "meta-starve-clear");
+    assert!(cleared.is_empty());
+    {
+        let counters = scheduler
+            .lane_counter(SchedulerLane::Background)
+            .expect("background counters after starvation clears");
+        assert_eq!(counters.starvation_events, 1);
+        assert!(!counters.starvation_active);
+    }
+
+    scheduler
+        .complete_task(&queued, 8_210, "meta-starve-complete-promoted")
+        .expect("promoted task should complete after starvation clears");
+
+    queue_lifecycle_digest(&scheduler)
+}
+
 #[test]
 fn metamorphic_queue_lifecycle_invariants_survive_observation_interleavings() {
     let baseline = run_queue_lifecycle(false);
@@ -675,6 +755,44 @@ fn metamorphic_preserving_hot_reload_keeps_background_queue_identity_and_promoti
     assert_eq!(reloaded.starvation_events, 0);
     assert_eq!(
         reloaded
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn metamorphic_repeated_starvation_checks_are_lifecycle_idempotent() {
+    let baseline = run_starvation_latch_lifecycle(false);
+    let repeated = run_starvation_latch_lifecycle(true);
+
+    assert_eq!(repeated, baseline);
+    assert_eq!(repeated.active_count, 0);
+    assert_eq!(repeated.queued_count, 0);
+    assert_eq!(repeated.first_queued_at_ms, None);
+    assert_eq!(repeated.completed_total, 2);
+    assert_eq!(repeated.rejected_total, 1);
+    assert_eq!(repeated.starvation_events, 1);
+    assert_eq!(
+        repeated
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_STARVED)
+            .count(),
+        1
+    );
+    assert_eq!(
+        repeated
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_STARVATION_CLEARED)
+            .count(),
+        1
+    );
+    assert_eq!(
+        repeated
             .audit_codes
             .iter()
             .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
