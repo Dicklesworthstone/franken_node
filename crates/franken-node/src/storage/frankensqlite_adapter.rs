@@ -851,10 +851,14 @@ impl FrankensqliteAdapter {
 
     /// Aggregate summary.
     pub fn summary(&self) -> AdapterSummary {
-        let writes_by_tier: BTreeMap<String, usize> = self
-            .writes_by_tier
+        let writes_by_tier: BTreeMap<String, usize> = DurabilityTier::all()
             .iter()
-            .map(|(t, c)| (t.label().to_string(), *c))
+            .map(|tier| {
+                (
+                    tier.label().to_string(),
+                    *self.writes_by_tier.get(tier).unwrap_or(&0),
+                )
+            })
             .collect();
         AdapterSummary {
             total_writes: self.write_count,
@@ -1574,6 +1578,39 @@ mod tests {
         assert_eq!(failed_report["summary"]["audit_log_truncated"], true);
         assert_eq!(failed_report["summary"]["replay_mismatches"], 1);
         assert_eq!(failed_report["summary"]["replay_count"], 1);
+    }
+
+    #[test]
+    fn frankensqlite_report_conformance_zero_fills_all_durability_tiers() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        let empty_report = adapter.to_report();
+        for tier in DurabilityTier::all() {
+            assert_eq!(
+                empty_report["summary"]["writes_by_tier"][tier.label()],
+                0,
+                "empty report should enumerate zero writes for {}",
+                tier.label()
+            );
+        }
+
+        adapter
+            .write_legacy(PersistenceClass::ControlState, "control-only", b"value")
+            .expect("control state write should succeed");
+
+        let partial_report = adapter.to_report();
+        assert_eq!(
+            partial_report["summary"]["writes_by_tier"][DurabilityTier::Tier1.label()],
+            1
+        );
+        assert_eq!(
+            partial_report["summary"]["writes_by_tier"][DurabilityTier::Tier2.label()],
+            0
+        );
+        assert_eq!(
+            partial_report["summary"]["writes_by_tier"][DurabilityTier::Tier3.label()],
+            0
+        );
     }
 
     #[test]
