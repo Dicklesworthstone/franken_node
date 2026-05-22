@@ -2194,4 +2194,109 @@ mod tests {
         // The fallback should only trigger for actual SystemTimeError conditions
         // (when duration_since fails, not when it succeeds with large values)
     }
+
+    // Frozen SHA-256 hex outputs of the public method
+    // StateVector::compute_state_hash (fork_detection.rs:162). The
+    // function is the state-vector canonical hash backing fork
+    // detection across replicas.
+    //
+    // Layout:
+    //
+    //   SHA256(
+    //     b"fork_detection_state_v1:"
+    //     || LE64(len(payload)) || payload.as_bytes()
+    //   ).hex()
+    //
+    // This golden COMPLEMENTS the existing reimplementation-style test
+    // `state_vector_compute_hash_length_prefixes_payload` at
+    // fork_detection.rs:792 (which manually constructs the expected
+    // byte sequence and compares). The L792 test catches "my
+    // reimplementation and the function diverge"; THIS golden catches
+    // "BOTH the function AND the reimplementation drift in lockstep"
+    // — a coordinated change to the v1 domain or LE64 width would pass
+    // L792 but fail these hex pins. Mutually reinforcing — same
+    // pattern as r41 interface_hash's relationship to the L277 test.
+    //
+    // Three frozen fixtures + structural invariants:
+    //
+    //   1. empty payload — locks v1 domain + LE64(0) framing.
+    //      Frozen: c70e2e44bf10b948b84f16afda1c57ec3c651a98fd04598407fe1159578cbd25
+    //
+    //   2. realistic state-vector payload (30 bytes — epoch + marker
+    //      + hash field concat).
+    //      Frozen: b87d871ac1bc8638b9d45e35d1572e6e68d7af76fb7a5ac3193b01bde0796ace
+    //
+    //   3. unicode payload (multi-byte UTF-8). Locks that LE64 prefix
+    //      counts BYTES, NOT codepoints — same invariant as r57
+    //      ecosystem_compliance but on a DIFFERENT v1 domain.
+    //      Frozen: 33e5a66d82cf360afa826336792ae9e1920040cccf62bd6d4daaa1800fd78e88
+    //
+    //   4. SAME-DOMAIN-DIFFERENT-PAYLOAD INVARIANT: empty payload and
+    //      a single-character payload MUST produce distinct hashes.
+    //      Catches a refactor that dropped the payload from the hasher.
+    //
+    //   5. 64-lowercase-hex length+casing contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): compute_state_hash is the
+    // canonical fingerprint that two replicas COMPARE to detect
+    // forks (DetectionResult::Forked at L185). If two replicas
+    // compute different hashes for the same logical state payload —
+    // because someone swapped LE64 widths, dropped the v1 domain, or
+    // normalized the payload before hashing — fork detection fires
+    // spuriously on legitimate identical states AND real forks may
+    // go undetected if the divergent encoding happens to collide.
+    #[test]
+    fn state_vector_compute_state_hash_frozen_canonical_byte_layout_golden() {
+        // 1. Empty payload baseline.
+        assert_eq!(
+            StateVector::compute_state_hash(""),
+            "c70e2e44bf10b948b84f16afda1c57ec3c651a98fd04598407fe1159578cbd25",
+            "empty StateVector::compute_state_hash drifted — check the \
+             v1 domain separator `fork_detection_state_v1:` or LE64(0) \
+             empty-payload framing"
+        );
+
+        // 2. Realistic state-vector payload.
+        assert_eq!(
+            StateVector::compute_state_hash("epoch=42:marker=svc-a:hash=abc"),
+            "b87d871ac1bc8638b9d45e35d1572e6e68d7af76fb7a5ac3193b01bde0796ace"
+        );
+
+        // 3. Unicode payload (multi-byte UTF-8). Locks LE64 byte-count
+        // (NOT codepoint-count) — same invariant as r57 on a different
+        // v1 domain.
+        let unicode_payload = "fork:détection:état";
+        // Sanity: payload has fewer codepoints than bytes due to
+        // accented characters.
+        assert!(unicode_payload.chars().count() < unicode_payload.as_bytes().len());
+        assert_eq!(
+            StateVector::compute_state_hash(unicode_payload),
+            "33e5a66d82cf360afa826336792ae9e1920040cccf62bd6d4daaa1800fd78e88",
+            "unicode payload compute_state_hash drifted — the LE64 \
+             length-prefix MUST count UTF-8 BYTES (NOT codepoints); \
+             a refactor that normalized to codepoint count would \
+             silently flip every hash for any payload with accented \
+             characters"
+        );
+
+        // 4. SAME-DOMAIN-DIFFERENT-PAYLOAD INVARIANT.
+        let single_char = StateVector::compute_state_hash("x");
+        assert_ne!(
+            single_char,
+            StateVector::compute_state_hash(""),
+            "empty payload and single-char payload MUST produce \
+             distinct hashes (catches a refactor that dropped payload \
+             from the hasher)"
+        );
+
+        // 5. 64-lowercase-hex length+casing contract.
+        for payload in ["", "epoch=42:marker=svc-a:hash=abc", unicode_payload, "x"] {
+            let h = StateVector::compute_state_hash(payload);
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
