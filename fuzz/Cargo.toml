@@ -556,3 +556,9 @@ name = "fuzz_federation_atc_sketches"
 path = "fuzz_targets/fuzz_federation_atc_sketches.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_federation_participation_weighting"
+path = "fuzz_targets/fuzz_federation_participation_weighting.rs"
+test = false
+doc = false
