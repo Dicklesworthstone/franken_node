@@ -3,7 +3,12 @@
 //! This module provides a quick way to test our fuzzing logic without
 //! waiting for the full libfuzzer compilation.
 
-use frankenengine_node::supply_chain::trust_card::TrustCardRegistrySnapshot;
+use std::path::{Path, PathBuf};
+
+use frankenengine_node::supply_chain::trust_card::{
+    SnapshotSourceContext, TrustCardError, TrustCardRegistry, TrustCardRegistrySnapshot,
+};
+use serde_json::{Map, Value};
 
 fn assert_snapshot_roundtrips(snapshot: &TrustCardRegistrySnapshot) {
     let encoded =
@@ -23,6 +28,206 @@ fn assert_snapshot_roundtrips(snapshot: &TrustCardRegistrySnapshot) {
         snapshot, &decoded_string,
         "trust-card snapshot must survive string serde roundtrip"
     );
+}
+
+fn assert_snapshot_debug_redacts_authentication_material(
+    snapshot: &TrustCardRegistrySnapshot,
+    label: &str,
+) {
+    let debug = format!("{snapshot:?}");
+
+    assert!(
+        !debug.contains(&snapshot.snapshot_hash),
+        "{label} debug output must redact snapshot_hash"
+    );
+    assert!(
+        !debug.contains(&snapshot.registry_signature),
+        "{label} debug output must redact registry_signature"
+    );
+}
+
+fn signed_empty_snapshot_value() -> Value {
+    let snapshot = TrustCardRegistry::default()
+        .snapshot()
+        .expect("default trust-card registry snapshot should sign");
+    serde_json::to_value(snapshot).expect("signed trust-card snapshot should convert to JSON")
+}
+
+fn snapshot_bytes(value: Value) -> Vec<u8> {
+    serde_json::to_vec(&value).expect("trust-card snapshot corpus value should serialize")
+}
+
+fn mutated_snapshot_bytes(value: &Value, mutate: impl FnOnce(&mut Map<String, Value>)) -> Vec<u8> {
+    let mut mutated = value.clone();
+    mutate(
+        mutated
+            .as_object_mut()
+            .expect("signed trust-card snapshot should serialize as an object"),
+    );
+    snapshot_bytes(mutated)
+}
+
+fn trust_card_high_water_path(snapshot_path: &Path) -> PathBuf {
+    let parent = snapshot_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = snapshot_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("trust-card-registry-state");
+    parent.join(format!("{file_name}.high-water.json"))
+}
+
+fn structure_aware_snapshot_fuzz_corpus() -> Vec<(&'static str, Vec<u8>, bool)> {
+    let valid_snapshot = signed_empty_snapshot_value();
+
+    vec![
+        (
+            "valid-signed-empty-snapshot",
+            snapshot_bytes(valid_snapshot.clone()),
+            true,
+        ),
+        ("invalid-utf8", vec![0xff, 0xfe, b'{'], false),
+        ("non-object-json", b"[]".to_vec(), false),
+        (
+            "unknown-field",
+            mutated_snapshot_bytes(&valid_snapshot, |object| {
+                object.insert("unexpected_field".to_string(), Value::Bool(true));
+            }),
+            false,
+        ),
+        (
+            "tampered-snapshot-hash",
+            mutated_snapshot_bytes(&valid_snapshot, |object| {
+                object.insert("snapshot_hash".to_string(), Value::String("00".repeat(32)));
+            }),
+            false,
+        ),
+        (
+            "tampered-registry-signature",
+            mutated_snapshot_bytes(&valid_snapshot, |object| {
+                object.insert(
+                    "registry_signature".to_string(),
+                    Value::String("00".repeat(32)),
+                );
+            }),
+            false,
+        ),
+        (
+            "missing-registry-signature",
+            mutated_snapshot_bytes(&valid_snapshot, |object| {
+                object.remove("registry_signature");
+            }),
+            false,
+        ),
+        (
+            "zero-cache-ttl",
+            mutated_snapshot_bytes(&valid_snapshot, |object| {
+                object.insert("cache_ttl_secs".to_string(), Value::Number(0_u64.into()));
+            }),
+            false,
+        ),
+        (
+            "cards-wrong-type",
+            mutated_snapshot_bytes(&valid_snapshot, |object| {
+                object.insert(
+                    "cards_by_extension".to_string(),
+                    Value::Array(vec![Value::String("not-a-registry-map".to_string())]),
+                );
+            }),
+            false,
+        ),
+        (
+            "unsupported-schema",
+            mutated_snapshot_bytes(&valid_snapshot, |object| {
+                object.insert(
+                    "schema_version".to_string(),
+                    Value::String("franken-node/trust-card-registry-state/v0".to_string()),
+                );
+            }),
+            false,
+        ),
+        (
+            "oversized-schema-string",
+            mutated_snapshot_bytes(&valid_snapshot, |object| {
+                object.insert(
+                    "schema_version".to_string(),
+                    Value::String("A".repeat(16_384)),
+                );
+            }),
+            false,
+        ),
+        (
+            "deep-nested-malformed-json",
+            b"{\"schema_version\":{\"nested\":{\"nested\":{\"nested\":true}}}}".to_vec(),
+            false,
+        ),
+    ]
+}
+
+/// Structure-aware supply-chain fuzz regression for untrusted trust-card snapshots.
+#[test]
+fn structure_aware_snapshot_fuzz_corpus_fails_closed_for_untrusted_loads() {
+    for (label, bytes, should_load) in structure_aware_snapshot_fuzz_corpus() {
+        if let Ok(snapshot) = serde_json::from_slice::<TrustCardRegistrySnapshot>(&bytes) {
+            assert_snapshot_roundtrips(&snapshot);
+            assert_snapshot_debug_redacts_authentication_material(&snapshot, label);
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(format!("{label}.json"));
+        std::fs::write(&path, &bytes).expect("write trust-card fuzz seed");
+
+        let result = TrustCardRegistry::load_authoritative_state(
+            &path,
+            60,
+            2_000,
+            SnapshotSourceContext::UntrustedNetwork,
+        );
+
+        if should_load {
+            assert!(result.is_ok(), "{label} should load, got {result:?}");
+            assert!(
+                trust_card_high_water_path(&path).exists(),
+                "{label} should persist a signed high-water marker after successful load"
+            );
+            continue;
+        }
+
+        let err = result.unwrap_err();
+        assert!(
+            !trust_card_high_water_path(&path).exists(),
+            "{label} must not persist high-water state after failed untrusted validation"
+        );
+        match err {
+            TrustCardError::InvalidSnapshot(detail) => {
+                assert_eq!(
+                    detail, "snapshot validation failed",
+                    "{label} should return sanitized validation detail"
+                );
+            }
+            TrustCardError::SnapshotParse { detail, .. } => {
+                assert_eq!(
+                    detail, "parsing failed",
+                    "{label} should return sanitized parse detail"
+                );
+            }
+            TrustCardError::UnsupportedSnapshotSchema(schema) => {
+                assert!(
+                    !schema.chars().any(char::is_control),
+                    "{label} unsupported schema error must not echo control characters"
+                );
+            }
+            TrustCardError::SnapshotRead { detail, .. } => {
+                assert!(
+                    detail.contains("valid UTF-8"),
+                    "{label} should only fail during read for non-UTF-8 fuzz bytes"
+                );
+            }
+            other => assert!(
+                matches!(&other, TrustCardError::InvalidSnapshot(_)),
+                "{label} returned unexpected untrusted-load error: {other:?}"
+            ),
+        }
+    }
 }
 
 /// Test that the fuzzing target logic works correctly
