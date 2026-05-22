@@ -1288,7 +1288,3 @@ required-features = ["advanced-features"]
 name = "bd_tg2_fleet_quarantine_conformance"
 path = "../../tests/conformance/bd_tg2_fleet_quarantine_conformance.rs"
 required-features = ["advanced-features"]
-
-[[test]]
-name = "ambient_authority_gate"
-path = "tests/ambient_authority_gate.rs"

@@ -6,7 +6,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use subtle::ConstantTimeEq;
 
 pub const EVENT_MODULE_CLEAN: &str = "AMB-001";
 pub const EVENT_VIOLATION: &str = "AMB-002";
@@ -280,7 +279,7 @@ pub fn compute_allowlist_signature(
     let mut hasher = Sha256::new();
     hasher.update(b"ambient_authority_signature_v1:");
     hasher.update(payload.as_bytes());
-    format!("sha256:{}", hex::encode(hasher.finalize()))
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 #[derive(Debug, Clone)]
@@ -786,7 +785,7 @@ fn validate_allowlist_entry(entry: &AllowlistEntry, today: NaiveDate) -> Allowli
         &entry.signer,
         &entry.expires_on,
     );
-    if !bool::from(entry.signature.as_bytes().ct_eq(expected.as_bytes())) {
+    if entry.signature != expected {
         return AllowlistEntryStatus::InvalidSignature;
     }
 
