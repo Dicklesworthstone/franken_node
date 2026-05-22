@@ -52,6 +52,12 @@ path = "src/bin/bd_3a3q_guardrail_monitor_conformance.rs"
 test = false
 required-features = ["advanced-features"]
 
+[[bin]]
+name = "bd-tg2-fleet-quarantine-conformance"
+path = "src/bin/bd_tg2_fleet_quarantine_conformance.rs"
+test = false
+required-features = ["advanced-features"]
+
 [lib]
 path = "src/lib.rs"
 test = false
@@ -802,6 +808,10 @@ name = "threshold_signature_verification"
 path = "../../tests/security/threshold_signature_verification.rs"
 
 [[test]]
+name = "threshold_sig_conformance"
+path = "tests/threshold_sig_conformance.rs"
+
+[[test]]
 name = "ed25519_verifier_rejects_malleable_signatures"
 path = "../../tests/security/ed25519_verifier_rejects_malleable_signatures.rs"
 
@@ -1271,4 +1281,10 @@ required-features = ["advanced-features"]
 [[test]]
 name = "bd_3a3q_guardrail_monitor_conformance"
 path = "../../tests/conformance/bd_3a3q_guardrail_monitor_conformance.rs"
+required-features = ["advanced-features"]
+
+# bd-tg2 Fleet Quarantine/Revocation API Conformance Test Suite
+[[test]]
+name = "bd_tg2_fleet_quarantine_conformance"
+path = "../../tests/conformance/bd_tg2_fleet_quarantine_conformance.rs"
 required-features = ["advanced-features"]

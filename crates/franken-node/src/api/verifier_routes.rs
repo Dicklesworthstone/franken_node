@@ -2710,4 +2710,75 @@ mod tests {
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("verifier_parameters") || error_msg.contains("missing field"));
     }
+
+    // Frozen SHA-256 hex outputs of `sha256_marker_from_parts`
+    // (verifier_routes.rs:222). The function builds the verifier marker
+    // string as:
+    //
+    //   "sha256:" + hex( SHA256( domain || (LE64(len(part_i)) || part_i)* ) )
+    //
+    // The domain is NOT length-prefixed (only the per-part bytes are). Any
+    // drift in: domain length-prefix decision, LE64 width on per-part length,
+    // field iteration order, or the "sha256:" prefix flips these markers
+    // and fails the test. Marker strings flow into ATC verifier response
+    // bodies as content/root/aggregate/report hashes (verifier_routes.rs:430-
+    // 493) — a silent layout change would split markers across verifier
+    // versions and break cross-version replay of recorded responses.
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing the function in Python — not captured from an unreviewed
+    // prior run. Recompute ALL three together if the layout intentionally
+    // changes.
+    #[test]
+    fn sha256_marker_from_parts_frozen_canonical_byte_layout_golden() {
+        // Empty-parts fixture: only the domain bytes feed the hasher.
+        // Locks the "no length prefix on the domain" decision against any
+        // future refactor that would length-prefix the domain too.
+        let empty = sha256_marker_from_parts(b"verifier_routes_golden_domain_v1:", &[]);
+        assert_eq!(
+            empty,
+            "sha256:ca9dc50055cd0eb2e18bc9bc231ed37687c820e36924c999207b2c1a06527fad",
+            "empty-parts marker drifted — either the domain is now \
+             length-prefixed (it must not be), or the `sha256:` prefix or \
+             hex casing changed"
+        );
+
+        // Populated-parts fixture: three parts of distinct non-zero lengths
+        // (op-golden-1 = 11, ATC-7 = 5, 2026-04-24T00:00:00Z = 20). Locks
+        // the LE64-len-per-part framing and the iteration order; reordering
+        // the parts would flip the hash.
+        let populated = sha256_marker_from_parts(
+            b"verifier_routes_golden_domain_v1:",
+            &["op-golden-1", "ATC-7", "2026-04-24T00:00:00Z"],
+        );
+        assert_eq!(
+            populated,
+            "sha256:f5b31bf1431183f178cf729dcc97ceeadf1658754ee9569f815b55a30fa63a86",
+            "populated-parts marker drifted — check LE64-len per-part \
+             framing or iteration order"
+        );
+
+        // Empty-string-parts fixture: a 0-length part sandwiched between
+        // non-empty parts. Locks the LE64(0) framing in the per-part loop —
+        // an empty-string part is still length-prefixed with LE64(0) and
+        // contributes zero subsequent bytes, distinct from a missing part.
+        let with_empty =
+            sha256_marker_from_parts(b"verifier_routes_golden_domain_v1:", &["", "non-empty", ""]);
+        assert_eq!(
+            with_empty,
+            "sha256:b277160e1f4f7586bbe75e7e4d92d6b28fd063906267761883354c6c9bdb7e61",
+            "empty-string-part marker drifted — check that an empty &str \
+             still emits LE64(0) into the hasher rather than being skipped"
+        );
+
+        // Cross-fixture distinctness: all three goldens must be distinct, and
+        // each must carry the "sha256:" prefix + 64 hex chars (72 chars total).
+        assert_ne!(empty, populated);
+        assert_ne!(populated, with_empty);
+        assert_ne!(empty, with_empty);
+        for marker in [&empty, &populated, &with_empty] {
+            assert_eq!(marker.len(), "sha256:".len() + 64);
+            assert!(marker.starts_with("sha256:"));
+        }
+    }
 }
