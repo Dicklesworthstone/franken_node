@@ -1,0 +1,22 @@
+Gnuplot not found, using plotters backend
+Loaded small corpus: 78147 bytes, 2509 lines (~2.5k LOC)
+Benchmarking migrate_tree_sitter/analyze_js/small_78147bytes
+Benchmarking migrate_tree_sitter/analyze_js/small_78147bytes: Warming up for 1.0000 s
+Benchmarking migrate_tree_sitter/analyze_js/small_78147bytes: Collecting 20 samples in estimated 3.9987 s (420 iterations)
+Benchmarking migrate_tree_sitter/analyze_js/small_78147bytes: Analyzing
+migrate_tree_sitter/analyze_js/small_78147bytes
+                        time:   [9.4898 ms 9.5011 ms 9.5113 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Loaded large corpus: 3099814 bytes, 102253 lines (~102k LOC)
+
+Benchmarking migrate_tree_sitter_parse_only/parse/small_78147bytes
+Benchmarking migrate_tree_sitter_parse_only/parse/small_78147bytes: Warming up for 1.0000 s
+Benchmarking migrate_tree_sitter_parse_only/parse/small_78147bytes: Collecting 20 samples in estimated 3.5253 s (420 iterations)
+Benchmarking migrate_tree_sitter_parse_only/parse/small_78147bytes: Analyzing
+migrate_tree_sitter_parse_only/parse/small_78147bytes
+                        time:   [8.3963 ms 8.4122 ms 8.4358 ms]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+

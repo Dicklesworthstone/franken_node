@@ -1,0 +1,9 @@
+Gnuplot not found, using plotters backend
+Loaded small corpus: 78147 bytes, 2509 lines (~2.5k LOC)
+Loaded large corpus: 3099814 bytes, 102253 lines (~102k LOC)
+Testing migrate_tree_sitter/analyze_js/large_3099814bytes
+Success
+
+Testing migrate_tree_sitter_parse_only/parse/large_3099814bytes
+Success
+

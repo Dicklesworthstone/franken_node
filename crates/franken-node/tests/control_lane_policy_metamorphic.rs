@@ -31,6 +31,9 @@
 //! 10. **Fresh-policy invariants** — `verify_all_assigned()` and
 //!     `verify_budget_sum()` always return `true` on a freshly constructed
 //!     policy.
+//! 11. **Priority monotonicity under lower-priority padding** — adding extra
+//!     Ready-lane work MUST NOT reduce Cancel or Timed run counts for the same
+//!     tick, and SHOULD NOT reduce the Ready-lane run count.
 
 use frankenengine_node::control_plane::control_lane_policy::{
     CANCEL_LANE_BUDGET_PCT, ControlLane, ControlLanePolicy, ControlTaskClass,
@@ -249,6 +252,54 @@ proptest! {
 
         // tick_history must record exactly one entry for this tick.
         prop_assert_eq!(policy.tick_history().len(), 1);
+    }
+
+    /// Property 11: adding lower-priority Ready work is an inclusive
+    /// transformation. MUST: higher-priority Cancel/Timed scheduling is
+    /// unchanged. SHOULD: Ready scheduling is monotonic because the available
+    /// Ready capacity is unchanged and only Ready demand increased.
+    #[test]
+    fn ready_padding_preserves_higher_priority_lane_counts(
+        cancel_pending in 0_u32..=64,
+        timed_pending in 0_u32..=64,
+        ready_pending in 0_u32..=64,
+        ready_padding in 0_u32..=64,
+        total_slots in 0_u32..=32,
+    ) {
+        let mut base_policy = ControlLanePolicy::new();
+        let base = base_policy.tick(
+            cancel_pending,
+            timed_pending,
+            ready_pending,
+            total_slots,
+            "trace-mr-base",
+        );
+
+        let mut padded_policy = ControlLanePolicy::new();
+        let padded = padded_policy.tick(
+            cancel_pending,
+            timed_pending,
+            ready_pending.saturating_add(ready_padding),
+            total_slots,
+            "trace-mr-ready-padding",
+        );
+
+        prop_assert_eq!(
+            padded.cancel_lane_tasks_run,
+            base.cancel_lane_tasks_run,
+            "MUST: Ready padding changed Cancel scheduling"
+        );
+        prop_assert_eq!(
+            padded.timed_lane_tasks_run,
+            base.timed_lane_tasks_run,
+            "MUST: Ready padding changed Timed scheduling"
+        );
+        prop_assert!(
+            padded.ready_lane_tasks_run >= base.ready_lane_tasks_run,
+            "SHOULD: Ready padding reduced Ready scheduling"
+        );
+        prop_assert_eq!(base_policy.tick_history().len(), 1);
+        prop_assert_eq!(padded_policy.tick_history().len(), 1);
     }
 
     /// Invalid task IDs are an untrusted-input boundary for the lane policy's

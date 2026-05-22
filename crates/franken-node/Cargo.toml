@@ -846,6 +846,10 @@ path = "../../tests/security/dgis_fragility_spof.rs"
 name = "dgis_graph_ingestion"
 path = "../../tests/security/dgis_graph_ingestion.rs"
 
+[[test]]
+name = "federation_dgis_atc_bridge_conformance"
+path = "tests/federation_dgis_atc_bridge_conformance.rs"
+
 # bd-cclm.1: DGIS adversarial validation suite artifacts
 [[test]]
 name = "dgis_adversarial_suite"

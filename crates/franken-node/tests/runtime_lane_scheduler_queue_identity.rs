@@ -838,6 +838,68 @@ fn run_drained_queue_lifecycle_after_optional_terminal_preserving_reload(
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_drained_queue_lifecycle_after_optional_terminal_telemetry_snapshots(
+    with_terminal_snapshots: bool,
+) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(
+            &task_classes::log_rotation(),
+            11_300,
+            "meta-terminal-telemetry-active",
+        )
+        .expect("first task should occupy the lane");
+    let queued = queued_task_id_from(
+        scheduler
+            .assign_task(
+                &task_classes::log_rotation(),
+                11_301,
+                "meta-terminal-telemetry-queued",
+            )
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    scheduler
+        .complete_task(
+            &active.task_id.to_string(),
+            11_310,
+            "meta-terminal-telemetry-complete-active",
+        )
+        .expect("completion should promote queued task before terminal snapshots");
+    scheduler
+        .complete_task(&queued, 11_320, "meta-terminal-telemetry-complete-promoted")
+        .expect("promoted task should complete before terminal snapshots");
+
+    if with_terminal_snapshots {
+        let before_snapshots = queue_lifecycle_digest(&scheduler);
+        let audit_len = scheduler.audit_log().len();
+
+        for timestamp_ms in [11_321, 11_350, 11_999] {
+            let snapshot = scheduler.telemetry_snapshot(timestamp_ms);
+            assert_eq!(snapshot.schema_version.as_str(), "ls-v1.0");
+            assert_eq!(snapshot.timestamp_ms, timestamp_ms);
+            let background = snapshot
+                .counters
+                .iter()
+                .find(|counters| counters.lane == SchedulerLane::Background)
+                .expect("background counters must be present in terminal telemetry");
+            assert_eq!(background.active_count, 0);
+            assert_eq!(background.queued_count, 0);
+            assert_eq!(background.first_queued_at_ms, None);
+            assert_eq!(background.completed_total, 2);
+            assert_eq!(background.rejected_total, 1);
+            assert_eq!(background.starvation_events, 0);
+            assert_eq!(scheduler.audit_log().len(), audit_len);
+            assert_eq!(queue_lifecycle_digest(&scheduler), before_snapshots);
+        }
+    }
+
+    queue_lifecycle_digest(&scheduler)
+}
+
 fn run_starvation_latch_lifecycle_with_probes(
     with_duplicate_starvation_check: bool,
     with_terminal_starvation_probes: bool,
@@ -1617,6 +1679,28 @@ fn metamorphic_terminal_preserving_hot_reload_retains_drained_lifecycle() {
     assert_eq!(reloaded.starvation_events, 0);
     assert_eq!(
         reloaded
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn metamorphic_terminal_telemetry_snapshots_preserve_drained_lifecycle() {
+    let baseline = run_drained_queue_lifecycle_after_optional_terminal_telemetry_snapshots(false);
+    let snapshotted = run_drained_queue_lifecycle_after_optional_terminal_telemetry_snapshots(true);
+
+    assert_eq!(snapshotted, baseline);
+    assert_eq!(snapshotted.active_count, 0);
+    assert_eq!(snapshotted.queued_count, 0);
+    assert_eq!(snapshotted.first_queued_at_ms, None);
+    assert_eq!(snapshotted.completed_total, 2);
+    assert_eq!(snapshotted.rejected_total, 1);
+    assert_eq!(snapshotted.starvation_events, 0);
+    assert_eq!(
+        snapshotted
             .audit_codes
             .iter()
             .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)

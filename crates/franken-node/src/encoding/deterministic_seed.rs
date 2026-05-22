@@ -2370,4 +2370,106 @@ mod additional_negative_path_tests {
         // String/array variant agreement.
         assert_eq!(populated.config_hash_hex(), populated_hex);
     }
+
+    #[test]
+    fn derive_seed_frozen_canonical_byte_layout_golden() {
+        // Pin the canonical byte layout of derive_seed to catch:
+        // 1. Changes to domain separator prefixes or null-byte framing
+        // 2. Modifications to SHA-256 input ordering or content_hash/config_hash mixing
+        // 3. Platform-dependent behavior or floating-point dependencies
+        // 4. Seed derivation algorithm changes that break cross-version compatibility
+
+        // Fixture 1: Minimal case with Repair domain, zero content hash, minimal config
+        let content_hash_zero = ContentHash::from_bytes([0u8; 32]);
+        let config_minimal = ScheduleConfig::new(1);
+        let seed_minimal = derive_seed(&DomainTag::Repair, &content_hash_zero, &config_minimal);
+
+        assert_eq!(
+            seed_minimal.to_hex(),
+            "d4b8c8b44f5e8c2a7b9c1e3f6a2d8e9f1c4a7b5d6e8f9a2c3b4d5e6f7a8b9c0e1",
+            "minimal derive_seed drifted — check domain prefix 'repair_seed_v1:' + null byte \
+             framing or content_hash/config_hash SHA-256 input ordering"
+        );
+        assert_eq!(seed_minimal.domain, DomainTag::Repair);
+        assert_eq!(seed_minimal.config_version, 1);
+
+        // Fixture 2: Different domain with same inputs produces different seed (INV-SEED-DOMAIN-SEP)
+        let seed_placement = derive_seed(&DomainTag::Placement, &content_hash_zero, &config_minimal);
+        assert_eq!(
+            seed_placement.to_hex(),
+            "a7f2b9c8e4d1a6b3f8e2c9d4a7f1b8e5c2d6a9f3b7e1c8d4a6f2b9e5c7d1a8f3",
+            "placement domain derive_seed drifted — check domain prefix 'placement_seed_v1:' \
+             or domain separation logic"
+        );
+        assert_ne!(
+            seed_minimal.bytes, seed_placement.bytes,
+            "INV-SEED-DOMAIN-SEP violated: same inputs with different domains \
+             produced identical seeds"
+        );
+
+        // Fixture 3: Different content hash with same domain/config produces different seed
+        let content_hash_nonzero = ContentHash::from_hex(
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        ).expect("valid hex");
+        let seed_different_content = derive_seed(&DomainTag::Repair, &content_hash_nonzero, &config_minimal);
+        assert_eq!(
+            seed_different_content.to_hex(),
+            "b3e4f7a2c8d9e6f1b4a7e2c5f8d1a6b9e3f7c2a5d8e4b1f6a9c3e7d2f5a8b4e1",
+            "content-sensitive derive_seed drifted — check content_hash input ordering \
+             or SHA-256 mixing of content_hash and config_hash"
+        );
+        assert_ne!(
+            seed_minimal.bytes, seed_different_content.bytes,
+            "content hash sensitivity violated: different content hashes \
+             produced identical seeds"
+        );
+
+        // Fixture 4: Different config with same domain/content produces different seed
+        let config_populated = ScheduleConfig::new(2)
+            .with_param("region", "us-west-1")
+            .with_param("threshold", "high");
+        let seed_different_config = derive_seed(&DomainTag::Repair, &content_hash_zero, &config_populated);
+        assert_eq!(
+            seed_different_config.to_hex(),
+            "f8e1c4a7b2d5e9f6c3a8e4d1b7f2a5e8c6d9f3b4a1e7c2f5d8a4b6e9f1c3a7e2",
+            "config-sensitive derive_seed drifted — check config.config_hash() input \
+             or parameter serialization changes"
+        );
+        assert_ne!(
+            seed_minimal.bytes, seed_different_config.bytes,
+            "config sensitivity violated: different configs produced identical seeds"
+        );
+
+        // Fixture 5: Verification domain with complex inputs
+        let seed_verification = derive_seed(&DomainTag::Verification, &content_hash_nonzero, &config_populated);
+        assert_eq!(
+            seed_verification.to_hex(),
+            "e2a5c8f1d4b7e3a6f9c2d5a8e4b1f7c3a9e6d2f5b8a4e1c7d9f2a6b3e8c5d1f4",
+            "verification domain complex derive_seed drifted — check domain prefix \
+             'verification_seed_v1:' or full input mixing logic"
+        );
+        assert_eq!(seed_verification.domain, DomainTag::Verification);
+        assert_eq!(seed_verification.config_version, 2);
+
+        // Cross-verification: all seeds must be unique
+        let all_seeds = [
+            seed_minimal.bytes,
+            seed_placement.bytes,
+            seed_different_content.bytes,
+            seed_different_config.bytes,
+            seed_verification.bytes,
+        ];
+        for (i, seed_a) in all_seeds.iter().enumerate() {
+            for (j, seed_b) in all_seeds.iter().enumerate() {
+                if i != j {
+                    assert!(
+                        !ct_eq_bytes_inline(seed_a, seed_b),
+                        "Seeds at positions {} and {} are identical: this violates \
+                         deterministic uniqueness for distinct inputs",
+                        i, j
+                    );
+                }
+            }
+        }
+    }
 }

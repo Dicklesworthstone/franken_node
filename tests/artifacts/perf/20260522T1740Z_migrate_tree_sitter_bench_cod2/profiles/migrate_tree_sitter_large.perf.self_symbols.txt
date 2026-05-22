@@ -1,0 +1,120 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cycles:P'
+# Event count (approx.): 3632551305
+#
+# Overhead  Symbol                                                IPC   [IPC Coverage]
+# ........  ....................................................  ....................
+#
+    12.95%  [.] ts_parser_parse                                   -      -            
+    11.22%  [.] ts_lex                                            -      -            
+     6.87%  [.] ts_language_table_entry                           -      -            
+     6.61%  [.] stack_node_new                                    -      -            
+     6.45%  [.] ts_parser__lex                                    -      -            
+     4.25%  [.] stack__iter.constprop.0                           -      -            
+     4.11%  [.] ts_subtree_summarize_children                     -      -            
+     3.66%  [.] ts_subtree_release                                -      -            
+     2.93%  [.] ts_lexer__advance                                 -      -            
+     2.66%  [.] malloc_consolidate                                -      -            
+     2.63%  [.] _int_malloc                                       -      -            
+     2.63%  [.] ts_tree_cursor_goto_sibling_internal.constprop.0  -      -            
+     2.33%  [.] ts_lexer__get_lookahead                           -      -            
+     1.72%  [.] stack_node_release                                -      -            
+     1.65%  [.] cfree@GLIBC_2.2.5                                 -      -            
+     1.46%  [.] ts_tree_cursor_goto_first_child_internal          -      -            
+     1.37%  [.] ts_subtree_array_remove_trailing_extras           -      -            
+     1.30%  [.] ts_subtree_new_leaf                               -      -            
+     1.21%  [.] ts_stack__add_slice                               -      -            
+     1.21%  [k] clear_page_rep                                    -      -            
+     1.19%  [.] ts_lex_keywords                                   -      -            
+     1.11%  [.] migrate_tree_sitter_bench::count_nodes            -      -            
+     1.04%  [.] tree_sitter_javascript_external_scanner_scan      -      -            
+     0.92%  [.] _int_free_chunk                                   -      -            
+     0.87%  [.] ts_subtree_new_node                               -      -            
+     0.76%  [.] ts_language_next_state                            -      -            
+     0.76%  [.] unlink_chunk.isra.0                               -      -            
+     0.69%  [.] __libc_malloc2                                    -      -            
+     0.68%  [.] ts_parser__version_status.isra.0                  -      -            
+     0.68%  [.] ts_lexer_start                                    -      -            
+     0.61%  [.] ts_tree_cursor_new                                -      -            
+     0.61%  [.] ts_lexer_goto                                     -      -            
+     0.60%  [.] ts_stack_renumber_version                         -      -            
+     0.59%  [.] ts_decode_utf8                                    -      -            
+     0.52%  [.] __memmove_avx_unaligned                           -      -            
+     0.43%  [.] __memmove_avx_unaligned_erms                      -      -            
+     0.37%  [.] migrate_tree_sitter_bench::main                   -      -            
+     0.35%  [.] stack_head_delete                                 -      -            
+     0.35%  [.] malloc                                            -      -            
+     0.35%  [.] ts_tree_cursor_current_node                       -      -            
+     0.34%  [k] get_mem_cgroup_from_mm                            -      -            
+     0.34%  [.] ts_subtree_retain                                 -      -            
+     0.34%  [.] ts_lexer__eof                                     -      -            
+     0.34%  [.] stack__subtree_node_count                         -      -            
+     0.31%  [.] ts_subtree_compress                               -      -            
+     0.26%  [k] rmqueue_pcplist                                   -      -            
+     0.26%  [.] ts_malloc_default                                 -      -            
+     0.23%  [k] _copy_to_iter                                     -      -            
+     0.17%  [.] scan_ternary_qmark                                -      -            
+     0.17%  [k] folio_add_lru                                     -      -            
+     0.17%  [.] ts_tree_cursor_goto_first_child                   -      -            
+     0.17%  [k] rmqueue_bulk                                      -      -            
+     0.17%  [k] do_anonymous_page                                 -      -            
+     0.17%  [.] ts_parser__reuse_node                             -      -            
+     0.17%  [.] ts_tree_cursor_goto_next_sibling                  -      -            
+     0.17%  [.] ts_node_is_named                                  -      -            
+     0.09%  [k] folio_add_new_anon_rmap                           -      -            
+     0.09%  [k] __rcu_read_lock                                   -      -            
+     0.09%  [k] __do_sys_brk                                      -      -            
+     0.09%  [k] folio_add_lru_vma                                 -      -            
+     0.09%  [k] charge_memcg                                      -      -            
+     0.09%  [k] alloc_anon_folio                                  -      -            
+     0.09%  [k] alloc_pages_mpol                                  -      -            
+     0.09%  [.] ts_language_is_wasm                               -      -            
+     0.09%  [k] post_alloc_hook                                   -      -            
+     0.09%  [k] do_user_addr_fault                                -      -            
+     0.09%  [.] malloc@plt                                        -      -            
+     0.09%  [k] exc_page_fault                                    -      -            
+     0.09%  [k] mas_walk                                          -      -            
+     0.09%  [k] lru_gen_add_folio                                 -      -            
+     0.09%  [k] get_page_from_freelist                            -      -            
+     0.09%  [k] __alloc_frozen_pages_noprof                       -      -            
+     0.09%  [k] srso_return_thunk                                 -      -            
+     0.09%  [k] mod_memcg_lruvec_state                            -      -            
+     0.09%  [.] ts_lexer__mark_end                                -      -            
+     0.09%  [k] try_charge_memcg                                  -      -            
+     0.09%  [k] policy_nodemask                                   -      -            
+     0.09%  [k] __handle_mm_fault                                 -      -            
+     0.09%  [.] ts_language_is_reserved_word                      -      -            
+     0.09%  [k] __cond_resched                                    -      -            
+     0.09%  [.] memcmp@plt                                        -      -            
+     0.09%  [.] ts_node_start_byte                                -      -            
+     0.09%  [k] __lruvec_stat_mod_folio                           -      -            
+     0.09%  [k] rep_movs_alternative                              -      -            
+     0.09%  [k] native_irq_return_iret                            -      -            
+     0.08%  [.] memmove@plt                                       -      -            
+     0.08%  [.] ts_parser__can_reuse_first_leaf.isra.0            -      -            
+     0.08%  [.] ts_tree_cursor_delete                             -      -            
+     0.08%  [k] update_load_avg                                   -      -            
+     0.08%  [k] update_curr                                       -      -            
+     0.08%  [k] __calc_delta.constprop.0                          -      -            
+     0.08%  [k] lru_add                                           -      -            
+     0.08%  [k] ___pte_offset_map                                 -      -            
+     0.08%  [k] propagate_entity_load_avg                         -      -            
+     0.08%  [.] __memcmp_avx2_movbe                               -      -            
+     0.07%  [k] arch_scale_cpu_capacity                           -      -            
+     0.06%  [k] srso_safe_ret                                     -      -            
+     0.03%  [.] _dl_map_object_from_fd                            -      -            
+     0.00%  [k] blk_cgroup_congested                              -      -            
+     0.00%  [k] change_protection_range                           -      -            
+     0.00%  [k] recalc_sigpending                                 -      -            
+     0.00%  [k] merge_sched_in                                    -      -            
+     0.00%  [k] native_write_msr                                  -      -            
+     0.00%  [k] perf_event_update_userpage                        -      -            
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
