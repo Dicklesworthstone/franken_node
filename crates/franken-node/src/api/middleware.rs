@@ -4065,4 +4065,151 @@ pub fn auth_failure_limiter_cardinality_loom_model() {
             assert_eq!(stats.unique_source_ips, 3);
         }
     });
+
+    // Frozen outputs of the module-private function `credential_principal`
+    // (middleware.rs:72). The function derives a content-addressed
+    // principal identifier from a label and a (sensitive) secret as:
+    //
+    //   first 8 bytes of SHA256(
+    //     b"control_plane_auth_principal_v1:"
+    //     || LE64(len(label))  || label.as_bytes()
+    //     || LE64(len(secret)) || secret.as_bytes()
+    //   ),
+    //   formatted as: "{label}:{16 hex chars}"
+    //
+    // The OUTPUT contains the raw label in plaintext followed by a colon
+    // and the truncated secret-bound hex. This is a deliberate design
+    // choice — the label is meant to be human-readable (e.g. "admin",
+    // "reader") so operators can identify roles in audit logs; the secret
+    // is bound via SHA-256 so the principal changes when the secret
+    // rotates without leaking the secret itself.
+    //
+    // Four frozen fixtures cover the label × secret (empty | non-empty)
+    // matrix:
+    //
+    //   1. admin (label="admin", secret="secret-token-1234") — typical
+    //      production-shaped principal.
+    //      Frozen: admin:5f2eee67f927ae27
+    //
+    //   2. reader (label="reader", secret="ro-token") — distinct label
+    //      AND secret, confirms full-label appearance in output.
+    //      Frozen: reader:7a04fc67404d6b99
+    //
+    //   3. empty-sec (label="user", secret="") — locks the LE64(0)
+    //      empty-secret framing AND confirms the principal is still
+    //      well-formed even with an empty secret (NOT a degenerate
+    //      "user:0000000000000000" — the v1 domain prefix prevents the
+    //      all-zero collision).
+    //      Frozen: user:d50e8c7729d717f2
+    //
+    //   4. empty-lbl (label="", secret="lone-secret") — locks the empty-
+    //      label edge case. Output begins with a bare colon ":<hex>".
+    //      This is an unusual shape but the function does NOT reject it;
+    //      callers are expected to provide a non-empty label, and this
+    //      golden documents that the function does NOT enforce that.
+    //      Frozen: :b15a5a82bf7f35ed
+    //
+    // Critical layout invariants this golden pins:
+    //   - the v1 domain separator `control_plane_auth_principal_v1:`
+    //   - LE64 width on per-string length prefix (NOT LE32, NOT varint)
+    //   - field order: label BEFORE secret (a future refactor that
+    //     swapped them would flip every existing audit-log principal
+    //     even if both inputs are identical strings)
+    //   - 8-byte truncation: `digest.iter().take(8)` produces 16 hex
+    //     chars; pinning here guards against accidental widening (which
+    //     would lengthen every principal and break label-based parsing)
+    //     OR narrowing (which would weaken collision resistance)
+    //   - "{label}:{hex}" format: colon is the separator, NOT "/" or ";"
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing the function in Python — NOT captured from an
+    // unreviewed prior run.
+    //
+    // Why this matters (the contract): credential_principal is the
+    // identifier emitted into audit logs (write_auth_failure_event at
+    // L65) and used to de-duplicate auth-failure sources. If two control-
+    // plane nodes derive different principals for the same logical
+    // (label, secret) pair — because someone reordered the fields,
+    // swapped LE64 widths, or muddled the v1 domain — audit dedup forks
+    // across nodes AND the same operator credential appears as TWO
+    // distinct principals in audit logs, breaking forensics.
+    #[test]
+    fn credential_principal_frozen_canonical_byte_layout_golden() {
+        // 1. admin: typical production-shaped principal.
+        let admin = super::credential_principal("admin", "secret-token-1234");
+        assert_eq!(
+            admin,
+            "admin:5f2eee67f927ae27",
+            "admin principal drifted — check the v1 domain separator, \
+             LE64 length-prefix per field, 8-byte truncation, OR the \
+             '{{label}}:{{hex}}' format string"
+        );
+
+        // 2. reader: distinct label AND distinct secret.
+        let reader = super::credential_principal("reader", "ro-token");
+        assert_eq!(reader, "reader:7a04fc67404d6b99");
+
+        // 3. empty-sec: empty secret. Locks LE64(0) empty-secret framing.
+        // Critical: this is NOT a degenerate "all-zero" hash because the
+        // v1 domain prefix differentiates it from an attacker that tries
+        // to forge a principal by constructing input bytes that hash to
+        // an all-zero digest.
+        let empty_sec = super::credential_principal("user", "");
+        assert_eq!(empty_sec, "user:d50e8c7729d717f2");
+
+        // 4. empty-lbl: empty label. Output begins with a bare colon.
+        let empty_lbl = super::credential_principal("", "lone-secret");
+        assert_eq!(empty_lbl, ":b15a5a82bf7f35ed");
+
+        // Cross-fixture distinctness: all four MUST produce distinct
+        // principals.
+        assert_ne!(admin, reader);
+        assert_ne!(empty_sec, empty_lbl);
+        assert_ne!(admin, empty_sec);
+        assert_ne!(reader, empty_lbl);
+
+        // FIELD-ORDER-SENSITIVITY INVARIANT: swapping label and secret
+        // — i.e. calling credential_principal("secret-token-1234",
+        // "admin") — MUST produce a DIFFERENT principal from
+        // credential_principal("admin", "secret-token-1234"). Pins that
+        // label and secret are NOT interchangeable (a future refactor
+        // that "normalised the input order" would silently flip every
+        // existing audit-log principal).
+        let swapped = super::credential_principal("secret-token-1234", "admin");
+        assert_ne!(
+            swapped, admin,
+            "swapping label and secret MUST produce a different principal; \
+             if it does not, the field-position distinction has been lost"
+        );
+
+        // SECRET-BINDING INVARIANT: changing only the secret with the
+        // same label MUST flip the hex tail. Pins that the secret IS
+        // fed into the hasher and IS load-bearing. A future bug where
+        // the secret is dropped would let an attacker enumerate
+        // principals by label alone.
+        let admin_diff_secret = super::credential_principal("admin", "different-secret");
+        assert_ne!(
+            admin, admin_diff_secret,
+            "changing only the secret MUST change the principal hex tail; \
+             if it does not, the secret is not being fed into the hasher \
+             and principal collision is trivial"
+        );
+        // But the label half MUST match (label is the prefix before the colon).
+        assert!(admin.starts_with("admin:"));
+        assert!(admin_diff_secret.starts_with("admin:"));
+
+        // Format contract: every principal is "{label}:" + exactly 16
+        // lowercase hex chars.
+        for (principal, expected_prefix) in [
+            (&admin, "admin:"),
+            (&reader, "reader:"),
+            (&empty_sec, "user:"),
+            (&empty_lbl, ":"),
+        ] {
+            assert!(principal.starts_with(expected_prefix));
+            let hex_tail = &principal[expected_prefix.len()..];
+            assert_eq!(hex_tail.len(), 16);
+            assert!(hex_tail.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
