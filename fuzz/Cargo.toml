@@ -574,3 +574,9 @@ name = "fuzz_remote_idempotency_derivation"
 path = "fuzz_targets/fuzz_remote_idempotency_derivation.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_remote_computation_registry"
+path = "fuzz_targets/fuzz_remote_computation_registry.rs"
+test = false
+doc = false
