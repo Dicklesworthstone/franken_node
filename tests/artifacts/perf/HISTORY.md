@@ -9,6 +9,7 @@ rounds append; never overwrite.
 |------:|---------------|-------------------------------------------|------------------------------------------------------|------------|
 | 1     | 2026-05-20    | `20260520T214003Z_franken_node_perf`      | All 10 Criterion benches; full DEFINE→HAND OFF; baselines + perf + samply + heaptrack for top-3 candidates | n/a (first profile) |
 | 2     | 2026-05-20    | `20260520T231041Z_franken_node_perf_r2`   | Round-1 deferred items: evidence_ledger (now registered as `[[bench]]`), dgis::contagion_simulator integration test, vef::proof_generator test, fleet_transport static read | confirmed 2 round-1 candidates as non-hotspots; raised 2 new candidates |
+| 3     | 2026-05-21    | `20260521T214316Z_franken_node_t46_rebaseline` | T4.6 re-baseline trust_card_canonical_bench post-T4.5; validated performance targets NOT met | **REGRESSION DETECTED**: all T4 targets missed by 2.66×-6.98×; requires heaptrack analysis |
 
 ## Unified cross-round hotspot ranking (current)
 
