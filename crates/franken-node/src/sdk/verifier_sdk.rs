@@ -8009,4 +8009,121 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
             assert!(unicode_result.is_ok(), "Should handle Unicode stress test");
         }
     }
+
+    // Frozen SHA-256 hex outputs of the verifier SDK's deterministic
+    // length-prefixed hasher `deterministic_hash_iter` (verifier_sdk.rs:263)
+    // and its slice-borrowing wrapper `deterministic_hash_fields` (L273).
+    // The function builds the SDK-side deterministic hash as:
+    //
+    //   SHA256(
+    //     b"verifier_sdk_v1:"
+    //     || for f in fields:
+    //          LE64(len(f)) || f.as_bytes()
+    //   )
+    //
+    // Per the function doc at L261-262: "Prevents hash collision when fields
+    // contain delimiters." That collision-resistance contract REQUIRES the
+    // exact LE64-len-prefix-per-field layout pinned here. The function is
+    // bound into `artifact_binding_hash` (L283) which forms the binding
+    // digest between an artifact and the trust claims attached to it —
+    // INV-VSK-DETERMINISTIC-VERIFY documented at L253.
+    //
+    // Four frozen fixtures cover all branches:
+    //
+    //   1. empty (no fields) — locks the v1 domain + zero-iterations
+    //      of the per-field loop.
+    //   2. single (one field) — locks per-field {LE64, bytes} framing.
+    //   3. multi (three distinct-length fields) — locks iteration order.
+    //   4. with-empty ("" sandwiched between non-empty fields) — locks the
+    //      LE64(0)-on-empty-string framing path. Critically, this case
+    //      ensures an empty-string field is NOT silently skipped (which
+    //      would defeat the delimiter-collision-resistance guarantee).
+    //
+    // Goldens were derived offline from the canonical-byte spec — NOT
+    // captured from an unreviewed prior run — by reimplementing the
+    // function in Python and hashing the resulting byte stream. Recompute
+    // all four together if the layout intentionally changes.
+    //
+    // Note: this golden is structurally analogous to r32's
+    // sha256_marker_from_parts (verifier_routes.rs:222) golden, but it
+    // covers a DIFFERENT surface (SDK rather than route handler) with a
+    // DIFFERENT domain separator (`verifier_sdk_v1:` vs the routes file's
+    // `verifier_routes_golden_domain_v1:` test fixture) and a DIFFERENT
+    // output format (raw hex, no `sha256:` prefix). A future refactor that
+    // accidentally unified the two functions would either flip these
+    // hashes OR change the prefix — either way, this golden catches it.
+    #[test]
+    fn deterministic_hash_iter_frozen_canonical_byte_layout_golden() {
+        // 1. Empty-fields fixture: only the domain bytes feed the hasher.
+        let empty = super::deterministic_hash_fields(&[]);
+        assert_eq!(
+            empty,
+            "483f2b83eaf92be15dd1ce2837aa223eae75397db83fbc0ce4df3db02a65b1a2",
+            "empty-fields hash drifted — check the `verifier_sdk_v1:` \
+             domain separator or per-field LE64-len framing decision \
+             on zero-length fields"
+        );
+
+        // 2. Single-field fixture: locks per-field {LE64(len), bytes}.
+        let single = super::deterministic_hash_fields(&["op-golden-1"]);
+        assert_eq!(
+            single,
+            "d712df886288cb44795b23be5a0dc02565b3271c4a08c5d8edd3c0225ccb0ac1",
+            "single-field hash drifted — check LE64 length-prefix width \
+             (must be 8 bytes, not 4 or varint) or domain bytes"
+        );
+
+        // 3. Multi-field fixture: three distinct-length fields exercise
+        // the iteration order. Reordering would flip the hash.
+        let multi = super::deterministic_hash_fields(&[
+            "artifact-x",
+            "sha256:abc",
+            "claim-trust-card",
+        ]);
+        assert_eq!(
+            multi,
+            "df0f524ecc684b7b8aafbe074ebfe0da20210a326334a85c39b9b36f1083f112",
+            "multi-field hash drifted — check iteration order or per-field \
+             {LE64, bytes} framing"
+        );
+
+        // 4. With-empty fixture: 0-length field sandwiched between non-
+        // empty fields. Locks the LE64(0)-on-empty-string contract — an
+        // empty &str MUST still emit LE64(0) into the hasher rather than
+        // being silently skipped. Skipping would defeat the
+        // delimiter-collision-resistance guarantee that motivates the
+        // length-prefix design (see L261-262 doc).
+        let with_empty = super::deterministic_hash_fields(&["", "non-empty", ""]);
+        assert_eq!(
+            with_empty,
+            "967d055241cf208db64213d05684611034406d5757722a32545f029b838f0795",
+            "with-empty hash drifted — check that an empty &str field \
+             still emits LE64(0) into the hasher rather than being skipped \
+             (skipping would defeat delimiter-collision-resistance)"
+        );
+
+        // Cross-fixture distinctness + length+casing contract.
+        for h in [&empty, &single, &multi, &with_empty] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+        assert_ne!(empty, single);
+        assert_ne!(single, multi);
+        assert_ne!(multi, with_empty);
+        assert_ne!(empty, with_empty);
+
+        // Iter/slice agreement invariant: deterministic_hash_iter and
+        // deterministic_hash_fields MUST agree on the same input
+        // (the latter is a thin slice-iter wrapper around the former).
+        // A future refactor that fixes one but not the other would silently
+        // fork SDK consumers; this catches it.
+        let iter_form = super::deterministic_hash_iter(["artifact-x", "sha256:abc"]);
+        let slice_form = super::deterministic_hash_fields(&["artifact-x", "sha256:abc"]);
+        assert_eq!(
+            iter_form, slice_form,
+            "deterministic_hash_iter and deterministic_hash_fields MUST \
+             produce identical hashes — the latter is a slice-iter wrapper \
+             around the former (verifier_sdk.rs:273-275)"
+        );
+    }
 }
