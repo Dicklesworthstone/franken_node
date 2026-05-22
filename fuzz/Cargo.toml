@@ -370,3 +370,9 @@ name = "fuzz_canonical_encoder_parity"
 path = "fuzz_targets/canonical_encoder_parity.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_claim_compiler_external_claim"
+path = "fuzz_targets/fuzz_claim_compiler_external_claim.rs"
+test = false
+doc = false
