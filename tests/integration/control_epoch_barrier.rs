@@ -171,6 +171,101 @@ fn barrier_commit_state_is_metamorphic_under_ack_order_permutation() -> Result<(
 }
 
 #[test]
+fn barrier_commit_state_is_metamorphic_under_registration_order_permutation() -> Result<(), String>
+{
+    #[derive(Debug, PartialEq, Eq)]
+    struct RegistrationOrderRun {
+        proposal: (u64, u64),
+        committed: u64,
+        current: u64,
+        history: (u64, u64, String, String, String, Option<String>),
+        drain_requests: Vec<(String, u64, Option<u64>, String)>,
+    }
+
+    fn run_registration_order(order: &[&str]) -> Result<RegistrationOrderRun, String> {
+        let mut coordinator = ProductEpochCoordinator::new(55, 2, BarrierConfig::new(10_000, 500));
+        for service_id in order {
+            coordinator.register_service(service_id);
+        }
+
+        let proposal = coordinator
+            .propose_transition("operator", "registration-order-mr", 20_000, "trace-propose")
+            .map_err(|err| err.to_string())?;
+        for service_id in [
+            "connector_fencing",
+            "connector_lifecycle",
+            "connector_rollout_state",
+        ] {
+            coordinator
+                .ack_drain(service_id, 1, 20, "trace-ack")
+                .map_err(|err| err.to_string())?;
+        }
+
+        let committed = coordinator
+            .commit_transition(20_100, "trace-commit")
+            .map_err(|err| err.to_string())?;
+        let history = coordinator
+            .history()
+            .first()
+            .ok_or_else(|| "committed transition did not record history".to_string())?;
+        let mut drain_requests = Vec::new();
+        for event in coordinator
+            .events()
+            .iter()
+            .filter(|event| event.event_code == EPOCH_DRAIN_REQUESTED)
+        {
+            let service_id = event
+                .service_id
+                .clone()
+                .ok_or_else(|| "drain request missing service id".to_string())?;
+            let status = event
+                .quiescence_status
+                .clone()
+                .ok_or_else(|| "drain request missing status".to_string())?;
+            drain_requests.push((
+                service_id,
+                event.epoch_current,
+                event.epoch_artifact,
+                status,
+            ));
+        }
+        drain_requests.sort();
+
+        Ok(RegistrationOrderRun {
+            proposal: (proposal.pre_epoch, proposal.target_epoch),
+            committed,
+            current: coordinator.current_epoch(),
+            history: (
+                history.pre_epoch,
+                history.target_epoch,
+                history.initiator.clone(),
+                history.reason.clone(),
+                history.outcome.clone(),
+                history.abort_reason.clone(),
+            ),
+            drain_requests,
+        })
+    }
+
+    let canonical = run_registration_order(&[
+        "connector_fencing",
+        "connector_lifecycle",
+        "connector_rollout_state",
+    ])?;
+    let permuted = run_registration_order(&[
+        "connector_rollout_state",
+        "connector_fencing",
+        "connector_lifecycle",
+    ])?;
+
+    assert_eq!(canonical.proposal, (55, 56));
+    assert_eq!(canonical.committed, 56);
+    assert_eq!(canonical.current, 56);
+    assert_eq!(canonical, permuted);
+    Ok(())
+}
+
+#[test]
 fn barrier_commit_advances_control_epoch_before_connectors_accept_target_epoch() {
     let mut coordinator = coordinator_at(41);
 
