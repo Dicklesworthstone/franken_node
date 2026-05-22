@@ -2092,4 +2092,202 @@ mod tests {
         assert_ne!(proof.content_hash(), tampered.content_hash());
         assert!(tampered.verify().is_err());
     }
+
+    // Frozen SHA-256 hex outputs for TWO complementary canonical-byte
+    // functions in this module:
+    //
+    //   OperatorContext::fingerprint (operator_intelligence.rs:179)
+    //     SHA256(
+    //       b"operator_intelligence_ctx_v1:"
+    //       || compatibility_pass.to_le_bytes()  # f64 LE — 8 bytes
+    //       || migration_success.to_le_bytes()   # f64 LE
+    //       || trust_valid.to_le_bytes()         # f64 LE
+    //       || error_rate.to_le_bytes()          # f64 LE
+    //       || pending_ops.to_le_bytes()         # usize LE (8 bytes on 64-bit)
+    //       || active_alerts.to_le_bytes()       # usize LE
+    //     ).finalize().into()
+    //
+    //   RollbackProof::content_hash (operator_intelligence.rs:227)
+    //     SHA256(
+    //       b"rollback_proof_content_v1:"
+    //       || pre_state_hash                    # 32 raw bytes — NO length prefix
+    //       || LE64(len(action_spec)) || action_spec.as_bytes()
+    //       || post_state_hash                   # 32 raw bytes
+    //       || LE64(len(rollback_spec)) || rollback_spec.as_bytes()
+    //     ).finalize().into()
+    //
+    // Distinctive features pinned by this golden:
+    //   - OperatorContext::fingerprint is the THIRD golden in the suite
+    //     to lock f64 IEEE-754 bit-pattern encoding (after r44
+    //     chain_evidence_hash and r51 quarantine_controller policy_hash).
+    //     Six fields, all fixed-width (4×f64 + 2×usize), NO length
+    //     prefixes — locks the "fixed-width fields skip length prefix"
+    //     design decision against a future "uniform length-prefix"
+    //     refactor.
+    //   - RollbackProof::content_hash mixes fixed-width [u8; 32] hashes
+    //     (NO length prefix) with variable-width Strings (LE64-prefixed).
+    //     This is the first golden in the suite to pin an asymmetric
+    //     "fixed-width pre-hash + len-prefixed string + fixed-width
+    //     post-hash + len-prefixed string" interleaved layout.
+    //   - Critical 64-bit assumption pinned: pending_ops / active_alerts
+    //     are `usize` which is 8 bytes on 64-bit targets. ed25519_dalek
+    //     and the rest of the workspace assume 64-bit; pinning these
+    //     hashes documents that contract.
+    //
+    // Five fixtures + structural invariants for each surface:
+    //
+    // OperatorContext::fingerprint:
+    //   1. zeros (all-zero context — locks the v1 domain + zero-f64-bit
+    //      pattern). Frozen: 626997a8...d2dc9
+    //   2. healthy (compat=0.99, mig=0.98, trust=0.97, err=0.01, pending=5).
+    //      Frozen: 2c0fdd3c...58c15
+    //   3. degraded (compat=0.50, mig=0.40, trust=0.60, err=0.30, pending=100,
+    //      active_alerts=25). Frozen: 00475f6b...9a1c0
+    //
+    // RollbackProof::content_hash:
+    //   4. minimal (pre=post=zeros, empty specs). Frozen: f67ba6e6...3ac09
+    //   5. typical (pre=pattern_ab, post=pattern_cd, specs filled).
+    //      Frozen: 751b2fd4...f7368
+    //
+    // Structural invariants pinned:
+    //   - usize-width invariant: pending_ops differing by 1 (5 vs 6)
+    //     MUST flip the fingerprint
+    //   - prestate-vs-poststate-distinguishability: swapping pre and
+    //     post state hashes MUST flip content_hash (asymmetric framing)
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python (struct.pack('<d', ...) for f64, '<Q' for usize-as-u64,
+    // and raw bytes for the 32-byte pre/post hashes) — NOT captured
+    // from an unreviewed prior run.
+    //
+    // Why this matters (the contract): OperatorContext::fingerprint is
+    // the audit-trail identifier for operator-intelligence decisions;
+    // RollbackProof::content_hash binds a rollback procedure to a
+    // specific (pre, post) state transition. If two control planes
+    // compute different fingerprints/content_hashes for the same logical
+    // operator context or rollback proof, audit dedup forks AND
+    // rollback verification fails opaquely.
+    #[test]
+    fn operator_context_and_rollback_proof_frozen_byte_layout_golden() {
+        // === OperatorContext::fingerprint ===
+
+        // 1. Zeros baseline.
+        let zeros = OperatorContext {
+            compatibility_pass: 0.0,
+            migration_success: 0.0,
+            trust_valid: 0.0,
+            error_rate: 0.0,
+            pending_ops: 0,
+            active_alerts: 0,
+        };
+        assert_eq!(
+            hex::encode(zeros.fingerprint()),
+            "626997a86e967e0c81a9c387e59e5a9151359d31277778260cd795bb972d2dc9",
+            "OperatorContext::fingerprint(all zeros) drifted — check \
+             the `operator_intelligence_ctx_v1:` domain separator, \
+             the f64-zero-bit-pattern (8 zero bytes), or the usize \
+             encoding (must be 8 bytes LE on 64-bit targets)"
+        );
+
+        // 2. Healthy fleet (high rates, low error/alerts).
+        let healthy = OperatorContext {
+            compatibility_pass: 0.99,
+            migration_success: 0.98,
+            trust_valid: 0.97,
+            error_rate: 0.01,
+            pending_ops: 5,
+            active_alerts: 0,
+        };
+        assert_eq!(
+            hex::encode(healthy.fingerprint()),
+            "2c0fdd3cc83815d5e5f9eff2d3ed094eae237058cfe089577706f245dbd58c15"
+        );
+
+        // 3. Degraded fleet (mid-range rates, many pending + alerts).
+        let degraded = OperatorContext {
+            compatibility_pass: 0.50,
+            migration_success: 0.40,
+            trust_valid: 0.60,
+            error_rate: 0.30,
+            pending_ops: 100,
+            active_alerts: 25,
+        };
+        assert_eq!(
+            hex::encode(degraded.fingerprint()),
+            "00475f6bd1cd0ffdbc9e121fb21ed614a42e8926087f1ef9914ff678b829a1c0"
+        );
+
+        // usize-width invariant: changing only pending_ops from 5 to 6
+        // MUST flip the fingerprint. Pins that usize is fed as 8 bytes
+        // LE (NOT 4-byte u32, NOT varint).
+        let mut healthy_pending6 = healthy.clone();
+        healthy_pending6.pending_ops = 6;
+        assert_ne!(
+            hex::encode(healthy_pending6.fingerprint()),
+            hex::encode(healthy.fingerprint()),
+            "incrementing pending_ops by 1 MUST flip the fingerprint; \
+             if it does not, usize is being truncated/normalised"
+        );
+
+        // === RollbackProof::content_hash ===
+
+        // 4. Minimal: zero hashes, empty specs.
+        let minimal = RollbackProof {
+            pre_state_hash: [0u8; 32],
+            action_spec: String::new(),
+            post_state_hash: [0u8; 32],
+            rollback_spec: String::new(),
+        };
+        assert_eq!(
+            hex::encode(minimal.content_hash()),
+            "f67ba6e64453c2fe25bf930d6df12f5d8184edd7f3e25a9894c653a7afb3ac09",
+            "RollbackProof::content_hash(minimal) drifted — check the \
+             `rollback_proof_content_v1:` domain separator, the raw \
+             32-byte pre/post-state framing (NO length prefix — they \
+             are fixed-width), or LE64(0) on empty specs"
+        );
+
+        // 5. Typical: distinct pattern pre/post + populated specs.
+        let typical = RollbackProof {
+            pre_state_hash: [0xab; 32],
+            action_spec: "migrate up v2".to_string(),
+            post_state_hash: [0xcd; 32],
+            rollback_spec: "migrate down v1".to_string(),
+        };
+        assert_eq!(
+            hex::encode(typical.content_hash()),
+            "751b2fd48f788d447b2ad17ef48fa8582ff253af9efa8bd4823b25b47aaf7368"
+        );
+
+        // prestate-vs-poststate-distinguishability invariant: swapping
+        // pre and post state hashes MUST produce a DIFFERENT
+        // content_hash. Pins that the framing distinguishes the two
+        // hashes by POSITION (interleaved with action_spec / rollback_spec),
+        // NOT by content alone. A future refactor that "concatenated
+        // pre and post hashes" would lose this distinction.
+        let swapped = RollbackProof {
+            pre_state_hash: [0xcd; 32], // was post
+            action_spec: "migrate up v2".to_string(),
+            post_state_hash: [0xab; 32], // was pre
+            rollback_spec: "migrate down v1".to_string(),
+        };
+        assert_ne!(
+            hex::encode(swapped.content_hash()),
+            hex::encode(typical.content_hash()),
+            "swapping pre_state_hash and post_state_hash MUST change \
+             content_hash; pins the positional framing of the two \
+             32-byte hashes"
+        );
+
+        // Length contract: every output is exactly 32 raw bytes.
+        for h in [
+            zeros.fingerprint(),
+            healthy.fingerprint(),
+            degraded.fingerprint(),
+            minimal.content_hash(),
+            typical.content_hash(),
+        ] {
+            assert_eq!(h.len(), 32);
+        }
+    }
 }
