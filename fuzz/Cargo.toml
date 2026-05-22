@@ -550,3 +550,9 @@ name = "fuzz_dgis_spof_detection"
 path = "fuzz_targets/fuzz_dgis_spof_detection.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_federation_atc_sketches"
+path = "fuzz_targets/fuzz_federation_atc_sketches.rs"
+test = false
+doc = false
