@@ -520,3 +520,9 @@ name = "fuzz_rewrite_suggestion_engine"
 path = "fuzz_targets/fuzz_rewrite_suggestion_engine.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_cleanup_receipts_storage"
+path = "fuzz_targets/fuzz_cleanup_receipts_storage.rs"
+test = false
+doc = false
