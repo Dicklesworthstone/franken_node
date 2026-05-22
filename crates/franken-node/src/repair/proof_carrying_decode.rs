@@ -6621,4 +6621,111 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
             }
         }
     }
+
+    #[test]
+    fn mr_cross_algorithm_determinism_consistency() {
+        // MR: When multiple algorithms can successfully process the same fragments,
+        // each algorithm must exhibit deterministic behavior across repeated runs.
+        // Property: f_alg1(input) = f_alg1(input) AND f_alg2(input) = f_alg2(input)
+        // This tests algorithm implementation consistency, not cross-algorithm output equality.
+
+        let algorithms = vec![
+            RepairAlgorithm::XorRecovery,
+            RepairAlgorithm::ReedSolomonRS255_223,
+        ];
+
+        let test_fragment_sets = vec![
+            // Single fragment case
+            vec![Fragment {
+                fragment_id: "single_determinism".to_string(),
+                data: b"deterministic_test_data_single".to_vec(),
+            }],
+            // Multiple fragment case
+            vec![
+                Fragment {
+                    fragment_id: "multi_determinism_1".to_string(),
+                    data: b"deterministic_test_part_1".to_vec(),
+                },
+                Fragment {
+                    fragment_id: "multi_determinism_2".to_string(),
+                    data: b"deterministic_test_part_2".to_vec(),
+                },
+            ],
+            // Identical duplicates case (edge case for algorithm handling)
+            vec![
+                Fragment {
+                    fragment_id: "duplicate_determinism_1".to_string(),
+                    data: b"identical_data".to_vec(),
+                },
+                Fragment {
+                    fragment_id: "duplicate_determinism_2".to_string(),
+                    data: b"identical_data".to_vec(),
+                },
+            ],
+        ];
+
+        for (set_idx, fragments) in test_fragment_sets.iter().enumerate() {
+            for algorithm in &algorithms {
+                let mut algorithm_outputs = Vec::new();
+                let mut algorithm_proofs = Vec::new();
+
+                // Run the same algorithm multiple times on identical input
+                for run in 0..3 {
+                    let mut decoder = ProofCarryingDecoder::new(
+                        ProofMode::Advisory,
+                        &format!("mr-determinism-signer-{}", run),
+                        "determinism-test-key",
+                    );
+
+                    let result = decoder.decode(
+                        &format!("mr_determinism_object_{}_{}", set_idx, run),
+                        fragments,
+                        &AlgorithmId::from(*algorithm),
+                        2000 + set_idx as u64 + run as u64,
+                        &format!("mr_determinism_trace_{}_{}_{:?}", set_idx, run, algorithm),
+                    );
+
+                    match result {
+                        Ok(decode_result) => {
+                            algorithm_outputs.push(decode_result.output_data);
+                            algorithm_proofs.push(decode_result.proof);
+                        }
+                        Err(_) => {
+                            // If algorithm can't handle this fragment set, skip consistency check
+                            // (but this is still valuable information - shows algorithm limitations)
+                            continue;
+                        }
+                    }
+                }
+
+                // Verify deterministic behavior: all outputs from same algorithm should be identical
+                if algorithm_outputs.len() >= 2 {
+                    for i in 1..algorithm_outputs.len() {
+                        assert_eq!(
+                            algorithm_outputs[0], algorithm_outputs[i],
+                            "Algorithm {:?} produced non-deterministic output for fragment set {}: run 0 vs run {}",
+                            algorithm, set_idx, i
+                        );
+                    }
+
+                    // Verify proof determinism (within algorithm)
+                    for i in 1..algorithm_proofs.len() {
+                        if let (Some(proof0), Some(proofi)) = (&algorithm_proofs[0], &algorithm_proofs[i]) {
+                            assert_eq!(
+                                proof0.output_hash, proofi.output_hash,
+                                "Algorithm {:?} produced non-deterministic proof output hash for fragment set {}: run 0 vs run {}",
+                                algorithm, set_idx, i
+                            );
+                            assert_eq!(
+                                proof0.input_fragment_hashes, proofi.input_fragment_hashes,
+                                "Algorithm {:?} produced non-deterministic fragment hashes for fragment set {}: run 0 vs run {}",
+                                algorithm, set_idx, i
+                            );
+                            // Note: attestation_signature may legitimately differ due to timestamps/trace_ids
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
