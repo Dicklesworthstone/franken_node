@@ -2454,4 +2454,98 @@ mod tests {
 
         assert!(matches!(err, ReceiptError::Internal(message) if message.contains("capacity")));
     }
+
+    // Frozen SHA-256 hex over the canonical byte layout produced by
+    // `compute_chain_hash` (decision_receipt.rs:1100). The function builds
+    // the receipt-chain link hash as:
+    //
+    //   SHA256(
+    //     b"decision_receipt_chain_v1:"
+    //     || LE64(len(prev))    where prev = previous_hash.unwrap_or("GENESIS")
+    //     || prev.as_bytes()
+    //     || LE64(len(payload))
+    //     || payload.as_bytes()
+    //   )
+    //
+    // Any drift in: the v1 domain separator, the LE64 width on either length
+    // prefix, the order of (prev, payload) fields, OR — critically — the
+    // hardcoded "GENESIS" sentinel for None previous hashes flips these
+    // hashes and fails the test. The "GENESIS" sentinel is a load-bearing
+    // contract: changing it (to "" or "ROOT" or anything else) silently
+    // disconnects every existing decision-receipt chain from its first link.
+    //
+    // Goldens were derived offline from the canonical-byte spec — NOT
+    // captured from an unreviewed prior run — by reimplementing the function
+    // in Python and hashing the resulting byte stream. Recompute all three
+    // hashes together if the layout intentionally changes (a one-sided
+    // update flags a real split between the None/Some previous-hash branches
+    // or between empty/non-empty payload paths — that is a bug, not churn).
+    #[test]
+    fn compute_chain_hash_frozen_canonical_byte_layout_golden() {
+        // Genesis empty fixture: previous_hash = None (locks the GENESIS
+        // sentinel + LE64(len("GENESIS")) = LE64(7) framing) and payload =
+        // "" (locks the empty-payload LE64(0) trailing framing).
+        let genesis_empty = compute_chain_hash(None, "");
+        assert_eq!(
+            genesis_empty,
+            "902bedd3d4525be8dfb1073ea69e27e8b8756b4f63f500b54f94370e1caac729",
+            "genesis-empty chain hash drifted — check the v1 domain \
+             separator, the GENESIS sentinel string, or the LE64(0) \
+             empty-payload framing"
+        );
+
+        // Genesis populated fixture: previous_hash = None, payload = a
+        // 31-byte JSON snippet. Locks the GENESIS branch + non-zero payload
+        // length-prefix encoding.
+        let genesis_populated =
+            compute_chain_hash(None, "{\"decision\":\"admit\",\"epoch\":1}");
+        assert_eq!(
+            genesis_populated,
+            "7364f9fc6b10bf99766966095ad5e0aaecd8d3f49ddd08e3a1af139b29264de8",
+            "genesis-populated chain hash drifted — check payload \
+             length-prefix encoding (LE64 vs BE64, or width drift)"
+        );
+
+        // Linked populated fixture: previous_hash = Some(64-char hex) —
+        // exercises the Some(_) branch with a realistic-sized prev hash.
+        // Locks the Some-prev framing across the previous_hash.unwrap_or(...)
+        // call site, ensuring a future refactor that, say, length-prefixed
+        // the OUTPUT of unwrap_or differently from the GENESIS literal would
+        // surface here.
+        let linked_populated = compute_chain_hash(
+            Some("abc123def456abc123def456abc123def456abc123def456abc123def456abcd"),
+            "{\"decision\":\"deny\",\"epoch\":2}",
+        );
+        assert_eq!(
+            linked_populated,
+            "0ed339fbd75f045ba7adc6329b98bb3398950996def8dd2ca29f6eb033eba518",
+            "linked-populated chain hash drifted — check Some(prev) \
+             branch framing or field ordering (prev MUST hash before payload)"
+        );
+
+        // Cross-fixture invariants: every hash is exactly 64 lowercase hex
+        // chars; all three are distinct (no accidental field-order or
+        // sentinel collision).
+        for hash in [&genesis_empty, &genesis_populated, &linked_populated] {
+            assert_eq!(hash.len(), 64);
+            assert!(hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+        assert_ne!(genesis_empty, genesis_populated);
+        assert_ne!(genesis_populated, linked_populated);
+        assert_ne!(genesis_empty, linked_populated);
+
+        // GENESIS-sentinel invariant: invoking with previous_hash = None
+        // MUST produce the same hash as invoking with previous_hash =
+        // Some("GENESIS"). This pins the unwrap_or("GENESIS") substitution
+        // against a future refactor that, say, switches to a separate
+        // "genesis branch" with a distinct domain-byte prefix — which would
+        // silently break the chain at every node's first link.
+        let explicit_genesis = compute_chain_hash(Some("GENESIS"), "");
+        assert_eq!(
+            explicit_genesis, genesis_empty,
+            "None previous_hash MUST hash identically to Some(\"GENESIS\") — \
+             the unwrap_or substitution is a load-bearing contract for the \
+             first link in every receipt chain"
+        );
+    }
 }
