@@ -1100,3 +1100,150 @@ fn stable_id(prefix: &str, parts: &[&str]) -> String {
     let hex = hex::encode(digest);
     format!("{prefix}-{}", &hex[..16])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Frozen outputs of the module-private function `stable_id`
+    // (immunization_planner.rs:1089). The function derives a stable
+    // composite identifier for immunization plans / barriers / cohorts.
+    //
+    // The function builds the canonical identifier as:
+    //
+    //   digest = SHA256(
+    //     b"dgis_immunization_planner_id_v1:"
+    //     || prefix.as_bytes()                        # NO length prefix
+    //     || for part in parts:
+    //          LE64(len(part)) || part.as_bytes()
+    //   ).hex()
+    //
+    //   id = format!("{prefix}-{}", &digest[..16])    # 16 hex chars suffix
+    //
+    // *** TWO DISTINCTIVE FEATURES pinned by this golden ***
+    //
+    // 1. ASYMMETRIC PREFIX FRAMING: the `prefix` argument is fed into
+    //    the hasher WITHOUT a length prefix (just raw bytes), while
+    //    each `part` IS length-prefixed. This is unusual — most
+    //    surfaces in the suite length-prefix all variable-width inputs
+    //    for collision resistance. Here the design relies on the
+    //    prefix being a hardcoded caller-controlled string (e.g.
+    //    "plan", "strategy", "cohort"); attacker-controlled prefixes
+    //    could attempt to forge collisions by absorbing characters
+    //    from the first part. Pinning the empty-parts + populated-parts
+    //    fixtures documents this design choice — a future refactor
+    //    that "uniformly length-prefixed everything" would silently
+    //    flip every stable_id across the planner.
+    //
+    // 2. SAME-DOMAIN-DIFFERENT-PREFIX-DISTINGUISHED: the prefix appears
+    //    BOTH in the hash AND literally in the output, so two
+    //    different prefixes produce visibly different ids AND
+    //    different digests. This is the FIRST golden to pin the
+    //    contract that two distinct logical-category strings (e.g.
+    //    "plan" vs "strategy") MUST produce distinguishable
+    //    identifiers even with otherwise-identical parts.
+    //
+    // Three frozen fixtures + three structural invariants:
+    //
+    //   1. plan-empty (prefix="plan", parts=[]). Locks the v1 domain
+    //      + raw prefix + zero-iterations-of-parts framing.
+    //      Frozen id: "plan-6bd0f608ceb36e40"
+    //
+    //   2. plan-multi (prefix="plan", parts=["node-1", "node-2",
+    //      "cohort-A"]). Locks per-part LE64-len framing + Vec order.
+    //      Frozen id: "plan-4ebc50bfd86f0fc3"
+    //
+    //   3. strategy (prefix="strategy", parts=["aggressive"]).
+    //      Different prefix → different category in output AND in hash.
+    //      Frozen id: "strategy-7d45d340edad9910"
+    //
+    //   4. PREFIX-IN-HASH INVARIANT: same parts with different prefix
+    //      MUST produce different ids (both because prefix is in the
+    //      literal output AND because prefix is in the digest).
+    //
+    //   5. PARTS-ORDER-SENSITIVITY: reordering the parts slice MUST
+    //      flip the id. Pins that &[&str] iteration is canonical
+    //      (NOT sorted) — opposite to BTreeMap surfaces.
+    //
+    //   6. FORMAT contract: every id is "{prefix}-{16 lowercase hex}"
+    //      where the suffix length is exactly 16.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): stable_id is the identifier-
+    // derivation primitive for immunization planner outputs. If two
+    // planner runs compute different ids for the same logical
+    // (prefix, parts) tuple — because someone added a length prefix
+    // to the prefix, swapped LE64 widths, dropped the v1 domain, or
+    // sorted parts — plan deduplication forks across nodes AND
+    // downstream consumers parsing the {prefix}-{hex} format can no
+    // longer extract the prefix category.
+    #[test]
+    fn stable_id_frozen_canonical_byte_layout_golden() {
+        // 1. plan-empty baseline.
+        assert_eq!(
+            stable_id("plan", &[]),
+            "plan-6bd0f608ceb36e40",
+            "plan-empty stable_id drifted — check the v1 domain \
+             separator `dgis_immunization_planner_id_v1:`, the raw-\
+             bytes (no length prefix) prefix encoding, OR the 16-char \
+             hex suffix truncation"
+        );
+
+        // 2. plan-multi: three parts.
+        assert_eq!(
+            stable_id("plan", &["node-1", "node-2", "cohort-A"]),
+            "plan-4ebc50bfd86f0fc3",
+            "plan-multi stable_id drifted — check per-part LE64-len \
+             framing OR Vec iteration order"
+        );
+
+        // 3. strategy: different prefix.
+        assert_eq!(
+            stable_id("strategy", &["aggressive"]),
+            "strategy-7d45d340edad9910"
+        );
+
+        // 4. PREFIX-IN-HASH INVARIANT: same parts but different prefix.
+        // Both id and hash must differ.
+        let plan_aggressive = stable_id("plan", &["aggressive"]);
+        let strategy_aggressive = stable_id("strategy", &["aggressive"]);
+        assert_ne!(
+            plan_aggressive, strategy_aggressive,
+            "different prefixes with identical parts MUST produce \
+             different ids — prefix is fed into the hasher AND appears \
+             in the output format"
+        );
+        // Both ids should start with their respective prefix.
+        assert!(plan_aggressive.starts_with("plan-"));
+        assert!(strategy_aggressive.starts_with("strategy-"));
+
+        // 5. PARTS-ORDER-SENSITIVITY INVARIANT: reordering parts MUST
+        // flip the id. Pins that &[&str] iteration is canonical
+        // (NOT sorted before hashing). Opposite to BTreeMap surfaces
+        // (r37 staking_governance, r39 verifier_benchmark_releases,
+        // r53 capability_artifact) which DO sort.
+        let plan_order_a = stable_id("plan", &["a", "b"]);
+        let plan_order_b = stable_id("plan", &["b", "a"]);
+        assert_ne!(
+            plan_order_a, plan_order_b,
+            "reordering parts MUST flip stable_id — the parts slice is \
+             NOT sorted before hashing (callers MUST provide a \
+             deterministic order)"
+        );
+
+        // 6. FORMAT contract: "{prefix}-{16 lowercase hex chars}".
+        for (id, expected_prefix) in [
+            (stable_id("plan", &[]), "plan"),
+            (stable_id("plan", &["node-1", "node-2", "cohort-A"]), "plan"),
+            (stable_id("strategy", &["aggressive"]), "strategy"),
+        ] {
+            let prefix_dash = format!("{expected_prefix}-");
+            assert!(id.starts_with(&prefix_dash));
+            let hex_tail = &id[prefix_dash.len()..];
+            assert_eq!(hex_tail.len(), 16);
+            assert!(hex_tail.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
+}
