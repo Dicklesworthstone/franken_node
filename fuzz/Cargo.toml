@@ -412,3 +412,9 @@ name = "fuzz_interface_hash_compute_verify"
 path = "fuzz_targets/fuzz_interface_hash_compute_verify.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_adversary_graph_replay"
+path = "fuzz_targets/fuzz_adversary_graph_replay.rs"
+test = false
+doc = false
