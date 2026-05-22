@@ -179,6 +179,17 @@ struct QueueLifecycleDigest {
     audit_codes: Vec<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct BackgroundLaneIsolationDigest {
+    active_count: usize,
+    queued_count: usize,
+    first_queued_at_ms: Option<u64>,
+    completed_total: u64,
+    rejected_total: u64,
+    starvation_events: u64,
+    background_audit_events: Vec<(String, String)>,
+}
+
 fn queue_lifecycle_digest(scheduler: &LaneScheduler) -> QueueLifecycleDigest {
     let counters = scheduler
         .lane_counter(SchedulerLane::Background)
@@ -196,6 +207,26 @@ fn queue_lifecycle_digest(scheduler: &LaneScheduler) -> QueueLifecycleDigest {
             .audit_log()
             .iter()
             .map(|record| record.event_code.clone())
+            .collect(),
+    }
+}
+
+fn background_lane_isolation_digest(scheduler: &LaneScheduler) -> BackgroundLaneIsolationDigest {
+    let counters = scheduler
+        .lane_counter(SchedulerLane::Background)
+        .expect("background counters");
+    BackgroundLaneIsolationDigest {
+        active_count: counters.active_count,
+        queued_count: counters.queued_count,
+        first_queued_at_ms: counters.first_queued_at_ms,
+        completed_total: counters.completed_total,
+        rejected_total: counters.rejected_total,
+        starvation_events: counters.starvation_events,
+        background_audit_events: scheduler
+            .audit_log()
+            .iter()
+            .filter(|record| record.lane == SchedulerLane::Background.as_str())
+            .map(|record| (record.event_code.clone(), record.trace_id.clone()))
             .collect(),
     }
 }
@@ -318,6 +349,118 @@ fn run_queue_lifecycle(with_observation_interleavings: bool) -> QueueLifecycleDi
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_background_queue_with_optional_independent_lane_work(
+    with_independent_lane_work: bool,
+) -> BackgroundLaneIsolationDigest {
+    let mut scheduler =
+        LaneScheduler::new(default_policy()).expect("default policy should construct scheduler");
+
+    let first_background = scheduler
+        .assign_task(&task_classes::log_rotation(), 6_000, "meta-bg-active-1")
+        .expect("first background task should occupy the lane");
+    let second_background = scheduler
+        .assign_task(&task_classes::telemetry_export(), 6_001, "meta-bg-active-2")
+        .expect("second background task should occupy the lane");
+    let queued_background = queued_task_id_from(
+        scheduler
+            .assign_task(&task_classes::log_rotation(), 6_002, "meta-bg-queued")
+            .expect_err("third background task should queue at cap"),
+    )
+    .expect("background cap error must include queued task id");
+
+    assert_eq!(
+        scheduler
+            .lane_counter(SchedulerLane::Background)
+            .expect("background counters before independent work")
+            .first_queued_at_ms,
+        Some(6_002)
+    );
+
+    if with_independent_lane_work {
+        let control = scheduler
+            .assign_task(
+                &task_classes::epoch_transition(),
+                6_003,
+                "meta-control-active",
+            )
+            .expect("control task should assign independently");
+        let remote = scheduler
+            .assign_task(
+                &task_classes::remote_computation(),
+                6_004,
+                "meta-remote-active",
+            )
+            .expect("remote task should assign independently");
+        let maintenance = scheduler
+            .assign_task(
+                &task_classes::garbage_collection(),
+                6_005,
+                "meta-maintenance-active",
+            )
+            .expect("maintenance task should assign independently");
+
+        assert_eq!(
+            scheduler
+                .lane_counter(SchedulerLane::Background)
+                .expect("background counters after independent assignment")
+                .queued_count,
+            1
+        );
+
+        scheduler
+            .complete_task(&control.task_id.to_string(), 6_006, "meta-control-complete")
+            .expect("control completion should not mutate background queue");
+        scheduler
+            .complete_task(&remote.task_id.to_string(), 6_007, "meta-remote-complete")
+            .expect("remote completion should not mutate background queue");
+        scheduler
+            .complete_task(
+                &maintenance.task_id.to_string(),
+                6_008,
+                "meta-maintenance-complete",
+            )
+            .expect("maintenance completion should not mutate background queue");
+
+        assert_eq!(
+            scheduler
+                .lane_counter(SchedulerLane::Background)
+                .expect("background counters after independent completion")
+                .first_queued_at_ms,
+            Some(6_002)
+        );
+    }
+
+    scheduler
+        .complete_task(
+            &first_background.task_id.to_string(),
+            6_010,
+            "meta-bg-complete-1",
+        )
+        .expect("background completion should promote queued background task");
+    assert_eq!(
+        scheduler.active_task_ids(SchedulerLane::Background).len(),
+        2
+    );
+    assert!(
+        scheduler
+            .queued_task_ids(SchedulerLane::Background)
+            .is_empty()
+    );
+
+    scheduler
+        .complete_task(
+            &second_background.task_id.to_string(),
+            6_020,
+            "meta-bg-complete-2",
+        )
+        .expect("second background task should complete");
+    scheduler
+        .complete_task(&queued_background, 6_021, "meta-bg-complete-promoted")
+        .expect("promoted background task should complete");
+
+    background_lane_isolation_digest(&scheduler)
+}
+
 fn run_head_abort_promotion(with_observation_interleavings: bool) -> QueueLifecycleDigest {
     let mut scheduler = LaneScheduler::new(single_background_lane_policy())
         .expect("test policy should construct scheduler");
@@ -402,6 +545,28 @@ fn metamorphic_queue_lifecycle_invariants_survive_observation_interleavings() {
     assert_eq!(observed.completed_total, 4);
     assert_eq!(observed.rejected_total, 2);
     assert_eq!(observed.starvation_events, 0);
+}
+
+#[test]
+fn metamorphic_independent_lane_work_commutes_with_background_queue_lifecycle() {
+    let baseline = run_background_queue_with_optional_independent_lane_work(false);
+    let transformed = run_background_queue_with_optional_independent_lane_work(true);
+
+    assert_eq!(transformed, baseline);
+    assert_eq!(transformed.active_count, 0);
+    assert_eq!(transformed.queued_count, 0);
+    assert_eq!(transformed.first_queued_at_ms, None);
+    assert_eq!(transformed.completed_total, 3);
+    assert_eq!(transformed.rejected_total, 1);
+    assert_eq!(transformed.starvation_events, 0);
+    assert_eq!(
+        transformed
+            .background_audit_events
+            .iter()
+            .filter(|(event_code, _)| event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
+    );
 }
 
 #[test]
