@@ -4042,4 +4042,130 @@ mod staking_governance_boundary_negative_tests {
 
         insta::assert_snapshot!("capability_stake_gate_decision_receipt", scrubbed);
     }
+
+    // Frozen SHA-256 hex outputs of the deterministic-penalty hashers
+    // `compute_evidence_hash` (staking_governance.rs:411) and
+    // `compute_penalty_hash` (staking_governance.rs:422). Both functions
+    // are part of the INV-STK-DETERMINISTIC-PENALTY +
+    // INV-STAKE-SLASH-DETERMINISTIC contract surface — every node in the
+    // staking-governance fleet MUST derive identical slashing penalty
+    // identifiers for identical evidence + policy parameters, otherwise
+    // distributed slashing decisions silently diverge across the validator
+    // set.
+    //
+    // The two functions build their hashes as:
+    //
+    //   compute_evidence_hash(payload):
+    //     SHA256( b"staking_governance_evidence_v1:"
+    //             || LE64(len(payload)) || payload.as_bytes() )
+    //
+    //   compute_penalty_hash(evidence_hash, slash_fraction_bps, stake_amount):
+    //     SHA256( b"staking_governance_penalty_v1:"
+    //             || LE64(len(evidence_hash)) || evidence_hash.as_bytes()
+    //             || LE64(slash_fraction_bps)   # raw u64 LE
+    //             || LE64(stake_amount) )       # raw u64 LE
+    //
+    // Critical layout invariants this golden pins for BOTH functions:
+    //   - distinct v1 domain separators (evidence vs penalty) — a future
+    //     refactor that accidentally shared a domain across the two would
+    //     enable cross-function collisions
+    //   - LE64 width on the length prefix AND on slash_fraction_bps /
+    //     stake_amount (must NOT be LE32, LE128, or varint)
+    //   - field order in compute_penalty_hash: evidence_hash FIRST, then
+    //     slash_fraction_bps, then stake_amount — swapping the two u64
+    //     fields would silently invert penalty hashes across hosts
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing both functions in Python — NOT captured from an
+    // unreviewed prior run. Recompute all four together if the layout
+    // intentionally changes.
+    #[test]
+    fn staking_governance_hashes_frozen_canonical_byte_layout_golden() {
+        // === compute_evidence_hash ===
+
+        // Empty-payload fixture: locks the v1 domain + LE64(0) +
+        // zero-bytes-payload framing.
+        let ev_empty = compute_evidence_hash("");
+        assert_eq!(
+            ev_empty,
+            "2d8a6c2a2e4336563fe091f523c526124657465319ad021c9b7fd3526addec88",
+            "compute_evidence_hash(\"\") drifted — check the \
+             `staking_governance_evidence_v1:` domain separator or the \
+             LE64(0) empty-payload framing"
+        );
+
+        // Populated-payload fixture: locks non-zero payload length-prefix
+        // encoding via a realistic violation evidence JSON.
+        let ev_populated = compute_evidence_hash(
+            "{\"actor\":\"node-7\",\"violation\":\"double-sign\",\"epoch\":42}",
+        );
+        assert_eq!(
+            ev_populated,
+            "9e6098d69493286daff435151cb33d23680db7638b137cf4d0656ad5a8e6f1e6",
+            "compute_evidence_hash(<json>) drifted — check LE64-prefix \
+             width or payload encoding"
+        );
+        assert_ne!(ev_empty, ev_populated);
+
+        // === compute_penalty_hash ===
+
+        // Minimal-penalty fixture: empty evidence_hash output + zero
+        // slash_fraction_bps + zero stake_amount. Locks the all-zero-u64
+        // framing path AND verifies the penalty hash uses a DIFFERENT
+        // domain separator from compute_evidence_hash (so calling
+        // compute_penalty_hash on a payload that happens to equal a valid
+        // evidence_hash output cannot collide with a direct
+        // compute_evidence_hash call on the same string).
+        let pen_min = compute_penalty_hash(&ev_empty, 0, 0);
+        assert_eq!(
+            pen_min,
+            "38f9fc70218923df839fce3bce3e6aca3ac131a7045676e1e5e0a17cfe9f7cd1",
+            "compute_penalty_hash(empty_ev, 0, 0) drifted — check the \
+             `staking_governance_penalty_v1:` domain separator or the \
+             zero-u64 slash/stake encoding"
+        );
+
+        // Populated-penalty fixture: real evidence hash + 500 bps (5%)
+        // slash on 1_000_000_000 stake. Locks the field-order contract
+        // (evidence_hash first, then slash_fraction_bps, then stake_amount
+        // — swapping the two u64 fields would invert penalty hashes).
+        let pen_populated = compute_penalty_hash(&ev_populated, 500, 1_000_000_000);
+        assert_eq!(
+            pen_populated,
+            "efe99a88ede1920bd263c175ad3f9e8c8096ab7ff2a8480759ec88c47e66345f",
+            "compute_penalty_hash(populated_ev, 500, 1_000_000_000) drifted \
+             — check field order (evidence_hash before slash_fraction_bps \
+             before stake_amount) or LE64 width on the u64 args"
+        );
+
+        // Cross-function distinct-domain invariant: pen_min and ev_empty
+        // operate on the same logical "empty payload" string yet MUST
+        // produce distinct hashes because the v1 domain separators differ.
+        // This guards against a future single-domain refactor that would
+        // enable cross-function collisions.
+        assert_ne!(
+            pen_min, ev_empty,
+            "compute_penalty_hash and compute_evidence_hash MUST use \
+             distinct domain separators — same logical input cannot \
+             collide across the two functions"
+        );
+        assert_ne!(pen_min, pen_populated);
+
+        // Field-order sensitivity invariant: swapping slash_fraction_bps
+        // and stake_amount MUST flip the penalty hash. This pins the order
+        // (slash_bps before stake_amount) as a load-bearing contract.
+        let swapped = compute_penalty_hash(&ev_populated, 1_000_000_000, 500);
+        assert_ne!(
+            swapped, pen_populated,
+            "swapping slash_fraction_bps and stake_amount MUST change the \
+             hash; if it does not, field order is being silently \
+             normalized somewhere"
+        );
+
+        // Length contract: all four hashes are 64 lowercase hex chars.
+        for h in [&ev_empty, &ev_populated, &pen_min, &pen_populated] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
