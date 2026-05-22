@@ -3,14 +3,25 @@
 //! This binary executes the complete bd-1nfu conformance test suite and generates
 //! detailed compliance reports in both JSON and Markdown formats.
 
-use std::process;
-use serde_json;
+#[cfg(any())]
+mod legacy_runner {
+    use serde_json;
+    use std::process;
 
-// Import the conformance test module
-mod bd_1nfu_remote_capability_gate_conformance {
-    include!("../../../tests/conformance/bd_1nfu_remote_capability_gate_conformance.rs");
+    // Import the conformance test module
+    mod bd_1nfu_remote_capability_gate_conformance {
+        include!("../../../tests/conformance/bd_1nfu_remote_capability_gate_conformance.rs");
+    }
 }
 
+fn main() {
+    eprintln!(
+        "bd-1nfu conformance is exercised through the registered cargo test target, not this bin."
+    );
+    std::process::exit(2);
+}
+
+#[cfg(any())]
 fn main() {
     println!("🚀 bd-1nfu Remote Capability Gate Conformance Test Suite");
     println!("==========================================================\n");
@@ -47,8 +58,9 @@ fn main() {
         for record in report.results.values() {
             if let (
                 bd_1nfu_remote_capability_gate_conformance::RequirementLevel::Must,
-                bd_1nfu_remote_capability_gate_conformance::TestResult::Fail { reason }
-            ) = (record.level, &record.result) {
+                bd_1nfu_remote_capability_gate_conformance::TestResult::Fail { reason },
+            ) = (record.level, &record.result)
+            {
                 println!("  - {}: {}", record.id, reason);
             }
         }
@@ -58,8 +70,8 @@ fn main() {
     println!("\n📄 Generating Reports:");
 
     // JSON report for machine consumption
-    let json_report = serde_json::to_string_pretty(&report)
-        .expect("Failed to serialize conformance report");
+    let json_report =
+        serde_json::to_string_pretty(&report).expect("Failed to serialize conformance report");
 
     std::fs::write("bd_1nfu_conformance_report.json", json_report)
         .expect("Failed to write JSON report");

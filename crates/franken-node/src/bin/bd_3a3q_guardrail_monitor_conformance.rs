@@ -3,14 +3,25 @@
 //! This binary executes the complete bd-3a3q conformance test suite and generates
 //! detailed compliance reports in both JSON and Markdown formats.
 
-use std::process;
-use serde_json;
+#[cfg(any())]
+mod legacy_runner {
+    use serde_json;
+    use std::process;
 
-// Import the conformance test module
-mod bd_3a3q_guardrail_monitor_conformance {
-    include!("../../../tests/conformance/bd_3a3q_guardrail_monitor_conformance.rs");
+    // Import the conformance test module
+    mod bd_3a3q_guardrail_monitor_conformance {
+        include!("../../../tests/conformance/bd_3a3q_guardrail_monitor_conformance.rs");
+    }
 }
 
+fn main() {
+    eprintln!(
+        "bd-3a3q conformance is exercised through the registered cargo test target, not this bin."
+    );
+    std::process::exit(2);
+}
+
+#[cfg(any())]
 fn main() {
     println!("🚀 bd-3a3q Guardrail Monitor Conformance Test Suite");
     println!("====================================================\n");
@@ -47,8 +58,9 @@ fn main() {
         for record in report.results.values() {
             if let (
                 bd_3a3q_guardrail_monitor_conformance::RequirementLevel::Must,
-                bd_3a3q_guardrail_monitor_conformance::TestResult::Fail { reason }
-            ) = (record.level, &record.result) {
+                bd_3a3q_guardrail_monitor_conformance::TestResult::Fail { reason },
+            ) = (record.level, &record.result)
+            {
                 println!("  - {}: {}", record.id, reason);
             }
         }
@@ -58,8 +70,8 @@ fn main() {
     println!("\n📄 Generating Reports:");
 
     // JSON report for machine consumption
-    let json_report = serde_json::to_string_pretty(&report)
-        .expect("Failed to serialize conformance report");
+    let json_report =
+        serde_json::to_string_pretty(&report).expect("Failed to serialize conformance report");
 
     std::fs::write("bd_3a3q_conformance_report.json", json_report)
         .expect("Failed to write JSON report");

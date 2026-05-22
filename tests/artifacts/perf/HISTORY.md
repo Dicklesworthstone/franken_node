@@ -11,6 +11,7 @@ rounds append; never overwrite.
 | 2     | 2026-05-20    | `20260520T231041Z_franken_node_perf_r2`   | Round-1 deferred items: evidence_ledger (now registered as `[[bench]]`), dgis::contagion_simulator integration test, vef::proof_generator test, fleet_transport static read | confirmed 2 round-1 candidates as non-hotspots; raised 2 new candidates |
 | 3     | 2026-05-21    | `20260521T214316Z_franken_node_t46_rebaseline` | T4.6 re-baseline trust_card_canonical_bench post-T4.5; validated performance targets NOT met | **REGRESSION DETECTED**: all T4 targets missed by 2.66×-6.98×; requires heaptrack analysis |
 | 4     | 2026-05-22    | `20260522T1740Z_migrate_tree_sitter_bench_cod2` | bd-98xo5.9.3 large-corpus tree-sitter profile; Criterion p50/p95/p99, perf top 30 symbols, heaptrack allocation summary | resolved migration tree-sitter parsing as parse-bound non-optimization finding; no new bead |
+| 5     | 2026-05-22    | `20260522T1841Z_dgis_large_graph_cod5` | bd-98xo5.10 large-graph DGIS contagion profile; Criterion 1k/10k/50k/1024-dense step loops plus perf self sample | **HOTSPOT CONFIRMED**: `contagion_simulator::step` is 46.54 % self cycles; filed bd-98xo5.17 |
 
 ## Unified cross-round hotspot ranking (current)
 
@@ -20,7 +21,7 @@ rounds append; never overwrite.
 | 2         | `crypto::Ed25519Scheme::{sign_raw,verify_raw}` rebuilds keys per call — flat +22 µs / +6 µs | R1           | confirmed; highest ROI fix (preparsed-handle pattern) |
 | 3         | `security::threshold_sig::verify_threshold` re-parses VerifyingKey per call — 10 % win available | R1           | already proven on bench; promote to real callers |
 | 4         | `cuckoo_revocation` insert cliff between N=10 k and N=50 k                                  | R1           | policy decision, no code change |
-| 5         | `dgis::contagion_graph` String NodeId BTreeMap operations — ~17 % of contagion-test cycles | **R2**       | new finding; clean contained win once production frequency is measured |
+| 5         | `dgis::contagion_simulator::step` large-graph loop — 46.54 % self cycles in 50k requested-node profile | **R5**       | confirmed hotspot; optimisation follow-up filed as bd-98xo5.17 |
 | 6         | `replay_bundle_event_size::vec_len` vs `streaming_counter` (1.86×)                          | R1           | one-call-site replacement |
 | 7         | `fleet_transport::canonicalize_json_value` `format!()` of unused-on-happy-path `path` string | **R2**       | reframed: NOT the same hotspot as trust_card; minor allocation hygiene only |
 | —         | `observability::evidence_ledger::append`                                                    | R2 (reject)  | 16.62 µs / append — not a hotspot at current scale; remove from R1 deferred list |
@@ -34,7 +35,13 @@ rounds append; never overwrite.
   as non-hotspot** by bd-98xo5.8.2 on 2026-05-21; see decision row below.
 - `migration` tree-sitter parsing on real npm corpora — **resolved
   as non-hotspot** by bd-98xo5.9.3 on 2026-05-22; see decision row below.
-- `contagion_simulator::step` on a *large* graph (10k nodes, 100 steps) to confirm or reject at scale.
+- `contagion_simulator::step` on a *large* graph (10k nodes, 100 steps) — **resolved as a confirmed hotspot** by bd-98xo5.10 on 2026-05-22; follow-up optimization bead bd-98xo5.17 tracks the fix.
+
+## Confirmed optimization follow-ups (bd-98xo5 epic)
+
+| Surface | Date / source run | Evidence | Follow-up |
+|---------|-------------------|----------|-----------|
+| `dgis::contagion_simulator::step` large-graph loop | 2026-05-22 / `20260522T1841Z_dgis_large_graph_cod5` | Criterion bench `requested_50000n_actual_1024n_42e_50s`: 10.016 ms `[9.8661, 10.261]` before perf and 9.8001 ms `[9.7664, 9.8366]` under the committed self profile. Perf `cycles:P` self profile: `step` 46.54 %, `__memcmp_avx2_movbe` 20.91 %, `__ieee754_exp_fma` 15.07 %, `exp@@GLIBC_2.29` 5.56 %. Harness loops through `crates/franken-node/benches/dgis_large_graph_bench.rs:88-96`; large-graph fixture bypasses the product input cap only through `ContagionGraph::generate_sparse_deterministic_for_benchmark` at `crates/franken-node/src/dgis/contagion_graph.rs:484-488`. | bd-98xo5.17 — reduce per-step `build_in_edges`, infected-state clone/equality work, and BTree lookup churn |
 
 ## Non-hotspot decisions (bd-98xo5 epic)
 
