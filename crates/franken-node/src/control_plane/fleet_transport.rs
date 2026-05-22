@@ -25,6 +25,7 @@ use crate::{
         AUDIT_BOUNDED_INPUT_REJECTED, BoundedInputPolicy, ERR_BOUNDED_INPUT_CAP_EXCEEDED,
     },
     config::timeouts,
+    connector::canonical_serializer::canonical_bytes,
 };
 
 #[cfg(feature = "control-plane")]
@@ -118,9 +119,8 @@ pub fn canonical_fleet_convergence_receipt_payload<T: Serialize>(
 ) -> Result<Vec<u8>, FleetTransportError> {
     let value = serde_json::to_value(payload)
         .map_err(|err| FleetTransportError::serialization(err.to_string()))?;
-    let canonical = canonicalize_json_value(value, &mut Vec::new())?;
-    serde_json::to_vec(&canonical)
-        .map_err(|err| FleetTransportError::serialization(err.to_string()))
+    reject_fleet_float_numbers(&value, &mut Vec::new())?;
+    Ok(canonical_bytes(&value))
 }
 
 pub fn sign_fleet_convergence_receipt_payload<T: Serialize>(
@@ -155,12 +155,12 @@ pub fn sign_fleet_convergence_receipt_payload<T: Serialize>(
 /// only rendered to a `String` on the float-error branch — the happy path
 /// never builds a path string at all (per bd-98xo5.7.1). The previous
 /// implementation `format!`-allocated `"$.foo.bar[3]"` on every descent.
-enum PathSeg {
+enum PathSeg<'a> {
     Index(usize),
-    Key(String),
+    Key(&'a str),
 }
 
-fn render_path(segments: &[PathSeg]) -> String {
+fn render_path(segments: &[PathSeg<'_>]) -> String {
     use std::fmt::Write as _;
     let mut out = String::from("$");
     for seg in segments {
@@ -178,33 +178,31 @@ fn render_path(segments: &[PathSeg]) -> String {
     out
 }
 
-fn canonicalize_json_value(
-    value: Value,
-    path: &mut Vec<PathSeg>,
-) -> Result<Value, FleetTransportError> {
+fn reject_fleet_float_numbers<'a>(
+    value: &'a Value,
+    path: &mut Vec<PathSeg<'a>>,
+) -> Result<(), FleetTransportError> {
     match value {
         Value::Array(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for (index, item) in items.into_iter().enumerate() {
+            for (index, item) in items.iter().enumerate() {
                 path.push(PathSeg::Index(index));
-                let canonical_item = canonicalize_json_value(item, path)?;
+                reject_fleet_float_numbers(item, path)?;
                 path.pop();
-                out.push(canonical_item);
             }
-            Ok(Value::Array(out))
+            Ok(())
         }
         Value::Object(map) => {
-            let mut entries = map.into_iter().collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-
-            let mut canonical = serde_json::Map::with_capacity(entries.len());
-            for (key, item) in entries {
-                path.push(PathSeg::Key(key.clone()));
-                let canonical_item = canonicalize_json_value(item, path)?;
+            let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            for key in keys {
+                path.push(PathSeg::Key(key));
+                let item = map
+                    .get(key)
+                    .expect("key obtained from map.keys() must be present in the same map");
+                reject_fleet_float_numbers(item, path)?;
                 path.pop();
-                canonical.insert(key, canonical_item);
             }
-            Ok(Value::Object(canonical))
+            Ok(())
         }
         Value::Number(number) if number.is_f64() => {
             Err(FleetTransportError::serialization(format!(
@@ -212,7 +210,7 @@ fn canonicalize_json_value(
                 render_path(path),
             )))
         }
-        other => Ok(other),
+        _ => Ok(()),
     }
 }
 
@@ -1941,6 +1939,7 @@ mod tests {
         push_bounded, sign_fleet_convergence_receipt_payload, validate_node_id, validate_zone_id,
         wait_until_fleet_converged_or_timeout,
     };
+    use crate::connector::canonical_serializer::canonical_bytes;
     use chrono::{DateTime, Utc};
     use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
@@ -3511,6 +3510,41 @@ mod tests {
         assert!(
             detail.contains("non-deterministic float"),
             "error message must keep the legacy `non-deterministic float` prefix; got: {detail}",
+        );
+    }
+
+    /// Regression for bd-98xo5.7.2: fleet convergence receipts now reuse
+    /// the shared T4 streaming canonical encoder after fleet-specific float
+    /// rejection. This pins the byte-level delegation on a deliberately
+    /// unsorted payload so future changes cannot silently rebuild a separate
+    /// canonical `Value` tree.
+    #[test]
+    fn fleet_receipt_payload_uses_shared_streaming_encoder_bytes() {
+        use serde_json::json;
+
+        let payload = json!({
+            "zones": [
+                {
+                    "zone_id": "zone-b",
+                    "status": "healthy",
+                    "nodes": [
+                        {"node_id": "n2", "epoch": 2},
+                        {"node_id": "n1", "epoch": 1}
+                    ]
+                }
+            ],
+            "convergence_state": "active",
+            "timestamp": "2026-04-21T19:00:00Z"
+        });
+
+        let fleet_bytes = canonical_fleet_convergence_receipt_payload(&payload)
+            .expect("integer-only fleet payload must canonicalise");
+        let shared_bytes = canonical_bytes(&payload);
+
+        assert_eq!(fleet_bytes, shared_bytes);
+        assert_eq!(
+            std::str::from_utf8(&fleet_bytes).expect("canonical JSON is UTF-8"),
+            r#"{"convergence_state":"active","timestamp":"2026-04-21T19:00:00Z","zones":[{"nodes":[{"epoch":2,"node_id":"n2"},{"epoch":1,"node_id":"n1"}],"status":"healthy","zone_id":"zone-b"}]}"#
         );
     }
 
