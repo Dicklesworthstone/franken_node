@@ -897,6 +897,7 @@ impl FrankensqliteAdapter {
                 "replay_count": summary.replay_count,
                 "replay_mismatches": summary.replay_mismatches,
                 "audit_log_truncated": summary.audit_log_truncated,
+                "writes_by_tier": summary.writes_by_tier,
                 "schema_version": summary.schema_version,
             },
             "persistence_classes": PersistenceClass::all().iter().map(|c| {
@@ -1526,6 +1527,53 @@ mod tests {
         assert_eq!(report["bead_id"], "bd-2tua");
         assert_eq!(report["section"], "10.16");
         assert_eq!(report["gate_verdict"], "PASS");
+    }
+
+    #[test]
+    fn frankensqlite_report_conformance_exposes_tier_counts_and_replay_fail_closed() {
+        let mut adapter = FrankensqliteAdapter::default();
+        for (class, key) in [
+            (PersistenceClass::ControlState, "control"),
+            (PersistenceClass::AuditLog, "audit"),
+            (PersistenceClass::Snapshot, "snapshot"),
+            (PersistenceClass::Cache, "cache"),
+        ] {
+            adapter
+                .write_legacy(class, key, b"value")
+                .expect("conformance write should succeed");
+        }
+
+        let report = adapter.to_report();
+        assert_eq!(
+            report["summary"]["writes_by_tier"][DurabilityTier::Tier1.label()],
+            2
+        );
+        assert_eq!(
+            report["summary"]["writes_by_tier"][DurabilityTier::Tier2.label()],
+            1
+        );
+        assert_eq!(
+            report["summary"]["writes_by_tier"][DurabilityTier::Tier3.label()],
+            1
+        );
+        assert_eq!(report["gate_verdict"], "PASS");
+
+        for idx in 0..=MAX_AUDIT_LOG_ENTRIES {
+            adapter
+                .write_legacy(
+                    PersistenceClass::AuditLog,
+                    &format!("overflow-audit-{idx:04}"),
+                    b"overflow",
+                )
+                .expect("audit overflow write should succeed");
+        }
+        adapter.replay();
+
+        let failed_report = adapter.to_report();
+        assert_eq!(failed_report["gate_verdict"], "FAIL");
+        assert_eq!(failed_report["summary"]["audit_log_truncated"], true);
+        assert_eq!(failed_report["summary"]["replay_mismatches"], 1);
+        assert_eq!(failed_report["summary"]["replay_count"], 1);
     }
 
     #[test]
