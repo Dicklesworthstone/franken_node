@@ -658,3 +658,9 @@ name = "fuzz_crypto_signature_verification"
 path = "fuzz_targets/fuzz_crypto_signature_verification.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_config_env_parsing"
+path = "fuzz_targets/fuzz_config_env_parsing.rs"
+test = false
+doc = false
