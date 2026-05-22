@@ -900,6 +900,74 @@ fn run_drained_queue_lifecycle_after_optional_terminal_telemetry_snapshots(
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_queued_pressure_lifecycle_after_optional_live_telemetry_snapshots(
+    with_live_snapshots: bool,
+) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(
+            &task_classes::log_rotation(),
+            12_000,
+            "meta-live-telemetry-active",
+        )
+        .expect("first task should occupy the lane");
+    let queued = queued_task_id_from(
+        scheduler
+            .assign_task(
+                &task_classes::log_rotation(),
+                12_001,
+                "meta-live-telemetry-queued",
+            )
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    if with_live_snapshots {
+        let before_snapshots = queue_lifecycle_digest(&scheduler);
+        let audit_len = scheduler.audit_log().len();
+
+        for timestamp_ms in [12_002, 12_050, 12_099] {
+            let snapshot = scheduler.telemetry_snapshot(timestamp_ms);
+            let background = snapshot
+                .counters
+                .iter()
+                .find(|counters| counters.lane == SchedulerLane::Background)
+                .expect("background counters must be present during queue pressure");
+            assert_eq!(background.active_count, 1);
+            assert_eq!(background.queued_count, 1);
+            assert_eq!(background.first_queued_at_ms, Some(12_001));
+            assert_eq!(background.completed_total, 0);
+            assert_eq!(background.rejected_total, 1);
+            assert_eq!(background.starvation_events, 0);
+            assert_eq!(
+                scheduler.active_task_ids(SchedulerLane::Background),
+                before_snapshots.active_task_ids
+            );
+            assert_eq!(
+                scheduler.queued_task_ids(SchedulerLane::Background),
+                before_snapshots.queued_task_ids
+            );
+            assert_eq!(scheduler.audit_log().len(), audit_len);
+            assert_eq!(queue_lifecycle_digest(&scheduler), before_snapshots);
+        }
+    }
+
+    scheduler
+        .complete_task(
+            &active.task_id.to_string(),
+            12_110,
+            "meta-live-telemetry-complete-active",
+        )
+        .expect("completion should promote queued task after live telemetry snapshots");
+    scheduler
+        .complete_task(&queued, 12_120, "meta-live-telemetry-complete-promoted")
+        .expect("promoted task should complete after live telemetry snapshots");
+
+    queue_lifecycle_digest(&scheduler)
+}
+
 fn run_starvation_latch_lifecycle_with_probes(
     with_duplicate_starvation_check: bool,
     with_terminal_starvation_probes: bool,
@@ -1691,6 +1759,28 @@ fn metamorphic_terminal_preserving_hot_reload_retains_drained_lifecycle() {
 fn metamorphic_terminal_telemetry_snapshots_preserve_drained_lifecycle() {
     let baseline = run_drained_queue_lifecycle_after_optional_terminal_telemetry_snapshots(false);
     let snapshotted = run_drained_queue_lifecycle_after_optional_terminal_telemetry_snapshots(true);
+
+    assert_eq!(snapshotted, baseline);
+    assert_eq!(snapshotted.active_count, 0);
+    assert_eq!(snapshotted.queued_count, 0);
+    assert_eq!(snapshotted.first_queued_at_ms, None);
+    assert_eq!(snapshotted.completed_total, 2);
+    assert_eq!(snapshotted.rejected_total, 1);
+    assert_eq!(snapshotted.starvation_events, 0);
+    assert_eq!(
+        snapshotted
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn metamorphic_live_telemetry_snapshots_preserve_queue_pressure_lifecycle() {
+    let baseline = run_queued_pressure_lifecycle_after_optional_live_telemetry_snapshots(false);
+    let snapshotted = run_queued_pressure_lifecycle_after_optional_live_telemetry_snapshots(true);
 
     assert_eq!(snapshotted, baseline);
     assert_eq!(snapshotted.active_count, 0);
