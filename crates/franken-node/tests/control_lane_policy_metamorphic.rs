@@ -34,13 +34,23 @@
 
 use frankenengine_node::control_plane::control_lane_policy::{
     CANCEL_LANE_BUDGET_PCT, ControlLane, ControlLanePolicy, ControlTaskClass,
-    READY_LANE_BUDGET_PCT, TIMED_LANE_BUDGET_PCT,
+    READY_LANE_BUDGET_PCT, TIMED_LANE_BUDGET_PCT, error_codes,
 };
 use proptest::prelude::*;
 
 fn task_class_strategy() -> impl Strategy<Value = ControlTaskClass> {
-    let variants = ControlTaskClass::all();
-    (0_usize..variants.len()).prop_map(move |i| variants[i])
+    proptest::sample::select(ControlTaskClass::all().to_vec())
+}
+
+fn invalid_task_id_strategy() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just(String::new()),
+        ".*".prop_map(|suffix| format!(" {suffix}")),
+        ".*".prop_map(|prefix| format!("{prefix} ")),
+        (0_u8..=31, ".*")
+            .prop_map(|(control, suffix)| { format!("task{}{}", char::from(control), suffix) }),
+        (257_usize..=320).prop_map(|len| "x".repeat(len)),
+    ]
 }
 
 fn cancel_tier_classes() -> &'static [ControlTaskClass] {
@@ -102,17 +112,18 @@ fn canonical_lane_and_lookup_are_total_and_agree() {
     let policy = ControlLanePolicy::new();
     for &tc in ControlTaskClass::all() {
         let canonical = ControlLanePolicy::canonical_lane(tc);
-        let assignment = policy
-            .lookup(tc)
-            .unwrap_or_else(|| panic!("lookup returned None for {tc:?}"));
-        assert_eq!(
-            assignment.lane, canonical,
-            "lookup lane disagrees with canonical_lane for {tc:?}"
-        );
-        assert_eq!(
-            assignment.task_class, tc,
-            "lookup returned wrong task_class for {tc:?}"
-        );
+        let assignment = policy.lookup(tc);
+        assert!(assignment.is_some(), "lookup returned None for {tc:?}");
+        if let Some(assignment) = assignment {
+            assert_eq!(
+                assignment.lane, canonical,
+                "lookup lane disagrees with canonical_lane for {tc:?}"
+            );
+            assert_eq!(
+                assignment.task_class, tc,
+                "lookup returned wrong task_class for {tc:?}"
+            );
+        }
     }
 }
 
@@ -238,6 +249,61 @@ proptest! {
 
         // tick_history must record exactly one entry for this tick.
         prop_assert_eq!(policy.tick_history().len(), 1);
+    }
+
+    /// Invalid task IDs are an untrusted-input boundary for the lane policy's
+    /// mutating APIs. Rejection must happen before any state mutation.
+    #[test]
+    fn invalid_task_ids_fail_closed_before_state_mutation(
+        tc in task_class_strategy(),
+        invalid_task_id in invalid_task_id_strategy(),
+        timestamp_ms in any::<u64>(),
+        budget_remaining_ms in any::<u64>(),
+    ) {
+        let mut policy = ControlLanePolicy::new();
+
+        let assign_error = policy
+            .assign_task(tc, &invalid_task_id, "trace-invalid-assign", timestamp_ms)
+            .expect_err("invalid task id must reject assignment");
+        prop_assert!(
+            assign_error.contains(error_codes::ERR_CLP_INVALID_TASK_ID),
+            "assign_task returned wrong error: {assign_error}"
+        );
+        prop_assert!(policy.audit_log().is_empty());
+        prop_assert!(policy.deadline_queue().is_empty());
+        prop_assert!(policy.preemption_events().is_empty());
+
+        let enqueue_error = policy
+            .enqueue_deadline_task(
+                tc,
+                &invalid_task_id,
+                timestamp_ms,
+                "trace-invalid-enqueue",
+            )
+            .expect_err("invalid task id must reject deadline enqueue");
+        prop_assert!(
+            enqueue_error.contains(error_codes::ERR_CLP_INVALID_TASK_ID),
+            "enqueue_deadline_task returned wrong error: {enqueue_error}"
+        );
+        prop_assert!(policy.audit_log().is_empty());
+        prop_assert!(policy.deadline_queue().is_empty());
+        prop_assert!(policy.preemption_events().is_empty());
+
+        let preempt_error = policy
+            .preempt_task(
+                &invalid_task_id,
+                ControlLanePolicy::canonical_lane(tc),
+                budget_remaining_ms,
+                "trace-invalid-preempt",
+            )
+            .expect_err("invalid task id must reject preemption");
+        prop_assert!(
+            preempt_error.contains(error_codes::ERR_CLP_INVALID_TASK_ID),
+            "preempt_task returned wrong error: {preempt_error}"
+        );
+        prop_assert!(policy.audit_log().is_empty());
+        prop_assert!(policy.deadline_queue().is_empty());
+        prop_assert!(policy.preemption_events().is_empty());
     }
 
     /// Properties 8, 9: deadline fail-closed and scheduled-count consistency.
