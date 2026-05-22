@@ -1569,4 +1569,173 @@ mod tests {
             "hash should match length-prefixed pattern"
         );
     }
+
+    // Frozen outputs of the public function `deterministic_decision`
+    // (time_travel.rs:830). The function is the canonical decision
+    // primitive used to demonstrate byte-for-byte replay equivalence
+    // across time-travel replays.
+    //
+    // The function builds a ControlDecision { decision_id, payload,
+    // metadata } where the LOAD-BEARING fields are derived from:
+    //
+    //   digest = SHA256(
+    //     b"time_travel_det_decision_v1:"
+    //     || seed.to_le_bytes()                   # raw u64 LE
+    //     || tick.to_le_bytes()                   # raw u64 LE
+    //     || LE64(len(input)) || input
+    //   ).hex()
+    //
+    //   decision_id = format!("dec-{tick}-{}", &digest[..8])
+    //   payload     = digest.as_bytes().to_vec()  # 64 ASCII hex bytes
+    //   metadata    = {"seed": seed.to_string(),
+    //                  "tick": tick.to_string(),
+    //                  "input_len": input.len().to_string()}
+    //
+    // *** DISTINCTIVE FEATURE pinned by this golden ***
+    //
+    // The decision_id is a COMPOSED IDENTIFIER: "dec-{tick}-{8 hex
+    // chars of digest}". The decision_id format itself is part of
+    // the public API contract — downstream consumers parse it to
+    // extract the tick (for monotonicity checks) and the 8-char
+    // hex prefix (for deduplication). This is the FIRST golden in
+    // the suite to pin a COMPOSITE-FORMAT identifier (vs the pure-
+    // hex outputs of prior surfaces). A future refactor that
+    // changed the format (e.g., "dec_{tick}_{}" with underscores,
+    // or expanding the hex prefix from 8 to 16 chars) would
+    // catastrophically break downstream tick-extraction parsing.
+    //
+    // Three frozen fixtures + four structural invariants:
+    //
+    //   1. zero (seed=0, tick=0, input=empty). Locks the v1 domain +
+    //      LE64 raw u64 encoding of zero counters + LE64(0) empty-
+    //      input framing + the "dec-0-{e21bf34f}" composite format.
+    //      decision_id = "dec-0-e21bf34f"
+    //      digest      = e21bf34f21efe4ee58a5141741368b451e9abd147fa34d310b36c0d0715e4b65
+    //
+    //   2. typical (seed=42, tick=7, input="replay-input-payload").
+    //      Locks the typical-production composite format.
+    //      decision_id = "dec-7-43475daa"
+    //
+    //   3. binary (seed=0xABCDEF, tick=100, input=bytes 0..8). Locks
+    //      that the function handles binary input (NOT only UTF-8
+    //      strings) and that the tick portion of decision_id can be
+    //      multi-digit (100 is 3 chars).
+    //      decision_id = "dec-100-3325effd"
+    //
+    //   4. payload-IS-DIGEST-ASCII-BYTES INVARIANT: payload.len() ==
+    //      64 (the digest is 64 hex chars; payload is digest.as_bytes()
+    //      so 64 bytes of ASCII hex). Pins this contract — a future
+    //      refactor that stored raw 32-byte SHA-256 in payload would
+    //      halve the payload length and confuse downstream consumers.
+    //
+    //   5. METADATA-PRESENT INVARIANT: metadata contains exactly
+    //      "seed", "tick", and "input_len" keys with stringified
+    //      values. Pins that no fields are accidentally added or
+    //      removed (downstream consumers iterate metadata).
+    //
+    //   6. SEED-DETERMINISTIC INVARIANT: same (seed, tick, input)
+    //      MUST always produce the same decision_id. Pins
+    //      INV-TT-DETERMINISTIC (the file's core invariant).
+    //
+    //   7. TICK-IN-DECISION-ID INVARIANT: the tick appears literally
+    //      in decision_id as the middle component. Downstream
+    //      consumers parse decision_id to extract tick; the format
+    //      "dec-{tick}-{hex}" is part of the API contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): deterministic_decision is the
+    // central primitive for replay equivalence across time-travel
+    // replays. If two replay runs compute different decision_ids for
+    // the same (seed, tick, input) tuple — because someone reordered
+    // fields, swapped LE64 widths, dropped the v1 prefix, or changed
+    // the composite-id format — replay equivalence verification
+    // fails opaquely AND the same logical workflow appears as two
+    // different decision streams.
+    #[test]
+    fn deterministic_decision_frozen_canonical_byte_layout_golden() {
+        // 1. Zero baseline.
+        let zero = deterministic_decision(0, 0, b"");
+        assert_eq!(
+            zero.decision_id, "dec-0-e21bf34f",
+            "zero deterministic_decision decision_id drifted — check \
+             the v1 domain separator, raw u64 LE encoding of seed/tick, \
+             or the \"dec-{{tick}}-{{8 hex}}\" composite format"
+        );
+
+        // 2. Typical production case.
+        let typical = deterministic_decision(42, 7, b"replay-input-payload");
+        assert_eq!(typical.decision_id, "dec-7-43475daa");
+
+        // 3. Binary input + multi-digit tick.
+        let binary_input: Vec<u8> = (0_u8..8).collect();
+        let binary = deterministic_decision(0xABCDEF, 100, &binary_input);
+        assert_eq!(binary.decision_id, "dec-100-3325effd");
+
+        // 4. PAYLOAD-IS-DIGEST-ASCII-BYTES INVARIANT: payload contains
+        // the full 64 hex chars as ASCII bytes.
+        assert_eq!(
+            zero.payload.len(),
+            64,
+            "payload MUST be 64 ASCII hex bytes (digest hex-encoded as \
+             bytes); a refactor that stored raw 32-byte SHA-256 would \
+             halve the payload length"
+        );
+        let zero_full_digest = String::from_utf8(zero.payload.clone()).unwrap();
+        assert_eq!(
+            zero_full_digest,
+            "e21bf34f21efe4ee58a5141741368b451e9abd147fa34d310b36c0d0715e4b65",
+            "zero payload (decoded as ASCII) MUST equal the full 64-char \
+             SHA-256 hex digest"
+        );
+        // And the first 8 chars of the payload-as-string MUST match the
+        // hex tail of decision_id.
+        assert_eq!(&zero_full_digest[..8], "e21bf34f");
+
+        // 5. METADATA-PRESENT INVARIANT: exactly seed/tick/input_len.
+        let zero_meta_keys: Vec<&String> = zero.metadata.keys().collect();
+        assert_eq!(zero_meta_keys.len(), 3);
+        assert!(zero.metadata.contains_key("seed"));
+        assert!(zero.metadata.contains_key("tick"));
+        assert!(zero.metadata.contains_key("input_len"));
+        assert_eq!(zero.metadata.get("seed").unwrap(), "0");
+        assert_eq!(zero.metadata.get("tick").unwrap(), "0");
+        assert_eq!(zero.metadata.get("input_len").unwrap(), "0");
+
+        let typical_input_len = typical.metadata.get("input_len").unwrap();
+        assert_eq!(typical_input_len, "20"); // "replay-input-payload" is 20 bytes
+
+        // 6. SEED-DETERMINISTIC INVARIANT: identical inputs MUST
+        // produce identical decision_ids. Pins INV-TT-DETERMINISTIC.
+        let zero_again = deterministic_decision(0, 0, b"");
+        assert_eq!(
+            zero_again.decision_id, zero.decision_id,
+            "deterministic_decision MUST be byte-for-byte deterministic \
+             (INV-TT-DETERMINISTIC) — same (seed, tick, input) MUST \
+             always produce the same decision_id"
+        );
+        assert_eq!(zero_again.payload, zero.payload);
+
+        // 7. TICK-IN-DECISION-ID INVARIANT: tick appears literally in
+        // decision_id as the middle component. The format
+        // "dec-{tick}-{8 hex}" is part of the API contract;
+        // downstream consumers parse it.
+        assert!(zero.decision_id.starts_with("dec-0-"));
+        assert!(typical.decision_id.starts_with("dec-7-"));
+        assert!(binary.decision_id.starts_with("dec-100-"));
+        // Format check: dec-{N}-{8 hex chars}
+        for d in [&zero.decision_id, &typical.decision_id, &binary.decision_id] {
+            assert!(d.starts_with("dec-"));
+            let after_dec = &d[4..];
+            let dash = after_dec
+                .find('-')
+                .expect("decision_id must have format 'dec-{tick}-{hex}'");
+            let tick_str = &after_dec[..dash];
+            let hex_tail = &after_dec[dash + 1..];
+            assert!(tick_str.chars().all(|c| c.is_ascii_digit()));
+            assert_eq!(hex_tail.len(), 8);
+            assert!(hex_tail.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
