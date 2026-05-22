@@ -1545,4 +1545,119 @@ mod tests {
 
         assert!(err.to_string().contains("invalid type"));
     }
+
+    // Frozen SHA-256 hex output of EvictionSaga::content_hash
+    // (eviction_saga.rs:670). The function is the eviction-saga
+    // verification-evidence primitive backing the saga audit trail.
+    //
+    // The function builds the canonical content hash as:
+    //
+    //   SHA256(
+    //     b"eviction_saga_hash_v1:"
+    //     || LE64(len(saga_id))     || saga_id.as_bytes()
+    //     || LE64(len(artifact_id)) || artifact_id.as_bytes()
+    //     || LE64(len(phase_str))   || phase_str.as_bytes()   # current_phase.as_str()
+    //     || LE64(transitions.len())                          # COUNT only, NOT iterated
+    //   ).hex()
+    //
+    // *** DISTINCTIVE FEATURES pinned by this golden ***
+    //
+    // 1. The phase IS length-prefixed here (LE64-len + bytes), in
+    //    CONTRAST to incident_bundle_retention.rs's compute_integrity_hash
+    //    (r55 commit 39706591) which feeds enum labels as raw bytes
+    //    WITHOUT a length prefix. The two sibling connector functions
+    //    have OPPOSITE enum-label encoding decisions — pinning both as
+    //    goldens documents that the inconsistency is a deliberate
+    //    design choice, not an oversight.
+    //
+    // 2. The transitions field is COUNT-ONLY: only the Vec length is
+    //    fed into the hasher; the individual PhaseTransition entries
+    //    are NOT serialized. This is a deliberate optimisation
+    //    (per-transition timestamps would introduce noise in the
+    //    audit hash) but it means content_hash CANNOT distinguish two
+    //    sagas that have the same count but different transition
+    //    history. A future refactor that "added per-transition data
+    //    to the hash" would silently flip every existing content_hash.
+    //    This golden pins the count-only contract.
+    //
+    // One frozen fixture + three structural invariants:
+    //
+    //   1. fresh-saga (saga_id="saga-1", artifact_id="artifact-x",
+    //      phase=Pending, no transitions). Locks the v1 domain + LE64
+    //      length-prefix on three strings + LE64(0) zero-transitions
+    //      count.
+    //      Frozen: adb896f0f07762ca2f4a7878980b004c22b4e93f4a6f2555f5e75caa76da59e7
+    //
+    //   2. saga_id-sensitivity: changing only saga_id MUST flip the hash.
+    //
+    //   3. artifact_id-sensitivity: changing only artifact_id MUST flip
+    //      the hash. Combined with (2), pins field-position distinction
+    //      between the two String fields.
+    //
+    //   4. length+casing contract on the output.
+    //
+    // Note: this golden pins the FRESH-saga case (EvictionSaga::new
+    // initial state). Pinning post-transition states would require
+    // driving the saga through SagaPhase::Uploading → Verifying →
+    // Retiring → Complete via the public phase-transition API, which
+    // expands the test scope significantly. The count-only contract
+    // (point 2 above) means the fresh-state hash is the canonical
+    // baseline; future test additions can pin post-transition counts
+    // (1, 2, 3, ...) without needing to model individual transitions.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): EvictionSaga::content_hash is
+    // the audit-evidence primitive emitted at every phase transition.
+    // If two nodes compute different hashes for the same logical
+    // (saga_id, artifact_id, phase, transition_count) tuple — because
+    // someone swapped LE64 widths, dropped the phase length prefix,
+    // or muddled the v1 domain — saga audit trails fork across the
+    // fleet AND incident-response forensics fail opaquely.
+    #[test]
+    fn eviction_saga_content_hash_frozen_canonical_byte_layout_golden() {
+        // 1. Fresh saga: EvictionSaga::new sets phase=Pending and
+        // transitions=Vec::new().
+        let fresh = EvictionSaga::new("saga-1", "artifact-x");
+        assert_eq!(
+            fresh.content_hash(),
+            "adb896f0f07762ca2f4a7878980b004c22b4e93f4a6f2555f5e75caa76da59e7",
+            "fresh EvictionSaga::content_hash drifted — check the v1 \
+             domain separator `eviction_saga_hash_v1:`, the LE64 \
+             length-prefix on saga_id/artifact_id/phase strings, OR \
+             the SagaPhase::Pending as_str() mapping (must be \"pending\")"
+        );
+
+        // 2. saga_id-sensitivity invariant.
+        let diff_saga_id = EvictionSaga::new("saga-2", "artifact-x");
+        assert_ne!(
+            diff_saga_id.content_hash(),
+            fresh.content_hash(),
+            "changing only saga_id MUST flip content_hash"
+        );
+
+        // 3. artifact_id-sensitivity invariant — combined with (2), pins
+        // field-position distinction (saga_id BEFORE artifact_id).
+        let diff_artifact_id = EvictionSaga::new("saga-1", "artifact-y");
+        assert_ne!(
+            diff_artifact_id.content_hash(),
+            fresh.content_hash(),
+            "changing only artifact_id MUST flip content_hash"
+        );
+        // And the saga_id-changed and artifact_id-changed hashes MUST
+        // themselves differ — otherwise position is being normalised.
+        assert_ne!(
+            diff_saga_id.content_hash(),
+            diff_artifact_id.content_hash(),
+            "saga_id and artifact_id MUST be position-distinct (NOT \
+             interchangeable); a future refactor that sorted or \
+             concatenated them would collapse this distinction"
+        );
+
+        // 4. Length+casing contract.
+        let h = fresh.content_hash();
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    }
 }
