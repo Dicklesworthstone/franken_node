@@ -3330,4 +3330,224 @@ mod tests {
             prop_assert_eq!(err.code(), error_codes::ERR_CART_DRIFT_DETECTED);
         }
     }
+
+    // Frozen "sha256:<hex>" outputs of `CapabilityEnvelope::compute_digest`
+    // (capability_artifact.rs:293). The method derives the
+    // identity-bound capability envelope digest as:
+    //
+    //   "sha256:" + hex(SHA256(
+    //     b"capability_artifact_digest_v2:"
+    //     || LE64(len(canonical_repr)) || canonical_repr.as_bytes()
+    //     || LE64(len(schema_version))  || schema_version.as_bytes()
+    //     || LE64(requirements.len())
+    //     || for (name, req) in requirements.iter():    # BTreeMap sorted
+    //          LE64(len(name))           || name.as_bytes()
+    //       || LE64(len(req.justification)) || req.justification.as_bytes()
+    //       || [req.mandatory as u8]    # 1 byte boolean
+    //   ))
+    //
+    // Where canonical_repr (capability_artifact.rs:186) is the ';'-
+    // delimited "field_len=N;field=value" representation of an
+    // ArtifactIdentity, e.g.:
+    //   artifact_id_len=8;artifact_id=art-id-1;author_len=17;author=alice@example.com;created_at_len=20;created_at=2026-04-24T00:00:00Z
+    //
+    // Distinctive feature: this golden pins TWO complementary layout
+    // styles in a single test:
+    //
+    //   (a) ArtifactIdentity::canonical_repr (text-based,
+    //       ';'-delimited with inline `_len=N` count per field). Used
+    //       to defeat delimiter-collision when an attacker embeds ';'
+    //       inside a field value — the `field_len=N;field=value` form
+    //       lets a parser reject mismatched lengths.
+    //
+    //   (b) The OUTER digest framing (binary, LE64-len-prefixed). Wraps
+    //       the canonical_repr text via the standard LE64-prefix scheme.
+    //
+    // Mixing TEXT canonical-repr with BINARY length-prefix framing is
+    // unusual and load-bearing — a future refactor that "uniformly
+    // serialized everything to binary" would flip every digest.
+    //
+    // Three frozen fixtures + three structural invariants:
+    //
+    //   1. empty (identity with NO requirements, schema="cart-v1.0").
+    //      Locks the v2 domain + LE64(0) zero-requirements framing.
+    //      Frozen: sha256:62c00a1bb69c004c97ea812c61620981ad32f52d68e67c8bb1e3c0c2fb31d9ac
+    //
+    //   2. one_req (single mandatory "cap:fs:read" requirement).
+    //      Locks per-requirement {LE64(len(name)), name, LE64(len(just)),
+    //      just, [mandatory u8]} framing.
+    //      Frozen: sha256:d377c3ef82c73443bb095afca34d28f0ca13bde942adc778bce0230fd0cd8076
+    //
+    //   3. three_req (three requirements inserted in NON-sorted order to
+    //      exercise the BTreeMap-sorted-iteration invariant; one is
+    //      mandatory=false to lock the [0u8] branch).
+    //      Frozen: sha256:84953eadda7d00b395bf7c890a3cca248762dcf41225c9d9b532c16fa61afac3
+    //
+    // Three structural invariants:
+    //   4. BTreeMap-sort invariant: building three_req via a DIFFERENT
+    //      insertion order MUST produce the same digest. BTreeMap
+    //      iterates in sorted key order — a future refactor that swaps
+    //      to HashMap or IndexMap would fork digests across hosts.
+    //
+    //   5. mandatory-flag-sensitivity invariant: flipping
+    //      mandatory=true → false on a requirement MUST change the
+    //      digest. Pins the [mandatory as u8] byte as load-bearing —
+    //      a future refactor that dropped the mandatory flag would
+    //      let optional and mandatory capabilities share digests.
+    //
+    //   6. identity-binding invariant (INV-CART-DIGEST-BOUND, doc at
+    //      L292-293): changing the ArtifactIdentity (different
+    //      artifact_id) with the SAME envelope MUST produce a different
+    //      digest. This is the property the verify_digest path at
+    //      L323 depends on.
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing the function in Python (both the text canonical_repr
+    // assembly AND the binary digest framing) — NOT captured from an
+    // unreviewed prior run.
+    //
+    // Why this matters (the contract): compute_digest BINDS a
+    // CapabilityEnvelope to a specific ArtifactIdentity. The digest is
+    // stored in CapabilityEnvelope::digest and verified via
+    // verify_digest at L324. If two nodes compute different digests for
+    // the same logical (identity, envelope) pair — because someone
+    // reordered fields, swapped LE64 widths, muddled the mandatory
+    // flag encoding, or changed the canonical_repr ';'-delimiter — the
+    // envelope verification fails opaquely AND extensions can no
+    // longer load across the cluster.
+    #[test]
+    fn capability_envelope_compute_digest_frozen_canonical_byte_layout_golden() {
+        let identity = ArtifactIdentity::new(
+            "art-id-1",
+            "alice@example.com",
+            "2026-04-24T00:00:00Z",
+        );
+
+        // 1. Empty envelope baseline (no requirements).
+        let empty = CapabilityEnvelope::new();
+        assert_eq!(
+            empty.compute_digest(&identity),
+            "sha256:62c00a1bb69c004c97ea812c61620981ad32f52d68e67c8bb1e3c0c2fb31d9ac",
+            "empty CapabilityEnvelope digest drifted — check the \
+             `capability_artifact_digest_v2:` domain separator, the \
+             LE64-len-prefixed canonical_repr framing, OR the LE64(0) \
+             zero-requirements framing"
+        );
+
+        // 2. One mandatory requirement.
+        let mut one_req = CapabilityEnvelope::new();
+        one_req.add_requirement(CapabilityRequirement::new(
+            "cap:fs:read",
+            "read user docs",
+            true,
+        ));
+        assert_eq!(
+            one_req.compute_digest(&identity),
+            "sha256:d377c3ef82c73443bb095afca34d28f0ca13bde942adc778bce0230fd0cd8076",
+            "one-req CapabilityEnvelope digest drifted — check per-\
+             requirement framing or the [mandatory as u8] 1-byte encoding"
+        );
+
+        // 3. Three requirements with a DIFFERENT identity AND inserted
+        // in NON-sorted order (BTreeMap will sort them at iteration).
+        let identity_x = ArtifactIdentity::new("art-x", "bob", "2026-04-25T12:00:00Z");
+        let mut three_req = CapabilityEnvelope::new();
+        // Insertion order: bind, write, read — but BTreeMap will iterate
+        // in sorted order: cap:env:read, cap:fs:write, cap:net:bind.
+        three_req.add_requirement(CapabilityRequirement::new(
+            "cap:net:bind",
+            "expose service port",
+            true,
+        ));
+        three_req.add_requirement(CapabilityRequirement::new(
+            "cap:fs:write",
+            "persist sessions",
+            true,
+        ));
+        three_req.add_requirement(CapabilityRequirement::new(
+            "cap:env:read",
+            "config lookup",
+            false, // optional capability
+        ));
+        assert_eq!(
+            three_req.compute_digest(&identity_x),
+            "sha256:84953eadda7d00b395bf7c890a3cca248762dcf41225c9d9b532c16fa61afac3",
+            "three-req CapabilityEnvelope digest drifted — check the \
+             BTreeMap sorted-iteration order or the [0u8] optional-\
+             requirement framing"
+        );
+
+        // BTreeMap-SORT INVARIANT: building three_req via a different
+        // insertion order MUST produce the same digest. Pins the
+        // contract that BTreeMap iterates in sorted key order — a
+        // future refactor to HashMap or IndexMap would fork digests
+        // across hosts based on build order.
+        let mut reordered = CapabilityEnvelope::new();
+        reordered.add_requirement(CapabilityRequirement::new(
+            "cap:env:read",
+            "config lookup",
+            false,
+        ));
+        reordered.add_requirement(CapabilityRequirement::new(
+            "cap:net:bind",
+            "expose service port",
+            true,
+        ));
+        reordered.add_requirement(CapabilityRequirement::new(
+            "cap:fs:write",
+            "persist sessions",
+            true,
+        ));
+        assert_eq!(
+            reordered.compute_digest(&identity_x),
+            three_req.compute_digest(&identity_x),
+            "CapabilityEnvelope::compute_digest MUST be insertion-order-\
+             independent — requirements is a BTreeMap and iterates in \
+             sorted key order"
+        );
+
+        // MANDATORY-FLAG-SENSITIVITY INVARIANT: flipping mandatory MUST
+        // change the digest. Pins the [mandatory as u8] byte as load-
+        // bearing; a future refactor that dropped the flag would let
+        // optional and mandatory capabilities share digests.
+        let mut flipped = CapabilityEnvelope::new();
+        flipped.add_requirement(CapabilityRequirement::new(
+            "cap:fs:read",
+            "read user docs",
+            false, // was true in one_req
+        ));
+        assert_ne!(
+            flipped.compute_digest(&identity),
+            one_req.compute_digest(&identity),
+            "flipping CapabilityRequirement::mandatory from true to false \
+             MUST change the envelope digest"
+        );
+
+        // IDENTITY-BINDING INVARIANT (INV-CART-DIGEST-BOUND, doc at L292):
+        // changing ArtifactIdentity with the SAME envelope MUST produce
+        // a different digest. This is the property the verify_digest path
+        // at L324 depends on.
+        let identity_other = ArtifactIdentity::new(
+            "art-id-2", // different artifact_id
+            "alice@example.com",
+            "2026-04-24T00:00:00Z",
+        );
+        assert_ne!(
+            one_req.compute_digest(&identity_other),
+            one_req.compute_digest(&identity),
+            "the SAME envelope bound to DIFFERENT artifact identities \
+             MUST produce different digests (INV-CART-DIGEST-BOUND)"
+        );
+
+        // "sha256:" prefix + 64 lowercase hex contract.
+        for digest in [
+            empty.compute_digest(&identity),
+            one_req.compute_digest(&identity),
+            three_req.compute_digest(&identity_x),
+        ] {
+            assert_eq!(digest.len(), 71);
+            assert!(digest.starts_with("sha256:"));
+            assert!(digest[7..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
