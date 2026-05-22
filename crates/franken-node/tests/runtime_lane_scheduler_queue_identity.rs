@@ -19,6 +19,71 @@ fn queued_task_id_from(error: LaneSchedulerError) -> Option<String> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct QueueDrainOutcome {
+    front_queued_id: String,
+    promoted_task_id: String,
+    active_task_ids: Vec<String>,
+    queued_task_ids: Vec<String>,
+    active_count: usize,
+    queued_count: usize,
+    first_queued_at_ms: Option<u64>,
+    completed_total: u64,
+}
+
+fn drain_front_queue_after_optional_tail_abort(abort_tail: bool) -> QueueDrainOutcome {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+    let active = scheduler
+        .assign_task(&task_classes::log_rotation(), 3_000, "trace-active")
+        .expect("first task should occupy the lane");
+    let front_queued = queued_task_id_from(
+        scheduler
+            .assign_task(&task_classes::log_rotation(), 3_001, "trace-front-queued")
+            .expect_err("front queued task should surface cap pressure"),
+    )
+    .expect("front cap error must include queued task id");
+
+    if abort_tail {
+        let tail_queued = queued_task_id_from(
+            scheduler
+                .assign_task(&task_classes::log_rotation(), 3_002, "trace-tail-queued")
+                .expect_err("tail queued task should surface cap pressure"),
+        )
+        .expect("tail cap error must include queued task id");
+        scheduler
+            .abort_queued_task_id(&tail_queued, 3_003, "trace-tail-abort")
+            .expect("tail queued task should abort cleanly");
+    }
+
+    scheduler
+        .complete_task(&active.task_id.to_string(), 3_010, "trace-complete-active")
+        .expect("completion should promote the front queued task");
+
+    let counters = scheduler
+        .lane_counter(SchedulerLane::Background)
+        .expect("background counters after drain");
+    let promoted_task_id = scheduler
+        .audit_log()
+        .iter()
+        .rev()
+        .find(|record| record.event_code == event_codes::LANE_TASK_PROMOTED)
+        .expect("promotion audit record")
+        .task_id
+        .clone();
+
+    QueueDrainOutcome {
+        front_queued_id: front_queued,
+        promoted_task_id,
+        active_task_ids: scheduler.active_task_ids(SchedulerLane::Background),
+        queued_task_ids: scheduler.queued_task_ids(SchedulerLane::Background),
+        active_count: counters.active_count,
+        queued_count: counters.queued_count,
+        first_queued_at_ms: counters.first_queued_at_ms,
+        completed_total: counters.completed_total,
+    }
+}
+
 #[test]
 fn hot_reload_removes_idle_stale_lane_counters() {
     let mut scheduler =
@@ -207,4 +272,18 @@ fn lane_scheduler_aborts_specific_queued_task_without_dropping_neighbors() {
     assert_eq!(counters.active_count, 1);
     assert_eq!(counters.queued_count, 1);
     assert_eq!(counters.first_queued_at_ms, Some(2_001));
+}
+
+#[test]
+fn metamorphic_tail_queue_abort_preserves_front_promotion() {
+    let baseline = drain_front_queue_after_optional_tail_abort(false);
+    let transformed = drain_front_queue_after_optional_tail_abort(true);
+
+    assert_eq!(
+        transformed, baseline,
+        "adding and aborting a non-front queued task must not alter front-queue promotion"
+    );
+    assert_eq!(baseline.promoted_task_id, baseline.front_queued_id);
+    assert_eq!(baseline.active_task_ids, vec![baseline.front_queued_id]);
+    assert!(baseline.queued_task_ids.is_empty());
 }
