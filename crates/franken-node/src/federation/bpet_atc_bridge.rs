@@ -1021,4 +1021,148 @@ mod tests {
         let err = consume_federated_temporal_prior(&local, &prior, 0.5).unwrap_err();
         assert!(matches!(err, BpetAtcBridgeError::InvalidPrior(_)));
     }
+
+    // Frozen SHA-256 hex outputs of TWO module-private hashing
+    // functions in this file:
+    //
+    //   hash_text (bpet_atc_bridge.rs:844):
+    //     SHA256(
+    //       b"bpet_atc_bridge_v1:"
+    //       || LE64(len(serde_json::to_vec(&value))) || serde_json::to_vec(&value)
+    //     ).hex()
+    //
+    //   hash_pair (bpet_atc_bridge.rs:840):
+    //     SHA256(
+    //       b"bpet_atc_bridge_v1:"
+    //       || LE64(len(serde_json::to_vec(&(left, right))))
+    //       || serde_json::to_vec(&(left, right))
+    //     ).hex()
+    //
+    // Both delegate to hash_serializable (L848) with HASH_DOMAIN =
+    // b"bpet_atc_bridge_v1:".
+    //
+    // *** DISTINCTIVE FEATURE pinned by this golden ***
+    //
+    // These functions feed `serde_json::to_vec` OUTPUT into the
+    // hasher — meaning the canonical bytes are JSON-serialized values:
+    //   - hash_text("hello")     → JSON: b"\"hello\"" (with quotes)
+    //   - hash_pair("a", "b")    → JSON: b"[\"a\",\"b\"]" (tuple as array)
+    //
+    // The serialized form depends on serde_json's encoding conventions:
+    //   - strings are double-quoted with " " character escapes
+    //   - tuples serialize as JSON arrays with NO whitespace separators
+    //
+    // This is the FIRST golden in the suite to pin serde_json
+    // string/tuple encoding as part of the canonical-byte contract.
+    // A future refactor that switched from serde_json to a different
+    // serialization library (e.g., serde_cbor, postcard, bincode)
+    // would silently flip every existing hash. Pinning these outputs
+    // documents that serde_json IS the contract — not "any
+    // serializer that produces deterministic bytes."
+    //
+    // Four frozen fixtures + structural invariants:
+    //
+    //   1. hash_text("") — empty string. JSON encoding is b"\"\"" (2
+    //      bytes — just two quote marks). Locks v1 domain + LE64(2) +
+    //      the 2-byte JSON empty-string encoding.
+    //      Frozen: 08c6be0791473fe0511000c04491a55f01b9ba605038e4a7ff9272ffbf5c0ca5
+    //
+    //   2. hash_text("trace-bpet-1") — ASCII string. JSON encoding is
+    //      b"\"trace-bpet-1\"" (14 bytes — 12 chars + 2 quotes).
+    //      Frozen: 33224f5a0d842259941560a111e9ce8726262da30f678621519202be1ad8b8e3
+    //
+    //   3. hash_pair("alpha", "beta") — tuple. JSON encoding is
+    //      b"[\"alpha\",\"beta\"]" (15 bytes — locks JSON array
+    //      no-whitespace + comma-separator + double-quoted strings).
+    //      Frozen: 9eaa2eec64584f1c9c088b7e8c972bb7a466c69af32c4bbb1e3236d9fa05982b
+    //
+    //   4. hash_pair("", "non-empty") — pair with empty first. JSON
+    //      encoding is b"[\"\",\"non-empty\"]" (16 bytes).
+    //      Frozen: 7b3ac3cacb40e009004d3d27a80195b58fc96642ca92750dcc6bdaadf9e7ea9d
+    //
+    //   5. SERDE-JSON-ENCODING INVARIANT: hash_text("a") MUST differ
+    //      from hash_pair("a", "") because hash_text wraps "a" as
+    //      `"a"` (JSON string) but hash_pair wraps as `["a",""]`
+    //      (JSON array). Pins the JSON encoding distinction.
+    //
+    //   6. ORDER-SENSITIVITY: hash_pair("a", "b") MUST differ from
+    //      hash_pair("b", "a") — JSON arrays preserve order.
+    //
+    //   7. 64-lowercase-hex length+casing contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python's json.dumps (matching serde_json's default output
+    // with no whitespace) — NOT captured from an unreviewed prior
+    // run.
+    //
+    // Why this matters (the contract): hash_text and hash_pair are
+    // the content-fingerprint primitives for the BPET-ATC bridge.
+    // The functions ensure INV-BPET-ATC-DETERMINISTIC-HASHES — every
+    // node MUST hash an identical text/pair to identical bytes. If
+    // two nodes use different serde_json versions whose string-
+    // encoding behavior differs (unlikely but possible), the hashes
+    // diverge AND federation aggregation fails opaquely.
+    #[test]
+    fn bpet_atc_bridge_hash_primitives_frozen_canonical_byte_layout_golden() {
+        // 1. hash_text(empty).
+        assert_eq!(
+            super::hash_text(""),
+            "08c6be0791473fe0511000c04491a55f01b9ba605038e4a7ff9272ffbf5c0ca5",
+            "hash_text(\"\") drifted — check the v1 domain separator \
+             `bpet_atc_bridge_v1:`, the LE64-len framing on serde_json \
+             output, OR the serde_json empty-string encoding b\"\\\"\\\"\" \
+             (2 bytes)"
+        );
+
+        // 2. hash_text(ascii).
+        assert_eq!(
+            super::hash_text("trace-bpet-1"),
+            "33224f5a0d842259941560a111e9ce8726262da30f678621519202be1ad8b8e3"
+        );
+
+        // 3. hash_pair(simple).
+        assert_eq!(
+            super::hash_pair("alpha", "beta"),
+            "9eaa2eec64584f1c9c088b7e8c972bb7a466c69af32c4bbb1e3236d9fa05982b",
+            "hash_pair(\"alpha\", \"beta\") drifted — check the \
+             serde_json tuple-as-array encoding b\"[\\\"a\\\",\\\"b\\\"]\" \
+             (NO whitespace, comma separator)"
+        );
+
+        // 4. hash_pair with empty first element.
+        assert_eq!(
+            super::hash_pair("", "non-empty"),
+            "7b3ac3cacb40e009004d3d27a80195b58fc96642ca92750dcc6bdaadf9e7ea9d"
+        );
+
+        // 5. SERDE-JSON-ENCODING INVARIANT: hash_text("a") MUST differ
+        // from hash_pair("a", "") — the JSON encodings are different
+        // (`"a"` vs `["a",""]`).
+        assert_ne!(
+            super::hash_text("a"),
+            super::hash_pair("a", ""),
+            "hash_text(\"a\") and hash_pair(\"a\", \"\") MUST produce \
+             different hashes — they encode differently in serde_json \
+             (string \"a\" vs array [\"a\",\"\"])"
+        );
+
+        // 6. ORDER-SENSITIVITY: hash_pair("a", "b") != hash_pair("b", "a").
+        assert_ne!(
+            super::hash_pair("a", "b"),
+            super::hash_pair("b", "a"),
+            "hash_pair(L, R) MUST differ from hash_pair(R, L) — JSON \
+             arrays preserve order"
+        );
+
+        // 7. 64-lowercase-hex length+casing contract.
+        for h in [
+            super::hash_text(""),
+            super::hash_text("trace-bpet-1"),
+            super::hash_pair("alpha", "beta"),
+            super::hash_pair("", "non-empty"),
+        ] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
