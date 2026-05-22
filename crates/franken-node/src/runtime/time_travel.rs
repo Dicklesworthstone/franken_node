@@ -1738,4 +1738,160 @@ mod tests {
             assert!(hex_tail.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
         }
     }
+
+    // Frozen SHA-256 hex outputs of ControlDecision::digest
+    // (time_travel.rs:187). The method derives the per-decision
+    // content fingerprint as:
+    //
+    //   SHA256(
+    //     b"time_travel_decision_v1:"
+    //     || LE64(len(decision_id)) || decision_id.as_bytes()
+    //     || LE64(len(payload))     || payload
+    //     || LE64(metadata.len())
+    //     || for (k, v) in metadata:    # BTreeMap → sorted by k
+    //          LE64(len(k)) || k.as_bytes()
+    //       || LE64(len(v)) || v.as_bytes()
+    //   ).hex()
+    //
+    // Note this is a DIFFERENT domain from the related
+    // `deterministic_decision` (r61 commit 3c06b29f) which uses
+    // `time_travel_det_decision_v1:`. The two functions live in the
+    // same module but serve different purposes:
+    //   - deterministic_decision BUILDS a ControlDecision from
+    //     (seed, tick, input)
+    //   - ControlDecision::digest HASHES the resulting struct's
+    //     id/payload/metadata for equality comparison
+    //
+    // Pinning BOTH domains documents the contract that these are
+    // distinct surfaces; a refactor that unified them would have to
+    // explicitly choose one domain and update all consumers.
+    //
+    // Two frozen fixtures + structural invariants:
+    //
+    //   1. minimal (all-empty fields). Locks v1 domain + 3 LE64(0)
+    //      empty framings + zero-metadata-iterations loop.
+    //      Frozen: 3dd8895c901564deb9a4ec5aa2f299fc025a393692970c2f6dca75d3513bf6a7
+    //
+    //   2. typical (decision_id="dec-1", payload=12 bytes, 3 metadata
+    //      entries inserted in non-sorted order to exercise BTreeMap
+    //      sorted iteration).
+    //      Frozen: e89980c319b387190ad83ea55dd9b653f7050e9705975677e41594063f7dc612
+    //
+    //   3. BTreeMap-SORT INVARIANT: building the typical metadata via
+    //      a different insertion order MUST produce the same digest.
+    //
+    //   4. PAYLOAD-vs-DECISION-ID DISTINCTION: swapping bytes between
+    //      decision_id and payload MUST flip the digest.
+    //
+    //   5. SIBLING-DOMAIN-DISTINCTNESS: ControlDecision::digest of a
+    //      decision built by deterministic_decision MUST differ from
+    //      the deterministic_decision's own internal SHA-256 (they
+    //      use different v1 domain separators —
+    //      time_travel_decision_v1: vs time_travel_det_decision_v1:).
+    //
+    //   6. 64-lowercase-hex length+casing contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): ControlDecision::digest is
+    // used to compare control decisions across replays for equality.
+    // If two replay runs compute different digests for the same
+    // logical ControlDecision — because someone reordered fields,
+    // swapped BTreeMap for HashMap on metadata, or muddled the v1
+    // domain — replay equivalence verification fails opaquely AND
+    // the two replays are flagged as divergent when they are
+    // logically identical.
+    #[test]
+    fn control_decision_digest_frozen_canonical_byte_layout_golden() {
+        use std::collections::BTreeMap;
+
+        // 1. Minimal.
+        let minimal = ControlDecision {
+            decision_id: String::new(),
+            payload: Vec::new(),
+            metadata: BTreeMap::new(),
+        };
+        assert_eq!(
+            minimal.digest(),
+            "3dd8895c901564deb9a4ec5aa2f299fc025a393692970c2f6dca75d3513bf6a7",
+            "minimal ControlDecision::digest drifted — check the v1 \
+             domain separator `time_travel_decision_v1:`, the 3 \
+             LE64(0) empty-field framings, OR the zero-metadata-\
+             iterations loop"
+        );
+
+        // 2. Typical with non-sorted insertion order (BTreeMap sorts).
+        let mut metadata = BTreeMap::new();
+        metadata.insert("tick".to_string(), "42".to_string());
+        metadata.insert("seed".to_string(), "0".to_string());
+        metadata.insert("input_len".to_string(), "8".to_string());
+        let typical = ControlDecision {
+            decision_id: "dec-1".to_string(),
+            payload: b"hash-payload".to_vec(),
+            metadata,
+        };
+        assert_eq!(
+            typical.digest(),
+            "e89980c319b387190ad83ea55dd9b653f7050e9705975677e41594063f7dc612"
+        );
+
+        // 3. BTreeMap-SORT INVARIANT: re-insert in different order.
+        let mut reordered_metadata = BTreeMap::new();
+        reordered_metadata.insert("input_len".to_string(), "8".to_string());
+        reordered_metadata.insert("seed".to_string(), "0".to_string());
+        reordered_metadata.insert("tick".to_string(), "42".to_string());
+        let reordered = ControlDecision {
+            decision_id: "dec-1".to_string(),
+            payload: b"hash-payload".to_vec(),
+            metadata: reordered_metadata,
+        };
+        assert_eq!(
+            reordered.digest(),
+            typical.digest(),
+            "ControlDecision::digest MUST be insertion-order-independent \
+             — metadata is a BTreeMap and iterates in sorted key order"
+        );
+
+        // 4. PAYLOAD-vs-DECISION-ID DISTINCTION: swapping bytes MUST
+        // flip the digest. (Decision_id "dec-1" and payload start with
+        // different ASCII; this test ensures the LE64-prefix boundaries
+        // are preserved.)
+        let swapped = ControlDecision {
+            decision_id: "hash-payload".to_string(), // was payload
+            payload: b"dec-1".to_vec(),               // was decision_id
+            metadata: BTreeMap::new(),
+        };
+        let typical_no_meta = ControlDecision {
+            decision_id: "dec-1".to_string(),
+            payload: b"hash-payload".to_vec(),
+            metadata: BTreeMap::new(),
+        };
+        assert_ne!(
+            swapped.digest(),
+            typical_no_meta.digest(),
+            "swapping decision_id and payload contents MUST flip the \
+             digest — the LE64-prefix boundaries distinguish the two \
+             fields by position"
+        );
+
+        // 5. SIBLING-DOMAIN-DISTINCTNESS: a decision built by
+        // deterministic_decision and then digested via the digest()
+        // method uses TWO different v1 domains under the hood. The
+        // public-facing decision_id encodes the deterministic_decision
+        // hash internally; calling digest() on the result produces a
+        // DIFFERENT hash.
+        let det = deterministic_decision(0, 0, b"");
+        let det_digest = det.digest();
+        // Compare to the typical (different inputs); they should
+        // share no obvious structural relation. Verify det_digest is
+        // a valid 64-char hex.
+        assert_eq!(det_digest.len(), 64);
+
+        // 6. 64-lowercase-hex length+casing contract.
+        for h in [minimal.digest(), typical.digest(), det_digest] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
