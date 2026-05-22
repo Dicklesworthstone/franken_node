@@ -731,6 +731,10 @@ name = "vef_proof_scheduler_conformance"
 path = "tests/vef_proof_scheduler_conformance.rs"
 
 [[test]]
+name = "vef_proof_generator_conformance"
+path = "tests/vef_proof_generator_conformance.rs"
+
+[[test]]
 name = "vef_proof_service_fail_closed"
 path = "tests/vef_proof_service_fail_closed.rs"
 
