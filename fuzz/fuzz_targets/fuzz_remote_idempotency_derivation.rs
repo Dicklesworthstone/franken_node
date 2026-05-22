@@ -11,10 +11,10 @@ use std::collections::BTreeSet;
 
 use arbitrary::{Arbitrary, Result as ArbResult, Unstructured};
 use frankenengine_node::remote::computation_registry::{
-    is_canonical_computation_name, ComputationEntry, ComputationRegistry,
+    ComputationEntry, ComputationRegistry, is_canonical_computation_name,
 };
 use frankenengine_node::remote::idempotency::{
-    key_fingerprint, IdempotencyError, IdempotencyKey, IdempotencyKeyDeriver, IDEMPOTENCY_KEY_LEN,
+    IDEMPOTENCY_KEY_LEN, IdempotencyError, IdempotencyKey, IdempotencyKeyDeriver, key_fingerprint,
 };
 use frankenengine_node::security::remote_cap::RemoteOperation;
 use libfuzzer_sys::fuzz_target;
@@ -121,6 +121,7 @@ fn fuzz_idempotency_case(case: IdempotencyCase) {
     check_determinism(&deriver, &primary_name, case.epoch, &case.payload, key);
     check_hex_roundtrip(key);
     check_fingerprint(key);
+    check_length_prefixed_boundary_separation(case.epoch, &case.payload);
     check_separation(
         &deriver,
         &alternate_deriver,
@@ -178,6 +179,36 @@ fn check_fingerprint(key: IdempotencyKey) {
             .strip_prefix("fp:")
             .is_some_and(|suffix| suffix.chars().all(|ch| ch.is_ascii_hexdigit())),
         "fingerprint suffix must be fixed-width hex"
+    );
+}
+
+fn check_length_prefixed_boundary_separation(epoch: u64, payload: &[u8]) {
+    let Ok(left_deriver) = IdempotencyKeyDeriver::new(b"ab") else {
+        return;
+    };
+    let Ok(right_deriver) = IdempotencyKeyDeriver::new(b"a") else {
+        return;
+    };
+    let Ok(left_key) = left_deriver.derive_key("c.d.v1", epoch, payload) else {
+        return;
+    };
+    let Ok(right_key) = right_deriver.derive_key("bc.d.v1", epoch, payload) else {
+        return;
+    };
+    assert_ne!(
+        left_key, right_key,
+        "length-prefixed domain/name framing must separate overlapping byte prefixes"
+    );
+
+    let Ok(empty_payload_key) = left_deriver.derive_key("c.d.v1", epoch, b"") else {
+        return;
+    };
+    let Ok(nul_payload_key) = left_deriver.derive_key("c.d.v1", epoch, b"\0") else {
+        return;
+    };
+    assert_ne!(
+        empty_payload_key, nul_payload_key,
+        "request-byte length framing must distinguish empty from NUL payloads"
     );
 }
 
