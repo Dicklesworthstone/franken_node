@@ -2118,6 +2118,82 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_tail_abort_commutes_with_head_completion_lifecycle() {
+        fn build_seed() -> (LaneScheduler, String, String, String) {
+            let mut p = LaneMappingPolicy::new();
+            add_lane_ok(&mut p, LaneConfig::new(SchedulerLane::Background, 10, 1));
+            p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+            let mut scheduler = LaneScheduler::new(p).unwrap();
+
+            let active = scheduler
+                .assign_task(&task_classes::log_rotation(), 1000, "trace-active")
+                .unwrap();
+            let promoted = queued_task_id_from(
+                scheduler
+                    .assign_task(&task_classes::log_rotation(), 1001, "trace-promoted")
+                    .expect_err("cap pressure should queue the future promoted task"),
+            );
+            let aborted = queued_task_id_from(
+                scheduler
+                    .assign_task(&task_classes::log_rotation(), 1002, "trace-aborted")
+                    .expect_err("cap pressure should queue the future aborted task"),
+            );
+
+            (scheduler, active.task_id.to_string(), promoted, aborted)
+        }
+
+        let (mut abort_then_complete, active_a, promoted_a, aborted_a) = build_seed();
+        let (mut complete_then_abort, active_b, promoted_b, aborted_b) = build_seed();
+        assert_eq!(
+            (active_a.as_str(), promoted_a.as_str(), aborted_a.as_str()),
+            (active_b.as_str(), promoted_b.as_str(), aborted_b.as_str())
+        );
+
+        let aborted_first = abort_then_complete
+            .abort_queued_task_id(&aborted_a, 1003, "trace-abort-tail")
+            .unwrap();
+        assert_eq!(aborted_first.task_id.to_string(), aborted_a);
+        abort_then_complete
+            .complete_task(&active_a, 1004, "trace-complete-head")
+            .unwrap();
+
+        complete_then_abort
+            .complete_task(&active_b, 1004, "trace-complete-head")
+            .unwrap();
+        let aborted_second = complete_then_abort
+            .abort_queued_task_id(&aborted_b, 1003, "trace-abort-tail")
+            .unwrap();
+        assert_eq!(aborted_second.task_id.to_string(), aborted_b);
+
+        assert_eq!(
+            abort_then_complete.active_task_ids(SchedulerLane::Background),
+            vec![promoted_a.clone()]
+        );
+        assert_eq!(
+            complete_then_abort.active_task_ids(SchedulerLane::Background),
+            vec![promoted_b]
+        );
+        assert!(
+            abort_then_complete
+                .queued_task_ids(SchedulerLane::Background)
+                .is_empty()
+        );
+        assert!(
+            complete_then_abort
+                .queued_task_ids(SchedulerLane::Background)
+                .is_empty()
+        );
+        assert_eq!(
+            abort_then_complete
+                .lane_counter(SchedulerLane::Background)
+                .unwrap(),
+            complete_then_abort
+                .lane_counter(SchedulerLane::Background)
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn promotion_global_cap_error_preserves_queued_task() {
         let mut p = LaneMappingPolicy::new();
         add_lane_ok(&mut p, LaneConfig::new(SchedulerLane::Background, 10, 1));
