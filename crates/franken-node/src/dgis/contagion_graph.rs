@@ -158,9 +158,12 @@ pub enum GraphError {
 #[derive(Debug, Clone)]
 pub struct ContagionGraph {
     interner: NodeInterner,
+    node_index_fingerprint: u64,
     nodes: Vec<NodeId>,
     nodes_internal: BTreeSet<InternedNodeId>,
+    nodes_internal_order: Vec<InternedNodeId>,
     edges: BTreeMap<InternedNodeId, Vec<InternedContagionEdge>>,
+    in_edges: BTreeMap<InternedNodeId, Vec<(InternedNodeId, f64)>>,
     neighbor_views: BTreeMap<InternedNodeId, Vec<ContagionEdge>>,
     seed: u64,
 }
@@ -185,6 +188,17 @@ fn overlong_node_id_error() -> GraphError {
 /// repeated `add_node` from bypassing the loader's check and ballooning memory.
 const MAX_NODES: usize = 1024;
 
+pub(super) const NODE_INDEX_FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const NODE_INDEX_FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+pub(super) fn append_node_index_fingerprint(mut fingerprint: u64, node: &str) -> u64 {
+    for byte in node.len().to_le_bytes().into_iter().chain(node.bytes()) {
+        fingerprint ^= u64::from(byte);
+        fingerprint = fingerprint.wrapping_mul(NODE_INDEX_FINGERPRINT_PRIME);
+    }
+    fingerprint
+}
+
 impl ContagionGraph {
     /// Construct an empty graph with the given seed. Intended for callers
     /// that build the graph node-by-node (used by campaign-profile loaders
@@ -196,9 +210,12 @@ impl ContagionGraph {
         GRAPH_CONSTRUCTIONS_TOTAL.fetch_add(1, Ordering::Relaxed);
         Self {
             interner: NodeInterner::new(),
+            node_index_fingerprint: NODE_INDEX_FINGERPRINT_OFFSET,
             nodes: Vec::new(),
             nodes_internal: BTreeSet::new(),
+            nodes_internal_order: Vec::new(),
             edges: BTreeMap::new(),
+            in_edges: BTreeMap::new(),
             neighbor_views: BTreeMap::new(),
             seed,
         }
@@ -225,20 +242,16 @@ impl ContagionGraph {
         self.interner.clone()
     }
 
-    pub(super) fn has_same_interner(&self, interner: &NodeInterner) -> bool {
-        &self.interner == interner
+    pub(super) fn interner_fingerprint(&self) -> u64 {
+        self.node_index_fingerprint
     }
 
-    pub(super) fn contains_interned_node(&self, id: InternedNodeId) -> bool {
-        self.nodes_internal.contains(&id)
+    pub(super) fn interned_nodes(&self) -> &[InternedNodeId] {
+        &self.nodes_internal_order
     }
 
-    pub(super) fn interned_edge_buckets(
-        &self,
-    ) -> impl Iterator<Item = (InternedNodeId, &[InternedContagionEdge])> + '_ {
-        self.edges
-            .iter()
-            .map(|(source, bucket)| (*source, bucket.as_slice()))
+    pub(super) fn interned_in_edges(&self, target: InternedNodeId) -> &[(InternedNodeId, f64)] {
+        self.in_edges.get(&target).map(Vec::as_slice).unwrap_or(&[])
     }
 
     fn unknown_target_for(&self, id: InternedNodeId) -> GraphError {
@@ -272,8 +285,12 @@ impl ContagionGraph {
             return;
         };
         if self.nodes_internal.insert(node_id) {
+            self.node_index_fingerprint =
+                append_node_index_fingerprint(self.node_index_fingerprint, &node);
+            self.nodes_internal_order.push(node_id);
             self.nodes.push(node);
             self.edges.insert(node_id, Vec::new());
+            self.in_edges.insert(node_id, Vec::new());
             self.neighbor_views.insert(node_id, Vec::new());
         }
     }
@@ -305,6 +322,8 @@ impl ContagionGraph {
         };
         let bucket = self.edges.entry(source_id).or_default();
         crate::push_bounded(bucket, internal_edge, MAX_EDGES_PER_NODE);
+        let in_bucket = self.in_edges.entry(target_id).or_default();
+        crate::push_bounded(in_bucket, (source_id, edge.weight), MAX_EDGES_PER_NODE);
         let view_bucket = self.neighbor_views.entry(source_id).or_default();
         crate::push_bounded(view_bucket, edge, MAX_EDGES_PER_NODE);
         Ok(())
@@ -775,6 +794,13 @@ mod tests {
         assert_eq!(neighbors[1].weight, 0.25);
         assert_eq!(neighbors[1].edge_kind, EdgeKind::MaintainerOverlap);
         assert_eq!(graph.edge_count(), 2);
+
+        let root_id = graph.member_id_for("pkg:root").expect("root is interned");
+        let dep_a_id = graph.member_id_for("pkg:dep-a").expect("dep-a is interned");
+        let dep_b_id = graph.member_id_for("pkg:dep-b").expect("dep-b is interned");
+        assert_eq!(graph.interned_nodes(), &[root_id, dep_a_id, dep_b_id]);
+        assert_eq!(graph.interned_in_edges(dep_a_id), &[(root_id, 0.75)][..]);
+        assert_eq!(graph.interned_in_edges(dep_b_id), &[(root_id, 0.25)][..]);
         Ok(())
     }
 

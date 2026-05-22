@@ -34,7 +34,7 @@ use frankenengine_node::dgis::contagion_profiles::{
 };
 use frankenengine_node::dgis::contagion_simulator::{
     InfectionState, SimulationTrace, SimulatorConfig, TerminationReason, detect_termination,
-    simulate,
+    simulate, step,
 };
 use frankenengine_node::dgis::node_interner::{InternError, NODE_INTERNER_MAX_NODES, NodeInterner};
 use proptest::prelude::*;
@@ -305,6 +305,47 @@ fn simulator_uses_interned_graph_edges_without_changing_trace_strings() -> TestR
         graph.neighbors(&"pkg:root".to_string())[0].target,
         "pkg:dep-a"
     );
+    Ok(())
+}
+
+#[test]
+fn simulator_step_fast_path_uses_cached_in_edges_after_edge_mutation() -> TestResult {
+    let mut graph = ContagionGraph::new(105);
+    graph.add_node("pkg:root".to_string());
+    graph.add_node("pkg:middle".to_string());
+    graph.add_node("pkg:leaf".to_string());
+    graph
+        .add_edge(
+            &"pkg:root".to_string(),
+            ContagionEdge::new("pkg:middle".to_string(), 1.0, EdgeKind::DependencyImport)
+                .map_err(|e| format!("edge rejected: {e:?}"))?,
+        )
+        .map_err(|e| format!("add edge middle failed: {e:?}"))?;
+    let config = SimulatorConfig {
+        max_steps: 3,
+        infection_threshold: 1.0,
+        decay_factor: 0.0,
+        seed: 0xD617,
+    };
+
+    let initial = InfectionState::new(&["pkg:root".to_string()]);
+    let after_first =
+        step(&graph, &initial, &config).map_err(|e| format!("first cached step failed: {e:?}"))?;
+    assert!(after_first.infected().contains("pkg:middle"));
+    assert!(!after_first.infected().contains("pkg:leaf"));
+
+    graph
+        .add_edge(
+            &"pkg:middle".to_string(),
+            ContagionEdge::new("pkg:leaf".to_string(), 1.0, EdgeKind::DependencyImport)
+                .map_err(|e| format!("edge rejected: {e:?}"))?,
+        )
+        .map_err(|e| format!("add edge leaf failed: {e:?}"))?;
+
+    let after_mutation = step(&graph, &after_first, &config)
+        .map_err(|e| format!("second cached step failed: {e:?}"))?;
+    assert!(after_mutation.infected().contains("pkg:leaf"));
+    assert_eq!(after_mutation.infected_count(), 3);
     Ok(())
 }
 

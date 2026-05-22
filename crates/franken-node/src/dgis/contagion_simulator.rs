@@ -76,6 +76,7 @@ const MAX_TRACE_SNAPSHOTS: usize = (MAX_SIMULATION_STEPS as usize).saturating_ad
 #[derive(Debug, Clone)]
 pub struct InfectionState {
     interner: Arc<NodeInterner>,
+    interner_fingerprint: u64,
     infected: BTreeSet<NodeId>,
     infected_internal: BTreeSet<InternedNodeId>,
     exposure_level: BTreeMap<NodeId, f64>,
@@ -100,13 +101,27 @@ impl InfectionState {
     pub fn new(initial_infected: &[NodeId]) -> Self {
         let mut interner = NodeInterner::new();
         let mut infected_internal = BTreeSet::new();
+        let mut interner_fingerprint = super::contagion_graph::NODE_INDEX_FINGERPRINT_OFFSET;
         for node in initial_infected {
+            let known = interner.get(node).is_some();
             let Ok(node_id) = interner.intern(node) else {
                 continue;
             };
+            if !known {
+                interner_fingerprint = super::contagion_graph::append_node_index_fingerprint(
+                    interner_fingerprint,
+                    node,
+                );
+            }
             infected_internal.insert(node_id);
         }
-        Self::from_internal(Arc::new(interner), infected_internal, BTreeMap::new(), 0)
+        Self::from_internal(
+            Arc::new(interner),
+            interner_fingerprint,
+            infected_internal,
+            BTreeMap::new(),
+            0,
+        )
     }
 
     fn new_for_graph(
@@ -121,6 +136,7 @@ impl InfectionState {
         }
         Ok(Self::from_internal(
             interner,
+            graph.interner_fingerprint(),
             infected_internal,
             BTreeMap::new(),
             0,
@@ -129,6 +145,7 @@ impl InfectionState {
 
     fn from_internal(
         interner: Arc<NodeInterner>,
+        interner_fingerprint: u64,
         infected_internal: BTreeSet<InternedNodeId>,
         exposure_internal: BTreeMap<InternedNodeId, f64>,
         step: u32,
@@ -147,6 +164,7 @@ impl InfectionState {
             .collect();
         Self {
             interner,
+            interner_fingerprint,
             infected,
             infected_internal,
             exposure_level,
@@ -332,14 +350,14 @@ pub fn step(
     // calls that never touched graph state.
     SIMULATION_STEPS_TOTAL.fetch_add(1, Ordering::Relaxed);
 
-    let (interner, infected_internal, exposure_internal) = state.reindexed_for_graph(graph)?;
-    let in_edges = build_in_edges(graph)?;
+    let (interner, reindexed) = state.reindexed_for_graph(graph)?;
+    let infected_internal = reindexed.infected();
+    let exposure_internal = reindexed.exposure();
 
     let mut next_exposure: BTreeMap<InternedNodeId, f64> = BTreeMap::new();
     let mut next_infected: BTreeSet<InternedNodeId> = infected_internal.clone();
 
-    for node in graph.nodes() {
-        let node_id = interner.get(node).ok_or(SimulatorError::UnknownNode)?;
+    for &node_id in graph.interned_nodes() {
         if infected_internal.contains(&node_id) {
             // Infected stays infected; we do not track exposure for them.
             continue;
@@ -356,23 +374,21 @@ pub fn step(
         }
 
         // Add weighted contributions from infected in-neighbors.
-        if let Some(sources) = in_edges.get(&node_id) {
-            for (src_id, weight) in sources {
-                if !infected_internal.contains(src_id) {
-                    continue;
-                }
-                if !weight.is_finite() {
-                    return Err(SimulatorError::NonFiniteFloat);
-                }
-                // Saturating add via clamp to f64::MAX so decay_factor=1.0 with
-                // a perpetually-infected source cannot blow up to +inf.
-                let candidate = exposure + weight;
-                exposure = if candidate.is_finite() {
-                    candidate
-                } else {
-                    f64::MAX
-                };
+        for (src_id, weight) in graph.interned_in_edges(node_id) {
+            if !infected_internal.contains(src_id) {
+                continue;
             }
+            if !weight.is_finite() {
+                return Err(SimulatorError::NonFiniteFloat);
+            }
+            // Saturating add via clamp to f64::MAX so decay_factor=1.0 with
+            // a perpetually-infected source cannot blow up to +inf.
+            let candidate = exposure + weight;
+            exposure = if candidate.is_finite() {
+                candidate
+            } else {
+                f64::MAX
+            };
         }
 
         if !exposure.is_finite() {
@@ -389,6 +405,7 @@ pub fn step(
 
     Ok(InfectionState::from_internal(
         interner,
+        graph.interner_fingerprint(),
         next_infected,
         next_exposure,
         state.step.saturating_add(1),
@@ -514,19 +531,14 @@ impl InfectionState {
     fn reindexed_for_graph(
         &self,
         graph: &ContagionGraph,
-    ) -> Result<
-        (
-            Arc<NodeInterner>,
-            BTreeSet<InternedNodeId>,
-            BTreeMap<InternedNodeId, f64>,
-        ),
-        SimulatorError,
-    > {
-        if graph.has_same_interner(self.interner.as_ref()) {
+    ) -> Result<(Arc<NodeInterner>, ReindexedState<'_>), SimulatorError> {
+        if self.interner_fingerprint == graph.interner_fingerprint() {
             return Ok((
                 Arc::clone(&self.interner),
-                self.infected_internal.clone(),
-                self.exposure_internal.clone(),
+                ReindexedState::Borrowed {
+                    infected: &self.infected_internal,
+                    exposure: &self.exposure_internal,
+                },
             ));
         }
 
@@ -541,30 +553,41 @@ impl InfectionState {
             let node_id = interner.get(node).ok_or(SimulatorError::UnknownNode)?;
             exposure_internal.insert(node_id, *exposure);
         }
-        Ok((interner, infected_internal, exposure_internal))
+        Ok((
+            interner,
+            ReindexedState::Owned {
+                infected: infected_internal,
+                exposure: exposure_internal,
+            },
+        ))
     }
 }
 
-/// Build the reverse-adjacency view directly from graph-owned interned buckets.
-fn build_in_edges(
-    graph: &ContagionGraph,
-) -> Result<BTreeMap<InternedNodeId, Vec<(InternedNodeId, f64)>>, SimulatorError> {
-    let mut in_edges: BTreeMap<InternedNodeId, Vec<(InternedNodeId, f64)>> = BTreeMap::new();
-    for (src_id, bucket) in graph.interned_edge_buckets() {
-        if !graph.contains_interned_node(src_id) {
-            return Err(SimulatorError::UnknownNode);
-        }
-        for edge in bucket {
-            if !graph.contains_interned_node(edge.target) {
-                return Err(SimulatorError::UnknownNode);
-            }
-            in_edges
-                .entry(edge.target)
-                .or_default()
-                .push((src_id, edge.weight));
+enum ReindexedState<'a> {
+    Borrowed {
+        infected: &'a BTreeSet<InternedNodeId>,
+        exposure: &'a BTreeMap<InternedNodeId, f64>,
+    },
+    Owned {
+        infected: BTreeSet<InternedNodeId>,
+        exposure: BTreeMap<InternedNodeId, f64>,
+    },
+}
+
+impl<'a> ReindexedState<'a> {
+    fn infected(&self) -> &BTreeSet<InternedNodeId> {
+        match self {
+            Self::Borrowed { infected, .. } => infected,
+            Self::Owned { infected, .. } => infected,
         }
     }
-    Ok(in_edges)
+
+    fn exposure(&self) -> &BTreeMap<InternedNodeId, f64> {
+        match self {
+            Self::Borrowed { exposure, .. } => exposure,
+            Self::Owned { exposure, .. } => exposure,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -606,6 +629,45 @@ mod tests {
         assert_eq!(next.infected_internal.len(), 2);
         assert!(next.interner.get("source").is_some());
         assert!(next.interner.get("target").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn step_fast_path_uses_cached_in_edges_after_edge_mutation() -> Result<(), String> {
+        let mut graph = ContagionGraph::new(12);
+        graph.add_node("source".to_string());
+        graph.add_node("middle".to_string());
+        graph.add_node("target".to_string());
+        graph
+            .add_edge(
+                &"source".to_string(),
+                ContagionEdge::new("middle".to_string(), 1.0, EdgeKind::DependencyImport)
+                    .map_err(|err| format!("edge rejected: {err:?}"))?,
+            )
+            .map_err(|err| format!("add edge middle failed: {err:?}"))?;
+        let config = SimulatorConfig {
+            max_steps: 3,
+            infection_threshold: 1.0,
+            decay_factor: 0.0,
+            seed: 0,
+        };
+
+        let state = InfectionState::new(&["source".to_string()]);
+        let next = step(&graph, &state, &config).map_err(|err| format!("{err:?}"))?;
+        assert!(next.infected().contains("middle"));
+        assert!(!next.infected().contains("target"));
+
+        graph
+            .add_edge(
+                &"middle".to_string(),
+                ContagionEdge::new("target".to_string(), 1.0, EdgeKind::DependencyImport)
+                    .map_err(|err| format!("edge rejected: {err:?}"))?,
+            )
+            .map_err(|err| format!("add edge target failed: {err:?}"))?;
+
+        let after_mutation = step(&graph, &next, &config).map_err(|err| format!("{err:?}"))?;
+        assert!(after_mutation.infected().contains("target"));
+        assert_eq!(after_mutation.infected_count(), 3);
         Ok(())
     }
 
