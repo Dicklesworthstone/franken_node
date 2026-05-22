@@ -672,7 +672,10 @@ fn run_queue_lifecycle_after_optional_preserving_reload(
     queue_lifecycle_digest(&scheduler)
 }
 
-fn run_starvation_latch_lifecycle(with_duplicate_starvation_check: bool) -> QueueLifecycleDigest {
+fn run_starvation_latch_lifecycle_with_probes(
+    with_duplicate_starvation_check: bool,
+    with_terminal_starvation_probes: bool,
+) -> QueueLifecycleDigest {
     let mut scheduler = LaneScheduler::new(fast_starving_background_lane_policy())
         .expect("test policy should construct scheduler");
 
@@ -740,7 +743,33 @@ fn run_starvation_latch_lifecycle(with_duplicate_starvation_check: bool) -> Queu
         .complete_task(&queued, 8_210, "meta-starve-complete-promoted")
         .expect("promoted task should complete after starvation clears");
 
+    if with_terminal_starvation_probes {
+        let before_terminal_probes = queue_lifecycle_digest(&scheduler);
+        let audit_len = scheduler.audit_log().len();
+        assert!(
+            scheduler
+                .check_starvation(8_220, "meta-starve-terminal-probe-1")
+                .is_empty()
+        );
+        assert!(
+            scheduler
+                .check_starvation(8_230, "meta-starve-terminal-probe-2")
+                .is_empty()
+        );
+        let counters = scheduler
+            .lane_counter(SchedulerLane::Background)
+            .expect("background counters after terminal starvation probes");
+        assert_eq!(counters.starvation_events, 1);
+        assert!(!counters.starvation_active);
+        assert_eq!(scheduler.audit_log().len(), audit_len);
+        assert_eq!(queue_lifecycle_digest(&scheduler), before_terminal_probes);
+    }
+
     queue_lifecycle_digest(&scheduler)
+}
+
+fn run_starvation_latch_lifecycle(with_duplicate_starvation_check: bool) -> QueueLifecycleDigest {
+    run_starvation_latch_lifecycle_with_probes(with_duplicate_starvation_check, false)
 }
 
 fn run_queue_lifecycle_after_optional_expanding_reload(
@@ -1325,6 +1354,44 @@ fn metamorphic_repeated_starvation_checks_are_lifecycle_idempotent() {
     );
     assert_eq!(
         repeated
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn metamorphic_terminal_starvation_probes_after_drain_are_lifecycle_idempotent() {
+    let baseline = run_starvation_latch_lifecycle_with_probes(false, false);
+    let probed = run_starvation_latch_lifecycle_with_probes(false, true);
+
+    assert_eq!(probed, baseline);
+    assert_eq!(probed.active_count, 0);
+    assert_eq!(probed.queued_count, 0);
+    assert_eq!(probed.first_queued_at_ms, None);
+    assert_eq!(probed.completed_total, 2);
+    assert_eq!(probed.rejected_total, 1);
+    assert_eq!(probed.starvation_events, 1);
+    assert_eq!(
+        probed
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_STARVED)
+            .count(),
+        1
+    );
+    assert_eq!(
+        probed
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_STARVATION_CLEARED)
+            .count(),
+        1
+    );
+    assert_eq!(
+        probed
             .audit_codes
             .iter()
             .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
