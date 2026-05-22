@@ -5,7 +5,7 @@ use frankenengine_node::connector::obligation_tracker::{
     ObligationState, ObligationTracker, event_codes,
 };
 use frankenengine_node::connector::region_ownership::{
-    ControlPlaneCx, Region, RegionError, atomic_next_for_test,
+    ControlPlaneCx, Region, RegionError, TaskState, atomic_next_for_test,
 };
 use frankenengine_node::connector::rollout_state::{
     PersistError, RolloutPhase, RolloutState, load, persist_lock_registry_key_for_test,
@@ -13,6 +13,7 @@ use frankenengine_node::connector::rollout_state::{
     persist_with_obligation_tracker_and_rename_for_test, persist_with_obligation_tracker_for_test,
 };
 use frankenengine_node::control_plane::control_epoch::ControlEpoch;
+use proptest::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 
@@ -26,6 +27,11 @@ fn sample_state() -> RolloutState {
     )
 }
 
+fn task_id_fuzz_string() -> impl Strategy<Value = String> {
+    proptest::collection::vec(0_u8..=127, 0..=96)
+        .prop_map(|bytes| bytes.into_iter().map(char::from).collect())
+}
+
 fn temp_leftovers(dir: &std::path::Path, marker: &str) -> Vec<String> {
     let mut leftovers = std::fs::read_dir(dir)
         .into_iter()
@@ -36,6 +42,63 @@ fn temp_leftovers(dir: &std::path::Path, marker: &str) -> Vec<String> {
         .collect::<Vec<_>>();
     leftovers.sort();
     leftovers
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn task_id_fuzz_generated_inputs_fail_closed_or_complete_atomically(
+        task_id in task_id_fuzz_string(),
+    ) {
+        let cx = ControlPlaneCx::new_root("test-conn", "trace-region-task-fuzz", 42)
+            .expect("create test control-plane cx");
+        let mut region = Region::new_root(cx, 5000).expect("create root region");
+        let region_id = region.id;
+
+        match region.register_task(&task_id) {
+            Ok(()) => {
+                prop_assert_eq!(region.tasks.len(), 1);
+                prop_assert_eq!(region.tasks[0].task_id.as_str(), task_id.as_str());
+
+                region
+                    .complete_task(&task_id)
+                    .expect("accepted generated task id should complete");
+                prop_assert_eq!(region.active_task_count(), 0);
+                prop_assert_eq!(region.tasks[0].state, TaskState::Completed);
+            }
+            Err(register_err) => {
+                let register_invalid_for_same_task = matches!(
+                    register_err,
+                    RegionError::InvalidTaskId {
+                        region_id: rejected_region_id,
+                        task_id: ref rejected_task_id,
+                        ..
+                    } if rejected_region_id == region_id && rejected_task_id == &task_id
+                );
+                prop_assert!(
+                    register_invalid_for_same_task,
+                    "invalid generated task id should reject with matching region/task"
+                );
+                prop_assert!(region.tasks.is_empty());
+
+                region
+                    .register_task("stable-task")
+                    .expect("control task id should register");
+                let complete_err = region
+                    .complete_task(&task_id)
+                    .expect_err("invalid generated task id must reject before lookup");
+                let complete_invalid_task_id =
+                    matches!(complete_err, RegionError::InvalidTaskId { .. });
+                prop_assert!(
+                    complete_invalid_task_id,
+                    "invalid generated task id should reject before completion lookup"
+                );
+                prop_assert_eq!(region.active_task_count(), 1);
+                prop_assert_eq!(region.tasks[0].state, TaskState::Running);
+            }
+        }
+    }
 }
 
 #[test]
