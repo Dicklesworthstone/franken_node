@@ -6,7 +6,6 @@
 
 use crate::observability::metrics::{MetricValidationError, MetricsRegistry};
 use crate::security::cuckoo_filter::revocation_filter_entries_gauge;
-use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// System-wide metrics collection and export service.
@@ -23,7 +22,7 @@ pub struct SystemMetricsExporter {
 }
 
 /// Point-in-time snapshot of system metrics
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct MetricSnapshot {
     timestamp_ms: u64,
     revocation_filter_entries: usize,
@@ -76,14 +75,44 @@ impl SystemMetricsExporter {
             revocation_filter_entries: revocation_filter_entries_gauge(),
         };
 
-        // Add to historical tracking with bounded capacity
+        self.push_snapshot(snapshot);
+        snapshot
+    }
+
+    /// Add a previously collected revocation-filter reading to the bounded
+    /// history window used for percentiles and growth-rate summaries.
+    #[must_use]
+    pub fn record_revocation_filter_snapshot(
+        &mut self,
+        timestamp_ms: u64,
+        revocation_filter_entries: usize,
+    ) -> MetricSnapshot {
+        let snapshot = MetricSnapshot {
+            timestamp_ms,
+            revocation_filter_entries,
+        };
+        self.push_snapshot(snapshot);
+        snapshot
+    }
+
+    fn push_snapshot(&mut self, snapshot: MetricSnapshot) {
         if self.historical_snapshots.len() >= self.max_history_samples {
             let overflow = self.historical_snapshots.len() - self.max_history_samples + 1;
             self.historical_snapshots.drain(0..overflow);
         }
-        self.historical_snapshots.push(snapshot.clone());
+        self.historical_snapshots.push(snapshot);
+    }
 
-        snapshot
+    /// Number of samples currently retained in the collection window.
+    #[must_use]
+    pub fn collection_sample_count(&self) -> usize {
+        self.historical_snapshots.len()
+    }
+
+    /// Duration covered by the retained collection window, in hours.
+    #[must_use]
+    pub fn collection_window_duration_hours(&self) -> f64 {
+        self.get_collection_window_info().duration_hours
     }
 
     /// Export current system metrics in Prometheus format.
@@ -178,7 +207,6 @@ impl SystemMetricsExporter {
         // Calculate percentiles
         let mut sorted_entries = entries.clone();
         sorted_entries.sort_unstable();
-        let len = sorted_entries.len();
 
         let p50 = percentile(&sorted_entries, 50.0);
         let p95 = percentile(&sorted_entries, 95.0);

@@ -7,8 +7,14 @@
 use crate::observability::system_metrics_exporter::SystemMetricsExporter;
 use std::error::Error;
 use std::fs;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Historical reading of the production revocation-filter entry gauge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevocationFilterSample {
+    pub timestamp_ms: u64,
+    pub entries: usize,
+}
 
 /// Configuration for metrics collection operation.
 #[derive(Debug, Clone)]
@@ -19,6 +25,8 @@ pub struct MetricsCollectionConfig {
     pub min_window_hours: f64,
     /// Enable immediate export even with short collection window (for testing)
     pub force_export: bool,
+    /// Historical production readings, normally sourced from Prometheus/Grafana.
+    pub historical_samples: Vec<RevocationFilterSample>,
 }
 
 impl Default for MetricsCollectionConfig {
@@ -27,6 +35,7 @@ impl Default for MetricsCollectionConfig {
             output_dir: "tests/artifacts/perf/cuckoo_n_distribution".to_string(),
             min_window_hours: 168.0, // 7 days
             force_export: false,
+            historical_samples: Vec::new(),
         }
     }
 }
@@ -56,36 +65,43 @@ pub struct MetricsCollectionResult {
 pub fn run_metrics_collection(
     config: MetricsCollectionConfig,
 ) -> Result<MetricsCollectionResult, Box<dyn Error>> {
-    // Initialize metrics exporter
-    // In production, this would be a long-running service with historical data
-    // For now, create a new instance and simulate having collected data
-    let mut exporter = SystemMetricsExporter::new(None);
+    let mut historical_samples = config.historical_samples;
+    let mut exporter = SystemMetricsExporter::new(Some(historical_samples.len().max(1)));
+    historical_samples.sort_by_key(|sample| sample.timestamp_ms);
 
-    // Take a snapshot to get current readings
-    let current_snapshot = exporter.collect_snapshot();
+    for sample in historical_samples {
+        let _ = exporter.record_revocation_filter_snapshot(sample.timestamp_ms, sample.entries);
+    }
 
-    // Check if we have sufficient collection window
-    // In production deployment, this would check the actual collection duration
-    let window_info = simulate_production_window_check(&config);
+    if exporter.collection_sample_count() == 0 {
+        exporter.collect_snapshot();
+    }
 
-    if !config.force_export && window_info.duration_hours < config.min_window_hours {
+    let window_duration_hours = exporter.collection_window_duration_hours();
+    let sample_count = exporter.collection_sample_count();
+
+    if !config.force_export && window_duration_hours < config.min_window_hours {
         return Ok(MetricsCollectionResult {
             collection_performed: false,
             output_file: None,
-            window_duration_hours: window_info.duration_hours,
-            sample_count: window_info.sample_count,
+            window_duration_hours,
+            sample_count,
             summary: format!(
                 "Insufficient collection window: {:.1} hours (need {:.1} hours). \
-                Use force_export=true to override, or wait for T3.1 to complete data collection.",
-                window_info.duration_hours, config.min_window_hours
+                Wait for T3.1 production telemetry to accumulate a representative window.",
+                window_duration_hours, config.min_window_hours
             ),
         });
     }
 
-    // Simulate having collected sufficient data for demonstration
-    // In production, this would use actual historical data from the long-running exporter
-    if config.force_export {
-        simulate_historical_data(&mut exporter);
+    if config.force_export && sample_count < 2 {
+        return Ok(MetricsCollectionResult {
+            collection_performed: false,
+            output_file: None,
+            window_duration_hours,
+            sample_count,
+            summary: "Forced export refused: at least two historical samples are required to compute a real distribution window.".to_string(),
+        });
     }
 
     // Generate production summary
@@ -112,19 +128,15 @@ pub fn run_metrics_collection(
         "✓ Metrics collection complete\n\
         ✓ Window: {:.1} hours ({} samples)\n\
         ✓ Output: {}\n\
-        ✓ Current revocation filter entries: {}\n\
         ✓ Ready for T3.2 analysis",
-        window_info.duration_hours,
-        window_info.sample_count,
-        output_file,
-        current_snapshot.revocation_filter_entries(),
+        window_duration_hours, sample_count, output_file,
     );
 
     Ok(MetricsCollectionResult {
         collection_performed: true,
         output_file: Some(output_file),
-        window_duration_hours: window_info.duration_hours,
-        sample_count: window_info.sample_count,
+        window_duration_hours,
+        sample_count,
         summary: result_summary,
     })
 }
@@ -135,62 +147,6 @@ pub fn run_metrics_collection(
 pub fn export_prometheus_metrics() -> Result<String, Box<dyn Error>> {
     let mut exporter = SystemMetricsExporter::new(Some(1440)); // 24 hours of 1-minute samples
     Ok(exporter.export_prometheus()?)
-}
-
-/// Information about the collection window.
-#[derive(Debug)]
-struct WindowInfo {
-    duration_hours: f64,
-    sample_count: usize,
-}
-
-/// Check production collection window status.
-///
-/// In a real production deployment, this would query the actual observability
-/// stack to determine how long metrics have been collected.
-fn simulate_production_window_check(config: &MetricsCollectionConfig) -> WindowInfo {
-    if config.force_export {
-        // Simulate sufficient data for testing
-        WindowInfo {
-            duration_hours: 168.5, // Just over 7 days
-            sample_count: 10_122,  // ~1 sample per minute for 7 days
-        }
-    } else {
-        // Simulate insufficient data (T3.1 not deployed long enough)
-        WindowInfo {
-            duration_hours: 4.2, // Only 4.2 hours of data
-            sample_count: 252,   // ~1 sample per minute for 4.2 hours
-        }
-    }
-}
-
-/// Add simulated historical data for demonstration purposes.
-///
-/// In production, the exporter would have real historical data from continuous operation.
-fn simulate_historical_data(exporter: &mut SystemMetricsExporter) {
-    // Simulate a week of metrics with realistic patterns
-    let base_time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-
-    // Simulate 7 days of hourly samples with realistic revocation filter growth
-    for hour in 0..168 {
-        // 7 days × 24 hours
-        let timestamp = base_time - ((168 - hour) * 60 * 60 * 1000); // Work backwards from now
-
-        // Simulate realistic revocation filter growth pattern
-        let base_entries = 12_000; // Starting baseline
-        let daily_growth = 2_000; // ~2K entries per day
-        let hourly_variance = (hour % 24) * 100; // Some hourly variation
-        let spike_factor = if hour == 72 { 5_000 } else { 0 }; // Simulate one spike
-
-        let entries = base_entries + (hour * daily_growth / 24) + hourly_variance + spike_factor;
-
-        // Create snapshot (this would normally be done by the continuous collection)
-        // For simulation, we'll create the snapshot directly
-        // Note: This is just for demonstration - real implementation would use actual data
-    }
 }
 
 /// Format Unix timestamp as ISO date string.
@@ -207,6 +163,20 @@ fn format_timestamp_as_date(timestamp_secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seven_day_samples() -> Vec<RevocationFilterSample> {
+        let start = 1_779_638_400_000;
+        [
+            12_000, 14_200, 18_400, 31_000, 29_500, 34_100, 36_800, 37_200,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(day, entries)| RevocationFilterSample {
+            timestamp_ms: start + (day as u64 * 24 * 60 * 60 * 1000),
+            entries,
+        })
+        .collect()
+    }
 
     #[test]
     fn metrics_collection_respects_minimum_window() {
@@ -225,19 +195,36 @@ mod tests {
     }
 
     #[test]
-    fn metrics_collection_works_with_force_export() {
+    fn force_export_without_historical_samples_refuses_summary() {
+        let config = MetricsCollectionConfig {
+            force_export: true,
+            ..Default::default()
+        };
+
+        let result = run_metrics_collection(config).expect("forced collection should fail closed");
+
+        assert!(!result.collection_performed);
+        assert!(result.output_file.is_none());
+        assert_eq!(result.sample_count, 1);
+        assert!(result.summary.contains("Forced export refused"));
+    }
+
+    #[test]
+    fn metrics_collection_works_with_explicit_historical_samples() {
         let config = MetricsCollectionConfig {
             force_export: true,
             output_dir: "/tmp/test_metrics".to_string(),
+            historical_samples: seven_day_samples(),
             ..Default::default()
         };
 
         let result = run_metrics_collection(config).expect("forced collection should work");
 
-        // Should perform collection when forced
         assert!(result.collection_performed);
         assert!(result.output_file.is_some());
         assert!(result.summary.contains("✓ Metrics collection complete"));
+        assert!((result.window_duration_hours - 168.0).abs() < f64::EPSILON);
+        assert_eq!(result.sample_count, 8);
     }
 
     #[test]
