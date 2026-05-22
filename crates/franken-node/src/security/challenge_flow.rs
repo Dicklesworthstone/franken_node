@@ -3428,4 +3428,175 @@ mod tests {
         assert!(err.message().contains("too old"));
         assert!(err.message().contains("3600000ms")); // age should be exactly 3600000ms
     }
+
+    // Frozen SHA-256 hex outputs of the public method
+    // `ChallengeAuditEntry::hash` (challenge_flow.rs:324). The function
+    // builds the tamper-evident audit-chain link hash as:
+    //
+    //   SHA256(
+    //     b"challenge_flow_hash_v1:"
+    //     || LE64(len(challenge_id))         || challenge_id.as_bytes()
+    //     || LE64(len(artifact_id))          || artifact_id.as_bytes()
+    //     || LE64(len(from_state.label()))   || from_state.label().as_bytes()
+    //     || LE64(len(to_state.label()))     || to_state.label().as_bytes()
+    //     || LE64(len(event_code))           || event_code.as_bytes()
+    //     || LE64(len(actor_id))             || actor_id.as_bytes()
+    //     || LE64(timestamp_ms)                # raw u64 — NOT length-prefixed
+    //     || LE64(len(detail))               || detail.as_bytes()
+    //     || LE64(len(prev_hash))            || prev_hash.as_bytes()
+    //   )
+    //
+    // Three frozen fixtures cover the design's distinguishing features:
+    //
+    //   1. genesis — empty prev_hash (chain root). Pins the v1 domain
+    //      separator + the load-bearing decision that prev_hash IS fed
+    //      into the hasher (unlike evidence_ledger which excludes its
+    //      prev_entry_hash, see r30 commit 9a909aa8). For challenge_flow
+    //      the chain is HASH-LINKED, so an empty prev_hash MUST still
+    //      contribute LE64(0) to the hash; dropping it would silently
+    //      let two genesis entries collide.
+    //      Frozen: b6e107e6593e6cf90cbd9a1f06e94d60ec048debf22b5c770d7af7ece4be4822
+    //
+    //   2. linked — non-empty prev_hash (mid-chain link) + non-genesis
+    //      state transition (proof_received → proof_verified). Locks the
+    //      Some-prev framing AND the ChallengeState::label() mapping
+    //      (proof_received vs proof_verified are 14-/14-byte strings).
+    //      Frozen: d4304d4962e787345e2cee5c32a8d97041736771144baf32d2de9fd72e468066
+    //
+    //   3. empty — all string fields empty except the two ChallengeState
+    //      labels (which are always non-empty since the enum has no
+    //      empty variant). Pins the LE64(0) framing across every
+    //      length-prefixed string field, and confirms that ChallengeState
+    //      labels are still present (their byte lengths feed the LE64
+    //      prefixes even when other fields are empty).
+    //      Frozen: 1ae59511410a081494755884f585a3a484d2561b7ac743d04c1a9e8c3892b0d6
+    //
+    // Critical layout invariants this golden pins:
+    //   - the v1 domain separator string `challenge_flow_hash_v1:`
+    //   - prev_hash IS INCLUDED in the hash (load-bearing — contrast
+    //     with evidence_ledger.rs:677 which EXCLUDES prev_entry_hash;
+    //     the two surfaces have different chain-design contracts)
+    //   - timestamp_ms is raw LE64, NOT length-prefixed (counter-style)
+    //   - field order: challenge_id, artifact_id, from_state, to_state,
+    //     event_code, actor_id, timestamp_ms, detail, prev_hash
+    //   - ChallengeState::label() lowercase mapping pinned via the
+    //     non-genesis fixture (pending/challenge_issued/proof_received/
+    //     proof_verified/denied/promoted)
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing the function in Python — NOT captured from an
+    // unreviewed prior run. Recompute all three together if the layout
+    // intentionally changes (a one-sided update flags a real split
+    // between empty/non-empty prev_hash branches or between state-label
+    // mappings — bug, not churn).
+    //
+    // Why this matters (the contract): ChallengeAuditEntry forms a
+    // hash-linked tamper-evident audit chain for challenge state
+    // transitions. The chain links via the embedded prev_hash field.
+    // If two auditors compute different canonical bytes for the same
+    // logical entry — because someone reordered fields, swapped LE64
+    // widths, dropped prev_hash from the hasher, or muddled
+    // ChallengeState::label() — chain verification fails opaquely and
+    // attackers can rewrite history without detection.
+    #[test]
+    fn challenge_audit_entry_hash_frozen_canonical_byte_layout_golden() {
+        // 1. Genesis-like fixture: empty prev_hash, pending → challenge_issued.
+        let genesis = ChallengeAuditEntry {
+            challenge_id: "CH-golden-1".to_string(),
+            artifact_id: "artifact-x".to_string(),
+            from_state: ChallengeState::Pending,
+            to_state: ChallengeState::ChallengeIssued,
+            event_code: "CHALLENGE_ISSUED".to_string(),
+            actor_id: "actor-system".to_string(),
+            timestamp_ms: 1_700_000_000_000,
+            detail: "auto-promoted by verifier".to_string(),
+            prev_hash: String::new(),
+        };
+        let genesis_hash = genesis.hash();
+        assert_eq!(
+            genesis_hash,
+            "b6e107e6593e6cf90cbd9a1f06e94d60ec048debf22b5c770d7af7ece4be4822",
+            "genesis-fixture ChallengeAuditEntry::hash drifted — check \
+             the `challenge_flow_hash_v1:` domain separator OR the \
+             load-bearing decision that an empty prev_hash still emits \
+             LE64(0) into the hasher (drift here may indicate prev_hash \
+             was silently dropped from the hasher, which would let two \
+             genesis entries collide)"
+        );
+
+        // 2. Linked fixture: non-empty prev_hash, proof_received →
+        // proof_verified. Locks Some-prev framing + the
+        // ChallengeState::label() mapping for the verified-path states.
+        let linked = ChallengeAuditEntry {
+            challenge_id: "CH-golden-2".to_string(),
+            artifact_id: "artifact-y".to_string(),
+            from_state: ChallengeState::ProofReceived,
+            to_state: ChallengeState::ProofVerified,
+            event_code: "PROOF_VERIFIED".to_string(),
+            actor_id: "actor-verifier-7".to_string(),
+            timestamp_ms: 1_700_000_001_000,
+            detail: "ed25519 sig OK".to_string(),
+            prev_hash: format!("sha256:{}", "a".repeat(64)),
+        };
+        let linked_hash = linked.hash();
+        assert_eq!(
+            linked_hash,
+            "d4304d4962e787345e2cee5c32a8d97041736771144baf32d2de9fd72e468066",
+            "linked-fixture ChallengeAuditEntry::hash drifted — check \
+             the non-empty prev_hash framing or the ChallengeState::label() \
+             mapping (proof_received / proof_verified)"
+        );
+
+        // 3. Empty fixture: all strings empty (except the two
+        // ChallengeState labels which are always non-empty per the enum).
+        let empty = ChallengeAuditEntry {
+            challenge_id: String::new(),
+            artifact_id: String::new(),
+            from_state: ChallengeState::Pending,
+            to_state: ChallengeState::Denied,
+            event_code: String::new(),
+            actor_id: String::new(),
+            timestamp_ms: 0,
+            detail: String::new(),
+            prev_hash: String::new(),
+        };
+        let empty_hash = empty.hash();
+        assert_eq!(
+            empty_hash,
+            "1ae59511410a081494755884f585a3a484d2561b7ac743d04c1a9e8c3892b0d6",
+            "empty-fixture ChallengeAuditEntry::hash drifted — check the \
+             LE64(0) framing across every length-prefixed string field"
+        );
+
+        // Cross-fixture distinctness: all three MUST produce distinct
+        // hashes. Empty MUST differ from genesis (different states) and
+        // from linked (different fields).
+        assert_ne!(genesis_hash, linked_hash);
+        assert_ne!(genesis_hash, empty_hash);
+        assert_ne!(linked_hash, empty_hash);
+
+        // prev_hash-inclusion invariant: cloning `genesis` and mutating
+        // prev_hash to a non-empty value MUST change the hash. This is
+        // the load-bearing decision that distinguishes challenge_flow's
+        // chain design from evidence_ledger's (which EXCLUDES
+        // prev_entry_hash; see r30 commit 9a909aa8 line 677). A future
+        // refactor that aligned challenge_flow with evidence_ledger
+        // would silently let attackers rewrite the audit chain.
+        let mut genesis_with_prev = genesis.clone();
+        genesis_with_prev.prev_hash = "sha256:tamper-attempt".to_string();
+        assert_ne!(
+            genesis_with_prev.hash(),
+            genesis_hash,
+            "prev_hash MUST be included in ChallengeAuditEntry::hash; \
+             if mutating prev_hash from empty to non-empty does not \
+             change the hash, the audit chain is broken (an attacker \
+             could rewrite history without detection)"
+        );
+
+        // Length+casing contract on every output.
+        for h in [&genesis_hash, &linked_hash, &empty_hash] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
