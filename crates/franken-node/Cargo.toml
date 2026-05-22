@@ -1321,5 +1321,10 @@ path = "../../tests/conformance/bd_2wz_mode_band_matrix_conformance.rs"
 required-features = ["advanced-features"]
 
 [[test]]
+name = "bd_1fp4_integrity_sweep_scheduler_conformance"
+path = "../../tests/conformance/bd_1fp4_integrity_sweep_scheduler_conformance.rs"
+required-features = ["advanced-features"]
+
+[[test]]
 name = "ambient_authority_gate"
 path = "tests/ambient_authority_gate.rs"
