@@ -36,8 +36,9 @@ use ed25519_dalek::{Signer, SigningKey};
 use frankenengine_node::control_plane::audience_token::{
     ActionScope, AudienceBoundToken, ERR_ABT_ATTENUATION_VIOLATION, ERR_ABT_AUDIENCE_MISMATCH,
     ERR_ABT_REPLAY_DETECTED, ERR_ABT_SIGNATURE_INVALID, ERR_ABT_TOKEN_EXPIRED,
-    ERR_ABT_TOKEN_TOO_LARGE, MAX_AUDIENCES_PER_TOKEN, MAX_TOKEN_FIELD_BYTES,
-    MAX_TOKEN_SIGNATURE_BYTES, MAX_TOKENS, TokenChain, TokenId, TokenValidator,
+    ERR_ABT_TOKEN_TOO_LARGE, INV_ABT_ATTENUATION, INV_ABT_AUDIENCE, INV_ABT_EXPIRY, INV_ABT_REPLAY,
+    MAX_AUDIENCES_PER_TOKEN, MAX_TOKEN_FIELD_BYTES, MAX_TOKEN_SIGNATURE_BYTES, MAX_TOKENS,
+    TokenChain, TokenId, TokenValidator,
 };
 use serde_json::json;
 use tracing::{error, info};
@@ -147,6 +148,213 @@ fn make_signed_token(key: &SigningKey, spec: TokenSpec<'_>) -> AudienceBoundToke
     let sig = key.sign(&t.signature_preimage()).to_bytes();
     t.signature = format!("ed25519:{}", hex::encode(sig));
     t
+}
+
+struct AudienceInvariantCase {
+    invariant: &'static str,
+    requirement: &'static str,
+    expected_error_code: &'static str,
+    exercise: fn(&SigningKey) -> String,
+}
+
+fn conformance_attenuation_violation(key: &SigningKey) -> String {
+    let root = make_signed_token(
+        key,
+        TokenSpec {
+            token_id: "tk-conf-attenuation-root",
+            issuer: ISSUER,
+            audience: vec!["svc-conf".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-conf-attenuation-root",
+            parent_token_hash: None,
+            max_delegation_depth: 1,
+        },
+    );
+    let mut chain = TokenChain::new(root.clone()).expect("conformance root chain ok");
+    let root_hash = chain.root().expect("root exists").hash();
+    let child = make_signed_token(
+        key,
+        TokenSpec {
+            token_id: "tk-conf-attenuation-child",
+            issuer: ISSUER,
+            audience: vec!["svc-conf".to_string()],
+            capabilities: caps(&[ActionScope::Revoke]),
+            issued_at: 1_000_000_100_000,
+            expires_at: 1_000_000_800_000,
+            nonce: "nonce-conf-attenuation-child",
+            parent_token_hash: Some(root_hash),
+            max_delegation_depth: 0,
+        },
+    );
+
+    chain
+        .append(child)
+        .expect_err("attenuation violation must be rejected")
+        .code
+}
+
+fn conformance_audience_mismatch(key: &SigningKey) -> String {
+    let mut validator =
+        TokenValidator::new(40).with_trusted_issuer_key(ISSUER, key.verifying_key());
+    let root = make_signed_token(
+        key,
+        TokenSpec {
+            token_id: "tk-conf-audience",
+            issuer: ISSUER,
+            audience: vec!["svc-conf".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-conf-audience",
+            parent_token_hash: None,
+            max_delegation_depth: 0,
+        },
+    );
+    let chain = TokenChain::new(root).expect("audience conformance chain ok");
+
+    validator
+        .verify_chain(
+            &chain,
+            "svc-conf-foreign",
+            1_000_000_500_000,
+            "trace-conf-audience",
+        )
+        .expect_err("audience mismatch must be rejected")
+        .code
+}
+
+fn conformance_expiry_rejection(key: &SigningKey) -> String {
+    let mut validator =
+        TokenValidator::new(40).with_trusted_issuer_key(ISSUER, key.verifying_key());
+    let root = make_signed_token(
+        key,
+        TokenSpec {
+            token_id: "tk-conf-expiry",
+            issuer: ISSUER,
+            audience: vec!["svc-conf".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-conf-expiry",
+            parent_token_hash: None,
+            max_delegation_depth: 0,
+        },
+    );
+    let chain = TokenChain::new(root).expect("expiry conformance chain ok");
+
+    validator
+        .verify_chain(&chain, "svc-conf", 1_000_001_000_000, "trace-conf-expiry")
+        .expect_err("expired token must be rejected")
+        .code
+}
+
+fn conformance_replay_rejection(key: &SigningKey) -> String {
+    let mut validator =
+        TokenValidator::new(40).with_trusted_issuer_key(ISSUER, key.verifying_key());
+    let root = make_signed_token(
+        key,
+        TokenSpec {
+            token_id: "tk-conf-replay",
+            issuer: ISSUER,
+            audience: vec!["svc-conf".to_string()],
+            capabilities: caps(&[ActionScope::Migrate]),
+            issued_at: 1_000_000_000_000,
+            expires_at: 1_000_000_900_000,
+            nonce: "nonce-conf-replay",
+            parent_token_hash: None,
+            max_delegation_depth: 0,
+        },
+    );
+    let chain = TokenChain::new(root).expect("replay conformance chain ok");
+
+    validator
+        .verify_chain(
+            &chain,
+            "svc-conf",
+            1_000_000_500_000,
+            "trace-conf-replay-first",
+        )
+        .expect("first replay conformance verification succeeds");
+
+    validator
+        .verify_chain(
+            &chain,
+            "svc-conf",
+            1_000_000_500_001,
+            "trace-conf-replay-second",
+        )
+        .expect_err("nonce replay must be rejected")
+        .code
+}
+
+#[test]
+fn e2e_audience_token_conformance_matrix_covers_public_invariants() {
+    let h = Harness::new("e2e_audience_token_conformance_matrix_covers_public_invariants");
+
+    let key = signing_key();
+    let cases = [
+        AudienceInvariantCase {
+            invariant: INV_ABT_ATTENUATION,
+            requirement: "delegated capabilities remain a subset of parent capabilities",
+            expected_error_code: ERR_ABT_ATTENUATION_VIOLATION,
+            exercise: conformance_attenuation_violation,
+        },
+        AudienceInvariantCase {
+            invariant: INV_ABT_AUDIENCE,
+            requirement: "leaf audience must contain the requester identity",
+            expected_error_code: ERR_ABT_AUDIENCE_MISMATCH,
+            exercise: conformance_audience_mismatch,
+        },
+        AudienceInvariantCase {
+            invariant: INV_ABT_EXPIRY,
+            requirement: "verification time must be before every token expiration",
+            expected_error_code: ERR_ABT_TOKEN_EXPIRED,
+            exercise: conformance_expiry_rejection,
+        },
+        AudienceInvariantCase {
+            invariant: INV_ABT_REPLAY,
+            requirement: "nonce reuse is rejected within the validator epoch",
+            expected_error_code: ERR_ABT_REPLAY_DETECTED,
+            exercise: conformance_replay_rejection,
+        },
+    ];
+
+    let mut covered = BTreeSet::new();
+    for case in cases {
+        let code = (case.exercise)(&key);
+        assert_eq!(
+            code, case.expected_error_code,
+            "{} failed requirement: {}",
+            case.invariant, case.requirement
+        );
+        assert!(
+            covered.insert(case.invariant),
+            "duplicate invariant in conformance matrix: {}",
+            case.invariant
+        );
+        h.log_phase(
+            case.invariant,
+            true,
+            json!({"requirement": case.requirement, "code": code}),
+        );
+    }
+
+    let expected: BTreeSet<&'static str> = [
+        INV_ABT_ATTENUATION,
+        INV_ABT_AUDIENCE,
+        INV_ABT_EXPIRY,
+        INV_ABT_REPLAY,
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(covered, expected);
+    h.log_phase(
+        "conformance_matrix_complete",
+        true,
+        json!({"invariants": covered.iter().copied().collect::<Vec<_>>()}),
+    );
 }
 
 #[test]
