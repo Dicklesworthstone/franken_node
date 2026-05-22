@@ -1326,5 +1326,10 @@ path = "../../tests/conformance/bd_1fp4_integrity_sweep_scheduler_conformance.rs
 required-features = ["advanced-features"]
 
 [[test]]
+name = "bd_2gk8_ecosystem_compliance_conformance"
+path = "../../tests/conformance/bd_2gk8_ecosystem_compliance_conformance.rs"
+required-features = ["advanced-features"]
+
+[[test]]
 name = "ambient_authority_gate"
 path = "tests/ambient_authority_gate.rs"
