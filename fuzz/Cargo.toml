@@ -538,3 +538,9 @@ name = "fuzz_cancellation_protocol_transitions"
 path = "fuzz_targets/fuzz_cancellation_protocol_transitions.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_time_travel_engine_replay_validation"
+path = "fuzz_targets/fuzz_time_travel_engine_replay_validation.rs"
+test = false
+doc = false
