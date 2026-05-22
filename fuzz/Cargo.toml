@@ -664,3 +664,9 @@ name = "fuzz_config_env_parsing"
 path = "fuzz_targets/fuzz_config_env_parsing.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_git_status_parser"
+path = "fuzz_targets/fuzz_git_status_parser.rs"
+test = false
+doc = false
