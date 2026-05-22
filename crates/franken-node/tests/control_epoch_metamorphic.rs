@@ -1,6 +1,7 @@
 use frankenengine_node::control_plane::control_epoch::{
     ControlEpoch, EpochRejectionReason, ValidityWindowPolicy, check_artifact_epoch,
 };
+use proptest::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EpochDecision {
@@ -104,6 +105,55 @@ fn shifting_current_and_artifact_epochs_preserves_relative_validity_decision() {
                     );
                 }
             }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 128,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn validity_window_boundaries_are_inclusive_and_saturating(
+        current_epoch in any::<u64>(),
+        lookback in any::<u64>(),
+        future_delta in 1_u64..=64,
+    ) {
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(current_epoch), lookback);
+        let min_accepted_epoch = current_epoch.saturating_sub(lookback);
+
+        prop_assert_eq!(
+            policy.min_accepted_epoch(),
+            ControlEpoch::new(min_accepted_epoch),
+            "min_accepted_epoch must saturate instead of underflowing"
+        );
+        prop_assert_eq!(
+            decision_for(min_accepted_epoch, current_epoch, lookback),
+            EpochDecision::Accepted,
+            "minimum accepted epoch must be inside the inclusive validity window"
+        );
+        prop_assert_eq!(
+            decision_for(current_epoch, current_epoch, lookback),
+            EpochDecision::Accepted,
+            "current epoch must be accepted"
+        );
+
+        if let Some(before_min) = min_accepted_epoch.checked_sub(1) {
+            prop_assert_eq!(
+                decision_for(before_min, current_epoch, lookback),
+                EpochDecision::Rejected(EpochRejectionReason::ExpiredEpoch),
+                "epoch immediately before the inclusive minimum must be expired"
+            );
+        }
+
+        if let Some(future_epoch) = current_epoch.checked_add(future_delta) {
+            prop_assert_eq!(
+                decision_for(future_epoch, current_epoch, lookback),
+                EpochDecision::Rejected(EpochRejectionReason::FutureEpoch),
+                "future epochs must reject regardless of lookback width"
+            );
         }
     }
 }
