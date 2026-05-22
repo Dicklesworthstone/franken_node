@@ -1646,6 +1646,8 @@ pub mod replay;
 pub mod root_pointer;
 pub mod runtime;
 pub mod schema_versions;
+#[cfg(test)]
+pub mod schema_versions_byte_layout_golden;
 #[cfg(feature = "verifier-tools")]
 pub mod sdk;
 pub mod security;
