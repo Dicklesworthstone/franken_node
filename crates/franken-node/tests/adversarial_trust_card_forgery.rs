@@ -18,8 +18,20 @@
 //! Bead: bd-2476c.1
 //! Pattern reference: tests/adversarial_remote_cap_replay.rs (commit f5858ec5).
 
+use chrono::Utc;
+use ed25519_dalek::SigningKey;
 use frankenengine_node::supply_chain::{
+    artifact_signing::{self, KeyId, KeyRing},
     certification::{EvidenceType, VerifiedEvidenceRef},
+    extension_registry::{
+        AdmissionKernel, ExtensionSignature, RegistrationRequest, RegistryConfig,
+        SignedExtensionRegistry, VersionEntry, canonical_registration_manifest_bytes, event_codes,
+    },
+    provenance::{
+        self as prov, AttestationEnvelopeFormat, AttestationLink, ChainLinkRole,
+        ProvenanceAttestation,
+    },
+    transparency_verifier as tv,
     trust_card::{
         BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
         DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
@@ -31,6 +43,8 @@ use frankenengine_node::supply_chain::{
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::collections::BTreeMap;
+use subtle::ConstantTimeEq;
+use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -39,6 +53,8 @@ const ATTACKER_KEY: &[u8] = b"adversarial-trust-card-forgery-attacker-key-not-tr
 const NOW_SECS: u64 = 1_777_000_000;
 const TRACE_ID: &str = "trace-trust-card-forgery";
 const CACHE_TTL_SECS: u64 = 60;
+const EXTENSION_PUBLISHER_ID: &str = "pub-001";
+const EXTENSION_NOW_EPOCH: u64 = 1_777_000_500;
 
 /// Build the (extension/publisher/policy) input shape the registry signs over.
 fn legitimate_input() -> TrustCardInput {
@@ -125,6 +141,111 @@ fn forge_signed_card(card: &mut TrustCard, attacker_key: &[u8]) {
     card.registry_signature = hex::encode(mac.finalize().into_bytes());
 }
 
+fn extension_id_matches(actual: &str, expected: &str) -> bool {
+    actual.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
+fn extension_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[42_u8; 32])
+}
+
+fn extension_provenance_signing_keys(sk: &SigningKey) -> BTreeMap<String, SigningKey> {
+    BTreeMap::from([(
+        EXTENSION_PUBLISHER_ID.to_string(),
+        SigningKey::from_bytes(&sk.to_bytes()),
+    )])
+}
+
+fn extension_provenance(sk: &SigningKey, now_epoch: u64) -> ProvenanceAttestation {
+    let mut attestation = ProvenanceAttestation {
+        schema_version: "1.0".to_string(),
+        source_repository_url: "https://github.com/example/ext".to_string(),
+        build_system_identifier: "github-actions".to_string(),
+        builder_identity: EXTENSION_PUBLISHER_ID.to_string(),
+        builder_version: "1.0.0".to_string(),
+        vcs_commit_sha: "abc123def456".to_string(),
+        build_timestamp_epoch: now_epoch.saturating_sub(60),
+        reproducibility_hash: "d".repeat(64),
+        input_hash: "e".repeat(64),
+        output_hash: "f".repeat(64),
+        slsa_level_claim: 2,
+        envelope_format: AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
+        links: vec![AttestationLink {
+            role: ChainLinkRole::Publisher,
+            signer_id: EXTENSION_PUBLISHER_ID.to_string(),
+            signer_version: "1.0.0".to_string(),
+            signature: String::new(),
+            signed_payload_hash: "f".repeat(64),
+            issued_at_epoch: now_epoch.saturating_sub(60),
+            expires_at_epoch: now_epoch.saturating_add(86_400),
+            revoked: false,
+        }],
+        custom_claims: BTreeMap::new(),
+    };
+    prov::sign_links_in_place(&mut attestation, &extension_provenance_signing_keys(sk))
+        .expect("extension provenance fixture should sign");
+    attestation
+}
+
+fn extension_version() -> VersionEntry {
+    VersionEntry {
+        version: "1.0.0".to_string(),
+        parent_version: None,
+        content_hash: "c".repeat(64),
+        registered_at: Utc::now().to_rfc3339(),
+        compatible_with: Vec::new(),
+    }
+}
+
+fn extension_registry(sk: &SigningKey) -> SignedExtensionRegistry {
+    let verifying_key = sk.verifying_key();
+    let mut key_ring = KeyRing::new();
+    key_ring.add_key(verifying_key);
+    let mut provenance_policy = prov::VerificationPolicy::development_profile();
+    provenance_policy.add_trusted_signer_key(EXTENSION_PUBLISHER_ID, &verifying_key);
+
+    SignedExtensionRegistry::new(
+        RegistryConfig::default(),
+        AdmissionKernel {
+            key_ring,
+            provenance_policy,
+            transparency_policy: tv::TransparencyPolicy {
+                required: false,
+                pinned_roots: Vec::new(),
+            },
+        },
+    )
+}
+
+fn extension_request(name: &str, sk: &SigningKey, now_epoch: u64) -> RegistrationRequest {
+    let initial_version = extension_version();
+    let tags = vec!["replay".to_string(), "conformance".to_string()];
+    let manifest_bytes = canonical_registration_manifest_bytes(
+        name,
+        EXTENSION_PUBLISHER_ID,
+        &initial_version,
+        &tags,
+    )
+    .expect("canonical extension registration manifest");
+
+    RegistrationRequest {
+        name: name.to_string(),
+        description: format!("Replay-prevention conformance fixture: {name}"),
+        publisher_id: EXTENSION_PUBLISHER_ID.to_string(),
+        signature: ExtensionSignature {
+            key_id: KeyId::from_verifying_key(&sk.verifying_key()).to_string(),
+            algorithm: "ed25519".to_string(),
+            signature_bytes: artifact_signing::sign_bytes(sk, &manifest_bytes),
+            signed_at: Utc::now().to_rfc3339(),
+        },
+        provenance: extension_provenance(sk, now_epoch),
+        initial_version,
+        tags,
+        manifest_bytes,
+        transparency_proof: None,
+    }
+}
+
 /// Sanity check: a legitimately-minted card must verify under the legitimate
 /// key. If this baseline ever fails, every subsequent rejection assertion is
 /// meaningless.
@@ -133,6 +254,88 @@ fn baseline_legitimate_card_verifies() {
     let card = mint_legitimate_card();
     verify_card_signature(&card, LEGITIMATE_KEY)
         .expect("baseline: legitimately-signed card must verify under legitimate key");
+}
+
+#[test]
+fn conformance_replayed_signature_over_canonical_manifest_rejected() {
+    let signing_key = extension_signing_key();
+    let source_name = "signed-extension-replay-source";
+    let target_name = "signed-extension-replay-target";
+    let trace_id = Uuid::now_v7().to_string();
+
+    let mut source_registry = extension_registry(&signing_key);
+    let source_request = extension_request(source_name, &signing_key, EXTENSION_NOW_EPOCH);
+    let replayed_signature = source_request.signature.clone();
+    let source_result = source_registry.register(source_request, &trace_id, EXTENSION_NOW_EPOCH);
+
+    assert!(
+        source_result.success,
+        "baseline signed source manifest must be admitted before replay check: {:?}",
+        source_result.error_code
+    );
+    assert!(
+        source_registry.query_by_name(source_name).is_some(),
+        "baseline signed source manifest must remain queryable"
+    );
+
+    let mut target_request = extension_request(target_name, &signing_key, EXTENSION_NOW_EPOCH);
+    target_request.signature = replayed_signature;
+
+    let mut replay_registry = extension_registry(&signing_key);
+    let result = replay_registry.register(target_request, &trace_id, EXTENSION_NOW_EPOCH);
+
+    assert!(!result.success, "replayed signature must fail closed");
+    assert_eq!(
+        result.error_code.as_deref(),
+        Some(event_codes::SER_ERR_INVALID_SIGNATURE)
+    );
+    assert!(
+        result.extension_id.is_none(),
+        "replayed signature must not return an extension_id"
+    );
+    assert!(
+        replay_registry.list(None).is_empty(),
+        "replayed signature must not mutate the registry"
+    );
+    assert!(
+        replay_registry.query_by_name(target_name).is_none(),
+        "replayed signature must not make the forged target queryable"
+    );
+
+    let receipt = replay_registry
+        .admission_receipts()
+        .last()
+        .expect("replayed signature rejection must persist a receipt");
+    assert!(!receipt.admitted);
+    assert_eq!(receipt.extension_name, target_name);
+    let witness = receipt
+        .witness
+        .as_ref()
+        .expect("replayed signature rejection must carry a negative witness");
+    assert_eq!(
+        witness.rejection_code,
+        event_codes::SER_ERR_INVALID_SIGNATURE
+    );
+    assert_eq!(
+        witness.checked_fields,
+        vec![
+            "signature.signature_bytes".to_string(),
+            "manifest_bytes".to_string(),
+        ]
+    );
+
+    let audit_events: Vec<_> = replay_registry
+        .audit_log()
+        .iter()
+        .map(|record| record.event_code.as_str())
+        .collect();
+    assert_eq!(
+        audit_events,
+        vec![
+            event_codes::SER_ADMISSION_EVALUATED,
+            event_codes::SER_ERR_INVALID_SIGNATURE,
+        ]
+    );
 }
 
 /// Variant (a): tamper scope claims (capability_declarations + risk score)
@@ -168,7 +371,8 @@ fn rejects_tampered_scope_claims_with_original_signature() {
     let err = verify_card_signature(&card, LEGITIMATE_KEY)
         .expect_err("tampered scope claims must be rejected by the verifier");
     assert!(
-        matches!(err, TrustCardError::CardHashMismatch(ref ext_id) if ext_id == &card.extension.extension_id),
+        matches!(err, TrustCardError::CardHashMismatch(ref ext_id)
+            if extension_id_matches(ext_id, &card.extension.extension_id)),
         "expected CardHashMismatch for tampered scope claims, got {err:?}"
     );
 }
@@ -209,7 +413,8 @@ fn rejects_re_signed_card_under_attacker_key() {
     let err = verify_card_signature(&card, LEGITIMATE_KEY)
         .expect_err("re-signed forgery under attacker key must be rejected by legitimate verifier");
     assert!(
-        matches!(err, TrustCardError::SignatureInvalid(ref ext_id) if ext_id == &card.extension.extension_id),
+        matches!(err, TrustCardError::SignatureInvalid(ref ext_id)
+            if extension_id_matches(ext_id, &card.extension.extension_id)),
         "expected SignatureInvalid for attacker-key re-sign, got {err:?}"
     );
 }
@@ -233,7 +438,8 @@ fn rejects_extended_freshness_window_without_resigning() {
         "extended freshness/TTL claim must be rejected — verifier must hash all signed fields",
     );
     assert!(
-        matches!(err, TrustCardError::CardHashMismatch(ref ext_id) if ext_id == &card.extension.extension_id),
+        matches!(err, TrustCardError::CardHashMismatch(ref ext_id)
+            if extension_id_matches(ext_id, &card.extension.extension_id)),
         "expected CardHashMismatch for extended freshness claim, got {err:?}"
     );
 }
