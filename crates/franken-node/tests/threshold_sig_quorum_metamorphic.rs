@@ -25,6 +25,8 @@
 //!    connector carrying the same content hash.
 //! 9. **Duplicate partial replay rejection** — replaying any already-valid
 //!    partial signature cannot inflate `valid_signatures` or satisfy quorum.
+//! 10. **Structure-aware adversarial fuzzing** — bounded signer/key/signature
+//!    mutations must fail closed and keep baseline/preparsed verdicts identical.
 //!
 //! These are the load-bearing safety properties: if any break, the threshold gate
 //! either lets unauthorised publications through or rejects valid quorums.
@@ -154,6 +156,31 @@ fn quorum_strategy() -> impl Strategy<Value = (u32, u32, u32, Vec<usize>)> {
             )
         })
     })
+}
+
+fn invalid_signature_hex_variant(variant: u8, seed: u64) -> String {
+    match variant % 5 {
+        0 => String::new(),
+        1 => "0".repeat(127),
+        2 => "0".repeat(129),
+        3 => format!("{}zz", "0".repeat(126)),
+        _ => format!("sig-{seed:016x}"),
+    }
+}
+
+fn unknown_safe_key_id_variant(variant: u8, seed: u64) -> String {
+    format!("unknown-signer-{}-{seed:016x}", variant % 8)
+}
+
+fn unsafe_key_id_variant(variant: u8, safe_key_id: &str) -> String {
+    match variant % 6 {
+        0 => format!("{safe_key_id} "),
+        1 => format!("{safe_key_id}\nspoof"),
+        2 => format!("/{safe_key_id}"),
+        3 => format!("{safe_key_id}\\alias"),
+        4 => format!("{safe_key_id}\u{202e}spoof"),
+        _ => String::new(),
+    }
 }
 
 proptest! {
@@ -541,7 +568,96 @@ proptest! {
         );
     }
 
-    /// Property 10 (bd-98xo5.1.4): verify_threshold and verify_threshold_preparsed
+    /// Property 10: structure-aware adversarial fuzzing. Mutating a minimally
+    /// valid k-of-n publication across replay, signer lookup, unsafe identifier,
+    /// and signature-encoding boundaries must fail closed without creating a
+    /// baseline/preparsed verifier split.
+    #[test]
+    fn adversarial_wire_mutations_fail_closed_and_match_preparsed(
+        k in 2_u32..=8_u32,
+        n_offset in 0_u32..=4_u32,
+        content_seed in any::<u64>(),
+        mutation in 0_u8..=6_u8,
+        corrupt_variant in 0_u8..=15_u8,
+        replay_count in 1_usize..=8_usize,
+        replay_position in 0_usize..=8_usize,
+    ) {
+        let n = k.saturating_add(n_offset);
+        let domain = format!("adversarial-fuzz-{k}-of-{n}-{content_seed:016x}");
+        let quorum = build_quorum(domain.as_bytes(), k, n);
+        let content_hash = format!("fuzz-{content_seed:016x}");
+        let chosen = (0..k as usize).collect::<Vec<_>>();
+        let signatures = sign_with_indices(&quorum, &content_hash, &chosen);
+        let valid_artifact = make_artifact(&content_hash, signatures.clone());
+        let valid_result = verify_threshold(&quorum.config, &valid_artifact, "fuzz-valid", "ts");
+        prop_assert!(valid_result.verified, "seed k-of-n artifact must verify before mutation");
+
+        let mut fuzz_artifact = valid_artifact.clone();
+        match mutation % 7 {
+            0 => {
+                fuzz_artifact.artifact_id = format!("art-replay-{content_seed:016x}");
+            }
+            1 => {
+                fuzz_artifact.connector_id = format!("conn-replay-{content_seed:016x}");
+            }
+            2 => {
+                fuzz_artifact.content_hash = format!("fuzz-mutated-{content_seed:016x}");
+            }
+            3 => {
+                fuzz_artifact.signatures[0].signature_hex =
+                    invalid_signature_hex_variant(corrupt_variant, content_seed);
+            }
+            4 => {
+                let unknown_key_id = unknown_safe_key_id_variant(corrupt_variant, content_seed);
+                fuzz_artifact.signatures[0].key_id = unknown_key_id.clone();
+                fuzz_artifact.signatures[0].signer_id = unknown_key_id;
+            }
+            5 => {
+                let unsafe_key_id =
+                    unsafe_key_id_variant(corrupt_variant, &quorum.config.signer_keys[0].key_id);
+                fuzz_artifact.signatures[0].key_id = unsafe_key_id.clone();
+                fuzz_artifact.signatures[0].signer_id = unsafe_key_id;
+            }
+            _ => {
+                let unique_count = k - 1;
+                let unique_indices = (0..unique_count as usize).collect::<Vec<_>>();
+                let unique_signatures = sign_with_indices(&quorum, &content_hash, &unique_indices);
+                let replayed_partial = unique_signatures[0].clone();
+                let insert_at = replay_position.min(unique_signatures.len());
+                let mut replayed =
+                    Vec::with_capacity(unique_signatures.len().saturating_add(replay_count));
+                replayed.extend_from_slice(&unique_signatures[..insert_at]);
+                replayed.extend(std::iter::repeat(replayed_partial).take(replay_count));
+                replayed.extend_from_slice(&unique_signatures[insert_at..]);
+                fuzz_artifact.signatures = replayed;
+            }
+        }
+
+        let preparsed = PreparsedThresholdConfig::from_config(quorum.config.clone())
+            .expect("valid fuzz config must parse");
+        let baseline = verify_threshold(&quorum.config, &fuzz_artifact, "fuzz-mut", "ts");
+        let optimized = verify_threshold_preparsed(&preparsed, &fuzz_artifact, "fuzz-mut", "ts");
+
+        prop_assert_eq!(
+            &baseline,
+            &optimized,
+            "structure-aware fuzz mutation must not split verifier implementations"
+        );
+        prop_assert!(
+            !baseline.verified,
+            "adversarial fuzz mutation must fail closed instead of satisfying quorum"
+        );
+        prop_assert!(
+            baseline.valid_signatures < baseline.threshold,
+            "fail-closed result must count fewer signatures than the threshold"
+        );
+        prop_assert!(
+            baseline.failure_reason.is_some(),
+            "fail-closed result must expose a machine-readable failure reason"
+        );
+    }
+
+    /// Property 11 (bd-98xo5.1.4): verify_threshold and verify_threshold_preparsed
     /// produce byte-identical VerifyResult for any valid input within the production
     /// envelope (signers 1..=64, threshold 1..=n, content up to 4 KiB).
     #[test]
