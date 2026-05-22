@@ -368,6 +368,16 @@ fn check_version_bump(registry: &mut ComputationRegistry, initial: u64, bump_ver
 
 fn check_catalog_roundtrip(registry: &ComputationRegistry) {
     let catalog = registry.to_catalog();
+    assert_eq!(catalog.entries, registry.list_computations());
+    let catalog_names: Vec<&str> = catalog
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    let unique_names: BTreeSet<&str> = catalog_names.iter().copied().collect();
+    let sorted_names: Vec<&str> = unique_names.iter().copied().collect();
+    assert_eq!(catalog_names, sorted_names);
+
     let serialized = serde_json::to_vec(&catalog);
     let Ok(serialized) = serialized else {
         return;
