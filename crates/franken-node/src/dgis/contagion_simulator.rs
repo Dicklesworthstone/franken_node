@@ -113,7 +113,7 @@ impl InfectionState {
         graph: &ContagionGraph,
         initial_infected: &[NodeId],
     ) -> Result<Self, SimulatorError> {
-        let interner = graph_node_interner(graph)?;
+        let interner = graph_node_interner(graph);
         let mut infected_internal = BTreeSet::new();
         for node in initial_infected {
             let node_id = interner.get(node).ok_or(SimulatorError::UnknownNode)?;
@@ -332,13 +332,8 @@ pub fn step(
     // calls that never touched graph state.
     SIMULATION_STEPS_TOTAL.fetch_add(1, Ordering::Relaxed);
 
-    // Pre-compute the in-edges for each node so we can scan "infected sources
-    // pointing at me" in a single pass per node. Building this map per step
-    // is O(E); given the campaign sizes we care about (≤ a few thousand
-    // edges) and the modest step budget, this is well within budget and
-    // keeps the simulator API graph-shape-agnostic.
     let (interner, infected_internal, exposure_internal) = state.reindexed_for_graph(graph)?;
-    let in_edges = build_in_edges(graph, &interner)?;
+    let in_edges = build_in_edges(graph)?;
 
     let mut next_exposure: BTreeMap<InternedNodeId, f64> = BTreeMap::new();
     let mut next_infected: BTreeSet<InternedNodeId> = infected_internal.clone();
@@ -509,17 +504,10 @@ pub fn detect_termination(
     None
 }
 
-/// Build the reverse-adjacency view: for each node, the list of `(source,
-/// weight)` pairs pointing at it. Used by [`step`] to do a single pass over
-/// "who could have infected me this step".
-fn graph_node_interner(graph: &ContagionGraph) -> Result<Arc<NodeInterner>, SimulatorError> {
-    let mut interner = NodeInterner::new();
-    for node in graph.nodes() {
-        interner
-            .intern(node)
-            .map_err(|_| SimulatorError::UnknownNode)?;
-    }
-    Ok(Arc::new(interner))
+/// Snapshot the graph's interner for infection/exposure state. This keeps
+/// simulator interned IDs aligned with the graph-owned edge buckets.
+fn graph_node_interner(graph: &ContagionGraph) -> Arc<NodeInterner> {
+    Arc::new(graph.interner_snapshot())
 }
 
 impl InfectionState {
@@ -534,11 +522,7 @@ impl InfectionState {
         ),
         SimulatorError,
     > {
-        if graph
-            .nodes()
-            .iter()
-            .all(|node| self.interner.get(node).is_some())
-        {
+        if graph.has_same_interner(self.interner.as_ref()) {
             return Ok((
                 Arc::clone(&self.interner),
                 self.infected_internal.clone(),
@@ -546,7 +530,7 @@ impl InfectionState {
             ));
         }
 
-        let interner = graph_node_interner(graph)?;
+        let interner = graph_node_interner(graph);
         let mut infected_internal = BTreeSet::new();
         for node in &self.infected {
             let node_id = interner.get(node).ok_or(SimulatorError::UnknownNode)?;
@@ -561,19 +545,21 @@ impl InfectionState {
     }
 }
 
+/// Build the reverse-adjacency view directly from graph-owned interned buckets.
 fn build_in_edges(
     graph: &ContagionGraph,
-    interner: &NodeInterner,
 ) -> Result<BTreeMap<InternedNodeId, Vec<(InternedNodeId, f64)>>, SimulatorError> {
     let mut in_edges: BTreeMap<InternedNodeId, Vec<(InternedNodeId, f64)>> = BTreeMap::new();
-    for src in graph.nodes() {
-        let src_id = interner.get(src).ok_or(SimulatorError::UnknownNode)?;
-        for edge in graph.neighbors(src) {
-            let target_id = interner
-                .get(&edge.target)
-                .ok_or(SimulatorError::UnknownNode)?;
+    for (src_id, bucket) in graph.interned_edge_buckets() {
+        if !graph.contains_interned_node(src_id) {
+            return Err(SimulatorError::UnknownNode);
+        }
+        for edge in bucket {
+            if !graph.contains_interned_node(edge.target) {
+                return Err(SimulatorError::UnknownNode);
+            }
             in_edges
-                .entry(target_id)
+                .entry(edge.target)
                 .or_default()
                 .push((src_id, edge.weight));
         }

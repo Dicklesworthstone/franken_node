@@ -75,7 +75,7 @@ pub enum InternError {
 /// next free `u32` for a fresh id, and `resolve(id)` always returns the
 /// original string for an id this interner issued. Iteration order is
 /// u32 order (i.e. insertion order) — see Decision 2 in the design note.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeInterner {
     to_str: Vec<String>,
     from_str: BTreeMap<String, u32>,

@@ -271,6 +271,44 @@ fn graph_add_edge_with_intern_creates_correct_adjacency() -> TestResult {
 }
 
 #[test]
+fn simulator_uses_interned_graph_edges_without_changing_trace_strings() -> TestResult {
+    let mut graph = ContagionGraph::new(104);
+    graph.add_node("pkg:root".to_string());
+    graph.add_node("pkg:dep-a".to_string());
+    graph
+        .add_edge(
+            &"pkg:root".to_string(),
+            ContagionEdge::new("pkg:dep-a".to_string(), 1.0, EdgeKind::DependencyImport)
+                .map_err(|e| format!("edge rejected: {e:?}"))?,
+        )
+        .map_err(|e| format!("add edge failed: {e:?}"))?;
+
+    let config = SimulatorConfig {
+        max_steps: 4,
+        infection_threshold: 1.0,
+        decay_factor: 0.0,
+        seed: 0xD615,
+    };
+    let trace = simulate(&graph, &["pkg:root".to_string()], &config)
+        .map_err(|e| format!("simulation failed: {e:?}"))?;
+    let last = trace
+        .states_per_step
+        .last()
+        .ok_or_else(|| "simulation returned no states".to_string())?;
+
+    assert_eq!(trace.termination_reason, TerminationReason::FullSpread);
+    assert_eq!(trace.terminated_at, 1);
+    assert_eq!(last.infected_count(), 2);
+    assert!(last.infected().contains("pkg:root"));
+    assert!(last.infected().contains("pkg:dep-a"));
+    assert_eq!(
+        graph.neighbors(&"pkg:root".to_string())[0].target,
+        "pkg:dep-a"
+    );
+    Ok(())
+}
+
+#[test]
 fn graph_validate_rejects_dangling_edge() -> TestResult {
     let mut graph = ContagionGraph::new(103);
     graph.add_node("pkg:root".to_string());

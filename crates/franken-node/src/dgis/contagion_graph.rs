@@ -128,9 +128,9 @@ impl ContagionEdge {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct InternedContagionEdge {
-    target: InternedNodeId,
-    weight: f64,
+pub(super) struct InternedContagionEdge {
+    pub(super) target: InternedNodeId,
+    pub(super) weight: f64,
     edge_kind: EdgeKind,
 }
 
@@ -219,6 +219,26 @@ impl ContagionGraph {
         self.interner
             .get(node)
             .filter(|id| self.nodes_internal.contains(id))
+    }
+
+    pub(super) fn interner_snapshot(&self) -> NodeInterner {
+        self.interner.clone()
+    }
+
+    pub(super) fn has_same_interner(&self, interner: &NodeInterner) -> bool {
+        &self.interner == interner
+    }
+
+    pub(super) fn contains_interned_node(&self, id: InternedNodeId) -> bool {
+        self.nodes_internal.contains(&id)
+    }
+
+    pub(super) fn interned_edge_buckets(
+        &self,
+    ) -> impl Iterator<Item = (InternedNodeId, &[InternedContagionEdge])> + '_ {
+        self.edges
+            .iter()
+            .map(|(source, bucket)| (*source, bucket.as_slice()))
     }
 
     fn unknown_target_for(&self, id: InternedNodeId) -> GraphError {
