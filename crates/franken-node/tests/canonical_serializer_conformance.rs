@@ -5,7 +5,7 @@
 
 // Import the canonical serializer module - actually use it!
 use frankenengine_node::connector::canonical_serializer::{
-    CanonicalSerializer, SerializerError, TrustObjectType,
+    CanonicalSerializer, SerializerError, SignaturePreimage, TrustObjectType,
 };
 
 fn canonical_payload_for_type(trust_type: TrustObjectType) -> &'static [u8] {
@@ -29,6 +29,85 @@ fn canonical_payload_for_type(trust_type: TrustObjectType) -> &'static [u8] {
             br#"{"receipt_id":"rec-001","operator_id":"operator-a","action":"approve","artifact_hash":"sha256:artifact","timestamp":"2026-04-21T00:00:00Z"}"#
         }
     }
+}
+
+fn fuzz_seed_payloads_for_type(trust_type: TrustObjectType) -> Vec<Vec<u8>> {
+    vec![
+        Vec::new(),
+        b"{}".to_vec(),
+        canonical_payload_for_type(trust_type).to_vec(),
+        format!("plain-text-{}", trust_type.label()).into_bytes(),
+        vec![0x00, 0x01, 0x02, 0x7f, 0xff],
+    ]
+}
+
+fn encoded_payload(payload: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(payload.len()).expect("fuzz seed payload fits canonical length prefix");
+    let mut encoded = Vec::with_capacity(4 + payload.len());
+    encoded.extend_from_slice(&len.to_be_bytes());
+    encoded.extend_from_slice(payload);
+    encoded
+}
+
+fn with_length_prefix(mut canonical: Vec<u8>, len: u32) -> Vec<u8> {
+    canonical[..4].copy_from_slice(&len.to_be_bytes());
+    canonical
+}
+
+fn length_prefix_mutation_cases(payload: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
+    let canonical = encoded_payload(payload);
+    let len = u32::try_from(payload.len()).expect("fuzz seed payload fits canonical length prefix");
+    let mut cases = Vec::new();
+
+    let mut truncated = canonical.clone();
+    truncated.truncate(truncated.len().saturating_sub(1));
+    cases.push(("truncated", truncated));
+
+    let mut trailing = canonical.clone();
+    trailing.push(0);
+    cases.push(("trailing-byte", trailing));
+
+    if len > 0 {
+        cases.push((
+            "prefix-minus-one",
+            with_length_prefix(canonical.clone(), len - 1),
+        ));
+        cases.push(("prefix-zero", with_length_prefix(canonical.clone(), 0)));
+
+        let mut little_endian = canonical.clone();
+        little_endian[..4].copy_from_slice(&len.to_le_bytes());
+        if little_endian != canonical {
+            cases.push(("prefix-little-endian", little_endian));
+        }
+    }
+
+    if len < u32::MAX {
+        cases.push((
+            "prefix-plus-one",
+            with_length_prefix(canonical.clone(), len + 1),
+        ));
+    }
+
+    cases.push(("prefix-u32-max", with_length_prefix(canonical, u32::MAX)));
+    cases
+}
+
+fn validate_preimage_domain(
+    expected_type: TrustObjectType,
+    bytes: &[u8],
+) -> Result<SignaturePreimage, ([u8; 2], [u8; 2])> {
+    assert!(bytes.len() >= 3, "preimage bytes include version and tag");
+    let expected = expected_type.domain_tag();
+    let actual = [bytes[1], bytes[2]];
+    if actual != expected {
+        return Err((expected, actual));
+    }
+
+    Ok(SignaturePreimage::build(
+        bytes[0],
+        actual,
+        bytes[3..].to_vec(),
+    ))
 }
 
 /// Main conformance test function - now actually uses CanonicalSerializer!
@@ -297,6 +376,64 @@ fn test_canonical_serializer_conformance() {
         "{} out of {} BD-JJM conformance requirements failed (compliance: {:.1}%)",
         failed_tests, total_tests, compliance_score
     );
+}
+
+#[test]
+fn fuzz_length_prefix_mutations_fail_closed_across_object_types() {
+    let serializer = CanonicalSerializer::with_all_schemas();
+
+    for &trust_type in TrustObjectType::all() {
+        for payload in fuzz_seed_payloads_for_type(trust_type) {
+            for (case_name, mutated) in length_prefix_mutation_cases(&payload) {
+                let result = serializer.deserialize(trust_type, &mutated);
+                assert!(
+                    matches!(result, Err(SerializerError::NonCanonicalInput { .. })),
+                    "{case_name} should reject mutated prefix for {} payload_len={} bytes={:?}",
+                    trust_type.label(),
+                    payload.len(),
+                    mutated
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn fuzz_signature_preimage_domain_tag_matrix_rejects_cross_type_swaps() {
+    let mut serializer = CanonicalSerializer::with_all_schemas();
+
+    for &trust_type in TrustObjectType::all() {
+        let preimage = serializer
+            .build_preimage(
+                trust_type,
+                canonical_payload_for_type(trust_type),
+                "fuzz-domain-tag-matrix",
+            )
+            .expect("schema-valid payload should build a preimage");
+
+        for &candidate_type in TrustObjectType::all() {
+            let mut bytes = preimage.to_bytes();
+            bytes[1..3].copy_from_slice(&candidate_type.domain_tag());
+            let parsed = validate_preimage_domain(trust_type, &bytes);
+
+            if candidate_type == trust_type {
+                assert_eq!(
+                    parsed.expect("matching domain tag should parse"),
+                    preimage,
+                    "{} should accept its own domain tag",
+                    trust_type.label()
+                );
+            } else {
+                assert_eq!(
+                    parsed,
+                    Err((trust_type.domain_tag(), candidate_type.domain_tag())),
+                    "{} should reject swapped {} domain tag",
+                    trust_type.label(),
+                    candidate_type.label()
+                );
+            }
+        }
+    }
 }
 
 /// Test negative cases for CanonicalSerializer error handling
