@@ -634,3 +634,9 @@ name = "fuzz_operator_json_validation"
 path = "fuzz_targets/fuzz_operator_json_validation.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_schema_byte_layout_canonical"
+path = "fuzz_targets/fuzz_schema_byte_layout_canonical.rs"
+test = false
+doc = false
