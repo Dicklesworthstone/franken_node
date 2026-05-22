@@ -3413,4 +3413,91 @@ mod tests {
         let hash_large = sha256_hex(&large_vec);
         assert_eq!(hash_large.len(), 64);
     }
+
+    // Frozen SHA-256 hex outputs of the public function
+    // sha256_hex (category_shift.rs:796). The function builds
+    // the category-shift content fingerprint as:
+    //
+    //   SHA256(
+    //     b"category_shift_v1:"
+    //     || LE64(len(data)) || data
+    //   ).hex()
+    //
+    // Three frozen fixtures + structural invariants:
+    //
+    //   1. empty (locks v1 domain + LE64(0) framing).
+    //      Frozen: 230517db8e6743dd39186d1fb4b6436cecfcb5a9b9f98d1604f29ed443603ccb
+    //
+    //   2. ASCII payload (26 bytes "category-shift-evidence-v1").
+    //      Frozen: 15d85f92b702aaf7db8401d0880dc830f9eeab443e64dfd13f82103947dbb1ae
+    //
+    //   3. binary payload (bytes 0..16 — control chars and printable
+    //      ASCII boundary). Pins that raw binary bytes are hashed
+    //      verbatim, NOT escaped or UTF-8-validated.
+    //      Frozen: 43091e493b4e4d7eb3b6eb7500be0b1803cd9dd8275b6f34cdc77677ea7dc851
+    //
+    //   4. EMPTY-VS-ZERO-BYTE INVARIANT: b"" and b"\0" MUST hash
+    //      differently. Empty bytes emit LE64(0)+0 bytes; single null
+    //      byte emits LE64(1)+[0x00]. Pins that the length prefix
+    //      distinguishes "no bytes" from "one zero byte" — a
+    //      property crucial for category-shift evidence integrity.
+    //
+    //   5. 64-lowercase-hex length+casing contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): sha256_hex is the content-
+    // hash primitive for category-shift evidence. If two evaluators
+    // compute different hashes for the same logical evidence bytes —
+    // because someone swapped LE64 widths, dropped the v1 domain, or
+    // escaped binary bytes before hashing — category-shift evaluation
+    // forks across the supply-chain audit pipeline AND legitimate
+    // evidence gets rejected.
+    #[test]
+    fn category_shift_sha256_hex_frozen_canonical_byte_layout_golden() {
+        // 1. Empty.
+        assert_eq!(
+            sha256_hex(b""),
+            "230517db8e6743dd39186d1fb4b6436cecfcb5a9b9f98d1604f29ed443603ccb",
+            "category_shift::sha256_hex(empty) drifted — check the v1 \
+             domain separator `category_shift_v1:` or LE64(0) empty \
+             framing"
+        );
+
+        // 2. ASCII payload.
+        assert_eq!(
+            sha256_hex(b"category-shift-evidence-v1"),
+            "15d85f92b702aaf7db8401d0880dc830f9eeab443e64dfd13f82103947dbb1ae"
+        );
+
+        // 3. Binary payload (control chars).
+        let binary: Vec<u8> = (0_u8..16).collect();
+        assert_eq!(
+            sha256_hex(&binary),
+            "43091e493b4e4d7eb3b6eb7500be0b1803cd9dd8275b6f34cdc77677ea7dc851",
+            "binary payload sha256_hex drifted — raw bytes MUST be \
+             hashed verbatim (no UTF-8 validation or escape)"
+        );
+
+        // 4. EMPTY-VS-ZERO-BYTE INVARIANT.
+        let h_empty = sha256_hex(b"");
+        let h_zero_byte = sha256_hex(b"\x00");
+        assert_ne!(
+            h_empty, h_zero_byte,
+            "b\"\" and b\"\\x00\" MUST hash differently — the length \
+             prefix distinguishes \"no bytes\" (LE64(0)) from \
+             \"one zero byte\" (LE64(1)+[0x00])"
+        );
+
+        // 5. 64-lowercase-hex length+casing contract.
+        for h in [
+            sha256_hex(b""),
+            sha256_hex(b"category-shift-evidence-v1"),
+            sha256_hex(&binary),
+        ] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
