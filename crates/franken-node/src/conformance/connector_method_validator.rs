@@ -919,4 +919,177 @@ mod tests {
         assert_eq!(parsed.verdict, "PASS");
         assert_eq!(parsed.methods.len(), 9);
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // bd-kpygy: metamorphic invariant harness.
+    //
+    // The 37 existing tests above are scenario-driven (happy path,
+    // missing-method, version-mismatch, etc.). This block adds
+    // CROSS-SCENARIO invariants that should hold for ALL inputs —
+    // catches regressions where, e.g., a HashMap iteration leak
+    // makes validate_contract order-dependent, or required_methods
+    // accidentally returns a value outside all_methods.
+    //
+    // Pattern: input transformation T(x) must yield an output that
+    // satisfies a known relation R(f(x), f(T(x))). Independent of
+    // the concrete f(x).
+    // ─────────────────────────────────────────────────────────────
+
+    fn reversed_declarations(decls: &[MethodDeclaration]) -> Vec<MethodDeclaration> {
+        let mut out = decls.to_vec();
+        out.reverse();
+        out
+    }
+
+    /// Helper that compares two reports for "structural equivalence":
+    /// identical verdict + summary counts. Per-method entries may
+    /// appear in different orders if a future refactor sorts them,
+    /// so we compare as multisets via BTreeSet of (name, status_code).
+    fn reports_structurally_equal(a: &ContractReport, b: &ContractReport) -> bool {
+        if a.verdict != b.verdict {
+            return false;
+        }
+        if a.summary != b.summary {
+            return false;
+        }
+        let set_a: std::collections::BTreeSet<(&str, &str)> = a
+            .methods
+            .iter()
+            .map(|m| (m.method.as_str(), m.status.as_str()))
+            .collect();
+        let set_b: std::collections::BTreeSet<(&str, &str)> = b
+            .methods
+            .iter()
+            .map(|m| (m.method.as_str(), m.status.as_str()))
+            .collect();
+        set_a == set_b
+    }
+
+    #[test]
+    fn metamorphic_declaration_order_invariance_on_full_contract() {
+        // INV-CMV-ORDER-INV: validate_contract verdict + counts must
+        // not depend on the order of declarations passed in. A
+        // regression where validate_contract uses
+        // declarations.iter().enumerate() to bind ordinal positions
+        // (rather than method-name-keyed lookup) would surface here.
+        let forward = validate_contract("test-conn", &full_declarations());
+        let reverse = validate_contract("test-conn", &reversed_declarations(&full_declarations()));
+        assert!(
+            reports_structurally_equal(&forward, &reverse),
+            "validate_contract must be insensitive to declaration order; \
+             forward.verdict={} reverse.verdict={}",
+            forward.verdict,
+            reverse.verdict
+        );
+    }
+
+    #[test]
+    fn metamorphic_order_invariance_on_partial_contract() {
+        // Same property on a partial declaration set that still
+        // produces a PASS (required-only). Catches the case where
+        // order dependence only surfaces when some optional methods
+        // are absent.
+        let forward = validate_contract("test-conn", &required_only_declarations());
+        let reverse = validate_contract(
+            "test-conn",
+            &reversed_declarations(&required_only_declarations()),
+        );
+        assert!(reports_structurally_equal(&forward, &reverse));
+    }
+
+    #[test]
+    fn metamorphic_idempotence_validate_contract() {
+        // INV-CMV-IDEMPOTENT: validate_contract on the same inputs
+        // returns structurally identical results across invocations.
+        // A regression that introduced hidden state (e.g., a static
+        // counter influencing detail strings) would surface here.
+        let decls = full_declarations();
+        let first = validate_contract("test-conn", &decls);
+        let second = validate_contract("test-conn", &decls);
+        assert!(reports_structurally_equal(&first, &second));
+    }
+
+    #[test]
+    fn metamorphic_required_subset_of_all() {
+        // INV-CMV-SUBSET: every method in required_methods() MUST
+        // also appear in all_methods(). A regression where
+        // STANDARD_METHODS marks a method required but the array
+        // omits it would surface here (impossible today since both
+        // derive from the same array, but the property pins the
+        // contract).
+        let req: std::collections::BTreeSet<&str> = required_methods().into_iter().collect();
+        let all: std::collections::BTreeSet<&str> = all_methods().into_iter().collect();
+        assert!(
+            req.is_subset(&all),
+            "required_methods() must be a subset of all_methods(); missing: {:?}",
+            req.difference(&all).collect::<Vec<_>>()
+        );
+        // Strict subset only if there are optional methods (which
+        // there must be by INV-CMV-OPTIONAL — simulate is optional).
+        assert!(req.len() < all.len());
+    }
+
+    #[test]
+    fn metamorphic_all_method_names_are_lowercase_ascii() {
+        // INV-CMV-NAME-FORMAT: method names must be lowercase ASCII
+        // identifiers — no whitespace, no unicode, no leading digit.
+        // This pins the contract documented by the JSON-RPC method
+        // naming convention before declarations are serialised onto
+        // the wire.
+        for name in all_methods() {
+            assert!(!name.is_empty(), "method name must be non-empty");
+            assert!(
+                name.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b == b'_' || b.is_ascii_digit()),
+                "method name {name:?} must be lowercase ASCII identifier"
+            );
+            assert!(
+                !name.as_bytes().first().unwrap().is_ascii_digit(),
+                "method name {name:?} must not start with a digit"
+            );
+        }
+    }
+
+    #[test]
+    fn metamorphic_duplicate_declaration_does_not_inflate_counts() {
+        // INV-CMV-DEDUPE-COUNT: passing the same method declaration
+        // twice in the input must not double-count it in the
+        // report's `methods` array. Otherwise a connector could
+        // pass a partial contract twice and appear to satisfy more
+        // methods than it actually does.
+        let mut decls = required_only_declarations();
+        if let Some(first) = decls.first().cloned() {
+            decls.push(first);
+        }
+        let report = validate_contract("test-conn", &decls);
+        let unique_names: std::collections::BTreeSet<&str> =
+            report.methods.iter().map(|m| m.method.as_str()).collect();
+        assert!(
+            report.methods.len() == unique_names.len() || report.summary.failing > 0,
+            "duplicate declaration must either dedupe (methods.len() == unique) \
+             OR fail validation (summary.failing > 0); got methods={} unique={} failing={}",
+            report.methods.len(),
+            unique_names.len(),
+            report.summary.failing
+        );
+    }
+
+    #[test]
+    fn metamorphic_empty_declarations_produces_consistent_failure() {
+        // INV-CMV-EMPTY: passing zero declarations must produce a
+        // FAIL verdict (no required methods satisfied) with
+        // summary.failing = required_methods().len() (or similar
+        // bounded value). The exact failing count is implementation
+        // detail; the invariant is that an empty contract never
+        // PASSes.
+        let report = validate_contract("test-conn", &[]);
+        assert_ne!(
+            report.verdict, "PASS",
+            "empty declaration list must not PASS validation"
+        );
+        assert!(
+            report.summary.failing > 0,
+            "empty declaration list must report at least one failure"
+        );
+    }
 }
