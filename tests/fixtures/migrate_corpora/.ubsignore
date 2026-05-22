@@ -1,0 +1,3 @@
+# Verbatim third-party JavaScript corpora for migration parser benchmarks.
+babel_standalone_v7_12_0.js
+commander_command_v12_1_0.js
