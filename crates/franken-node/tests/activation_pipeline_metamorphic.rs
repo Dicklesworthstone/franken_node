@@ -9,10 +9,13 @@
 use std::collections::BTreeSet;
 
 use frankenengine_node::connector::activation_pipeline::{
-    ActivationInput, ActivationStage, DefaultExecutor, StageExecutor, activate, verify_stage_order,
+    ActivationInput, ActivationStage, DefaultExecutor, StageExecutor, activate, transcripts_match,
+    verify_stage_order,
 };
 
 const TEST_ITERATIONS: usize = 100;
+const FUZZ_CAPABILITY_BOUNDARY: usize = 1024;
+const FUZZ_SECRET_BOUNDARY: usize = 4096;
 
 /// Test executor that can be configured to fail at specific stages
 #[derive(Debug, Clone)]
@@ -146,6 +149,15 @@ struct ActivationConformanceCase {
     expected_error_code: Option<&'static str>,
 }
 
+struct ActivationFuzzSeed {
+    label: &'static str,
+    input: ActivationInput,
+    executor: ConfigurableExecutor,
+    expected_completed: bool,
+    expected_stages: &'static [ActivationStage],
+    expected_error_code: Option<&'static str>,
+}
+
 const SANDBOX_ONLY: &[ActivationStage] = &[ActivationStage::SandboxCreate];
 const THROUGH_SECRET_MOUNT: &[ActivationStage] =
     &[ActivationStage::SandboxCreate, ActivationStage::SecretMount];
@@ -160,6 +172,225 @@ const FULL_ACTIVATION: &[ActivationStage] = &[
     ActivationStage::CapabilityIssue,
     ActivationStage::HealthReady,
 ];
+
+fn input_with_capability_count(seed: u64, count: usize) -> ActivationInput {
+    let mut input = generate_test_input(seed);
+    input.capabilities = (0..count)
+        .map(|idx| format!("cap-boundary-{idx:04}"))
+        .collect();
+    input
+}
+
+fn input_with_secret_count(seed: u64, count: usize) -> ActivationInput {
+    let mut input = generate_test_input(seed);
+    input.secret_refs = (0..count)
+        .map(|idx| format!("secret-boundary-{idx:04}"))
+        .collect();
+    input
+}
+
+fn activation_transition_fuzz_seeds() -> Vec<ActivationFuzzSeed> {
+    let mut empty_sandbox_config = generate_test_input(0xa110_c001);
+    empty_sandbox_config.sandbox_config.clear();
+
+    let mut invalid_sandbox_json = generate_test_input(0xa110_c002);
+    invalid_sandbox_json.sandbox_config = "{not-json".to_string();
+
+    vec![
+        ActivationFuzzSeed {
+            label: "valid exact secret and capability issue reaches health",
+            input: generate_test_input(0xa110_c100),
+            executor: ConfigurableExecutor::default(),
+            expected_completed: true,
+            expected_stages: FULL_ACTIVATION,
+            expected_error_code: None,
+        },
+        ActivationFuzzSeed {
+            label: "secret mount order is semantic-set equivalent",
+            input: generate_test_input(0xa110_c101),
+            executor: ConfigurableExecutor {
+                secret_mount_behavior: SecretMountBehavior::Reordered,
+                ..Default::default()
+            },
+            expected_completed: true,
+            expected_stages: FULL_ACTIVATION,
+            expected_error_code: None,
+        },
+        ActivationFuzzSeed {
+            label: "empty sandbox config stops before secret mount",
+            input: empty_sandbox_config,
+            executor: ConfigurableExecutor::default(),
+            expected_completed: false,
+            expected_stages: SANDBOX_ONLY,
+            expected_error_code: Some("ACT_SANDBOX_FAILED"),
+        },
+        ActivationFuzzSeed {
+            label: "invalid sandbox json stops before secret mount",
+            input: invalid_sandbox_json,
+            executor: ConfigurableExecutor::default(),
+            expected_completed: false,
+            expected_stages: SANDBOX_ONLY,
+            expected_error_code: Some("ACT_SANDBOX_FAILED"),
+        },
+        ActivationFuzzSeed {
+            label: "partial secret mount fails before capability issue",
+            input: generate_test_input(0xa110_c102),
+            executor: ConfigurableExecutor {
+                secret_mount_behavior: SecretMountBehavior::Partial(1),
+                ..Default::default()
+            },
+            expected_completed: false,
+            expected_stages: THROUGH_SECRET_MOUNT,
+            expected_error_code: Some("ACT_SECRET_MOUNT_FAILED"),
+        },
+        ActivationFuzzSeed {
+            label: "extra secret mount fails before capability issue",
+            input: generate_test_input(0xa110_c103),
+            executor: ConfigurableExecutor {
+                secret_mount_behavior: SecretMountBehavior::Extra(vec![
+                    "unexpected-secret".to_string(),
+                ]),
+                ..Default::default()
+            },
+            expected_completed: false,
+            expected_stages: THROUGH_SECRET_MOUNT,
+            expected_error_code: Some("ACT_SECRET_MOUNT_FAILED"),
+        },
+        ActivationFuzzSeed {
+            label: "explicit secret executor failure stops before capability issue",
+            input: generate_test_input(0xa110_c104),
+            executor: ConfigurableExecutor {
+                fail_secret_mount: true,
+                ..Default::default()
+            },
+            expected_completed: false,
+            expected_stages: THROUGH_SECRET_MOUNT,
+            expected_error_code: Some("ACT_SECRET_MOUNT_FAILED"),
+        },
+        ActivationFuzzSeed {
+            label: "explicit capability executor failure stops before health",
+            input: generate_test_input(0xa110_c105),
+            executor: ConfigurableExecutor {
+                fail_capability: true,
+                ..Default::default()
+            },
+            expected_completed: false,
+            expected_stages: THROUGH_CAPABILITY_ISSUE,
+            expected_error_code: Some("ACT_CAPABILITY_FAILED"),
+        },
+        ActivationFuzzSeed {
+            label: "explicit health executor failure is terminal",
+            input: generate_test_input(0xa110_c106),
+            executor: ConfigurableExecutor {
+                fail_health: true,
+                ..Default::default()
+            },
+            expected_completed: false,
+            expected_stages: FULL_ACTIVATION,
+            expected_error_code: Some("ACT_HEALTH_FAILED"),
+        },
+        ActivationFuzzSeed {
+            label: "exact capability boundary still reaches health",
+            input: input_with_capability_count(0xa110_c107, FUZZ_CAPABILITY_BOUNDARY),
+            executor: ConfigurableExecutor::default(),
+            expected_completed: true,
+            expected_stages: FULL_ACTIVATION,
+            expected_error_code: None,
+        },
+        ActivationFuzzSeed {
+            label: "capability boundary overflow fails before side-effecting stages",
+            input: input_with_capability_count(0xa110_c108, FUZZ_CAPABILITY_BOUNDARY + 1),
+            executor: ConfigurableExecutor::default(),
+            expected_completed: false,
+            expected_stages: SANDBOX_ONLY,
+            expected_error_code: Some("ACT_SANDBOX_FAILED"),
+        },
+        ActivationFuzzSeed {
+            label: "secret boundary is fail-closed at capacity",
+            input: input_with_secret_count(0xa110_c109, FUZZ_SECRET_BOUNDARY),
+            executor: ConfigurableExecutor::default(),
+            expected_completed: false,
+            expected_stages: THROUGH_SECRET_MOUNT,
+            expected_error_code: Some("ACT_SECRET_MOUNT_FAILED"),
+        },
+    ]
+}
+
+fn assert_activation_fuzz_seed(seed: &ActivationFuzzSeed) -> Result<(), String> {
+    let transcript = activate(&seed.input, &seed.executor);
+    let replayed = activate(&seed.input, &seed.executor);
+
+    if !transcripts_match(&transcript, &replayed) {
+        return Err(format!("{} replay transcript diverged", seed.label));
+    }
+    if !verify_stage_order(&transcript) {
+        return Err(format!("{} violated canonical stage order", seed.label));
+    }
+
+    let actual_stages: Vec<_> = transcript.stages.iter().map(|stage| stage.stage).collect();
+    if actual_stages.as_slice() != seed.expected_stages {
+        return Err(format!(
+            "{} stage prefix mismatch: got {:?}, expected {:?}",
+            seed.label, actual_stages, seed.expected_stages
+        ));
+    }
+    if transcript.completed != seed.expected_completed {
+        return Err(format!(
+            "{} completion mismatch: got {}, expected {}",
+            seed.label, transcript.completed, seed.expected_completed
+        ));
+    }
+
+    if seed.expected_completed {
+        if transcript
+            .stages
+            .iter()
+            .any(|stage| !stage.success || stage.error.is_some())
+        {
+            return Err(format!(
+                "{} completed transcript contains failed stage or error",
+                seed.label
+            ));
+        }
+        return Ok(());
+    }
+
+    let Some((last, previous)) = transcript.stages.split_last() else {
+        return Err(format!("{} failed without recording a stage", seed.label));
+    };
+    if previous
+        .iter()
+        .any(|stage| !stage.success || stage.error.is_some())
+    {
+        return Err(format!(
+            "{} recorded an earlier failed stage before the terminal failure",
+            seed.label
+        ));
+    }
+    if last.success {
+        return Err(format!(
+            "{} incomplete transcript ended with success",
+            seed.label
+        ));
+    }
+
+    let expected_code = seed
+        .expected_error_code
+        .ok_or_else(|| format!("{} missing expected failure code", seed.label))?;
+    let Some(error) = last.error.as_ref() else {
+        return Err(format!("{} terminal stage omitted an error", seed.label));
+    };
+    if error.code() != expected_code {
+        return Err(format!(
+            "{} error code mismatch: got {}, expected {}",
+            seed.label,
+            error.code(),
+            expected_code
+        ));
+    }
+
+    Ok(())
+}
 
 /// Spec-derived conformance matrix for the activation stage contract.
 #[test]
@@ -279,6 +510,16 @@ fn activation_pipeline_stage_contract_conformance_matrix() {
             ),
         }
     }
+}
+
+/// Structure-aware fuzz seed regression for activation state transitions.
+#[test]
+fn activation_pipeline_structure_aware_state_transition_fuzz_seeds() -> Result<(), String> {
+    for seed in activation_transition_fuzz_seeds() {
+        assert_activation_fuzz_seed(&seed)?;
+    }
+
+    Ok(())
 }
 
 /// Production default must fail closed until a real executor is supplied.
