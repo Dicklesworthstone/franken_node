@@ -394,3 +394,9 @@ name = "fuzz_cuckoo_filter_insert_contains_remove"
 path = "fuzz_targets/fuzz_cuckoo_filter_insert_contains_remove.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_fleet_decision_receipt_payload_hash"
+path = "fuzz_targets/fuzz_fleet_decision_receipt_payload_hash.rs"
+test = false
+doc = false
