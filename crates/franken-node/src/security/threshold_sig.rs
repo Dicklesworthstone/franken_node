@@ -684,6 +684,7 @@ enum PendingFailure<'a> {
     InvalidSignature(&'a str),
     DuplicateSigner(&'a str),
     UnsafeSignerId(&'static str),
+    UnsafeKeyId(&'static str),
 }
 
 /// Tracks valid signer keys without allocating until a second distinct key appears.
@@ -727,6 +728,9 @@ impl PendingFailure<'_> {
             },
             Self::UnsafeSignerId(reason) => FailureReason::InvalidSignature {
                 signer_id: format!("unsafe signer_id: {reason}"),
+            },
+            Self::UnsafeKeyId(reason) => FailureReason::InvalidSignature {
+                signer_id: format!("unsafe key_id: {reason}"),
             },
         }
     }
@@ -996,6 +1000,12 @@ fn verify_threshold_with_validated_artifact(
         if let Err(reason) = validate_safe_identifier(&sig.signer_id) {
             if first_failure.is_none() {
                 first_failure = Some(PendingFailure::UnsafeSignerId(reason));
+            }
+            continue;
+        }
+        if let Err(reason) = validate_safe_identifier(&sig.key_id) {
+            if first_failure.is_none() {
+                first_failure = Some(PendingFailure::UnsafeKeyId(reason));
             }
             continue;
         }
@@ -2177,22 +2187,25 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_key_id_is_unknown_even_when_signature_bytes_are_valid() {
+    fn unsafe_key_id_is_rejected_before_lookup_even_when_signature_bytes_are_valid() {
         let (sks, config) = test_config(2, 3);
         let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
         let mut shifted_key = test_sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
-        shifted_key.signer_id = "signer-1 ".to_string();
         shifted_key.key_id = "signer-1 ".to_string();
         push_bounded(&mut artifact.signatures, shifted_key, MAX_SIGNATURES);
 
-        let result = verify_threshold(&config, &artifact, "t-whitespace-key", "ts");
+        let result = verify_threshold(&config, &artifact, "t-unsafe-key", "ts");
 
         assert!(!result.verified);
         assert_eq!(result.valid_signatures, 1);
         assert_eq!(
             result.failure_reason,
-            Some(FailureReason::UnknownSigner {
-                signer_id: "signer-1 ".to_string(),
+            Some(FailureReason::InvalidSignature {
+                signer_id: concat!(
+                    "unsafe key_id: identifier contains unsafe characters ",
+                    "(only alphanumeric, hyphen, underscore, dot allowed)"
+                )
+                .to_string(),
             })
         );
     }
