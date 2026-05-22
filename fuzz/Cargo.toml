@@ -496,3 +496,9 @@ name = "fuzz_frankensqlite_adapter_auth_ops"
 path = "fuzz_targets/fuzz_frankensqlite_adapter_auth_ops.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_retrievability_gate_proof_verification"
+path = "fuzz_targets/fuzz_retrievability_gate_proof_verification.rs"
+test = false
+doc = false
