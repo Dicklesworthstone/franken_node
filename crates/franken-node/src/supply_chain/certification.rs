@@ -2463,4 +2463,140 @@ mod tests {
             }
         }
     }
+
+    // Frozen "sha256:<hex>" outputs of `compute_derivation_hash`
+    // (certification.rs:247). The function binds a (refs, derived_at)
+    // tuple into a content-addressed derivation hash:
+    //
+    //   SHA256(
+    //     b"certification_derivation_v1:"
+    //     || derived_at.to_le_bytes()             # raw u64 LE
+    //     || LE64(refs.len())
+    //     || for r in refs:
+    //          LE64(len(evidence_id))              || evidence_id
+    //       || LE64(len(serde_json::to_string(&evidence_type)))
+    //                                              || type_tag.as_bytes()
+    //       || verified_at_epoch.to_le_bytes()    # raw u64 LE
+    //       || LE64(len(verification_receipt_hash)) || receipt_hash
+    //   ).hex()  + "sha256:" prefix
+    //
+    // *** DISTINCTIVE FEATURE pinned by this golden ***
+    //
+    // SECOND golden in the suite (after r67 bpet_atc_bridge) to pin
+    // serde_json output as part of the canonical-byte contract — but
+    // unlike r67 which serialized free-form &str values, THIS one
+    // serializes an ENUM variant via the
+    // `#[serde(rename_all = "snake_case")]` attribute at L215. So
+    // EvidenceType::ProvenanceChain serializes to `"provenance_chain"`
+    // (with double quotes, 18 bytes) — pinning both the snake_case
+    // rename AND the JSON-string quoting in a single fixture.
+    //
+    // Two frozen fixtures + structural invariants:
+    //
+    //   1. empty (no refs, derived_at=0). Locks v1 domain + LE64(0)
+    //      zero-refs framing + raw u64 LE on derived_at.
+    //      Frozen: sha256:b96cb1e060a11bc3d88183a7fe19658438d07e776f23fede5e02246f4c6154fa
+    //
+    //   2. populated (2 refs: ProvenanceChain + AuditReport with distinct
+    //      receipt hashes). Locks per-ref framing + the snake_case JSON
+    //      serialization for the EvidenceType enum (incl. the double
+    //      quotes that JSON adds around string values).
+    //      Frozen: sha256:21b499701bd85b44eac59fa2226787d93d61e461984d46784380036c127e308f
+    //
+    //   3. SERDE-SNAKE-CASE-RENAME INVARIANT: implicitly verified by
+    //      the populated fixture — if the rename_all attribute were
+    //      removed (EvidenceType::ProvenanceChain → JSON
+    //      "ProvenanceChain" PascalCase instead of "provenance_chain"
+    //      snake_case), the populated hash would fail.
+    //
+    //   4. DERIVED-AT-SENSITIVITY: bumping derived_at by 1 MUST flip.
+    //
+    //   5. REF-ORDER-SENSITIVITY: reversing the refs Vec MUST flip
+    //      the hash. Pins that Vec<VerifiedEvidenceRef> iteration is
+    //      canonical (NOT sorted — opposite to BTreeMap surfaces).
+    //
+    //   6. "sha256:" prefix + 64 lowercase hex contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python (json.dumps for the EvidenceType variant strings, with
+    // the same snake_case rename) — NOT captured from an unreviewed
+    // prior run.
+    //
+    // Why this matters (the contract): compute_derivation_hash is the
+    // content-addressed derivation_chain_hash bound into trust cards
+    // and certification results (per DerivationMetadata at L240-244).
+    // It "proves their decisions are grounded in canonical
+    // verification, not caller-supplied assertions" (L226-227). If two
+    // certifiers compute different hashes for the same logical
+    // (refs, derived_at) tuple — because someone removed the
+    // rename_all attribute, swapped LE64 widths, dropped the v1
+    // domain, or sorted refs — derivation chain verification fails
+    // opaquely AND legitimate trust cards get rejected.
+    #[test]
+    fn compute_derivation_hash_frozen_canonical_byte_layout_golden() {
+        // 1. Empty refs.
+        let empty = compute_derivation_hash(&[], 0);
+        assert_eq!(
+            empty,
+            "sha256:b96cb1e060a11bc3d88183a7fe19658438d07e776f23fede5e02246f4c6154fa",
+            "empty compute_derivation_hash drifted — check the v1 \
+             domain separator, raw u64 LE encoding of derived_at, OR \
+             LE64(0) zero-refs framing"
+        );
+
+        // 2. Populated refs.
+        let populated_refs = vec![
+            VerifiedEvidenceRef {
+                evidence_id: "evidence-1".to_string(),
+                evidence_type: EvidenceType::ProvenanceChain,
+                verified_at_epoch: 1_700_000_000,
+                verification_receipt_hash:
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_string(),
+            },
+            VerifiedEvidenceRef {
+                evidence_id: "evidence-2".to_string(),
+                evidence_type: EvidenceType::AuditReport,
+                verified_at_epoch: 1_700_000_001,
+                verification_receipt_hash:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+            },
+        ];
+        assert_eq!(
+            compute_derivation_hash(&populated_refs, 1_700_000_100),
+            "sha256:21b499701bd85b44eac59fa2226787d93d61e461984d46784380036c127e308f",
+            "populated compute_derivation_hash drifted — check the \
+             EvidenceType snake_case serialization (e.g. \
+             ProvenanceChain → \"provenance_chain\"), the JSON \
+             double-quote wrapping, OR per-ref field order"
+        );
+
+        // 3. DERIVED-AT-SENSITIVITY.
+        assert_ne!(
+            compute_derivation_hash(&[], 1),
+            empty,
+            "bumping derived_at from 0 to 1 MUST flip the hash"
+        );
+
+        // 4. REF-ORDER-SENSITIVITY: reversing refs Vec MUST flip.
+        let mut reversed_refs = populated_refs.clone();
+        reversed_refs.reverse();
+        assert_ne!(
+            compute_derivation_hash(&reversed_refs, 1_700_000_100),
+            compute_derivation_hash(&populated_refs, 1_700_000_100),
+            "reversing refs Vec MUST flip the hash — Vec iteration \
+             is canonical (NOT sorted)"
+        );
+
+        // 5. "sha256:" prefix + 64 lowercase hex contract.
+        for h in [
+            compute_derivation_hash(&[], 0),
+            compute_derivation_hash(&populated_refs, 1_700_000_100),
+        ] {
+            assert_eq!(h.len(), 71);
+            assert!(h.starts_with("sha256:"));
+            assert!(h[7..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
