@@ -420,6 +420,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_revocation_registry_monotonic"
+path = "fuzz_targets/fuzz_revocation_registry_monotonic.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_adversary_graph_replay"
 path = "fuzz_targets/fuzz_adversary_graph_replay.rs"
 test = false
@@ -638,5 +644,11 @@ doc = false
 [[bin]]
 name = "fuzz_schema_byte_layout_canonical"
 path = "fuzz_targets/fuzz_schema_byte_layout_canonical.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_deterministic_seed_encoding"
+path = "fuzz_targets/fuzz_deterministic_seed_encoding.rs"
 test = false
 doc = false
