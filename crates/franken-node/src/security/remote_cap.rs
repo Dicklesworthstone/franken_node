@@ -6260,4 +6260,189 @@ mod toctou_concurrency_regression_tests {
             NUM_THREADS, final_success_count
         );
     }
+
+    // Frozen SHA-256 hex outputs of the module-private function
+    // `token_id_hash` (remote_cap.rs:2688) — the canonical remote-cap
+    // token identity derivation.
+    //
+    // The function builds the token id as:
+    //
+    //   SHA256(
+    //     b"remote_cap_token_id_v1:"
+    //     || LE64(len(issuer_identity)) || issuer_identity.as_bytes()
+    //     || issued_at_epoch_secs.to_le_bytes()     # raw u64 LE
+    //     || expires_at_epoch_secs.to_le_bytes()    # raw u64 LE
+    //     || LE64(len(scope_fingerprint)) || scope_fingerprint.as_bytes()
+    //     || [single_use as u8]                     # 1 byte
+    //     || LE64(len(trace_id)) || trace_id.as_bytes()
+    //   ).hex()
+    //
+    // Where scope_fingerprint (remote_cap.rs:2502) builds a TEXT
+    // canonical form:
+    //
+    //   format!("ops={ops_enc};endpoints={endpoints_enc}")
+    //
+    // and encode_scope_entries (L2508) builds each entry as
+    // `{len}:{entry}|` (NOT length-prefixed binary). For example, an
+    // empty scope yields "ops=;endpoints=" (no entries).
+    //
+    // *** DISTINCTIVE FEATURE pinned by this golden ***
+    //
+    // This is the SECOND golden in the suite (after r53's
+    // capability_artifact) to pin a HYBRID layout that mixes a TEXT
+    // canonical form (scope_fingerprint's "ops=...;endpoints=..."
+    // serialization with inline `{len}:{entry}|` records) INSIDE the
+    // BINARY length-prefixed framing of token_id_hash. The two
+    // serialization styles must AGREE byte-for-byte; a refactor that
+    // "unified to binary everywhere" would silently flip every
+    // existing token_id. Pinning both the empty-scope text form AND
+    // a populated-scope text form documents the contract.
+    //
+    // Two frozen fixtures + structural invariants:
+    //
+    //   1. minimal (empty issuer, empty scope, issued=0, expires=0,
+    //      single_use=false, empty trace_id). Locks the v1 domain +
+    //      empty-scope text form "ops=;endpoints=" (15 bytes) +
+    //      LE64(0) framing on issuer/trace_id + single_use=false
+    //      encoded as [0u8].
+    //      Frozen: 9616c9a6eb3df047d742138df98383470c1b212a2a521321ba9b75ec28d8dd8b
+    //
+    //   2. single-op (issuer="issuer-1", scope=[TelemetryExport],
+    //      issued=1.7e9, expires=+1day, single_use=true, trace_id="trace-1").
+    //      Locks the scope_fingerprint single-entry text form
+    //      "ops=16:telemetry_export|;endpoints=" (35 bytes — the
+    //      RemoteOperation::TelemetryExport.as_str() label "telemetry_export"
+    //      is 16 bytes) AND the single_use=true [1u8] branch.
+    //      Frozen: 82c8047c44b063e187d36f02b3877b9e359b87e1267674a01c25737763e75267
+    //
+    //   3. SINGLE-USE-FLAG INVARIANT: changing only single_use
+    //      true→false MUST flip the hash. Pins the [u8::from(single_use)]
+    //      byte as load-bearing — a future refactor that dropped the
+    //      flag would let a multi-use token replay against a single-
+    //      use binding.
+    //
+    //   4. TIMESTAMP-SENSITIVITY: changing only issued_at_epoch_secs
+    //      MUST flip the hash. Pins that timestamps are fed as raw
+    //      u64 LE (NOT formatted as ISO strings, NOT rounded).
+    //
+    //   5. SCOPE-DISTINGUISHABILITY: changing only the scope MUST
+    //      flip the hash. Pins that scope_fingerprint contributes to
+    //      the token id — a future refactor that dropped scope would
+    //      let an attacker reuse a token across different scopes.
+    //
+    //   6. 64-lowercase-hex length+casing contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): token_id_hash is the content-
+    // addressed token identifier for the remote-cap subsystem. The
+    // token_id is bound into RemoteCap and stored in the replay-store
+    // to prevent token replay. If two nodes compute different token_ids
+    // for the same logical (issuer, scope, issued, expires, single_use,
+    // trace_id) tuple — because someone reordered fields, swapped LE64
+    // widths, dropped the single_use flag byte, or muddled the v1
+    // domain — replay-prevention fails opaquely AND legitimate tokens
+    // fail to verify across the fleet.
+    #[test]
+    fn token_id_hash_frozen_canonical_byte_layout_golden() {
+        // 1. Minimal: empty issuer + empty scope + zero timestamps +
+        // single_use=false + empty trace_id.
+        let empty_scope = RemoteScope::new(Vec::new(), Vec::new());
+        let minimal = super::token_id_hash(
+            "",
+            &empty_scope,
+            0,
+            0,
+            false,
+            "",
+        );
+        assert_eq!(
+            minimal,
+            "9616c9a6eb3df047d742138df98383470c1b212a2a521321ba9b75ec28d8dd8b",
+            "minimal token_id_hash drifted — check the v1 domain \
+             separator `remote_cap_token_id_v1:`, the empty-scope text \
+             form \"ops=;endpoints=\" (15 bytes), OR the single_use=false \
+             [0u8] byte encoding"
+        );
+
+        // 2. Single-op with single_use=true. Pins the text-form scope
+        // serialization for a single TelemetryExport operation.
+        let single_op_scope =
+            RemoteScope::new(vec![RemoteOperation::TelemetryExport], Vec::new());
+        let single = super::token_id_hash(
+            "issuer-1",
+            &single_op_scope,
+            1_700_000_000,
+            1_700_086_400, // +1 day
+            true,
+            "trace-1",
+        );
+        assert_eq!(
+            single,
+            "82c8047c44b063e187d36f02b3877b9e359b87e1267674a01c25737763e75267",
+            "single-op token_id_hash drifted — check the scope_fingerprint \
+             text form (\"ops=16:telemetry_export|;endpoints=\"), the \
+             RemoteOperation::TelemetryExport.as_str() label \
+             (\"telemetry_export\", 16 bytes), OR the single_use=true \
+             [1u8] byte encoding"
+        );
+
+        // 3. SINGLE-USE-FLAG INVARIANT: flipping single_use MUST change
+        // the hash. Pins the [u8::from(single_use)] byte.
+        let multi_use = super::token_id_hash(
+            "issuer-1",
+            &single_op_scope,
+            1_700_000_000,
+            1_700_086_400,
+            false, // was true
+            "trace-1",
+        );
+        assert_ne!(
+            multi_use, single,
+            "flipping single_use true→false MUST flip the token_id; \
+             if it does not, the single_use byte is not authenticated \
+             and a multi-use token could replay against a single-use \
+             binding"
+        );
+
+        // 4. TIMESTAMP-SENSITIVITY: bumping issued_at by 1 MUST flip.
+        let timestamp_bumped = super::token_id_hash(
+            "issuer-1",
+            &single_op_scope,
+            1_700_000_001, // bumped from 1_700_000_000
+            1_700_086_400,
+            true,
+            "trace-1",
+        );
+        assert_ne!(
+            timestamp_bumped, single,
+            "bumping issued_at_epoch_secs by 1 MUST flip the hash"
+        );
+
+        // 5. SCOPE-DISTINGUISHABILITY INVARIANT: changing scope MUST
+        // flip the hash. Pins that scope_fingerprint contributes.
+        let diff_scope =
+            RemoteScope::new(vec![RemoteOperation::FederationSync], Vec::new());
+        let diff_scope_hash = super::token_id_hash(
+            "issuer-1",
+            &diff_scope,
+            1_700_000_000,
+            1_700_086_400,
+            true,
+            "trace-1",
+        );
+        assert_ne!(
+            diff_scope_hash, single,
+            "changing only the RemoteScope (TelemetryExport → \
+             FederationSync) MUST flip the token_id; pins that scope \
+             contributes to the content-addressed token identifier"
+        );
+
+        // 6. 64-lowercase-hex length+casing contract.
+        for h in [&minimal, &single] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
