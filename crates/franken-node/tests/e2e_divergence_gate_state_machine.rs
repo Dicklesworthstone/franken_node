@@ -202,6 +202,118 @@ fn active_divergence_fingerprint(gate: &ControlPlaneDivergenceGate) -> String {
         .authorization_fingerprint()
 }
 
+#[derive(Clone, Copy)]
+enum SeededGateAction {
+    ConvergedPropagation,
+    ForkedPropagation,
+    MutationCheck,
+    Halt,
+    Quarantine,
+    Alert,
+    ValidRecovery,
+    ExpiredRecovery,
+    TamperedRecovery,
+}
+
+fn next_seeded_word(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    *state
+}
+
+fn seeded_action(word: u64) -> SeededGateAction {
+    match word % 9 {
+        0 => SeededGateAction::ConvergedPropagation,
+        1 => SeededGateAction::ForkedPropagation,
+        2 => SeededGateAction::MutationCheck,
+        3 => SeededGateAction::Halt,
+        4 => SeededGateAction::Quarantine,
+        5 => SeededGateAction::Alert,
+        6 => SeededGateAction::ValidRecovery,
+        7 => SeededGateAction::ExpiredRecovery,
+        _ => SeededGateAction::TamperedRecovery,
+    }
+}
+
+fn seeded_mutation_kind(word: u64) -> MutationKind {
+    match word % 6 {
+        0 => MutationKind::PolicyUpdate,
+        1 => MutationKind::TokenIssuance,
+        2 => MutationKind::ZoneBoundaryChange,
+        3 => MutationKind::RevocationPublish,
+        4 => MutationKind::EpochTransition,
+        _ => MutationKind::QuarantinePromotion,
+    }
+}
+
+fn seeded_vectors(
+    case_id: u64,
+    step_id: u64,
+    word: u64,
+    diverged: bool,
+) -> (StateVector, StateVector) {
+    let epoch = 100 + case_id.saturating_mul(64) + step_id;
+    let parent = StateVector::compute_state_hash(&format!("seeded-parent-{case_id}"));
+    let local_payload = format!("seeded-local-{case_id}-{step_id}-{word}");
+    let remote_payload = if diverged {
+        format!("seeded-remote-diverged-{case_id}-{step_id}-{word}")
+    } else {
+        local_payload.clone()
+    };
+
+    (
+        sv("seed-node-a", epoch, &local_payload, &parent),
+        sv("seed-node-b", epoch, &remote_payload, &parent),
+    )
+}
+
+fn recoverable_state(state: GateState) -> bool {
+    matches!(
+        state,
+        GateState::Diverged | GateState::Quarantined | GateState::Alerted
+    )
+}
+
+fn seeded_active_fingerprint(gate: &ControlPlaneDivergenceGate) -> Option<String> {
+    gate.active_divergence()
+        .map(|active| active.authorization_fingerprint())
+}
+
+fn assert_seeded_invariants(
+    gate: &ControlPlaneDivergenceGate,
+    context: &str,
+) -> Result<(), String> {
+    let state = gate.state();
+    if gate.allows_mutation() != (state == GateState::Normal) {
+        return Err(format!(
+            "{context}: allows_mutation must match Normal state"
+        ));
+    }
+
+    match state {
+        GateState::Normal => {
+            if gate.active_divergence().is_some() {
+                return Err(format!(
+                    "{context}: Normal state must not retain divergence"
+                ));
+            }
+        }
+        GateState::Diverged | GateState::Quarantined | GateState::Alerted => {
+            if gate.active_divergence().is_none() {
+                return Err(format!("{context}: non-normal gate must retain divergence"));
+            }
+        }
+        GateState::Recovering => {
+            return Err(format!(
+                "{context}: Recovering must not persist after operation"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 struct DivergencePreservation<'a> {
     audit_before: usize,
     events_before: usize,
@@ -436,6 +548,205 @@ fn e2e_divergence_gate_audits_distinct_fork_while_already_diverged() {
             "trace_id": audit_entry.trace_id.as_str(),
         }),
     );
+}
+
+#[test]
+fn e2e_divergence_gate_seeded_state_machine_fuzz_invariants() -> Result<(), String> {
+    const EXPIRED_AUTH_OFFSET_MS: u64 = 300_001;
+
+    let h = Harness::new("e2e_divergence_gate_seeded_state_machine_fuzz_invariants");
+
+    for case_id in 0_u64..96 {
+        let mut word = 0xD1E5_6A7E_C0DE_0000_u64 ^ case_id;
+        let mut gate = ControlPlaneDivergenceGate::new(format!("seeded-node-{case_id}"));
+
+        for step_id in 0_u64..32 {
+            let action_word = next_seeded_word(&mut word);
+            let timestamp = 1_745_900_000 + case_id.saturating_mul(1_000) + step_id;
+            let trace_id = format!("seeded-trace-{case_id}-{step_id}");
+
+            match seeded_action(action_word) {
+                SeededGateAction::ConvergedPropagation => {
+                    let (local, remote) = seeded_vectors(case_id, step_id, action_word, false);
+                    let (result, _, _) =
+                        gate.check_propagation(&local, &remote, timestamp, &trace_id);
+                    assert_eq!(result, DetectionResult::Converged);
+                }
+                SeededGateAction::ForkedPropagation => {
+                    let (local, remote) = seeded_vectors(case_id, step_id, action_word, true);
+                    let before = gate.state();
+                    let (result, _, _) =
+                        gate.check_propagation(&local, &remote, timestamp, &trace_id);
+                    assert_eq!(result, DetectionResult::Forked);
+                    if before == GateState::Normal {
+                        assert_eq!(gate.state(), GateState::Diverged);
+                    }
+                }
+                SeededGateAction::MutationCheck => {
+                    let kind = seeded_mutation_kind(next_seeded_word(&mut word));
+                    let result = gate.check_mutation(&kind, timestamp, &trace_id);
+                    if gate.state() == GateState::Normal {
+                        assert!(result.is_ok());
+                    } else {
+                        assert!(matches!(
+                            result,
+                            Err(DivergenceGateError::DivergenceBlock { .. })
+                        ));
+                    }
+                }
+                SeededGateAction::Halt => {
+                    let before = gate.state();
+                    let result = gate.respond_halt(timestamp, &trace_id);
+                    if before == GateState::Diverged {
+                        assert!(result.is_ok());
+                        assert_eq!(gate.state(), GateState::Diverged);
+                    } else {
+                        assert!(matches!(
+                            result,
+                            Err(DivergenceGateError::InvalidTransition { .. })
+                        ));
+                        assert_eq!(gate.state(), before);
+                    }
+                }
+                SeededGateAction::Quarantine => {
+                    let before = gate.state();
+                    let result = gate.respond_quarantine(
+                        format!("seeded-partition-{case_id}-{step_id}"),
+                        format!("seeded-node-{case_id}"),
+                        timestamp,
+                        &trace_id,
+                    );
+                    if before == GateState::Diverged {
+                        assert!(result.is_ok());
+                        assert_eq!(gate.state(), GateState::Quarantined);
+                    } else {
+                        assert!(matches!(
+                            result,
+                            Err(DivergenceGateError::InvalidTransition { .. })
+                        ));
+                        assert_eq!(gate.state(), before);
+                    }
+                }
+                SeededGateAction::Alert => {
+                    let before = gate.state();
+                    let result = gate.respond_alert(timestamp, &trace_id);
+                    if matches!(before, GateState::Diverged | GateState::Quarantined) {
+                        assert!(result.is_ok());
+                        assert_eq!(gate.state(), GateState::Alerted);
+                    } else {
+                        assert!(matches!(
+                            result,
+                            Err(DivergenceGateError::InvalidTransition { .. })
+                        ));
+                        assert_eq!(gate.state(), before);
+                    }
+                }
+                SeededGateAction::ValidRecovery => {
+                    let before = gate.state();
+                    if recoverable_state(before) {
+                        let auth = recovery_auth(
+                            &gate,
+                            "seeded-operator",
+                            step_id,
+                            timestamp,
+                            "seeded fuzz recovery",
+                        );
+                        let recovery = gate.respond_recover(
+                            &auth,
+                            &auth_key(&auth),
+                            step_id,
+                            timestamp.saturating_add(1),
+                            &trace_id,
+                        );
+                        assert!(recovery.is_ok());
+                        assert_eq!(gate.state(), GateState::Normal);
+                    } else {
+                        let auth = OperatorAuthorization::new(
+                            "seeded-operator",
+                            step_id,
+                            timestamp,
+                            "invalid-state recovery",
+                            SIGNING_KEY,
+                        );
+                        let result = gate.respond_recover(
+                            &auth,
+                            &auth_key(&auth),
+                            step_id,
+                            timestamp,
+                            &trace_id,
+                        );
+                        assert!(matches!(
+                            result,
+                            Err(DivergenceGateError::InvalidTransition { .. })
+                        ));
+                        assert_eq!(gate.state(), before);
+                    }
+                }
+                SeededGateAction::ExpiredRecovery => {
+                    let before = gate.state();
+                    if recoverable_state(before) {
+                        let fingerprint_before = seeded_active_fingerprint(&gate);
+                        let auth = recovery_auth(
+                            &gate,
+                            "seeded-operator",
+                            step_id,
+                            timestamp,
+                            "expired seeded recovery",
+                        );
+                        let result = gate.respond_recover(
+                            &auth,
+                            &auth_key(&auth),
+                            step_id,
+                            timestamp.saturating_add(EXPIRED_AUTH_OFFSET_MS),
+                            &trace_id,
+                        );
+                        assert!(matches!(
+                            result,
+                            Err(DivergenceGateError::UnauthorizedRecovery { .. })
+                        ));
+                        assert_eq!(gate.state(), before);
+                        assert_eq!(seeded_active_fingerprint(&gate), fingerprint_before);
+                    }
+                }
+                SeededGateAction::TamperedRecovery => {
+                    let before = gate.state();
+                    if recoverable_state(before) {
+                        let fingerprint_before = seeded_active_fingerprint(&gate);
+                        let mut auth = recovery_auth(
+                            &gate,
+                            "seeded-operator",
+                            step_id,
+                            timestamp,
+                            "tampered seeded recovery",
+                        );
+                        auth.reason.push_str(" after signing");
+                        let result = gate.respond_recover(
+                            &auth,
+                            &auth_key(&auth),
+                            step_id,
+                            timestamp.saturating_add(1),
+                            &trace_id,
+                        );
+                        assert!(matches!(
+                            result,
+                            Err(DivergenceGateError::UnauthorizedRecovery { .. })
+                        ));
+                        assert_eq!(gate.state(), before);
+                        assert_eq!(seeded_active_fingerprint(&gate), fingerprint_before);
+                    }
+                }
+            }
+
+            assert_seeded_invariants(&gate, &format!("case {case_id} step {step_id}"))?;
+        }
+    }
+
+    h.log_phase(
+        "seeded_cases_complete",
+        true,
+        json!({"cases": 96, "steps": 32}),
+    );
+    Ok(())
 }
 
 #[test]
