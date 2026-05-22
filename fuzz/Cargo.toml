@@ -532,3 +532,9 @@ name = "fuzz_system_metrics_exporter"
 path = "fuzz_targets/fuzz_system_metrics_exporter.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_cancellation_protocol_transitions"
+path = "fuzz_targets/fuzz_cancellation_protocol_transitions.rs"
+test = false
+doc = false
