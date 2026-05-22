@@ -376,3 +376,9 @@ name = "fuzz_claim_compiler_external_claim"
 path = "fuzz_targets/fuzz_claim_compiler_external_claim.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_deterministic_seed_derivation"
+path = "fuzz_targets/fuzz_deterministic_seed_derivation.rs"
+test = false
+doc = false
