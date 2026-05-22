@@ -1078,15 +1078,30 @@ impl LaneScheduler {
                 return Ok(());
             }
 
+            let queue_is_empty = self
+                .queued_tasks
+                .get(lane.as_str())
+                .ok_or_else(|| LaneSchedulerError::UnknownLane {
+                    lane: lane.to_string(),
+                })?
+                .is_empty();
+            if queue_is_empty {
+                return Ok(());
+            }
+
+            if self.active_tasks.len() >= self.max_total_active_tasks {
+                return Err(LaneSchedulerError::GlobalTaskCapExceeded {
+                    current: self.active_tasks.len(),
+                    max: self.max_total_active_tasks,
+                });
+            }
+
             let queued = {
                 let queue = self.queued_tasks.get_mut(lane.as_str()).ok_or_else(|| {
                     LaneSchedulerError::UnknownLane {
                         lane: lane.to_string(),
                     }
                 })?;
-                if queue.is_empty() {
-                    return Ok(());
-                }
                 let Some(queued) = queue.pop_front() else {
                     return Ok(());
                 };
@@ -1106,14 +1121,6 @@ impl LaneScheduler {
                     lane: lane.to_string(),
                 }
             })?;
-
-            // Check global active task capacity before insertion
-            if self.active_tasks.len() >= self.max_total_active_tasks {
-                return Err(LaneSchedulerError::GlobalTaskCapExceeded {
-                    current: self.active_tasks.len(),
-                    max: self.max_total_active_tasks,
-                });
-            }
 
             counters.active_count = counters.active_count.saturating_add(1);
             self.active_tasks.insert(queued.task_id, assignment);
@@ -1968,6 +1975,52 @@ mod tests {
         assert_eq!(
             s.queued_task_ids(SchedulerLane::Background),
             vec![second_queued]
+        );
+    }
+
+    #[test]
+    fn promotion_global_cap_error_preserves_queued_task() {
+        let mut p = LaneMappingPolicy::new();
+        add_lane_ok(&mut p, LaneConfig::new(SchedulerLane::Background, 10, 1));
+        add_lane_ok(
+            &mut p,
+            LaneConfig::new(SchedulerLane::ControlCritical, 100, 1),
+        );
+        p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+        p.add_rule(
+            &task_classes::epoch_transition(),
+            SchedulerLane::ControlCritical,
+        );
+        let mut s = LaneScheduler::new(p).unwrap();
+
+        let background_active = s
+            .assign_task(&task_classes::log_rotation(), 1000, "background-active")
+            .unwrap();
+        let queued = queued_task_id_from(
+            s.assign_task(&task_classes::log_rotation(), 1001, "background-queued")
+                .expect_err("background cap pressure should queue work"),
+        );
+        let control_active = s
+            .assign_task(&task_classes::epoch_transition(), 1002, "control-active")
+            .unwrap();
+
+        s.max_total_active_tasks = 1;
+        let err = s
+            .complete_task(&background_active.task_id, 1003, "complete-background")
+            .expect_err("global cap should block queued promotion");
+
+        assert_eq!(err.code(), error_codes::ERR_LANE_GLOBAL_CAP_EXCEEDED);
+        assert_eq!(
+            s.queued_task_ids(SchedulerLane::Background),
+            vec![queued],
+            "promotion failure must not dequeue and lose the oldest queued task"
+        );
+        let counters = s.lane_counter(SchedulerLane::Background).unwrap();
+        assert_eq!(counters.queued_count, 1);
+        assert_eq!(counters.first_queued_at_ms, Some(1001));
+        assert_eq!(
+            s.active_task_ids(SchedulerLane::ControlCritical),
+            vec![control_active.task_id]
         );
     }
 
