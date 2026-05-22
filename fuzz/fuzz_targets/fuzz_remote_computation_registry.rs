@@ -11,11 +11,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use arbitrary::{Arbitrary, Result as ArbResult, Unstructured};
 use frankenengine_node::remote::computation_registry::{
-    is_canonical_computation_name, ComputationEntry, ComputationRegistry, ComputationRegistryError,
-    RegistryCatalog, CR_LOOKUP_MALFORMED, CR_LOOKUP_SUCCESS, CR_LOOKUP_UNKNOWN, CR_REGISTRY_LOADED,
-    CR_REGISTRY_REJECTED, CR_VERSION_UPGRADED, ERR_DUPLICATE_COMPUTATION,
+    CR_DISPATCH_GATED, CR_LOOKUP_MALFORMED, CR_LOOKUP_SUCCESS, CR_LOOKUP_UNKNOWN,
+    CR_REGISTRY_LOADED, CR_REGISTRY_REJECTED, CR_VERSION_UPGRADED, ComputationEntry,
+    ComputationRegistry, ComputationRegistryError, ERR_DUPLICATE_COMPUTATION,
     ERR_INVALID_COMPUTATION_ENTRY, ERR_MALFORMED_COMPUTATION_NAME, ERR_REGISTRY_VERSION_REGRESSION,
-    ERR_UNKNOWN_COMPUTATION,
+    ERR_UNKNOWN_COMPUTATION, RegistryCatalog, is_canonical_computation_name,
 };
 use frankenengine_node::security::remote_cap::{CapabilityGate, RemoteOperation};
 use libfuzzer_sys::fuzz_target;
@@ -31,6 +31,7 @@ const KNOWN_EVENT_CODES: &[&str] = &[
     CR_LOOKUP_UNKNOWN,
     CR_LOOKUP_MALFORMED,
     CR_VERSION_UPGRADED,
+    CR_DISPATCH_GATED,
     CR_REGISTRY_REJECTED,
 ];
 
@@ -294,9 +295,11 @@ fn check_listing(
             continue;
         };
         assert_eq!(entry, expected);
-        assert!(entry
-            .required_capabilities
-            .contains(&RemoteOperation::RemoteComputation));
+        assert!(
+            entry
+                .required_capabilities
+                .contains(&RemoteOperation::RemoteComputation)
+        );
         assert_sorted_unique(&entry.required_capabilities);
     }
 }
@@ -407,6 +410,7 @@ fn check_missing_cap_dispatch(
     let Ok(mut gate) = CapabilityGate::new("registry-fuzz-secret") else {
         return;
     };
+    let audit_len_before = registry.audit_events().len();
     let result = registry.authorize_dispatch(
         name,
         "https://compute.example.com/job",
@@ -419,6 +423,19 @@ fn check_missing_cap_dispatch(
         matches!(result, Err(ComputationRegistryError::DispatchDenied { .. })),
         "registered dispatch without a capability must fail closed"
     );
+    assert_eq!(
+        registry.audit_events().len(),
+        audit_len_before.saturating_add(1)
+    );
+    let Some(event) = registry.audit_events().last() else {
+        return;
+    };
+    assert_eq!(event.event_code, CR_DISPATCH_GATED);
+    assert_eq!(event.trace_id, "trace-fuzz-missing-cap");
+    assert_eq!(event.computation_name.as_deref(), Some(name.as_str()));
+    assert!(event.detail.contains("dispatch denied"));
+    assert!(!event.detail.chars().any(char::is_control));
+    check_audit_log(registry.audit_events());
 }
 
 fn check_audit_log(
@@ -474,11 +491,7 @@ fn ascii_text(seed: &[u8]) -> String {
         };
         out.push(ch);
     }
-    if out.is_empty() {
-        "x".to_string()
-    } else {
-        out
-    }
+    if out.is_empty() { "x".to_string() } else { out }
 }
 
 fn distinct_unknown_name(
