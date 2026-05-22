@@ -502,3 +502,9 @@ name = "fuzz_retrievability_gate_proof_verification"
 path = "fuzz_targets/fuzz_retrievability_gate_proof_verification.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_witness_ref_validation"
+path = "fuzz_targets/fuzz_witness_ref_validation.rs"
+test = false
+doc = false

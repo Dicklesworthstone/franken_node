@@ -7001,4 +7001,175 @@ mod session_auth_boundary_negative_tests {
         assert!(message_debug.contains("test-session"));
         assert!(message_debug.contains("abcd1234"));
     }
+
+    // Frozen SHA-256 hex outputs of the module-private function
+    // `session_key_material` (session_auth.rs:1691). The function derives
+    // a deterministic 32-byte key-material binding from a key_id and a
+    // KeyRole tag as:
+    //
+    //   SHA256(
+    //     b"session_auth_key_role_binding_v1:"
+    //     || role.tag()                      # 2 raw bytes — NO length prefix
+    //     || LE64(len(key_id)) || key_id.as_bytes()
+    //   ).finalize().to_vec()
+    //
+    // The function output is Vec<u8> (raw 32 bytes); the test hex-encodes
+    // for comparison against the frozen pins.
+    //
+    // Distinctive features pinned by this golden:
+    //   - KeyRole::tag() is a FIXED 2-byte tag — NOT length-prefixed and
+    //     NOT a u8. The 4 role variants (Signing/Encryption/Issuance/
+    //     Attestation) map to [0x00, 0x01..0x04] respectively. Pinning
+    //     all four ensures the role-tag mapping is locked.
+    //   - The 2-byte role tag IS NOT length-prefixed (in contrast to the
+    //     key_id which IS LE64-prefixed). This asymmetric framing is a
+    //     deliberate design choice — the role tag has a fixed width, so
+    //     no prefix is needed; the key_id is variable-length, so a prefix
+    //     is required to prevent delimiter-collision attacks.
+    //
+    // Five frozen fixtures cover all four roles + an empty-key_id edge case:
+    //
+    //   1. signing-typical (Signing role, "control-signing-v1") — locks
+    //      role tag [0x00, 0x01] + LE64-len framing on a typical key_id.
+    //      Frozen: 6262c8eafdff05e33c8cd1c679c53673a29ca75bdec84940c6c9837a7912f0c4
+    //
+    //   2. encryption-typical (Encryption role, "session-encr-v1") —
+    //      role tag [0x00, 0x02].
+    //      Frozen: b9ad9e7bcfaf5064f31f8cab7666bd2a3bd53a323424663bf6a4db4cb65b72e8
+    //
+    //   3. issuance-typical (Issuance role, "delegation-issuance-v1") —
+    //      role tag [0x00, 0x03].
+    //      Frozen: f9935017ec83e6b7e73a180dadc59ce177fa408fa11e01f1070ab0e83eaca815
+    //
+    //   4. attestation-typical (Attestation role, "operator-attest-v1") —
+    //      role tag [0x00, 0x04].
+    //      Frozen: 158adbc1362aa0440c68bf0618a76536aa5a5cd537bbd58cc22886e8f666c031
+    //
+    //   5. empty-key_id-signing (Signing role, "") — locks the LE64(0)
+    //      empty-key_id framing AND confirms that an empty key_id is
+    //      NOT a degenerate case (the v1 domain + role tag prevent
+    //      all-zero collision).
+    //      Frozen: 94d67b93afcabd321f19bfa901340e71e83243f701948aa6f5e974662ee7ca3e
+    //
+    // Critical layout invariants this golden pins:
+    //   - the v1 domain separator `session_auth_key_role_binding_v1:`
+    //   - KeyRole::tag() 2-byte mapping: Signing=[0,1], Encryption=[0,2],
+    //     Issuance=[0,3], Attestation=[0,4] (NOT little-endian u16 swap,
+    //     NOT 1-byte tag, NOT 4-byte tag)
+    //   - role tag is NOT length-prefixed (fixed-width contract)
+    //   - key_id IS LE64-length-prefixed (variable-width contract)
+    //   - field order: role tag BEFORE key_id (a future refactor that
+    //     reordered would silently flip every binding)
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing the function in Python — NOT captured from an
+    // unreviewed prior run.
+    //
+    // Why this matters (the contract): session_key_material is the
+    // role-binding primitive that ties an Ed25519 signing key (or HMAC
+    // session key, or AEAD encryption key, etc.) to a specific role at
+    // bind-time. If two control-plane nodes derive different key material
+    // for the same logical (key_id, role) pair — because someone reordered
+    // fields, swapped role-tag widths, or muddled the v1 domain — session
+    // key derivation forks across nodes AND mutually-authenticated
+    // sessions fail with opaque "key material mismatch" errors.
+    #[test]
+    fn session_key_material_frozen_canonical_byte_layout_golden() {
+        use crate::control_plane::key_role_separation::KeyRole;
+
+        // 1. Signing role.
+        assert_eq!(
+            hex::encode(super::session_key_material("control-signing-v1", KeyRole::Signing)),
+            "6262c8eafdff05e33c8cd1c679c53673a29ca75bdec84940c6c9837a7912f0c4",
+            "session_key_material(Signing) drifted — check the v1 domain \
+             separator, the Signing-role 2-byte tag [0x00, 0x01], or \
+             LE64-len framing on key_id"
+        );
+
+        // 2. Encryption role.
+        assert_eq!(
+            hex::encode(super::session_key_material(
+                "session-encr-v1",
+                KeyRole::Encryption,
+            )),
+            "b9ad9e7bcfaf5064f31f8cab7666bd2a3bd53a323424663bf6a4db4cb65b72e8",
+            "session_key_material(Encryption) drifted — check Encryption-\
+             role 2-byte tag [0x00, 0x02]"
+        );
+
+        // 3. Issuance role.
+        assert_eq!(
+            hex::encode(super::session_key_material(
+                "delegation-issuance-v1",
+                KeyRole::Issuance,
+            )),
+            "f9935017ec83e6b7e73a180dadc59ce177fa408fa11e01f1070ab0e83eaca815",
+            "session_key_material(Issuance) drifted — check Issuance-role \
+             2-byte tag [0x00, 0x03]"
+        );
+
+        // 4. Attestation role.
+        assert_eq!(
+            hex::encode(super::session_key_material(
+                "operator-attest-v1",
+                KeyRole::Attestation,
+            )),
+            "158adbc1362aa0440c68bf0618a76536aa5a5cd537bbd58cc22886e8f666c031",
+            "session_key_material(Attestation) drifted — check Attestation-\
+             role 2-byte tag [0x00, 0x04]"
+        );
+
+        // 5. Empty key_id (Signing role).
+        assert_eq!(
+            hex::encode(super::session_key_material("", KeyRole::Signing)),
+            "94d67b93afcabd321f19bfa901340e71e83243f701948aa6f5e974662ee7ca3e",
+            "session_key_material(empty key_id) drifted — check the \
+             LE64(0)-on-empty-key_id framing"
+        );
+
+        // ROLE-DISTINGUISHABILITY INVARIANT: same key_id with two
+        // different roles MUST produce distinct key material. Pins the
+        // contract that the role tag IS load-bearing in the hash; a
+        // future refactor that dropped the role tag would allow ONE
+        // physical signing key to be authenticated for ALL FOUR roles,
+        // catastrophically breaking the key-role separation property
+        // bd-qkjac is designed to enforce.
+        let same_key_signing = super::session_key_material("shared-key", KeyRole::Signing);
+        let same_key_encryption =
+            super::session_key_material("shared-key", KeyRole::Encryption);
+        assert_ne!(
+            same_key_signing, same_key_encryption,
+            "session_key_material(same key_id, different roles) MUST \
+             produce distinct material — the role tag is the gate that \
+             prevents cross-role key reuse"
+        );
+
+        // All four roles MUST produce mutually-distinct key material for
+        // the same key_id (4-way distinction across the role enum).
+        let materials: Vec<Vec<u8>> = KeyRole::all()
+            .iter()
+            .map(|r| super::session_key_material("4-way-test-key", *r))
+            .collect();
+        for (i, mi) in materials.iter().enumerate() {
+            for (j, mj) in materials.iter().enumerate() {
+                if i < j {
+                    assert_ne!(
+                        mi, mj,
+                        "KeyRole material {i} and {j} must be distinct for the same key_id"
+                    );
+                }
+            }
+            assert_eq!(mi.len(), 32, "key material must be exactly 32 bytes (SHA-256)");
+        }
+
+        // OUTPUT-LENGTH CONTRACT: every output is exactly 32 raw bytes
+        // (SHA-256 finalize.to_vec()) — pinning here guards against a
+        // future refactor that truncated or expanded the output.
+        assert_eq!(
+            super::session_key_material("len-check", KeyRole::Encryption).len(),
+            32,
+            "session_key_material output MUST be exactly 32 bytes \
+             (full SHA-256 digest)"
+        );
+    }
 }
