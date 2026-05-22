@@ -24,9 +24,13 @@
 //!   returns a typed [`SimulatorError`].
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use super::contagion_graph::{ContagionGraph, NodeId};
+use super::node_interner::{NodeId as InternedNodeId, NodeInterner};
 
 /// Process-wide counter incremented every time
 /// [`step`] runs to completion (successfully or not, but only after
@@ -69,11 +73,22 @@ const MAX_TRACE_SNAPSHOTS: usize = (MAX_SIMULATION_STEPS as usize).saturating_ad
 /// * `step` only increases via `saturating_add`.
 /// * `infected` is a subset of the graph's node ids when the state is
 ///   produced by [`step`] / [`simulate`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct InfectionState {
+    interner: Arc<NodeInterner>,
     infected: BTreeSet<NodeId>,
+    infected_internal: BTreeSet<InternedNodeId>,
     exposure_level: BTreeMap<NodeId, f64>,
+    exposure_internal: BTreeMap<InternedNodeId, f64>,
     step: u32,
+}
+
+impl PartialEq for InfectionState {
+    fn eq(&self, other: &Self) -> bool {
+        self.infected == other.infected
+            && self.exposure_level == other.exposure_level
+            && self.step == other.step
+    }
 }
 
 impl InfectionState {
@@ -83,14 +98,60 @@ impl InfectionState {
     /// membership in any graph; that check lives in [`simulate`] /
     /// [`step`] which take a graph reference.
     pub fn new(initial_infected: &[NodeId]) -> Self {
-        let mut infected = BTreeSet::new();
+        let mut interner = NodeInterner::new();
+        let mut infected_internal = BTreeSet::new();
         for node in initial_infected {
-            infected.insert(node.clone());
+            let Ok(node_id) = interner.intern(node) else {
+                continue;
+            };
+            infected_internal.insert(node_id);
         }
+        Self::from_internal(Arc::new(interner), infected_internal, BTreeMap::new(), 0)
+    }
+
+    fn new_for_graph(
+        graph: &ContagionGraph,
+        initial_infected: &[NodeId],
+    ) -> Result<Self, SimulatorError> {
+        let interner = graph_node_interner(graph)?;
+        let mut infected_internal = BTreeSet::new();
+        for node in initial_infected {
+            let node_id = interner.get(node).ok_or(SimulatorError::UnknownNode)?;
+            infected_internal.insert(node_id);
+        }
+        Ok(Self::from_internal(
+            interner,
+            infected_internal,
+            BTreeMap::new(),
+            0,
+        ))
+    }
+
+    fn from_internal(
+        interner: Arc<NodeInterner>,
+        infected_internal: BTreeSet<InternedNodeId>,
+        exposure_internal: BTreeMap<InternedNodeId, f64>,
+        step: u32,
+    ) -> Self {
+        let infected = infected_internal
+            .iter()
+            .filter_map(|id| interner.resolve(*id).map(str::to_string))
+            .collect();
+        let exposure_level = exposure_internal
+            .iter()
+            .filter_map(|(id, exposure)| {
+                interner
+                    .resolve(*id)
+                    .map(|node| (node.to_string(), *exposure))
+            })
+            .collect();
         Self {
+            interner,
             infected,
-            exposure_level: BTreeMap::new(),
-            step: 0,
+            infected_internal,
+            exposure_level,
+            exposure_internal,
+            step,
         }
     }
 
@@ -103,7 +164,12 @@ impl InfectionState {
     /// that have never received exposure (and for already-infected nodes,
     /// which we deliberately do not track exposure for after infection).
     pub fn exposure_of(&self, node: &NodeId) -> f64 {
-        match self.exposure_level.get(node).copied() {
+        match self
+            .interner
+            .get(node)
+            .and_then(|node_id| self.exposure_internal.get(&node_id))
+            .copied()
+        {
             Some(v) if v.is_finite() => v,
             _ => 0.0,
         }
@@ -271,19 +337,21 @@ pub fn step(
     // is O(E); given the campaign sizes we care about (≤ a few thousand
     // edges) and the modest step budget, this is well within budget and
     // keeps the simulator API graph-shape-agnostic.
-    let in_edges = build_in_edges(graph);
+    let (interner, infected_internal, exposure_internal) = state.reindexed_for_graph(graph)?;
+    let in_edges = build_in_edges(graph, &interner)?;
 
-    let mut next_exposure: BTreeMap<NodeId, f64> = BTreeMap::new();
-    let mut next_infected: BTreeSet<NodeId> = state.infected.clone();
+    let mut next_exposure: BTreeMap<InternedNodeId, f64> = BTreeMap::new();
+    let mut next_infected: BTreeSet<InternedNodeId> = infected_internal.clone();
 
     for node in graph.nodes() {
-        if state.infected.contains(node) {
+        let node_id = interner.get(node).ok_or(SimulatorError::UnknownNode)?;
+        if infected_internal.contains(&node_id) {
             // Infected stays infected; we do not track exposure for them.
             continue;
         }
 
         // Start from decayed prior exposure.
-        let prior = state.exposure_of(node);
+        let prior = exposure_internal.get(&node_id).copied().unwrap_or(0.0);
         if !prior.is_finite() {
             return Err(SimulatorError::NonFiniteFloat);
         }
@@ -293,9 +361,9 @@ pub fn step(
         }
 
         // Add weighted contributions from infected in-neighbors.
-        if let Some(sources) = in_edges.get(node) {
+        if let Some(sources) = in_edges.get(&node_id) {
             for (src_id, weight) in sources {
-                if !state.infected.contains(src_id) {
+                if !infected_internal.contains(src_id) {
                     continue;
                 }
                 if !weight.is_finite() {
@@ -317,18 +385,19 @@ pub fn step(
         }
 
         if exposure >= config.infection_threshold {
-            next_infected.insert(node.clone());
+            next_infected.insert(node_id);
             // Once infected, we stop tracking exposure for this node.
         } else if exposure > 0.0 {
-            next_exposure.insert(node.clone(), exposure);
+            next_exposure.insert(node_id, exposure);
         }
     }
 
-    Ok(InfectionState {
-        infected: next_infected,
-        exposure_level: next_exposure,
-        step: state.step.saturating_add(1),
-    })
+    Ok(InfectionState::from_internal(
+        interner,
+        next_infected,
+        next_exposure,
+        state.step.saturating_add(1),
+    ))
 }
 
 /// Run the simulator until termination.
@@ -356,7 +425,7 @@ pub fn simulate(
     }
 
     let clamped = config.clamped();
-    let mut current = InfectionState::new(initial_infected);
+    let mut current = InfectionState::new_for_graph(graph, initial_infected)?;
     let mut states_per_step: Vec<InfectionState> = Vec::with_capacity(8);
     crate::push_bounded(&mut states_per_step, current.clone(), MAX_TRACE_SNAPSHOTS);
 
@@ -443,17 +512,73 @@ pub fn detect_termination(
 /// Build the reverse-adjacency view: for each node, the list of `(source,
 /// weight)` pairs pointing at it. Used by [`step`] to do a single pass over
 /// "who could have infected me this step".
-fn build_in_edges(graph: &ContagionGraph) -> BTreeMap<NodeId, Vec<(NodeId, f64)>> {
-    let mut in_edges: BTreeMap<NodeId, Vec<(NodeId, f64)>> = BTreeMap::new();
+fn graph_node_interner(graph: &ContagionGraph) -> Result<Arc<NodeInterner>, SimulatorError> {
+    let mut interner = NodeInterner::new();
+    for node in graph.nodes() {
+        interner
+            .intern(node)
+            .map_err(|_| SimulatorError::UnknownNode)?;
+    }
+    Ok(Arc::new(interner))
+}
+
+impl InfectionState {
+    fn reindexed_for_graph(
+        &self,
+        graph: &ContagionGraph,
+    ) -> Result<
+        (
+            Arc<NodeInterner>,
+            BTreeSet<InternedNodeId>,
+            BTreeMap<InternedNodeId, f64>,
+        ),
+        SimulatorError,
+    > {
+        if graph
+            .nodes()
+            .iter()
+            .all(|node| self.interner.get(node).is_some())
+        {
+            return Ok((
+                Arc::clone(&self.interner),
+                self.infected_internal.clone(),
+                self.exposure_internal.clone(),
+            ));
+        }
+
+        let interner = graph_node_interner(graph)?;
+        let mut infected_internal = BTreeSet::new();
+        for node in &self.infected {
+            let node_id = interner.get(node).ok_or(SimulatorError::UnknownNode)?;
+            infected_internal.insert(node_id);
+        }
+        let mut exposure_internal = BTreeMap::new();
+        for (node, exposure) in &self.exposure_level {
+            let node_id = interner.get(node).ok_or(SimulatorError::UnknownNode)?;
+            exposure_internal.insert(node_id, *exposure);
+        }
+        Ok((interner, infected_internal, exposure_internal))
+    }
+}
+
+fn build_in_edges(
+    graph: &ContagionGraph,
+    interner: &NodeInterner,
+) -> Result<BTreeMap<InternedNodeId, Vec<(InternedNodeId, f64)>>, SimulatorError> {
+    let mut in_edges: BTreeMap<InternedNodeId, Vec<(InternedNodeId, f64)>> = BTreeMap::new();
     for src in graph.nodes() {
+        let src_id = interner.get(src).ok_or(SimulatorError::UnknownNode)?;
         for edge in graph.neighbors(src) {
+            let target_id = interner
+                .get(&edge.target)
+                .ok_or(SimulatorError::UnknownNode)?;
             in_edges
-                .entry(edge.target.clone())
+                .entry(target_id)
                 .or_default()
-                .push((src.clone(), edge.weight));
+                .push((src_id, edge.weight));
         }
     }
-    in_edges
+    Ok(in_edges)
 }
 
 #[cfg(test)]
@@ -463,6 +588,39 @@ mod tests {
 
     fn id(s: &str) -> NodeId {
         s.to_string()
+    }
+
+    #[test]
+    fn step_uses_interned_state_without_changing_public_views() -> Result<(), String> {
+        let mut graph = ContagionGraph::new(11);
+        graph.add_node("source".to_string());
+        graph.add_node("target".to_string());
+        graph
+            .add_edge(
+                &"source".to_string(),
+                ContagionEdge::new("target".to_string(), 1.0, EdgeKind::DependencyImport)
+                    .map_err(|err| format!("edge rejected: {err:?}"))?,
+            )
+            .map_err(|err| format!("add_edge failed: {err:?}"))?;
+
+        let state = InfectionState::new(&["source".to_string()]);
+        let config = SimulatorConfig {
+            max_steps: 2,
+            infection_threshold: 1.0,
+            decay_factor: 0.0,
+            seed: 0,
+        };
+
+        let next = step(&graph, &state, &config).map_err(|err| format!("{err:?}"))?;
+
+        assert!(next.infected().contains("source"));
+        assert!(next.infected().contains("target"));
+        assert_eq!(next.infected_count(), 2);
+        assert!(next.exposure_level().is_empty());
+        assert_eq!(next.infected_internal.len(), 2);
+        assert!(next.interner.get("source").is_some());
+        assert!(next.interner.get("target").is_some());
+        Ok(())
     }
 
     /// Regression for bd-98xo5.5.5: every successful `step` invocation
