@@ -12,6 +12,15 @@ fn single_background_lane_policy() -> LaneMappingPolicy {
     policy
 }
 
+fn reweighted_single_background_lane_policy() -> LaneMappingPolicy {
+    let mut policy = LaneMappingPolicy::new();
+    let mut config = LaneConfig::new(SchedulerLane::Background, 25, 1);
+    config.starvation_window_ms = 2_000;
+    policy.add_lane(config).expect("test lane should be unique");
+    policy.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+    policy
+}
+
 fn single_control_critical_lane_policy() -> LaneMappingPolicy {
     let mut policy = LaneMappingPolicy::new();
     policy
@@ -534,6 +543,65 @@ fn run_head_abort_promotion(with_observation_interleavings: bool) -> QueueLifecy
     queue_lifecycle_digest(&scheduler)
 }
 
+fn run_queue_lifecycle_after_optional_preserving_reload(
+    with_preserving_reload: bool,
+) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(&task_classes::log_rotation(), 7_000, "meta-reload-active")
+        .expect("first task should occupy the lane");
+    let queued = queued_task_id_from(
+        scheduler
+            .assign_task(&task_classes::log_rotation(), 7_001, "meta-reload-queued")
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    if with_preserving_reload {
+        scheduler
+            .reload_policy(reweighted_single_background_lane_policy())
+            .expect("reload preserving queued lane should succeed");
+        assert_eq!(
+            scheduler
+                .policy()
+                .lane_configs
+                .get(SchedulerLane::Background.as_str())
+                .expect("background lane must survive reload")
+                .priority_weight,
+            25
+        );
+        assert_eq!(
+            scheduler.queued_task_ids(SchedulerLane::Background),
+            vec![queued.clone()]
+        );
+    }
+
+    scheduler
+        .complete_task(
+            &active.task_id.to_string(),
+            7_010,
+            "meta-reload-complete-active",
+        )
+        .expect("completion should promote queued task after reload");
+    assert_eq!(
+        scheduler.active_task_ids(SchedulerLane::Background),
+        vec![queued.clone()]
+    );
+    assert!(
+        scheduler
+            .queued_task_ids(SchedulerLane::Background)
+            .is_empty()
+    );
+
+    scheduler
+        .complete_task(&queued, 7_020, "meta-reload-complete-promoted")
+        .expect("promoted task should complete after reload");
+
+    queue_lifecycle_digest(&scheduler)
+}
+
 #[test]
 fn metamorphic_queue_lifecycle_invariants_survive_observation_interleavings() {
     let baseline = run_queue_lifecycle(false);
@@ -590,6 +658,28 @@ fn metamorphic_head_queue_abort_rebases_front_and_survives_observation_interleav
         observed
             .audit_codes
             .contains(&event_codes::LANE_TASK_PROMOTED.to_string())
+    );
+}
+
+#[test]
+fn metamorphic_preserving_hot_reload_keeps_background_queue_identity_and_promotion() {
+    let baseline = run_queue_lifecycle_after_optional_preserving_reload(false);
+    let reloaded = run_queue_lifecycle_after_optional_preserving_reload(true);
+
+    assert_eq!(reloaded, baseline);
+    assert_eq!(reloaded.active_count, 0);
+    assert_eq!(reloaded.queued_count, 0);
+    assert_eq!(reloaded.first_queued_at_ms, None);
+    assert_eq!(reloaded.completed_total, 2);
+    assert_eq!(reloaded.rejected_total, 1);
+    assert_eq!(reloaded.starvation_events, 0);
+    assert_eq!(
+        reloaded
+            .audit_codes
+            .iter()
+            .filter(|event_code| *event_code == event_codes::LANE_TASK_PROMOTED)
+            .count(),
+        1
     );
 }
 
