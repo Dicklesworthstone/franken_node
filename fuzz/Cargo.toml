@@ -562,3 +562,9 @@ name = "fuzz_federation_participation_weighting"
 path = "fuzz_targets/fuzz_federation_participation_weighting.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_federation_atc_reciprocity"
+path = "fuzz_targets/fuzz_federation_atc_reciprocity.rs"
+test = false
+doc = false
