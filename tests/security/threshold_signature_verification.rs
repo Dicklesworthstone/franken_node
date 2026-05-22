@@ -183,6 +183,31 @@ fn signer_identity_must_match_key_id() {
 }
 
 #[test]
+fn unsafe_key_id_rejected_before_lookup() {
+    let (sks, cfg) = config(2, 3);
+    let mut art = artifact_with_sigs(&sks, &cfg, "h11-unsafe-key", 1);
+    let mut shifted_key = sign(
+        &sks[1],
+        &cfg.signer_keys[1].key_id,
+        "art-test",
+        "conn-test",
+        "h11-unsafe-key",
+    );
+    shifted_key.key_id = "signer-1\nbad".into();
+    art.signatures.push(shifted_key);
+
+    let result = verify_threshold(&cfg, &art, "t11-unsafe-key", "ts");
+
+    assert!(!result.verified);
+    assert_eq!(result.valid_signatures, 1);
+    assert!(matches!(
+        result.failure_reason,
+        Some(FailureReason::InvalidSignature { ref signer_id })
+            if signer_id.contains("unsafe key_id")
+    ));
+}
+
+#[test]
 fn preparsed_verifier_matches_standard_verifier() {
     let (sks, cfg) = config(2, 3);
     let art = artifact_with_sigs(&sks, &cfg, "h12", 2);
