@@ -2051,6 +2051,49 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_same_id_replacement_commutes_with_capacity_noise() {
+        fn full_state() -> TrustState {
+            let mut state = TrustState::new(4);
+            let (replace_me, _) = make_record_with_meta("replace-me", 2, 2_000, "node-b");
+            let (keeper, _) = make_record_with_meta("keeper", 3, 3_000, "node-c");
+            assert!(state.insert_with_capacity_batch(replace_me, 2));
+            assert!(state.insert_with_capacity_batch(keeper, 2));
+            state.recompute_root_digest();
+            state
+        }
+
+        let (replacement, _) = make_record_with_meta("replace-me", 4, 1_000, "node-z");
+        let (noise, _) = make_record_with_meta("discarded-noise", 1, 1_000, "node-a");
+        let mut noise_then_replace = full_state();
+        let mut replace_then_noise = full_state();
+
+        assert!(!noise_then_replace.insert_with_capacity_batch(noise.clone(), 2));
+        assert!(noise_then_replace.insert_with_capacity_batch(replacement.clone(), 2));
+        noise_then_replace.recompute_root_digest();
+
+        assert!(replace_then_noise.insert_with_capacity_batch(replacement, 2));
+        assert!(!replace_then_noise.insert_with_capacity_batch(noise, 2));
+        replace_then_noise.recompute_root_digest();
+
+        assert_eq!(
+            sorted_record_ids(&noise_then_replace),
+            sorted_record_ids(&replace_then_noise)
+        );
+        assert!(noise_then_replace.contains("keeper"));
+        assert!(!noise_then_replace.contains("discarded-noise"));
+        assert_digest_eq(
+            noise_then_replace.root_digest(),
+            replace_then_noise.root_digest(),
+        );
+
+        let retained = noise_then_replace
+            .get("replace-me")
+            .expect("replacement record should be retained");
+        assert_eq!(retained.epoch, 4);
+        assert_eq!(retained.origin_node_id, "node-z");
+    }
+
+    #[test]
     fn test_epoch_tolerance_boundary_accepts_equal_limit_and_rejects_above() {
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
             epoch_tolerance: 2,
