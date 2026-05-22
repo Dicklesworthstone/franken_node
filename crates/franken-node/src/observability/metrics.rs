@@ -506,4 +506,130 @@ mod tests {
         // Ensure the output still contains expected content (proving compatibility)
         assert!(rendered.contains("test_metric{label=\"value\"} 42.5"));
     }
+
+    #[test]
+    fn render_prometheus_frozen_canonical_byte_layout_golden() {
+        // Pin the canonical Prometheus output format to catch:
+        // 1. Changes to HELP/TYPE line formatting or metric ordering
+        // 2. Label escaping algorithm modifications
+        // 3. Value precision or formatting changes
+        // 4. Whitespace, newline, or separator character modifications
+
+        // Fixture 1: Minimal registry with single gauge metric
+        let mut registry_minimal = MetricsRegistry::new();
+        registry_minimal
+            .record_gauge("franken_node_uptime_seconds", "Node uptime in seconds", 3600.0, &[])
+            .expect("valid gauge");
+
+        let minimal_output = registry_minimal.render_prometheus();
+        let expected_minimal = "# HELP franken_node_uptime_seconds Node uptime in seconds\n\
+                               # TYPE franken_node_uptime_seconds gauge\n\
+                               franken_node_uptime_seconds 3600\n";
+        assert_eq!(
+            minimal_output,
+            expected_minimal,
+            "minimal render_prometheus output drifted — check HELP/TYPE line formatting \
+             or metric value precision for gauges without labels"
+        );
+
+        // Fixture 2: Counter with labels requiring escaping
+        let mut registry_complex = MetricsRegistry::new();
+        registry_complex
+            .record_counter(
+                "franken_node_requests_total",
+                "Total HTTP requests processed",
+                42.0,
+                &[
+                    ("method", "GET"),
+                    ("status", "200"),
+                    ("path", "/api/v1/health\"test\\newline\n"),
+                ]
+            )
+            .expect("valid counter with escaped labels");
+
+        let complex_output = registry_complex.render_prometheus();
+        let expected_complex = "# HELP franken_node_requests_total Total HTTP requests processed\n\
+                               # TYPE franken_node_requests_total counter\n\
+                               franken_node_requests_total{method=\"GET\",path=\"/api/v1/health\\\"test\\\\newline\\n\",status=\"200\"} 42\n";
+        assert_eq!(
+            complex_output,
+            expected_complex,
+            "complex render_prometheus output drifted — check label escaping for quotes/backslashes/newlines \
+             or sorted label ordering in Prometheus output"
+        );
+
+        // Fixture 3: Multiple metrics with different types and sorting
+        let mut registry_multi = MetricsRegistry::new();
+        registry_multi
+            .record_gauge("z_last_metric", "Last metric alphabetically", 1.0, &[])
+            .expect("valid gauge");
+        registry_multi
+            .record_counter("a_first_metric", "First metric alphabetically", 5.0, &[("env", "test")])
+            .expect("valid counter");
+        registry_multi
+            .record_gauge("m_middle_metric", "Middle metric", 2.5, &[("region", "us-east-1")])
+            .expect("valid gauge");
+
+        let multi_output = registry_multi.render_prometheus();
+        let expected_multi = "# HELP a_first_metric First metric alphabetically\n\
+                             # TYPE a_first_metric counter\n\
+                             a_first_metric{env=\"test\"} 5\n\
+                             # HELP m_middle_metric Middle metric\n\
+                             # TYPE m_middle_metric gauge\n\
+                             m_middle_metric{region=\"us-east-1\"} 2.5\n\
+                             # HELP z_last_metric Last metric alphabetically\n\
+                             # TYPE z_last_metric gauge\n\
+                             z_last_metric 1\n";
+        assert_eq!(
+            multi_output,
+            expected_multi,
+            "multi-metric render_prometheus output drifted — check lexicographic metric sorting \
+             or multi-metric formatting with different types"
+        );
+
+        // Fixture 4: Edge case values and precision
+        let mut registry_edge = MetricsRegistry::new();
+        registry_edge
+            .record_gauge("franken_node_precision_test", "Precision test metric", 123.456789, &[])
+            .expect("valid gauge");
+        registry_edge
+            .record_counter("franken_node_zero_test", "Zero value test", 0.0, &[])
+            .expect("valid counter");
+
+        let edge_output = registry_edge.render_prometheus();
+        let expected_edge = "# HELP franken_node_precision_test Precision test metric\n\
+                            # TYPE franken_node_precision_test gauge\n\
+                            franken_node_precision_test 123.456789\n\
+                            # HELP franken_node_zero_test Zero value test\n\
+                            # TYPE franken_node_zero_test counter\n\
+                            franken_node_zero_test 0\n";
+        assert_eq!(
+            edge_output,
+            expected_edge,
+            "edge-case render_prometheus output drifted — check floating-point precision \
+             handling or zero-value formatting in Prometheus output"
+        );
+
+        // Fixture 5: Help text escaping edge cases
+        let mut registry_help_escape = MetricsRegistry::new();
+        registry_help_escape
+            .record_gauge(
+                "franken_node_escape_test",
+                "Help with backslash \\ and newline \n characters",
+                1.0,
+                &[]
+            )
+            .expect("valid gauge with escaped help");
+
+        let help_escape_output = registry_help_escape.render_prometheus();
+        let expected_help_escape = "# HELP franken_node_escape_test Help with backslash \\\\ and newline \\n characters\n\
+                                   # TYPE franken_node_escape_test gauge\n\
+                                   franken_node_escape_test 1\n";
+        assert_eq!(
+            help_escape_output,
+            expected_help_escape,
+            "help-escape render_prometheus output drifted — check help text escaping \
+             for backslashes and newlines in HELP lines"
+        );
+    }
 }
