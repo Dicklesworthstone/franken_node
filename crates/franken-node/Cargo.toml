@@ -1112,6 +1112,13 @@ path = "tests/cuckoo_filter_telemetry_gauge.rs"
 name = "n_version_semantic_oracle"
 path = "../../tests/oracle/n_version_semantic_oracle.rs"
 
+# bd-9zqcq: register the bd-3u2o adjacent-substrate gate conformance test.
+# One of 31 orphan tests/conformance/*.rs files discovered in r8-cc2-1138-tight;
+# the remaining 30 are tracked in the same bead body for a batch follow-on.
+[[test]]
+name = "conformance_adjacent_substrate_gate"
+path = "../../tests/conformance/adjacent_substrate_gate.rs"
+
 [[bench]]
 name = "cuckoo_revocation_bench"
 harness = false
