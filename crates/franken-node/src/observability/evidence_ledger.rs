@@ -8801,4 +8801,114 @@ mod tests {
         super::record_append_elapsed_us(u64::MAX);
         // No panic = test pass.
     }
+
+    // Frozen SHA-256 hex over the canonical byte layout produced by
+    // `evidence_entry_hash_hex` (evidence_ledger.rs:686). The function
+    // delegates to `compute_entry_hash_bytes` (evidence_ledger.rs:609) which
+    // builds the chain-hash pre-image as:
+    //
+    //   b"evidence_entry_v1:"
+    //   || LE64(len(schema_version)) || schema_version
+    //   || (0u8 if entry_id None | 1u8 || LE64(len) || entry_id bytes)
+    //   || LE64(len(decision_id)) || decision_id
+    //   || LE64(len(decision_kind.label())) || label bytes
+    //   || LE64(len(decision_time)) || decision_time
+    //   || LE64(timestamp_ms)                          // raw u64, NOT len-prefixed
+    //   || LE64(len(trace_id)) || trace_id
+    //   || LE64(epoch_id)                              // raw u64
+    //   || (LE64(0) | LE64(len(payload_json)) || payload_json)
+    //   || LE64(size_bytes as u64)                     // raw u64
+    //   || LE64(len(signature)) || signature
+    //
+    // NOTE: `prev_entry_hash` is intentionally excluded (per the explicit
+    // comment at evidence_ledger.rs:677) to prevent a circular dependency in
+    // the hash chain. Any drift in the v1 domain separator, the LE64 width,
+    // the Option<entry_id> 0u8/1u8 framing, field order, or the payload-Some
+    // vs payload-None encoding flips these hashes and fails the test.
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing the function in Python — NOT captured from an unreviewed
+    // run. If the layout intentionally changes, recompute BOTH hashes
+    // together; a one-sided update flags a real split between the None and
+    // Some(entry_id) Option branches or between an empty and non-empty
+    // signature — that is a bug, not churn.
+    #[test]
+    fn evidence_entry_hash_hex_frozen_canonical_byte_layout_golden() {
+        // Minimal fixture: entry_id = None, signature = "" (locks the None
+        // 0u8 prefix and the zero-length signature trailing block); payload
+        // is `Value::Null` which serde_json::to_vec serializes to b"null"
+        // unconditionally regardless of any preserve_order feature.
+        let minimal = super::EvidenceEntry {
+            schema_version: "evidence-ledger-test-v1".to_string(),
+            entry_id: None,
+            decision_id: "DEC-golden-1".to_string(),
+            decision_kind: super::DecisionKind::Quarantine,
+            decision_time: "2026-04-24T00:00:00Z".to_string(),
+            timestamp_ms: 1_700_000_000_000,
+            trace_id: "trace-golden-1".to_string(),
+            epoch_id: 42,
+            payload: serde_json::Value::Null,
+            size_bytes: 128,
+            signature: String::new(),
+            prev_entry_hash: String::new(), // intentionally excluded from hash
+        };
+        let minimal_hash = super::evidence_entry_hash_hex(&minimal);
+        assert_eq!(
+            minimal_hash,
+            "f76209b32c7b798ceae98944596c71fe70dc858b0e88796d0e4829a3fa248ccb",
+            "minimal-fixture evidence_entry_hash drifted — check v1 domain \
+             separator, entry_id None framing (single 0u8), or empty-signature \
+             zero-length tail"
+        );
+        assert_eq!(minimal_hash.len(), 64);
+
+        // Populated fixture: Some(entry_id), non-empty signature — locks the
+        // 1u8 Option-prefix + length framing AND the trailing len-prefixed
+        // signature path. Decision kind changes from Quarantine→Release so
+        // the label-len framing is exercised across two distinct lengths.
+        // Critically, varying `prev_entry_hash` MUST NOT change the result
+        // (it's excluded from the hash per evidence_ledger.rs:677); we set
+        // it to a distinct non-empty value to guard against accidentally
+        // re-introducing it into the hasher.
+        let populated = super::EvidenceEntry {
+            schema_version: "evidence-ledger-test-v1".to_string(),
+            entry_id: Some("ENTRY-7".to_string()),
+            decision_id: "DEC-golden-2".to_string(),
+            decision_kind: super::DecisionKind::Release,
+            decision_time: "2026-04-24T01:00:00Z".to_string(),
+            timestamp_ms: 1_700_000_001_000,
+            trace_id: "trace-golden-2".to_string(),
+            epoch_id: 43,
+            payload: serde_json::Value::Null,
+            size_bytes: 256,
+            signature: "ed25519:placeholder-signature-hex".to_string(),
+            prev_entry_hash: "sha256:deadbeef-must-be-ignored".to_string(),
+        };
+        let populated_hash = super::evidence_entry_hash_hex(&populated);
+        assert_eq!(
+            populated_hash,
+            "77b0d56da8e864ce9fbaf1745f585fe69d39e67f081bc27f8102e3f19862e810",
+            "populated-fixture evidence_entry_hash drifted — check Option=Some \
+             entry_id 1u8 prefix, decision_kind label-len framing, or \
+             signature length-prefixing"
+        );
+        assert_eq!(populated_hash.len(), 64);
+        assert_ne!(
+            minimal_hash, populated_hash,
+            "minimal and populated fixtures must produce distinct entry hashes"
+        );
+
+        // Pin the prev_entry_hash-exclusion invariant directly: mutating
+        // prev_entry_hash MUST NOT change the hash result (circular-
+        // dependency guard at evidence_ledger.rs:677).
+        let mut populated_with_different_prev = populated.clone();
+        populated_with_different_prev.prev_entry_hash =
+            "sha256:another-totally-different-value".to_string();
+        assert_eq!(
+            super::evidence_entry_hash_hex(&populated_with_different_prev),
+            populated_hash,
+            "prev_entry_hash MUST be excluded from evidence_entry_hash_hex; \
+             a change to that field must NOT alter the chain-hash digest"
+        );
+    }
 }
