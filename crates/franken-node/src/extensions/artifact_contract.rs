@@ -2725,4 +2725,191 @@ mod tests {
             );
         }
     }
+
+    // Frozen SHA-256 hex outputs of compute_contract_signature
+    // (artifact_contract.rs:842). The function derives the canonical
+    // capability-contract signature as:
+    //
+    //   SHA256(
+    //     b"artifact_contract_digest_v1:"
+    //     || LE64(len(contract_id))         || contract_id.as_bytes()
+    //     || LE64(len(extension_id))        || extension_id.as_bytes()
+    //     || LE64(len(extension_version))   || extension_version.as_bytes()
+    //     || LE64(len(artifact_id))         || artifact_id.as_bytes()
+    //     || LE64(len(payload_hash))        || payload_hash.as_bytes()
+    //     || LE64(len(signer_id))           || signer_id.as_bytes()
+    //     || LE64(len(schema_version))      || schema_version.as_bytes()
+    //     || LE64(capabilities.len())
+    //     || for cap in capabilities:
+    //          LE64(len(cap.capability_id)) || cap.capability_id.as_bytes()
+    //       || LE64(len(cap.scope))         || cap.scope.as_bytes()
+    //       || cap.max_calls_per_epoch.to_le_bytes()    # raw u64
+    //     || issued_epoch_ms.to_le_bytes()              # raw u64
+    //   ).hex()
+    //
+    // Critical layout invariants pinned:
+    //   - 7 string fields each LE64-len-prefixed in fixed order
+    //   - capabilities Vec iterated in slice order (NOT sorted)
+    //   - per-cap u64 counters fed raw LE
+    //   - signature field is NOT in the signed payload (circularity)
+    //
+    // Three frozen fixtures + three structural invariants:
+    //
+    //   1. minimal (all-empty strings, no caps, epoch=0).
+    //      Frozen: 0b1212fbba689029fdfac4ff0296697cf8df520e72b4858563bbf8cc894ae48f
+    //
+    //   2. typical (one mandatory fs:read cap with scope, epoch=1.7e12).
+    //      Frozen: 4cb860e222e7625909c3ca1f7d84f069714b14bb89185806f7b24f1874bb5e33
+    //
+    //   3. multi-cap (two network caps, different scopes + max_calls).
+    //      Frozen: 89756cf9190cdf2033104f0ce2307ff707facb712d45df17604b81506070eafc
+    //
+    //   4. SIGNATURE-EXCLUSION INVARIANT: changing only the `signature`
+    //      field of the input contract MUST NOT change the output
+    //      signature (signature is the OUTPUT, not an input).
+    //
+    //   5. CAPABILITY-ORDER-SENSITIVITY: reordering the capabilities
+    //      Vec MUST flip the output. Pins that Vec iteration order is
+    //      canonical (NOT sorted — opposite to r53 capability_artifact's
+    //      BTreeMap design).
+    //
+    //   6. MAX-CALLS-SENSITIVITY: bumping max_calls_per_epoch by 1 MUST
+    //      flip the signature. Pins that the per-cap u64 IS fed into
+    //      the hasher.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): compute_contract_signature is
+    // the integrity-binding primitive for capability contracts. If
+    // two nodes compute different signatures for the same logical
+    // contract — because someone reordered fields, swapped Vec for
+    // BTreeMap on capabilities (which would alphabetically sort caps),
+    // dropped max_calls_per_epoch from the hasher, or muddled the v1
+    // domain — contract verification (verify_contract_signature at
+    // L836) fails opaquely AND legitimate extensions get rejected.
+    #[test]
+    fn compute_contract_signature_frozen_canonical_byte_layout_golden() {
+        // 1. Minimal: empty everything.
+        let minimal = CapabilityContract {
+            contract_id: String::new(),
+            extension_id: String::new(),
+            extension_version: String::new(),
+            artifact_id: String::new(),
+            payload_hash: String::new(),
+            capabilities: Vec::new(),
+            signer_id: String::new(),
+            signature: String::new(), // NOT in the signed payload
+            schema_version: String::new(),
+            issued_epoch_ms: 0,
+        };
+        assert_eq!(
+            compute_contract_signature(&minimal),
+            "0b1212fbba689029fdfac4ff0296697cf8df520e72b4858563bbf8cc894ae48f",
+            "minimal compute_contract_signature drifted — check the v1 \
+             domain separator `artifact_contract_digest_v1:`, the 7 \
+             LE64(0)-empty-string framings, OR the LE64(0) zero-caps \
+             count"
+        );
+
+        // 2. Typical: one capability.
+        let typical = CapabilityContract {
+            contract_id: "contract-1".to_string(),
+            extension_id: "ext-fs-reader".to_string(),
+            extension_version: "1.2.3".to_string(),
+            artifact_id: "art-x".to_string(),
+            payload_hash:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+            capabilities: vec![CapabilityEntry {
+                capability_id: "cap:fs:read".to_string(),
+                scope: "/home/user/docs".to_string(),
+                max_calls_per_epoch: 100,
+            }],
+            signer_id: "signer-prod-7".to_string(),
+            signature: String::new(),
+            schema_version: "cart-v1.0".to_string(),
+            issued_epoch_ms: 1_700_000_000_000,
+        };
+        assert_eq!(
+            compute_contract_signature(&typical),
+            "4cb860e222e7625909c3ca1f7d84f069714b14bb89185806f7b24f1874bb5e33"
+        );
+
+        // 3. Multi-cap.
+        let multi_cap = CapabilityContract {
+            contract_id: "contract-2".to_string(),
+            extension_id: "ext-net".to_string(),
+            extension_version: "2.0".to_string(),
+            artifact_id: "art-y".to_string(),
+            payload_hash:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            capabilities: vec![
+                CapabilityEntry {
+                    capability_id: "cap:net:bind".to_string(),
+                    scope: "0.0.0.0:8080".to_string(),
+                    max_calls_per_epoch: 10,
+                },
+                CapabilityEntry {
+                    capability_id: "cap:net:connect".to_string(),
+                    scope: "api.example.com:443".to_string(),
+                    max_calls_per_epoch: 50,
+                },
+            ],
+            signer_id: "signer-2".to_string(),
+            signature: String::new(),
+            schema_version: "cart-v1.0".to_string(),
+            issued_epoch_ms: 1_700_000_001_000,
+        };
+        assert_eq!(
+            compute_contract_signature(&multi_cap),
+            "89756cf9190cdf2033104f0ce2307ff707facb712d45df17604b81506070eafc"
+        );
+
+        // 4. SIGNATURE-EXCLUSION INVARIANT: changing only the
+        // signature field MUST NOT change the output.
+        let mut with_sig = typical.clone();
+        with_sig.signature = "ed25519:placeholder-signature-bytes".to_string();
+        assert_eq!(
+            compute_contract_signature(&with_sig),
+            compute_contract_signature(&typical),
+            "the `signature` field MUST be EXCLUDED from \
+             compute_contract_signature (it is the OUTPUT, not an input \
+             — including it would be circular)"
+        );
+
+        // 5. CAPABILITY-ORDER-SENSITIVITY: reordering caps MUST flip.
+        let mut reordered = multi_cap.clone();
+        reordered.capabilities.reverse();
+        assert_ne!(
+            compute_contract_signature(&reordered),
+            compute_contract_signature(&multi_cap),
+            "reversing the capabilities Vec MUST flip the signature \
+             — Vec<CapabilityEntry> iteration is canonical (NOT \
+             sorted; opposite to r53 capability_artifact's BTreeMap)"
+        );
+
+        // 6. MAX-CALLS-SENSITIVITY: bumping max_calls MUST flip.
+        let mut max_calls_bumped = typical.clone();
+        max_calls_bumped.capabilities[0].max_calls_per_epoch = 101;
+        assert_ne!(
+            compute_contract_signature(&max_calls_bumped),
+            compute_contract_signature(&typical),
+            "bumping CapabilityEntry::max_calls_per_epoch from 100 to \
+             101 MUST flip the signature; if it does not, the u64 \
+             counter is not being fed into the hasher and capability \
+             quota tampering goes undetected"
+        );
+
+        // 64-lowercase-hex length+casing contract.
+        for sig in [
+            compute_contract_signature(&minimal),
+            compute_contract_signature(&typical),
+            compute_contract_signature(&multi_cap),
+        ] {
+            assert_eq!(sig.len(), 64);
+            assert!(sig.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
