@@ -5669,4 +5669,165 @@ mod tests {
             elapsed.as_millis()
         );
     }
+
+    // Frozen "franken-policy-<hex>" outputs of the module-private
+    // method EngineDispatcher::generate_opaque_policy_id (engine_dispatcher.rs:
+    // 1770). The method derives a content-addressed opaque policy id
+    // that intentionally OBSCURES the underlying Profile name to
+    // prevent information disclosure in policy logs.
+    //
+    // The function derives the id as:
+    //
+    //   digest = SHA256(
+    //     b"engine_dispatcher_policy_id_v1:"
+    //     || LE64(len(format!("{:?}", profile))) || profile_debug_str.as_bytes()
+    //     || match policy_mode:
+    //          Some(mode) => b"mode:" || LE64(len(mode)) || mode.as_bytes()
+    //          None       => b"no_mode"                # NO length prefix!
+    //   ).hex()
+    //
+    //   id = format!("franken-policy-{}", &digest[..16])  # 16 hex chars
+    //
+    // *** TWO DISTINCTIVE FEATURES pinned by this golden ***
+    //
+    // 1. ASYMMETRIC Some/None DISCRIMINATOR — the Some branch uses
+    //    `b"mode:" || LE64(len) || bytes` (length-prefixed payload),
+    //    while the None branch uses `b"no_mode"` as a RAW BYTE
+    //    LITERAL with NO length prefix. This is the FIRST golden in
+    //    the suite to pin an asymmetric Some/None branching where
+    //    only one branch is length-prefixed. A future refactor that
+    //    "uniformly length-prefixed both branches" (a reasonable
+    //    consistency cleanup!) would silently flip every policy id.
+    //
+    // 2. Debug-FORMAT DEPENDENCY — the Profile is fed into the
+    //    hasher via `format!("{:?}", profile)`, NOT via a stable
+    //    .as_str() label. Rust's Derive(Debug) output is stable
+    //    across compiler versions BUT depends on the enum variant
+    //    names. If anyone renames Strict → SecureStrict (or similar)
+    //    the Debug output changes and every policy id flips. Pinning
+    //    documents that Strict, Balanced, LegacyRisky are NOT free
+    //    to rename without coordinated bump.
+    //
+    // Three frozen fixtures + three structural invariants:
+    //
+    //   1. Strict-no_mode (profile=Strict, mode=None). Locks v1 +
+    //      Debug("Strict") + b"no_mode" raw-literal branch.
+    //      Frozen id: "franken-policy-565162d63a7903cb"
+    //
+    //   2. Balanced-mode (profile=Balanced, mode=Some("compat-checks")).
+    //      Locks Debug("Balanced") + b"mode:" + LE64-len framing.
+    //      Frozen id: "franken-policy-aabee4aa9f04f68d"
+    //
+    //   3. Strict-empty-mode (profile=Strict, mode=Some("")). Locks
+    //      that Some("") emits b"mode:" + LE64(0) + 0 bytes — which
+    //      MUST differ from None's b"no_mode" raw literal.
+    //      Frozen id: "franken-policy-d8a9e3d2f3a077ff"
+    //
+    //   4. Some-empty-vs-None DISCRIMINATOR: Some("") MUST hash
+    //      differently from None. Pins that the two branches encode
+    //      distinct byte sequences even when the value is "empty".
+    //
+    //   5. PROFILE-DEBUG-SENSITIVITY: Strict vs Balanced (otherwise
+    //      identical args) MUST flip the policy id. Catches a refactor
+    //      where Profile was silently switched from Debug to a single
+    //      shared label.
+    //
+    //   6. FORMAT contract: "franken-policy-" + 16 lowercase hex chars
+    //      (31 total).
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): generate_opaque_policy_id
+    // produces the policy identifier used in security policy
+    // enforcement (the surrounding module gates dispatcher operations
+    // on profile + mode). If two dispatcher nodes derive different
+    // ids for the same logical (Profile, mode) tuple — because someone
+    // renamed a Profile variant, swapped the asymmetric Some/None
+    // encoding for uniform length-prefixing, or muddled the v1 domain
+    // — security policy lookups silently miss across the fleet AND
+    // operations get gated by the wrong policy.
+    #[cfg(feature = "engine")]
+    #[test]
+    fn generate_opaque_policy_id_frozen_canonical_byte_layout_golden() {
+        // 1. Strict + None.
+        assert_eq!(
+            super::EngineDispatcher::generate_opaque_policy_id(
+                crate::config::Profile::Strict,
+                None,
+            ),
+            "franken-policy-565162d63a7903cb",
+            "Strict + None policy id drifted — check the v1 domain \
+             separator `engine_dispatcher_policy_id_v1:`, the \
+             Debug(Profile::Strict) literal (\"Strict\"), OR the \
+             b\"no_mode\" raw-literal None branch"
+        );
+
+        // 2. Balanced + Some("compat-checks").
+        assert_eq!(
+            super::EngineDispatcher::generate_opaque_policy_id(
+                crate::config::Profile::Balanced,
+                Some("compat-checks"),
+            ),
+            "franken-policy-aabee4aa9f04f68d"
+        );
+
+        // 3. Strict + Some(""). Pins that Some-empty MUST differ from
+        // None (asymmetric discriminator).
+        let strict_some_empty = super::EngineDispatcher::generate_opaque_policy_id(
+            crate::config::Profile::Strict,
+            Some(""),
+        );
+        assert_eq!(
+            strict_some_empty, "franken-policy-d8a9e3d2f3a077ff",
+            "Strict + Some(\"\") drifted — locks the Some branch \
+             encoding b\"mode:\" + LE64(0) + 0 bytes"
+        );
+
+        // 4. Some-empty-vs-None DISCRIMINATOR INVARIANT.
+        let strict_none = super::EngineDispatcher::generate_opaque_policy_id(
+            crate::config::Profile::Strict,
+            None,
+        );
+        assert_ne!(
+            strict_some_empty, strict_none,
+            "Some(\"\") MUST hash differently from None — the Some \
+             branch emits b\"mode:\"+LE64(0) but the None branch \
+             emits the raw literal b\"no_mode\"; these byte sequences \
+             are distinct by design"
+        );
+
+        // 5. PROFILE-DEBUG-SENSITIVITY: Strict vs Balanced MUST flip.
+        let balanced_none = super::EngineDispatcher::generate_opaque_policy_id(
+            crate::config::Profile::Balanced,
+            None,
+        );
+        assert_ne!(
+            balanced_none, strict_none,
+            "Strict and Balanced profiles MUST produce different \
+             policy ids — the profile IS fed via Debug-format into \
+             the hasher"
+        );
+
+        // 6. FORMAT contract.
+        for id in [
+            super::EngineDispatcher::generate_opaque_policy_id(
+                crate::config::Profile::Strict,
+                None,
+            ),
+            super::EngineDispatcher::generate_opaque_policy_id(
+                crate::config::Profile::Balanced,
+                Some("compat-checks"),
+            ),
+            super::EngineDispatcher::generate_opaque_policy_id(
+                crate::config::Profile::Strict,
+                Some(""),
+            ),
+        ] {
+            assert!(id.starts_with("franken-policy-"));
+            let hex_tail = &id["franken-policy-".len()..];
+            assert_eq!(hex_tail.len(), 16);
+            assert!(hex_tail.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
