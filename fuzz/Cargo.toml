@@ -546,6 +546,36 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_storage_content_hash"
+path = "fuzz_targets/fuzz_storage_content_hash.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_migration_smoke_hash"
+path = "fuzz_targets/fuzz_migration_smoke_hash.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_migration_format_parse"
+path = "fuzz_targets/fuzz_migration_format_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_api_traceparent_parse"
+path = "fuzz_targets/fuzz_api_traceparent_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_observability_hash_update"
+path = "fuzz_targets/fuzz_observability_hash_update.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_dgis_spof_detection"
 path = "fuzz_targets/fuzz_dgis_spof_detection.rs"
 test = false
@@ -578,5 +608,11 @@ doc = false
 [[bin]]
 name = "fuzz_remote_computation_registry"
 path = "fuzz_targets/fuzz_remote_computation_registry.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_frame_parser_guardrails"
+path = "fuzz_targets/fuzz_frame_parser_guardrails.rs"
 test = false
 doc = false
