@@ -2296,4 +2296,137 @@ mod artifact_signing_boundary_negative_tests {
             }
         ));
     }
+
+    // Frozen 16-char-hex KeyId outputs of the public method
+    // `KeyId::from_verifying_key` (artifact_signing.rs:148). The function
+    // builds the per-signing-key identifier as:
+    //
+    //   first 8 bytes of SHA256(
+    //     b"artifact_signing_keyid_v1:"
+    //     || LE64(vk.as_bytes().len())   # always 32 for Ed25519
+    //     || vk.as_bytes()               # 32-byte Ed25519 public key
+    //   ),
+    //   hex-encoded → 16 lowercase hex characters
+    //
+    // Three frozen fixtures derive Ed25519 verifying keys from
+    // deterministic 32-byte seeds via `SigningKey::from_bytes`. The seed
+    // → public-key derivation follows RFC 8032 (SHA-512 of seed, clamp,
+    // scalar-multiply the base point); the resulting VK bytes are pinned
+    // here implicitly via the resulting KeyId hash. Goldens were derived
+    // offline via pynacl (libsodium-backed) which uses the same RFC 8032
+    // path — any future divergence from RFC 8032 in ed25519_dalek's
+    // SigningKey::from_bytes → verifying_key path would flip these
+    // assertions immediately.
+    //
+    //   1. zeros (seed = [0u8; 32]) — the RFC 8032 test-vector-style
+    //      all-zero seed. VK bytes are 3b6a27bc...da29; KeyId =
+    //      d03618689e8baac1.
+    //   2. sevens (seed = [7u8; 32]) — uniform-non-zero seed; VK bytes
+    //      ea4a6c63...d22c; KeyId = 45ef0a576c7d2d09.
+    //   3. counting (seed = 0..32) — bytewise-distinct seed exercising
+    //      every position; VK bytes 03a107bf...31b8; KeyId =
+    //      8003acb369006cb6.
+    //
+    // Critical layout invariants this golden pins:
+    //   - the v1 domain separator string `artifact_signing_keyid_v1:`
+    //   - LE64 width on the 32-byte VK length prefix (always emits the
+    //     value 32 because Ed25519 verifying keys are fixed-width;
+    //     pinning here guards against a future refactor that dropped
+    //     the length prefix as "redundant for fixed-width inputs")
+    //   - the 8-byte truncation: KeyId takes hash[..8], NOT hash[..16]
+    //     or the full digest (16 hex chars output, not 64)
+    //   - Ed25519 SigningKey::from_bytes → verifying_key follows RFC
+    //     8032 (the goldens were derived against pynacl/libsodium which
+    //     also implements RFC 8032; ed25519_dalek matching the same
+    //     test vectors confirms the algorithm contract)
+    //
+    // Goldens were derived offline by reimplementing the function in
+    // Python using pynacl for the Ed25519 secret→public-key derivation
+    // and hashlib for the SHA-256 step — NOT captured from an unreviewed
+    // prior run.
+    //
+    // Why this matters (the contract): KeyId is the content-addressed
+    // identifier for signing keys throughout the supply-chain pipeline.
+    // It binds into ChecksumManifest::key_id (L182) which is serialized
+    // into release manifests AND into DecisionReceiptSignature::key_id
+    // (api::fleet_quarantine) which is checked at every fleet receipt
+    // verification site. If two nodes derive different KeyIds for the
+    // same physical signing key — because someone dropped the length
+    // prefix, swapped the 8-byte truncation for a different width, or
+    // muddled the v1 domain — the same key would appear as TWO distinct
+    // keys across the fleet, silently double-counting signers AND
+    // breaking key-rotation tracking.
+    #[test]
+    fn key_id_from_verifying_key_frozen_canonical_byte_layout_golden() {
+        use ed25519_dalek::SigningKey;
+
+        // 1. zeros seed: RFC 8032 all-zero secret seed.
+        let sk_zeros = SigningKey::from_bytes(&[0_u8; 32]);
+        let vk_zeros = sk_zeros.verifying_key();
+        assert_eq!(
+            hex::encode(vk_zeros.as_bytes()),
+            "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+            "Ed25519 verifying-key bytes for the all-zero seed drifted — \
+             this MUST match RFC 8032 / libsodium derivation; drift here \
+             indicates ed25519_dalek diverged from the standard"
+        );
+        let kid_zeros = KeyId::from_verifying_key(&vk_zeros);
+        assert_eq!(
+            kid_zeros.0,
+            "d03618689e8baac1",
+            "KeyId for the all-zero-seed VK drifted — check the v1 domain \
+             separator, the LE64(32) VK length prefix, or the 8-byte \
+             SHA-256 truncation (16 hex chars)"
+        );
+
+        // 2. sevens seed: uniform-non-zero.
+        let sk_sevens = SigningKey::from_bytes(&[7_u8; 32]);
+        let vk_sevens = sk_sevens.verifying_key();
+        assert_eq!(
+            hex::encode(vk_sevens.as_bytes()),
+            "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+            "Ed25519 verifying-key bytes for the all-7 seed drifted"
+        );
+        let kid_sevens = KeyId::from_verifying_key(&vk_sevens);
+        assert_eq!(kid_sevens.0, "45ef0a576c7d2d09");
+
+        // 3. counting seed: bytewise-distinct (0..31) exercises every
+        // position in the seed.
+        let mut counting_seed = [0_u8; 32];
+        for (i, b) in counting_seed.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let sk_counting = SigningKey::from_bytes(&counting_seed);
+        let vk_counting = sk_counting.verifying_key();
+        assert_eq!(
+            hex::encode(vk_counting.as_bytes()),
+            "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+            "Ed25519 verifying-key bytes for the counting seed drifted"
+        );
+        let kid_counting = KeyId::from_verifying_key(&vk_counting);
+        assert_eq!(kid_counting.0, "8003acb369006cb6");
+
+        // Cross-fixture distinctness: three distinct seeds MUST produce
+        // three distinct KeyIds.
+        assert_ne!(kid_zeros, kid_sevens);
+        assert_ne!(kid_sevens, kid_counting);
+        assert_ne!(kid_zeros, kid_counting);
+
+        // Length+casing contract: every KeyId is exactly 16 lowercase
+        // hex chars (8 bytes × 2 hex chars per byte).
+        for kid in [&kid_zeros, &kid_sevens, &kid_counting] {
+            assert_eq!(kid.0.len(), 16);
+            assert!(kid.0.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+
+        // Determinism invariant: calling from_verifying_key twice on the
+        // same VK MUST produce identical KeyIds. Guards against a future
+        // refactor that accidentally introduced any non-determinism
+        // (e.g. timestamp salting, RNG seeding) into the hasher.
+        assert_eq!(
+            KeyId::from_verifying_key(&vk_zeros).0,
+            kid_zeros.0,
+            "KeyId::from_verifying_key MUST be deterministic"
+        );
+    }
 }
