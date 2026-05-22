@@ -622,3 +622,9 @@ name = "fuzz_cli_path_validation"
 path = "fuzz_targets/fuzz_cli_path_validation.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_config_toml_parsing"
+path = "fuzz_targets/fuzz_config_toml_parsing.rs"
+test = false
+doc = false
