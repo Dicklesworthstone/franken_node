@@ -1311,5 +1311,10 @@ path = "../../tests/conformance/bd_ncwlf_hot_path_budget_smoke_conformance.rs"
 required-features = ["advanced-features"]
 
 [[test]]
+name = "bd_2wjg_timing_instrumentation_conformance"
+path = "../../tests/conformance/bd_2wjg_timing_instrumentation_conformance.rs"
+required-features = ["advanced-features"]
+
+[[test]]
 name = "ambient_authority_gate"
 path = "tests/ambient_authority_gate.rs"
