@@ -20,6 +20,8 @@
 
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
+#[cfg(feature = "test-support")]
+use frankenengine_node::supply_chain::extension_registry::parse_signed_registration_manifest;
 use frankenengine_node::supply_chain::{
     artifact_signing::{self, KeyId, KeyRing},
     certification::{EvidenceType, VerifiedEvidenceRef},
@@ -491,6 +493,60 @@ fn register_with_manifest_bytes(
     (registry, result)
 }
 
+fn resign_extension_request(sk: &SigningKey, request: &mut RegistrationRequest) {
+    request.manifest_bytes = canonical_registration_manifest_bytes(
+        &request.name,
+        &request.publisher_id,
+        &request.initial_version,
+        &request.tags,
+    )
+    .expect("registration manifest serializes");
+    request.signature.signature_bytes = artifact_signing::sign_bytes(sk, &request.manifest_bytes);
+}
+
+fn assert_invalid_extension_version_request(
+    sk: &SigningKey,
+    mut request: RegistrationRequest,
+    trace_suffix: &str,
+    expected_field: &str,
+    expected_detail: &str,
+) {
+    resign_extension_request(sk, &mut request);
+
+    let mut registry = extension_registry(sk);
+    let result = registry.register(
+        request,
+        &format!("{TRACE_ID}-{trace_suffix}"),
+        EXTENSION_NOW_EPOCH,
+    );
+
+    assert!(!result.success, "invalid version entry must fail closed");
+    assert_eq!(
+        result.error_code.as_deref(),
+        Some(event_codes::SER_ERR_INVALID_INPUT)
+    );
+    assert!(
+        result.detail.contains(expected_detail),
+        "rejection detail should contain {expected_detail:?}, got {:?}",
+        result.detail
+    );
+    assert!(
+        registry.list(None).is_empty(),
+        "invalid version entry must not register an extension"
+    );
+    assert!(
+        registry.admission_receipts().is_empty(),
+        "invalid version metadata must fail before signature admission"
+    );
+
+    let audit = registry
+        .audit_log()
+        .last()
+        .expect("invalid version entry must emit an audit record");
+    assert_eq!(audit.event_code, event_codes::SER_ERR_INVALID_INPUT);
+    assert_eq!(audit.details["field"], expected_field);
+}
+
 /// Sanity check: a legitimately-minted card must verify under the legitimate
 /// key. If this baseline ever fails, every subsequent rejection assertion is
 /// meaningless.
@@ -593,6 +649,223 @@ proptest! {
             );
         }
     }
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn signed_extension_registration_manifest_parser_corpus_fails_closed_without_echo() {
+    let signing_key = extension_signing_key();
+    let request = extension_request(
+        "signed-extension-parser-corpus",
+        &signing_key,
+        EXTENSION_NOW_EPOCH,
+    );
+
+    let parsed =
+        parse_signed_registration_manifest(&request.manifest_bytes).expect("canonical manifest");
+    assert_eq!(
+        parsed.schema_version,
+        EXTENSION_REGISTRATION_MANIFEST_SCHEMA
+    );
+    assert_eq!(parsed.name, request.name);
+
+    let mut unknown_field = exact_registration_manifest_value(&request);
+    unknown_field
+        .as_object_mut()
+        .expect("manifest object")
+        .insert(
+            "unexpected".to_string(),
+            Value::String("must-not-be-accepted".to_string()),
+        );
+
+    let mut wrong_version_shape = exact_registration_manifest_value(&request);
+    wrong_version_shape
+        .as_object_mut()
+        .expect("manifest object")
+        .insert(
+            "initial_version".to_string(),
+            Value::String("1.0.0".to_string()),
+        );
+
+    for (label, manifest_bytes) in [
+        ("empty", Vec::new()),
+        ("literal", b"not-json".to_vec()),
+        (
+            "unknown-field",
+            serde_json::to_vec(&unknown_field).expect("unknown-field seed serializes"),
+        ),
+        (
+            "wrong-version-shape",
+            serde_json::to_vec(&wrong_version_shape).expect("wrong-version-shape seed serializes"),
+        ),
+    ] {
+        let err = parse_signed_registration_manifest(&manifest_bytes).expect_err(label);
+        assert_eq!(err, "invalid signed extension registration manifest");
+        assert!(
+            !err.contains(label),
+            "parser error must not reflect malformed input label {label}: {err}"
+        );
+    }
+
+    let mut wrong_schema = exact_registration_manifest_value(&request);
+    wrong_schema
+        .as_object_mut()
+        .expect("manifest object")
+        .insert(
+            "schema_version".to_string(),
+            Value::String("evil\nschema".to_string()),
+        );
+    let err = parse_signed_registration_manifest(
+        &serde_json::to_vec(&wrong_schema).expect("wrong-schema seed serializes"),
+    )
+    .expect_err("wrong schema");
+    assert_eq!(
+        err,
+        "unsupported signed extension registration manifest schema"
+    );
+    assert!(
+        !err.contains("evil"),
+        "schema rejection must not echo attacker-controlled schema"
+    );
+}
+
+#[test]
+fn signed_extension_registration_version_entry_corpus_rejects_before_admission() {
+    let signing_key = extension_signing_key();
+
+    let mut max_version_request = extension_request(
+        "signed-extension-max-version",
+        &signing_key,
+        EXTENSION_NOW_EPOCH,
+    );
+    max_version_request.initial_version.version = "18446744073709551615.0.0".to_string();
+    resign_extension_request(&signing_key, &mut max_version_request);
+    let mut registry = extension_registry(&signing_key);
+    let result = registry.register(
+        max_version_request,
+        &format!("{TRACE_ID}-max-version"),
+        EXTENSION_NOW_EPOCH,
+    );
+    assert!(
+        result.success,
+        "u64::MAX major version remains a valid numeric boundary: {:?} {}",
+        result.error_code, result.detail
+    );
+    assert_eq!(registry.list(None).len(), 1);
+
+    for (suffix, version, expected_detail) in [
+        ("empty-version", "", "non-empty version"),
+        ("partial-version", "1.2", "numeric major.minor.patch"),
+        ("extra-component", "1.2.3.4", "numeric major.minor.patch"),
+        ("control-character", "1.2.3\n", "numeric major.minor.patch"),
+        ("prefix-version", "v1.2.3", "numeric major.minor.patch"),
+        ("negative-version", "1.-2.3", "numeric major.minor.patch"),
+        ("alpha-version", "1.2.x", "numeric major.minor.patch"),
+        (
+            "u64-overflow",
+            "18446744073709551616.0.0",
+            "numeric major.minor.patch",
+        ),
+    ] {
+        let mut request = extension_request(
+            &format!("signed-extension-{suffix}"),
+            &signing_key,
+            EXTENSION_NOW_EPOCH,
+        );
+        request.initial_version.version = version.to_string();
+        assert_invalid_extension_version_request(
+            &signing_key,
+            request,
+            suffix,
+            "initial_version.version",
+            expected_detail,
+        );
+    }
+
+    let mut overlong = extension_request(
+        "signed-extension-overlong-version",
+        &signing_key,
+        EXTENSION_NOW_EPOCH,
+    );
+    overlong.initial_version.version = "1".repeat(129);
+    assert_invalid_extension_version_request(
+        &signing_key,
+        overlong,
+        "overlong-version",
+        "initial_version.version",
+        "Version too long",
+    );
+
+    let mut bad_parent = extension_request(
+        "signed-extension-bad-parent",
+        &signing_key,
+        EXTENSION_NOW_EPOCH,
+    );
+    bad_parent.initial_version.parent_version = Some("1.2.x".to_string());
+    assert_invalid_extension_version_request(
+        &signing_key,
+        bad_parent,
+        "bad-parent",
+        "initial_version.parent_version",
+        "Parent version must use numeric major.minor.patch form",
+    );
+
+    let mut bad_hash = extension_request(
+        "signed-extension-bad-hash",
+        &signing_key,
+        EXTENSION_NOW_EPOCH,
+    );
+    bad_hash.initial_version.content_hash = "g".repeat(64);
+    assert_invalid_extension_version_request(
+        &signing_key,
+        bad_hash,
+        "bad-hash",
+        "initial_version.content_hash",
+        "64 hex characters",
+    );
+
+    let mut overlong_registered_at = extension_request(
+        "signed-extension-overlong-registered-at",
+        &signing_key,
+        EXTENSION_NOW_EPOCH,
+    );
+    overlong_registered_at.initial_version.registered_at = "r".repeat(65);
+    assert_invalid_extension_version_request(
+        &signing_key,
+        overlong_registered_at,
+        "overlong-registered-at",
+        "initial_version.registered_at",
+        "Version registration timestamp too long",
+    );
+
+    let mut empty_compatibility = extension_request(
+        "signed-extension-empty-compatibility",
+        &signing_key,
+        EXTENSION_NOW_EPOCH,
+    );
+    empty_compatibility.initial_version.compatible_with = vec![String::new()];
+    assert_invalid_extension_version_request(
+        &signing_key,
+        empty_compatibility,
+        "empty-compatibility",
+        "initial_version.compatible_with[0]",
+        "Compatibility marker must be non-empty",
+    );
+
+    let mut too_many_compatibility = extension_request(
+        "signed-extension-too-many-compatibility",
+        &signing_key,
+        EXTENSION_NOW_EPOCH,
+    );
+    too_many_compatibility.initial_version.compatible_with =
+        (0..33).map(|index| format!("runtime-{index}")).collect();
+    assert_invalid_extension_version_request(
+        &signing_key,
+        too_many_compatibility,
+        "too-many-compatibility",
+        "initial_version.compatible_with",
+        "Too many compatibility markers",
+    );
 }
 
 #[test]
