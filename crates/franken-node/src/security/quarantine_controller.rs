@@ -2019,4 +2019,189 @@ mod quarantine_controller_additional_negative_tests {
             }
         }
     }
+
+    // Frozen "sha256:<hex>" outputs of `QuarantineController::policy_hash`
+    // (quarantine_controller.rs:244). The method derives a content-
+    // addressed policy fingerprint as:
+    //
+    //   "sha256:" + hex(SHA256(
+    //     b"quarantine_threshold_policy_v1:"
+    //     || LE64(len(QUARANTINE_POLICY_VERSION)) || POLICY_VERSION.as_bytes()
+    //     || throttle.to_le_bytes()      # f64 LE — 8 bytes raw IEEE-754
+    //     || isolate.to_le_bytes()       # f64 LE
+    //     || quarantine.to_le_bytes()    # f64 LE
+    //     || revoke.to_le_bytes()        # f64 LE
+    //   ))
+    //
+    // QUARANTINE_POLICY_VERSION = "quarantine-threshold-policy-v1" (30 bytes).
+    //
+    // Distinctive features pinned: SECOND golden in the suite to lock f64
+    // IEEE-754 bit-pattern encoding (after r44's chain_evidence_hash). All
+    // four threshold fields are raw 8-byte LE — drift in either the f64
+    // encoding decision OR the field order (throttle → isolate →
+    // quarantine → revoke) flips the hash. The asymmetric framing pinned
+    // here is: the policy-version string IS length-prefixed (variable-
+    // width), but the four f64 thresholds are NOT length-prefixed
+    // (fixed-width 8 bytes each).
+    //
+    // Three frozen fixtures + three behavioural invariants:
+    //
+    //   1. default (0.45, 0.60, 0.75, 0.90 — per Default impl at L143-148).
+    //      Pins the production-default policy fingerprint; a future edit
+    //      to the Default::default() impl flips this AND requires
+    //      downstream consumers to acknowledge the policy change.
+    //      Frozen: sha256:5fccb777051511e9db8cba352738d7286ca08e85bef45ee605564cda084e8681
+    //
+    //   2. strict (0.10, 0.20, 0.30, 0.40) — aggressive containment
+    //      policy. Locks the f64 encoding of values < the production
+    //      thresholds; distinguishes from default purely through f64
+    //      byte content.
+    //      Frozen: sha256:62d9e09f78c9a52d8e51659d4dcb0ed6970055c525e7b36f35f53d9b85d0ac70
+    //
+    //   3. permissive (0.80, 0.85, 0.90, 0.95) — high-threshold policy.
+    //      Frozen: sha256:6f2a3a6f73449c453a0e2989f7e5787e3fe018d56a1c1a11c213d337458b607b
+    //
+    //   4. field-order-sensitivity invariant: changing only the throttle
+    //      threshold (while leaving the other three fixed) MUST flip the
+    //      hash. Pins that each f64 threshold IS independently fed into
+    //      the hasher (not aggregated into a single scalar like sum/mean).
+    //
+    //   5. f64-bit-pattern-sensitivity invariant: changing throttle from
+    //      0.45 to 0.45000000001 (a tiny f64-distinct value) MUST flip
+    //      the hash. Catches a future refactor that "rounded thresholds
+    //      to 2 decimals" which would silently collapse distinct policy
+    //      configurations.
+    //
+    //   6. "sha256:" prefix + 64 lowercase hex contract.
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing the function in Python (using struct.pack('<d', ...)
+    // for f64 IEEE-754 LE) — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): policy_hash is the content-
+    // addressed identifier used to detect threshold-policy drift across
+    // the quarantine controller fleet. If two controllers compute
+    // different fingerprints for the same logical
+    // QuarantineThresholdPolicy — because someone reordered fields,
+    // swapped the f64 encoding, or muddled the v1 domain — the
+    // controllers will diverge on which posterior values trigger which
+    // ControlAction (Throttle/Isolate/Quarantine/Revoke), silently
+    // splitting fleet response behavior.
+    #[test]
+    fn quarantine_controller_policy_hash_frozen_canonical_byte_layout_golden() {
+        // 1. Default policy (per Default impl at L143-148).
+        let default_policy = QuarantineThresholdPolicy::default();
+        assert_eq!(default_policy.throttle, 0.45);
+        assert_eq!(default_policy.isolate, 0.60);
+        assert_eq!(default_policy.quarantine, 0.75);
+        assert_eq!(default_policy.revoke, 0.90);
+        let default_ctrl = QuarantineController::new(default_policy, "test-key")
+            .expect("default policy must validate");
+        assert_eq!(
+            default_ctrl.policy_hash(),
+            "sha256:5fccb777051511e9db8cba352738d7286ca08e85bef45ee605564cda084e8681",
+            "default policy_hash drifted — check the v1 domain separator, \
+             the QUARANTINE_POLICY_VERSION = \"quarantine-threshold-policy-v1\" \
+             constant, OR the f64-LE encoding of the production-default \
+             thresholds (0.45/0.60/0.75/0.90)"
+        );
+
+        // 2. Strict policy.
+        let strict = QuarantineController::new(
+            QuarantineThresholdPolicy {
+                throttle: 0.10,
+                isolate: 0.20,
+                quarantine: 0.30,
+                revoke: 0.40,
+            },
+            "test-key",
+        )
+        .expect("strict policy must validate");
+        assert_eq!(
+            strict.policy_hash(),
+            "sha256:62d9e09f78c9a52d8e51659d4dcb0ed6970055c525e7b36f35f53d9b85d0ac70",
+            "strict policy_hash drifted — check per-threshold f64-LE \
+             encoding (each threshold is fed as 8 raw bytes, NOT a \
+             string representation)"
+        );
+
+        // 3. Permissive policy.
+        let permissive = QuarantineController::new(
+            QuarantineThresholdPolicy {
+                throttle: 0.80,
+                isolate: 0.85,
+                quarantine: 0.90,
+                revoke: 0.95,
+            },
+            "test-key",
+        )
+        .expect("permissive policy must validate");
+        assert_eq!(
+            permissive.policy_hash(),
+            "sha256:6f2a3a6f73449c453a0e2989f7e5787e3fe018d56a1c1a11c213d337458b607b"
+        );
+
+        // Cross-fixture distinctness: all three MUST produce distinct hashes.
+        assert_ne!(default_ctrl.policy_hash(), strict.policy_hash());
+        assert_ne!(strict.policy_hash(), permissive.policy_hash());
+        assert_ne!(default_ctrl.policy_hash(), permissive.policy_hash());
+
+        // FIELD-ORDER-SENSITIVITY INVARIANT: changing only `throttle`
+        // (leaving the other three unchanged) MUST flip the hash. Pins
+        // that each f64 threshold IS independently fed into the hasher
+        // — not aggregated into a single scalar (sum, mean, etc.). A
+        // future "compress the four thresholds into one scalar" refactor
+        // would catastrophically collapse the four-way distinction.
+        let throttle_bumped = QuarantineController::new(
+            QuarantineThresholdPolicy {
+                throttle: 0.46, // bumped from 0.45
+                isolate: 0.60,
+                quarantine: 0.75,
+                revoke: 0.90,
+            },
+            "test-key",
+        )
+        .expect("throttle-bumped policy must validate");
+        assert_ne!(
+            throttle_bumped.policy_hash(),
+            default_ctrl.policy_hash(),
+            "changing only throttle from 0.45 to 0.46 MUST flip the \
+             policy_hash; if it does not, throttle is not being \
+             independently fed into the hasher"
+        );
+
+        // f64-BIT-PATTERN-SENSITIVITY INVARIANT: changing throttle from
+        // 0.45 to 0.45000000001 (a tiny f64-distinct value) MUST flip
+        // the hash. Catches a future refactor that "rounded thresholds
+        // to 2 decimals" or "normalised via Display" — both would
+        // silently collapse distinct policy configurations.
+        let tiny_bump = QuarantineController::new(
+            QuarantineThresholdPolicy {
+                throttle: 0.45000000001,
+                isolate: 0.60,
+                quarantine: 0.75,
+                revoke: 0.90,
+            },
+            "test-key",
+        )
+        .expect("tiny-bumped policy must validate");
+        assert_ne!(
+            tiny_bump.policy_hash(),
+            default_ctrl.policy_hash(),
+            "policy_hash MUST distinguish f64-bit-pattern-distinct \
+             thresholds (0.45 vs 0.45000000001); drift here may indicate \
+             f64 is being string-formatted or rounded somewhere"
+        );
+
+        // "sha256:" prefix + 64 lowercase hex contract.
+        for h in [
+            &default_ctrl.policy_hash(),
+            &strict.policy_hash(),
+            &permissive.policy_hash(),
+        ] {
+            assert_eq!(h.len(), 71); // "sha256:" + 64 hex
+            assert!(h.starts_with("sha256:"));
+            assert!(h[7..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
