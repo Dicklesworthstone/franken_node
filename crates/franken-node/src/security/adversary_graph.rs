@@ -3645,4 +3645,146 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             total_homograph_variants
         );
     }
+
+    // Frozen SHA-256 hex outputs of the module-private `chain_evidence_hash`
+    // function (adversary_graph.rs:268). The function builds the adversary-
+    // graph evidence-chain link as:
+    //
+    //   "sha256:" + hex(SHA256(
+    //     b"adversary_graph_evidence_chain_v1:"
+    //     || LE64(len(previous_hash))     || previous_hash.as_bytes()
+    //     || LE64(len(evidence_ref))      || evidence_ref.as_bytes()
+    //     || LE64(len(trace_id))          || trace_id.as_bytes()
+    //     || likelihood.to_le_bytes()     # f64 LE 8 bytes — RAW BIT PATTERN
+    //     || evidence_weight.to_le_bytes()  # u64 LE 8 bytes
+    //   ))
+    //
+    // Distinctive feature among golden surfaces: this one hashes an f64
+    // via to_le_bytes() — feeding the RAW IEEE-754 bit pattern into the
+    // hasher. A future refactor that normalised the f64 (e.g. canonical
+    // floats per RFC 8949 §3.3, or formatting via Display) would silently
+    // flip every existing adversary-graph evidence-chain hash AND would
+    // invalidate the perspective that exact bit-for-bit f64 equality is
+    // load-bearing here. Three fixtures pin three distinct f64 inputs
+    // (0.0, 0.75, 1.0) whose IEEE-754 representations are well-known
+    // distinct byte patterns, so any silent f64-encoding drift surfaces.
+    //
+    // Three frozen fixtures:
+    //
+    //   1. genesis — all-empty strings + likelihood = 0.0 + weight = 0.
+    //      Locks the v1 domain separator, the three LE64(0)+zero-bytes
+    //      empty-string framings, AND the f64 zero-bits payload
+    //      (0x0000000000000000 — eight zero bytes).
+    //      Frozen: sha256:5d8377c66b4f81636c288c474f29f9527d2e09f361196b2f67741640e47301b2
+    //
+    //   2. typical — realistic chain link: 71-byte sha256-style prev_hash,
+    //      31-byte evidence_ref, 14-byte trace_id, likelihood = 0.75
+    //      (whose IEEE-754 LE bytes are 00 00 00 00 00 00 e8 3f), weight = 10.
+    //      Frozen: sha256:cbda8015814aae5362eb97507a52c0004d3966dcb8464e885651fd291032ccde
+    //
+    //   3. p1.0 — likelihood = 1.0 + weight = 1 (the certainty endpoint).
+    //      1.0 in IEEE-754 LE is 00 00 00 00 00 00 f0 3f — distinct bit
+    //      pattern from 0.75, locks the f64 encoding via a 3-way split.
+    //      Frozen: sha256:d91e7a5c95100e7d453083d665ea1360445ee8b4132dffc284f9d03788856dd1
+    //
+    // Critical layout invariants this golden pins:
+    //   - the v1 domain separator string `adversary_graph_evidence_chain_v1:`
+    //   - LE64 width on per-string length prefix (NOT LE32, NOT varint)
+    //   - f64 fed as RAW BIT PATTERN via to_le_bytes() — drift here would
+    //     indicate someone "normalised" the f64 (e.g. via Display/Debug
+    //     formatting) which would silently shift every evidence-chain hash
+    //   - field order: prev → evidence_ref → trace_id → likelihood → weight
+    //   - "sha256:" prefix is part of the output contract (NOT raw hex)
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing the function in Python (using struct.pack('<d', ...)
+    // for f64 IEEE-754 LE) — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): chain_evidence_hash is the
+    // evidence-chain link primitive that ties Bayesian-posterior updates
+    // back to a tamper-evident chain (see AdversaryGraph::record_observation
+    // upstream which feeds prev_hash forward). If two nodes compute
+    // different canonical bytes for the same logical (prev, ref, trace,
+    // likelihood, weight) tuple — because someone reordered fields, swapped
+    // the f64 encoding, or muddled the v1 domain — chain integrity breaks
+    // silently and forks the adversary-risk posterior across the fleet.
+    #[test]
+    fn chain_evidence_hash_frozen_canonical_byte_layout_golden() {
+        // 1. Genesis: all-empty strings + zero f64 + zero weight.
+        let genesis = super::chain_evidence_hash("", "", "", 0.0, 0);
+        assert_eq!(
+            genesis,
+            "sha256:5d8377c66b4f81636c288c474f29f9527d2e09f361196b2f67741640e47301b2",
+            "genesis chain_evidence_hash drifted — check the v1 domain \
+             separator, the LE64(0) empty-string framing, OR the f64 \
+             zero-bits payload (must be 8 zero bytes, NOT 0.0 formatted \
+             as ASCII)"
+        );
+
+        // 2. Typical: realistic chain link, likelihood = 0.75.
+        let typical = super::chain_evidence_hash(
+            &format!("sha256:{}", "0".repeat(64)),
+            "evidence://feed-x/2026-04-24",
+            "trace-golden-1",
+            0.75,
+            10,
+        );
+        assert_eq!(
+            typical,
+            "sha256:cbda8015814aae5362eb97507a52c0004d3966dcb8464e885651fd291032ccde",
+            "typical chain_evidence_hash drifted — check per-string LE64 \
+             length-prefix framing OR the f64-as-LE-bit-pattern encoding \
+             for likelihood = 0.75"
+        );
+
+        // 3. p1.0: certainty endpoint, distinguishes 1.0 bit-pattern.
+        let p1_0 = super::chain_evidence_hash(
+            &format!("sha256:{}", "f".repeat(64)),
+            "evidence-2",
+            "trace-2",
+            1.0,
+            1,
+        );
+        assert_eq!(
+            p1_0,
+            "sha256:d91e7a5c95100e7d453083d665ea1360445ee8b4132dffc284f9d03788856dd1",
+            "p1.0 chain_evidence_hash drifted — likelihood = 1.0 has a \
+             distinct IEEE-754 LE bit pattern (00 00 00 00 00 00 f0 3f) \
+             from 0.75 (00 00 00 00 00 00 e8 3f); drift here may indicate \
+             the f64 is being normalised away from raw bit pattern"
+        );
+
+        // Cross-fixture distinctness.
+        assert_ne!(genesis, typical);
+        assert_ne!(typical, p1_0);
+        assert_ne!(genesis, p1_0);
+
+        // f64-bit-pattern-sensitivity invariant: 0.75 and 1.0 are distinct
+        // f64 values; swapping them with otherwise-identical inputs MUST
+        // change the hash. Guards against a future refactor that
+        // normalised f64 to a string (e.g., "0.75" vs "1.0") which would
+        // still produce distinct hashes BUT via a different byte path —
+        // and that path divergence is itself a contract change worth
+        // catching.
+        let same_inputs_diff_f64 = super::chain_evidence_hash(
+            &format!("sha256:{}", "0".repeat(64)),
+            "evidence://feed-x/2026-04-24",
+            "trace-golden-1",
+            1.0, // differs from typical's 0.75
+            10,
+        );
+        assert_ne!(
+            same_inputs_diff_f64, typical,
+            "changing likelihood from 0.75 to 1.0 with otherwise-identical \
+             inputs MUST change the chain_evidence_hash"
+        );
+
+        // Length+casing contract on every output (each is 7 + 64 = 71
+        // chars: "sha256:" prefix + 64 lowercase hex).
+        for h in [&genesis, &typical, &p1_0] {
+            assert_eq!(h.len(), 71);
+            assert!(h.starts_with("sha256:"));
+            assert!(h[7..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
