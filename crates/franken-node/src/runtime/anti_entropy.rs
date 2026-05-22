@@ -1126,6 +1126,14 @@ mod tests {
         state.record_ids().into_iter().collect()
     }
 
+    fn reconciliation_event_codes(reconciler: &AntiEntropyReconciler) -> Vec<String> {
+        reconciler
+            .events()
+            .iter()
+            .map(|event| event.code.clone())
+            .collect()
+    }
+
     fn assert_digest_eq(left: &[u8], right: &[u8]) {
         assert!(crate::security::constant_time::ct_eq_bytes(left, right));
     }
@@ -1774,6 +1782,89 @@ mod tests {
         assert_eq!(second.delta_size, 0);
         assert_eq!(second.records_accepted, 0);
         assert_digest_eq(local.root_digest(), &converged_root);
+    }
+
+    #[test]
+    fn metamorphic_disabled_cancellation_matches_uncancelled_enabled_reconciliation() {
+        let (alpha, root) = make_record_with_meta("cancel-alpha", 2, 2_000, "node-a");
+        let (beta, _) = make_record_with_meta("cancel-beta", 2, 2_100, "node-b");
+        let (local_replace, _) = make_record_with_meta("cancel-replace", 1, 1_000, "node-a");
+        let (remote_replace, _) = make_record_with_meta("cancel-replace", 2, 2_200, "node-z");
+
+        let mut remote = TrustState::new(2);
+        for record in [alpha, beta, remote_replace] {
+            assert!(remote.insert(record));
+        }
+
+        let mut enabled_local = TrustState::new(2);
+        let mut disabled_local = TrustState::new(2);
+        assert!(enabled_local.insert(local_replace.clone()));
+        assert!(disabled_local.insert(local_replace));
+
+        let enabled_config = ReconciliationConfig {
+            proof_required: false,
+            cancellation_enabled: true,
+            ..ReconciliationConfig::default()
+        };
+        let disabled_config = ReconciliationConfig {
+            proof_required: false,
+            cancellation_enabled: false,
+            ..ReconciliationConfig::default()
+        };
+        let mut enabled_reconciler =
+            AntiEntropyReconciler::new(enabled_config).expect("enabled config should be valid");
+        let mut disabled_reconciler =
+            AntiEntropyReconciler::new(disabled_config).expect("disabled config should be valid");
+        let clear_cancel = AtomicBool::new(false);
+        let raised_cancel = AtomicBool::new(true);
+
+        let enabled_result = enabled_reconciler
+            .reconcile(&mut enabled_local, &remote, &root, &clear_cancel)
+            .expect("clear cancellation flag should converge");
+        let disabled_result = disabled_reconciler
+            .reconcile(&mut disabled_local, &remote, &root, &raised_cancel)
+            .expect("disabled cancellation gate should ignore raised flag");
+
+        assert_eq!(enabled_result.delta_size, 3);
+        assert_eq!(disabled_result.delta_size, enabled_result.delta_size);
+        assert_eq!(
+            disabled_result.records_accepted,
+            enabled_result.records_accepted
+        );
+        assert_eq!(
+            disabled_result.records_rejected,
+            enabled_result.records_rejected
+        );
+        assert!(!enabled_result.cancelled);
+        assert!(!disabled_result.cancelled);
+        assert_eq!(
+            sorted_record_ids(&disabled_local),
+            sorted_record_ids(&enabled_local)
+        );
+        assert_digest_eq(disabled_local.root_digest(), enabled_local.root_digest());
+        assert_eq!(
+            disabled_local
+                .get("cancel-replace")
+                .expect("replacement record should converge")
+                .origin_node_id
+                .as_str(),
+            "node-z"
+        );
+        assert_eq!(
+            reconciliation_event_codes(&disabled_reconciler),
+            reconciliation_event_codes(&enabled_reconciler)
+        );
+        assert_eq!(
+            reconciliation_event_codes(&enabled_reconciler),
+            vec![
+                EVT_CYCLE_STARTED.to_string(),
+                EVT_DELTA_COMPUTED.to_string(),
+                EVT_RECORD_ACCEPTED.to_string(),
+                EVT_RECORD_ACCEPTED.to_string(),
+                EVT_RECORD_ACCEPTED.to_string(),
+                EVT_CYCLE_COMPLETED.to_string(),
+            ]
+        );
     }
 
     #[test]
