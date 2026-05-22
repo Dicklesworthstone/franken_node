@@ -869,4 +869,140 @@ mod tests {
 
         assert_eq!(e.export_audit_log_jsonl().unwrap(), "");
     }
+
+    // Frozen SHA-256 hex outputs of the module-private content-hash function
+    // `compute_metrics_content_hash` (verifier_benchmark_releases.rs:430).
+    // The function builds the verifier-benchmark metrics content hash as:
+    //
+    //   SHA256(
+    //     b"verifier_benchmark_hash_v2:"
+    //     || LE64(total_releases as u64)
+    //     || LE64(published_releases as u64)
+    //     || LE64(total_downloads)              # raw u64 — already-typed
+    //     || for (release_type, downloads) in downloads_by_type:  # BTreeMap → sorted by key
+    //          LE64(len(release_type)) || release_type.as_bytes()
+    //       || LE64(downloads)                  # raw u64, NOT length-prefixed
+    //     || LE64(len(schema_version)) || schema_version.as_bytes()
+    //   )
+    //
+    // Three frozen fixtures cover all branches:
+    //
+    //   1. empty (all zero counters, no by_type entries, schema="demo-v1.0")
+    //      — locks the v2 domain separator + the LE64(0) zero-counters
+    //      framing + the trailing schema-version length-prefix on a
+    //      typical short version string.
+    //   2. populated (realistic 100/87 release split, ~1.2M downloads,
+    //      three by_type entries) — locks BTreeMap sorted-iteration order
+    //      (beta < nightly < stable for the keys used here) and the
+    //      mixed framing: release_type length-prefixed but downloads u64
+    //      NOT length-prefixed (asymmetric encoding decision).
+    //   3. empty-schema (non-zero counters, empty schema_version "") —
+    //      locks the LE64(0)-then-no-trailing-bytes framing for the
+    //      trailing schema field; an empty schema MUST still emit LE64(0)
+    //      not be skipped.
+    //
+    // Critical layout invariants this golden pins:
+    //   - the `v2` domain separator (a future v1→v2 schema bump elsewhere
+    //     in the swarm must NOT accidentally re-use the same domain)
+    //   - LE64 width on all three top-level counters (usize-cast for the
+    //     two release counts, raw u64 for total_downloads)
+    //   - per-entry asymmetric framing: release_type length-prefixed,
+    //     downloads NOT length-prefixed (raw LE64). A future refactor that
+    //     accidentally length-prefixed BOTH would diverge here.
+    //   - BTreeMap sorted-iteration order on downloads_by_type
+    //
+    // Goldens were derived offline from the canonical-byte spec by
+    // reimplementing the function in Python — NOT captured from an
+    // unreviewed prior run. Recompute all three together if the layout
+    // intentionally changes.
+    #[test]
+    fn compute_metrics_content_hash_frozen_canonical_byte_layout_golden() {
+        use std::collections::BTreeMap;
+
+        // 1. Empty fixture: all zero counters, no by_type entries.
+        let empty = compute_metrics_content_hash(0, 0, 0, &BTreeMap::new(), "demo-v1.0");
+        assert_eq!(
+            empty,
+            "63c0a1eaa7d7f2f7814b0668b4c07df2e6d1968feebee76644d1dcc683377339",
+            "empty-fixture metrics hash drifted — check `verifier_benchmark_hash_v2:` \
+             domain separator or LE64(0) zero-counter framing"
+        );
+
+        // 2. Populated fixture: realistic 100/87 release split with three
+        // by_type entries. BTreeMap iterates sorted by key: beta < nightly
+        // < stable for the keys below.
+        let mut by_type = BTreeMap::new();
+        by_type.insert("stable".to_string(), 800_000u64);
+        by_type.insert("nightly".to_string(), 350_000u64);
+        by_type.insert("beta".to_string(), 84_567u64);
+        let populated = compute_metrics_content_hash(
+            100,
+            87,
+            1_234_567,
+            &by_type,
+            "verifier-benchmark-v2.0",
+        );
+        assert_eq!(
+            populated,
+            "5721d310160b90c7ed5b74b765aaccc2080c2b105343bfdaaee517d0dc9cc639",
+            "populated-fixture metrics hash drifted — check BTreeMap \
+             sorted-iteration order or per-entry asymmetric framing \
+             (release_type LE64-prefixed but downloads raw LE64)"
+        );
+
+        // 3. Empty-schema fixture: non-zero counters but empty schema.
+        // Pins the LE64(0)-then-no-trailing-bytes framing for the trailing
+        // schema field — an empty &str MUST still emit LE64(0) into the
+        // hasher rather than being silently skipped.
+        let empty_schema = compute_metrics_content_hash(5, 3, 99, &BTreeMap::new(), "");
+        assert_eq!(
+            empty_schema,
+            "c33f2c1f0ee2fdab2c1d6ac16ae97fc9b432b90f5b23ecf346e6e8e406c857b7",
+            "empty-schema metrics hash drifted — check that an empty \
+             schema_version still emits LE64(0) into the hasher rather \
+             than being skipped"
+        );
+
+        // BTreeMap insertion-order invariant: building `by_type` via a
+        // DIFFERENT insertion order MUST produce the same populated hash
+        // because BTreeMap iterates in sorted-by-key order. A future
+        // refactor that swaps BTreeMap for HashMap or IndexMap would
+        // silently fork hashes across hosts based on build order.
+        let mut reordered = BTreeMap::new();
+        reordered.insert("beta".to_string(), 84_567u64);
+        reordered.insert("stable".to_string(), 800_000u64);
+        reordered.insert("nightly".to_string(), 350_000u64);
+        let reordered_hash = compute_metrics_content_hash(
+            100,
+            87,
+            1_234_567,
+            &reordered,
+            "verifier-benchmark-v2.0",
+        );
+        assert_eq!(
+            reordered_hash, populated,
+            "compute_metrics_content_hash MUST be insertion-order-independent \
+             — downloads_by_type is a BTreeMap and iterates in sorted key order"
+        );
+
+        // Counter-distinctness invariant: bumping total_releases from 0 -> 1
+        // with otherwise-empty inputs MUST flip the hash. Guards against
+        // a future bug that accidentally excludes a counter from the hasher.
+        let bumped_total = compute_metrics_content_hash(1, 0, 0, &BTreeMap::new(), "demo-v1.0");
+        assert_ne!(
+            bumped_total, empty,
+            "incrementing total_releases from 0 to 1 with empty inputs MUST \
+             change the hash; if it does not, total_releases is not being \
+             fed into the hasher"
+        );
+
+        // Length+casing contract on every output.
+        for h in [&empty, &populated, &empty_schema, &bumped_total] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+        assert_ne!(empty, populated);
+        assert_ne!(empty, empty_schema);
+        assert_ne!(populated, empty_schema);
+    }
 }
