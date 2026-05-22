@@ -2,9 +2,8 @@
 //!
 //! See `docs/dev/dgis_node_interner_design.md` for the three load-bearing
 //! design decisions (Display strategy, determinism, capacity bound). This
-//! module is the skeleton implementation produced by that bead; the
-//! migration of `dgis::contagion_graph` internals to `NodeId(u32)` lands
-//! in bd-98xo5.5.2 — NOT here.
+//! module is the interned-id foundation used by `dgis::contagion_graph`;
+//! sibling DGIS surfaces migrate to the same representation in follow-on beads.
 //!
 //! ## Why u32 interning
 //!
@@ -40,12 +39,10 @@ pub const NODE_INTERNER_MAX_NODES: usize = 1024;
 pub struct NodeId(u32);
 
 impl NodeId {
-    /// Construct a `NodeId` from a raw u32. **Only call this from inside
-    /// `NodeInterner::intern`** — calling it externally bypasses the
-    /// `from_str` index and the capacity cap. The constructor is
-    /// `pub(crate)` precisely so external callers cannot fabricate
-    /// disconnected ids.
-    pub(crate) fn from_raw(value: u32) -> Self {
+    /// Construct a `NodeId` from a raw u32. Keep this private so sibling
+    /// modules cannot fabricate ids that bypass the interner's string index
+    /// and capacity cap.
+    fn from_raw(value: u32) -> Self {
         Self(value)
     }
 
@@ -128,7 +125,8 @@ impl NodeInterner {
     /// Returns `None` if the id was not produced by this interner.
     #[must_use]
     pub fn resolve(&self, id: NodeId) -> Option<&str> {
-        self.to_str.get(id.as_u32() as usize).map(String::as_str)
+        let index = usize::try_from(id.as_u32()).ok()?;
+        self.to_str.get(index).map(String::as_str)
     }
 
     /// Number of distinct node ids currently interned.
@@ -147,10 +145,11 @@ impl NodeInterner {
     /// Decision 2 in the design note for why this is the natural order
     /// for the simulator's deterministic walks.
     pub fn iter(&self) -> impl Iterator<Item = (NodeId, &str)> + '_ {
-        self.to_str
-            .iter()
-            .enumerate()
-            .map(|(idx, s)| (NodeId::from_raw(idx as u32), s.as_str()))
+        self.to_str.iter().enumerate().map(|(idx, s)| {
+            let id =
+                u32::try_from(idx).expect("interner length bounded by NODE_INTERNER_MAX_NODES");
+            (NodeId::from_raw(id), s.as_str())
+        })
     }
 }
 
@@ -219,7 +218,8 @@ mod tests {
     #[test]
     fn resolve_unknown_id_returns_none() {
         let interner = NodeInterner::new();
-        // NodeId::from_raw is pub(crate); inside this test we can call it.
+        // Tests live in this module, so they can still fabricate an id to
+        // verify fail-closed lookup behavior while production callers cannot.
         assert_eq!(interner.resolve(NodeId::from_raw(42)), None);
     }
 
@@ -271,6 +271,25 @@ mod tests {
         let collected: Vec<(u32, &str)> = interner.iter().map(|(id, s)| (id.as_u32(), s)).collect();
         // Insertion order: c=0, a=1, b=2 (NOT alphabetical, NOT BTreeMap order).
         assert_eq!(collected, vec![(0, "c"), (1, "a"), (2, "b")]);
+    }
+
+    #[test]
+    fn clone_preserves_lookup_state_and_next_id() {
+        let mut original = NodeInterner::new();
+        let alpha = original.intern("alpha").unwrap();
+        let beta = original.intern("beta").unwrap();
+
+        let mut cloned = original.clone();
+
+        assert_eq!(cloned.get("alpha"), Some(alpha));
+        assert_eq!(cloned.get("beta"), Some(beta));
+        assert_eq!(cloned.resolve(alpha), Some("alpha"));
+        assert_eq!(cloned.resolve(beta), Some("beta"));
+
+        let gamma = cloned.intern("gamma").unwrap();
+        assert_eq!(gamma.as_u32(), 2);
+        assert_eq!(cloned.resolve(gamma), Some("gamma"));
+        assert_eq!(original.get("gamma"), None);
     }
 
     #[test]

@@ -1,17 +1,25 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use tree_sitter::{Language, Node, Parser as JsParser};
 use std::fs;
 use std::path::PathBuf;
+use tree_sitter::{Language, Node, Parser as JsParser};
 
 /// Test corpus information (name, relative_path, expected_size_category)
 const CORPORA: &[(&str, &str, &str)] = &[
-    ("small", "tests/fixtures/migrate_corpora/commander_command_v12_1_0.js", "~2.5k LOC"),
-    ("large", "tests/fixtures/migrate_corpora/babel_standalone_v7_12_0.js", "~102k LOC"),
+    (
+        "small",
+        "tests/fixtures/migrate_corpora/commander_command_v12_1_0.js",
+        "~2.5k LOC",
+    ),
+    (
+        "large",
+        "tests/fixtures/migrate_corpora/babel_standalone_v7_12_0.js",
+        "~102k LOC",
+    ),
 ];
 
 fn load_corpus(corpus_path: &str) -> String {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("../../");  // Go up from crates/franken-node to project root
+    path.push("../../"); // Go up from crates/franken-node to project root
     path.push(corpus_path);
     fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("Failed to load corpus at {}: {err}", path.display()))
@@ -66,10 +74,8 @@ fn bench_js_analysis(c: &mut Criterion) {
             BenchmarkId::new("analyze_js", format!("{}_{}bytes", name, source_len)),
             &source,
             |b, source| {
-                b.iter(|| {
-                    black_box(analyze_js_with_tree_sitter(black_box(source)).unwrap_or(0))
-                })
-            }
+                b.iter(|| black_box(analyze_js_with_tree_sitter(black_box(source)).unwrap_or(0)))
+            },
         );
     }
 
@@ -94,23 +100,22 @@ fn bench_tree_sitter_parse_only(c: &mut Criterion) {
                 b.iter(|| {
                     let mut parser = JsParser::new();
                     let language: Language = tree_sitter_javascript::LANGUAGE.into();
-                    parser.set_language(&language).expect("JavaScript parser available");
+                    parser
+                        .set_language(&language)
+                        .expect("JavaScript parser available");
 
-                    let tree = parser.parse(black_box(source), None)
+                    let tree = parser
+                        .parse(black_box(source), None)
                         .expect("Parser produces syntax tree");
 
                     black_box(tree.root_node())
                 })
-            }
+            },
         );
     }
 
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_js_analysis,
-    bench_tree_sitter_parse_only
-);
+criterion_group!(benches, bench_js_analysis, bench_tree_sitter_parse_only);
 criterion_main!(benches);
