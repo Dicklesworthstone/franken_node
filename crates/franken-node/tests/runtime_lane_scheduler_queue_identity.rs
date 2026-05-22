@@ -12,6 +12,15 @@ fn single_background_lane_policy() -> LaneMappingPolicy {
     policy
 }
 
+fn two_slot_background_lane_policy() -> LaneMappingPolicy {
+    let mut policy = LaneMappingPolicy::new();
+    let mut config = LaneConfig::new(SchedulerLane::Background, 10, 2);
+    config.starvation_window_ms = 1_000;
+    policy.add_lane(config).expect("test lane should be unique");
+    policy.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+    policy
+}
+
 fn queued_task_id_from(error: LaneSchedulerError) -> Option<String> {
     match error {
         LaneSchedulerError::CapExceeded { queued_task_id, .. } => queued_task_id,
@@ -82,6 +91,171 @@ fn drain_front_queue_after_optional_tail_abort(abort_tail: bool) -> QueueDrainOu
         first_queued_at_ms: counters.first_queued_at_ms,
         completed_total: counters.completed_total,
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct QueueLifecycleDigest {
+    active_task_ids: Vec<String>,
+    queued_task_ids: Vec<String>,
+    active_count: usize,
+    queued_count: usize,
+    first_queued_at_ms: Option<u64>,
+    completed_total: u64,
+    rejected_total: u64,
+    starvation_events: u64,
+    audit_codes: Vec<String>,
+}
+
+fn queue_lifecycle_digest(scheduler: &LaneScheduler) -> QueueLifecycleDigest {
+    let counters = scheduler
+        .lane_counter(SchedulerLane::Background)
+        .expect("background counters");
+    QueueLifecycleDigest {
+        active_task_ids: scheduler.active_task_ids(SchedulerLane::Background),
+        queued_task_ids: scheduler.queued_task_ids(SchedulerLane::Background),
+        active_count: counters.active_count,
+        queued_count: counters.queued_count,
+        first_queued_at_ms: counters.first_queued_at_ms,
+        completed_total: counters.completed_total,
+        rejected_total: counters.rejected_total,
+        starvation_events: counters.starvation_events,
+        audit_codes: scheduler
+            .audit_log()
+            .iter()
+            .map(|record| record.event_code.clone())
+            .collect(),
+    }
+}
+
+fn observe_scheduler_without_lane_mutation(scheduler: &mut LaneScheduler, timestamp_ms: u64) {
+    let before = queue_lifecycle_digest(scheduler);
+    let audit_len = scheduler.audit_log().len();
+
+    assert_eq!(
+        scheduler
+            .telemetry_snapshot(timestamp_ms)
+            .schema_version
+            .as_str(),
+        "ls-v1.0"
+    );
+    assert!(
+        scheduler
+            .assign_task(
+                &task_classes::compaction(),
+                timestamp_ms,
+                "metamorphic-observe-unknown",
+            )
+            .is_err(),
+        "unknown-class probes must fail without mutating lane state"
+    );
+    assert!(
+        scheduler
+            .check_starvation(timestamp_ms, "metamorphic-observe-starvation")
+            .is_empty(),
+        "observation timestamps stay below the starvation window"
+    );
+
+    assert_eq!(scheduler.audit_log().len(), audit_len);
+    assert_eq!(queue_lifecycle_digest(scheduler), before);
+}
+
+fn run_queue_lifecycle(with_observation_interleavings: bool) -> QueueLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(two_slot_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let first = scheduler
+        .assign_task(&task_classes::log_rotation(), 1_000, "meta-active-1")
+        .expect("first task should start");
+    let second = scheduler
+        .assign_task(&task_classes::log_rotation(), 1_001, "meta-active-2")
+        .expect("second task should start");
+    let first_queued = queued_task_id_from(
+        scheduler
+            .assign_task(&task_classes::log_rotation(), 1_002, "meta-queued-1")
+            .expect_err("third task should queue at cap"),
+    )
+    .expect("first queued task id");
+    let second_queued = queued_task_id_from(
+        scheduler
+            .assign_task(&task_classes::log_rotation(), 1_003, "meta-queued-2")
+            .expect_err("fourth task should queue at cap"),
+    )
+    .expect("second queued task id");
+
+    assert_eq!(
+        scheduler.active_task_ids(SchedulerLane::Background),
+        vec![first.task_id.to_string(), second.task_id.to_string()]
+    );
+    assert_eq!(
+        scheduler.queued_task_ids(SchedulerLane::Background),
+        vec![first_queued.clone(), second_queued.clone()]
+    );
+
+    if with_observation_interleavings {
+        observe_scheduler_without_lane_mutation(&mut scheduler, 1_004);
+    }
+
+    scheduler
+        .complete_task(&first.task_id, 1_010, "meta-complete-1")
+        .expect("first completion should promote front queued task");
+    assert_eq!(
+        scheduler.active_task_ids(SchedulerLane::Background),
+        vec![second.task_id.to_string(), first_queued.clone()]
+    );
+    assert_eq!(
+        scheduler.queued_task_ids(SchedulerLane::Background),
+        vec![second_queued.clone()]
+    );
+
+    if with_observation_interleavings {
+        observe_scheduler_without_lane_mutation(&mut scheduler, 1_011);
+    }
+
+    scheduler
+        .complete_task(&second.task_id, 1_020, "meta-complete-2")
+        .expect("second completion should promote tail queued task");
+    assert_eq!(
+        scheduler.active_task_ids(SchedulerLane::Background),
+        vec![first_queued.clone(), second_queued.clone()]
+    );
+    assert!(
+        scheduler
+            .queued_task_ids(SchedulerLane::Background)
+            .is_empty()
+    );
+
+    if with_observation_interleavings {
+        observe_scheduler_without_lane_mutation(&mut scheduler, 1_021);
+    }
+
+    for (offset, task_id) in scheduler
+        .active_task_ids(SchedulerLane::Background)
+        .into_iter()
+        .enumerate()
+    {
+        scheduler
+            .complete_task(
+                &task_id,
+                1_030 + u64::try_from(offset).expect("small offset fits in u64"),
+                "meta-drain",
+            )
+            .expect("remaining active task should complete");
+    }
+
+    queue_lifecycle_digest(&scheduler)
+}
+
+#[test]
+fn metamorphic_queue_lifecycle_invariants_survive_observation_interleavings() {
+    let baseline = run_queue_lifecycle(false);
+    let observed = run_queue_lifecycle(true);
+
+    assert_eq!(observed, baseline);
+    assert_eq!(observed.active_count, 0);
+    assert_eq!(observed.queued_count, 0);
+    assert_eq!(observed.completed_total, 4);
+    assert_eq!(observed.rejected_total, 2);
+    assert_eq!(observed.starvation_events, 0);
 }
 
 #[test]

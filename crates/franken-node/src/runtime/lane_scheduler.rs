@@ -17,6 +17,7 @@ use crate::push_bounded;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
+use std::ops::Deref;
 
 /// Schema version for lane metrics exports.
 pub const SCHEMA_VERSION: &str = "ls-v1.0";
@@ -65,15 +66,58 @@ pub mod error_codes {
 
 // ---- Core types ----
 
-/// Task identifier newtype to eliminate per-assignment String allocation.
+const TASK_ID_PREFIX: &[u8] = b"task-";
+const TASK_ID_MIN_DIGITS: usize = 8;
+const TASK_ID_MAX_DIGITS: usize = 20;
+const TASK_ID_BUFFER_LEN: usize = TASK_ID_PREFIX.len() + TASK_ID_MAX_DIGITS;
+
+/// Task identifier newtype to eliminate per-assignment heap allocation.
 ///
-/// Internally stores u64 counter, formats to "task-{:08}" only at display boundaries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct TaskId(u64);
+/// Stores the numeric counter plus its canonical fixed-buffer text form so
+/// existing `&str` API boundaries can borrow the identifier without allocating.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TaskId {
+    counter: u64,
+    text_len: u8,
+    text: [u8; TASK_ID_BUFFER_LEN],
+}
 
 impl TaskId {
     fn new(counter: u64) -> Self {
-        Self(counter)
+        let mut text = [0u8; TASK_ID_BUFFER_LEN];
+        text[..TASK_ID_PREFIX.len()].copy_from_slice(TASK_ID_PREFIX);
+
+        let mut digits = [0u8; TASK_ID_MAX_DIGITS];
+        let mut value = counter;
+        let mut digit_count = 0usize;
+        loop {
+            let digit = u8::try_from(value % 10).expect("single decimal digit fits in u8");
+            let index = TASK_ID_MAX_DIGITS - 1 - digit_count;
+            digits[index] = b'0' + digit;
+            digit_count += 1;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+
+        let width = digit_count.max(TASK_ID_MIN_DIGITS);
+        let leading_zeroes = width - digit_count;
+        let digits_start = TASK_ID_PREFIX.len();
+        for offset in 0..leading_zeroes {
+            text[digits_start + offset] = b'0';
+        }
+        let source_start = TASK_ID_MAX_DIGITS - digit_count;
+        let destination_start = digits_start + leading_zeroes;
+        text[destination_start..destination_start + digit_count]
+            .copy_from_slice(&digits[source_start..]);
+
+        Self {
+            counter,
+            text_len: u8::try_from(TASK_ID_PREFIX.len() + width)
+                .expect("task id text length fits in u8"),
+            text,
+        }
     }
 
     /// Parse a task ID string in "task-{:08}" format back to TaskId.
@@ -82,11 +126,103 @@ impl TaskId {
             .and_then(|suffix| suffix.parse::<u64>().ok())
             .map(Self::new)
     }
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.text[..usize::from(self.text_len)])
+            .expect("TaskId canonical text is always ASCII")
+    }
+}
+
+impl fmt::Debug for TaskId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("TaskId").field(&"<redacted>").finish()
+    }
+}
+
+impl Serialize for TaskId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TaskIdVisitor;
+
+        impl serde::de::Visitor<'_> for TaskIdVisitor {
+            type Value = TaskId;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a task id string with prefix task- or a u64 counter")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                TaskId::from_str(value)
+                    .ok_or_else(|| E::custom(format!("invalid task id: {value}")))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(TaskId::new(value))
+            }
+        }
+
+        deserializer.deserialize_any(TaskIdVisitor)
+    }
+}
+
+impl Deref for TaskId {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for TaskId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq<String> for TaskId {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<TaskId> for String {
+    fn eq(&self, other: &TaskId) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl PartialEq<&str> for TaskId {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<TaskId> for &str {
+    fn eq(&self, other: &TaskId) -> bool {
+        *self == other.as_str()
+    }
 }
 
 impl fmt::Display for TaskId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "task-{:08}", self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -1512,11 +1648,14 @@ impl LaneScheduler {
 
     /// Active task IDs for a lane in deterministic ID order.
     pub fn active_task_ids(&self, lane: SchedulerLane) -> Vec<String> {
-        self.active_tasks
+        let mut task_ids: Vec<String> = self
+            .active_tasks
             .values()
             .filter(|assignment| assignment.lane == lane)
             .map(|assignment| assignment.task_id.to_string())
-            .collect()
+            .collect();
+        task_ids.sort();
+        task_ids
     }
 
     /// Take a telemetry snapshot.
@@ -3655,23 +3794,23 @@ mod tests {
 
         // Test TaskAssignment debug redaction
         let assignment = TaskAssignment {
-            task_id: "sensitive-task-456".to_string(),
+            task_id: TaskId::new(456),
             task_class: TaskClass("sensitive-class".to_string()),
-            lane: SchedulerLane::Critical,
+            lane: SchedulerLane::ControlCritical,
             assigned_at_ms: 1000,
             trace_id: "sensitive-trace-789".to_string(),
         };
         let debug_output = format!("{:?}", assignment);
         assert!(debug_output.contains("<redacted>"));
-        assert!(!debug_output.contains("sensitive-task-456"));
+        assert!(!debug_output.contains("task-00000456"));
         assert!(!debug_output.contains("sensitive-class"));
         assert!(!debug_output.contains("sensitive-trace-789"));
         assert!(debug_output.contains("1000")); // timestamp should remain
-        assert!(debug_output.contains("Critical")); // lane should remain
+        assert!(debug_output.contains("ControlCritical")); // lane should remain
 
         // Test QueuedTaskAssignment debug redaction
         let queued = QueuedTaskAssignment {
-            task_id: "sensitive-queued-123".to_string(),
+            task_id: TaskId::new(123),
             task_class: TaskClass("sensitive-queued-class".to_string()),
             lane: SchedulerLane::Background,
             queued_at_ms: 2000,
@@ -3679,7 +3818,7 @@ mod tests {
         };
         let debug_output = format!("{:?}", queued);
         assert!(debug_output.contains("<redacted>"));
-        assert!(!debug_output.contains("sensitive-queued-123"));
+        assert!(!debug_output.contains("task-00000123"));
         assert!(!debug_output.contains("sensitive-queued-class"));
         assert!(!debug_output.contains("sensitive-queued-trace"));
         assert!(debug_output.contains("2000")); // timestamp should remain
