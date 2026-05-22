@@ -3,12 +3,17 @@
 //! This module provides a quick way to test our fuzzing logic without
 //! waiting for the full libfuzzer compilation.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use frankenengine_node::supply_chain::trust_card::{
-    SnapshotSourceContext, TrustCardError, TrustCardRegistry, TrustCardRegistrySnapshot,
+    SnapshotSourceContext, TrustCard, TrustCardError, TrustCardRegistry, TrustCardRegistrySnapshot,
 };
 use serde_json::{Map, Value};
+
+const DEFAULT_TEST_REGISTRY_KEY: &[u8] = b"franken-node-trust-card-registry-key-v1";
 
 fn assert_snapshot_roundtrips(snapshot: &TrustCardRegistrySnapshot) {
     let encoded =
@@ -65,6 +70,16 @@ fn mutated_snapshot_bytes(value: &Value, mutate: impl FnOnce(&mut Map<String, Va
             .expect("signed trust-card snapshot should serialize as an object"),
     );
     snapshot_bytes(mutated)
+}
+
+fn signed_snapshot_value_with_empty_history(extension_id: &str) -> Value {
+    let mut cards_by_extension: BTreeMap<String, Vec<TrustCard>> = BTreeMap::new();
+    cards_by_extension.insert(extension_id.to_string(), Vec::new());
+    let snapshot =
+        TrustCardRegistrySnapshot::signed(60, cards_by_extension, DEFAULT_TEST_REGISTRY_KEY)
+            .expect("empty-history fuzz snapshot should sign before semantic validation");
+    serde_json::to_value(snapshot)
+        .expect("signed empty-history trust-card snapshot should convert to JSON")
 }
 
 fn trust_card_high_water_path(snapshot_path: &Path) -> PathBuf {
@@ -163,6 +178,15 @@ fn structure_aware_snapshot_fuzz_corpus() -> Vec<(&'static str, Vec<u8>, bool)> 
     ]
 }
 
+fn signed_postparse_invalid_snapshot_fuzz_corpus() -> Vec<(&'static str, Vec<u8>)> {
+    vec![(
+        "signed-empty-history-bucket",
+        snapshot_bytes(signed_snapshot_value_with_empty_history(
+            "npm:@acme/postparse-fuzz",
+        )),
+    )]
+}
+
 /// Structure-aware supply-chain fuzz regression for untrusted trust-card snapshots.
 #[test]
 fn structure_aware_snapshot_fuzz_corpus_fails_closed_for_untrusted_loads() {
@@ -225,6 +249,51 @@ fn structure_aware_snapshot_fuzz_corpus_fails_closed_for_untrusted_loads() {
             other => assert!(
                 matches!(&other, TrustCardError::InvalidSnapshot(_)),
                 "{label} returned unexpected untrusted-load error: {other:?}"
+            ),
+        }
+    }
+}
+
+/// Fuzz signed snapshots that pass signature preflight but fail during semantic restore.
+#[test]
+fn signed_postparse_invalid_snapshot_fuzz_corpus_sanitizes_untrusted_failures() {
+    for (label, bytes) in signed_postparse_invalid_snapshot_fuzz_corpus() {
+        let snapshot = serde_json::from_slice::<TrustCardRegistrySnapshot>(&bytes)
+            .expect("post-parse invalid fuzz seed should remain syntactically valid");
+        assert_snapshot_roundtrips(&snapshot);
+        assert_snapshot_debug_redacts_authentication_material(&snapshot, label);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(format!("{label}.json"));
+        std::fs::write(&path, &bytes).expect("write post-parse trust-card fuzz seed");
+
+        let result = TrustCardRegistry::load_authoritative_state(
+            &path,
+            60,
+            2_000,
+            SnapshotSourceContext::UntrustedNetwork,
+        );
+
+        assert!(
+            result.is_err(),
+            "{label} should fail after signature preflight but before high-water persistence"
+        );
+        let err =
+            result.expect_err("post-parse invalid signed snapshot should fail untrusted loading");
+        assert!(
+            !trust_card_high_water_path(&path).exists(),
+            "{label} must not persist high-water state after semantic restore rejection"
+        );
+        match err {
+            TrustCardError::InvalidSnapshot(detail) => {
+                assert_eq!(
+                    detail, "snapshot validation failed",
+                    "{label} should sanitize post-parse InvalidSnapshot detail"
+                );
+            }
+            other => assert!(
+                matches!(&other, TrustCardError::InvalidSnapshot(_)),
+                "{label} returned unexpected post-parse untrusted-load error: {other:?}"
             ),
         }
     }

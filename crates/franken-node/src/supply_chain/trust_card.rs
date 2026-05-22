@@ -92,7 +92,7 @@ fn validate_extension_id(extension_id: &str) -> Result<(), TrustCardError> {
             reason: "extension_id cannot be empty".to_string(),
         });
     }
-    if extension_id != trimmed {
+    if has_surrounding_whitespace(extension_id) {
         return Err(TrustCardError::InvalidInput {
             reason: "extension_id cannot contain leading or trailing whitespace".to_string(),
         });
@@ -112,6 +112,11 @@ fn validate_extension_id(extension_id: &str) -> Result<(), TrustCardError> {
         });
     }
     Ok(())
+}
+
+fn has_surrounding_whitespace(value: &str) -> bool {
+    value.chars().next().is_some_and(char::is_whitespace)
+        || value.chars().next_back().is_some_and(char::is_whitespace)
 }
 
 fn ensure_evidence_refs_present(refs: &[VerifiedEvidenceRef]) -> Result<(), TrustCardError> {
@@ -149,7 +154,7 @@ fn validate_evidence_ref_field(
             reason: format!("evidence_refs.{field} cannot be empty"),
         });
     }
-    if value != trimmed {
+    if has_surrounding_whitespace(value) {
         return Err(TrustCardError::InvalidInput {
             reason: format!("evidence_refs.{field} cannot contain leading or trailing whitespace"),
         });
@@ -608,6 +613,16 @@ fn sanitize_error_for_untrusted(err: TrustCardError) -> TrustCardError {
         }
         // Pass through other errors unchanged
         other => other,
+    }
+}
+
+fn sanitize_error_for_source_context(
+    source_context: SnapshotSourceContext,
+    err: TrustCardError,
+) -> TrustCardError {
+    match source_context {
+        SnapshotSourceContext::TrustedFile => err,
+        SnapshotSourceContext::UntrustedNetwork => sanitize_error_for_untrusted(err),
     }
 }
 const TRUST_CARD_REGISTRY_HIGH_WATER_SCHEMA: &str =
@@ -1295,17 +1310,21 @@ impl TrustCardRegistry {
                 }
             };
 
-        let high_water = read_snapshot_high_water(path, DEFAULT_REGISTRY_KEY)?;
-        validate_snapshot_high_water(path, &snapshot, high_water.as_ref())?;
+        let high_water = read_snapshot_high_water(path, DEFAULT_REGISTRY_KEY)
+            .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
+        validate_snapshot_high_water(path, &snapshot, high_water.as_ref())
+            .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
         let trusted_snapshot = snapshot.clone();
-        let mut registry = Self::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, loaded_at_secs)?;
+        let mut registry = Self::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, loaded_at_secs)
+            .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
         registry.cache_ttl_secs = cache_ttl_secs.max(1);
         persist_snapshot_high_water_if_newer(
             path,
             &trusted_snapshot,
             high_water.as_ref(),
             DEFAULT_REGISTRY_KEY,
-        )?;
+        )
+        .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
         Ok(registry)
     }
 
@@ -1365,10 +1384,13 @@ impl TrustCardRegistry {
                 }
             };
 
-        let high_water = read_snapshot_high_water(path, &registry_key)?;
-        validate_snapshot_high_water(path, &snapshot, high_water.as_ref())?;
+        let high_water = read_snapshot_high_water(path, &registry_key)
+            .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
+        validate_snapshot_high_water(path, &snapshot, high_water.as_ref())
+            .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
         let trusted_snapshot = snapshot.clone();
-        let mut registry = Self::from_snapshot(snapshot, &registry_key, loaded_at_secs)?;
+        let mut registry = Self::from_snapshot(snapshot, &registry_key, loaded_at_secs)
+            .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
         registry.cache_ttl_secs = cache_ttl_secs.max(1);
 
         persist_snapshot_high_water_if_newer(
@@ -1376,7 +1398,8 @@ impl TrustCardRegistry {
             &trusted_snapshot,
             high_water.as_ref(),
             &registry_key,
-        )?;
+        )
+        .map_err(|err| sanitize_error_for_source_context(source_context, err))?;
         Ok(registry)
     }
 
