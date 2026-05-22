@@ -400,3 +400,9 @@ name = "fuzz_fleet_decision_receipt_payload_hash"
 path = "fuzz_targets/fuzz_fleet_decision_receipt_payload_hash.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_replay_trace_canonical_digest"
+path = "fuzz_targets/fuzz_replay_trace_canonical_digest.rs"
+test = false
+doc = false
