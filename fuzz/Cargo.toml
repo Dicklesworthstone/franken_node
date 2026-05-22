@@ -514,3 +514,9 @@ name = "fuzz_validation_proof_economics"
 path = "fuzz_targets/fuzz_validation_proof_economics.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_rewrite_suggestion_engine"
+path = "fuzz_targets/fuzz_rewrite_suggestion_engine.rs"
+test = false
+doc = false
