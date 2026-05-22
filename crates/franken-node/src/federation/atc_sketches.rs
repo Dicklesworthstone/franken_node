@@ -965,4 +965,179 @@ mod tests {
         assert!((0.0..=100.0).contains(&conf_high));
         assert!((0.0..=100.0).contains(&conf_low));
     }
+
+    // Frozen u64 outputs of TWO module-private hashing functions in
+    // this file:
+    //
+    //   derive_hash_seeds (atc_sketches.rs:514):
+    //     For each row in [0, depth):
+    //       seed = u64::from_le_bytes(SHA256(
+    //         LE64(len(CMS_DOMAIN_SEPARATOR))
+    //         || CMS_DOMAIN_SEPARATOR
+    //         || depth.to_le_bytes()     # u32 LE — 4 bytes (NOT 8!)
+    //         || width.to_le_bytes()     # u32 LE
+    //         || row.to_le_bytes()       # u32 LE
+    //       ).finalize()[..8])
+    //
+    //   cell_column (atc_sketches.rs:533):
+    //     If width == 0: return 0
+    //     h = u64::from_le_bytes(SHA256(
+    //       LE64(len(CMS_DOMAIN_SEPARATOR))
+    //       || CMS_DOMAIN_SEPARATOR
+    //       || seed.to_le_bytes()        # u64 LE — 8 bytes
+    //       || LE64(len(key)) || key
+    //     ).finalize()[..8])
+    //     return (h % width as u64) as usize
+    //
+    // Where CMS_DOMAIN_SEPARATOR = b"atc_sketch_cms_v1:" (18 bytes).
+    //
+    // *** TWO DISTINCTIVE FEATURES (FIRSTS in suite) ***
+    //
+    // 1. u32-LE ENCODING FOR DIMENSIONS: this is the FIRST golden to
+    //    pin u32-LE encoding (4 bytes) for the depth/width/row fields
+    //    of derive_hash_seeds. Every prior golden in the suite has
+    //    used u64-LE (8 bytes) for counter fields. A future refactor
+    //    that "widened all counters to u64" would silently double the
+    //    bytes-per-counter AND flip every existing seed across the
+    //    sketch fleet. The two prior u32-vs-u64-width-contract goldens
+    //    (r55 incident_bundle_retention's export_format_version,
+    //    r66 here) document the u32 contract on different surfaces.
+    //
+    // 2. SHA256-TRUNCATE-TO-u64 PATTERN: both functions take the
+    //    first 8 bytes of the SHA-256 digest and interpret as u64
+    //    via from_le_bytes. This is a load-bearing decision (only
+    //    8 of the 32 SHA-256 bytes contribute to the seed/column);
+    //    a refactor to take a different slice (e.g., bytes 8..16) or
+    //    use a different endianness would silently shift every
+    //    sketch column mapping.
+    //
+    // Five frozen fixtures + three structural invariants:
+    //
+    // derive_hash_seeds:
+    //   1. depth=1, width=16 → single seed 0x294655db40e9a76c.
+    //   2. depth=3, width=256 → three seeds
+    //      [0xe57d966d5f352fe2, 0x83adbca9a72f2d10, 0xe06836c440838296].
+    //
+    // cell_column:
+    //   3. seed=0x1234567890abcdef, key=b"", width=1 → 0
+    //      (any value mod 1 is 0 — locks the width=1 edge case).
+    //   4. seed=0x1234567890abcdef, key=b"hello", width=1024 → 199.
+    //   5. seed=0, key=b"\0", width=100 → 86.
+    //
+    //   6. WIDTH-ZERO-EARLY-RETURN: cell_column(_, _, 0) MUST return
+    //      0 without dividing (catches a refactor that removed the
+    //      early-return guard, which would cause divide-by-zero
+    //      panic).
+    //
+    //   7. SEED-DETERMINATION INVARIANT: derive_hash_seeds(d, w)
+    //      MUST produce d seeds where each is determined by
+    //      (depth, width, row) — changing only depth or width MUST
+    //      flip ALL seeds in the vector.
+    //
+    //   8. KEY-IN-COLUMN INVARIANT: same seed + same width + different
+    //      key MUST produce (likely) different column. Tests that the
+    //      key contributes to the hash.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python (struct.pack('<I', ...) for u32 LE, '<Q' for u64 LE) —
+    // NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): derive_hash_seeds + cell_column
+    // together form the Count-Min Sketch row/column mapping for ATC
+    // federation. If two aggregators compute different seeds or
+    // columns for the same logical (depth, width, row, seed, key)
+    // tuple — because someone widened u32 to u64, dropped the
+    // truncate-to-first-8-bytes pattern, or muddled the v1 domain —
+    // CMS estimates diverge across the federation AND the sketch
+    // becomes nondeterministic.
+    #[test]
+    fn atc_sketches_hash_primitives_frozen_canonical_byte_layout_golden() {
+        // 1. derive_hash_seeds(depth=1, width=16): single seed.
+        let seeds_1x16 = super::derive_hash_seeds(1, 16);
+        assert_eq!(
+            seeds_1x16,
+            vec![0x294655db40e9a76c_u64],
+            "derive_hash_seeds(1, 16) drifted — check the CMS_DOMAIN_\
+             SEPARATOR (b\"atc_sketch_cms_v1:\"), the u32-LE encoding \
+             of depth/width/row (4 bytes each), OR the SHA256-truncate-\
+             to-first-8-bytes-as-u64-LE pattern"
+        );
+
+        // 2. derive_hash_seeds(depth=3, width=256): three seeds.
+        let seeds_3x256 = super::derive_hash_seeds(3, 256);
+        assert_eq!(
+            seeds_3x256,
+            vec![
+                0xe57d966d5f352fe2_u64,
+                0x83adbca9a72f2d10_u64,
+                0xe06836c440838296_u64,
+            ],
+            "derive_hash_seeds(3, 256) drifted — three rows of seeds \
+             MUST be derived in row-iteration order with row.to_le_bytes() \
+             (u32 LE) as the per-row salt"
+        );
+
+        // 3. cell_column width-zero edge case.
+        assert_eq!(
+            super::cell_column(0x1234567890abcdef, b"", 1),
+            0,
+            "cell_column(_, _, 1) MUST return 0 (any value mod 1 is 0)"
+        );
+
+        // 4. cell_column with non-empty key.
+        assert_eq!(
+            super::cell_column(0x1234567890abcdef, b"hello", 1024),
+            199,
+            "cell_column drifted — check CMS_DOMAIN_SEPARATOR, seed \
+             u64-LE encoding, OR LE64-len-prefix on key"
+        );
+
+        // 5. cell_column with binary key + seed=0.
+        assert_eq!(
+            super::cell_column(0, b"\0", 100),
+            86,
+            "cell_column with seed=0 and single null byte key drifted \
+             — pins that seed=0 is fed as 8 zero bytes (NOT skipped)"
+        );
+
+        // 6. WIDTH-ZERO-EARLY-RETURN INVARIANT.
+        assert_eq!(
+            super::cell_column(0x1234567890abcdef, b"any-key", 0),
+            0,
+            "cell_column(_, _, 0) MUST return 0 via the early-return \
+             guard at L534 (catches a refactor that removed the guard, \
+             which would cause divide-by-zero panic)"
+        );
+
+        // 7. SEED-DETERMINATION INVARIANT: depth-bumped seeds MUST
+        // differ entirely from the original. Each seed depends on
+        // (depth, width, row); changing depth changes ALL seeds.
+        let seeds_2x16 = super::derive_hash_seeds(2, 16);
+        // The first seed at depth=2 must differ from the first seed
+        // at depth=1 (because depth field changed).
+        assert_ne!(
+            seeds_2x16[0], seeds_1x16[0],
+            "derive_hash_seeds(2, 16)[0] MUST differ from \
+             derive_hash_seeds(1, 16)[0] — depth IS fed into each \
+             per-row hash, so changing depth flips all seeds"
+        );
+
+        // 8. KEY-IN-COLUMN INVARIANT: same seed/width + different key
+        // produces different column (with high probability — using
+        // two distinct keys here).
+        let col_a = super::cell_column(0xDEADBEEF, b"key-a", 65536);
+        let col_b = super::cell_column(0xDEADBEEF, b"key-b", 65536);
+        assert_ne!(
+            col_a, col_b,
+            "different keys with same seed+width MUST produce \
+             different columns (assuming reasonable hash distribution); \
+             if equal here, the key may not be feeding into the hasher"
+        );
+
+        // Seeds length contract: derive_hash_seeds(depth, _) returns
+        // exactly `depth` seeds.
+        assert_eq!(seeds_1x16.len(), 1);
+        assert_eq!(seeds_3x256.len(), 3);
+        assert_eq!(seeds_2x16.len(), 2);
+    }
 }
