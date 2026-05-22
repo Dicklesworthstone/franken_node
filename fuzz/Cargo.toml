@@ -388,3 +388,9 @@ name = "fuzz_transparency_verifier_inclusion"
 path = "fuzz_targets/fuzz_transparency_verifier_inclusion.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_cuckoo_filter_insert_contains_remove"
+path = "fuzz_targets/fuzz_cuckoo_filter_insert_contains_remove.rs"
+test = false
+doc = false
