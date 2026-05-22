@@ -2816,4 +2816,220 @@ mod tests {
 
         assert!(err.to_string().contains("invalid type"));
     }
+
+    // Frozen SHA-256 hex outputs of the module-private function
+    // PolicyCheckpoint::compute_hash (policy_checkpoint.rs:230). The
+    // function is the canonical-serialization primitive backing
+    // INV-PCK-CANONICAL-SER + INV-PCK-HASH-INTEGRITY at the policy-
+    // checkpoint chain layer.
+    //
+    // The function builds the canonical checkpoint hash as:
+    //
+    //   SHA256(
+    //     b"policy_checkpoint_hash_v1:"
+    //     || sequence.to_be_bytes()              # u64 BIG-ENDIAN — NOT LE!
+    //     || epoch_id.to_be_bytes()              # u64 BIG-ENDIAN
+    //     || LE64(len(channel_label)) || channel_label.as_bytes()
+    //     || LE64(len(policy_hash))   || policy_hash.as_bytes()
+    //     || LE64(len(parent))        || parent.as_bytes()  # parent_hash.unwrap_or("GENESIS")
+    //     || timestamp.to_be_bytes()             # u64 BIG-ENDIAN
+    //     || LE64(len(signer))        || signer.as_bytes()
+    //   ).hex()
+    //
+    // *** DISTINCTIVE FEATURE pinned by this golden ***
+    //
+    // This is the FIRST golden in the suite to pin a function that
+    // uses BIG-ENDIAN encoding for counter fields. Every prior golden
+    // in this suite uses LITTLE-ENDIAN (`to_le_bytes()`); this one
+    // uses BIG-ENDIAN (`to_be_bytes()`) for the three u64 counter
+    // fields (sequence, epoch_id, timestamp) while keeping LITTLE-
+    // ENDIAN length prefixes. This asymmetric BE-counter + LE-length-
+    // prefix design is a load-bearing contract — a "uniform endianness"
+    // refactor would catastrophically flip every checkpoint hash AND
+    // break the entire chain history.
+    //
+    // The choice of BE for counter fields here is documented at
+    // policy_checkpoint.rs:227 as "deterministic field ordering" but
+    // the to_be_bytes() endianness itself is implicit. This golden
+    // makes it explicit.
+    //
+    // Three frozen fixtures + three structural invariants:
+    //
+    //   1. genesis (parent_hash=None, channel=Stable, sequence=1) —
+    //      Locks the v1 domain + BE u64 encoding of sequence=1
+    //      (0x00..00 00..01 — 7 zero bytes followed by 0x01, in
+    //      contrast to LE which would be 0x01 0x00..00) + the
+    //      hardcoded "GENESIS" fallback when parent_hash is None.
+    //      Frozen: ab488c7260050ca5b675070c5e9bf297d4dd2e757bf34cd94f2d45c784a50515
+    //
+    //   2. linked (parent_hash=Some(genesis), channel=Beta, sequence=2) —
+    //      Locks the Some-parent framing + ReleaseChannel::Beta label
+    //      mapping ("beta", 4 bytes).
+    //      Frozen: 34a5d37b475b6de13d461ffec1094785d38fb8ab9949f4dc5a84274663302110
+    //
+    //   3. custom (channel=Custom("internal-qa"), sequence=3) —
+    //      Locks the ReleaseChannel::Custom Display: "custom:<name>"
+    //      (NOT just the name). This is a 18-byte channel label
+    //      (custom:internal-qa) vs the 6-byte "stable" / 4-byte "beta"
+    //      / 6-byte "canary" — the LE64 length prefix is what makes
+    //      the variable-length encoding work.
+    //      Frozen: ad5550dbc720449e6b8f833a5c134c4b1da63800a5f9f9ddf51a1c4e1cd9d2d4
+    //
+    //   4. ENDIANNESS-SENSITIVITY INVARIANT: incrementing sequence
+    //      from 1 → 2 with otherwise-identical inputs MUST flip the
+    //      hash AT THE FRONT of the hashed bytes (BE-encoded). This
+    //      pins that sequence IS encoded as BE — under LE, sequence
+    //      1 vs 2 would differ at byte position 25 (after b"...:"),
+    //      under BE they differ at byte position 32 (the last byte of
+    //      the 8-byte field). The hash will flip either way, but the
+    //      goldens above only hold if the BE encoding is preserved.
+    //
+    //   5. GENESIS-FALLBACK INVARIANT: compute_hash with parent_hash =
+    //      None MUST equal compute_hash with parent_hash = Some("GENESIS")
+    //      (the unwrap_or substitution at L251). Pins this load-bearing
+    //      substitution — a future refactor that changed the sentinel
+    //      string (e.g., to "" or "ROOT") would disconnect every
+    //      existing chain from its first link.
+    //
+    //   6. CHANNEL-DISTINGUISHABILITY INVARIANT: changing only the
+    //      channel from Stable to Beta MUST flip the hash. Pins that
+    //      ReleaseChannel IS fed into the hasher; a future refactor
+    //      that dropped channel would let a Stable checkpoint be
+    //      replayed against a Beta lineage history.
+    //
+    // Goldens were derived offline from the canonical-byte spec via
+    // Python (struct.pack('>Q', ...) for BE u64 counters, '<Q' for LE
+    // length prefixes) — NOT captured from an unreviewed prior run.
+    //
+    // Why this matters (the contract): PolicyCheckpoint::compute_hash
+    // is the canonical-serialization primitive backing the policy-
+    // checkpoint append-only chain. If two nodes compute different
+    // hashes for the same logical checkpoint — because someone
+    // swapped BE for LE on the counter fields, dropped the GENESIS
+    // fallback, or muddled the ReleaseChannel label format — chain
+    // verification fails opaquely AND historical lineage cannot be
+    // replayed.
+    #[test]
+    fn policy_checkpoint_compute_hash_frozen_canonical_byte_layout_golden() {
+        // 1. Genesis fixture: parent_hash = None → "GENESIS" sentinel.
+        let genesis = super::PolicyCheckpoint::compute_hash(
+            1,
+            42,
+            &ReleaseChannel::Stable,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            None,
+            1_700_000_000,
+            "operator-1",
+        );
+        assert_eq!(
+            genesis,
+            "ab488c7260050ca5b675070c5e9bf297d4dd2e757bf34cd94f2d45c784a50515",
+            "genesis PolicyCheckpoint hash drifted — check the v1 \
+             domain separator, the BIG-ENDIAN u64 encoding of \
+             sequence/epoch_id/timestamp (NOT LE), or the hardcoded \
+             \"GENESIS\" parent fallback"
+        );
+
+        // 2. Linked fixture: parent_hash = Some(genesis), channel = Beta.
+        let linked = super::PolicyCheckpoint::compute_hash(
+            2,
+            42,
+            &ReleaseChannel::Beta,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some(&genesis),
+            1_700_000_001,
+            "operator-2",
+        );
+        assert_eq!(
+            linked,
+            "34a5d37b475b6de13d461ffec1094785d38fb8ab9949f4dc5a84274663302110",
+            "linked PolicyCheckpoint hash drifted — check Some-parent \
+             framing or ReleaseChannel::Beta label (\"beta\", 4 bytes)"
+        );
+
+        // 3. Custom-channel fixture: locks the "custom:<name>" Display.
+        let custom = super::PolicyCheckpoint::compute_hash(
+            3,
+            43,
+            &ReleaseChannel::Custom("internal-qa".to_string()),
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            Some(&linked),
+            1_700_000_002,
+            "operator-internal",
+        );
+        assert_eq!(
+            custom,
+            "ad5550dbc720449e6b8f833a5c134c4b1da63800a5f9f9ddf51a1c4e1cd9d2d4",
+            "custom-channel PolicyCheckpoint hash drifted — check the \
+             ReleaseChannel::Custom Display (\"custom:<name>\", NOT \
+             just the name)"
+        );
+
+        // 4. ENDIANNESS-SENSITIVITY (combined with sequence-bump): pins
+        // that sequence IS being encoded into the hasher. The frozen
+        // pins above already assume BE; if compute_hash silently swapped
+        // to LE, the genesis pin would fail at fixture 1 already.
+        // Direct check: changing only sequence MUST flip the hash.
+        let seq_bumped = super::PolicyCheckpoint::compute_hash(
+            2, // bumped from 1
+            42,
+            &ReleaseChannel::Stable,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            None,
+            1_700_000_000,
+            "operator-1",
+        );
+        assert_ne!(
+            seq_bumped, genesis,
+            "incrementing sequence from 1 to 2 MUST flip the hash"
+        );
+
+        // 5. GENESIS-FALLBACK INVARIANT: compute_hash(None) MUST equal
+        // compute_hash(Some("GENESIS")). Pins the unwrap_or substitution
+        // at L251 as load-bearing — a future refactor that changed the
+        // sentinel string would disconnect every existing chain from
+        // its first link.
+        let explicit_genesis = super::PolicyCheckpoint::compute_hash(
+            1,
+            42,
+            &ReleaseChannel::Stable,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            Some("GENESIS"),
+            1_700_000_000,
+            "operator-1",
+        );
+        assert_eq!(
+            explicit_genesis, genesis,
+            "compute_hash with parent_hash=None MUST equal compute_hash \
+             with parent_hash=Some(\"GENESIS\") — the unwrap_or(\"GENESIS\") \
+             substitution is a load-bearing contract for the first link \
+             in every checkpoint chain"
+        );
+
+        // 6. CHANNEL-DISTINGUISHABILITY INVARIANT: changing only the
+        // channel (Stable → Beta) MUST flip the hash. Pins that channel
+        // IS fed into the hasher; a future refactor that dropped it
+        // would let Stable checkpoints replay against Beta lineage.
+        let beta_channel_genesis = super::PolicyCheckpoint::compute_hash(
+            1,
+            42,
+            &ReleaseChannel::Beta, // changed from Stable
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            None,
+            1_700_000_000,
+            "operator-1",
+        );
+        assert_ne!(
+            beta_channel_genesis, genesis,
+            "changing only the ReleaseChannel from Stable to Beta MUST \
+             change the checkpoint hash; the channel is a chain-lineage \
+             discriminator"
+        );
+
+        // Length+casing contract.
+        for h in [&genesis, &linked, &custom] {
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        }
+    }
 }
