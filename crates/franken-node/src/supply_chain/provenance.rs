@@ -682,6 +682,26 @@ fn validate_attestation_freshness(
     now_epoch: u64,
     issues: &mut Vec<ChainIssue>,
 ) {
+    if attestation.build_timestamp_epoch > now_epoch {
+        push_bounded(
+            issues,
+            ChainIssue {
+                code: VerificationErrorCode::ChainStale,
+                link_role: None,
+                message: format!(
+                    "attestation build timestamp {} is in the future relative to verification time {now_epoch}",
+                    attestation.build_timestamp_epoch
+                ),
+                remediation:
+                    "Reject not-yet-valid provenance and re-attest with a current build timestamp."
+                        .to_string(),
+                allow_in_cached_mode: false,
+            },
+            MAX_CHAIN_ISSUES,
+        );
+        return;
+    }
+
     let age = now_epoch.saturating_sub(attestation.build_timestamp_epoch);
     if age < policy.max_attestation_age_secs {
         return;
@@ -780,6 +800,26 @@ fn validate_links(
                     MAX_CHAIN_ISSUES,
                 );
             }
+        }
+
+        if link.issued_at_epoch > now_epoch {
+            push_bounded(
+                issues,
+                ChainIssue {
+                    code: VerificationErrorCode::ChainStale,
+                    link_role: Some(link.role),
+                    message: format!(
+                        "link issued_at_epoch {} is in the future relative to verification time {now_epoch}",
+                        link.issued_at_epoch
+                    ),
+                    remediation:
+                        "Reject not-yet-valid provenance links and re-attest after issuance."
+                            .to_string(),
+                    allow_in_cached_mode: false,
+                },
+                MAX_CHAIN_ISSUES,
+            );
+            continue;
         }
 
         let age = now_epoch.saturating_sub(link.issued_at_epoch);

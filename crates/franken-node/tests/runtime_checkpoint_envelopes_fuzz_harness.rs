@@ -9,7 +9,9 @@
 //! Follows the canonical_serializer_fuzz_harness pattern with structure-aware
 //! checkpoint state generation and invariant enforcement.
 
-use frankenengine_node::runtime::bounded_mask::{CancellationState, CapabilityContext};
+use frankenengine_node::runtime::bounded_mask::{
+    CancellationState, CapabilityContext, MaskPolicy, bounded_mask_with_report,
+};
 use frankenengine_node::runtime::checkpoint::{
     CHECKPOINT_RESTORE, CHECKPOINT_SAVE, CheckpointBackend, CheckpointContract, CheckpointError,
     CheckpointEvent, CheckpointId, CheckpointMeta, CheckpointRecord, CheckpointWriter,
@@ -20,7 +22,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::time::Duration;
 use tempfile::TempDir;
 
 const MAX_ORCHESTRATION_ID_LEN: usize = 256;
@@ -337,6 +341,96 @@ fn tempfile_checkpoint_backend_isolates_path_colliding_orchestration_ids() {
     assert_eq!(right_records[0].orchestration_id, right_orchestration_id);
     assert_eq!(left_records[0].progress_state_hash, "left-state-hash");
     assert_eq!(right_records[0].progress_state_hash, "right-state-hash");
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PanicRecoveryDigest {
+    cancel_requested_after_panic: bool,
+    deferred_signals_after_panic: u64,
+    delivered_after_mask_after_panic: u64,
+    recovery_value: &'static str,
+    recovery_event_names: Vec<String>,
+    recovery_deferred_cancel_pending: bool,
+}
+
+fn bounded_mask_panic_recovery_digest(panic_payload: &'static str) -> PanicRecoveryDigest {
+    let cx = CapabilityContext::with_scopes(
+        "cx-r105-panic-recovery",
+        "operator-r105",
+        ["runtime.mask".to_string()],
+    );
+    let mut cancellation = CancellationState::new();
+    let panic_policy = MaskPolicy::new(
+        Duration::from_millis(50),
+        format!("trace-r105-panic-{}", panic_payload.len()),
+    );
+
+    let panic_result = catch_unwind(AssertUnwindSafe(|| {
+        let _ = bounded_mask_with_report(
+            &cx,
+            &mut cancellation,
+            "r105_checkpoint_panic_path",
+            &panic_policy,
+            |_cx, cancel| {
+                cancel.request_cancel();
+                panic!("{panic_payload}");
+            },
+        );
+    }));
+    assert!(panic_result.is_err(), "mask panic must propagate to caller");
+
+    let cancel_requested_after_panic = cancellation.is_cancel_requested();
+    let deferred_signals_after_panic = cancellation.deferred_signals();
+    let delivered_after_mask_after_panic = cancellation.delivered_after_mask();
+
+    cancellation.clear_cancellation();
+    let recovery_policy = MaskPolicy::new(Duration::from_millis(50), "trace-r105-recovery");
+    let recovered = bounded_mask_with_report(
+        &cx,
+        &mut cancellation,
+        "r105_checkpoint_recovery_path",
+        &recovery_policy,
+        |_cx, cancel| {
+            assert!(
+                !cancel.is_cancel_requested(),
+                "recovery path should not inherit delivered cancellation"
+            );
+            "recovered"
+        },
+    )
+    .expect("panic recovery must clear bounded-mask nesting state");
+
+    PanicRecoveryDigest {
+        cancel_requested_after_panic,
+        deferred_signals_after_panic,
+        delivered_after_mask_after_panic,
+        recovery_value: *recovered.value(),
+        recovery_event_names: recovered
+            .events
+            .iter()
+            .map(|event| event.event_name.clone())
+            .collect(),
+        recovery_deferred_cancel_pending: recovered.report.deferred_cancel_pending,
+    }
+}
+
+#[test]
+fn metamorphic_bounded_mask_panic_recovery_is_payload_invariant() {
+    let short_payload = bounded_mask_panic_recovery_digest("panic-a");
+    let long_payload = bounded_mask_panic_recovery_digest(
+        "panic-b-with-extra-runtime-checkpoint-context-that-must-not-change-recovery",
+    );
+
+    assert_eq!(short_payload, long_payload);
+    assert!(short_payload.cancel_requested_after_panic);
+    assert_eq!(short_payload.deferred_signals_after_panic, 0);
+    assert_eq!(short_payload.delivered_after_mask_after_panic, 1);
+    assert_eq!(short_payload.recovery_value, "recovered");
+    assert_eq!(
+        short_payload.recovery_event_names,
+        vec!["MASK_ENTER".to_string(), "MASK_EXIT".to_string()]
+    );
+    assert!(!short_payload.recovery_deferred_cancel_pending);
 }
 
 /// Test state structure for checkpoint fuzzing

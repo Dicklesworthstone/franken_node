@@ -461,6 +461,49 @@ fn durable_replay_marker_contract_uses_length_prefixes_and_redacts_signature() -
 }
 
 #[test]
+fn remote_cap_duplicate_renewal_request_is_idempotent_for_authorization() -> TestResult {
+    let harness = ReplayHarness::new(ReplayStoreMode::Memory)?;
+    let renewal = IssuedTokenVector {
+        label: "renewal".to_string(),
+        trace_id: "trace-renewal-idempotent".to_string(),
+        issued_at_epoch_secs: 1_700_001_000,
+        ttl_secs: 3_600,
+        single_use: false,
+        operations: vec![RemoteOperation::RevocationFetch],
+        endpoint_prefixes: vec!["revocation://global-feed".to_string()],
+    };
+    let mut divergent = renewal.clone();
+    divergent.trace_id = "trace-renewal-idempotent-divergent".to_string();
+
+    let first = harness.issue_token(&renewal)?;
+    let second = harness.issue_token(&renewal)?;
+    let divergent = harness.issue_token(&divergent)?;
+
+    assert_eq!(first, second);
+    assert_ne!(first.token_id(), divergent.token_id());
+    assert_eq!(first.expires_at_epoch_secs(), 1_700_004_600);
+    assert_eq!(harness.provider.audit_log().len(), 3);
+
+    let mut gate = harness.gate()?;
+    for (cap, trace_id) in [
+        (&first, "trace-renewal-first-use"),
+        (&second, "trace-renewal-duplicate-use"),
+    ] {
+        gate.authorize_network(
+            Some(cap),
+            RemoteOperation::RevocationFetch,
+            "revocation://global-feed/latest",
+            1_700_001_100,
+            trace_id,
+        )
+        .map_err(|err| format!("{trace_id} authorization failed: {err}"))?;
+    }
+    assert_eq!(gate.audit_log().len(), 2);
+
+    Ok(())
+}
+
+#[test]
 fn remote_cap_replay_token_state_machine_matches_golden_vectors() -> TestResult {
     let (_, _, vectors) = load_vectors()?;
 

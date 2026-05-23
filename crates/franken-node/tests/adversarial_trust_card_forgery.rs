@@ -1005,6 +1005,71 @@ fn conformance_replayed_signature_over_canonical_manifest_rejected() {
     );
 }
 
+#[test]
+fn conformance_future_provenance_timestamps_rejected_before_registry_mutation() {
+    let signing_key = extension_signing_key();
+    let mut registry = extension_registry(&signing_key);
+    let now_epoch = EXTENSION_NOW_EPOCH;
+    let extension_name = "signed-extension-future-provenance";
+    let mut request = extension_request(extension_name, &signing_key, now_epoch);
+
+    request.provenance.build_timestamp_epoch = now_epoch.saturating_add(3_600);
+    for link in &mut request.provenance.links {
+        link.issued_at_epoch = now_epoch.saturating_add(60);
+        link.expires_at_epoch = now_epoch.saturating_add(86_400);
+    }
+    prov::sign_links_in_place(
+        &mut request.provenance,
+        &extension_provenance_signing_keys(&signing_key),
+    )
+    .expect("future provenance fixture should re-sign after timestamp mutation");
+
+    let result = registry.register(request, "trace-future-provenance", now_epoch);
+
+    assert!(
+        !result.success,
+        "future-dated provenance must fail closed before extension admission"
+    );
+    assert_eq!(
+        result.error_code.as_deref(),
+        Some(event_codes::SER_ERR_PROVENANCE_CHAIN_INVALID)
+    );
+    assert!(result.extension_id.is_none());
+    assert!(
+        registry.list(None).is_empty(),
+        "future-dated provenance must not mutate registry state"
+    );
+    assert!(registry.query_by_name(extension_name).is_none());
+
+    let receipt = registry
+        .admission_receipts()
+        .last()
+        .expect("future provenance rejection must persist an admission receipt");
+    assert!(!receipt.admitted);
+    assert_eq!(receipt.extension_name, extension_name);
+    let witness = receipt
+        .witness
+        .as_ref()
+        .expect("future provenance rejection must carry a negative witness");
+    assert_eq!(
+        witness.rejection_code,
+        event_codes::SER_ERR_PROVENANCE_CHAIN_INVALID
+    );
+
+    let audit_events: Vec<_> = registry
+        .audit_log()
+        .iter()
+        .map(|record| record.event_code.as_str())
+        .collect();
+    assert_eq!(
+        audit_events,
+        vec![
+            event_codes::SER_ADMISSION_EVALUATED,
+            event_codes::SER_ERR_PROVENANCE_CHAIN_INVALID,
+        ]
+    );
+}
+
 /// Variant (a): tamper scope claims (capability_declarations + risk score)
 /// while keeping the original signature. The card_hash recomputation in the
 /// verifier must catch the divergence.

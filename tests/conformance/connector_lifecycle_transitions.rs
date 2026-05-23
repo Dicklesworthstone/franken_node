@@ -12,6 +12,10 @@
 use frankenengine_node::connector::lifecycle::{
     ConnectorState, LifecycleError, transition, transition_matrix,
 };
+use frankenengine_node::connector::state_model::{
+    DivergenceType, ReconcileAction, StateModelType, StateRoot, detect_divergence, reconcile_action,
+};
+use serde_json::json;
 use std::collections::HashSet;
 use std::fmt::Debug;
 
@@ -110,6 +114,15 @@ fn expect_illegal_transition(from: ConnectorState, to: ConnectorState) -> Result
     }
 }
 
+fn apply_pull_canonical(local: &mut StateRoot, canonical: &StateRoot) {
+    local.connector_id.clone_from(&canonical.connector_id);
+    local.state_model = canonical.state_model;
+    local.head = canonical.head.clone();
+    local.root_hash.clone_from(&canonical.root_hash);
+    local.version = canonical.version;
+    local.last_modified.clone_from(&canonical.last_modified);
+}
+
 #[test]
 fn transition_matrix_matches_authoritative_transition_table() -> Result<(), String> {
     let matrix = transition_matrix();
@@ -132,6 +145,66 @@ fn transition_matrix_matches_authoritative_transition_table() -> Result<(), Stri
             expect_illegal_transition(entry.from, entry.to)?;
         }
     }
+    Ok(())
+}
+
+#[test]
+fn reconcile_pull_canonical_is_idempotent_after_stale_lifecycle_cache() -> Result<(), String> {
+    let mut canonical = StateRoot::new(
+        "connector-r103".to_string(),
+        StateModelType::Document,
+        json!({"lifecycle_state": "configured", "generation": 1}),
+    );
+    canonical.update_head(json!({"lifecycle_state": "active", "generation": 2}));
+    let mut local = StateRoot::new(
+        "connector-r103".to_string(),
+        StateModelType::Document,
+        json!({"lifecycle_state": "configured", "generation": 1}),
+    );
+
+    let stale = detect_divergence(&local, &canonical);
+    ensure_eq(
+        stale.divergence_type.clone(),
+        DivergenceType::Stale,
+        "initial divergence",
+    )?;
+    ensure_eq(
+        reconcile_action(&stale),
+        ReconcileAction::PullCanonical,
+        "stale reconcile action",
+    )?;
+
+    apply_pull_canonical(&mut local, &canonical);
+    let after_first_pull = detect_divergence(&local, &canonical);
+    ensure_eq(
+        after_first_pull.divergence_type.clone(),
+        DivergenceType::None,
+        "first pull convergence",
+    )?;
+    ensure_eq(
+        reconcile_action(&after_first_pull),
+        ReconcileAction::NoAction,
+        "MUST converge to no action after applying canonical state",
+    )?;
+
+    let settled_hash = local.root_hash.clone();
+    apply_pull_canonical(&mut local, &canonical);
+    let after_second_pull = detect_divergence(&local, &canonical);
+    ensure_eq(
+        after_second_pull.divergence_type.clone(),
+        DivergenceType::None,
+        "second pull convergence",
+    )?;
+    ensure_eq(
+        reconcile_action(&after_second_pull),
+        ReconcileAction::NoAction,
+        "SHOULD keep repeated canonical pulls idempotent",
+    )?;
+    ensure_eq(
+        local.root_hash,
+        settled_hash,
+        "repeated pull must not perturb settled root hash",
+    )?;
     Ok(())
 }
 
