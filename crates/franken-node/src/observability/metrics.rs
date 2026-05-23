@@ -773,4 +773,290 @@ mod tests {
              for backslashes and newlines in HELP lines"
         );
     }
+
+    #[test]
+    fn metric_snapshot_determinism_property_tests() {
+        // Property-based tests for metric snapshot determinism and invariants
+        // Ensures consistent behavior across different input combinations
+        use proptest::prelude::*;
+        use std::collections::BTreeSet;
+
+        proptest! {
+            #[test]
+            fn metric_snapshot_creation_is_deterministic(
+                name in "[a-zA-Z_:][a-zA-Z0-9_:]*",
+                help in "\\PC*",  // Any printable characters
+                value in proptest::num::f64::POSITIVE,
+                label_count in 0usize..10,
+            ) {
+                // Generate valid labels
+                let labels: Vec<(String, String)> = (0..label_count)
+                    .map(|i| (format!("label{}", i), format!("value{}", i)))
+                    .collect();
+
+                // Create the same metric multiple times
+                let snapshot1 = MetricSnapshot::new(
+                    name.clone(),
+                    help.clone(),
+                    MetricKind::Counter,
+                    value,
+                    labels.clone(),
+                );
+                let snapshot2 = MetricSnapshot::new(
+                    name.clone(),
+                    help.clone(),
+                    MetricKind::Counter,
+                    value,
+                    labels.clone(),
+                );
+
+                // Both should succeed or fail identically
+                match (&snapshot1, &snapshot2) {
+                    (Ok(s1), Ok(s2)) => {
+                        prop_assert_eq!(s1, s2, "Identical inputs should produce identical snapshots");
+                        prop_assert_eq!(s1.name(), s2.name());
+                        prop_assert_eq!(s1.help(), s2.help());
+                        prop_assert_eq!(s1.value(), s2.value());
+                        prop_assert_eq!(s1.labels(), s2.labels());
+                    }
+                    (Err(_), Err(_)) => {
+                        // Both failed - this is fine for determinism
+                    }
+                    _ => prop_assert!(false, "Determinism violation: same inputs produced different results"),
+                }
+            }
+
+            #[test]
+            fn label_sorting_is_stable_and_deterministic(
+                mut labels in prop::collection::vec(
+                    ("[a-zA-Z_][a-zA-Z0-9_]*".prop_map(|s| s.chars().take(20).collect::<String>()), "\\PC{0,50}"),
+                    1..20
+                ),
+            ) {
+                // Remove duplicates and ensure valid labels
+                let mut seen = BTreeSet::new();
+                labels.retain(|(name, _)| seen.insert(name.clone()) && name != "__name__");
+                if labels.is_empty() {
+                    return Ok(());  // Skip empty label test
+                }
+
+                let name = "test_metric";
+                let help = "Test metric for label sorting";
+
+                // Create snapshot with original label order
+                let snapshot1 = MetricSnapshot::new(
+                    name,
+                    help,
+                    MetricKind::Gauge,
+                    1.0,
+                    labels.clone(),
+                );
+
+                // Reverse labels and create another snapshot
+                labels.reverse();
+                let snapshot2 = MetricSnapshot::new(
+                    name,
+                    help,
+                    MetricKind::Gauge,
+                    1.0,
+                    labels,
+                );
+
+                match (snapshot1, snapshot2) {
+                    (Ok(s1), Ok(s2)) => {
+                        // Labels should be sorted identically regardless of input order
+                        prop_assert_eq!(s1.labels(), s2.labels(), "Label sorting should be deterministic");
+
+                        // Verify labels are actually sorted by key
+                        let sorted_labels = s1.labels();
+                        for i in 1..sorted_labels.len() {
+                            prop_assert!(
+                                sorted_labels[i-1].0 <= sorted_labels[i].0,
+                                "Labels should be sorted lexicographically by key"
+                            );
+                        }
+                    }
+                    _ => {
+                        // Both should succeed or fail the same way
+                        prop_assert!(false, "Label sorting determinism violated");
+                    }
+                }
+            }
+
+            #[test]
+            fn prometheus_output_determinism(
+                metric_count in 1usize..20,
+                base_value in 0.0..1000.0,
+            ) {
+                let mut registry1 = MetricsRegistry::new();
+                let mut registry2 = MetricsRegistry::new();
+
+                // Add metrics in different orders to both registries
+                for i in 0..metric_count {
+                    let name = format!("metric_{:03}", i);
+                    let help = format!("Test metric number {}", i);
+                    let value = base_value + i as f64;
+                    let labels = vec![("instance".to_string(), format!("host_{}", i))];
+
+                    let metric = MetricSnapshot::new(&name, &help, MetricKind::Counter, value, labels)?;
+
+                    registry1.record(metric.clone());
+                    registry2.record(metric);
+                }
+
+                // Add the same metrics to registry2 in reverse order
+                let mut registry3 = MetricsRegistry::new();
+                for i in (0..metric_count).rev() {
+                    let name = format!("metric_{:03}", i);
+                    let help = format!("Test metric number {}", i);
+                    let value = base_value + i as f64;
+                    let labels = vec![("instance".to_string(), format!("host_{}", i))];
+
+                    let metric = MetricSnapshot::new(&name, &help, MetricKind::Counter, value, labels)?;
+                    registry3.record(metric);
+                }
+
+                // All registries should produce identical Prometheus output
+                let output1 = registry1.render_prometheus();
+                let output2 = registry2.render_prometheus();
+                let output3 = registry3.render_prometheus();
+
+                prop_assert_eq!(output1, output2, "Registry with same metrics should produce identical output");
+                prop_assert_eq!(output1, output3, "Metric insertion order should not affect output");
+
+                // Verify output contains expected number of metrics
+                let metric_lines = output1.lines().filter(|line| !line.starts_with('#') && !line.is_empty()).count();
+                prop_assert_eq!(metric_lines, metric_count, "Output should contain all metrics");
+            }
+
+            #[test]
+            fn registry_capacity_bounds_are_respected(
+                attempts in 1usize..15000,
+                base_value in 0.0..100.0,
+            ) {
+                let mut registry = MetricsRegistry::new();
+
+                for i in 0..attempts {
+                    let metric = MetricSnapshot::new(
+                        format!("overflow_test_{}", i),
+                        "Capacity test metric",
+                        MetricKind::Counter,
+                        base_value + i as f64,
+                        vec![],
+                    )?;
+
+                    registry.record(metric);
+
+                    // Verify capacity bounds are always respected
+                    prop_assert!(
+                        registry.len() <= super::MAX_METRICS_PER_REGISTRY,
+                        "Registry should never exceed MAX_METRICS_PER_REGISTRY ({})",
+                        super::MAX_METRICS_PER_REGISTRY
+                    );
+                }
+
+                // Should be at capacity or close to it for large attempts
+                if attempts > super::MAX_METRICS_PER_REGISTRY {
+                    prop_assert_eq!(
+                        registry.len(),
+                        super::MAX_METRICS_PER_REGISTRY,
+                        "Registry should be at capacity for overflow scenarios"
+                    );
+                }
+            }
+
+            #[test]
+            fn metric_value_precision_consistency(
+                values in prop::collection::vec(
+                    prop::num::f64::POSITIVE.prop_filter("finite values only", |v| v.is_finite()),
+                    1..50
+                )
+            ) {
+                let mut registry = MetricsRegistry::new();
+
+                for (i, value) in values.iter().enumerate() {
+                    let metric = MetricSnapshot::new(
+                        format!("precision_test_{}", i),
+                        "Precision consistency test",
+                        MetricKind::Gauge,
+                        *value,
+                        vec![],
+                    )?;
+
+                    registry.record(metric.clone());
+
+                    // Verify stored value matches input exactly
+                    let recorded_metric = registry.iter().last().unwrap();
+                    prop_assert_eq!(
+                        recorded_metric.value(),
+                        *value,
+                        "Recorded value should match input exactly"
+                    );
+                }
+
+                // Verify Prometheus output preserves precision
+                let prometheus_output = registry.render_prometheus();
+                for (i, value) in values.iter().enumerate() {
+                    let expected_line = format!("precision_test_{} {}", i, value);
+                    prop_assert!(
+                        prometheus_output.contains(&expected_line),
+                        "Prometheus output should contain precise value: {}",
+                        expected_line
+                    );
+                }
+            }
+
+            #[test]
+            fn label_escaping_round_trip_consistency(
+                special_chars in "[\\\\\n\"]+"  // Backslashes, newlines, quotes
+            ) {
+                if special_chars.is_empty() {
+                    return Ok(());
+                }
+
+                let label_value = format!("test{}value", special_chars);
+                let metric = MetricSnapshot::new(
+                    "escape_test",
+                    "Label escaping test",
+                    MetricKind::Counter,
+                    1.0,
+                    vec![("special".to_string(), label_value.clone())],
+                )?;
+
+                let mut registry = MetricsRegistry::new();
+                registry.record(metric);
+
+                // Verify round-trip consistency
+                let stored_metric = registry.iter().next().unwrap();
+                prop_assert_eq!(
+                    stored_metric.labels()[0].1,
+                    label_value,
+                    "Stored label value should match input exactly"
+                );
+
+                // Verify Prometheus output contains properly escaped version
+                let prometheus_output = registry.render_prometheus();
+
+                // Verify escaping rules are applied
+                if label_value.contains('\\') {
+                    prop_assert!(
+                        prometheus_output.contains("\\\\"),
+                        "Backslashes should be escaped in output"
+                    );
+                }
+                if label_value.contains('\n') {
+                    prop_assert!(
+                        prometheus_output.contains("\\n"),
+                        "Newlines should be escaped in output"
+                    );
+                }
+                if label_value.contains('"') {
+                    prop_assert!(
+                        prometheus_output.contains("\\\""),
+                        "Quotes should be escaped in output"
+                    );
+                }
+            }
+        }
+    }
 }
