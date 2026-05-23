@@ -11,6 +11,10 @@ use frankenengine_node::policy::evidence_emission::{
     build_evidence_entry,
 };
 use frankenengine_node::policy::hardening_state_machine::{HardeningLevel, HardeningStateMachine};
+use frankenengine_node::policy::object_class_tuning::{
+    ClassTuning, FetchPriority, OC_POLICY_OVERRIDE_APPLIED, ObjectClass, ObjectClassTuningEngine,
+    PrefetchPolicy, default_tuning,
+};
 use serde_json::json;
 
 type TestResult = Result<(), String>;
@@ -112,6 +116,86 @@ fn invalid_transition_insertion_is_log_invariant() -> TestResult {
             }
         }
     }
+
+    Ok(())
+}
+
+#[test]
+fn object_class_override_replacement_precedence_is_ordered_and_reversible() -> TestResult {
+    let class = ObjectClass::TrustReceipt;
+    let critical_class = ObjectClass::CriticalMarker;
+    let resolve = |engine: &ObjectClassTuningEngine, class: &ObjectClass| {
+        engine
+            .resolve(class)
+            .ok_or_else(|| format!("class {} MUST resolve to effective tuning", class.label()))
+    };
+    let default = default_tuning(&class)
+        .ok_or_else(|| "canonical class MUST have default tuning".to_string())?;
+    let first_override = ClassTuning {
+        symbol_size_bytes: 2048,
+        encoding_overhead_ratio: 0.06,
+        fetch_priority: FetchPriority::Critical,
+        prefetch_policy: PrefetchPolicy::Eager,
+    };
+    let second_override = ClassTuning {
+        symbol_size_bytes: 3072,
+        encoding_overhead_ratio: 0.07,
+        fetch_priority: FetchPriority::Background,
+        prefetch_policy: PrefetchPolicy::None,
+    };
+    let untouched_default = default_tuning(&critical_class)
+        .ok_or_else(|| "canonical control class MUST have default tuning".to_string())?;
+
+    let mut engine = ObjectClassTuningEngine::with_init_event();
+    assert_eq!(resolve(&engine, &class)?, default);
+
+    engine
+        .apply_override(class.clone(), first_override.clone())
+        .map_err(|err| format!("first override rejected: {err}"))?;
+    assert_eq!(
+        resolve(&engine, &class)?,
+        first_override,
+        "MUST prefer accepted override over benchmark default"
+    );
+    assert_eq!(engine.active_overrides().len(), 1);
+
+    engine
+        .apply_override(class.clone(), second_override.clone())
+        .map_err(|err| format!("second override rejected: {err}"))?;
+    assert_eq!(
+        resolve(&engine, &class)?,
+        second_override,
+        "MUST prefer the latest accepted override for the same class"
+    );
+    assert_eq!(
+        engine.active_overrides().len(),
+        1,
+        "MUST keep exactly one effective override per class"
+    );
+    assert_eq!(
+        resolve(&engine, &critical_class)?,
+        untouched_default,
+        "SHOULD leave unrelated class defaults unchanged"
+    );
+
+    let applied_events: Vec<_> = engine
+        .events()
+        .iter()
+        .filter(|event| event.code == OC_POLICY_OVERRIDE_APPLIED)
+        .collect();
+    assert_eq!(applied_events.len(), 2);
+    assert!(
+        applied_events[1].detail.contains("symbol_size=2048")
+            && applied_events[1].detail.contains("symbol_size=3072"),
+        "SHOULD audit replacement from previous override to new override"
+    );
+
+    assert!(engine.remove_override(&class));
+    assert_eq!(
+        resolve(&engine, &class)?,
+        default,
+        "MUST revert to benchmark default after override removal"
+    );
 
     Ok(())
 }
