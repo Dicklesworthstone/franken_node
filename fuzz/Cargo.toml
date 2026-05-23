@@ -719,3 +719,9 @@ name = "fuzz_session_mac_deserialize"
 path = "fuzz_targets/fuzz_session_mac_deserialize.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_swarm_timestamp_parser"
+path = "fuzz_targets/fuzz_swarm_timestamp_parser.rs"
+test = false
+doc = false
