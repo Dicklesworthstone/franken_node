@@ -94,7 +94,7 @@ impl TempFileCheckpointBackend {
             .chars()
             .take(32)
             .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
                     c
                 } else {
                     '_'
@@ -135,10 +135,10 @@ impl CheckpointBackend for TempFileCheckpointBackend {
         if file_path.exists() {
             let existing_records = self.load_all(orchestration_id)?;
             for existing in existing_records {
-                if existing.checkpoint_id == record.checkpoint_id
-                    && existing.iteration_count == record.iteration_count
-                    && existing.epoch == record.epoch
-                {
+                let same_checkpoint = existing.checkpoint_id.eq(&record.checkpoint_id);
+                let same_iteration = existing.iteration_count.eq(&record.iteration_count);
+                let same_epoch = existing.epoch.eq(&record.epoch);
+                if same_checkpoint && same_iteration && same_epoch {
                     self.log_operation(
                         "SAVE_DUPLICATE",
                         orchestration_id,
@@ -243,7 +243,7 @@ impl CheckpointBackend for TempFileCheckpointBackend {
                 ))
             })?;
 
-            if record.orchestration_id == orchestration_id {
+            if record.orchestration_id.eq(orchestration_id) {
                 records.push(record);
             }
         }
@@ -373,7 +373,7 @@ fn bounded_mask_panic_recovery_digest(panic_payload: &'static str) -> PanicRecov
             &panic_policy,
             |_cx, cancel| {
                 cancel.request_cancel();
-                panic!("{panic_payload}");
+                std::panic::resume_unwind(Box::new(panic_payload));
             },
         );
     }));
@@ -625,7 +625,7 @@ fn validate_checkpoint_record_round_trip(
     let deserialized: CheckpointRecord = serde_json::from_str(&serialized)
         .map_err(|e| HarnessCheckpointError::Serialization(e.to_string()))?;
 
-    if record != deserialized {
+    if !record.eq(&deserialized) {
         return Err(HarnessCheckpointError::Serialization(
             "round-trip inequality".to_string(),
         ));
