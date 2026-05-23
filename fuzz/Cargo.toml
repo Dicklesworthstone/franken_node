@@ -732,3 +732,15 @@ name = "fuzz_policy_override_spec_parser"
 path = "fuzz_targets/fuzz_policy_override_spec_parser.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_compat_gates_key_id_from_bytes"
+path = "fuzz_targets/fuzz_compat_gates_key_id_from_bytes.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_fragility_fixture_json_loader"
+path = "fuzz_targets/fuzz_fragility_fixture_json_loader.rs"
+test = false
+doc = false

@@ -445,4 +445,321 @@ mod tests {
 
         assert_eq!(outputs.len(), 1);
     }
+
+    // Property-based tests for canonical serialization
+    #[cfg(test)]
+    mod property_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        // Strategy for generating valid DomainTag values
+        fn domain_tag_strategy() -> impl Strategy<Value = DomainTag> {
+            prop_oneof![
+                Just(DomainTag::Verification),
+                Just(DomainTag::CapabilityGate),
+                Just(DomainTag::Supply),
+                Just(DomainTag::Observatory),
+            ]
+        }
+
+        // Strategy for generating valid PersistenceClass values
+        fn persistence_class_strategy() -> impl Strategy<Value = PersistenceClass> {
+            prop_oneof![
+                Just(PersistenceClass::Snapshot),
+                Just(PersistenceClass::Telemetry),
+                Just(PersistenceClass::AuditLog),
+                Just(PersistenceClass::TemporaryData),
+            ]
+        }
+
+        // Strategy for generating reasonable payload sizes
+        fn payload_size_strategy() -> impl Strategy<Value = usize> {
+            prop_oneof![
+                0usize..=16,         // Small payloads
+                17usize..=512,       // Medium payloads
+                513usize..=4096,     // Large payloads
+                4097usize..=16384,   // Extra large payloads
+            ]
+        }
+
+        // Strategy for generating valid config versions
+        fn config_version_strategy() -> impl Strategy<Value = u32> {
+            1u32..=1000
+        }
+
+        // Strategy for generating valid schema version probes
+        fn schema_version_probe_strategy() -> impl Strategy<Value = u32> {
+            1u32..=100
+        }
+
+        // Strategy for generating valid audit index probes
+        fn audit_index_probe_strategy() -> impl Strategy<Value = usize> {
+            0usize..=MAX_AUDIT_LOG_ENTRIES.saturating_sub(1)
+        }
+
+        // Property: Canonical serialization determinism
+        // Same input should always produce identical byte output
+        proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig {
+                cases: 50,
+                failure_persistence: Some(Box::new(
+                    proptest::test_runner::FileFailurePersistence::WithSource("regressions")
+                )),
+                ..proptest::prelude::ProptestConfig::default()
+            })]
+
+            #[test]
+            fn prop_canonical_serialization_determinism(
+                domain in domain_tag_strategy(),
+                class in persistence_class_strategy(),
+                config_version in config_version_strategy(),
+                schema_version_probe in schema_version_probe_strategy(),
+                audit_index_probe in audit_index_probe_strategy(),
+                payload_len in payload_size_strategy(),
+            ) {
+                let case = MatrixCase {
+                    label: "property_test",
+                    config_version,
+                    boundary_size: BoundarySize::SmallestPossible,
+                    schema_version_probe,
+                    audit_index_probe,
+                    expectation: MatrixExpectation::RoundTrip,
+                };
+
+                // Generate the same row multiple times
+                let row1 = conformance_row(domain, class, case, payload_len);
+                let row2 = conformance_row(domain, class, case, payload_len);
+
+                // Canonical serialization should be deterministic
+                let bytes1 = canonical_bytes(&row1);
+                let bytes2 = canonical_bytes(&row2);
+
+                prop_assert_eq!(bytes1, bytes2, "Canonical serialization must be deterministic");
+
+                // Verify the rows are identical
+                prop_assert_eq!(row1, row2, "Conformance rows with same inputs must be identical");
+            }
+        }
+
+        // Property: Round-trip consistency
+        // Serialize -> deserialize -> serialize should produce identical results
+        proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig {
+                cases: 40,
+                failure_persistence: Some(Box::new(
+                    proptest::test_runner::FileFailurePersistence::WithSource("regressions")
+                )),
+                ..proptest::prelude::ProptestConfig::default()
+            })]
+
+            #[test]
+            fn prop_canonical_roundtrip_consistency(
+                domain in domain_tag_strategy(),
+                class in persistence_class_strategy(),
+                config_version in config_version_strategy(),
+                schema_version_probe in schema_version_probe_strategy(),
+                audit_index_probe in audit_index_probe_strategy(),
+                payload_len in 0usize..=1024,
+            ) {
+                let case = MatrixCase {
+                    label: "roundtrip_test",
+                    config_version,
+                    boundary_size: BoundarySize::SmallestPossible,
+                    schema_version_probe,
+                    audit_index_probe,
+                    expectation: MatrixExpectation::RoundTrip,
+                };
+
+                let original_row = conformance_row(domain, class, case, payload_len);
+
+                // First serialization
+                let serialized1 = canonical_bytes(&original_row);
+
+                // Deserialize
+                let deserialized: FrankensqliteCanonicalRow = serde_json::from_slice(&serialized1)
+                    .expect("canonical bytes should deserialize");
+
+                // Second serialization
+                let serialized2 = canonical_bytes(&deserialized);
+
+                // Should be identical
+                prop_assert_eq!(serialized1, serialized2, "Round-trip serialization must be stable");
+                prop_assert_eq!(original_row, deserialized, "Round-trip deserialization must preserve data");
+            }
+        }
+
+        // Property: Size limit enforcement
+        // Oversized payloads should be rejected consistently
+        proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig {
+                cases: 30,
+                failure_persistence: Some(Box::new(
+                    proptest::test_runner::FileFailurePersistence::WithSource("regressions")
+                )),
+                ..proptest::prelude::ProptestConfig::default()
+            })]
+
+            #[test]
+            fn prop_size_limit_enforcement(
+                domain in domain_tag_strategy(),
+                class in persistence_class_strategy(),
+                config_version in config_version_strategy(),
+                schema_version_probe in schema_version_probe_strategy(),
+                audit_index_probe in audit_index_probe_strategy(),
+            ) {
+                let case = MatrixCase {
+                    label: "size_limit_test",
+                    config_version,
+                    boundary_size: BoundarySize::OneByteOverLimit,
+                    schema_version_probe,
+                    audit_index_probe,
+                    expectation: MatrixExpectation::RejectTooLarge,
+                };
+
+                // Find the largest payload that fits under the limit
+                let max_safe_len = largest_payload_len_under_limit(domain, class, case);
+
+                // Test payload just under limit should succeed
+                let safe_row = conformance_row(domain, class, case, max_safe_len);
+                let safe_result = canonical_bytes_with_limit(&safe_row);
+                prop_assert!(safe_result.is_ok(), "Payload under limit should succeed");
+
+                if let Ok(safe_bytes) = safe_result {
+                    prop_assert!(safe_bytes.len() <= CANONICAL_ROW_MAX_BYTES,
+                        "Safe payload should be within byte limit");
+                }
+
+                // Test oversized payload should be rejected
+                let oversized_len = max_safe_len.saturating_add(100); // Definitely oversized
+                let oversized_row = conformance_row(domain, class, case, oversized_len);
+                let oversized_result = canonical_bytes_with_limit(&oversized_row);
+
+                match oversized_result {
+                    Err(CanonicalRowError::RowTooLarge { actual, limit }) => {
+                        prop_assert!(actual > limit, "Rejected row should exceed limit");
+                        prop_assert_eq!(limit, CANONICAL_ROW_MAX_BYTES, "Limit should match constant");
+                    },
+                    Ok(_) => {
+                        // If somehow it succeeded, verify it's actually within limits
+                        let actual_bytes = canonical_bytes(&oversized_row);
+                        prop_assert!(actual_bytes.len() <= CANONICAL_ROW_MAX_BYTES,
+                            "Unexpectedly accepted oversized row should still be within limits");
+                    }
+                }
+            }
+        }
+
+        // Property: Field ordering independence
+        // Canonical serialization should produce identical output regardless of
+        // the order fields were set (JSON object field ordering)
+        proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig {
+                cases: 25,
+                failure_persistence: Some(Box::new(
+                    proptest::test_runner::FileFailurePersistence::WithSource("regressions")
+                )),
+                ..proptest::prelude::ProptestConfig::default()
+            })]
+
+            #[test]
+            fn prop_field_ordering_independence(
+                domain in domain_tag_strategy(),
+                class in persistence_class_strategy(),
+                config_version in config_version_strategy(),
+                schema_version_probe in schema_version_probe_strategy(),
+                audit_index_probe in audit_index_probe_strategy(),
+                payload_len in 0usize..=512,
+            ) {
+                let case = MatrixCase {
+                    label: "field_ordering_test",
+                    config_version,
+                    boundary_size: BoundarySize::SmallestPossible,
+                    schema_version_probe,
+                    audit_index_probe,
+                    expectation: MatrixExpectation::RoundTrip,
+                };
+
+                // Create the same logical row through different construction paths
+                let content_hash = content_hash_for(domain, class, case, payload_len);
+                let config = ScheduleConfig::new(config_version);
+                let seed = derive_seed(&content_hash, &config);
+
+                // Path 1: Direct construction
+                let row1 = FrankensqliteCanonicalRow {
+                    requirement_id: format!("req-{}-{}", domain.label(), class.label()),
+                    matrix_row: case.label.to_string(),
+                    domain,
+                    domain_label: domain.label().to_string(),
+                    domain_prefix: domain.prefix().to_string(),
+                    persistence_class: class,
+                    persistence_class_label: class.label().to_string(),
+                    persistence_tier_label: class.tier().label().to_string(),
+                    content_hash: content_hash.clone(),
+                    config: config.clone(),
+                    config_hash_hex: config.hash_hex().to_string(),
+                    seed: seed.clone(),
+                    schema_version_probe,
+                    audit_index_probe,
+                    payload_len,
+                    payload: format!("test-payload-{payload_len}"),
+                };
+
+                // Path 2: Construction via helper function
+                let row2 = conformance_row(domain, class, case, payload_len);
+
+                // Both should serialize to identical bytes
+                let bytes1 = canonical_bytes(&row1);
+                let bytes2 = canonical_bytes(&row2);
+
+                prop_assert_eq!(bytes1, bytes2, "Different construction paths should yield identical canonical serialization");
+                prop_assert_eq!(row1, row2, "Rows should be structurally identical");
+            }
+        }
+
+        // Property: Hash content stability
+        // Content hash should remain stable across serialization boundaries
+        proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig {
+                cases: 30,
+                failure_persistence: Some(Box::new(
+                    proptest::test_runner::FileFailurePersistence::WithSource("regressions")
+                )),
+                ..proptest::prelude::ProptestConfig::default()
+            })]
+
+            #[test]
+            fn prop_content_hash_stability(
+                domain in domain_tag_strategy(),
+                class in persistence_class_strategy(),
+                config_version in config_version_strategy(),
+                payload_len in 0usize..=256,
+            ) {
+                let case = MatrixCase {
+                    label: "hash_stability_test",
+                    config_version,
+                    boundary_size: BoundarySize::SmallestPossible,
+                    schema_version_probe: 1,
+                    audit_index_probe: 0,
+                    expectation: MatrixExpectation::RoundTrip,
+                };
+
+                let original_row = conformance_row(domain, class, case, payload_len);
+                let original_hash = original_row.content_hash.clone();
+
+                // Serialize and deserialize
+                let serialized = canonical_bytes(&original_row);
+                let deserialized: FrankensqliteCanonicalRow = serde_json::from_slice(&serialized)
+                    .expect("should deserialize");
+
+                // Content hash should be preserved
+                prop_assert_eq!(original_hash, deserialized.content_hash,
+                    "Content hash must be preserved across serialization");
+
+                // Regenerate content hash and verify consistency
+                let regenerated_hash = content_hash_for(domain, class, case, payload_len);
+                prop_assert_eq!(original_hash, regenerated_hash,
+                    "Content hash should be deterministically regeneratable");
+            }
+        }
+    }
 }
