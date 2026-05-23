@@ -183,7 +183,7 @@ impl HexInput {
             CharacterSet::InvalidChars => "ghijklmnopqrstuvwxyzGHIJKLMNOPQRSTUVWXYZ!@#$%",
             CharacterSet::Mixed => "0123456789abcdefGHIJKLMN!@#",
             CharacterSet::Unicode => "0123456789abcdef🔥💥⚠️αβγδ",
-            CharacterSet::Control => "0123456789abcdef\0\x01\x02\x03\x7F\x80\x81",
+            CharacterSet::Control => "0123456789abcdef\0\x01\x02\x03\x7F",
             CharacterSet::Whitespace => "0123456789abcdef \t\n\r\x0B\x0C",
         };
 

@@ -676,3 +676,9 @@ name = "fuzz_replay_signature_decode"
 path = "fuzz_targets/fuzz_replay_signature_decode.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_baseline_csv_parser"
+path = "fuzz_targets/fuzz_baseline_csv_parser.rs"
+test = false
+doc = false

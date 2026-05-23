@@ -150,7 +150,7 @@ impl UnicodeVariant {
     fn apply(&self, base: &str) -> String {
         match self {
             UnicodeVariant::Emoji => format!("{}🔥💥⚠️", base),
-            UnicodeVariant::HighSurrogates => format!("{}\u{D800}\u{DC00}", base),
+            UnicodeVariant::HighSurrogates => format!("{}\u{10000}\u{10001}", base),
             UnicodeVariant::NonAscii => format!("{}ñ€αβγδ", base),
             UnicodeVariant::Combining => format!("{}a\u{0300}\u{0301}", base),
             UnicodeVariant::Rtl => format!("{}\u{202E}abc\u{202D}", base),
