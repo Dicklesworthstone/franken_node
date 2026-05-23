@@ -769,3 +769,27 @@ name = "fuzz_fragility_fixture_json_loader"
 path = "fuzz_targets/fuzz_fragility_fixture_json_loader.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_trajectory_gaming_camouflage_kind_parse"
+path = "fuzz_targets/fuzz_trajectory_gaming_camouflage_kind_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_product_lane_parse_label"
+path = "fuzz_targets/fuzz_product_lane_parse_label.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ssrf_ipv4_parser"
+path = "fuzz_targets/fuzz_ssrf_ipv4_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_mmr_hash_hex_decoder"
+path = "fuzz_targets/fuzz_mmr_hash_hex_decoder.rs"
+test = false
+doc = false
