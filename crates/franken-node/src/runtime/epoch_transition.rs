@@ -642,6 +642,7 @@ fn manifest_hash_for_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn stale_and_future_operations_are_rejected() {
@@ -776,6 +777,124 @@ mod tests {
             .expect("commit succeeds");
         assert_eq!(committed, 31);
         assert_eq!(coordinator.current_epoch(), 31);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct AckOrderDigest {
+        current_epoch: u64,
+        history: Vec<(u64, u64, String, Option<String>)>,
+        event_counts: BTreeMap<String, usize>,
+        requested_services: BTreeSet<String>,
+        confirmed_services: BTreeSet<String>,
+        abort_count: usize,
+    }
+
+    fn ack_order_digest(ack_order: &[&str]) -> AckOrderDigest {
+        let mut coordinator = ProductEpochCoordinator::new(100, 1, BarrierConfig::default());
+        for service_id in ["svc-a", "svc-b", "svc-c"] {
+            coordinator.register_service(service_id);
+        }
+
+        let proposal = coordinator
+            .propose_transition("operator-ack-order", "ack-order", 1_000, "trace-propose")
+            .expect("proposal succeeds");
+        assert_eq!(proposal.pre_epoch, 100);
+        assert_eq!(proposal.target_epoch, 101);
+
+        for service_id in ack_order {
+            let (drained_items, elapsed_ms) = match *service_id {
+                "svc-a" => (1, 5),
+                "svc-b" => (2, 7),
+                "svc-c" => (3, 11),
+                other => panic!("unknown test service {other}"),
+            };
+            coordinator
+                .ack_drain(
+                    service_id,
+                    drained_items,
+                    elapsed_ms,
+                    &format!("trace-ack-{service_id}"),
+                )
+                .expect("drain ack succeeds");
+        }
+
+        let committed = coordinator
+            .commit_transition(1_050, "trace-commit")
+            .expect("commit succeeds");
+        assert_eq!(committed, 101);
+
+        let proposed_index = coordinator
+            .events()
+            .iter()
+            .position(|event| event.event_code == EPOCH_PROPOSED)
+            .expect("proposal event exists");
+        let advanced_index = coordinator
+            .events()
+            .iter()
+            .position(|event| event.event_code == EPOCH_ADVANCED)
+            .expect("advanced event exists");
+        assert!(proposed_index < advanced_index);
+
+        let mut event_counts = BTreeMap::new();
+        let mut requested_services = BTreeSet::new();
+        let mut confirmed_services = BTreeSet::new();
+        for (index, event) in coordinator.events().iter().enumerate() {
+            *event_counts.entry(event.event_code.clone()).or_insert(0) += 1;
+            if event.event_code == EPOCH_DRAIN_REQUESTED {
+                assert!(index > proposed_index);
+                assert!(index < advanced_index);
+                requested_services.insert(event.service_id.clone().expect("service id"));
+            }
+            if event.event_code == EPOCH_DRAIN_CONFIRMED {
+                assert!(index < advanced_index);
+                confirmed_services.insert(event.service_id.clone().expect("service id"));
+            }
+        }
+
+        let history = coordinator
+            .history()
+            .iter()
+            .map(|record| {
+                (
+                    record.pre_epoch,
+                    record.target_epoch,
+                    record.outcome.clone(),
+                    record.abort_reason.clone(),
+                )
+            })
+            .collect();
+
+        AckOrderDigest {
+            current_epoch: coordinator.current_epoch(),
+            history,
+            event_counts,
+            requested_services,
+            confirmed_services,
+            abort_count: coordinator.abort_manager().abort_count(),
+        }
+    }
+
+    #[test]
+    fn metamorphic_drain_ack_permutation_preserves_epoch_transition_order() {
+        let baseline = ack_order_digest(&["svc-a", "svc-b", "svc-c"]);
+
+        for ack_order in [
+            ["svc-c", "svc-b", "svc-a"],
+            ["svc-b", "svc-c", "svc-a"],
+            ["svc-c", "svc-a", "svc-b"],
+        ] {
+            assert_eq!(ack_order_digest(&ack_order), baseline);
+        }
+        assert_eq!(baseline.current_epoch, 101);
+        assert_eq!(
+            baseline.history,
+            vec![(100, 101, "COMMITTED".to_string(), None)]
+        );
+        assert_eq!(baseline.event_counts.get(EPOCH_PROPOSED), Some(&1));
+        assert_eq!(baseline.event_counts.get(EPOCH_DRAIN_REQUESTED), Some(&3));
+        assert_eq!(baseline.event_counts.get(EPOCH_DRAIN_CONFIRMED), Some(&3));
+        assert_eq!(baseline.event_counts.get(EPOCH_ADVANCED), Some(&1));
+        assert_eq!(baseline.abort_count, 0);
     }
 
     #[test]
@@ -1603,8 +1722,7 @@ mod tests {
         // 1. Minimal: all-empty strings + zero target_epoch.
         let minimal = super::manifest_hash_for_transition("", "", "", 0);
         assert_eq!(
-            minimal,
-            "be59d75f2e1f67444fefd8eb216393ed6941594ad3cbe0a8a17883554a65c158",
+            minimal, "be59d75f2e1f67444fefd8eb216393ed6941594ad3cbe0a8a17883554a65c158",
             "minimal manifest_hash_for_transition drifted — check the \
              v1 domain separator `epoch_transition_hash_v1:` or the \
              LE64(0)-on-three-empty-strings + zero-u64-target_epoch \
@@ -1631,8 +1749,7 @@ mod tests {
             u64::MAX,
         );
         assert_eq!(
-            epoch_max,
-            "d64194c9f4793a81d7538822ebc5850f1abb564263830305c2ffd4021098942e",
+            epoch_max, "d64194c9f4793a81d7538822ebc5850f1abb564263830305c2ffd4021098942e",
             "target_epoch = u64::MAX manifest_hash drifted — the u64 \
              LE encoding (0xFF * 8) is being preserved; drift here may \
              indicate target_epoch was silently cast to i64 (where \
@@ -1642,8 +1759,8 @@ mod tests {
         // 4. FIELD-ORDER-SENSITIVITY INVARIANT: swap transition_id +
         // initiator with otherwise-identical inputs MUST flip hash.
         let swapped = super::manifest_hash_for_transition(
-            "operator-7",         // was initiator
-            "tx-2026-001",        // was transition_id
+            "operator-7",  // was initiator
+            "tx-2026-001", // was transition_id
             "scheduled rotation",
             42,
         );
@@ -1671,7 +1788,10 @@ mod tests {
         // 6. Length+casing contract.
         for h in [&minimal, &typical, &epoch_max] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }
