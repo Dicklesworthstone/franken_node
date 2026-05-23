@@ -151,6 +151,53 @@ fn vef_proof_scheduler_budget_fairness_dispatches_fit_lower_tier_job() {
     );
 }
 
+#[test]
+fn vef_proof_scheduler_budget_fairness_fails_closed_when_no_job_fits_tick() {
+    let mut scheduler = VefProofScheduler::new(no_fit_budget_policy());
+    let windows = vec![
+        proof_window(
+            "win-standard-unfit",
+            10,
+            10,
+            1,
+            WorkloadTier::Standard,
+            "trace-vef-scheduler-no-fit",
+        ),
+        proof_window(
+            "win-background-unfit",
+            11,
+            11,
+            1,
+            WorkloadTier::Background,
+            "trace-vef-scheduler-no-fit",
+        ),
+    ];
+
+    scheduler
+        .enqueue_windows(&windows, ENQUEUED_AT_MILLIS)
+        .expect("no-fit fairness windows must enqueue");
+    let err = scheduler
+        .dispatch_jobs(DISPATCHED_AT_MILLIS)
+        .expect_err("dispatch must fail closed when no pending job fits");
+
+    assert_eq!(err.code, "ERR-VEF-SCHED-BUDGET");
+    assert_eq!(err.event_code, event_codes::VEF_SCHED_ERR_002_BUDGET);
+    assert!(
+        scheduler
+            .jobs()
+            .values()
+            .all(|job| job.status == ProofJobStatus::Pending),
+        "budget rejection must not partially dispatch any unfit proof job"
+    );
+    assert!(
+        scheduler
+            .events()
+            .iter()
+            .all(|event| event.event_code != event_codes::VEF_SCHED_002_JOB_DISPATCHED),
+        "fail-closed no-fit dispatch must not emit successful dispatch events"
+    );
+}
+
 fn build_conformance_report() -> ConformanceReport {
     let (entries, checkpoints) = sample_stream();
     let mut dispatch_scheduler = VefProofScheduler::new(conformance_policy());
@@ -305,6 +352,20 @@ fn fairness_budget_policy() -> SchedulerPolicy {
         max_concurrent_jobs: 2,
         max_compute_millis_per_tick: 100,
         max_memory_mib_per_tick: 8,
+        tier_deadline_millis,
+    }
+}
+
+fn no_fit_budget_policy() -> SchedulerPolicy {
+    let mut tier_deadline_millis = BTreeMap::new();
+    tier_deadline_millis.insert(WorkloadTier::Standard, 60_000);
+    tier_deadline_millis.insert(WorkloadTier::Background, 120_000);
+
+    SchedulerPolicy {
+        max_receipts_per_window: 2,
+        max_concurrent_jobs: 2,
+        max_compute_millis_per_tick: 50,
+        max_memory_mib_per_tick: 4,
         tier_deadline_millis,
     }
 }
