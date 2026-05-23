@@ -455,6 +455,11 @@ path = "../../tests/conformance/bd_b9b6_durability_violation_conformance.rs"
 required-features = ["advanced-features"]
 
 [[test]]
+name = "bd_bq4p_controller_boundary_checks_conformance"
+path = "../../tests/conformance/bd_bq4p_controller_boundary_checks_conformance.rs"
+required-features = ["advanced-features"]
+
+[[test]]
 name = "fastapi_rust_control_plane_integration"
 path = "tests/fastapi_rust_control_plane_integration.rs"
 required-features = ["test-support"]
