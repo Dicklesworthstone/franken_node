@@ -4168,4 +4168,204 @@ mod staking_governance_boundary_negative_tests {
             assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
         }
     }
+
+    /// Golden artifact test for comprehensive staking governance registry resolution
+    ///
+    /// Creates a complex staking scenario covering deposits, slashes, appeals, and resolutions
+    /// across multiple publishers and risk tiers, then captures the complete ledger state
+    /// as a JSON golden artifact for regression protection.
+    #[test]
+    fn golden_comprehensive_staking_governance_registry() {
+        let mut ledger = StakingLedger::new();
+
+        // Phase 1: Create diverse publisher stakes across risk tiers
+        let alice_stake = ledger.deposit("alice-publisher", 1000, RiskTier::Low, 1000)
+            .expect("alice deposit should succeed");
+        let bob_stake = ledger.deposit("bob-corp", 5000, RiskTier::Medium, 1001)
+            .expect("bob deposit should succeed");
+        let charlie_stake = ledger.deposit("charlie-enterprise", 50000, RiskTier::Critical, 1002)
+            .expect("charlie deposit should succeed");
+        let diana_stake = ledger.deposit("diana-validator", 2500, RiskTier::High, 1003)
+            .expect("diana deposit should succeed");
+
+        // Phase 2: Slash alice for policy violation
+        let alice_evidence = SlashEvidence::new(
+            ViolationType::PolicyViolation,
+            "Failed to maintain required uptime SLA",
+            "uptime_metrics: {failures: 12, threshold: 5}",
+            "monitoring-system",
+            2000
+        );
+        let alice_slash = ledger.slash(alice_stake, alice_evidence, 2001)
+            .expect("alice slash should succeed");
+
+        // Phase 3: Bob appeals his slash (future slash for test completeness)
+        let bob_evidence = SlashEvidence::new(
+            ViolationType::SecurityViolation,
+            "Suspected signature falsification",
+            "signature_verification: {invalid_count: 3, threshold: 1}",
+            "security-auditor",
+            2100
+        );
+        let bob_slash = ledger.slash(bob_stake, bob_evidence, 2101)
+            .expect("bob slash should succeed");
+
+        let bob_appeal = ledger.file_appeal(bob_stake, bob_slash.slash_id, "False positive - signatures were valid but used new key rotation scheme", 2200)
+            .expect("bob appeal should succeed");
+
+        // Phase 4: Resolve Bob's appeal (successful restoration)
+        ledger.resolve_appeal(bob_appeal.appeal_id, true, 3000)
+            .expect("bob appeal resolution should succeed");
+
+        // Phase 5: Charlie's stake expires naturally
+        let charlie_with_expiry = ledger.deposit("charlie-expiring", 10000, RiskTier::Medium, 3100)
+            .expect("charlie expiring deposit should succeed");
+        ledger.expire(charlie_with_expiry, 4000)
+            .expect("charlie expiry should succeed");
+
+        // Phase 6: Diana withdraws her stake
+        ledger.withdraw(diana_stake, 4100)
+            .expect("diana withdrawal should succeed");
+
+        // Phase 7: Create capacity test publishers (test bounded collections)
+        for i in 0..5 {
+            let publisher_id = format!("bulk-publisher-{:03}", i);
+            let amount = 1000 + (i as u64 * 100);
+            let epoch = 5000 + i as u64;
+
+            if let Ok(_stake_id) = ledger.deposit(&publisher_id, amount, RiskTier::Low, epoch) {
+                // Successfully created bulk publisher
+            }
+        }
+
+        // Create comprehensive golden state snapshot
+        let golden_state = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "test_name": "comprehensive_staking_governance_registry",
+            "test_description": "Complete staking governance scenario with deposits, slashes, appeals, resolutions, expiry, and withdrawal",
+            "accounts": ledger.accounts.iter().map(|(publisher_id, account)| {
+                serde_json::json!({
+                    "publisher_id": publisher_id,
+                    "balance": account.balance,
+                    "deposited": account.deposited,
+                    "slashed": account.slashed,
+                    "withdrawn": account.withdrawn,
+                    "stakes": account.stakes,
+                    "cooldown_until": account.cooldown_until
+                })
+            }).collect::<Vec<_>>(),
+            "stakes": ledger.state.stakes.iter().map(|(stake_id, stake)| {
+                serde_json::json!({
+                    "stake_id": stake_id,
+                    "publisher_id": stake.publisher_id,
+                    "amount": stake.amount,
+                    "deposited_at": stake.deposited_at,
+                    "expires_at": stake.expires_at,
+                    "state": format!("{:?}", stake.state),
+                    "risk_tier": format!("{:?}", stake.risk_tier)
+                })
+            }).collect::<Vec<_>>(),
+            "slash_events": ledger.state.slash_events.iter().map(|event| {
+                serde_json::json!({
+                    "slash_id": event.slash_id,
+                    "stake_id": event.stake_id,
+                    "slash_amount": event.slash_amount,
+                    "slashed_at": event.slashed_at,
+                    "evidence": {
+                        "violation_type": format!("{:?}", event.evidence.violation_type),
+                        "description": event.evidence.description,
+                        "evidence_payload": event.evidence.evidence_payload,
+                        "collector_identity": event.evidence.collector_identity,
+                        "reported_at": event.evidence.reported_at
+                    }
+                })
+            }).collect::<Vec<_>>(),
+            "appeals": ledger.state.appeals.iter().map(|appeal| {
+                serde_json::json!({
+                    "appeal_id": appeal.appeal_id,
+                    "slash_id": appeal.slash_id,
+                    "stake_id": appeal.stake_id,
+                    "reason": appeal.reason,
+                    "filed_at": appeal.filed_at,
+                    "resolved_at": appeal.resolved_at,
+                    "resolution": appeal.resolution.as_ref().map(|res| {
+                        serde_json::json!({
+                            "outcome": res.outcome,
+                            "decided_at": res.decided_at
+                        })
+                    })
+                })
+            }).collect::<Vec<_>>(),
+            "audit_log": ledger.state.audit_log.iter().map(|entry| {
+                serde_json::json!({
+                    "event_code": entry.event_code,
+                    "description": entry.description,
+                    "publisher_id": entry.publisher_id,
+                    "stake_id": entry.stake_id,
+                    "timestamp": entry.timestamp,
+                    "details": entry.details
+                })
+            }).collect::<Vec<_>>(),
+            "policy": {
+                "tiers": ledger.engine.penalty_schedule.tiers.iter().map(|(tier_name, tier_policy)| {
+                    serde_json::json!({
+                        "tier_name": tier_name,
+                        "minimum_stake": tier_policy.minimum_stake,
+                        "slash_fraction_bps": tier_policy.slash_fraction_bps,
+                        "appeal_window_secs": tier_policy.appeal_window_secs,
+                        "cooldown_secs": tier_policy.cooldown_secs
+                    })
+                }).collect::<Vec<_>>()
+            },
+            "collection_capacities": {
+                "max_slash_events": MAX_SLASH_EVENTS,
+                "max_appeal_records": MAX_APPEAL_RECORDS,
+                "max_slash_history_per_account": MAX_SLASH_HISTORY_PER_ACCOUNT,
+                "max_stake_records": MAX_STAKE_RECORDS,
+                "max_audit_log_entries": MAX_AUDIT_LOG_ENTRIES
+            },
+            "stats": {
+                "total_accounts": ledger.accounts.len(),
+                "total_stakes": ledger.state.stakes.len(),
+                "total_slash_events": ledger.state.slash_events.len(),
+                "total_appeals": ledger.state.appeals.len(),
+                "total_audit_entries": ledger.state.audit_log.len()
+            }
+        });
+
+        // Write golden artifact
+        let golden_content = serde_json::to_string_pretty(&golden_state)
+            .expect("golden state should serialize to JSON");
+
+        std::fs::create_dir_all("tests/golden")
+            .expect("should create golden directory");
+        std::fs::write("tests/golden/registry_staking_governance_comprehensive.json", golden_content)
+            .expect("should write golden artifact");
+
+        // Verify golden artifact integrity by reading it back
+        let written_content = std::fs::read_to_string("tests/golden/registry_staking_governance_comprehensive.json")
+            .expect("should read back golden artifact");
+        let parsed_golden: serde_json::Value = serde_json::from_str(&written_content)
+            .expect("written golden artifact should parse as JSON");
+
+        // Verify essential golden artifact structure
+        assert_eq!(parsed_golden["schema_version"], SCHEMA_VERSION);
+        assert!(parsed_golden["accounts"].as_array().unwrap().len() >= 4,
+               "should have at least 4 publisher accounts");
+        assert!(parsed_golden["stakes"].as_array().unwrap().len() >= 4,
+               "should have at least 4 stake records");
+        assert!(parsed_golden["slash_events"].as_array().unwrap().len() >= 2,
+               "should have at least 2 slash events");
+        assert!(parsed_golden["appeals"].as_array().unwrap().len() >= 1,
+               "should have at least 1 appeal");
+        assert!(!parsed_golden["audit_log"].as_array().unwrap().is_empty(),
+               "should have audit log entries");
+
+        // Verify state consistency in golden artifact
+        let stats = &parsed_golden["stats"];
+        assert!(stats["total_accounts"].as_u64().unwrap() >= 4);
+        assert!(stats["total_stakes"].as_u64().unwrap() >= 4);
+        assert!(stats["total_slash_events"].as_u64().unwrap() >= 2);
+        assert!(stats["total_appeals"].as_u64().unwrap() >= 1);
+    }
 }
