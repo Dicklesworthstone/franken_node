@@ -1776,6 +1776,123 @@ mod tests {
         assert_eq!(assigned, vec!["timed-q", "realtime-q", "background-q"]);
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct PromotionOrderDigest {
+        promoted: Vec<(String, String)>,
+        total_in_flight: usize,
+        lane_states: Vec<(ProductLane, usize, usize, u64, u64)>,
+    }
+
+    fn promotion_order_for_priority_scale(scale: u32) -> PromotionOrderDigest {
+        let mut cfg = runtime_config();
+        cfg.remote_max_in_flight = 16;
+        for (lane, weight) in [
+            ("cancel", 40_u32),
+            ("timed", 30),
+            ("realtime", 20),
+            ("background", 10),
+        ] {
+            cfg.lanes
+                .get_mut(lane)
+                .expect("lane config")
+                .priority_weight = weight.saturating_mul(scale);
+        }
+        let mut router = LaneRouter::from_runtime_config(&cfg).expect("router");
+
+        for idx in 0..3 {
+            enqueue_for_test(
+                &mut router,
+                ProductLane::Background,
+                &format!("background-scale-{idx}"),
+                idx,
+                10_000,
+            );
+            enqueue_for_test(
+                &mut router,
+                ProductLane::Realtime,
+                &format!("realtime-scale-{idx}"),
+                idx,
+                10_000,
+            );
+            enqueue_for_test(
+                &mut router,
+                ProductLane::Timed,
+                &format!("timed-scale-{idx}"),
+                idx,
+                10_000,
+            );
+            enqueue_for_test(
+                &mut router,
+                ProductLane::Cancel,
+                &format!("cancel-scale-{idx}"),
+                idx,
+                10_000,
+            );
+        }
+
+        router
+            .promote_queued(100)
+            .expect("promotion should succeed");
+
+        let promoted = router
+            .events()
+            .iter()
+            .filter(|event| event.event_code == event_codes::LANE_ASSIGNED)
+            .map(|event| (event.lane_name.clone(), event.operation_id.clone()))
+            .collect();
+        let snapshot = router.metrics_snapshot();
+        let lane_states = snapshot
+            .lanes
+            .iter()
+            .map(|metrics| {
+                (
+                    metrics.lane,
+                    metrics.in_flight,
+                    metrics.queued,
+                    metrics.completed,
+                    metrics.rejected,
+                )
+            })
+            .collect();
+
+        PromotionOrderDigest {
+            promoted,
+            total_in_flight: snapshot.total_in_flight,
+            lane_states,
+        }
+    }
+
+    #[test]
+    fn metamorphic_priority_weight_scaling_preserves_promotion_order_under_load() {
+        let baseline = promotion_order_for_priority_scale(1);
+
+        for scaled in [2_u32, 5, 11] {
+            assert_eq!(promotion_order_for_priority_scale(scaled), baseline);
+        }
+        assert_eq!(
+            baseline
+                .promoted
+                .iter()
+                .map(|(lane, _)| lane.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "cancel",
+                "cancel",
+                "cancel",
+                "timed",
+                "timed",
+                "timed",
+                "realtime",
+                "realtime",
+                "realtime",
+                "background",
+                "background",
+                "background",
+            ]
+        );
+        assert_eq!(baseline.total_in_flight, 12);
+    }
+
     #[test]
     fn queued_promotion_is_deterministic_under_repeated_load() {
         fn run_once() -> Vec<(String, String)> {
