@@ -8,6 +8,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use base64::prelude::*;
 
 const SIGNATURE_LEN: usize = 32;
 
@@ -234,7 +235,7 @@ impl InvalidCharType {
             InvalidCharType::SpecialChars => '@',
             InvalidCharType::Whitespace => ' ',
             InvalidCharType::ControlChars => '\x01',
-            InvalidCharType::HighAscii => '\x80',
+            InvalidCharType::HighAscii => '\u{80}',
             InvalidCharType::NullBytes => '\0',
             InvalidCharType::Base64Chars => '=',
         };
@@ -276,7 +277,7 @@ impl InjectionType {
             InjectionType::CommandInjection => format!("{};rm -rf /", base),
             InjectionType::PathTraversal => format!("{}../../../etc/passwd", base),
             InjectionType::XssPayload => format!("{}<script>alert(1)</script>", base),
-            InjectionType::JsonEscape => format!("{}\\\"}{{", base),
+            InjectionType::JsonEscape => format!("{}\\\"}}{}", base),
             InjectionType::RegexEscape => format!("{}.*+?{{}}[]()^$", base),
         }
     }
@@ -302,11 +303,11 @@ impl EncodingConfusionType {
         let hex_str = hex::encode(base_value);
         let padded = format!("{}{}", hex_str, hex_str); // Make it 64 chars
         match self {
-            EncodingConfusionType::Base64 => base64::encode(padded.as_bytes()).chars().take(64).collect(),
+            EncodingConfusionType::Base64 => base64::prelude::BASE64_STANDARD.encode(padded.as_bytes()).chars().take(64).collect(),
             EncodingConfusionType::Base32 => {
                 // Mock base32 encoding
                 padded.chars().map(|c| match c {
-                    'a'..='f' => char::from((c as u8 - b'a' + b'2')),
+                    'a'..='f' => char::from(c as u8 - b'a' + b'2'),
                     '0'..='9' => c,
                     _ => c,
                 }).collect()
@@ -334,7 +335,7 @@ impl EncodingConfusionType {
 
 impl TimingAttackType {
     fn generate(&self, pattern_length: u8) -> String {
-        let len = (pattern_length as usize % 32) + 1;
+        let _len = (pattern_length as usize % 32) + 1;
         match self {
             TimingAttackType::EarlyExit => {
                 // Invalid char at start
