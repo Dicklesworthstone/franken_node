@@ -425,6 +425,11 @@ path = "../../tests/conformance/idempotency_key_derivation.rs"
 required-features = ["extended-surfaces"]
 
 [[test]]
+name = "isolation_rail_router_conformance"
+path = "../../tests/conformance/isolation_rail_router_conformance.rs"
+required-features = ["advanced-features"]
+
+[[test]]
 name = "fastapi_rust_control_plane_integration"
 path = "tests/fastapi_rust_control_plane_integration.rs"
 required-features = ["test-support"]
