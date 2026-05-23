@@ -740,6 +740,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_ed25519_public_key_hex_decode"
+path = "fuzz_targets/fuzz_ed25519_public_key_hex_decode.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_fragility_fixture_json_loader"
 path = "fuzz_targets/fuzz_fragility_fixture_json_loader.rs"
 test = false
