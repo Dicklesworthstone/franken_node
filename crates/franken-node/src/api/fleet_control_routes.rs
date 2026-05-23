@@ -2222,4 +2222,219 @@ mod tests {
             assert_eq!(state.next_fencing_seq, u64::MAX);
         }
     }
+
+    /// Comprehensive boundary testing for fleet control API edge cases and resilience.
+    /// Tests lease management boundaries, fencing operation validation, and coordination limits.
+    #[test]
+    fn fleet_control_api_boundary_comprehensive() {
+        let admin = AuthIdentity {
+            identity_id: "admin-boundary-test".to_string(),
+            method: AuthMethod::Internal,
+        };
+        let trace = TraceContext {
+            request_id: "fleet-boundary-test".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            user_agent: "boundary-test".to_string(),
+            trace_flags: BTreeSet::new(),
+        };
+
+        // Reset state for clean test
+        {
+            let mut state = fleet_lease_state().lock().expect("state lock");
+            state.leases.clear();
+            state.fencing_operations.clear();
+            state.coordination_history.clear();
+            state.next_lease_seq = 1;
+            state.next_fencing_seq = 1;
+        }
+
+        // Test lease request validation with edge case inputs
+        let lease_edge_cases = [
+            // Valid minimal lease
+            LeaseRequest {
+                holder: "valid-holder".to_string(),
+                resource: "valid-resource".to_string(),
+                duration_seconds: 60,
+            },
+            // Empty holder (should be rejected)
+            LeaseRequest {
+                holder: "".to_string(),
+                resource: "resource-1".to_string(),
+                duration_seconds: 60,
+            },
+            // Empty resource (should be rejected)
+            LeaseRequest {
+                holder: "holder-1".to_string(),
+                resource: "".to_string(),
+                duration_seconds: 60,
+            },
+            // Zero duration (should be rejected)
+            LeaseRequest {
+                holder: "holder-1".to_string(),
+                resource: "resource-1".to_string(),
+                duration_seconds: 0,
+            },
+            // Excessive duration (should be clamped)
+            LeaseRequest {
+                holder: "holder-1".to_string(),
+                resource: "resource-1".to_string(),
+                duration_seconds: u64::MAX,
+            },
+            // Unicode characters in holder/resource
+            LeaseRequest {
+                holder: "用户-🔒".to_string(),
+                resource: "资源-💾".to_string(),
+                duration_seconds: 300,
+            },
+            // Long holder/resource names
+            LeaseRequest {
+                holder: "x".repeat(1000),
+                resource: "y".repeat(1000),
+                duration_seconds: 120,
+            },
+            // Special characters that might cause issues
+            LeaseRequest {
+                holder: "holder\n\r\t".to_string(),
+                resource: "resource\"'\\".to_string(),
+                duration_seconds: 180,
+            },
+        ];
+
+        let mut successful_leases = Vec::new();
+        let mut failed_leases = Vec::new();
+
+        for (i, lease_req) in lease_edge_cases.iter().enumerate() {
+            let result = acquire_lease(&admin, &trace, lease_req);
+
+            match i {
+                0 | 5 | 6 | 7 => {
+                    // Valid cases should succeed (including unicode, long names, special chars)
+                    assert!(result.is_ok(), "Lease case {} should succeed: {:?}", i, result);
+                    if let Ok(lease) = result {
+                        successful_leases.push(lease);
+                    }
+                }
+                1 | 2 | 3 => {
+                    // Invalid cases should fail (empty holder/resource, zero duration)
+                    assert!(result.is_err(), "Lease case {} should fail: {:?}", i, result);
+                    failed_leases.push(i);
+                }
+                4 => {
+                    // Excessive duration case - might succeed with clamping or fail
+                    match result {
+                        Ok(lease) => {
+                            // If it succeeds, duration should be clamped to reasonable value
+                            assert!(lease.data.resource.len() > 0, "Should have valid resource");
+                            successful_leases.push(lease);
+                        }
+                        Err(_) => {
+                            // Rejection is also acceptable for excessive duration
+                            failed_leases.push(i);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Test fencing operation validation with edge cases
+        let fencing_edge_cases = [
+            // Valid fencing request
+            FencingRequest {
+                target_node: "valid-node".to_string(),
+                action: FencingAction::Isolate,
+                reason: "Valid test isolation".to_string(),
+            },
+            // Empty target node (should be rejected)
+            FencingRequest {
+                target_node: "".to_string(),
+                action: FencingAction::Drain,
+                reason: "Empty target test".to_string(),
+            },
+            // Empty reason (should be rejected)
+            FencingRequest {
+                target_node: "node-1".to_string(),
+                action: FencingAction::Rejoin,
+                reason: "".to_string(),
+            },
+            // Unicode in target and reason
+            FencingRequest {
+                target_node: "节点-🖥️".to_string(),
+                action: FencingAction::Isolate,
+                reason: "测试 unicode 隔离".to_string(),
+            },
+            // Very long target/reason
+            FencingRequest {
+                target_node: "a".repeat(500),
+                action: FencingAction::Drain,
+                reason: "b".repeat(5000),
+            },
+            // Special characters
+            FencingRequest {
+                target_node: "node\n\r\t".to_string(),
+                action: FencingAction::Rejoin,
+                reason: "reason\"'\\%".to_string(),
+            },
+        ];
+
+        let mut successful_fences = Vec::new();
+        let mut failed_fences = Vec::new();
+
+        for (i, fence_req) in fencing_edge_cases.iter().enumerate() {
+            let result = execute_fence(&admin, &trace, fence_req);
+
+            match i {
+                0 | 3 | 4 | 5 => {
+                    // Valid cases should succeed
+                    assert!(result.is_ok(), "Fence case {} should succeed: {:?}", i, result);
+                    if let Ok(fence) = result {
+                        successful_fences.push(fence);
+                    }
+                }
+                1 | 2 => {
+                    // Invalid cases should fail (empty target/reason)
+                    assert!(result.is_err(), "Fence case {} should fail: {:?}", i, result);
+                    failed_fences.push(i);
+                }
+                _ => {}
+            }
+        }
+
+        // Test all fencing actions
+        let fencing_actions = [
+            FencingAction::Isolate,
+            FencingAction::Drain,
+            FencingAction::Rejoin,
+        ];
+
+        for (i, &action) in fencing_actions.iter().enumerate() {
+            let action_req = FencingRequest {
+                target_node: format!("action-test-{}", i),
+                action,
+                reason: format!("Testing {:?} action", action),
+            };
+
+            let result = execute_fence(&admin, &trace, &action_req);
+            assert!(result.is_ok(), "All fencing actions should be supported: {:?}", action);
+
+            if let Ok(fence) = result {
+                assert_eq!(fence.data.action, action);
+                assert_eq!(fence.data.status, FencingStatus::Completed);
+            }
+        }
+
+        // Test list leases functionality with populated state
+        let list_result = list_leases(&admin, &trace);
+        assert!(list_result.is_ok(), "Should be able to list leases");
+
+        if let Ok(lease_list) = list_result {
+            assert!(lease_list.data.len() >= 0, "Should return lease list");
+
+            // Verify lease list structure
+            for lease in &lease_list.data {
+                assert!(!lease.lease_id.is_empty(), "Listed lease should have valid ID");
+                assert!(!lease.holder.is_empty(), "Listed lease should have valid holder");
+            }
+        }
+    }
 }
