@@ -700,3 +700,9 @@ name = "fuzz_merkle_hash_hex_decoder"
 path = "fuzz_targets/fuzz_merkle_hash_hex_decoder.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_threshold_sig_parser"
+path = "fuzz_targets/fuzz_threshold_sig_parser.rs"
+test = false
+doc = false
