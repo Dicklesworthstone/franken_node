@@ -706,3 +706,9 @@ name = "fuzz_threshold_sig_parser"
 path = "fuzz_targets/fuzz_threshold_sig_parser.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_fleet_operation_slot_parser"
+path = "fuzz_targets/fuzz_fleet_operation_slot_parser.rs"
+test = false
+doc = false
