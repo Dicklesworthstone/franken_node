@@ -16,9 +16,9 @@ use frankenengine_node::{
         FilesystemDeletionAdapter, MockDeletionAdapter,
     },
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::MutexGuard;
 use tempfile::TempDir;
 
@@ -51,6 +51,69 @@ fn lock_deletion_requests(adapter: &MockDeletionAdapter) -> MutexGuard<'_, Vec<P
         "cleanup executor deletion request test mutex",
     )
     .expect("cleanup executor deletion request test mutex should not be poisoned")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CleanupPermutationDigest {
+    candidates_digest: String,
+    total_candidates: usize,
+    removed_count: usize,
+    skipped_count: usize,
+    failed_count: usize,
+    bytes_freed: u64,
+    bytes_skipped: u64,
+    skipped_pins: u64,
+    outcomes_by_path: BTreeMap<String, CleanupOutcome>,
+    deletion_requests: BTreeSet<String>,
+}
+
+fn path_label(base: &Path, path: &Path) -> String {
+    path.strip_prefix(base)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn execute_cleanup_permutation_digest(
+    base: &Path,
+    candidates: &[CleanupCandidate],
+    reservations: BTreeSet<PathBuf>,
+) -> CleanupPermutationDigest {
+    let mock_adapter = MockDeletionAdapter::default();
+    let mut executor =
+        CleanupExecutor::with_protection_rules(test_cleanup_rules(), mock_adapter.clone());
+    executor.update_reservations(reservations);
+
+    let receipt = executor.execute_cleanup(
+        candidates,
+        CleanupMode::Execute,
+        "permutation_test".to_string(),
+        "Permutation invariant cleanup execution".to_string(),
+        Some("r100-cod2-0047".to_string()),
+    );
+
+    let outcomes_by_path = receipt
+        .operations
+        .iter()
+        .map(|operation| (path_label(base, &operation.path), operation.outcome))
+        .collect();
+    let deletion_requests = lock_deletion_requests(&mock_adapter)
+        .iter()
+        .map(|path| path_label(base, path))
+        .collect();
+
+    CleanupPermutationDigest {
+        candidates_digest: receipt.candidates_digest,
+        total_candidates: receipt.summary.total_candidates,
+        removed_count: receipt.summary.removed_count,
+        skipped_count: receipt.summary.skipped_count,
+        failed_count: receipt.summary.failed_count,
+        bytes_freed: receipt.bytes_freed,
+        bytes_skipped: receipt.bytes_skipped,
+        skipped_pins: receipt.skipped_pins,
+        outcomes_by_path,
+        deletion_requests,
+    }
 }
 
 /// Create temporary test files for cleanup testing.
@@ -557,6 +620,112 @@ fn test_candidate_digest_consistency() {
 
     // Digests should be the same regardless of order
     assert_eq!(receipt1.candidates_digest, receipt2.candidates_digest);
+}
+
+#[test]
+fn metamorphic_cleanup_execute_summary_survives_candidate_permutation() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let test_files = create_test_files(&temp_dir);
+    let protected_file = temp_dir.path().join("src/protected.rs");
+    fs::create_dir_all(protected_file.parent().expect("protected file parent"))
+        .expect("create protected file parent");
+    fs::write(&protected_file, "protected source code").expect("write protected file");
+    let missing_file = temp_dir.path().join("target/debug/deps/missing.rlib");
+
+    let candidates = vec![
+        CleanupCandidate {
+            path: test_files[3].clone(),
+            size_bytes: fs::metadata(&test_files[3])
+                .expect("generated artifact metadata")
+                .len(),
+            reason: "Generated artifact".to_string(),
+            requires_approval: false,
+            mtime: None,
+        },
+        CleanupCandidate {
+            path: protected_file.clone(),
+            size_bytes: fs::metadata(&protected_file)
+                .expect("protected file metadata")
+                .len(),
+            reason: "Protected source file".to_string(),
+            requires_approval: false,
+            mtime: None,
+        },
+        CleanupCandidate {
+            path: test_files[1].clone(),
+            size_bytes: fs::metadata(&test_files[1])
+                .expect("reserved artifact metadata")
+                .len(),
+            reason: "Reserved file".to_string(),
+            requires_approval: false,
+            mtime: None,
+        },
+        CleanupCandidate {
+            path: test_files[4].clone(),
+            size_bytes: fs::metadata(&test_files[4])
+                .expect("build intermediate metadata")
+                .len(),
+            reason: "Build intermediate cleanup".to_string(),
+            requires_approval: false,
+            mtime: None,
+        },
+        CleanupCandidate {
+            path: missing_file,
+            size_bytes: 4096,
+            reason: "Missing stale artifact".to_string(),
+            requires_approval: false,
+            mtime: None,
+        },
+    ];
+    let mut reversed = candidates.clone();
+    reversed.reverse();
+    let reservations = BTreeSet::from([test_files[1].clone()]);
+
+    let baseline =
+        execute_cleanup_permutation_digest(temp_dir.path(), &candidates, reservations.clone());
+    let transformed = execute_cleanup_permutation_digest(temp_dir.path(), &reversed, reservations);
+
+    assert_eq!(transformed, baseline);
+    assert_eq!(baseline.total_candidates, 5);
+    assert_eq!(baseline.removed_count, 2);
+    assert_eq!(baseline.skipped_count, 2);
+    assert_eq!(baseline.failed_count, 0);
+    assert!(baseline.bytes_freed > 0);
+    assert!(baseline.bytes_skipped > 0);
+    assert_eq!(baseline.skipped_pins, 1);
+    assert_eq!(
+        baseline.deletion_requests,
+        BTreeSet::from([
+            "generated/artifacts/output.txt".to_string(),
+            "temp_build/intermediate.o".to_string(),
+        ])
+    );
+    assert_eq!(
+        baseline
+            .outcomes_by_path
+            .get("generated/artifacts/output.txt"),
+        Some(&CleanupOutcome::Removed)
+    );
+    assert_eq!(
+        baseline.outcomes_by_path.get("temp_build/intermediate.o"),
+        Some(&CleanupOutcome::Removed)
+    );
+    assert_eq!(
+        baseline.outcomes_by_path.get("src/protected.rs"),
+        Some(&CleanupOutcome::SkippedProtected)
+    );
+    assert_eq!(
+        baseline
+            .outcomes_by_path
+            .get("target/debug/deps/test2.rlib"),
+        Some(&CleanupOutcome::SkippedReserved)
+    );
+    assert_eq!(
+        baseline
+            .outcomes_by_path
+            .get("target/debug/deps/missing.rlib"),
+        Some(&CleanupOutcome::NotFound)
+    );
 }
 
 #[test]

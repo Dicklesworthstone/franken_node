@@ -85,6 +85,72 @@ fn vef_proof_scheduler_matches_spec_frozen_window_dispatch_deadline_fixture() {
     );
 }
 
+#[test]
+fn vef_proof_scheduler_budget_fairness_dispatches_fit_lower_tier_job() {
+    let mut scheduler = VefProofScheduler::new(fairness_budget_policy());
+    let windows = vec![
+        proof_window(
+            "win-critical-unfit",
+            0,
+            1,
+            2,
+            WorkloadTier::Critical,
+            "trace-vef-scheduler-fairness",
+        ),
+        proof_window(
+            "win-standard-fit",
+            2,
+            2,
+            1,
+            WorkloadTier::Standard,
+            "trace-vef-scheduler-fairness",
+        ),
+    ];
+
+    let queued_job_ids = scheduler
+        .enqueue_windows(&windows, ENQUEUED_AT_MILLIS)
+        .expect("fairness windows must enqueue");
+    assert_eq!(queued_job_ids, vec!["job-00000000", "job-00000001"]);
+
+    let dispatched = scheduler
+        .dispatch_jobs(DISPATCHED_AT_MILLIS)
+        .expect("lower-tier job fitting the budget must not be starved");
+
+    assert_eq!(
+        dispatched
+            .iter()
+            .map(|job| job.job_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["job-00000001"],
+        "unfit critical-tier job must not head-of-line block a fit standard-tier job"
+    );
+    assert_eq!(
+        scheduler
+            .jobs()
+            .get("job-00000000")
+            .expect("critical job should remain tracked")
+            .status,
+        ProofJobStatus::Pending
+    );
+    assert_eq!(
+        scheduler
+            .jobs()
+            .get("job-00000001")
+            .expect("standard job should remain tracked")
+            .status,
+        ProofJobStatus::Dispatched
+    );
+    assert_eq!(
+        scheduler
+            .events()
+            .iter()
+            .filter(|event| event.event_code == event_codes::VEF_SCHED_002_JOB_DISPATCHED)
+            .map(|event| event.detail.as_str())
+            .collect::<Vec<_>>(),
+        vec!["job=job-00000001 window=win-standard-fit"]
+    );
+}
+
 fn build_conformance_report() -> ConformanceReport {
     let (entries, checkpoints) = sample_stream();
     let mut dispatch_scheduler = VefProofScheduler::new(conformance_policy());
@@ -226,6 +292,40 @@ fn conformance_policy() -> SchedulerPolicy {
         max_compute_millis_per_tick: 500,
         max_memory_mib_per_tick: 64,
         tier_deadline_millis,
+    }
+}
+
+fn fairness_budget_policy() -> SchedulerPolicy {
+    let mut tier_deadline_millis = BTreeMap::new();
+    tier_deadline_millis.insert(WorkloadTier::Critical, 10_000);
+    tier_deadline_millis.insert(WorkloadTier::Standard, 60_000);
+
+    SchedulerPolicy {
+        max_receipts_per_window: 2,
+        max_concurrent_jobs: 2,
+        max_compute_millis_per_tick: 100,
+        max_memory_mib_per_tick: 8,
+        tier_deadline_millis,
+    }
+}
+
+fn proof_window(
+    window_id: &str,
+    start_index: u64,
+    end_index: u64,
+    entry_count: u64,
+    tier: WorkloadTier,
+    trace_id: &str,
+) -> ProofWindow {
+    ProofWindow {
+        window_id: window_id.to_string(),
+        start_index,
+        end_index,
+        entry_count,
+        aligned_checkpoint_id: None,
+        tier,
+        created_at_millis: SELECTED_AT_MILLIS,
+        trace_id: trace_id.to_string(),
     }
 }
 
