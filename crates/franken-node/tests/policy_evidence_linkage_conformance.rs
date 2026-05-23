@@ -10,6 +10,7 @@ use frankenengine_node::policy::evidence_emission::{
     ActionId, ConformanceError, EvidenceConformanceChecker, PolicyAction, PolicyActionOutcome,
     build_evidence_entry,
 };
+use frankenengine_node::policy::hardening_state_machine::{HardeningLevel, HardeningStateMachine};
 use serde_json::json;
 
 type TestResult = Result<(), String>;
@@ -58,6 +59,61 @@ fn assert_action_id_mismatch(
             "expected ActionIdMismatch rejection, got {other:?}"
         )),
     }
+}
+
+#[test]
+fn invalid_transition_insertion_is_log_invariant() -> TestResult {
+    for start in HardeningLevel::all() {
+        for target in HardeningLevel::all() {
+            if target <= start {
+                continue;
+            }
+
+            let mut baseline = HardeningStateMachine::with_level(*start);
+            baseline
+                .escalate(*target, 1_000, "r92-baseline")
+                .map_err(|err| format!("baseline escalation rejected: {err}"))?;
+            let baseline_replay =
+                HardeningStateMachine::replay_transitions(baseline.transition_log());
+
+            for invalid_target in HardeningLevel::all()
+                .iter()
+                .copied()
+                .filter(|candidate| candidate <= start)
+            {
+                let mut perturbed = HardeningStateMachine::with_level(*start);
+                let rejected = perturbed
+                    .escalate(invalid_target, 999, "r92-rejected")
+                    .expect_err("invalid transition insertion MUST fail closed");
+                assert_eq!(rejected.code(), "HARDEN_ILLEGAL_REGRESSION");
+
+                perturbed
+                    .escalate(*target, 1_000, "r92-baseline")
+                    .map_err(|err| format!("perturbed escalation rejected: {err}"))?;
+
+                assert_eq!(
+                    perturbed.current_level(),
+                    baseline.current_level(),
+                    "MUST preserve committed level after rejected transition insertion"
+                );
+                assert_eq!(
+                    perturbed.transition_log(),
+                    baseline.transition_log(),
+                    "MUST preserve audit log after rejected transition insertion"
+                );
+
+                let perturbed_replay =
+                    HardeningStateMachine::replay_transitions(perturbed.transition_log());
+                assert_eq!(
+                    perturbed_replay.transition_log(),
+                    baseline_replay.transition_log(),
+                    "SHOULD replay to identical accepted transition log"
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[test]
