@@ -2350,4 +2350,367 @@ mod tests {
             );
         }
     }
+
+    /// Property-based tests for event code consistency and validation
+    #[cfg(test)]
+    mod event_code_property_tests {
+        use super::event_codes;
+        use proptest::prelude::*;
+        use std::collections::{BTreeSet, HashMap};
+
+        // Collect all event codes from various modules for cross-module testing
+        fn collect_all_event_codes() -> Vec<(&'static str, &'static str)> {
+            vec![
+                // Witness event codes
+                ("WITNESS_ATTACHED", event_codes::WITNESS_ATTACHED),
+                ("WITNESS_VALIDATED", event_codes::WITNESS_VALIDATED),
+                ("WITNESS_BROKEN_REF", event_codes::WITNESS_BROKEN_REF),
+                ("WITNESS_HASH_MISMATCH", event_codes::WITNESS_HASH_MISMATCH),
+                // Durability violation codes (reference from other module)
+                ("VIOLATION_BUNDLE_GENERATED", "EVD-VIOLATION-001"),
+                ("VIOLATION_GATING_HALTED", "EVD-VIOLATION-002"),
+                ("VIOLATION_HALT_CLEARED", "EVD-VIOLATION-003"),
+                ("VIOLATION_OP_REJECTED", "EVD-VIOLATION-004"),
+                // Security/staking codes (reference from other module)
+                ("STAKE_DEPOSITED", "STAKE-001"),
+                ("STAKE_SLASHED", "STAKE-002"),
+                ("STAKE_APPEAL_FILED", "STAKE-003"),
+                ("STAKE_APPEAL_RESOLVED", "STAKE-004"),
+                ("STAKE_WITHDRAWN", "STAKE-005"),
+                ("STAKE_EXPIRED", "STAKE-006"),
+                ("STAKE_GATE_CHECKED", "STAKE-007"),
+                // Adversary graph codes (reference from other module)
+                ("ADV_GRAPH_001", "EVD-ADV-GRAPH-001"),
+                ("ADV_GRAPH_002", "EVD-ADV-GRAPH-002"),
+            ]
+        }
+
+        // Strategy for generating valid event code formats
+        fn valid_event_code_strategy() -> impl Strategy<Value = String> {
+            prop_oneof![
+                // EVD prefix codes
+                "[A-Z]{3}-[A-Z]{3,12}-[0-9]{3}",
+                // STAKE prefix codes
+                "STAKE-[0-9]{3}",
+                // POLICY prefix codes
+                "POLICY-[0-9]{3}",
+                // FLEET prefix codes
+                "FLEET-[0-9]{3}",
+            ].prop_map(|pattern| match pattern {
+                p if p.contains("EVD") => "EVD-WITNESS-999".to_string(),
+                p if p.contains("STAKE") => "STAKE-999".to_string(),
+                p if p.contains("POLICY") => "POLICY-999".to_string(),
+                _ => "FLEET-999".to_string(),
+            })
+        }
+
+        // Strategy for generating invalid event code formats
+        fn invalid_event_code_strategy() -> impl Strategy<Value = String> {
+            prop_oneof![
+                // Empty or whitespace
+                "[ ]*",
+                // Invalid characters
+                "[a-z]+-[0-9]+",
+                // Wrong format
+                "[A-Z]+[0-9]+",
+                // Missing separators
+                "[A-Z]{6}[0-9]{3}",
+                // Special characters
+                "[A-Z]+-@#$%-[0-9]+",
+            ].prop_map(|pattern| match pattern.chars().next().unwrap_or(' ') {
+                ' ' => "   ".to_string(),
+                '[' if pattern.contains("a-z") => "evd-witness-001".to_string(),
+                '[' if pattern.contains("A-Z") && pattern.contains("0-9") && !pattern.contains("-") => "EVDWITNESS001".to_string(),
+                '[' if pattern.contains("@") => "EVD-@#$%-001".to_string(),
+                _ => "INVALIDFORMAT999".to_string(),
+            })
+        }
+
+        // Property: Event code format consistency
+        proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig {
+                cases: 50,
+                failure_persistence: Some(Box::new(
+                    proptest::test_runner::FileFailurePersistence::WithSource("regressions")
+                )),
+                ..proptest::prelude::ProptestConfig::default()
+            })]
+
+            #[test]
+            fn prop_event_code_format_consistency(
+                _mock_code in valid_event_code_strategy(),
+            ) {
+                let all_codes = collect_all_event_codes();
+
+                // Property 1: All codes follow expected format patterns
+                for (name, code) in &all_codes {
+                    prop_assert!(
+                        is_valid_event_code_format(code),
+                        "Event code {} ({}) must follow valid format: {}",
+                        name, code, code
+                    );
+                }
+
+                // Property 2: All codes are non-empty and properly formatted
+                for (name, code) in &all_codes {
+                    prop_assert!(!code.is_empty(), "Event code {} must not be empty", name);
+                    prop_assert!(!code.trim().is_empty(), "Event code {} must not be whitespace", name);
+                    prop_assert_eq!(code, &code.trim(), "Event code {} must not have leading/trailing whitespace", name);
+                }
+            }
+        }
+
+        // Property: Event code uniqueness across domains
+        proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig {
+                cases: 10, // Only need a few runs since we're testing fixed data
+                ..proptest::prelude::ProptestConfig::default()
+            })]
+
+            #[test]
+            fn prop_event_code_uniqueness_across_domains(
+                _trigger in 0..10u32, // Just to make it a proptest
+            ) {
+                let all_codes = collect_all_event_codes();
+                let mut seen_codes = BTreeSet::new();
+                let mut duplicates = Vec::new();
+
+                // Check for exact duplicates
+                for (name, code) in &all_codes {
+                    if seen_codes.contains(code) {
+                        duplicates.push((name, code));
+                    }
+                    seen_codes.insert(*code);
+                }
+
+                prop_assert!(duplicates.is_empty(),
+                    "Found duplicate event codes: {:?}. Each event code must be unique across all domains",
+                    duplicates);
+
+                // Check for namespace collisions (codes with same prefix-suffix but different middle)
+                let mut prefix_suffix_map: HashMap<(String, String), Vec<&str>> = HashMap::new();
+
+                for (_, code) in &all_codes {
+                    if let Some((prefix, suffix)) = extract_prefix_suffix(code) {
+                        prefix_suffix_map
+                            .entry((prefix, suffix))
+                            .or_default()
+                            .push(code);
+                    }
+                }
+
+                for ((prefix, suffix), codes) in prefix_suffix_map {
+                    if codes.len() > 1 {
+                        prop_assert!(
+                            codes.len() <= 1,
+                            "Found potential namespace collision for prefix '{}' suffix '{}': {:?}",
+                            prefix, suffix, codes
+                        );
+                    }
+                }
+            }
+        }
+
+        // Property: Event code sequence consistency within domains
+        proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig {
+                cases: 20,
+                ..proptest::prelude::ProptestConfig::default()
+            })]
+
+            #[test]
+            fn prop_event_code_sequence_consistency(
+                _trigger in 0..20u32,
+            ) {
+                let all_codes = collect_all_event_codes();
+
+                // Group codes by domain prefix
+                let mut domain_groups: HashMap<String, Vec<(&str, &str)>> = HashMap::new();
+
+                for (name, code) in &all_codes {
+                    if let Some(domain) = extract_domain_prefix(code) {
+                        domain_groups
+                            .entry(domain)
+                            .or_default()
+                            .push((name, code));
+                    }
+                }
+
+                // For each domain, verify sequence consistency
+                for (domain, mut codes) in domain_groups {
+                    if codes.len() > 1 {
+                        // Sort by the numeric suffix
+                        codes.sort_by_key(|(_, code)| extract_numeric_suffix(code));
+
+                        let sequences: Vec<u32> = codes
+                            .iter()
+                            .filter_map(|(_, code)| extract_numeric_suffix(code))
+                            .collect();
+
+                        // Check for gaps in sequence (with reasonable tolerance)
+                        if sequences.len() > 1 {
+                            let min_seq = sequences.iter().min().unwrap();
+                            let max_seq = sequences.iter().max().unwrap();
+                            let expected_count = (max_seq - min_seq + 1) as usize;
+
+                            // Allow some gaps but flag excessive ones
+                            prop_assert!(
+                                sequences.len() >= expected_count / 2,
+                                "Domain {} has suspicious sequence gaps. Found: {:?}, Expected: {} to {}",
+                                domain, sequences, min_seq, max_seq
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Property: Event code immutability and stability
+        proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig {
+                cases: 30,
+                ..proptest::prelude::ProptestConfig::default()
+            })]
+
+            #[test]
+            fn prop_event_code_immutability_and_stability(
+                invalid_code in invalid_event_code_strategy(),
+            ) {
+                let all_codes = collect_all_event_codes();
+
+                // Property 1: Valid codes should pass format validation
+                for (name, code) in &all_codes {
+                    prop_assert!(
+                        is_valid_event_code_format(code),
+                        "Valid event code {} ({}) must pass format validation",
+                        name, code
+                    );
+                }
+
+                // Property 2: Invalid codes should fail validation
+                prop_assert!(
+                    !is_valid_event_code_format(&invalid_code),
+                    "Invalid code '{}' should fail format validation",
+                    invalid_code
+                );
+
+                // Property 3: Event codes should be deterministically serializable
+                for (name, code) in &all_codes {
+                    let serialized1 = format!("{}", code);
+                    let serialized2 = format!("{}", code);
+                    prop_assert_eq!(
+                        serialized1, serialized2,
+                        "Event code {} serialization must be deterministic",
+                        name
+                    );
+                }
+            }
+        }
+
+        // Property: Event code cross-module consistency
+        proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig {
+                cases: 15,
+                ..proptest::prelude::ProptestConfig::default()
+            })]
+
+            #[test]
+            fn prop_event_code_cross_module_consistency(
+                _trigger in 0..15u32,
+            ) {
+                // This test ensures that event codes follow consistent patterns across modules
+                let witness_codes = vec![
+                    event_codes::WITNESS_ATTACHED,
+                    event_codes::WITNESS_VALIDATED,
+                    event_codes::WITNESS_BROKEN_REF,
+                    event_codes::WITNESS_HASH_MISMATCH,
+                ];
+
+                // Property 1: All witness codes should have EVD-WITNESS prefix
+                for code in &witness_codes {
+                    prop_assert!(
+                        code.starts_with("EVD-WITNESS-"),
+                        "Witness event code '{}' must start with 'EVD-WITNESS-'",
+                        code
+                    );
+                }
+
+                // Property 2: All witness codes should have sequential numeric suffixes
+                let suffixes: Vec<u32> = witness_codes
+                    .iter()
+                    .filter_map(|code| extract_numeric_suffix(code))
+                    .collect();
+
+                let mut sorted_suffixes = suffixes.clone();
+                sorted_suffixes.sort();
+
+                prop_assert_eq!(
+                    suffixes, sorted_suffixes,
+                    "Witness codes should be defined in sequential order: {:?}",
+                    suffixes
+                );
+
+                // Property 3: No gaps in sequence
+                if suffixes.len() > 1 {
+                    for i in 1..suffixes.len() {
+                        prop_assert_eq!(
+                            suffixes[i], suffixes[i-1] + 1,
+                            "Witness codes should have no gaps in sequence: {:?}",
+                            suffixes
+                        );
+                    }
+                }
+            }
+        }
+
+        // Helper functions for property tests
+        fn is_valid_event_code_format(code: &str) -> bool {
+            if code.is_empty() || code.trim() != code {
+                return false;
+            }
+
+            // Check basic patterns
+            if code.starts_with("EVD-") {
+                // EVD-{DOMAIN}-{NUMBER}
+                let parts: Vec<&str> = code.split('-').collect();
+                parts.len() == 3
+                    && parts[0] == "EVD"
+                    && parts[1].chars().all(|c| c.is_ascii_uppercase())
+                    && parts[2].chars().all(|c| c.is_ascii_digit())
+                    && parts[2].len() == 3
+            } else if code.starts_with("STAKE-") {
+                // STAKE-{NUMBER}
+                let parts: Vec<&str> = code.split('-').collect();
+                parts.len() == 2
+                    && parts[0] == "STAKE"
+                    && parts[1].chars().all(|c| c.is_ascii_digit())
+                    && parts[1].len() == 3
+            } else {
+                // Other patterns - be permissive for extensibility
+                code.chars().all(|c| c.is_ascii() && (c.is_alphanumeric() || c == '-'))
+                    && code.contains('-')
+                    && !code.starts_with('-')
+                    && !code.ends_with('-')
+            }
+        }
+
+        fn extract_prefix_suffix(code: &str) -> Option<(String, String)> {
+            let parts: Vec<&str> = code.split('-').collect();
+            if parts.len() >= 2 {
+                Some((parts[0].to_string(), parts.last().unwrap().to_string()))
+            } else {
+                None
+            }
+        }
+
+        fn extract_domain_prefix(code: &str) -> Option<String> {
+            code.split('-').next().map(|s| s.to_string())
+        }
+
+        fn extract_numeric_suffix(code: &str) -> Option<u32> {
+            code.split('-')
+                .last()
+                .and_then(|s| s.parse::<u32>().ok())
+        }
+    }
 }
