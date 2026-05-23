@@ -2,6 +2,7 @@ use frankenengine_node::runtime::lane_scheduler::{
     LaneConfig, LaneMappingPolicy, LaneScheduler, LaneSchedulerError, SchedulerLane, TaskClass,
     default_policy, error_codes, event_codes, task_classes,
 };
+use std::collections::BTreeMap;
 
 fn single_background_lane_policy() -> LaneMappingPolicy {
     let mut policy = LaneMappingPolicy::new();
@@ -253,6 +254,15 @@ struct BackgroundLaneIsolationDigest {
     background_audit_events: Vec<(String, String)>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct LaneBackpressureDigest {
+    total_active: usize,
+    total_completed: u64,
+    lane_states: BTreeMap<String, (usize, usize, u64, u64, Option<u64>)>,
+    control_assign_count: usize,
+    background_queue_count: usize,
+}
+
 fn queue_lifecycle_digest(scheduler: &LaneScheduler) -> QueueLifecycleDigest {
     let counters = scheduler
         .lane_counter(SchedulerLane::Background)
@@ -307,6 +317,108 @@ fn background_lane_isolation_digest(scheduler: &LaneScheduler) -> BackgroundLane
             .filter(|record| record.lane == SchedulerLane::Background.as_str())
             .map(|record| (record.event_code.clone(), record.trace_id.clone()))
             .collect(),
+    }
+}
+
+fn lane_backpressure_policy() -> LaneMappingPolicy {
+    let mut policy = LaneMappingPolicy::new();
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 2))
+        .expect("control lane should be unique");
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::Background, 10, 1))
+        .expect("background lane should be unique");
+    policy.add_rule(
+        &task_classes::epoch_transition(),
+        SchedulerLane::ControlCritical,
+    );
+    policy.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+    policy
+}
+
+fn lane_backpressure_digest(control_first: bool) -> LaneBackpressureDigest {
+    let mut scheduler =
+        LaneScheduler::new(lane_backpressure_policy()).expect("test policy should construct");
+
+    if control_first {
+        scheduler
+            .assign_task(
+                &task_classes::epoch_transition(),
+                1_000,
+                "trace-control-first",
+            )
+            .expect("control lane should assign before background pressure");
+    }
+
+    scheduler
+        .assign_task(
+            &task_classes::log_rotation(),
+            1_001,
+            "trace-background-active",
+        )
+        .expect("first background task should occupy the lane");
+    let queued_attempts = [
+        (1_002, "trace-background-queued-0"),
+        (1_003, "trace-background-queued-1"),
+        (1_004, "trace-background-queued-2"),
+    ];
+    for (timestamp_ms, trace_id) in queued_attempts {
+        let error = scheduler
+            .assign_task(&task_classes::log_rotation(), timestamp_ms, trace_id)
+            .expect_err("background cap pressure should queue instead of assigning");
+        assert_eq!(error.code(), error_codes::ERR_LANE_CAP_EXCEEDED);
+    }
+
+    if !control_first {
+        scheduler
+            .assign_task(
+                &task_classes::epoch_transition(),
+                1_010,
+                "trace-control-after-backpressure",
+            )
+            .expect("control lane should assign after background pressure");
+    }
+
+    let lane_states = SchedulerLane::all()
+        .iter()
+        .filter_map(|lane| {
+            scheduler.lane_counter(*lane).map(|counters| {
+                (
+                    lane.as_str().to_string(),
+                    (
+                        counters.active_count,
+                        counters.queued_count,
+                        counters.completed_total,
+                        counters.rejected_total,
+                        counters.first_queued_at_ms,
+                    ),
+                )
+            })
+        })
+        .collect();
+    let control_assign_count = scheduler
+        .audit_log()
+        .iter()
+        .filter(|record| {
+            record.event_code == event_codes::LANE_ASSIGN
+                && record.lane == SchedulerLane::ControlCritical.as_str()
+        })
+        .count();
+    let background_queue_count = scheduler
+        .audit_log()
+        .iter()
+        .filter(|record| {
+            record.event_code == event_codes::LANE_TASK_QUEUED
+                && record.lane == SchedulerLane::Background.as_str()
+        })
+        .count();
+
+    LaneBackpressureDigest {
+        total_active: scheduler.total_active(),
+        total_completed: scheduler.total_completed(),
+        lane_states,
+        control_assign_count,
+        background_queue_count,
     }
 }
 
@@ -1655,6 +1767,28 @@ fn metamorphic_independent_lane_work_commutes_with_background_queue_lifecycle() 
             .count(),
         1
     );
+}
+
+#[test]
+fn metamorphic_control_lane_preemption_survives_background_backpressure_ordering() {
+    let baseline = lane_backpressure_digest(false);
+    let transformed = lane_backpressure_digest(true);
+
+    assert_eq!(transformed, baseline);
+    assert_eq!(baseline.total_active, 2);
+    assert_eq!(baseline.total_completed, 0);
+    assert_eq!(
+        baseline
+            .lane_states
+            .get(SchedulerLane::ControlCritical.as_str()),
+        Some(&(1, 0, 0, 0, None))
+    );
+    assert_eq!(
+        baseline.lane_states.get(SchedulerLane::Background.as_str()),
+        Some(&(1, 3, 0, 3, Some(1_002)))
+    );
+    assert_eq!(baseline.control_assign_count, 1);
+    assert_eq!(baseline.background_queue_count, 3);
 }
 
 #[test]
