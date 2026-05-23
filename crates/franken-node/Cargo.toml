@@ -720,6 +720,10 @@ name = "supply_chain_trust_card_golden_bytes"
 path = "tests/supply_chain_trust_card_golden_bytes.rs"
 
 [[test]]
+name = "supply_chain_manifest_replay_conformance"
+path = "tests/supply_chain_manifest_replay_conformance.rs"
+
+[[test]]
 name = "project_scanner"
 path = "tests/project_scanner.rs"
 
