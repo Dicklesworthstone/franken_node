@@ -23,6 +23,7 @@ chrono = "0.4.44"
 zeroize = { version = "1.8.2" }
 base64 = "0.22.1"
 urlencoding = "2.1"
+sha2 = "0.10"
 
 [dependencies.frankenengine-node]
 path = "../crates/franken-node"

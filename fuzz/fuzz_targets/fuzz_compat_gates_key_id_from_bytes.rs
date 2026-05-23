@@ -317,7 +317,7 @@ impl InjectionType {
         let base = b"base_key_domain";
         let pos = (position as usize) % base.len();
 
-        let injection = match self {
+        let injection: &[u8] = match self {
             InjectionType::HashExtension => b"\x80\x00\x00\x00\x00\x00\x02\x00",
             InjectionType::LengthPrefix => b"\x00\x00\x00\x20",
             InjectionType::PathTraversal => b"../../../etc/passwd",
