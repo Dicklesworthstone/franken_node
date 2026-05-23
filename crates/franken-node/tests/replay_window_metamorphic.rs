@@ -151,6 +151,12 @@ fn expect_replay(result: Result<GateDecision, FreshnessError>, expected_nonce: &
     }
 }
 
+fn expect_degraded_success(
+    result: Result<GateDecision, FreshnessError>,
+) -> TestResult<GateDecision> {
+    result.map_err(|error| format!("stale frontier should degrade: {error:?}"))
+}
+
 fn assert_all_requirements_covered(rows: &[CoverageRow]) -> TestResult {
     let required_ids = [
         "RFG-CONF-FRESH-CONSUMES",
@@ -575,4 +581,65 @@ fn duplicate_replay_attempt_does_not_refresh_fifo_eviction_order() -> TestResult
         !duplicate_augmented.is_nonce_consumed(oldest_nonce),
         "oldest nonce should be evicted after MAX_CONSUMED_NONCES newer unique inserts",
     )
+}
+
+#[test]
+fn tier_tightening_propagates_stale_revocation_frontier_fail_closed() -> TestResult {
+    let stale_epoch = CURRENT_EPOCH.saturating_sub(SafetyTier::Advisory.max_staleness_epochs());
+    let cases = [
+        (
+            SafetyTier::Advisory,
+            ACTION_ID,
+            false,
+            Ok(("RFG-003", true)),
+            "rwmm-tier-advisory",
+        ),
+        (
+            SafetyTier::Standard,
+            STANDARD_ACTION_ID,
+            true,
+            Ok(("RFG-003", true)),
+            "rwmm-tier-standard",
+        ),
+        (
+            SafetyTier::Critical,
+            CRITICAL_ACTION_ID,
+            true,
+            Err("ERR_RFG_STALE"),
+            "rwmm-tier-critical",
+        ),
+    ];
+
+    for (tier, action_id, owner_bypass, expected, nonce) in cases {
+        let mut gate = tiered_gate();
+        let proof = proof_for_tier(tier, stale_epoch, nonce);
+        let result = check(
+            &mut gate,
+            &proof,
+            true,
+            owner_bypass,
+            action_id,
+            "trace-rwmm-tier-tightening",
+        );
+
+        match expected {
+            Ok((event_code, degraded)) => {
+                let decision = expect_degraded_success(result)?;
+                expect_allowed(&decision, degraded, event_code)?;
+                ensure(
+                    gate.is_nonce_consumed(nonce),
+                    "degraded success must consume nonce",
+                )?;
+            }
+            Err(code) => {
+                expect_error_code(result, code)?;
+                ensure(
+                    !gate.is_nonce_consumed(nonce),
+                    "stale denial must not consume nonce",
+                )?;
+            }
+        }
+    }
+
+    Ok(())
 }
