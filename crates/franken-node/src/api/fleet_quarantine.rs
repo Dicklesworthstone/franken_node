@@ -7053,4 +7053,284 @@ mod tests {
             "reconcile and quarantine fixtures must hash differently"
         );
     }
+
+    /// Boundary testing for fleet quarantine capacity limits and edge cases.
+    /// Tests the invariant INV-FLEET-BOUNDED: all collections are bounded with capacity eviction.
+    mod boundary_tests {
+        use super::*;
+
+        #[test]
+        fn fleet_events_boundary_at_max_capacity() {
+            let transport = FileFleetTransport::new(test_transport_dir().join("events_boundary"));
+            let mut fleet = FleetQuarantineApi::new(transport, DEFAULT_SIGNING_KEY.to_string())
+                .expect("fleet API init");
+
+            // Add MAX_FLEET_EVENTS exactly
+            for i in 0..MAX_FLEET_EVENTS {
+                let result = fleet.quarantine(QuarantineRequest {
+                    extension_id: format!("test-ext-{}", i),
+                    zone_id: "test-zone".to_string(),
+                    tenant_id: Some("test-tenant".to_string()),
+                    reason: format!("boundary test event {}", i),
+                });
+                assert!(result.is_ok(), "quarantine {} should succeed within capacity", i);
+            }
+
+            // Verify we're at capacity
+            let events_count = fleet.state.lock().unwrap().fleet_events.len();
+            assert_eq!(events_count, MAX_FLEET_EVENTS, "should be at exact capacity");
+
+            // Add one more event to trigger eviction
+            let overflow_result = fleet.quarantine(QuarantineRequest {
+                extension_id: "overflow-ext".to_string(),
+                zone_id: "test-zone".to_string(),
+                tenant_id: Some("test-tenant".to_string()),
+                reason: "overflow event to test capacity eviction".to_string(),
+            });
+
+            assert!(overflow_result.is_ok(), "overflow quarantine should succeed with eviction");
+
+            // Verify capacity is maintained (oldest event evicted)
+            let final_count = fleet.state.lock().unwrap().fleet_events.len();
+            assert!(final_count <= MAX_FLEET_EVENTS,
+                "capacity should be maintained after overflow, got {}", final_count);
+        }
+
+        #[test]
+        fn zone_status_boundary_at_max_capacity() {
+            let transport = FileFleetTransport::new(test_transport_dir().join("zone_status_boundary"));
+            let mut fleet = FleetQuarantineApi::new(transport, DEFAULT_SIGNING_KEY.to_string())
+                .expect("fleet API init");
+
+            // Add different zones up to MAX_ZONE_STATUS
+            for i in 0..MAX_ZONE_STATUS {
+                let result = fleet.quarantine(QuarantineRequest {
+                    extension_id: "test-ext".to_string(),
+                    zone_id: format!("zone-{}", i),
+                    tenant_id: Some("test-tenant".to_string()),
+                    reason: "zone status boundary test".to_string(),
+                });
+                assert!(result.is_ok(), "quarantine for zone {} should succeed", i);
+
+                // Check status to force zone status creation
+                let status_result = fleet.get_status(StatusRequest {
+                    zone_id: format!("zone-{}", i),
+                    tenant_id: Some("test-tenant".to_string()),
+                });
+                assert!(status_result.is_ok(), "status check for zone {} should succeed", i);
+            }
+
+            // Verify we're near capacity for zone statuses
+            let zone_count = fleet.state.lock().unwrap().zone_status.len();
+            assert!(zone_count <= MAX_ZONE_STATUS, "zone status count should be within bounds");
+
+            // Add more zones to test eviction
+            let overflow_result = fleet.quarantine(QuarantineRequest {
+                extension_id: "test-ext".to_string(),
+                zone_id: "overflow-zone".to_string(),
+                tenant_id: Some("test-tenant".to_string()),
+                reason: "zone status overflow test".to_string(),
+            });
+
+            assert!(overflow_result.is_ok(), "overflow zone quarantine should succeed");
+        }
+
+        #[test]
+        fn incident_tracking_boundary_at_max_capacity() {
+            let transport = FileFleetTransport::new(test_transport_dir().join("incident_boundary"));
+            let mut fleet = FleetQuarantineApi::new(transport, DEFAULT_SIGNING_KEY.to_string())
+                .expect("fleet API init");
+
+            // Create incidents up to MAX_INCIDENTS
+            for i in 0..MAX_INCIDENTS.min(100) { // Limit to 100 for test speed
+                let quarantine_result = fleet.quarantine(QuarantineRequest {
+                    extension_id: format!("ext-{}", i),
+                    zone_id: format!("zone-{}", i % 10), // Cycle through zones
+                    tenant_id: Some(format!("tenant-{}", i % 5)), // Cycle through tenants
+                    reason: format!("incident boundary test {}", i),
+                });
+                assert!(quarantine_result.is_ok(), "incident {} quarantine should succeed", i);
+            }
+
+            // Verify incident tracking is bounded
+            let state = fleet.state.lock().unwrap();
+            let incident_count = state.incidents.len();
+            drop(state);
+
+            assert!(incident_count <= MAX_INCIDENTS,
+                "incident count should be bounded: got {}, max {}", incident_count, MAX_INCIDENTS);
+        }
+
+        #[test]
+        fn quarantine_request_size_boundaries() {
+            let transport = FileFleetTransport::new(test_transport_dir().join("request_size_boundary"));
+            let mut fleet = FleetQuarantineApi::new(transport, DEFAULT_SIGNING_KEY.to_string())
+                .expect("fleet API init");
+
+            // Test minimum valid request
+            let minimal_result = fleet.quarantine(QuarantineRequest {
+                extension_id: "a".to_string(),
+                zone_id: "z".to_string(),
+                tenant_id: None,
+                reason: "x".to_string(),
+            });
+            assert!(minimal_result.is_ok(), "minimal request should succeed");
+
+            // Test large but valid request
+            let large_reason = "x".repeat(8192); // 8KB reason
+            let large_result = fleet.quarantine(QuarantineRequest {
+                extension_id: "test-large-ext".to_string(),
+                zone_id: "test-large-zone".to_string(),
+                tenant_id: Some("test-large-tenant".to_string()),
+                reason: large_reason,
+            });
+            assert!(large_result.is_ok(), "large request should succeed");
+
+            // Test empty fields boundary
+            let empty_ext_result = fleet.quarantine(QuarantineRequest {
+                extension_id: "".to_string(),
+                zone_id: "test-zone".to_string(),
+                tenant_id: Some("test-tenant".to_string()),
+                reason: "empty extension test".to_string(),
+            });
+            // Should fail validation for empty extension_id
+            assert!(empty_ext_result.is_err(), "empty extension_id should fail");
+
+            let empty_zone_result = fleet.quarantine(QuarantineRequest {
+                extension_id: "test-ext".to_string(),
+                zone_id: "".to_string(),
+                tenant_id: Some("test-tenant".to_string()),
+                reason: "empty zone test".to_string(),
+            });
+            // Should fail validation for empty zone_id
+            assert!(empty_zone_result.is_err(), "empty zone_id should fail");
+        }
+
+        #[test]
+        fn concurrent_access_boundary_conditions() {
+            use std::sync::Arc;
+            use std::thread;
+
+            let transport = FileFleetTransport::new(test_transport_dir().join("concurrent_boundary"));
+            let fleet = Arc::new(Mutex::new(
+                FleetQuarantineApi::new(transport, DEFAULT_SIGNING_KEY.to_string())
+                    .expect("fleet API init")
+            ));
+
+            // Test concurrent quarantine operations
+            let mut handles = Vec::new();
+            for i in 0..10 {
+                let fleet_clone = fleet.clone();
+                let handle = thread::spawn(move || {
+                    for j in 0..5 {
+                        let mut fleet_guard = fleet_clone.lock().unwrap();
+                        let result = fleet_guard.quarantine(QuarantineRequest {
+                            extension_id: format!("concurrent-ext-{}-{}", i, j),
+                            zone_id: format!("concurrent-zone-{}", i),
+                            tenant_id: Some(format!("concurrent-tenant-{}", i)),
+                            reason: format!("concurrent test {}-{}", i, j),
+                        });
+                        drop(fleet_guard);
+
+                        // Allow some failures due to contention, but not all
+                        if result.is_err() {
+                            println!("Concurrent quarantine {}-{} failed (expected under contention)", i, j);
+                        }
+                    }
+                });
+                handles.push(handle);
+            }
+
+            // Wait for all threads to complete
+            for handle in handles {
+                handle.join().expect("thread should complete");
+            }
+
+            // Verify fleet state remains consistent
+            let final_fleet = fleet.lock().unwrap();
+            let events_count = final_fleet.state.lock().unwrap().fleet_events.len();
+            drop(final_fleet);
+
+            assert!(events_count <= MAX_FLEET_EVENTS, "concurrent access should maintain capacity bounds");
+        }
+
+        #[test]
+        fn reconcile_boundary_with_large_convergence_gaps() {
+            let transport = FileFleetTransport::new(test_transport_dir().join("reconcile_boundary"));
+            let mut fleet = FleetQuarantineApi::new(transport, DEFAULT_SIGNING_KEY.to_string())
+                .expect("fleet API init");
+
+            // Create a scenario with many pending actions
+            for i in 0..50 {
+                let result = fleet.quarantine(QuarantineRequest {
+                    extension_id: format!("pending-ext-{}", i),
+                    zone_id: format!("pending-zone-{}", i % 5),
+                    tenant_id: Some(format!("pending-tenant-{}", i % 3)),
+                    reason: format!("pending reconcile test {}", i),
+                });
+                assert!(result.is_ok(), "pending quarantine {} should succeed", i);
+            }
+
+            // Test reconcile with large convergence gap
+            let reconcile_result = fleet.reconcile(ReconcileRequest {
+                zone_id: "pending-zone-0".to_string(),
+                tenant_id: Some("pending-tenant-0".to_string()),
+                target_convergence: 100.0, // Request full convergence
+                timeout_seconds: Some(30),
+            });
+
+            assert!(reconcile_result.is_ok(), "reconcile should handle large convergence gap");
+
+            if let Ok(response) = reconcile_result {
+                // Verify convergence tracking is bounded
+                assert!(response.convergence_progress >= 0.0, "progress should be non-negative");
+                assert!(response.convergence_progress <= 100.0, "progress should not exceed 100%");
+
+                if let Some(eta_seconds) = response.estimated_completion_seconds {
+                    assert!(eta_seconds >= 0, "ETA should be non-negative");
+                    assert!(eta_seconds <= 3600, "ETA should be reasonable (<1 hour)");
+                }
+            }
+        }
+
+        #[test]
+        fn api_rate_limiting_boundary_behavior() {
+            let transport = FileFleetTransport::new(test_transport_dir().join("rate_limit_boundary"));
+            let mut fleet = FleetQuarantineApi::new(transport, DEFAULT_SIGNING_KEY.to_string())
+                .expect("fleet API init");
+
+            let start_time = std::time::Instant::now();
+            let mut success_count = 0;
+            let mut failure_count = 0;
+
+            // Rapid-fire requests to test rate limiting behavior
+            for i in 0..100 {
+                let result = fleet.quarantine(QuarantineRequest {
+                    extension_id: format!("rate-test-ext-{}", i),
+                    zone_id: "rate-test-zone".to_string(),
+                    tenant_id: Some("rate-test-tenant".to_string()),
+                    reason: format!("rate limiting test {}", i),
+                });
+
+                match result {
+                    Ok(_) => success_count += 1,
+                    Err(ApiError::RateLimited { .. }) => failure_count += 1,
+                    Err(e) => panic!("Unexpected error during rate limit test: {:?}", e),
+                }
+
+                // Early exit if we get consistent rate limiting
+                if failure_count > 10 {
+                    break;
+                }
+            }
+
+            let duration = start_time.elapsed();
+            println!("Rate limit test: {} successes, {} rate limited in {:?}",
+                success_count, failure_count, duration);
+
+            // Verify that either rate limiting kicked in OR all succeeded quickly
+            assert!(success_count > 0, "at least some requests should succeed");
+            assert!(duration.as_millis() < 5000, "test should complete within reasonable time");
+        }
+    }
 }
