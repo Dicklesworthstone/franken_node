@@ -759,6 +759,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_signing_key_blob_parser"
+path = "fuzz_targets/fuzz_signing_key_blob_parser.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_fragility_fixture_json_loader"
 path = "fuzz_targets/fuzz_fragility_fixture_json_loader.rs"
 test = false
