@@ -65,6 +65,11 @@ path = "src/bin/bd_137_policy_compatibility_gate_conformance.rs"
 test = false
 required-features = ["advanced-features"]
 
+[[bin]]
+name = "vef-degraded-mode-metamorphic"
+path = "tests/vef_degraded_mode_metamorphic.rs"
+test = false
+
 [lib]
 path = "src/lib.rs"
 test = false
@@ -440,6 +445,11 @@ path = "../../tests/conformance/vef_perf_budget_gate_conformance.rs"
 required-features = ["advanced-features"]
 
 [[test]]
+name = "rollback_bundle_conformance"
+path = "../../tests/conformance/rollback_bundle_conformance.rs"
+required-features = ["advanced-features"]
+
+[[test]]
 name = "fastapi_rust_control_plane_integration"
 path = "tests/fastapi_rust_control_plane_integration.rs"
 required-features = ["test-support"]
@@ -766,11 +776,6 @@ required-features = ["test-support"]
 [[test]]
 name = "vef_receipt_schema_conformance"
 path = "tests/vef_receipt_schema_conformance.rs"
-
-[[test]]
-name = "vef_degraded_mode_metamorphic"
-path = "tests/vef_degraded_mode_metamorphic.rs"
-harness = false
 
 [[test]]
 name = "vef_policy_constraint_compiler"
