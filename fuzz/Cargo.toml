@@ -694,3 +694,9 @@ name = "fuzz_js_string_literal_parser"
 path = "fuzz_targets/fuzz_js_string_literal_parser.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_merkle_hash_hex_decoder"
+path = "fuzz_targets/fuzz_merkle_hash_hex_decoder.rs"
+test = false
+doc = false
