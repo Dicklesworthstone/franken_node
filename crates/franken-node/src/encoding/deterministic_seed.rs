@@ -2472,4 +2472,193 @@ mod additional_negative_path_tests {
             }
         }
     }
+
+    /// Property-based testing for encoding deterministic seed round-trip invariants.
+    /// Verifies the core invariants using randomized inputs to catch edge cases.
+    mod proptest_encoding_round_trip {
+        use super::*;
+        use proptest::prelude::*;
+
+        // Property: INV-SEED-STABLE - identical inputs always produce identical outputs
+        proptest! {
+            #[test]
+            fn prop_deterministic_seed_stability(
+                domain_idx in 0_usize..4,
+                content_bytes in prop::collection::vec(any::<u8>(), 32),
+                config_version in 1_u32..=65535,
+                param_count in 0_usize..8,
+                param_data in prop::collection::vec((
+                    prop::string::string_regex("[a-z0-9_]{1,16}").unwrap(),
+                    prop::string::string_regex("[a-zA-Z0-9_.-]{0,32}").unwrap()
+                ), 0..8)
+            ) {
+                let domains = [DomainTag::Repair, DomainTag::Placement, DomainTag::Encoding, DomainTag::Verification];
+                let domain = domains[domain_idx % domains.len()];
+                let content_hash = ContentHash::from_bytes(
+                    content_bytes.try_into().unwrap_or([0u8; 32])
+                );
+
+                let mut config = ScheduleConfig::new(config_version);
+                for (key, value) in param_data.iter().take(param_count) {
+                    config = config.with_param(key, value);
+                }
+
+                // First derivation
+                let seed1 = derive_seed(&domain, &content_hash, &config);
+                // Second derivation with identical inputs
+                let seed2 = derive_seed(&domain, &content_hash, &config);
+
+                // INV-SEED-STABLE: must produce identical results
+                prop_assert_eq!(seed1.bytes, seed2.bytes,
+                    "INV-SEED-STABLE violated: identical inputs produced different seeds");
+                prop_assert_eq!(seed1.domain, seed2.domain);
+                prop_assert_eq!(seed1.config_version, seed2.config_version);
+            }
+        }
+
+        // Property: INV-SEED-DOMAIN-SEP - different domains always produce different seeds
+        proptest! {
+            #[test]
+            fn prop_domain_separation_invariant(
+                content_bytes in prop::collection::vec(any::<u8>(), 32),
+                config_version in 1_u32..=65535,
+                param_data in prop::collection::vec((
+                    prop::string::string_regex("[a-z0-9_]{1,16}").unwrap(),
+                    prop::string::string_regex("[a-zA-Z0-9_.-]{0,32}").unwrap()
+                ), 0..4)
+            ) {
+                let content_hash = ContentHash::from_bytes(
+                    content_bytes.try_into().unwrap_or([0u8; 32])
+                );
+
+                let mut config = ScheduleConfig::new(config_version);
+                for (key, value) in param_data {
+                    config = config.with_param(&key, &value);
+                }
+
+                let domains = [DomainTag::Repair, DomainTag::Placement, DomainTag::Encoding, DomainTag::Verification];
+                let mut seeds = Vec::new();
+
+                // Generate seeds for all domains with identical content/config
+                for domain in &domains {
+                    let seed = derive_seed(domain, &content_hash, &config);
+                    seeds.push((domain, seed));
+                }
+
+                // INV-SEED-DOMAIN-SEP: all domain seeds must be unique
+                for (i, (domain_a, seed_a)) in seeds.iter().enumerate() {
+                    for (j, (domain_b, seed_b)) in seeds.iter().enumerate() {
+                        if i != j {
+                            prop_assert!(
+                                !ct_eq_bytes_inline(&seed_a.bytes, &seed_b.bytes),
+                                "INV-SEED-DOMAIN-SEP violated: domains {:?} and {:?} produced identical seeds",
+                                domain_a, domain_b
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Property: Content hash sensitivity - different content produces different seeds
+        proptest! {
+            #[test]
+            fn prop_content_hash_sensitivity(
+                domain_idx in 0_usize..4,
+                content_bytes_1 in prop::collection::vec(any::<u8>(), 32),
+                content_bytes_2 in prop::collection::vec(any::<u8>(), 32),
+                config_version in 1_u32..=65535
+            ) {
+                let domains = [DomainTag::Repair, DomainTag::Placement, DomainTag::Encoding, DomainTag::Verification];
+                let domain = domains[domain_idx % domains.len()];
+
+                let content_hash_1 = ContentHash::from_bytes(
+                    content_bytes_1.try_into().unwrap_or([0u8; 32])
+                );
+                let content_hash_2 = ContentHash::from_bytes(
+                    content_bytes_2.try_into().unwrap_or([1u8; 32])
+                );
+
+                // Only test when content hashes are actually different
+                if !ct_eq_bytes_inline(&content_hash_1.bytes, &content_hash_2.bytes) {
+                    let config = ScheduleConfig::new(config_version);
+
+                    let seed_1 = derive_seed(&domain, &content_hash_1, &config);
+                    let seed_2 = derive_seed(&domain, &content_hash_2, &config);
+
+                    prop_assert!(
+                        !ct_eq_bytes_inline(&seed_1.bytes, &seed_2.bytes),
+                        "Content sensitivity violated: different content hashes produced identical seeds"
+                    );
+                }
+            }
+        }
+
+        // Property: Config sensitivity - different configs produce different seeds
+        proptest! {
+            #[test]
+            fn prop_config_sensitivity(
+                domain_idx in 0_usize..4,
+                content_bytes in prop::collection::vec(any::<u8>(), 32),
+                config_version_1 in 1_u32..=32767,
+                config_version_2 in 32768_u32..=65535,
+                param_key in prop::string::string_regex("[a-z0-9_]{1,16}").unwrap(),
+                param_value_1 in prop::string::string_regex("[a-zA-Z0-9_.-]{1,16}").unwrap(),
+                param_value_2 in prop::string::string_regex("[a-zA-Z0-9_.-]{17,32}").unwrap()
+            ) {
+                let domains = [DomainTag::Repair, DomainTag::Placement, DomainTag::Encoding, DomainTag::Verification];
+                let domain = domains[domain_idx % domains.len()];
+                let content_hash = ContentHash::from_bytes(
+                    content_bytes.try_into().unwrap_or([0u8; 32])
+                );
+
+                // Create two different configs
+                let config_1 = ScheduleConfig::new(config_version_1).with_param(&param_key, &param_value_1);
+                let config_2 = ScheduleConfig::new(config_version_2).with_param(&param_key, &param_value_2);
+
+                let seed_1 = derive_seed(&domain, &content_hash, &config_1);
+                let seed_2 = derive_seed(&domain, &content_hash, &config_2);
+
+                prop_assert!(
+                    !ct_eq_bytes_inline(&seed_1.bytes, &seed_2.bytes),
+                    "Config sensitivity violated: different configs produced identical seeds"
+                );
+            }
+        }
+
+        // Property: Hex round-trip consistency
+        proptest! {
+            #[test]
+            fn prop_hex_round_trip_consistency(
+                domain_idx in 0_usize..4,
+                content_bytes in prop::collection::vec(any::<u8>(), 32),
+                config_version in 1_u32..=65535
+            ) {
+                let domains = [DomainTag::Repair, DomainTag::Placement, DomainTag::Encoding, DomainTag::Verification];
+                let domain = domains[domain_idx % domains.len()];
+                let content_hash = ContentHash::from_bytes(
+                    content_bytes.try_into().unwrap_or([0u8; 32])
+                );
+                let config = ScheduleConfig::new(config_version);
+
+                let seed = derive_seed(&domain, &content_hash, &config);
+
+                // Round-trip: seed -> hex -> bytes comparison
+                let hex_string = seed.to_hex();
+                let reconstructed_bytes = hex::decode(&hex_string)
+                    .expect("to_hex() should produce valid hex");
+
+                prop_assert_eq!(reconstructed_bytes.len(), 32,
+                    "Hex encoding should produce exactly 32 bytes");
+                prop_assert_eq!(&reconstructed_bytes[..], &seed.bytes[..],
+                    "Hex round-trip should preserve seed bytes");
+
+                // Verify hex format
+                prop_assert_eq!(hex_string.len(), 64,
+                    "Hex string should be exactly 64 characters");
+                prop_assert!(hex_string.chars().all(|c| c.is_ascii_hexdigit()),
+                    "Hex string should contain only hex digits");
+            }
+        }
+    }
 }
