@@ -31,7 +31,7 @@ use std::sync::Once;
 use std::time::Instant;
 
 use frankenengine_node::control_plane::key_role_separation::{
-    KeyRole, KeyRoleRegistry, KeyRoleSeparationError,
+    KeyRole, KeyRoleRegistry, KeyRoleSeparationError, event_codes,
 };
 use serde_json::json;
 use tracing::{error, info};
@@ -321,6 +321,89 @@ fn e2e_key_role_separation_rotate_atomic() {
         true,
         json!({"new_key_id": "key-new", "active": 1, "revoked": 1}),
     );
+}
+
+#[test]
+fn e2e_key_role_rotation_order_is_stable_across_composed_handoffs()
+-> Result<(), KeyRoleSeparationError> {
+    let h = Harness::new("e2e_key_role_rotation_order_is_stable_across_composed_handoffs");
+
+    let mut reg = KeyRoleRegistry::new();
+    reg.bind(
+        "key-order-old",
+        KeyRole::Attestation,
+        vec![0x10; 32],
+        AUTHORITY,
+        NOW,
+        VALIDITY,
+        "trace-order-bind",
+    )?;
+
+    reg.rotate(
+        KeyRole::Attestation,
+        "key-order-old",
+        "key-order-mid",
+        vec![0x20; 32],
+        AUTHORITY,
+        NOW + 100,
+        VALIDITY,
+        "trace-order-rotate-mid",
+    )?;
+    reg.rotate(
+        KeyRole::Attestation,
+        "key-order-mid",
+        "key-order-new",
+        vec![0x30; 32],
+        AUTHORITY,
+        NOW + 200,
+        VALIDITY,
+        "trace-order-rotate-new",
+    )?;
+
+    assert!(reg.lookup("key-order-old").is_none());
+    assert!(reg.lookup("key-order-mid").is_none());
+    let expected_final_key = [0x30; 32];
+    assert_eq!(
+        reg.lookup("key-order-new").map(|binding| binding.role),
+        Some(KeyRole::Attestation)
+    );
+    assert_eq!(
+        reg.lookup("key-order-new")
+            .map(|binding| binding.public_key_bytes.as_slice()),
+        Some(expected_final_key.as_slice())
+    );
+    assert_eq!(reg.active_count(), 1);
+    assert_eq!(reg.revoked_count(), 2);
+    assert_eq!(
+        reg.revoked_bindings()
+            .iter()
+            .map(|binding| binding.key_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["key-order-old", "key-order-mid"],
+        "MUST preserve composed rotation handoff order in the revoked audit trail"
+    );
+    assert_eq!(
+        reg.events()
+            .iter()
+            .map(|event| event.event_code.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            event_codes::KRS_KEY_ROLE_BOUND,
+            event_codes::KRS_KEY_ROLE_ROTATED,
+            event_codes::KRS_KEY_ROLE_ROTATED,
+        ],
+        "SHOULD emit deterministic event order for composed rotations"
+    );
+    h.log_phase(
+        "composed_rotation_order_stable",
+        true,
+        json!({
+            "active": reg.active_count(),
+            "revoked": reg.revoked_count(),
+            "final_key": "key-order-new",
+        }),
+    );
+    Ok(())
 }
 
 #[test]
