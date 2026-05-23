@@ -209,6 +209,54 @@ fn reconcile_pull_canonical_is_idempotent_after_stale_lifecycle_cache() -> Resul
 }
 
 #[test]
+fn reconcile_split_brain_review_is_idempotent_for_local_lifecycle_fork() -> Result<(), String> {
+    let canonical = StateRoot::new(
+        "connector-r103-split".to_string(),
+        StateModelType::Document,
+        json!({"lifecycle_state": "active", "generation": 2}),
+    );
+    let mut local = canonical.clone();
+    local.update_head(json!({"lifecycle_state": "paused", "generation": 3}));
+
+    let first_check = detect_divergence(&local, &canonical);
+    ensure_eq(
+        first_check.divergence_type.clone(),
+        DivergenceType::SplitBrain,
+        "initial split-brain divergence",
+    )?;
+    ensure_eq(
+        reconcile_action(&first_check),
+        ReconcileAction::FlagForReview,
+        "MUST flag local lifecycle forks for review",
+    )?;
+
+    let local_hash = local.root_hash.clone();
+    let canonical_hash = canonical.root_hash.clone();
+    let second_check = detect_divergence(&local, &canonical);
+    ensure_eq(
+        second_check.divergence_type.clone(),
+        DivergenceType::SplitBrain,
+        "repeated split-brain divergence",
+    )?;
+    ensure_eq(
+        reconcile_action(&second_check),
+        ReconcileAction::FlagForReview,
+        "SHOULD keep repeated split-brain reconciliation idempotent",
+    )?;
+    ensure_eq(
+        local.root_hash,
+        local_hash,
+        "review-only reconciliation must not mutate local fork hash",
+    )?;
+    ensure_eq(
+        canonical.root_hash,
+        canonical_hash,
+        "review-only reconciliation must not mutate canonical hash",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn self_transitions_return_stable_self_error() -> Result<(), String> {
     for state in ConnectorState::ALL {
         match transition(state, state) {
