@@ -746,6 +746,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_canonical_decode_boundary"
+path = "fuzz_targets/fuzz_canonical_decode_boundary.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_fragility_fixture_json_loader"
 path = "fuzz_targets/fuzz_fragility_fixture_json_loader.rs"
 test = false
