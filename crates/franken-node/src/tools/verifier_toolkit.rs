@@ -1581,4 +1581,285 @@ mod tests {
 
         assert!(result.is_err());
     }
+
+    /// Comprehensive boundary testing for verifier toolkit validation edge cases and invariant verification.
+    /// Tests schema validation boundaries, evidence chain integrity, and deterministic report generation.
+    #[test]
+    fn verifier_toolkit_validation_boundary_comprehensive() {
+        let mut toolkit = VerifierToolkit::new();
+
+        // Test schema validation with edge case claims
+        let edge_case_claims = [
+            // Minimal valid claim
+            Claim {
+                claim_id: "minimal-001".to_string(),
+                claim_type: ClaimType::BenchmarkPerformance,
+                description: "x".to_string(), // Single character description
+                asserted_at: "2026-01-01T00:00:00Z".to_string(),
+                evidence_refs: vec![],
+                metadata: BTreeMap::new(),
+            },
+            // Maximum metadata claim
+            Claim {
+                claim_id: "maximal-002".to_string(),
+                claim_type: ClaimType::SecurityCompliance,
+                description: "z".repeat(10000), // Very long description
+                asserted_at: "2026-12-31T23:59:59Z".to_string(),
+                evidence_refs: (0..100).map(|i| format!("evidence-{:03}", i)).collect(),
+                metadata: (0..500).map(|i| (format!("key{}", i), format!("value{}", i))).collect(),
+            },
+            // Unicode edge case claim
+            Claim {
+                claim_id: "unicode-🔒-003".to_string(),
+                claim_type: ClaimType::TrustMetric,
+                description: "测试 unicode 🚀 validation ñoël".to_string(),
+                asserted_at: "2026-06-15T12:30:45Z".to_string(),
+                evidence_refs: vec!["证据-001".to_string(), "بيانات-002".to_string()],
+                metadata: {
+                    let mut map = BTreeMap::new();
+                    map.insert("🔑".to_string(), "🔓".to_string());
+                    map.insert("español".to_string(), "año".to_string());
+                    map
+                },
+            },
+            // Empty/boundary values claim
+            Claim {
+                claim_id: "".to_string(), // Empty ID (should be rejected)
+                claim_type: ClaimType::BenchmarkPerformance,
+                description: "".to_string(), // Empty description
+                asserted_at: "invalid-timestamp".to_string(), // Invalid timestamp
+                evidence_refs: vec!["".to_string()], // Empty evidence ref
+                metadata: BTreeMap::new(),
+            },
+        ];
+
+        // Test validation of each edge case claim
+        for (i, claim) in edge_case_claims.iter().enumerate() {
+            let result = toolkit.validate_claim(claim.clone());
+
+            match i {
+                0 | 1 | 2 => {
+                    // Minimal, maximal, and unicode claims should validate
+                    assert!(result.is_ok(), "Edge case claim {} should validate: {:?}", i, result);
+                    if let Ok(report) = result {
+                        assert_eq!(report.overall_verdict, "PASS");
+                        assert_eq!(report.claims_validated, 1);
+                        assert_eq!(report.claims_passed, 1);
+                        assert_eq!(report.claims_failed, 0);
+                    }
+                }
+                3 => {
+                    // Empty/invalid claim should be rejected
+                    assert!(result.is_err(), "Invalid edge case claim {} should be rejected", i);
+                }
+                _ => {}
+            }
+        }
+
+        // Test evidence chain integrity with missing/malformed evidence
+        let mut claim_with_evidence = Claim {
+            claim_id: "evidence-test-004".to_string(),
+            claim_type: ClaimType::SecurityCompliance,
+            description: "Testing evidence chain integrity".to_string(),
+            asserted_at: "2026-04-17T12:00:00Z".to_string(),
+            evidence_refs: vec![
+                "valid-evidence-001".to_string(),
+                "missing-evidence-002".to_string(),
+                "malformed-evidence-003".to_string(),
+            ],
+            metadata: BTreeMap::new(),
+        };
+
+        // Should detect missing evidence references
+        let evidence_result = toolkit.validate_claim(claim_with_evidence.clone());
+        assert!(evidence_result.is_err(), "Claims with missing evidence should be rejected");
+
+        // Test deterministic report generation (same input → same output)
+        let deterministic_claim = Claim {
+            claim_id: "deterministic-005".to_string(),
+            claim_type: ClaimType::BenchmarkPerformance,
+            description: "Deterministic validation test".to_string(),
+            asserted_at: "2026-04-17T12:00:00Z".to_string(),
+            evidence_refs: vec!["evidence-001".to_string()],
+            metadata: {
+                let mut map = BTreeMap::new();
+                map.insert("benchmark".to_string(), "latency_p99".to_string());
+                map.insert("result".to_string(), "1.23ms".to_string());
+                map
+            },
+        };
+
+        let report1 = toolkit.validate_claim(deterministic_claim.clone()).expect("Should validate");
+        let report2 = toolkit.validate_claim(deterministic_claim.clone()).expect("Should validate");
+
+        // Reports should be identical (deterministic)
+        assert_eq!(report1.content_hash, report2.content_hash, "Reports should be deterministic");
+        assert_eq!(report1.toolkit_version, report2.toolkit_version);
+        assert_eq!(report1.claims_validated, report2.claims_validated);
+        assert_eq!(report1.overall_verdict, report2.overall_verdict);
+
+        // Test audit trail generation
+        assert!(!toolkit.audit_records.is_empty(), "Should have audit records");
+
+        // Verify audit records contain expected events
+        let event_codes: Vec<&str> = toolkit.audit_records.iter()
+            .map(|r| r.event_code.as_str())
+            .collect();
+
+        assert!(event_codes.contains(&event_codes::VTK_CLAIM_INGESTED), "Should record claim ingestion");
+        assert!(event_codes.contains(&event_codes::VTK_SCHEMA_VALIDATED), "Should record schema validation");
+
+        // Test capacity boundaries for audit records
+        let initial_audit_count = toolkit.audit_records.len();
+
+        // Add many claims to test audit record capacity
+        for i in 0..20 {
+            let capacity_test_claim = Claim {
+                claim_id: format!("capacity-{:03}", i),
+                claim_type: ClaimType::TrustMetric,
+                description: format!("Capacity test claim {}", i),
+                asserted_at: "2026-04-17T12:00:00Z".to_string(),
+                evidence_refs: vec![],
+                metadata: BTreeMap::new(),
+            };
+
+            let _ = toolkit.validate_claim(capacity_test_claim);
+        }
+
+        // Should respect capacity limits
+        assert!(toolkit.audit_records.len() <= MAX_AUDIT_LOG_ENTRIES,
+               "Should respect audit log capacity limit");
+        assert!(toolkit.validation_reports.len() <= MAX_REPORTS,
+               "Should respect validation reports capacity limit");
+
+        // Test claim type coverage across all enum variants
+        let claim_types = [
+            ClaimType::BenchmarkPerformance,
+            ClaimType::SecurityCompliance,
+            ClaimType::TrustMetric,
+            ClaimType::IntegrityProof,
+        ];
+
+        for (i, claim_type) in claim_types.iter().enumerate() {
+            let coverage_claim = Claim {
+                claim_id: format!("coverage-{:03}", i),
+                claim_type: *claim_type,
+                description: format!("Coverage test for {:?}", claim_type),
+                asserted_at: "2026-04-17T12:00:00Z".to_string(),
+                evidence_refs: vec![],
+                metadata: BTreeMap::new(),
+            };
+
+            let result = toolkit.validate_claim(coverage_claim);
+            assert!(result.is_ok(), "All claim types should be supported: {:?}", claim_type);
+        }
+
+        // Test timestamp boundary validation
+        let timestamp_edge_cases = [
+            "2026-01-01T00:00:00Z",          // Valid boundary
+            "2026-12-31T23:59:59Z",          // Valid boundary
+            "2026-02-29T12:00:00Z",          // Invalid leap year
+            "2026-13-01T12:00:00Z",          // Invalid month
+            "2026-04-31T12:00:00Z",          // Invalid day
+            "2026-04-17T25:00:00Z",          // Invalid hour
+            "2026-04-17T12:60:00Z",          // Invalid minute
+            "2026-04-17T12:00:60Z",          // Invalid second
+            "not-a-timestamp",               // Invalid format
+            "",                              // Empty timestamp
+        ];
+
+        let mut valid_timestamps = 0;
+        let mut invalid_timestamps = 0;
+
+        for (i, timestamp) in timestamp_edge_cases.iter().enumerate() {
+            let timestamp_claim = Claim {
+                claim_id: format!("timestamp-{:03}", i),
+                claim_type: ClaimType::BenchmarkPerformance,
+                description: "Timestamp validation test".to_string(),
+                asserted_at: timestamp.to_string(),
+                evidence_refs: vec![],
+                metadata: BTreeMap::new(),
+            };
+
+            match toolkit.validate_claim(timestamp_claim) {
+                Ok(_) => {
+                    valid_timestamps += 1;
+                    assert!(i < 2, "Only first two timestamps should be valid");
+                }
+                Err(_) => {
+                    invalid_timestamps += 1;
+                    assert!(i >= 2, "Timestamps after index 1 should be invalid");
+                }
+            }
+        }
+
+        assert_eq!(valid_timestamps, 2, "Should have exactly 2 valid timestamps");
+        assert_eq!(invalid_timestamps, 8, "Should have exactly 8 invalid timestamps");
+
+        // Test metadata serialization edge cases
+        let metadata_edge_cases = [
+            BTreeMap::new(), // Empty metadata
+            {
+                let mut map = BTreeMap::new();
+                map.insert("key".to_string(), "value".to_string());
+                map
+            }, // Single entry
+            {
+                let mut map = BTreeMap::new();
+                map.insert("".to_string(), "".to_string()); // Empty key/value
+                map
+            },
+            {
+                let mut map = BTreeMap::new();
+                map.insert("key_with_\n_newline".to_string(), "value_with_\t_tab".to_string());
+                map
+            }, // Control characters
+        ];
+
+        for (i, metadata) in metadata_edge_cases.iter().enumerate() {
+            let metadata_claim = Claim {
+                claim_id: format!("metadata-{:03}", i),
+                claim_type: ClaimType::TrustMetric,
+                description: "Metadata edge case test".to_string(),
+                asserted_at: "2026-04-17T12:00:00Z".to_string(),
+                evidence_refs: vec![],
+                metadata: metadata.clone(),
+            };
+
+            let result = toolkit.validate_claim(metadata_claim);
+            // All should validate (metadata is flexible)
+            assert!(result.is_ok(), "Metadata edge case {} should validate", i);
+        }
+
+        // Test hash determinism for content integrity
+        let hash_test_claim = Claim {
+            claim_id: "hash-test-006".to_string(),
+            claim_type: ClaimType::IntegrityProof,
+            description: "Hash determinism test".to_string(),
+            asserted_at: "2026-04-17T12:00:00Z".to_string(),
+            evidence_refs: vec!["evidence-hash-001".to_string()],
+            metadata: {
+                let mut map = BTreeMap::new();
+                map.insert("alpha".to_string(), "first".to_string());
+                map.insert("beta".to_string(), "second".to_string());
+                map
+            },
+        };
+
+        let hash_report1 = toolkit.validate_claim(hash_test_claim.clone()).expect("Should validate");
+        let hash_report2 = toolkit.validate_claim(hash_test_claim).expect("Should validate");
+
+        // Content hashes should be identical and deterministic
+        assert_eq!(hash_report1.content_hash, hash_report2.content_hash);
+        assert_eq!(hash_report1.content_hash.len(), 64, "Should be SHA-256 hex string");
+        assert!(hash_report1.content_hash.chars().all(|c| c.is_ascii_hexdigit()),
+               "Content hash should be valid hex");
+
+        // Verify toolkit versioning is embedded in reports
+        for report in &toolkit.validation_reports {
+            assert_eq!(report.toolkit_version, TOOLKIT_VERSION, "Should embed toolkit version");
+            assert!(!report.report_id.is_empty(), "Should have non-empty report ID");
+            assert!(!report.timestamp.is_empty(), "Should have non-empty timestamp");
+        }
+    }
 }
