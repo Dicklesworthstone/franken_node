@@ -21,6 +21,7 @@ toml = "0.8"
 chrono = "0.4.44"
 # Remove zeroize_derive to reduce proc-macro compilation overhead
 zeroize = { version = "1.8.2" }
+base64 = "0.22.1"
 
 [dependencies.frankenengine-node]
 path = "../crates/franken-node"
@@ -710,5 +711,11 @@ doc = false
 [[bin]]
 name = "fuzz_fleet_operation_slot_parser"
 path = "fuzz_targets/fuzz_fleet_operation_slot_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_session_mac_deserialize"
+path = "fuzz_targets/fuzz_session_mac_deserialize.rs"
 test = false
 doc = false
