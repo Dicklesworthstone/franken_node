@@ -2661,4 +2661,211 @@ mod additional_negative_path_tests {
             }
         }
     }
+
+    /// Comprehensive boundary testing for deterministic seed edge cases and robustness.
+    /// Tests parameter limits, version boundaries, and collision resistance scenarios.
+    #[test]
+    fn deterministic_seed_boundary_comprehensive_test() {
+        // Test boundary values for config version (u32 limits)
+        let content_zero = ContentHash::from_bytes([0u8; 32]);
+        let content_max = ContentHash::from_bytes([255u8; 32]);
+
+        // Version boundary testing
+        let config_v0 = ScheduleConfig::new(0);
+        let config_v1 = ScheduleConfig::new(1);
+        let config_max = ScheduleConfig::new(u32::MAX);
+
+        // All version boundaries should produce unique seeds
+        let seed_v0 = derive_seed(&DomainTag::Encoding, &content_zero, &config_v0);
+        let seed_v1 = derive_seed(&DomainTag::Encoding, &content_zero, &config_v1);
+        let seed_max = derive_seed(&DomainTag::Encoding, &content_zero, &config_max);
+
+        assert_ne!(seed_v0.bytes, seed_v1.bytes, "Version 0 vs 1 should produce different seeds");
+        assert_ne!(seed_v1.bytes, seed_max.bytes, "Version 1 vs MAX should produce different seeds");
+        assert_ne!(seed_v0.bytes, seed_max.bytes, "Version 0 vs MAX should produce different seeds");
+
+        // Test parameter length boundaries
+        let empty_key = "";
+        let long_key = "x".repeat(1000); // Very long key
+        let empty_value = "";
+        let long_value = "y".repeat(10000); // Very long value
+
+        let config_empty = ScheduleConfig::new(1)
+            .with_param(empty_key, empty_value);
+        let config_long_key = ScheduleConfig::new(1)
+            .with_param(&long_key, "value");
+        let config_long_value = ScheduleConfig::new(1)
+            .with_param("key", &long_value);
+        let config_both_long = ScheduleConfig::new(1)
+            .with_param(&long_key, &long_value);
+
+        let seed_empty = derive_seed(&DomainTag::Repair, &content_zero, &config_empty);
+        let seed_long_key = derive_seed(&DomainTag::Repair, &content_zero, &config_long_key);
+        let seed_long_value = derive_seed(&DomainTag::Repair, &content_zero, &config_long_value);
+        let seed_both_long = derive_seed(&DomainTag::Repair, &content_zero, &config_both_long);
+
+        // All parameter variations should produce unique seeds
+        assert_ne!(seed_empty.bytes, seed_long_key.bytes);
+        assert_ne!(seed_empty.bytes, seed_long_value.bytes);
+        assert_ne!(seed_long_key.bytes, seed_long_value.bytes);
+        assert_ne!(seed_both_long.bytes, seed_empty.bytes);
+
+        // Test content hash edge cases - all zeros vs all 0xFF
+        let seed_zero_content = derive_seed(&DomainTag::Verification, &content_zero, &config_v1);
+        let seed_max_content = derive_seed(&DomainTag::Verification, &content_max, &config_v1);
+
+        assert_ne!(seed_zero_content.bytes, seed_max_content.bytes,
+                   "Zero vs max content should produce different seeds");
+
+        // Test one-bit difference in content hash (avalanche effect)
+        let mut content_one_bit = [0u8; 32];
+        content_one_bit[0] = 1; // Single bit difference
+        let content_one_bit_hash = ContentHash::from_bytes(content_one_bit);
+
+        let seed_zero_bit = derive_seed(&DomainTag::Placement, &content_zero, &config_v1);
+        let seed_one_bit = derive_seed(&DomainTag::Placement, &content_one_bit_hash, &config_v1);
+
+        assert_ne!(seed_zero_bit.bytes, seed_one_bit.bytes,
+                   "Single bit difference should produce different seeds");
+
+        // Test parameter ordering independence (BTreeMap should ensure this)
+        let config_order_1 = ScheduleConfig::new(42)
+            .with_param("aaa", "111")
+            .with_param("zzz", "999")
+            .with_param("mmm", "555");
+        let config_order_2 = ScheduleConfig::new(42)
+            .with_param("zzz", "999")
+            .with_param("aaa", "111")
+            .with_param("mmm", "555");
+
+        let seed_order_1 = derive_seed(&DomainTag::Scheduling, &content_zero, &config_order_1);
+        let seed_order_2 = derive_seed(&DomainTag::Scheduling, &content_zero, &config_order_2);
+
+        assert_eq!(seed_order_1.bytes, seed_order_2.bytes,
+                   "Parameter insertion order should not affect seeds (BTreeMap ordering)");
+
+        // Test cross-domain collision resistance with adversarial inputs
+        // Use inputs designed to potentially cause hash collisions
+        let adversarial_configs = [
+            ScheduleConfig::new(0),
+            ScheduleConfig::new(1).with_param("", ""),
+            ScheduleConfig::new(1).with_param("a", "b"),
+            ScheduleConfig::new(2).with_param("ab", ""),
+            ScheduleConfig::new(3).with_param("", "ab"),
+        ];
+
+        let adversarial_contents = [
+            ContentHash::from_bytes([0u8; 32]),
+            ContentHash::from_bytes([1u8; 32]),
+            ContentHash::from_hex("0000000000000000000000000000000000000000000000000000000000000001").unwrap(),
+            ContentHash::from_hex("8000000000000000000000000000000000000000000000000000000000000000").unwrap(),
+        ];
+
+        // Generate all combinations across all domains
+        let mut all_seeds = Vec::new();
+        for domain in DomainTag::all() {
+            for content in &adversarial_contents {
+                for config in &adversarial_configs {
+                    let seed = derive_seed(domain, content, config);
+                    all_seeds.push((domain, content, config, seed.bytes));
+                }
+            }
+        }
+
+        // Verify no collisions in adversarial test matrix
+        for (i, (domain_a, content_a, config_a, seed_a)) in all_seeds.iter().enumerate() {
+            for (j, (domain_b, content_b, config_b, seed_b)) in all_seeds.iter().enumerate() {
+                if i != j && ct_eq_bytes_inline(seed_a, seed_b) {
+                    panic!(
+                        "Collision detected between adversarial inputs:\n\
+                         A: domain={:?}, content={}, config_version={}\n\
+                         B: domain={:?}, content={}, config_version={}",
+                        domain_a, content_a.to_hex(), config_a.version,
+                        domain_b, content_b.to_hex(), config_b.version
+                    );
+                }
+            }
+        }
+
+        // Test version bump edge case boundaries (critical for migration safety)
+        let mut version_bump_seeds = Vec::new();
+        let version_boundaries = [0u32, 1, 255, 256, 65535, 65536, u32::MAX - 1, u32::MAX];
+
+        for &version in &version_boundaries {
+            let config = ScheduleConfig::new(version).with_param("stability", "test");
+            let seed = derive_seed(&DomainTag::Encoding, &content_zero, &config);
+            version_bump_seeds.push((version, seed.bytes));
+        }
+
+        // All version boundaries must produce unique seeds
+        for (i, (version_a, seed_a)) in version_bump_seeds.iter().enumerate() {
+            for (j, (version_b, seed_b)) in version_bump_seeds.iter().enumerate() {
+                if i != j {
+                    assert!(
+                        !ct_eq_bytes_inline(seed_a, seed_b),
+                        "Version boundary collision: version {} and {} produced identical seeds",
+                        version_a, version_b
+                    );
+                }
+            }
+        }
+
+        // Test config hash stability under parameter duplication edge cases
+        let config_base = ScheduleConfig::new(100).with_param("key1", "value1");
+        let config_duplicate_attempt = ScheduleConfig::new(100)
+            .with_param("key1", "value1")
+            .with_param("key1", "value2"); // Second insert should overwrite
+
+        // BTreeMap should handle duplicate keys consistently
+        let hash_base = config_base.config_hash();
+        let hash_duplicate = config_duplicate_attempt.config_hash();
+
+        // The configs should have different hashes since the second value overwrites
+        assert_ne!(hash_base, hash_duplicate,
+                   "Config hash should reflect final parameter values after deduplication");
+
+        // Test hex format edge cases with ContentHash
+        let test_hex_cases = [
+            ("0000000000000000000000000000000000000000000000000000000000000000", true),
+            ("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", true),
+            ("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", true),
+            ("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", true), // Uppercase
+            ("gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg", false), // Invalid chars
+            ("00000000000000000000000000000000000000000000000000000000000000", false), // Too short
+            ("000000000000000000000000000000000000000000000000000000000000000000", false), // Too long
+        ];
+
+        for (hex_str, should_succeed) in test_hex_cases {
+            let result = ContentHash::from_hex(hex_str);
+            if should_succeed {
+                let content_hash = result.expect(&format!("Valid hex '{}' should parse", hex_str));
+                // Round-trip test
+                let round_trip = content_hash.to_hex();
+                assert_eq!(round_trip.len(), 64, "Round-trip hex should be 64 chars");
+                assert_eq!(round_trip, hex_str.to_lowercase(),
+                           "Round-trip should match original (lowercase)");
+            } else {
+                assert!(result.is_err(), "Invalid hex '{}' should fail to parse", hex_str);
+            }
+        }
+
+        // Test domain prefix uniqueness (regression test for domain separation)
+        let all_prefixes: std::collections::HashSet<_> = DomainTag::all()
+            .iter()
+            .map(|d| d.prefix())
+            .collect();
+        assert_eq!(all_prefixes.len(), DomainTag::all().len(),
+                   "All domain prefixes must be unique for proper domain separation");
+
+        // Verify domain prefixes follow expected format
+        for domain in DomainTag::all() {
+            let prefix = domain.prefix();
+            assert!(prefix.starts_with("franken_node."),
+                    "Domain prefix should start with 'franken_node.': {}", prefix);
+            assert!(prefix.ends_with(".v1"),
+                    "Domain prefix should end with '.v1': {}", prefix);
+            assert!(!prefix.contains(' '),
+                    "Domain prefix should not contain spaces: {}", prefix);
+        }
+    }
 }
