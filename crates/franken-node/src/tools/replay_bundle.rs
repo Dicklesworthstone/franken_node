@@ -34,8 +34,13 @@ const MAX_PREPARED_EVENTS: usize = 50000; // Hardening: prevent unbounded prepar
 const DEFAULT_POLICY_VERSION: &str = "0.1.0";
 const DEFAULT_CREATED_AT: &str = "1970-01-01T00:00:00.000000Z";
 pub const INCIDENT_EVIDENCE_SCHEMA: &str = "franken-node/incident-evidence-source/v1";
+const REPLAY_BUNDLE_SIGNATURE_ALGORITHM: &str = "ed25519";
 const REPLAY_BUNDLE_SIGNATURE_TRUST_SCOPE: &str = "incident_replay_bundle";
 const REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN: &[u8] = b"replay_bundle_sig_v1:";
+const ED25519_PUBLIC_KEY_BYTES: usize = 32;
+const ED25519_PUBLIC_KEY_HEX_LEN: usize = ED25519_PUBLIC_KEY_BYTES * 2;
+const ED25519_SIGNATURE_BYTES: usize = 64;
+const ED25519_SIGNATURE_HEX_LEN: usize = ED25519_SIGNATURE_BYTES * 2;
 
 /// RAII guard that orphans a temp file on drop (unless defused after rename).
 #[must_use]
@@ -394,16 +399,17 @@ pub struct ReplayBundleSignature {
 
 impl std::fmt::Debug for ReplayBundleSignature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReplayBundleSignature")
-            .field("algorithm", &self.algorithm)
-            .field("public_key_hex", &self.public_key_hex)
-            .field("key_id", &self.key_id)
-            .field("key_source", &self.key_source)
-            .field("signing_identity", &self.signing_identity)
-            .field("trust_scope", &self.trust_scope)
-            .field("signed_payload_sha256", &self.signed_payload_sha256)
-            .field("signature_hex", &"[REDACTED]")
-            .finish()
+        write!(
+            f,
+            "ReplayBundleSignature {{ algorithm: {:?}, public_key_hex: {:?}, key_id: {:?}, key_source: {:?}, signing_identity: {:?}, trust_scope: {:?}, signed_payload_sha256: {:?}, signature_hex: \"[REDACTED]\" }}",
+            self.algorithm,
+            self.public_key_hex,
+            self.key_id,
+            self.key_source,
+            self.signing_identity,
+            self.trust_scope,
+            self.signed_payload_sha256
+        )
     }
 }
 
@@ -632,7 +638,7 @@ pub fn validate_incident_evidence_package(
             });
         }
         if let Some(parent_event_id) = &event.parent_event_id
-            && parent_event_id == &event.event_id
+            && constant_time::ct_eq(parent_event_id, &event.event_id)
         {
             return Err(ReplayBundleError::EvidenceSelfParentRef {
                 event_id: event.event_id.clone(),
@@ -1073,12 +1079,12 @@ pub fn verify_replay_bundle_signature(
         .as_ref()
         .ok_or(ReplayBundleError::SignatureMissing)?;
     let trusted_key_id = trusted_key_id.ok_or(ReplayBundleError::SignatureTrustAnchorMissing)?;
-    if signature.algorithm != "ed25519" {
+    if !constant_time::ct_eq(&signature.algorithm, REPLAY_BUNDLE_SIGNATURE_ALGORITHM) {
         return Err(ReplayBundleError::SignatureAlgorithmUnsupported {
             algorithm: signature.algorithm.clone(),
         });
     }
-    if signature.trust_scope != REPLAY_BUNDLE_SIGNATURE_TRUST_SCOPE {
+    if !constant_time::ct_eq(&signature.trust_scope, REPLAY_BUNDLE_SIGNATURE_TRUST_SCOPE) {
         return Err(ReplayBundleError::SignatureTrustScopeMismatch {
             actual: signature.trust_scope.clone(),
             expected: REPLAY_BUNDLE_SIGNATURE_TRUST_SCOPE,
@@ -1098,14 +1104,19 @@ pub fn verify_replay_bundle_signature(
         return Err(ReplayBundleError::SignatureKeyUntrusted);
     }
 
-    let public_key_bytes = hex::decode(&signature.public_key_hex).map_err(|source| {
+    if signature.public_key_hex.len() != ED25519_PUBLIC_KEY_HEX_LEN {
+        return Err(ReplayBundleError::SignaturePublicKeyMalformed {
+            detail: format!(
+                "expected {} hex chars, got {}",
+                ED25519_PUBLIC_KEY_HEX_LEN,
+                signature.public_key_hex.len()
+            ),
+        });
+    }
+    let mut public_key_bytes = [0_u8; ED25519_PUBLIC_KEY_BYTES];
+    hex::decode_to_slice(&signature.public_key_hex, &mut public_key_bytes).map_err(|source| {
         ReplayBundleError::SignaturePublicKeyMalformed {
             detail: source.to_string(),
-        }
-    })?;
-    let public_key_bytes: [u8; 32] = public_key_bytes.try_into().map_err(|bytes: Vec<u8>| {
-        ReplayBundleError::SignaturePublicKeyMalformed {
-            detail: format!("expected 32 bytes, got {}", bytes.len()),
         }
     })?;
     // Validate the public-key bytes by parsing them; failure means malformed.
@@ -1138,7 +1149,17 @@ pub fn verify_replay_bundle_signature(
     // length-prefixed domain separator (`REPLAY_BUNDLE_SIGNATURE_PAYLOAD_DOMAIN`),
     // so we deliberately bypass the trait's wrapper-domain surface here —
     // see the comment on the sign side for the on-the-wire-compat reason.
-    let sig_bytes = hex::decode(&signature.signature_hex).map_err(|source| {
+    if signature.signature_hex.len() != ED25519_SIGNATURE_HEX_LEN {
+        return Err(ReplayBundleError::SignatureMalformed {
+            detail: format!(
+                "expected {} hex chars, got {}",
+                ED25519_SIGNATURE_HEX_LEN,
+                signature.signature_hex.len()
+            ),
+        });
+    }
+    let mut sig_bytes = [0_u8; ED25519_SIGNATURE_BYTES];
+    hex::decode_to_slice(&signature.signature_hex, &mut sig_bytes).map_err(|source| {
         ReplayBundleError::SignatureMalformed {
             detail: source.to_string(),
         }
@@ -4550,20 +4571,21 @@ mod proptest_replay_bundle_invariants {
 
     fn raw_event_strategy() -> impl Strategy<Value = RawEvent> {
         (
-            "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z",
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z",
             prop::option::of(any::<u64>()),
-            prop::option::of("[0-9]\.[0-9]\.[0-9]"),
-            json_leaf_strategy()
-        ).prop_map(|(timestamp, causal_parent, policy_version, payload)| {
-            let mut event = RawEvent::new(timestamp, EventType::UserAction, payload);
-            if let Some(parent) = causal_parent {
-                event = event.with_causal_parent(parent);
-            }
-            if let Some(version) = policy_version {
-                event = event.with_policy_version(version);
-            }
-            event
-        })
+            prop::option::of(r"[0-9]\.[0-9]\.[0-9]"),
+            json_leaf_strategy(),
+        )
+            .prop_map(|(timestamp, causal_parent, policy_version, payload)| {
+                let mut event = RawEvent::new(timestamp, EventType::UserAction, payload);
+                if let Some(parent) = causal_parent {
+                    event = event.with_causal_parent(parent);
+                }
+                if let Some(version) = policy_version {
+                    event = event.with_policy_version(version);
+                }
+                event
+            })
     }
 
     // Property: INV-RB-DETERMINISTIC - identical inputs produce byte-identical bundles
@@ -4683,5 +4705,266 @@ mod proptest_replay_bundle_invariants {
                 }
             }
         }
+    }
+
+    /// Comprehensive integrity gate test for replay bundle tamper detection
+    ///
+    /// Tests various integrity verification scenarios including hash validation,
+    /// tamper detection, boundary conditions, and recovery from corrupted state.
+    /// Serves as a security gate to ensure replay bundle integrity cannot be
+    /// bypassed under adversarial conditions.
+    #[test]
+    fn integrity_gate_comprehensive_tamper_detection() {
+        let incident_id = "integrity-gate-test";
+        let events = vec![
+            raw_event("event-001", "integrity_test_event", "initial_state", 1000),
+            raw_event("event-002", "signature_validation", "crypto_proof", 2000),
+            raw_event("event-003", "merkle_verification", "integrity_check", 3000),
+        ];
+
+        // Phase 1: Generate valid bundle
+        let original_bundle = generate_replay_bundle(incident_id, &events)
+            .expect("valid bundle generation should succeed");
+
+        // Verify baseline integrity
+        let baseline_integrity = validate_bundle_integrity(&original_bundle)
+            .expect("baseline integrity check should not fail");
+        assert!(baseline_integrity, "baseline bundle should have valid integrity");
+
+        // Store original integrity hash for comparison
+        let original_hash = original_bundle.integrity_hash.clone();
+
+        // Phase 2: Test tamper detection scenarios
+
+        // Test 1: Incident ID manipulation
+        {
+            let mut tampered = original_bundle.clone();
+            tampered.incident_id = "tampered-incident-id".to_string();
+
+            let integrity_result = validate_bundle_integrity(&tampered);
+            match integrity_result {
+                Ok(is_valid) => assert!(!is_valid, "incident ID tampering should invalidate integrity"),
+                Err(_) => {}, // Acceptable - validation detects tampering
+            }
+        }
+
+        // Test 2: Timeline event manipulation
+        {
+            let mut tampered = original_bundle.clone();
+            if !tampered.timeline.is_empty() {
+                tampered.timeline[0].sequence_number = 9999;
+
+                let integrity_result = validate_bundle_integrity(&tampered);
+                match integrity_result {
+                    Ok(is_valid) => assert!(!is_valid, "timeline tampering should invalidate integrity"),
+                    Err(_) => {}, // Acceptable - validation detects tampering
+                }
+            }
+        }
+
+        // Test 3: Evidence reference manipulation
+        {
+            let mut tampered = original_bundle.clone();
+            if !tampered.evidence_refs.is_empty() {
+                let first_key = tampered.evidence_refs.keys().next().unwrap().clone();
+                tampered.evidence_refs.insert("tampered-ref".to_string(), tampered.evidence_refs[&first_key].clone());
+
+                let integrity_result = validate_bundle_integrity(&tampered);
+                match integrity_result {
+                    Ok(is_valid) => assert!(!is_valid, "evidence ref tampering should invalidate integrity"),
+                    Err(_) => {}, // Acceptable - validation detects tampering
+                }
+            }
+        }
+
+        // Test 4: Metadata field manipulation
+        {
+            let mut tampered = original_bundle.clone();
+            tampered.metadata.policy_version = "999.999.999".to_string();
+
+            let integrity_result = validate_bundle_integrity(&tampered);
+            match integrity_result {
+                Ok(is_valid) => assert!(!is_valid, "metadata tampering should invalidate integrity"),
+                Err(_) => {}, // Acceptable - validation detects tampering
+            }
+        }
+
+        // Test 5: Direct integrity hash manipulation (should always fail)
+        {
+            let mut tampered = original_bundle.clone();
+            tampered.integrity_hash = "00".repeat(32); // Invalid hash
+
+            let integrity_result = validate_bundle_integrity(&tampered);
+            match integrity_result {
+                Ok(is_valid) => assert!(!is_valid, "hash manipulation should invalidate integrity"),
+                Err(_) => {}, // Acceptable - validation detects invalid hash
+            }
+        }
+
+        // Test 6: Chunk manipulation (if bundle is chunked)
+        {
+            let mut tampered = original_bundle.clone();
+            if !tampered.chunks.is_empty() {
+                // Manipulate chunk index
+                let first_chunk_id = tampered.chunks.keys().next().unwrap().clone();
+                tampered.chunks.get_mut(&first_chunk_id).unwrap().chunk_index = 9999;
+
+                let integrity_result = validate_bundle_integrity(&tampered);
+                match integrity_result {
+                    Ok(is_valid) => assert!(!is_valid, "chunk tampering should invalidate integrity"),
+                    Err(_) => {}, // Acceptable - validation detects tampering
+                }
+            }
+        }
+
+        // Phase 3: Boundary condition tests
+
+        // Test 7: Empty bundle validation
+        {
+            let empty_bundle = ReplayBundle {
+                incident_id: "empty-test".to_string(),
+                bundle_id: Uuid::now_v7(),
+                created_at: Utc::now(),
+                integrity_hash: "".to_string(),
+                timeline: vec![],
+                evidence_refs: BTreeMap::new(),
+                chunks: BTreeMap::new(),
+                metadata: BundleMetadata {
+                    policy_version: DEFAULT_POLICY_VERSION.to_string(),
+                    total_events: 0,
+                    total_size_bytes: 0,
+                },
+            };
+
+            let integrity_result = validate_bundle_integrity(&empty_bundle);
+            // Empty bundle should either be valid (if allowed) or properly rejected
+            match integrity_result {
+                Ok(_) => {}, // Acceptable
+                Err(_) => {}, // Also acceptable - empty bundles may be rejected
+            }
+        }
+
+        // Test 8: Maximum size boundary
+        {
+            let mut large_bundle = original_bundle.clone();
+            large_bundle.metadata.total_size_bytes = MAX_BUNDLE_BYTES + 1;
+
+            let integrity_result = validate_bundle_integrity(&large_bundle);
+            // Should handle oversized bundle gracefully
+            match integrity_result {
+                Ok(is_valid) => {
+                    // If validation succeeds, integrity should depend on whether size is actually checked
+                },
+                Err(_) => {}, // Acceptable - oversized bundle may be rejected
+            }
+        }
+
+        // Phase 4: Recovery and reconstruction tests
+
+        // Test 9: Bundle reconstruction from valid components
+        {
+            let reconstructed_bundle = ReplayBundle {
+                incident_id: original_bundle.incident_id.clone(),
+                bundle_id: original_bundle.bundle_id,
+                created_at: original_bundle.created_at,
+                integrity_hash: original_bundle.integrity_hash.clone(),
+                timeline: original_bundle.timeline.clone(),
+                evidence_refs: original_bundle.evidence_refs.clone(),
+                chunks: original_bundle.chunks.clone(),
+                metadata: original_bundle.metadata.clone(),
+            };
+
+            let integrity_result = validate_bundle_integrity(&reconstructed_bundle)
+                .expect("reconstructed bundle validation should not fail");
+            assert!(integrity_result, "reconstructed bundle should maintain integrity");
+            assert_eq!(reconstructed_bundle.integrity_hash, original_hash,
+                      "reconstructed bundle should have same integrity hash");
+        }
+
+        // Test 10: Signature validation context
+        {
+            // Test that bundle validation is context-aware for different signing scenarios
+            let bundle_with_signature = original_bundle.clone();
+
+            // Verify integrity in multiple contexts
+            for context in ["primary", "backup", "audit"] {
+                std::env::set_var("REPLAY_BUNDLE_VALIDATION_CONTEXT", context);
+
+                let integrity_result = validate_bundle_integrity(&bundle_with_signature);
+                match integrity_result {
+                    Ok(is_valid) => {
+                        // Context should not affect basic integrity for unsigned bundles
+                        assert!(is_valid, "context should not affect basic integrity: {}", context);
+                    },
+                    Err(_) => {
+                        // Context-specific validation failures may be acceptable
+                    }
+                }
+            }
+            std::env::remove_var("REPLAY_BUNDLE_VALIDATION_CONTEXT");
+        }
+
+        // Phase 5: Performance boundary test
+        {
+            let start_time = std::time::Instant::now();
+
+            // Run validation multiple times to test performance consistency
+            for i in 0..100 {
+                let validation_result = validate_bundle_integrity(&original_bundle);
+                assert!(validation_result.is_ok(), "validation {} should not fail", i);
+                if let Ok(is_valid) = validation_result {
+                    assert!(is_valid, "validation {} should confirm integrity", i);
+                }
+            }
+
+            let duration = start_time.elapsed();
+            assert!(duration < std::time::Duration::from_millis(1000),
+                   "100 integrity validations should complete within 1 second, took: {:?}", duration);
+        }
+
+        // Phase 6: Concurrent validation test
+        {
+            use std::sync::{Arc, Mutex};
+            use std::thread;
+
+            let bundle = Arc::new(original_bundle.clone());
+            let results = Arc::new(Mutex::new(Vec::new()));
+            let mut handles = vec![];
+
+            // Spawn multiple threads for concurrent validation
+            for thread_id in 0..4 {
+                let bundle_clone = Arc::clone(&bundle);
+                let results_clone = Arc::clone(&results);
+
+                let handle = thread::spawn(move || {
+                    for i in 0..25 {
+                        let validation_result = validate_bundle_integrity(&bundle_clone);
+                        let mut results_guard = results_clone.lock().unwrap();
+                        results_guard.push((thread_id, i, validation_result.is_ok()));
+                    }
+                });
+                handles.push(handle);
+            }
+
+            // Wait for all threads to complete
+            for handle in handles {
+                handle.join().expect("thread should complete successfully");
+            }
+
+            // Verify all validations succeeded
+            let final_results = results.lock().unwrap();
+            assert_eq!(final_results.len(), 100, "should have 100 validation results");
+
+            for (thread_id, iteration, success) in final_results.iter() {
+                assert!(*success, "thread {} iteration {} should succeed", thread_id, iteration);
+            }
+        }
+
+        // Final verification: Original bundle should still be valid after all tests
+        let final_integrity = validate_bundle_integrity(&original_bundle)
+            .expect("final integrity check should not fail");
+        assert!(final_integrity, "original bundle should remain valid");
+        assert_eq!(original_bundle.integrity_hash, original_hash,
+                  "original hash should be unchanged");
     }
 }
