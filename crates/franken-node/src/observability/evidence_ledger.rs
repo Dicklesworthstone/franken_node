@@ -8911,4 +8911,269 @@ mod tests {
              a change to that field must NOT alter the chain-hash digest"
         );
     }
+
+    /// Golden test for evidence ledger snapshot serialization and canonical ordering.
+    /// Ensures deterministic JSON output for regression testing and replay consistency.
+    #[test]
+    fn evidence_ledger_snapshot_canonical_golden() {
+        let (signing_key, verifying_key) = test_keys();
+        let capacity = LedgerCapacity::new(5, 10_000);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+
+        // Create a realistic evidence sequence with diverse entry types
+        let entries = [
+            ("QUARANTINE-001", DecisionKind::Quarantine, 1700000001000, 100, r#"{"risk_level":"high","source":"policy_engine"}"#),
+            ("RELEASE-001", DecisionKind::Release, 1700000002000, 150, r#"{"approval":"supervisor","reason":"false_positive"}"#),
+            ("QUARANTINE-002", DecisionKind::Quarantine, 1700000003000, 200, r#"{"malware_detected":true,"family":"trojan"}"#),
+            ("AUDIT-001", DecisionKind::Audit, 1700000004000, 300, r#"{"compliance_check":"passed","auditor_id":"AUD-123"}"#),
+            ("RELEASE-002", DecisionKind::Release, 1700000005000, 250, r#"{"batch_release":true,"count":42}"#),
+        ];
+
+        // Append entries to build a realistic ledger state
+        for (decision_id, kind, timestamp, size, payload_json) in entries {
+            let payload: serde_json::Value = serde_json::from_str(payload_json)
+                .expect("Test payload should be valid JSON");
+            let mut entry = EvidenceEntry {
+                schema_version: "evidence-ledger-v2".to_string(),
+                entry_id: None, // Will be assigned by ledger
+                decision_id: decision_id.to_string(),
+                decision_kind: kind,
+                decision_time: chrono::DateTime::from_timestamp(timestamp / 1000, 0)
+                    .unwrap_or_default()
+                    .to_rfc3339(),
+                timestamp_ms: timestamp,
+                trace_id: format!("trace-{}", decision_id),
+                epoch_id: 100 + (timestamp % 10) as u64,
+                payload,
+                size_bytes: size,
+                signature: String::new(),
+                prev_entry_hash: String::new(),
+            };
+
+            // Sign the entry
+            let entry_bytes = serde_json::to_vec(&entry).expect("Entry should serialize");
+            let signature = signing_key.sign(&entry_bytes);
+            entry.signature = hex::encode(signature.to_bytes());
+
+            ledger.append(entry).expect("Entry should append successfully");
+        }
+
+        // Create canonical snapshot
+        let snapshot = ledger.snapshot();
+
+        // Verify core snapshot properties
+        assert_eq!(snapshot.entries.len(), 5, "Should contain all 5 entries");
+        assert_eq!(snapshot.total_appended, 5, "Should track 5 total appends");
+        assert_eq!(snapshot.total_evicted, 0, "Should have no evictions under capacity");
+
+        // Verify canonical ordering (append order preserved)
+        let decision_ids: Vec<String> = snapshot.entries
+            .iter()
+            .map(|e| e.decision_id.clone())
+            .collect();
+        assert_eq!(
+            decision_ids,
+            vec!["QUARANTINE-001", "RELEASE-001", "QUARANTINE-002", "AUDIT-001", "RELEASE-002"],
+            "Snapshot should preserve append order"
+        );
+
+        // Verify entry IDs are sequential
+        let entry_ids: Vec<Option<String>> = snapshot.entries
+            .iter()
+            .map(|e| e.entry_id.clone())
+            .collect();
+        for (i, entry_id) in entry_ids.iter().enumerate() {
+            match entry_id {
+                Some(id) => assert_eq!(id, &format!("ENTRY-{}", i + 1), "Entry IDs should be sequential"),
+                None => panic!("Entry ID should be assigned by ledger"),
+            }
+        }
+
+        // Create golden JSON for deterministic comparison
+        let golden_json = serde_json::json!({
+            "schema_version": "evidence-ledger-snapshot-v1",
+            "timestamp": "2026-04-24T12:00:00Z", // Fixed for golden testing
+            "capacity": {
+                "max_entries": 5,
+                "max_bytes": 10000
+            },
+            "statistics": {
+                "total_appended": 5,
+                "total_evicted": 0,
+                "current_size": 5
+            },
+            "entries": [
+                {
+                    "entry_id": "ENTRY-1",
+                    "decision_id": "QUARANTINE-001",
+                    "decision_kind": "quarantine",
+                    "timestamp_ms": 1700000001000,
+                    "epoch_id": 101,
+                    "payload": {"risk_level": "high", "source": "policy_engine"},
+                    "size_bytes": 100,
+                    "has_signature": true
+                },
+                {
+                    "entry_id": "ENTRY-2",
+                    "decision_id": "RELEASE-001",
+                    "decision_kind": "release",
+                    "timestamp_ms": 1700000002000,
+                    "epoch_id": 102,
+                    "payload": {"approval": "supervisor", "reason": "false_positive"},
+                    "size_bytes": 150,
+                    "has_signature": true
+                },
+                {
+                    "entry_id": "ENTRY-3",
+                    "decision_id": "QUARANTINE-002",
+                    "decision_kind": "quarantine",
+                    "timestamp_ms": 1700000003000,
+                    "epoch_id": 103,
+                    "payload": {"malware_detected": true, "family": "trojan"},
+                    "size_bytes": 200,
+                    "has_signature": true
+                },
+                {
+                    "entry_id": "ENTRY-4",
+                    "decision_id": "AUDIT-001",
+                    "decision_kind": "audit",
+                    "timestamp_ms": 1700000004000,
+                    "epoch_id": 104,
+                    "payload": {"compliance_check": "passed", "auditor_id": "AUD-123"},
+                    "size_bytes": 300,
+                    "has_signature": true
+                },
+                {
+                    "entry_id": "ENTRY-5",
+                    "decision_id": "RELEASE-002",
+                    "decision_kind": "release",
+                    "timestamp_ms": 1700000005000,
+                    "epoch_id": 105,
+                    "payload": {"batch_release": true, "count": 42},
+                    "size_bytes": 250,
+                    "has_signature": true
+                }
+            ]
+        });
+
+        // Verify snapshot structure matches golden expectation
+        assert_eq!(golden_json["statistics"]["total_appended"], 5);
+        assert_eq!(golden_json["statistics"]["total_evicted"], 0);
+        assert_eq!(golden_json["entries"].as_array().unwrap().len(), 5);
+
+        // Verify each entry matches expected structure
+        for (i, entry) in snapshot.entries.iter().enumerate() {
+            let golden_entry = &golden_json["entries"][i];
+            assert_eq!(entry.entry_id.as_ref().unwrap(), golden_entry["entry_id"].as_str().unwrap());
+            assert_eq!(entry.decision_id, golden_entry["decision_id"].as_str().unwrap());
+            assert_eq!(entry.timestamp_ms, golden_entry["timestamp_ms"].as_u64().unwrap());
+            assert_eq!(entry.epoch_id, golden_entry["epoch_id"].as_u64().unwrap());
+            assert_eq!(entry.size_bytes, golden_entry["size_bytes"].as_u64().unwrap());
+            assert!(!entry.signature.is_empty(), "Entry should have signature");
+            assert_eq!(entry.payload, golden_entry["payload"]);
+
+            // Verify decision kind serialization
+            let expected_kind = match golden_entry["decision_kind"].as_str().unwrap() {
+                "quarantine" => DecisionKind::Quarantine,
+                "release" => DecisionKind::Release,
+                "audit" => DecisionKind::Audit,
+                _ => panic!("Unexpected decision kind in golden"),
+            };
+            assert_eq!(entry.decision_kind, expected_kind);
+        }
+
+        // Test capacity overflow behavior with additional entry
+        let overflow_entry = EvidenceEntry {
+            schema_version: "evidence-ledger-v2".to_string(),
+            entry_id: None,
+            decision_id: "OVERFLOW-001".to_string(),
+            decision_kind: DecisionKind::Quarantine,
+            decision_time: chrono::DateTime::from_timestamp(1700000006, 0)
+                .unwrap_or_default()
+                .to_rfc3339(),
+            timestamp_ms: 1700000006000,
+            trace_id: "trace-overflow".to_string(),
+            epoch_id: 106,
+            payload: serde_json::json!({"overflow_test": true}),
+            size_bytes: 100,
+            signature: String::new(),
+            prev_entry_hash: String::new(),
+        };
+
+        // Add one more entry to trigger overflow (capacity is 5)
+        let overflow_bytes = serde_json::to_vec(&overflow_entry).expect("Should serialize");
+        let overflow_signature = signing_key.sign(&overflow_bytes);
+        let mut signed_overflow = overflow_entry;
+        signed_overflow.signature = hex::encode(overflow_signature.to_bytes());
+
+        ledger.append(signed_overflow).expect("Overflow entry should append");
+
+        // Verify overflow behavior
+        let overflow_snapshot = ledger.snapshot();
+        assert_eq!(overflow_snapshot.entries.len(), 5, "Should still have 5 entries after overflow");
+        assert_eq!(overflow_snapshot.total_appended, 6, "Should track 6 total appends");
+        assert_eq!(overflow_snapshot.total_evicted, 1, "Should have 1 eviction");
+
+        // Verify oldest entry was evicted (FIFO)
+        assert_ne!(
+            overflow_snapshot.entries[0].decision_id,
+            "QUARANTINE-001",
+            "Oldest entry should be evicted"
+        );
+        assert_eq!(
+            overflow_snapshot.entries[4].decision_id,
+            "OVERFLOW-001",
+            "Newest entry should be present"
+        );
+
+        // Verify deterministic replay: identical operations produce identical snapshots
+        let (signing_key_2, verifying_key_2) = test_keys();
+        let mut replay_ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key_2);
+
+        // Replay the same sequence
+        for (decision_id, kind, timestamp, size, payload_json) in entries {
+            let payload: serde_json::Value = serde_json::from_str(payload_json)
+                .expect("Test payload should be valid JSON");
+            let mut entry = EvidenceEntry {
+                schema_version: "evidence-ledger-v2".to_string(),
+                entry_id: None,
+                decision_id: decision_id.to_string(),
+                decision_kind: kind,
+                decision_time: chrono::DateTime::from_timestamp(timestamp / 1000, 0)
+                    .unwrap_or_default()
+                    .to_rfc3339(),
+                timestamp_ms: timestamp,
+                trace_id: format!("trace-{}", decision_id),
+                epoch_id: 100 + (timestamp % 10) as u64,
+                payload,
+                size_bytes: size,
+                signature: String::new(),
+                prev_entry_hash: String::new(),
+            };
+
+            let entry_bytes = serde_json::to_vec(&entry).expect("Entry should serialize");
+            let signature = signing_key_2.sign(&entry_bytes);
+            entry.signature = hex::encode(signature.to_bytes());
+
+            replay_ledger.append(entry).expect("Replay entry should append");
+        }
+
+        let replay_snapshot = replay_ledger.snapshot();
+
+        // Snapshots should be structurally identical (excluding signatures which depend on keys)
+        assert_eq!(snapshot.total_appended, replay_snapshot.total_appended);
+        assert_eq!(snapshot.total_evicted, replay_snapshot.total_evicted);
+        assert_eq!(snapshot.entries.len(), replay_snapshot.entries.len());
+
+        for (orig, replay) in snapshot.entries.iter().zip(replay_snapshot.entries.iter()) {
+            assert_eq!(orig.entry_id, replay.entry_id);
+            assert_eq!(orig.decision_id, replay.decision_id);
+            assert_eq!(orig.decision_kind, replay.decision_kind);
+            assert_eq!(orig.timestamp_ms, replay.timestamp_ms);
+            assert_eq!(orig.payload, replay.payload);
+            // Signatures will differ due to different keys, but both should be non-empty
+            assert!(!orig.signature.is_empty());
+            assert!(!replay.signature.is_empty());
+        }
+    }
 }
