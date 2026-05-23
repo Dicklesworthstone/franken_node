@@ -508,6 +508,147 @@ mod tests {
     }
 
     #[test]
+    fn comprehensive_metric_snapshot_golden() {
+        // Comprehensive test creating a realistic metrics registry snapshot
+        // for golden artifact verification of metric serialization consistency
+        let mut registry = MetricsRegistry::new();
+
+        // System health metrics (typical operator metrics)
+        registry
+            .record_gauge(
+                "franken_node_health_status",
+                "Overall system health score (0-1)",
+                0.95,
+                &[("component", "runtime"), ("zone", "us-east-1")],
+            )
+            .expect("health metric");
+
+        registry
+            .record_counter(
+                "franken_node_requests_total",
+                "Total processed requests",
+                1_247_892.0,
+                &[("method", "POST"), ("endpoint", "/validate"), ("status", "200")],
+            )
+            .expect("request counter");
+
+        registry
+            .record_counter(
+                "franken_node_errors_total",
+                "Total error count",
+                42.0,
+                &[("type", "validation"), ("severity", "recoverable")],
+            )
+            .expect("error counter");
+
+        // Performance metrics with edge case values
+        registry
+            .record_gauge(
+                "franken_node_latency_p99_seconds",
+                "99th percentile latency in seconds",
+                0.00012,
+                &[("operation", "signature_verify"), ("cache", "hit")],
+            )
+            .expect("latency gauge");
+
+        registry
+            .record_gauge(
+                "franken_node_memory_usage_bytes",
+                "Current memory usage in bytes",
+                1_073_741_824.0,  // 1GB
+                &[("pool", "evidence_ledger"), ("region", "heap")],
+            )
+            .expect("memory gauge");
+
+        // Fleet quarantine metrics with special characters in labels
+        registry
+            .record_counter(
+                "franken_node_quarantine_events_total",
+                "Quarantine events triggered",
+                15.0,
+                &[("reason", "high_risk_code\"injection"), ("action", "block\\log")],
+            )
+            .expect("quarantine counter");
+
+        // Verify registry state
+        assert_eq!(registry.len(), 6, "Should have exactly 6 metrics recorded");
+        assert!(!registry.is_empty(), "Registry should not be empty");
+
+        // Create deterministic snapshot for comparison
+        let mut snapshot_entries = Vec::new();
+        for metric in registry.iter() {
+            let entry = serde_json::json!({
+                "name": metric.name(),
+                "help": metric.help(),
+                "kind": match metric.kind() {
+                    MetricKind::Counter => "counter",
+                    MetricKind::Gauge => "gauge",
+                },
+                "value": metric.value(),
+                "labels": metric.labels().iter().collect::<std::collections::BTreeMap<_, _>>(),
+            });
+            snapshot_entries.push(entry);
+        }
+
+        // Sort for deterministic output
+        snapshot_entries.sort_by_key(|entry| entry["name"].as_str().unwrap().to_string());
+
+        let golden_snapshot = serde_json::json!({
+            "version": "1.0",
+            "metrics_count": snapshot_entries.len(),
+            "snapshot_timestamp": "2026-05-22T20:00:00Z", // Fixed for golden testing
+            "metrics": snapshot_entries
+        });
+
+        // Verify key properties of the snapshot
+        assert_eq!(golden_snapshot["metrics_count"], 6);
+        assert_eq!(golden_snapshot["version"], "1.0");
+
+        // Verify specific metric entries exist with expected structure
+        let metrics = golden_snapshot["metrics"].as_array().unwrap();
+
+        // Health metric verification
+        let health_metric = metrics.iter().find(|m| m["name"] == "franken_node_health_status").unwrap();
+        assert_eq!(health_metric["kind"], "gauge");
+        assert_eq!(health_metric["value"], 0.95);
+        assert_eq!(health_metric["labels"]["component"], "runtime");
+
+        // Request counter verification
+        let request_metric = metrics.iter().find(|m| m["name"] == "franken_node_requests_total").unwrap();
+        assert_eq!(request_metric["kind"], "counter");
+        assert_eq!(request_metric["value"], 1247892.0);
+        assert_eq!(request_metric["labels"]["endpoint"], "/validate");
+
+        // Error handling for special characters
+        let quarantine_metric = metrics.iter().find(|m| m["name"] == "franken_node_quarantine_events_total").unwrap();
+        assert_eq!(quarantine_metric["labels"]["reason"], "high_risk_code\"injection");
+        assert_eq!(quarantine_metric["labels"]["action"], "block\\log");
+
+        // Verify Prometheus output contains all metrics
+        let prometheus_output = registry.render_prometheus();
+        assert!(prometheus_output.contains("franken_node_health_status"));
+        assert!(prometheus_output.contains("franken_node_requests_total"));
+        assert!(prometheus_output.contains("franken_node_quarantine_events_total"));
+        assert!(prometheus_output.contains("component=\"runtime\""));
+        assert!(prometheus_output.contains("high_risk_code\\\"injection"));
+
+        // Validate metric count bounds (DoS protection verification)
+        assert!(registry.len() <= super::MAX_METRICS_PER_REGISTRY, "Should respect capacity bounds");
+
+        // Verify against golden artifact for regression testing
+        let expected_json = include_str!("../../../../tests/golden/observability_metrics_comprehensive_snapshot.json");
+        let expected: serde_json::Value = serde_json::from_str(expected_json)
+            .expect("Golden artifact should be valid JSON");
+
+        // Compare structural elements
+        assert_eq!(golden_snapshot["version"], expected["version"]);
+        assert_eq!(golden_snapshot["metrics_count"], expected["metrics_count"]);
+        assert_eq!(golden_snapshot["snapshot_timestamp"], expected["snapshot_timestamp"]);
+        assert_eq!(golden_snapshot["metrics"], expected["metrics"],
+            "Metric snapshot should match golden artifact");
+    }
+
+    #[test]
     fn render_prometheus_frozen_canonical_byte_layout_golden() {
         // Pin the canonical Prometheus output format to catch:
         // 1. Changes to HELP/TYPE line formatting or metric ordering

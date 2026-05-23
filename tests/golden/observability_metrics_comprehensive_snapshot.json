@@ -1,0 +1,68 @@
+{
+  "version": "1.0",
+  "metrics_count": 6,
+  "snapshot_timestamp": "2026-05-22T20:00:00Z",
+  "metrics": [
+    {
+      "name": "franken_node_errors_total",
+      "help": "Total error count",
+      "kind": "counter",
+      "value": 42.0,
+      "labels": {
+        "severity": "recoverable",
+        "type": "validation"
+      }
+    },
+    {
+      "name": "franken_node_health_status",
+      "help": "Overall system health score (0-1)",
+      "kind": "gauge",
+      "value": 0.95,
+      "labels": {
+        "component": "runtime",
+        "zone": "us-east-1"
+      }
+    },
+    {
+      "name": "franken_node_latency_p99_seconds",
+      "help": "99th percentile latency in seconds",
+      "kind": "gauge",
+      "value": 0.00012,
+      "labels": {
+        "cache": "hit",
+        "operation": "signature_verify"
+      }
+    },
+    {
+      "name": "franken_node_memory_usage_bytes",
+      "help": "Current memory usage in bytes",
+      "kind": "gauge",
+      "value": 1073741824.0,
+      "labels": {
+        "pool": "evidence_ledger",
+        "region": "heap"
+      }
+    },
+    {
+      "name": "franken_node_quarantine_events_total",
+      "help": "Quarantine events triggered",
+      "kind": "counter",
+      "value": 15.0,
+      "labels": {
+        "action": "block\\log",
+        "reason": "high_risk_code\"injection"
+      }
+    },
+    {
+      "name": "franken_node_requests_total",
+      "help": "Total processed requests",
+      "kind": "counter",
+      "value": 1247892.0,
+      "labels": {
+        "endpoint": "/validate",
+        "method": "POST",
+        "status": "200"
+      }
+    }
+  ]
+}
