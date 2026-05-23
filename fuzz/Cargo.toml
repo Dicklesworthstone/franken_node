@@ -793,3 +793,9 @@ name = "fuzz_mmr_hash_hex_decoder"
 path = "fuzz_targets/fuzz_mmr_hash_hex_decoder.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_federation_signal_kind_parser"
+path = "fuzz_targets/fuzz_federation_signal_kind_parser.rs"
+test = false
+doc = false
