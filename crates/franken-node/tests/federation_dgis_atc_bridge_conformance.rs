@@ -1,7 +1,10 @@
+use frankenengine_node::federation::atc_reciprocity::{
+    AccessTier, ContributionMetrics, ReciprocityEngine,
+};
 use frankenengine_node::federation::dgis_atc_bridge::{
+    DgisAtcBridgeError, DgisAtcPrivacyPolicy, DgisTopologyIndicatorInput,
     consume_federated_cascade_prior, derive_federated_cascade_prior, export_topology_indicators,
-    invariants, region_hash_for, window_hash_for, DgisAtcBridgeError, DgisAtcPrivacyPolicy,
-    DgisTopologyIndicatorInput,
+    invariants, region_hash_for, window_hash_for,
 };
 use frankenengine_node::security::dgis::update_copilot::TopologyRiskMetrics;
 
@@ -55,6 +58,19 @@ fn conformance_policy() -> DgisAtcPrivacyPolicy {
     }
 }
 
+fn excepted_metrics(exception_expires_at: &str) -> ContributionMetrics {
+    ContributionMetrics {
+        participant_id: "exc-shift".to_string(),
+        contributions_made: 0,
+        intelligence_consumed: 100,
+        contribution_quality: 0.0,
+        membership_age_seconds: 86400 * 90,
+        has_exception: true,
+        exception_reason: Some("approved research partner".to_string()),
+        exception_expires_at: Some(exception_expires_at.to_string()),
+    }
+}
+
 #[test]
 fn dgis_atc_export_redacts_raw_identifiers_and_preserves_contract_markers() {
     let raw_inputs = vec![
@@ -82,17 +98,23 @@ fn dgis_atc_export_redacts_raw_identifiers_and_preserves_contract_markers() {
     }
 
     assert_eq!(report.indicators.len(), raw_inputs.len());
-    assert!(report
-        .verifier_checks
-        .get("raw_dependency_graph_absent")
-        .copied()
-        .unwrap_or(false));
-    assert!(report
-        .invariant_markers
-        .contains(&invariants::INV_DGIS_ATC_NO_RAW_DEPENDENCY_LEAKAGE.to_string()));
-    assert!(report
-        .invariant_markers
-        .contains(&invariants::INV_DGIS_ATC_K_ANONYMITY.to_string()));
+    assert!(
+        report
+            .verifier_checks
+            .get("raw_dependency_graph_absent")
+            .copied()
+            .unwrap_or(false)
+    );
+    assert!(
+        report
+            .invariant_markers
+            .contains(&invariants::INV_DGIS_ATC_NO_RAW_DEPENDENCY_LEAKAGE.to_string())
+    );
+    assert!(
+        report
+            .invariant_markers
+            .contains(&invariants::INV_DGIS_ATC_K_ANONYMITY.to_string())
+    );
 }
 
 #[test]
@@ -120,6 +142,34 @@ fn dgis_atc_export_is_order_deterministic_and_fails_closed_below_k() {
             ..
         }
     ));
+}
+
+#[test]
+fn atc_exception_window_shift_preserves_access_decision() {
+    let base_metrics = excepted_metrics("2026-02-21T00:00:00Z");
+    let shifted_metrics = excepted_metrics("2026-02-22T00:00:00Z");
+
+    let mut base_engine = ReciprocityEngine::default();
+    let base_decision = base_engine.evaluate_access(&base_metrics, "2026-02-20T00:00:00Z");
+
+    let mut shifted_engine = ReciprocityEngine::default();
+    let shifted_decision = shifted_engine.evaluate_access(&shifted_metrics, "2026-02-21T00:00:00Z");
+
+    assert!(base_decision.exception_applied);
+    assert_eq!(base_decision, shifted_decision);
+    assert_eq!(base_decision.tier, AccessTier::Standard);
+    assert_eq!(
+        base_engine.audit_log()[0].event_code,
+        shifted_engine.audit_log()[0].event_code
+    );
+    assert_eq!(
+        base_engine.audit_log()[0].content_hash,
+        shifted_engine.audit_log()[0].content_hash
+    );
+    assert_ne!(
+        base_engine.audit_log()[0].timestamp,
+        shifted_engine.audit_log()[0].timestamp
+    );
 }
 
 #[test]
