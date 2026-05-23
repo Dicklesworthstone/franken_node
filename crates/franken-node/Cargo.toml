@@ -469,6 +469,11 @@ path = "../../tests/conformance/bd_3v9p_deterministic_seed_encoding_conformance.
 required-features = ["advanced-features"]
 
 [[test]]
+name = "bd_5k7w_sybil_defense_conformance"
+path = "../../tests/conformance/bd_5k7w_sybil_defense_conformance.rs"
+required-features = ["advanced-features"]
+
+[[test]]
 name = "fastapi_rust_control_plane_integration"
 path = "tests/fastapi_rust_control_plane_integration.rs"
 required-features = ["test-support"]
