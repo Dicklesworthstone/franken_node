@@ -34,6 +34,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use frankenengine_node::dgis::fragility_model::{
+    FragilityFactor, PublisherProfile, assess_publisher,
+};
 use frankenengine_node::dgis::fragility_fixtures::{
     ExpectedFinding, FixtureVerdict, FragilityFixture, SpofKindLabel, evaluate_fixture,
     load_fixture_from_json, synthesize_active_maintainers_recent_commits,
@@ -287,6 +290,41 @@ fn test_multi_quorum_publishers_is_robust() -> TestResult {
     );
     let verdict = evaluate_fixture_named("multi_quorum_publishers", &fixture)?;
     assert_robust(&verdict);
+    Ok(())
+}
+
+fn publisher_has_no_quorum_factor(quorum: Option<u8>, now: i64) -> Result<bool, String> {
+    let publisher = PublisherProfile {
+        id: "boundary-publisher".to_string(),
+        org_id: Some("boundary-org".to_string()),
+        packages_published: vec!["boundary-pkg".to_string()],
+        signature_keys_count: 3,
+        key_rotation_policy: Some("rotate-90d".to_string()),
+        recovery_quorum: quorum,
+    };
+    let score = assess_publisher(&publisher, now)
+        .map_err(|err| format!("assess boundary quorum {quorum:?}: {err:?}"))?;
+    Ok(score.factors.contains(&FragilityFactor::NoQuorum))
+}
+
+#[test]
+fn test_publisher_quorum_boundary_requires_two_or_more_signers() -> TestResult {
+    let now = 1_800_000_000;
+
+    for quorum in [None, Some(0), Some(1)] {
+        assert!(
+            publisher_has_no_quorum_factor(quorum, now)?,
+            "quorum {quorum:?} must be treated as no_quorum"
+        );
+    }
+
+    for quorum in [Some(2), Some(3), Some(u8::MAX)] {
+        assert!(
+            !publisher_has_no_quorum_factor(quorum, now)?,
+            "quorum {quorum:?} must satisfy recovery quorum boundary"
+        );
+    }
+
     Ok(())
 }
 
