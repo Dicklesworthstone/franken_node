@@ -3077,6 +3077,87 @@ mod tests {
     }
 
     #[test]
+    fn remote_cap_renewal_shifts_validity_window_without_broadening_scope() {
+        let provider = CapabilityProvider::new("secret-a").expect("valid provider");
+        let base_now = 1_700_000_000;
+        let ttl_secs = 60;
+        let renewal_delta = 120;
+        let (original, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                base_now,
+                ttl_secs,
+                true,
+                false,
+                "trace-renewal-original",
+            )
+            .expect("issue original token");
+        let (renewed, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                base_now + renewal_delta,
+                ttl_secs,
+                true,
+                false,
+                "trace-renewal-renewed",
+            )
+            .expect("issue renewed token");
+
+        assert_ne!(original.token_id(), renewed.token_id());
+        assert_eq!(
+            renewed.issued_at_epoch_secs() - original.issued_at_epoch_secs(),
+            renewal_delta
+        );
+        assert_eq!(
+            renewed.expires_at_epoch_secs() - original.expires_at_epoch_secs(),
+            renewal_delta
+        );
+        assert_eq!(
+            renewed.expires_at_epoch_secs() - renewed.issued_at_epoch_secs(),
+            original.expires_at_epoch_secs() - original.issued_at_epoch_secs()
+        );
+        assert_eq!(original.scope(), renewed.scope());
+        assert_eq!(original.is_single_use(), renewed.is_single_use());
+
+        let mut old_gate = CapabilityGate::new("secret-a").expect("valid gate");
+        let expired = old_gate
+            .authorize_network(
+                Some(&original),
+                RemoteOperation::FederationSync,
+                "https://federation.example.com/sync",
+                base_now + renewal_delta,
+                "trace-renewal-expired-original",
+            )
+            .expect_err("renewal time must not extend the original token");
+        assert_eq!(expired.code(), "REMOTECAP_EXPIRED");
+
+        let mut renewed_gate = CapabilityGate::new("secret-a").expect("valid gate");
+        renewed_gate
+            .authorize_network(
+                Some(&renewed),
+                RemoteOperation::FederationSync,
+                "https://federation.example.com/sync",
+                base_now + renewal_delta,
+                "trace-renewal-valid-renewed",
+            )
+            .expect("renewed token should authorize inside shifted window");
+
+        let mut scope_gate = CapabilityGate::new("secret-a").expect("valid gate");
+        let denied = scope_gate
+            .authorize_network(
+                Some(&renewed),
+                RemoteOperation::RemoteComputation,
+                "https://federation.example.com/sync",
+                base_now + renewal_delta,
+                "trace-renewal-no-scope-broadening",
+            )
+            .expect_err("renewal must preserve the original operation scope");
+        assert_eq!(denied.code(), "REMOTECAP_SCOPE_DENIED");
+    }
+
+    #[test]
     fn invalid_signature_is_denied() {
         let provider = CapabilityProvider::new("secret-a").expect("valid provider");
         let (mut cap, _) = provider

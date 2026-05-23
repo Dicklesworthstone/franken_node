@@ -435,6 +435,11 @@ path = "../../tests/conformance/performance_hardening_metrics_conformance.rs"
 required-features = ["advanced-features"]
 
 [[test]]
+name = "vef_perf_budget_gate_conformance"
+path = "../../tests/conformance/vef_perf_budget_gate_conformance.rs"
+required-features = ["advanced-features"]
+
+[[test]]
 name = "fastapi_rust_control_plane_integration"
 path = "tests/fastapi_rust_control_plane_integration.rs"
 required-features = ["test-support"]
@@ -761,6 +766,11 @@ required-features = ["test-support"]
 [[test]]
 name = "vef_receipt_schema_conformance"
 path = "tests/vef_receipt_schema_conformance.rs"
+
+[[test]]
+name = "vef_degraded_mode_metamorphic"
+path = "tests/vef_degraded_mode_metamorphic.rs"
+harness = false
 
 [[test]]
 name = "vef_policy_constraint_compiler"
