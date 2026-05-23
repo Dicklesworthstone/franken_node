@@ -802,19 +802,8 @@ mod tests {
         assert_eq!(proposal.target_epoch, 101);
 
         for service_id in ack_order {
-            let (drained_items, elapsed_ms) = match *service_id {
-                "svc-a" => (1, 5),
-                "svc-b" => (2, 7),
-                "svc-c" => (3, 11),
-                other => panic!("unknown test service {other}"),
-            };
             coordinator
-                .ack_drain(
-                    service_id,
-                    drained_items,
-                    elapsed_ms,
-                    &format!("trace-ack-{service_id}"),
-                )
+                .ack_drain(service_id, 1, 5, &format!("trace-ack-{service_id}"))
                 .expect("drain ack succeeds");
         }
 
