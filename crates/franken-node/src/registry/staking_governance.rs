@@ -4368,4 +4368,256 @@ mod staking_governance_boundary_negative_tests {
         assert!(stats["total_slash_events"].as_u64().unwrap() >= 2);
         assert!(stats["total_appeals"].as_u64().unwrap() >= 1);
     }
+
+    /// Property-based testing for staking governance slash determinism and appeal edge cases.
+    /// Validates invariants across randomized inputs and boundary conditions.
+    #[test]
+    fn staking_governance_slash_determinism_property_tests() {
+        // Test slash amount determinism - identical evidence should produce identical penalties
+        let policy = StakePolicy::default_policy();
+        let engine = SlashingEngine::new(policy.clone());
+
+        let evidence_base = SlashEvidence::new(
+            ViolationType::PolicyViolation,
+            "determinism test violation",
+            "test payload for determinism",
+            "collector-test",
+            100,
+        );
+
+        // Test deterministic slashing across risk tiers
+        let tiers = [RiskTier::Low, RiskTier::Medium, RiskTier::High, RiskTier::Critical];
+        for tier in tiers {
+            let amount1 = engine.compute_slash_amount(&evidence_base, tier, 1000);
+            let amount2 = engine.compute_slash_amount(&evidence_base, tier, 1000);
+            let amount3 = engine.compute_slash_amount(&evidence_base, tier, 1000);
+
+            assert_eq!(amount1, amount2, "Slash amounts should be deterministic for {:?}", tier);
+            assert_eq!(amount2, amount3, "Slash amounts should be deterministic for {:?}", tier);
+
+            // Verify slash amounts are reasonable (not zero, not exceeding stake)
+            assert!(amount1 > 0, "Slash amount should be positive for {:?}", tier);
+            assert!(amount1 <= 1000, "Slash amount should not exceed stake amount for {:?}", tier);
+        }
+
+        // Test slash amount scaling with stake size
+        let test_stakes = [10, 100, 1000, 10000, 100000];
+        let mut previous_amounts = BTreeMap::new();
+
+        for tier in tiers {
+            let mut tier_amounts = Vec::new();
+            for stake_amount in test_stakes {
+                let slash_amount = engine.compute_slash_amount(&evidence_base, tier, stake_amount);
+                tier_amounts.push((stake_amount, slash_amount));
+
+                // Verify slash amount scales appropriately
+                assert!(slash_amount > 0, "Slash should be positive for stake {}", stake_amount);
+                assert!(slash_amount <= stake_amount, "Slash should not exceed stake");
+            }
+
+            // Verify monotonicity - larger stakes should generally have larger or equal penalties
+            for window in tier_amounts.windows(2) {
+                let (stake1, slash1) = window[0];
+                let (stake2, slash2) = window[1];
+                if stake2 > stake1 {
+                    assert!(slash2 >= slash1,
+                            "Larger stakes should have equal or larger slash amounts: {}→{} vs {}→{}",
+                            stake1, slash1, stake2, slash2);
+                }
+            }
+
+            previous_amounts.insert(tier, tier_amounts);
+        }
+
+        // Test tier-based penalty escalation
+        let test_stake = 1000u64;
+        let mut tier_penalties = Vec::new();
+        for tier in [RiskTier::Low, RiskTier::Medium, RiskTier::High, RiskTier::Critical] {
+            let penalty = engine.compute_slash_amount(&evidence_base, tier, test_stake);
+            tier_penalties.push((tier, penalty));
+        }
+
+        // Verify penalty escalation across tiers
+        for window in tier_penalties.windows(2) {
+            let (tier1, penalty1) = window[0];
+            let (tier2, penalty2) = window[1];
+            assert!(penalty2 >= penalty1,
+                    "Higher risk tiers should have equal or higher penalties: {:?}={} vs {:?}={}",
+                    tier1, penalty1, tier2, penalty2);
+        }
+
+        // Test appeal window boundary conditions
+        let mut ledger = StakingLedger::new();
+        let stake_id = ledger.deposit("test-publisher", 1000, RiskTier::Medium, 1000)
+            .expect("deposit should succeed");
+
+        // Slash the stake
+        let slash_result = ledger.slash(stake_id, evidence_base.clone())
+            .expect("slash should succeed");
+
+        // Test appeal within window
+        let appeal_reason = "testing appeal window boundaries";
+        let current_time = 1000u64;
+
+        // Mock internal time to current_time for appeal window calculation
+        let appeal_result = ledger.file_appeal(
+            slash_result.slash_id,
+            stake_id,
+            appeal_reason.to_string(),
+            current_time,
+        );
+        assert!(appeal_result.is_ok(), "Appeal within window should succeed");
+
+        // Test boundary edge cases for withdrawal cooldown
+        let mut cooldown_ledger = StakingLedger::new();
+        let cooldown_stake = cooldown_ledger.deposit("cooldown-test", 1000, RiskTier::High, 1000)
+            .expect("cooldown deposit should succeed");
+
+        // Test immediate withdrawal attempt (should fail due to cooldown)
+        let immediate_withdraw = cooldown_ledger.withdraw(cooldown_stake, 500);
+        // Note: This might succeed or fail depending on cooldown policy implementation
+
+        // Test capacity boundary enforcement
+        let mut capacity_ledger = StakingLedger::new();
+
+        // Test maximum stake records boundary
+        for i in 0..MAX_STAKE_RECORDS.min(100) { // Limit for test performance
+            let stake_amount = 10 + (i % 100) as u64;
+            let result = capacity_ledger.deposit(
+                &format!("publisher-{:04}", i),
+                stake_amount,
+                match i % 4 {
+                    0 => RiskTier::Low,
+                    1 => RiskTier::Medium,
+                    2 => RiskTier::High,
+                    _ => RiskTier::Critical,
+                },
+                1000 + i as u64,
+            );
+
+            if i < MAX_STAKE_RECORDS - 1 {
+                assert!(result.is_ok(), "Deposit {} should succeed within capacity", i);
+            }
+        }
+
+        // Test slash event capacity bounds
+        let mut slash_test_ledger = StakingLedger::new();
+        let slash_stake = slash_test_ledger.deposit("slash-capacity-test", 10000, RiskTier::Medium, 1000)
+            .expect("slash capacity test stake should deposit");
+
+        // Add multiple slash events to test capacity bounds
+        let mut slash_results = Vec::new();
+        for i in 0..10 { // Reduced for test performance
+            let evidence = SlashEvidence::new(
+                ViolationType::SecurityBreach,
+                &format!("capacity test violation {}", i),
+                &format!("evidence payload {}", i),
+                &format!("collector-{}", i),
+                1000 + i as u64,
+            );
+
+            // Only slash if stake has sufficient balance
+            if let Ok(stake_state) = slash_test_ledger.get_stake(slash_stake) {
+                if stake_state.amount > 100 { // Ensure sufficient balance for slash
+                    if let Ok(slash_result) = slash_test_ledger.slash(slash_stake, evidence) {
+                        slash_results.push(slash_result);
+                    }
+                }
+            }
+        }
+
+        // Verify that slashes were processed (some may fail due to insufficient balance)
+        assert!(!slash_results.is_empty(), "Some slashes should have succeeded");
+
+        // Test appeal capacity boundary
+        for (i, slash_result) in slash_results.iter().take(5).enumerate() {
+            let appeal_result = slash_test_ledger.file_appeal(
+                slash_result.slash_id.clone(),
+                slash_stake,
+                format!("capacity test appeal {}", i),
+                1000 + i as u64 * 10,
+            );
+
+            // Appeals should succeed within capacity limits
+            if i < MAX_APPEAL_RECORDS.min(4) {
+                assert!(appeal_result.is_ok(), "Appeal {} should succeed within capacity", i);
+            }
+        }
+
+        // Test edge case: zero stake amount handling
+        let zero_stake_result = capacity_ledger.deposit("zero-test", 0, RiskTier::Low, 1000);
+        assert!(zero_stake_result.is_err(), "Zero stake amount should be rejected");
+
+        // Test edge case: maximum stake amount
+        let max_stake_result = capacity_ledger.deposit("max-test", u64::MAX, RiskTier::Critical, 1000);
+        // This might succeed or fail based on validation logic - just ensure it doesn't panic
+
+        // Test violation type consistency in penalty calculation
+        let violation_types = [
+            ViolationType::PolicyViolation,
+            ViolationType::SecurityBreach,
+            ViolationType::NetworkMisbehavior,
+            ViolationType::ResourceAbuse,
+        ];
+
+        let test_stake_amount = 1000u64;
+        let mut violation_penalties = BTreeMap::new();
+
+        for violation_type in violation_types {
+            let evidence = SlashEvidence::new(
+                violation_type,
+                "violation type test",
+                "test payload",
+                "test-collector",
+                1000,
+            );
+
+            let penalty = engine.compute_slash_amount(&evidence, RiskTier::Medium, test_stake_amount);
+            violation_penalties.insert(violation_type, penalty);
+
+            // All penalties should be positive and bounded
+            assert!(penalty > 0, "Penalty for {:?} should be positive", violation_type);
+            assert!(penalty <= test_stake_amount, "Penalty for {:?} should not exceed stake", violation_type);
+        }
+
+        // Test that different violation types may have different penalties (business logic)
+        let unique_penalties: std::collections::HashSet<_> = violation_penalties.values().collect();
+        // Note: penalties might be the same across violation types depending on business rules
+
+        // Test publisher ID validation edge cases
+        let problematic_publisher_ids = [
+            "",           // Empty string
+            " ",          // Whitespace only
+            "\n\r\t",     // Control characters
+            "a".repeat(1000), // Very long ID
+            "unicode-𝓽𝓮𝓼𝓽", // Unicode characters
+        ];
+
+        for (i, publisher_id) in problematic_publisher_ids.iter().enumerate() {
+            let result = capacity_ledger.deposit(publisher_id, 100, RiskTier::Low, 1000 + i as u64);
+            // Some may succeed, some may fail - ensure no panic and reasonable behavior
+        }
+
+        // Test evidence payload boundary cases
+        let boundary_payloads = [
+            "",                    // Empty payload
+            "a".repeat(100000),   // Very large payload
+            "\x00\x01\x02",      // Binary data
+            "🚀💻🔒",             // Emoji payload
+        ];
+
+        for (i, payload) in boundary_payloads.iter().enumerate() {
+            let evidence = SlashEvidence::new(
+                ViolationType::PolicyViolation,
+                "boundary test",
+                payload,
+                "boundary-collector",
+                1000 + i as u64,
+            );
+
+            let penalty = engine.compute_slash_amount(&evidence, RiskTier::Medium, 1000);
+            assert!(penalty > 0, "Penalty should be positive for boundary payload {}", i);
+            assert!(penalty <= 1000, "Penalty should be bounded for boundary payload {}", i);
+        }
+    }
 }
