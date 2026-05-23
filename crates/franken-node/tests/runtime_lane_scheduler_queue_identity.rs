@@ -244,6 +244,13 @@ struct AuditCapacityLifecycleDigest {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct TimestampShiftLifecycleDigest {
+    state: QueueStateDigest,
+    normalized_last_completion_ms: Option<u64>,
+    normalized_audit_records: Vec<(String, String, String, String, u64, String, String)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct BackgroundLaneIsolationDigest {
     active_count: usize,
     queued_count: usize,
@@ -1734,6 +1741,72 @@ fn run_queue_lifecycle_with_optional_bounded_audit_capacity(
     }
 }
 
+fn run_queue_lifecycle_with_timestamp_offset(
+    timestamp_offset_ms: u64,
+) -> TimestampShiftLifecycleDigest {
+    let mut scheduler = LaneScheduler::new(single_background_lane_policy())
+        .expect("test policy should construct scheduler");
+
+    let active = scheduler
+        .assign_task(
+            &task_classes::log_rotation(),
+            13_000 + timestamp_offset_ms,
+            "meta-timestamp-shift-active",
+        )
+        .expect("first task should occupy the lane");
+    let queued = queued_task_id_from(
+        scheduler
+            .assign_task(
+                &task_classes::log_rotation(),
+                13_001 + timestamp_offset_ms,
+                "meta-timestamp-shift-queued",
+            )
+            .expect_err("second task should queue at cap"),
+    )
+    .expect("cap pressure must expose queued task id");
+
+    scheduler
+        .complete_task(
+            &active.task_id.to_string(),
+            13_010 + timestamp_offset_ms,
+            "meta-timestamp-shift-complete-active",
+        )
+        .expect("completion should promote queued task under shifted timestamps");
+    scheduler
+        .complete_task(
+            &queued,
+            13_020 + timestamp_offset_ms,
+            "meta-timestamp-shift-complete-promoted",
+        )
+        .expect("promoted task should complete under shifted timestamps");
+
+    let normalized_last_completion_ms = scheduler
+        .lane_counter(SchedulerLane::Background)
+        .expect("background counters after timestamp shift")
+        .last_completion_ms
+        .map(|timestamp_ms| timestamp_ms.saturating_sub(timestamp_offset_ms));
+
+    TimestampShiftLifecycleDigest {
+        state: queue_state_digest(&scheduler),
+        normalized_last_completion_ms,
+        normalized_audit_records: scheduler
+            .audit_log()
+            .iter()
+            .map(|record| {
+                (
+                    record.event_code.clone(),
+                    record.task_id.clone(),
+                    record.task_class.clone(),
+                    record.lane.clone(),
+                    record.timestamp_ms.saturating_sub(timestamp_offset_ms),
+                    record.detail.clone(),
+                    record.trace_id.clone(),
+                )
+            })
+            .collect(),
+    }
+}
+
 #[test]
 fn metamorphic_queue_lifecycle_invariants_survive_observation_interleavings() {
     let baseline = run_queue_lifecycle(false);
@@ -2186,6 +2259,38 @@ fn metamorphic_bounded_audit_capacity_preserves_queue_lifecycle() {
             event_codes::LANE_TASK_PROMOTED.to_string(),
             event_codes::LANE_TASK_COMPLETED.to_string(),
         ]
+    );
+}
+
+#[test]
+fn metamorphic_timestamp_shift_preserves_queue_lifecycle_and_audit_durations() {
+    let baseline = run_queue_lifecycle_with_timestamp_offset(0);
+    let shifted = run_queue_lifecycle_with_timestamp_offset(50_000);
+
+    assert_eq!(shifted, baseline);
+    assert_eq!(shifted.state.active_count, 0);
+    assert_eq!(shifted.state.queued_count, 0);
+    assert_eq!(shifted.state.first_queued_at_ms, None);
+    assert_eq!(shifted.state.completed_total, 2);
+    assert_eq!(shifted.state.rejected_total, 1);
+    assert_eq!(shifted.state.starvation_events, 0);
+    assert_eq!(shifted.normalized_last_completion_ms, Some(13_020));
+    assert_eq!(
+        shifted
+            .normalized_audit_records
+            .iter()
+            .map(|record| record.4)
+            .collect::<Vec<_>>(),
+        vec![13_000, 13_001, 13_010, 13_010, 13_020]
+    );
+    assert_eq!(
+        shifted
+            .normalized_audit_records
+            .iter()
+            .filter(|record| record.0 == event_codes::LANE_TASK_COMPLETED)
+            .map(|record| record.5.as_str())
+            .collect::<Vec<_>>(),
+        vec!["completed in 10ms", "completed in 10ms"]
     );
 }
 
