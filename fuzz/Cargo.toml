@@ -682,3 +682,9 @@ name = "fuzz_baseline_csv_parser"
 path = "fuzz_targets/fuzz_baseline_csv_parser.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_signing_key_parser"
+path = "fuzz_targets/fuzz_signing_key_parser.rs"
+test = false
+doc = false
