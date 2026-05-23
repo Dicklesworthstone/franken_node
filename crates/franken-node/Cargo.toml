@@ -430,6 +430,11 @@ path = "../../tests/conformance/isolation_rail_router_conformance.rs"
 required-features = ["advanced-features"]
 
 [[test]]
+name = "performance_hardening_metrics_conformance"
+path = "../../tests/conformance/performance_hardening_metrics_conformance.rs"
+required-features = ["advanced-features"]
+
+[[test]]
 name = "fastapi_rust_control_plane_integration"
 path = "tests/fastapi_rust_control_plane_integration.rs"
 required-features = ["test-support"]
