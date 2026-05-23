@@ -688,3 +688,9 @@ name = "fuzz_signing_key_parser"
 path = "fuzz_targets/fuzz_signing_key_parser.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_js_string_literal_parser"
+path = "fuzz_targets/fuzz_js_string_literal_parser.rs"
+test = false
+doc = false
