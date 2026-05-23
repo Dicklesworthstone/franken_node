@@ -1862,7 +1862,7 @@ fn replay_bundle_signature_payload(bundle: &ReplayBundle) -> Vec<u8> {
 
 fn validate_bundle_structure(bundle: &ReplayBundle) -> Result<(), ReplayBundleError> {
     let expected_created_at = derive_created_at(&bundle.timeline);
-    if bundle.created_at != expected_created_at {
+    if !constant_time::ct_eq(&bundle.created_at, &expected_created_at) {
         return Err(ReplayBundleError::CreatedAtMismatch);
     }
 
@@ -1878,7 +1878,7 @@ fn validate_bundle_structure(bundle: &ReplayBundle) -> Result<(), ReplayBundleEr
             deterministic_bundle_id(&bundle.incident_id, &expected_created_at, &bundle.timeline)?;
         debug_assert_eq!(expected_bundle_id, expected_via_legacy);
     }
-    if bundle.bundle_id != expected_bundle_id {
+    if !constant_time::ct_eq_bytes(bundle.bundle_id.as_bytes(), expected_bundle_id.as_bytes()) {
         return Err(ReplayBundleError::BundleIdMismatch);
     }
 
@@ -1894,7 +1894,11 @@ fn validate_bundle_structure(bundle: &ReplayBundle) -> Result<(), ReplayBundleEr
         let expected_via_legacy = chunk_timeline(expected_bundle_id, &bundle.timeline)?;
         debug_assert_eq!(expected_chunks.chunks, expected_via_legacy);
     }
-    if bundle.chunks.as_slice() != expected_chunks.chunks.as_slice() {
+    if !bundle
+        .chunks
+        .as_slice()
+        .eq(expected_chunks.chunks.as_slice())
+    {
         return Err(ReplayBundleError::ChunkLayoutMismatch);
     }
 
@@ -1906,7 +1910,7 @@ fn validate_bundle_structure(bundle: &ReplayBundle) -> Result<(), ReplayBundleEr
         &expected_chunks.canonical_timeline_bytes,
         &mut gzip_scratch,
     )?;
-    if bundle.manifest != expected_manifest {
+    if !bundle.manifest.eq(&expected_manifest) {
         return Err(ReplayBundleError::ManifestMismatch);
     }
 
@@ -4729,7 +4733,10 @@ mod proptest_replay_bundle_invariants {
         // Verify baseline integrity
         let baseline_integrity = validate_bundle_integrity(&original_bundle)
             .expect("baseline integrity check should not fail");
-        assert!(baseline_integrity, "baseline bundle should have valid integrity");
+        assert!(
+            baseline_integrity,
+            "baseline bundle should have valid integrity"
+        );
 
         // Store original integrity hash for comparison
         let original_hash = original_bundle.integrity_hash.clone();
@@ -4743,8 +4750,11 @@ mod proptest_replay_bundle_invariants {
 
             let integrity_result = validate_bundle_integrity(&tampered);
             match integrity_result {
-                Ok(is_valid) => assert!(!is_valid, "incident ID tampering should invalidate integrity"),
-                Err(_) => {}, // Acceptable - validation detects tampering
+                Ok(is_valid) => assert!(
+                    !is_valid,
+                    "incident ID tampering should invalidate integrity"
+                ),
+                Err(_) => {} // Acceptable - validation detects tampering
             }
         }
 
@@ -4756,8 +4766,10 @@ mod proptest_replay_bundle_invariants {
 
                 let integrity_result = validate_bundle_integrity(&tampered);
                 match integrity_result {
-                    Ok(is_valid) => assert!(!is_valid, "timeline tampering should invalidate integrity"),
-                    Err(_) => {}, // Acceptable - validation detects tampering
+                    Ok(is_valid) => {
+                        assert!(!is_valid, "timeline tampering should invalidate integrity")
+                    }
+                    Err(_) => {} // Acceptable - validation detects tampering
                 }
             }
         }
@@ -4767,12 +4779,18 @@ mod proptest_replay_bundle_invariants {
             let mut tampered = original_bundle.clone();
             if !tampered.evidence_refs.is_empty() {
                 let first_key = tampered.evidence_refs.keys().next().unwrap().clone();
-                tampered.evidence_refs.insert("tampered-ref".to_string(), tampered.evidence_refs[&first_key].clone());
+                tampered.evidence_refs.insert(
+                    "tampered-ref".to_string(),
+                    tampered.evidence_refs[&first_key].clone(),
+                );
 
                 let integrity_result = validate_bundle_integrity(&tampered);
                 match integrity_result {
-                    Ok(is_valid) => assert!(!is_valid, "evidence ref tampering should invalidate integrity"),
-                    Err(_) => {}, // Acceptable - validation detects tampering
+                    Ok(is_valid) => assert!(
+                        !is_valid,
+                        "evidence ref tampering should invalidate integrity"
+                    ),
+                    Err(_) => {} // Acceptable - validation detects tampering
                 }
             }
         }
@@ -4784,8 +4802,10 @@ mod proptest_replay_bundle_invariants {
 
             let integrity_result = validate_bundle_integrity(&tampered);
             match integrity_result {
-                Ok(is_valid) => assert!(!is_valid, "metadata tampering should invalidate integrity"),
-                Err(_) => {}, // Acceptable - validation detects tampering
+                Ok(is_valid) => {
+                    assert!(!is_valid, "metadata tampering should invalidate integrity")
+                }
+                Err(_) => {} // Acceptable - validation detects tampering
             }
         }
 
@@ -4797,7 +4817,7 @@ mod proptest_replay_bundle_invariants {
             let integrity_result = validate_bundle_integrity(&tampered);
             match integrity_result {
                 Ok(is_valid) => assert!(!is_valid, "hash manipulation should invalidate integrity"),
-                Err(_) => {}, // Acceptable - validation detects invalid hash
+                Err(_) => {} // Acceptable - validation detects invalid hash
             }
         }
 
@@ -4807,12 +4827,18 @@ mod proptest_replay_bundle_invariants {
             if !tampered.chunks.is_empty() {
                 // Manipulate chunk index
                 let first_chunk_id = tampered.chunks.keys().next().unwrap().clone();
-                tampered.chunks.get_mut(&first_chunk_id).unwrap().chunk_index = 9999;
+                tampered
+                    .chunks
+                    .get_mut(&first_chunk_id)
+                    .unwrap()
+                    .chunk_index = 9999;
 
                 let integrity_result = validate_bundle_integrity(&tampered);
                 match integrity_result {
-                    Ok(is_valid) => assert!(!is_valid, "chunk tampering should invalidate integrity"),
-                    Err(_) => {}, // Acceptable - validation detects tampering
+                    Ok(is_valid) => {
+                        assert!(!is_valid, "chunk tampering should invalidate integrity")
+                    }
+                    Err(_) => {} // Acceptable - validation detects tampering
                 }
             }
         }
@@ -4839,8 +4865,8 @@ mod proptest_replay_bundle_invariants {
             let integrity_result = validate_bundle_integrity(&empty_bundle);
             // Empty bundle should either be valid (if allowed) or properly rejected
             match integrity_result {
-                Ok(_) => {}, // Acceptable
-                Err(_) => {}, // Also acceptable - empty bundles may be rejected
+                Ok(_) => {}  // Acceptable
+                Err(_) => {} // Also acceptable - empty bundles may be rejected
             }
         }
 
@@ -4854,8 +4880,8 @@ mod proptest_replay_bundle_invariants {
             match integrity_result {
                 Ok(is_valid) => {
                     // If validation succeeds, integrity should depend on whether size is actually checked
-                },
-                Err(_) => {}, // Acceptable - oversized bundle may be rejected
+                }
+                Err(_) => {} // Acceptable - oversized bundle may be rejected
             }
         }
 
@@ -4876,9 +4902,14 @@ mod proptest_replay_bundle_invariants {
 
             let integrity_result = validate_bundle_integrity(&reconstructed_bundle)
                 .expect("reconstructed bundle validation should not fail");
-            assert!(integrity_result, "reconstructed bundle should maintain integrity");
-            assert_eq!(reconstructed_bundle.integrity_hash, original_hash,
-                      "reconstructed bundle should have same integrity hash");
+            assert!(
+                integrity_result,
+                "reconstructed bundle should maintain integrity"
+            );
+            assert_eq!(
+                reconstructed_bundle.integrity_hash, original_hash,
+                "reconstructed bundle should have same integrity hash"
+            );
         }
 
         // Test 10: Signature validation context
@@ -4894,8 +4925,12 @@ mod proptest_replay_bundle_invariants {
                 match integrity_result {
                     Ok(is_valid) => {
                         // Context should not affect basic integrity for unsigned bundles
-                        assert!(is_valid, "context should not affect basic integrity: {}", context);
-                    },
+                        assert!(
+                            is_valid,
+                            "context should not affect basic integrity: {}",
+                            context
+                        );
+                    }
                     Err(_) => {
                         // Context-specific validation failures may be acceptable
                     }
@@ -4911,15 +4946,22 @@ mod proptest_replay_bundle_invariants {
             // Run validation multiple times to test performance consistency
             for i in 0..100 {
                 let validation_result = validate_bundle_integrity(&original_bundle);
-                assert!(validation_result.is_ok(), "validation {} should not fail", i);
+                assert!(
+                    validation_result.is_ok(),
+                    "validation {} should not fail",
+                    i
+                );
                 if let Ok(is_valid) = validation_result {
                     assert!(is_valid, "validation {} should confirm integrity", i);
                 }
             }
 
             let duration = start_time.elapsed();
-            assert!(duration < std::time::Duration::from_millis(1000),
-                   "100 integrity validations should complete within 1 second, took: {:?}", duration);
+            assert!(
+                duration < std::time::Duration::from_millis(1000),
+                "100 integrity validations should complete within 1 second, took: {:?}",
+                duration
+            );
         }
 
         // Phase 6: Concurrent validation test
@@ -4953,10 +4995,18 @@ mod proptest_replay_bundle_invariants {
 
             // Verify all validations succeeded
             let final_results = results.lock().unwrap();
-            assert_eq!(final_results.len(), 100, "should have 100 validation results");
+            assert_eq!(
+                final_results.len(),
+                100,
+                "should have 100 validation results"
+            );
 
             for (thread_id, iteration, success) in final_results.iter() {
-                assert!(*success, "thread {} iteration {} should succeed", thread_id, iteration);
+                assert!(
+                    *success,
+                    "thread {} iteration {} should succeed",
+                    thread_id, iteration
+                );
             }
         }
 
@@ -4964,7 +5014,9 @@ mod proptest_replay_bundle_invariants {
         let final_integrity = validate_bundle_integrity(&original_bundle)
             .expect("final integrity check should not fail");
         assert!(final_integrity, "original bundle should remain valid");
-        assert_eq!(original_bundle.integrity_hash, original_hash,
-                  "original hash should be unchanged");
+        assert_eq!(
+            original_bundle.integrity_hash, original_hash,
+            "original hash should be unchanged"
+        );
     }
 }

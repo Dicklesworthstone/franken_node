@@ -1,4 +1,25 @@
-use frankenengine_node::security::vef_degraded_mode::{
+mod capacity_defaults {
+    pub mod aliases {
+        pub const MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+    if items.len() >= cap {
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
+    }
+    items.push(item);
+}
+
+#[path = "../src/security/vef_degraded_mode.rs"]
+mod vef_degraded_mode;
+
+use vef_degraded_mode::{
     ProofLagMetrics, VefDegradedModeConfig, VefDegradedModeEngine, VefDegradedModeEvent, VefMode,
 };
 
