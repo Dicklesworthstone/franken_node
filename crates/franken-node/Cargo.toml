@@ -1346,6 +1346,24 @@ name = "bd_4m2n_supply_chain_extension_registry_conformance"
 path = "../../tests/conformance/bd_4m2n_supply_chain_extension_registry_conformance.rs"
 required-features = ["advanced-features"]
 
+# bd-3v9p Retrievability Gate Conformance Test Suite
+[[test]]
+name = "bd_3v9p_retrievability_gate_conformance"
+path = "../../tests/conformance/bd_3v9p_retrievability_gate_conformance.rs"
+required-features = ["advanced-features"]
+
+# bd-5k7w Runtime Resource Governor Conformance Test Suite
+[[test]]
+name = "bd_5k7w_runtime_resource_governor_conformance"
+path = "../../tests/conformance/bd_5k7w_runtime_resource_governor_conformance.rs"
+required-features = ["advanced-features"]
+
+# bd-7s2p Connector Method Validator Conformance Test Suite
+[[test]]
+name = "bd_7s2p_connector_method_validator_conformance"
+path = "../../tests/conformance/bd_7s2p_connector_method_validator_conformance.rs"
+required-features = ["advanced-features"]
+
 [[test]]
 name = "ambient_authority_gate"
 path = "tests/ambient_authority_gate.rs"
