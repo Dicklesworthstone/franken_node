@@ -753,6 +753,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_proc_cmdline_decoder"
+path = "fuzz_targets/fuzz_proc_cmdline_decoder.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_fragility_fixture_json_loader"
 path = "fuzz_targets/fuzz_fragility_fixture_json_loader.rs"
 test = false
