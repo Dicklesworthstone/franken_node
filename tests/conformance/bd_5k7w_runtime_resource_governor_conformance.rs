@@ -122,7 +122,7 @@ fn conformance_must_rg_002_deterministic_process_classification() {
 
     for (command, expected_kind) in test_commands {
         let process = ObservedValidationProcess::new(Some(1234), command)
-            .unwrap_or_else(|| panic!("Failed to classify command: {}", command));
+            .expect(&format!("Failed to classify command: {}", command));
 
         assert_eq!(
             process.kind,
