@@ -9,17 +9,47 @@ enum EpochDecision {
     Rejected(EpochRejectionReason),
 }
 
-fn decision_for(artifact_epoch: u64, current_epoch: u64, lookback: u64) -> EpochDecision {
-    let policy = ValidityWindowPolicy::new(ControlEpoch::new(current_epoch), lookback);
+#[derive(Debug, Clone, Copy)]
+enum PolicyReloadOrder {
+    CurrentThenLookback,
+    LookbackThenCurrent,
+}
+
+fn decision_for_policy(policy: &ValidityWindowPolicy, artifact_epoch: u64) -> EpochDecision {
     match check_artifact_epoch(
         "bundle/replay-chunk-0001",
         ControlEpoch::new(artifact_epoch),
-        &policy,
+        policy,
         "trace-control-epoch-metamorphic",
     ) {
         Ok(()) => EpochDecision::Accepted,
         Err(rejection) => EpochDecision::Rejected(rejection.rejection_reason),
     }
+}
+
+fn decision_for(artifact_epoch: u64, current_epoch: u64, lookback: u64) -> EpochDecision {
+    let policy = ValidityWindowPolicy::new(ControlEpoch::new(current_epoch), lookback);
+    decision_for_policy(&policy, artifact_epoch)
+}
+
+fn decision_after_hot_reload(
+    artifact_epoch: u64,
+    current_epoch: u64,
+    lookback: u64,
+    order: PolicyReloadOrder,
+) -> EpochDecision {
+    let mut policy = ValidityWindowPolicy::new(ControlEpoch::GENESIS, 0);
+    match order {
+        PolicyReloadOrder::CurrentThenLookback => {
+            policy.set_current_epoch(ControlEpoch::new(current_epoch));
+            policy.set_max_lookback(lookback);
+        }
+        PolicyReloadOrder::LookbackThenCurrent => {
+            policy.set_max_lookback(lookback);
+            policy.set_current_epoch(ControlEpoch::new(current_epoch));
+        }
+    }
+    decision_for_policy(&policy, artifact_epoch)
 }
 
 #[test]
@@ -102,6 +132,40 @@ fn shifting_current_and_artifact_epochs_preserves_relative_validity_decision() {
                     assert_eq!(
                         shifted, original,
                         "translation invariance failed: current={current_epoch} artifact={artifact_epoch} shift={shift} lookback={lookback}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn hot_reloaded_policy_matches_fresh_policy_across_epoch_boundaries() {
+    for current_epoch in [0_u64, 1, 2, 8, 64, 512] {
+        for lookback in [0_u64, 1, 2, 8, 128] {
+            let min_accepted = current_epoch.saturating_sub(lookback);
+            let mut artifact_epochs =
+                vec![ControlEpoch::GENESIS.value(), min_accepted, current_epoch];
+            if let Some(before_min) = min_accepted.checked_sub(1) {
+                artifact_epochs.push(before_min);
+            }
+            if let Some(before_current) = current_epoch.checked_sub(1) {
+                artifact_epochs.push(before_current);
+            }
+            if let Some(future_epoch) = current_epoch.checked_add(1) {
+                artifact_epochs.push(future_epoch);
+            }
+
+            for artifact_epoch in artifact_epochs {
+                let fresh = decision_for(artifact_epoch, current_epoch, lookback);
+                for order in [
+                    PolicyReloadOrder::CurrentThenLookback,
+                    PolicyReloadOrder::LookbackThenCurrent,
+                ] {
+                    assert_eq!(
+                        decision_after_hot_reload(artifact_epoch, current_epoch, lookback, order),
+                        fresh,
+                        "hot reload order diverged from fresh policy: current={current_epoch} lookback={lookback} artifact={artifact_epoch} order={order:?}"
                     );
                 }
             }
