@@ -205,3 +205,44 @@ fn dgis_atc_prior_consumption_is_bounded_and_rejects_tampered_contracts() {
     let err = consume_federated_cascade_prior(&local, &tampered, 0.5).unwrap_err();
     assert!(matches!(err, DgisAtcBridgeError::InvalidPrior(_)));
 }
+
+#[test]
+fn dgis_atc_prior_weight_increase_is_monotone_for_assimilation() {
+    let report = export_topology_indicators(
+        &[
+            topology_input("pkg-weight-a", "3.0.0", "trace-weight-a", 97.0),
+            topology_input("pkg-weight-b", "3.0.1", "trace-weight-b", 93.0),
+        ],
+        &conformance_policy(),
+    )
+    .unwrap();
+    let region = region_hash_for("cargo-critical-auth-region").unwrap();
+    let window = window_hash_for("2026-05-week-22").unwrap();
+    let prior = derive_federated_cascade_prior(&report, &region, &window).unwrap();
+    let local = metrics(3.0, 0.04, 0.03, 2, 1, false);
+
+    let weak = consume_federated_cascade_prior(&local, &prior, 0.25).unwrap();
+    let strong = consume_federated_cascade_prior(&local, &prior, 0.75).unwrap();
+
+    assert_eq!(weak.original_metrics, local);
+    assert_eq!(strong.original_metrics, local);
+    assert_eq!(weak.prior_id, strong.prior_id);
+    assert!(strong.adjusted_metrics.fan_out >= weak.adjusted_metrics.fan_out);
+    assert!(
+        strong.adjusted_metrics.betweenness_centrality
+            >= weak.adjusted_metrics.betweenness_centrality
+    );
+    assert!(
+        strong.adjusted_metrics.trust_bottleneck_score
+            >= weak.adjusted_metrics.trust_bottleneck_score
+    );
+    assert!(
+        strong.adjusted_metrics.transitive_dependency_count
+            >= weak.adjusted_metrics.transitive_dependency_count
+    );
+    assert!(strong.adjusted_metrics.max_depth_in_graph >= weak.adjusted_metrics.max_depth_in_graph);
+    assert!(
+        !weak.changed_metrics.is_empty() && !strong.changed_metrics.is_empty(),
+        "both assimilation weights should alter at least one metric"
+    );
+}
