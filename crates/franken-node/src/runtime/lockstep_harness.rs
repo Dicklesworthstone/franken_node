@@ -572,10 +572,11 @@ impl LockstepHarness {
             )
         })?;
 
+        // Lock hierarchy: fixture-specific locks before global persist_lock() to prevent ABBA deadlock
+        let _fixture_lock = Self::acquire_divergence_fixture_persist_lock(&output_dir)?;
         let _persist_guard = persist_lock()
             .lock()
             .map_err(|_| anyhow::anyhow!("lockstep divergence fixture persist lock poisoned"))?;
-        let _fixture_lock = Self::acquire_divergence_fixture_persist_lock(&output_dir)?;
 
         let mut written = Vec::new();
         for divergence in &report.divergences {
