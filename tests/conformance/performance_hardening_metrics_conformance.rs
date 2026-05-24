@@ -31,19 +31,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use franken_node::tools::performance_hardening_metrics::{
-    OperationCategory, Percentiles, PerformanceMetric, CategoryStats,
-    PerformanceReport, PhmAuditRecord, PerformanceHardeningMetrics,
-    invariants::{
-        INV_PHM_PERCENTILE, INV_PHM_DETERMINISTIC, INV_PHM_OVERHEAD,
-        INV_PHM_GATED, INV_PHM_VERSIONED, INV_PHM_AUDITABLE
-    },
+    CategoryStats, METRIC_VERSION, OperationCategory, Percentiles, PerformanceHardeningMetrics,
+    PerformanceMetric, PerformanceReport, PhmAuditRecord,
     event_codes::{
-        PHM_METRIC_SUBMITTED, PHM_PERCENTILES_COMPUTED, PHM_COLD_START_MEASURED,
-        PHM_OVERHEAD_COMPUTED, PHM_THRESHOLD_CHECKED, PHM_REPORT_GENERATED,
-        PHM_TREND_DETECTED, PHM_CATEGORY_REGISTERED, PHM_VERSION_EMBEDDED,
-        PHM_BUDGET_CHECKED, PHM_ERR_BUDGET_EXCEEDED, PHM_ERR_INVALID_METRIC
+        PHM_BUDGET_CHECKED, PHM_CATEGORY_REGISTERED, PHM_COLD_START_MEASURED,
+        PHM_ERR_BUDGET_EXCEEDED, PHM_ERR_INVALID_METRIC, PHM_METRIC_SUBMITTED,
+        PHM_OVERHEAD_COMPUTED, PHM_PERCENTILES_COMPUTED, PHM_REPORT_GENERATED,
+        PHM_THRESHOLD_CHECKED, PHM_TREND_DETECTED, PHM_VERSION_EMBEDDED,
     },
-    METRIC_VERSION,
+    invariants::{
+        INV_PHM_AUDITABLE, INV_PHM_DETERMINISTIC, INV_PHM_GATED, INV_PHM_OVERHEAD,
+        INV_PHM_PERCENTILE, INV_PHM_VERSIONED,
+    },
 };
 
 /// Test requirement levels from the performance hardening metrics specification.
@@ -218,7 +217,7 @@ fn test_inv_phm_percentile() -> TestResult {
 
     // Test 2: Invalid ordering should be detected
     let invalid_percentiles_1 = Percentiles {
-        p50_ms: 50.0,  // p50 > p95
+        p50_ms: 50.0, // p50 > p95
         p95_ms: 10.0,
         p99_ms: 100.0,
     };
@@ -344,16 +343,22 @@ fn test_inv_phm_deterministic() -> TestResult {
             (Some(s1), Some(s2)) => {
                 if s1.count != s2.count {
                     return TestResult::Fail {
-                        reason: format!("Category {} count differs: {} vs {}",
-                                      category.label(), s1.count, s2.count),
+                        reason: format!(
+                            "Category {} count differs: {} vs {}",
+                            category.label(),
+                            s1.count,
+                            s2.count
+                        ),
                     };
                 }
             }
             (None, None) => continue,
             _ => {
                 return TestResult::Fail {
-                    reason: format!("Category {} presence differs between reports",
-                                  category.label()),
+                    reason: format!(
+                        "Category {} presence differs between reports",
+                        category.label()
+                    ),
                 };
             }
         }
@@ -377,9 +382,9 @@ fn test_inv_phm_overhead() -> TestResult {
             p99_ms: 300.0,
         },
         hardened: Percentiles {
-            p50_ms: 150.0,  // 1.5x overhead
-            p95_ms: 400.0,  // 2.0x overhead
-            p99_ms: 600.0,  // 2.0x overhead
+            p50_ms: 150.0, // 1.5x overhead
+            p95_ms: 400.0, // 2.0x overhead
+            p99_ms: 600.0, // 2.0x overhead
         },
         cold_start_ms: 500.0,
         warm_start_ms: 150.0,
@@ -393,7 +398,10 @@ fn test_inv_phm_overhead() -> TestResult {
 
     if (overhead - expected).abs() > 0.001 {
         return TestResult::Fail {
-            reason: format!("Overhead ratio incorrect: expected {}, got {}", expected, overhead),
+            reason: format!(
+                "Overhead ratio incorrect: expected {}, got {}",
+                expected, overhead
+            ),
         };
     }
 
@@ -420,7 +428,8 @@ fn test_inv_phm_overhead() -> TestResult {
     let zero_overhead = zero_baseline_metric.overhead_ratio();
     if zero_overhead.is_finite() {
         return TestResult::Fail {
-            reason: "Zero baseline should result in infinite overhead (handled gracefully)".to_string(),
+            reason: "Zero baseline should result in infinite overhead (handled gracefully)"
+                .to_string(),
         };
     }
 
@@ -439,12 +448,12 @@ fn test_inv_phm_gated() -> TestResult {
         baseline: Percentiles {
             p50_ms: 10.0,
             p95_ms: 30.0,
-            p99_ms: 50.0,  // Under 100ms budget
+            p99_ms: 50.0, // Under 100ms budget
         },
         hardened: Percentiles {
             p50_ms: 15.0,
             p95_ms: 40.0,
-            p99_ms: 80.0,  // Under 100ms budget
+            p99_ms: 80.0, // Under 100ms budget
         },
         cold_start_ms: 200.0,
         warm_start_ms: 15.0,
@@ -465,12 +474,12 @@ fn test_inv_phm_gated() -> TestResult {
         baseline: Percentiles {
             p50_ms: 50.0,
             p95_ms: 120.0,
-            p99_ms: 180.0,  // Exceeds 100ms budget
+            p99_ms: 180.0, // Exceeds 100ms budget
         },
         hardened: Percentiles {
             p50_ms: 60.0,
             p95_ms: 150.0,
-            p99_ms: 250.0,  // Exceeds 100ms budget
+            p99_ms: 250.0, // Exceeds 100ms budget
         },
         cold_start_ms: 300.0,
         warm_start_ms: 60.0,
@@ -491,12 +500,12 @@ fn test_inv_phm_gated() -> TestResult {
         baseline: Percentiles {
             p50_ms: 1000.0,
             p95_ms: 3000.0,
-            p99_ms: 4500.0,  // Under 5000ms budget
+            p99_ms: 4500.0, // Under 5000ms budget
         },
         hardened: Percentiles {
             p50_ms: 1200.0,
             p95_ms: 3500.0,
-            p99_ms: 4800.0,  // Under 5000ms budget
+            p99_ms: 4800.0, // Under 5000ms budget
         },
         cold_start_ms: 6000.0,
         warm_start_ms: 1200.0,
@@ -551,8 +560,10 @@ fn test_inv_phm_versioned() -> TestResult {
 
     if report.version != METRIC_VERSION {
         return TestResult::Fail {
-            reason: format!("Report version mismatch: expected {}, got {}",
-                          METRIC_VERSION, report.version),
+            reason: format!(
+                "Report version mismatch: expected {}, got {}",
+                METRIC_VERSION, report.version
+            ),
         };
     }
 
@@ -676,7 +687,10 @@ fn test_event_phm_001() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("PHM_METRIC_SUBMITTED value incorrect: {}", PHM_METRIC_SUBMITTED),
+            reason: format!(
+                "PHM_METRIC_SUBMITTED value incorrect: {}",
+                PHM_METRIC_SUBMITTED
+            ),
         }
     }
 }
@@ -687,7 +701,10 @@ fn test_event_phm_002() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("PHM_PERCENTILES_COMPUTED value incorrect: {}", PHM_PERCENTILES_COMPUTED),
+            reason: format!(
+                "PHM_PERCENTILES_COMPUTED value incorrect: {}",
+                PHM_PERCENTILES_COMPUTED
+            ),
         }
     }
 }
@@ -698,7 +715,10 @@ fn test_event_phm_003() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("PHM_COLD_START_MEASURED value incorrect: {}", PHM_COLD_START_MEASURED),
+            reason: format!(
+                "PHM_COLD_START_MEASURED value incorrect: {}",
+                PHM_COLD_START_MEASURED
+            ),
         }
     }
 }
@@ -709,7 +729,10 @@ fn test_event_phm_004() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("PHM_OVERHEAD_COMPUTED value incorrect: {}", PHM_OVERHEAD_COMPUTED),
+            reason: format!(
+                "PHM_OVERHEAD_COMPUTED value incorrect: {}",
+                PHM_OVERHEAD_COMPUTED
+            ),
         }
     }
 }
@@ -720,7 +743,10 @@ fn test_event_phm_005() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("PHM_THRESHOLD_CHECKED value incorrect: {}", PHM_THRESHOLD_CHECKED),
+            reason: format!(
+                "PHM_THRESHOLD_CHECKED value incorrect: {}",
+                PHM_THRESHOLD_CHECKED
+            ),
         }
     }
 }
@@ -731,7 +757,10 @@ fn test_event_phm_006() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("PHM_REPORT_GENERATED value incorrect: {}", PHM_REPORT_GENERATED),
+            reason: format!(
+                "PHM_REPORT_GENERATED value incorrect: {}",
+                PHM_REPORT_GENERATED
+            ),
         }
     }
 }
@@ -783,18 +812,29 @@ fn run_performance_hardening_metrics_conformance_suite() {
         // Structured JSON-line output for CI parsing
         println!(
             "{{\"id\":\"{}\",\"verdict\":\"{}\",\"level\":\"{:?}\",\"category\":\"{:?}\",\"duration_ms\":{}}}",
-            case.id, verdict, case.level, case.category, duration.as_millis()
+            case.id,
+            verdict,
+            case.level,
+            case.category,
+            duration.as_millis()
         );
     }
 
     let total = pass + fail + xfail + skip;
     println!("\n═══════════════════════════════════════════════════════════");
     println!("Performance Hardening Metrics Conformance Summary");
-    println!("Total: {}, Pass: {}, Fail: {}, XFail: {}, Skip: {}", total, pass, fail, xfail, skip);
+    println!(
+        "Total: {}, Pass: {}, Fail: {}, XFail: {}, Skip: {}",
+        total, pass, fail, xfail, skip
+    );
 
     // Calculate conformance score
-    let must_cases = PHM_CONFORMANCE_CASES.iter().filter(|c| c.level == RequirementLevel::Must).count();
-    let must_pass = PHM_CONFORMANCE_CASES.iter()
+    let must_cases = PHM_CONFORMANCE_CASES
+        .iter()
+        .filter(|c| c.level == RequirementLevel::Must)
+        .count();
+    let must_pass = PHM_CONFORMANCE_CASES
+        .iter()
         .filter(|c| c.level == RequirementLevel::Must)
         .map(|c| (c.test_fn)())
         .filter(|r| matches!(r, TestResult::Pass))
@@ -806,9 +846,16 @@ fn run_performance_hardening_metrics_conformance_suite() {
         0.0
     };
 
-    println!("MUST Conformance: {:.1}% ({}/{})", conformance_score, must_pass, must_cases);
+    println!(
+        "MUST Conformance: {:.1}% ({}/{})",
+        conformance_score, must_pass, must_cases
+    );
     println!("═══════════════════════════════════════════════════════════");
 
     assert_eq!(fail, 0, "{} conformance tests failed", fail);
-    assert!(conformance_score >= 95.0, "MUST conformance below 95%: {:.1}%", conformance_score);
+    assert!(
+        conformance_score >= 95.0,
+        "MUST conformance below 95%: {:.1}%",
+        conformance_score
+    );
 }

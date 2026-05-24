@@ -21,8 +21,8 @@ use std::collections::BTreeMap;
 
 // Import the module under test
 use frankenengine_node::encoding::deterministic_seed::{
-    derive_seed, DeterministicSeed, DeterministicSeedDeriver, DomainTag, ContentHash,
-    ScheduleConfig, EVENT_SEED_DERIVED, EVENT_SEED_VERSION_BUMP
+    ContentHash, DeterministicSeed, DeterministicSeedDeriver, DomainTag, EVENT_SEED_DERIVED,
+    EVENT_SEED_VERSION_BUMP, ScheduleConfig, derive_seed,
 };
 use frankenengine_node::security::constant_time::ct_eq;
 
@@ -77,7 +77,6 @@ pub const DETERMINISTIC_SEED_ENCODING_CASES: &[ConformanceCase] = &[
         description: "Domain separation with edge case inputs (empty config, zero hash)",
         test_fn: test_domain_separation_edge_cases,
     },
-
     // MUST_R_DSE_002: Deterministic stability (INV-SEED-STABLE)
     ConformanceCase {
         id: "DSE-002.1",
@@ -100,7 +99,6 @@ pub const DETERMINISTIC_SEED_ENCODING_CASES: &[ConformanceCase] = &[
         description: "Parameter insertion order independence (BTreeMap sorting)",
         test_fn: test_deterministic_stability_parameter_ordering,
     },
-
     // MUST_R_DSE_003: Content-size independence (INV-SEED-BOUNDED)
     ConformanceCase {
         id: "DSE-003.1",
@@ -116,7 +114,6 @@ pub const DETERMINISTIC_SEED_ENCODING_CASES: &[ConformanceCase] = &[
         description: "Derivation time is independent of config parameter count and size",
         test_fn: test_content_size_independence_config_size,
     },
-
     // MUST_R_DSE_004: Platform independence (INV-SEED-NO-PLATFORM)
     ConformanceCase {
         id: "DSE-004.1",
@@ -139,7 +136,6 @@ pub const DETERMINISTIC_SEED_ENCODING_CASES: &[ConformanceCase] = &[
         description: "Golden vector stability ensures cross-platform compatibility",
         test_fn: test_platform_independence_golden_vectors,
     },
-
     // EVD-SEED-001: SEED_DERIVED event emission
     ConformanceCase {
         id: "DSE-EVD-001.1",
@@ -148,7 +144,6 @@ pub const DETERMINISTIC_SEED_ENCODING_CASES: &[ConformanceCase] = &[
         description: "SEED_DERIVED event code is defined and accessible",
         test_fn: test_seed_derived_event_defined,
     },
-
     // EVD-SEED-002: SEED_VERSION_BUMP event emission
     ConformanceCase {
         id: "DSE-EVD-002.1",
@@ -222,7 +217,8 @@ fn test_domain_separation_edge_cases() -> TestResult {
 
     if ct_eq(&seed_encoding.bytes, &seed_verification.bytes) {
         return TestResult::Fail {
-            reason: "INV-SEED-DOMAIN-SEP violated with edge case inputs (empty config, zero hash)".to_string(),
+            reason: "INV-SEED-DOMAIN-SEP violated with edge case inputs (empty config, zero hash)"
+                .to_string(),
         };
     }
 
@@ -235,7 +231,8 @@ fn test_domain_separation_edge_cases() -> TestResult {
 
     if ct_eq(&seed_scheduling.bytes, &seed_placement.bytes) {
         return TestResult::Fail {
-            reason: "INV-SEED-DOMAIN-SEP violated with edge case inputs (max config, max hash)".to_string(),
+            reason: "INV-SEED-DOMAIN-SEP violated with edge case inputs (max config, max hash)"
+                .to_string(),
         };
     }
 
@@ -255,7 +252,8 @@ fn test_deterministic_stability_basic() -> TestResult {
         return TestResult::Fail {
             reason: format!(
                 "INV-SEED-STABLE violated: Identical inputs produced different seeds: {} != {}",
-                hex::encode(seed1.bytes), hex::encode(seed2.bytes)
+                hex::encode(seed1.bytes),
+                hex::encode(seed2.bytes)
             ),
         };
     }
@@ -271,12 +269,14 @@ fn test_deterministic_stability_basic() -> TestResult {
 
 fn test_deterministic_stability_multiple_derivers() -> TestResult {
     let content_hash = match ContentHash::from_hex(
-        "deadbeefcafebabe0123456789abcdefdeadbeefcafebabe0123456789abcdef"
+        "deadbeefcafebabe0123456789abcdefdeadbeefcafebabe0123456789abcdef",
     ) {
         Ok(hash) => hash,
-        Err(_) => return TestResult::Fail {
-            reason: "Test setup failed: invalid hex content hash".to_string(),
-        },
+        Err(_) => {
+            return TestResult::Fail {
+                reason: "Test setup failed: invalid hex content hash".to_string(),
+            };
+        }
     };
     let config = ScheduleConfig::new(5).with_param("multi_deriver", "test");
 
@@ -288,7 +288,9 @@ fn test_deterministic_stability_multiple_derivers() -> TestResult {
 
     if !ct_eq(&seed1.bytes, &seed2.bytes) {
         return TestResult::Fail {
-            reason: "INV-SEED-STABLE violated: Different deriver instances produced different seeds".to_string(),
+            reason:
+                "INV-SEED-STABLE violated: Different deriver instances produced different seeds"
+                    .to_string(),
         };
     }
 
@@ -334,7 +336,8 @@ fn test_content_size_independence_hash_based() -> TestResult {
 
     if !ct_eq(&seed_small.bytes, &seed_large.bytes) {
         return TestResult::Fail {
-            reason: "INV-SEED-BOUNDED violated: Same content hash produced different seeds".to_string(),
+            reason: "INV-SEED-BOUNDED violated: Same content hash produced different seeds"
+                .to_string(),
         };
     }
 
@@ -401,7 +404,7 @@ fn test_platform_independence_no_locale() -> TestResult {
     // Test with locale-sensitive characters that could be processed differently
     let config = ScheduleConfig::new(1)
         .with_param("locale_test", "café_naïve_ñoño")
-        .with_param("numbers", "1,234.56");  // Could be parsed differently in some locales
+        .with_param("numbers", "1,234.56"); // Could be parsed differently in some locales
 
     let seed1 = derive_seed(&DomainTag::Verification, &content_hash, &config);
     let seed2 = derive_seed(&DomainTag::Verification, &content_hash, &config);
@@ -414,7 +417,11 @@ fn test_platform_independence_no_locale() -> TestResult {
 
     // Test Unicode normalization independence
     let config_normalization = ScheduleConfig::new(1).with_param("unicode", "é"); // Could be NFC vs NFD
-    let _seed3 = derive_seed(&DomainTag::Verification, &content_hash, &config_normalization);
+    let _seed3 = derive_seed(
+        &DomainTag::Verification,
+        &content_hash,
+        &config_normalization,
+    );
 
     // Real platform independence is verified by golden vector tests
     TestResult::Pass
@@ -433,7 +440,8 @@ fn test_platform_independence_golden_vectors() -> TestResult {
         return TestResult::Fail {
             reason: format!(
                 "INV-SEED-NO-PLATFORM violated: Golden vector 1 mismatch. Expected: {}, Got: {}",
-                expected_golden1, seed_golden1.to_hex()
+                expected_golden1,
+                seed_golden1.to_hex()
             ),
         };
     }
@@ -448,7 +456,8 @@ fn test_platform_independence_golden_vectors() -> TestResult {
         return TestResult::Fail {
             reason: format!(
                 "INV-SEED-NO-PLATFORM violated: Golden vector 2 mismatch. Expected: {}, Got: {}",
-                expected_golden2, seed_golden2.to_hex()
+                expected_golden2,
+                seed_golden2.to_hex()
             ),
         };
     }
@@ -513,7 +522,10 @@ pub fn run_deterministic_seed_encoding_conformance() -> (usize, usize, usize) {
     }
 
     println!("\nDeterministic Seed Encoding Conformance Summary:");
-    println!("Passed: {}, Failed: {}, Skipped: {}", passed, failed, skipped);
+    println!(
+        "Passed: {}, Failed: {}, Skipped: {}",
+        passed, failed, skipped
+    );
 
     (passed, failed, skipped)
 }
@@ -533,21 +545,36 @@ mod tests {
     #[test]
     fn conformance_must_r_dse_002_deterministic_stability() {
         assert_eq!(test_deterministic_stability_basic(), TestResult::Pass);
-        assert_eq!(test_deterministic_stability_multiple_derivers(), TestResult::Pass);
-        assert_eq!(test_deterministic_stability_parameter_ordering(), TestResult::Pass);
+        assert_eq!(
+            test_deterministic_stability_multiple_derivers(),
+            TestResult::Pass
+        );
+        assert_eq!(
+            test_deterministic_stability_parameter_ordering(),
+            TestResult::Pass
+        );
     }
 
     #[test]
     fn conformance_must_r_dse_003_content_size_independence() {
-        assert_eq!(test_content_size_independence_hash_based(), TestResult::Pass);
-        assert_eq!(test_content_size_independence_config_size(), TestResult::Pass);
+        assert_eq!(
+            test_content_size_independence_hash_based(),
+            TestResult::Pass
+        );
+        assert_eq!(
+            test_content_size_independence_config_size(),
+            TestResult::Pass
+        );
     }
 
     #[test]
     fn conformance_must_r_dse_004_platform_independence() {
         assert_eq!(test_platform_independence_no_float(), TestResult::Pass);
         assert_eq!(test_platform_independence_no_locale(), TestResult::Pass);
-        assert_eq!(test_platform_independence_golden_vectors(), TestResult::Pass);
+        assert_eq!(
+            test_platform_independence_golden_vectors(),
+            TestResult::Pass
+        );
     }
 
     #[test]
@@ -563,7 +590,11 @@ mod tests {
     #[test]
     fn run_all_conformance_tests() {
         let (passed, failed, _skipped) = run_deterministic_seed_encoding_conformance();
-        assert!(failed == 0, "All conformance tests must pass, but {} failed", failed);
+        assert!(
+            failed == 0,
+            "All conformance tests must pass, but {} failed",
+            failed
+        );
         assert!(passed > 0, "At least some tests should pass");
     }
 }

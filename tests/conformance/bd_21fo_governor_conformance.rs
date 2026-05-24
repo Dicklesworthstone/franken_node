@@ -30,8 +30,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use frankenengine_node::perf::optimization_governor::{
-    GovernorGate, OptimizationProposal, PredictedMetrics, RuntimeKnob, GovernorDecision,
-    RejectionReason, event_codes, error_codes, invariants, SCHEMA_VERSION
+    GovernorDecision, GovernorGate, OptimizationProposal, PredictedMetrics, RejectionReason,
+    RuntimeKnob, SCHEMA_VERSION, error_codes, event_codes, invariants,
 };
 
 /// Test requirement levels from the bd-21fo specification.
@@ -106,7 +106,6 @@ pub const BD21FO_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Governor can only adjust exposed runtime knobs, not engine-core internals",
         test_fn: test_ac_3_engine_boundary_protection,
     },
-
     // MUST Requirements: Invariants
     ConformanceCase {
         id: "BD21FO-INV-SHADOW",
@@ -140,7 +139,6 @@ pub const BD21FO_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "INV-GOVERNOR-ENGINE-BOUNDARY: adjusts only exposed RuntimeKnob variants",
         test_fn: test_inv_engine_boundary,
     },
-
     // SHOULD Requirements: Event Codes
     ConformanceCase {
         id: "BD21FO-EVENT-PROPOSED",
@@ -182,7 +180,6 @@ pub const BD21FO_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "GOVERNOR_POLICY_REVERTED event emitted for reverted policies",
         test_fn: test_event_policy_reverted,
     },
-
     // SHOULD Requirements: Error Codes
     ConformanceCase {
         id: "BD21FO-ERR-UNSAFE",
@@ -224,7 +221,6 @@ pub const BD21FO_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "ERR_GOVERNOR_KNOB_READONLY for locked knobs",
         test_fn: test_error_knob_readonly,
     },
-
     // Edge Cases
     ConformanceCase {
         id: "BD21FO-EDGE-AUDIT-CAPACITY",
@@ -274,15 +270,19 @@ fn test_ac_1_shadow_evaluation_required() -> TestResult {
 
     if shadow_events.is_empty() {
         return TestResult::Fail {
-            reason: "No GOVERNOR_SHADOW_EVAL_START event found - shadow evaluation requirement not met".to_string(),
+            reason:
+                "No GOVERNOR_SHADOW_EVAL_START event found - shadow evaluation requirement not met"
+                    .to_string(),
         };
     }
 
     // Verify shadow evaluation occurs before any policy application
     let all_new_events = &gate.audit_trail()[initial_audit_count..];
-    let shadow_index = all_new_events.iter()
+    let shadow_index = all_new_events
+        .iter()
         .position(|entry| entry.event_code == event_codes::GOVERNOR_SHADOW_EVAL_START);
-    let applied_index = all_new_events.iter()
+    let applied_index = all_new_events
+        .iter()
         .position(|entry| entry.event_code == event_codes::GOVERNOR_POLICY_APPLIED);
 
     if let (Some(shadow_idx), Some(applied_idx)) = (shadow_index, applied_index) {
@@ -327,13 +327,13 @@ fn test_ac_2_auto_reject_with_evidence() -> TestResult {
 
             if error_events.is_empty() {
                 return TestResult::Fail {
-                    reason: "Rejection occurred but no error event recorded as evidence".to_string(),
+                    reason: "Rejection occurred but no error event recorded as evidence"
+                        .to_string(),
                 };
             }
 
             // Evidence should include rejection reason
-            let has_evidence = error_events.iter()
-                .any(|entry| !entry.detail.is_empty());
+            let has_evidence = error_events.iter().any(|entry| !entry.detail.is_empty());
 
             if !has_evidence {
                 return TestResult::Fail {
@@ -364,7 +364,8 @@ fn test_ac_3_engine_boundary_protection() -> TestResult {
 
     if result.is_ok() {
         return TestResult::Fail {
-            reason: "Engine internal adjustment was allowed - boundary protection failed".to_string(),
+            reason: "Engine internal adjustment was allowed - boundary protection failed"
+                .to_string(),
         };
     }
 
@@ -377,7 +378,8 @@ fn test_ac_3_engine_boundary_protection() -> TestResult {
     }
 
     // Verify audit trail recorded the boundary violation
-    let boundary_violations: Vec<_> = gate.audit_trail()
+    let boundary_violations: Vec<_> = gate
+        .audit_trail()
         .iter()
         .filter(|entry| entry.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION)
         .collect();
@@ -479,7 +481,8 @@ fn test_inv_safety_envelope() -> TestResult {
     // Safety envelope mechanism is working if we see safety-related events
     if safety_check_events == 0 && envelope_violation_events == 0 {
         return TestResult::Fail {
-            reason: "No safety envelope events detected - invariant implementation unclear".to_string(),
+            reason: "No safety envelope events detected - invariant implementation unclear"
+                .to_string(),
         };
     }
 
@@ -533,14 +536,13 @@ fn test_inv_engine_boundary() -> TestResult {
     // Verify all enumerated knobs are RuntimeKnob variants
     for knob_desc in &enumeration.knobs {
         match knob_desc.knob {
-            RuntimeKnob::ConcurrencyLimit |
-            RuntimeKnob::BatchSize |
-            RuntimeKnob::CacheCapacity |
-            RuntimeKnob::DrainTimeoutMs |
-            RuntimeKnob::RetryBudget => {
+            RuntimeKnob::ConcurrencyLimit
+            | RuntimeKnob::BatchSize
+            | RuntimeKnob::CacheCapacity
+            | RuntimeKnob::DrainTimeoutMs
+            | RuntimeKnob::RetryBudget => {
                 // These are the allowed exposed knobs
-            }
-            // If new variants are added, they should be explicitly allowed here
+            } // If new variants are added, they should be explicitly allowed here
         }
     }
 
@@ -653,7 +655,8 @@ fn test_event_safety_check_pass() -> TestResult {
 
         if safety_events.is_empty() {
             return TestResult::Fail {
-                reason: "GOVERNOR_SAFETY_CHECK_PASS event not emitted for approved proposal".to_string(),
+                reason: "GOVERNOR_SAFETY_CHECK_PASS event not emitted for approved proposal"
+                    .to_string(),
             };
         }
     }
@@ -688,7 +691,8 @@ fn test_event_policy_applied() -> TestResult {
 
         if applied_events.is_empty() {
             return TestResult::Fail {
-                reason: "GOVERNOR_POLICY_APPLIED event not emitted for approved proposal".to_string(),
+                reason: "GOVERNOR_POLICY_APPLIED event not emitted for approved proposal"
+                    .to_string(),
             };
         }
     }
@@ -718,8 +722,11 @@ fn test_event_policy_reverted() -> TestResult {
     // Should have revert events equal to number of reverted policies
     if revert_events.len() != reverted.len() {
         return TestResult::Fail {
-            reason: format!("Revert event count ({}) doesn't match reverted policies ({})",
-                          revert_events.len(), reverted.len()),
+            reason: format!(
+                "Revert event count ({}) doesn't match reverted policies ({})",
+                revert_events.len(),
+                reverted.len()
+            ),
         };
     }
 
@@ -756,7 +763,8 @@ fn test_error_unsafe_candidate() -> TestResult {
 
         if unsafe_events.is_empty() {
             return TestResult::Fail {
-                reason: "ERR_GOVERNOR_UNSAFE_CANDIDATE not emitted for envelope violation".to_string(),
+                reason: "ERR_GOVERNOR_UNSAFE_CANDIDATE not emitted for envelope violation"
+                    .to_string(),
             };
         }
     }
@@ -798,7 +806,9 @@ fn test_error_benefit_below_threshold() -> TestResult {
 
         if benefit_events.is_empty() {
             return TestResult::Fail {
-                reason: "ERR_GOVERNOR_BENEFIT_BELOW_THRESHOLD not emitted for non-beneficial proposal".to_string(),
+                reason:
+                    "ERR_GOVERNOR_BENEFIT_BELOW_THRESHOLD not emitted for non-beneficial proposal"
+                        .to_string(),
             };
         }
     }
@@ -895,7 +905,8 @@ fn test_edge_concurrent_submissions() -> TestResult {
     }
 
     // Verify audit trail maintains proposal ID ordering
-    let proposal_ids: Vec<_> = gate.audit_trail()
+    let proposal_ids: Vec<_> = gate
+        .audit_trail()
         .iter()
         .filter(|entry| entry.event_code == event_codes::GOVERNOR_CANDIDATE_PROPOSED)
         .map(|entry| &entry.proposal_id)
@@ -948,16 +959,18 @@ pub fn run_bd21fo_conformance_tests() -> ConformanceReport {
         results.insert(case.id.to_string(), test_record);
 
         // Structured JSON output for CI parsing
-        println!("{{\"id\":\"{}\",\"verdict\":\"{:?}\",\"level\":\"{:?}\",\"duration_ms\":{}}}",
-                case.id,
-                match &results[case.id].result {
-                    TestResult::Pass => "PASS",
-                    TestResult::Fail { .. } => "FAIL",
-                    TestResult::Skipped { .. } => "SKIP",
-                    TestResult::ExpectedFailure { .. } => "XFAIL",
-                },
-                case.level,
-                duration.as_millis());
+        println!(
+            "{{\"id\":\"{}\",\"verdict\":\"{:?}\",\"level\":\"{:?}\",\"duration_ms\":{}}}",
+            case.id,
+            match &results[case.id].result {
+                TestResult::Pass => "PASS",
+                TestResult::Fail { .. } => "FAIL",
+                TestResult::Skipped { .. } => "SKIP",
+                TestResult::ExpectedFailure { .. } => "XFAIL",
+            },
+            case.level,
+            duration.as_millis()
+        );
     }
 
     ConformanceReport {
@@ -1032,39 +1045,57 @@ impl ConformanceReport {
         let passing_tests = self.stats.must_pass + self.stats.should_pass + self.stats.may_pass;
         md.push_str(&format!("- **Total Tests**: {}\n", total_tests));
         md.push_str(&format!("- **Passing**: {}\n", passing_tests));
-        md.push_str(&format!("- **Compliance Score**: {:.1}%\n\n", self.compliance_score() * 100.0));
+        md.push_str(&format!(
+            "- **Compliance Score**: {:.1}%\n\n",
+            self.compliance_score() * 100.0
+        ));
 
         md.push_str("## Coverage by Requirement Level\n\n");
         md.push_str("| Level | Pass | Fail | Skip | XFAIL | Total | Score |\n");
         md.push_str("|-------|------|------|------|-------|-------|-------|\n");
 
         let must_total = self.stats.must_pass + self.stats.must_fail;
-        let must_score = if must_total == 0 { 100.0 } else {
+        let must_score = if must_total == 0 {
+            100.0
+        } else {
             (self.stats.must_pass as f64 / must_total as f64) * 100.0
         };
-        md.push_str(&format!("| MUST  | {} | {} | 0 | 0 | {} | {:.1}% |\n",
-                           self.stats.must_pass, self.stats.must_fail, must_total, must_score));
+        md.push_str(&format!(
+            "| MUST  | {} | {} | 0 | 0 | {} | {:.1}% |\n",
+            self.stats.must_pass, self.stats.must_fail, must_total, must_score
+        ));
 
         let should_total = self.stats.should_pass + self.stats.should_fail;
-        let should_score = if should_total == 0 { 100.0 } else {
+        let should_score = if should_total == 0 {
+            100.0
+        } else {
             (self.stats.should_pass as f64 / should_total as f64) * 100.0
         };
-        md.push_str(&format!("| SHOULD| {} | {} | 0 | 0 | {} | {:.1}% |\n",
-                           self.stats.should_pass, self.stats.should_fail, should_total, should_score));
+        md.push_str(&format!(
+            "| SHOULD| {} | {} | 0 | 0 | {} | {:.1}% |\n",
+            self.stats.should_pass, self.stats.should_fail, should_total, should_score
+        ));
 
         let may_total = self.stats.may_pass + self.stats.may_fail;
-        let may_score = if may_total == 0 { 100.0 } else {
+        let may_score = if may_total == 0 {
+            100.0
+        } else {
             (self.stats.may_pass as f64 / may_total as f64) * 100.0
         };
-        md.push_str(&format!("| MAY   | {} | {} | 0 | 0 | {} | {:.1}% |\n\n",
-                           self.stats.may_pass, self.stats.may_fail, may_total, may_score));
+        md.push_str(&format!(
+            "| MAY   | {} | {} | 0 | 0 | {} | {:.1}% |\n\n",
+            self.stats.may_pass, self.stats.may_fail, may_total, may_score
+        ));
 
         md.push_str("## Detailed Results\n\n");
 
         // Group by category
         let mut by_category: BTreeMap<TestCategory, Vec<&TestRecord>> = BTreeMap::new();
         for record in self.results.values() {
-            by_category.entry(record.category.clone()).or_default().push(record);
+            by_category
+                .entry(record.category.clone())
+                .or_default()
+                .push(record);
         }
 
         for (category, records) in by_category {
@@ -1079,8 +1110,10 @@ impl ConformanceReport {
                     TestResult::Skipped { .. } => "⏭️ SKIP",
                     TestResult::ExpectedFailure { .. } => "⏳ XFAIL",
                 };
-                md.push_str(&format!("| {} | {} | {:?} | {} |\n",
-                                   record.id, record.description, record.level, result_str));
+                md.push_str(&format!(
+                    "| {} | {} | {:?} | {} |\n",
+                    record.id, record.description, record.level, result_str
+                ));
             }
             md.push_str("\n");
         }
@@ -1089,10 +1122,14 @@ impl ConformanceReport {
         if self.compliance_score() >= 0.95 {
             md.push_str("**✅ CONFORMANT** - Meets bd-21fo specification requirements.\n\n");
         } else {
-            md.push_str("**❌ NON-CONFORMANT** - Does not meet bd-21fo specification requirements.\n\n");
+            md.push_str(
+                "**❌ NON-CONFORMANT** - Does not meet bd-21fo specification requirements.\n\n",
+            );
             md.push_str("### Failed MUST Requirements\n\n");
             for record in self.results.values() {
-                if let (RequirementLevel::Must, TestResult::Fail { reason }) = (record.level, &record.result) {
+                if let (RequirementLevel::Must, TestResult::Fail { reason }) =
+                    (record.level, &record.result)
+                {
                     md.push_str(&format!("- **{}**: {}\n", record.id, reason));
                 }
             }

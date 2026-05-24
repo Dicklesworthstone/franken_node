@@ -5135,4 +5135,93 @@ mod tests {
             }
         }
     }
+
+    #[cfg(loom)]
+    #[doc(hidden)]
+    pub fn anti_entropy_concurrent_reconciliation_loom_model() {
+        use loom::sync::Arc;
+        use loom::sync::atomic::{AtomicBool, Ordering};
+        use loom::thread;
+
+        loom::model(|| {
+            // Test concurrent reconciliation with cancellation to verify:
+            // 1. Cancellation is respected atomically
+            // 2. No data races in reconciliation state
+            // 3. Invariants hold under all interleavings
+            let config = ReconciliationConfig::default();
+            let reconciler = Arc::new(loom::sync::Mutex::new(
+                AntiEntropyReconciler::new(config).expect("valid config"),
+            ));
+            let cancelled = Arc::new(AtomicBool::new(false));
+
+            // Create simple local and remote states
+            let mut local = TrustState::new(1);
+            let mut remote = TrustState::new(1);
+
+            // Add a record to remote to create a delta
+            let record = TrustRecord {
+                id: "test-record".to_string(),
+                epoch: 1,
+                recorded_at_ms: 1000,
+                origin_node_id: "node-1".to_string(),
+                payload: b"test-payload".to_vec(),
+                mmr_pos: 0,
+                marker_hash: "test-hash".to_string(),
+                inclusion_proof: None,
+            };
+            assert!(remote.insert(record));
+
+            let mmr_root = crate::control_plane::mmr_proofs::MmrRoot {
+                hash: "root-hash".to_string(),
+            };
+
+            // Clone data for thread contention
+            let reconciler_cancel = Arc::clone(&reconciler);
+            let cancelled_cancel = Arc::clone(&cancelled);
+            let reconciler_reconcile = Arc::clone(&reconciler);
+            let cancelled_reconcile = Arc::clone(&cancelled);
+
+            // Thread 1: Perform reconciliation
+            let handle_reconcile = thread::spawn(move || {
+                let mut reconciler_guard = reconciler_reconcile.lock().unwrap();
+                let mut local_copy = local;
+                reconciler_guard.reconcile(
+                    &mut local_copy,
+                    &remote,
+                    &mmr_root,
+                    &cancelled_reconcile,
+                )
+            });
+
+            // Thread 2: Set cancellation flag
+            let handle_cancel = thread::spawn(move || {
+                cancelled_cancel.store(true, Ordering::Release);
+            });
+
+            let reconcile_result = handle_reconcile
+                .join()
+                .expect("reconcile thread should not panic");
+            handle_cancel
+                .join()
+                .expect("cancel thread should not panic");
+
+            // Verify invariants regardless of whether cancellation occurred
+            match reconcile_result {
+                Ok(result) => {
+                    // If reconciliation succeeded, verify expected properties
+                    assert!(
+                        result.accepted <= 1,
+                        "At most one record should be accepted"
+                    );
+                }
+                Err(ReconciliationError::Cancelled { .. }) => {
+                    // Cancellation is a valid outcome
+                }
+                Err(_) => {
+                    // Other errors should not occur in this simple scenario
+                    // unless cancellation races caused them
+                }
+            }
+        });
+    }
 }

@@ -1852,12 +1852,10 @@ dependencies = [
  "itoa",
  "lazy_static",
  "lru 0.16.4",
- "regex",
  "serde",
  "serde_json",
  "smallvec",
  "tracing",
- "tracing-subscriber",
  "xxhash-rust",
 ]
 

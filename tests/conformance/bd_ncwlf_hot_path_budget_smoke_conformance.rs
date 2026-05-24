@@ -7,15 +7,14 @@
 //! - INV-REGRESSION-PROTECTION: regression guards must prevent degradation
 //! - INV-SKIP-MODE-HONESTY: skip mode must not emit false positives
 
-use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 use frankenengine_node::policy::perf_budget_guard::{
-    default_hot_path_budget_smoke_cases, hot_path_budget_smoke_policy,
-    run_hot_path_budget_smoke, hot_path_budget_smoke_to_json,
-    HotPathBudgetSmokeCase, HotPathBudgetSmokeReport, HotPathBudgetSmokeMode,
-    PathBudget, BenchmarkMeasurement, GateResult, PerfBudgetError,
-    HOT_PATH_SMOKE_SCHEMA_VERSION, HOT_PATH_SMOKE_BEAD_ID, HOT_PATH_SMOKE_TRACE_ID,
+    BenchmarkMeasurement, GateResult, HOT_PATH_SMOKE_BEAD_ID, HOT_PATH_SMOKE_SCHEMA_VERSION,
+    HOT_PATH_SMOKE_TRACE_ID, HotPathBudgetSmokeCase, HotPathBudgetSmokeMode,
+    HotPathBudgetSmokeReport, PathBudget, PerfBudgetError, default_hot_path_budget_smoke_cases,
+    hot_path_budget_smoke_policy, hot_path_budget_smoke_to_json, run_hot_path_budget_smoke,
 };
 
 #[derive(Debug, Clone)]
@@ -66,7 +65,6 @@ const BD_NCWLF_CASES: &[ConformanceCase] = &[
         description: "p50 calculation follows fixed 0.70 multiplier rule",
         test_fn: test_p50_calculation_deterministic,
     },
-
     // INV-BUDGET-ENFORCEMENT: budget violations must be properly detected
     ConformanceCase {
         id: "bd-ncwlf-budget-1",
@@ -89,7 +87,6 @@ const BD_NCWLF_CASES: &[ConformanceCase] = &[
         description: "budget policy applies correct budgets to hot paths",
         test_fn: test_budget_policy_application,
     },
-
     // INV-CORRECTNESS-VALIDATION: correctness assertions must be validated
     ConformanceCase {
         id: "bd-ncwlf-correctness-1",
@@ -105,7 +102,6 @@ const BD_NCWLF_CASES: &[ConformanceCase] = &[
         description: "correctness assertions are specific and actionable",
         test_fn: test_correctness_assertions_quality,
     },
-
     // INV-REGRESSION-PROTECTION: regression guards must prevent degradation
     ConformanceCase {
         id: "bd-ncwlf-regression-1",
@@ -128,7 +124,6 @@ const BD_NCWLF_CASES: &[ConformanceCase] = &[
         description: "regression guards include specific thresholds",
         test_fn: test_regression_guard_specificity,
     },
-
     // INV-SKIP-MODE-HONESTY: skip mode must not emit false positives
     ConformanceCase {
         id: "bd-ncwlf-skip-1",
@@ -151,7 +146,6 @@ const BD_NCWLF_CASES: &[ConformanceCase] = &[
         description: "skip policy documented for each hot path",
         test_fn: test_skip_policy_documentation,
     },
-
     // Schema and serialization requirements
     ConformanceCase {
         id: "bd-ncwlf-schema-1",
@@ -181,7 +175,6 @@ const BD_NCWLF_CASES: &[ConformanceCase] = &[
         description: "evidence path follows naming convention",
         test_fn: test_evidence_path_convention,
     },
-
     // Hot path coverage requirements
     ConformanceCase {
         id: "bd-ncwlf-coverage-1",
@@ -220,7 +213,10 @@ fn test_default_cases_deterministic() -> TestResult {
             || case1.cold_start_ms != case2.cold_start_ms
         {
             return TestResult::Fail {
-                reason: format!("Case {} differs between calls: {:?} vs {:?}", i, case1.hot_path, case2.hot_path),
+                reason: format!(
+                    "Case {} differs between calls: {:?} vs {:?}",
+                    i, case1.hot_path, case2.hot_path
+                ),
             };
         }
     }
@@ -245,7 +241,10 @@ fn test_measurement_method_consistent() -> TestResult {
             || measurement1.cold_start_ms != measurement2.cold_start_ms
         {
             return TestResult::Fail {
-                reason: format!("Measurement inconsistent for {}: {:?} vs {:?}", case.hot_path, measurement1, measurement2),
+                reason: format!(
+                    "Measurement inconsistent for {}: {:?} vs {:?}",
+                    case.hot_path, measurement1, measurement2
+                ),
             };
         }
     }
@@ -295,11 +294,11 @@ fn test_budget_overhead_detection() -> TestResult {
         unit: "test_units".to_string(),
         before_fix_p95_units: 10.0,
         before_fix_p99_units: 12.0,
-        post_fix_p95_units: 20.0,  // Worse performance - should violate budget
-        post_fix_p99_units: 25.0,  // Worse performance - should violate budget
+        post_fix_p95_units: 20.0, // Worse performance - should violate budget
+        post_fix_p99_units: 25.0, // Worse performance - should violate budget
         cold_start_ms: 0.5,
         budget: PathBudget {
-            max_overhead_p95_pct: 10.0,  // Only 10% overhead allowed
+            max_overhead_p95_pct: 10.0, // Only 10% overhead allowed
             max_overhead_p99_pct: 10.0,
             max_cold_start_ms: 1.0,
         },
@@ -312,9 +311,11 @@ fn test_budget_overhead_detection() -> TestResult {
 
     // Calculate actual overhead percentages
     let p95_overhead_pct = ((measurement.integrated_p95_us - measurement.baseline_p95_us)
-        / measurement.baseline_p95_us) * 100.0;
+        / measurement.baseline_p95_us)
+        * 100.0;
     let p99_overhead_pct = ((measurement.integrated_p99_us - measurement.baseline_p99_us)
-        / measurement.baseline_p99_us) * 100.0;
+        / measurement.baseline_p99_us)
+        * 100.0;
 
     // Budget should be violated since post-fix is worse than pre-fix
     if p95_overhead_pct <= violating_case.budget.max_overhead_p95_pct
@@ -323,7 +324,8 @@ fn test_budget_overhead_detection() -> TestResult {
         return TestResult::Fail {
             reason: format!(
                 "Budget violation not detected: p95_overhead={}%, p99_overhead={}%, limits={}%/{}%",
-                p95_overhead_pct, p99_overhead_pct,
+                p95_overhead_pct,
+                p99_overhead_pct,
                 violating_case.budget.max_overhead_p95_pct,
                 violating_case.budget.max_overhead_p99_pct
             ),
@@ -410,7 +412,8 @@ fn test_correctness_assertions_quality() -> TestResult {
     for case in cases {
         for assertion in &case.correctness_assertions {
             // Assertions should be specific, not generic
-            if assertion.len() < 20 {  // Reasonable minimum for specificity
+            if assertion.len() < 20 {
+                // Reasonable minimum for specificity
                 return TestResult::Fail {
                     reason: format!(
                         "Correctness assertion too vague for {}: '{}'",
@@ -476,7 +479,9 @@ fn test_post_fix_performance_improvement() -> TestResult {
                     case.hot_path,
                     case.before_fix_p95_units,
                     case.post_fix_p95_units,
-                    ((case.post_fix_p95_units - case.before_fix_p95_units) / case.before_fix_p95_units) * 100.0
+                    ((case.post_fix_p95_units - case.before_fix_p95_units)
+                        / case.before_fix_p95_units)
+                        * 100.0
                 ),
             };
         }
@@ -488,7 +493,9 @@ fn test_post_fix_performance_improvement() -> TestResult {
                     case.hot_path,
                     case.before_fix_p99_units,
                     case.post_fix_p99_units,
-                    ((case.post_fix_p99_units - case.before_fix_p99_units) / case.before_fix_p99_units) * 100.0
+                    ((case.post_fix_p99_units - case.before_fix_p99_units)
+                        / case.before_fix_p99_units)
+                        * 100.0
                 ),
             };
         }
@@ -534,7 +541,10 @@ fn test_skip_mode_generates_skip_report() -> TestResult {
         Ok(report) => {
             if report.verdict != "SKIP" {
                 return TestResult::Fail {
-                    reason: format!("Skip mode should generate SKIP verdict, got: {}", report.verdict),
+                    reason: format!(
+                        "Skip mode should generate SKIP verdict, got: {}",
+                        report.verdict
+                    ),
                 };
             }
 
@@ -568,13 +578,15 @@ fn test_skip_mode_false_negative_protection() -> TestResult {
             // Critical: skip mode must never report a false positive
             if report.overall_pass {
                 return TestResult::Fail {
-                    reason: "Skip mode MUST set overall_pass=false to prevent false positives".to_string(),
+                    reason: "Skip mode MUST set overall_pass=false to prevent false positives"
+                        .to_string(),
                 };
             }
 
             if report.verdict == "PASS" {
                 return TestResult::Fail {
-                    reason: "Skip mode MUST NOT emit PASS verdict - this creates false positives".to_string(),
+                    reason: "Skip mode MUST NOT emit PASS verdict - this creates false positives"
+                        .to_string(),
                 };
             }
 
@@ -598,9 +610,8 @@ fn test_skip_policy_documentation() -> TestResult {
 
         // Skip policy should mention when to skip
         let policy = case.skip_policy.to_lowercase();
-        let mentions_conditions = policy.contains("skip")
-            || policy.contains("when")
-            || policy.contains("only");
+        let mentions_conditions =
+            policy.contains("skip") || policy.contains("when") || policy.contains("only");
 
         if !mentions_conditions {
             return TestResult::Fail {
@@ -668,31 +679,27 @@ fn test_json_round_trip_safety() -> TestResult {
     };
 
     match run_hot_path_budget_smoke(skip_mode) {
-        Ok(report) => {
-            match hot_path_budget_smoke_to_json(&report) {
-                Ok(json) => {
-                    match serde_json::from_str::<HotPathBudgetSmokeReport>(&json) {
-                        Ok(deserialized) => {
-                            if deserialized.schema_version != report.schema_version
-                                || deserialized.bead_id != report.bead_id
-                                || deserialized.verdict != report.verdict
-                            {
-                                return TestResult::Fail {
-                                    reason: "JSON round-trip altered core fields".to_string(),
-                                };
-                            }
-                            TestResult::Pass
-                        }
-                        Err(err) => TestResult::Fail {
-                            reason: format!("JSON deserialization failed: {}", err),
-                        },
+        Ok(report) => match hot_path_budget_smoke_to_json(&report) {
+            Ok(json) => match serde_json::from_str::<HotPathBudgetSmokeReport>(&json) {
+                Ok(deserialized) => {
+                    if deserialized.schema_version != report.schema_version
+                        || deserialized.bead_id != report.bead_id
+                        || deserialized.verdict != report.verdict
+                    {
+                        return TestResult::Fail {
+                            reason: "JSON round-trip altered core fields".to_string(),
+                        };
                     }
+                    TestResult::Pass
                 }
                 Err(err) => TestResult::Fail {
-                    reason: format!("JSON serialization failed: {}", err),
+                    reason: format!("JSON deserialization failed: {}", err),
                 },
-            }
-        }
+            },
+            Err(err) => TestResult::Fail {
+                reason: format!("JSON serialization failed: {}", err),
+            },
+        },
         Err(err) => TestResult::Fail {
             reason: format!("Failed to generate report: {}", err),
         },
@@ -741,11 +748,11 @@ fn test_critical_hot_paths_covered() -> TestResult {
 
     // Verify coverage of critical system areas
     let critical_areas = [
-        "ops.telemetry_bridge",       // Telemetry/observability
+        "ops.telemetry_bridge",          // Telemetry/observability
         "control_plane.fleet_transport", // Control plane
         "observability.evidence_ledger", // Evidence/audit
-        "storage.frankensqlite_adapter",  // Storage layer
-        "crypto.ed25519_scheme",      // Cryptography
+        "storage.frankensqlite_adapter", // Storage layer
+        "crypto.ed25519_scheme",         // Cryptography
     ];
 
     for area in critical_areas {
@@ -780,7 +787,8 @@ fn test_source_bead_references() -> TestResult {
                 };
             }
 
-            if bead_id.len() < 6 {  // bd- + at least 3 chars
+            if bead_id.len() < 6 {
+                // bd- + at least 3 chars
                 return TestResult::Fail {
                     reason: format!(
                         "Source bead ID too short for {}: '{}'",
@@ -821,7 +829,10 @@ fn bd_ncwlf_full_conformance() {
             }
             TestResult::ExpectedFailure { ref reason } => {
                 xfail += 1;
-                eprintln!("XFAIL {}: {}\n  Reason: {reason}", case.id, case.description);
+                eprintln!(
+                    "XFAIL {}: {}\n  Reason: {reason}",
+                    case.id, case.description
+                );
                 "XFAIL"
             }
         };
@@ -867,7 +878,9 @@ fn generate_compliance_matrix() {
         } else {
             0.0
         };
-        println!("| {invariant:<25} | {must_count:^4} | {total:^5} | {passing:^4} | {score:5.1}% |");
+        println!(
+            "| {invariant:<25} | {must_count:^4} | {total:^5} | {passing:^4} | {score:5.1}% |"
+        );
     }
 }
 
@@ -878,18 +891,34 @@ mod tests {
     #[test]
     fn conformance_case_coverage() {
         // Verify we have comprehensive coverage
-        let invariant_counts: BTreeMap<&str, usize> = BD_NCWLF_CASES
-            .iter()
-            .fold(BTreeMap::new(), |mut acc, case| {
-                *acc.entry(case.invariant).or_default() += 1;
-                acc
-            });
+        let invariant_counts: BTreeMap<&str, usize> =
+            BD_NCWLF_CASES
+                .iter()
+                .fold(BTreeMap::new(), |mut acc, case| {
+                    *acc.entry(case.invariant).or_default() += 1;
+                    acc
+                });
 
         // Each core invariant should have multiple test cases
-        assert!(invariant_counts.get("INV-HOT-PATH-DETERMINISTIC").unwrap_or(&0) >= &2);
+        assert!(
+            invariant_counts
+                .get("INV-HOT-PATH-DETERMINISTIC")
+                .unwrap_or(&0)
+                >= &2
+        );
         assert!(invariant_counts.get("INV-BUDGET-ENFORCEMENT").unwrap_or(&0) >= &2);
-        assert!(invariant_counts.get("INV-CORRECTNESS-VALIDATION").unwrap_or(&0) >= &1);
-        assert!(invariant_counts.get("INV-REGRESSION-PROTECTION").unwrap_or(&0) >= &2);
+        assert!(
+            invariant_counts
+                .get("INV-CORRECTNESS-VALIDATION")
+                .unwrap_or(&0)
+                >= &1
+        );
+        assert!(
+            invariant_counts
+                .get("INV-REGRESSION-PROTECTION")
+                .unwrap_or(&0)
+                >= &2
+        );
         assert!(invariant_counts.get("INV-SKIP-MODE-HONESTY").unwrap_or(&0) >= &2);
     }
 
@@ -898,6 +927,10 @@ mod tests {
         use std::collections::HashSet;
 
         let ids: HashSet<&str> = BD_NCWLF_CASES.iter().map(|case| case.id).collect();
-        assert_eq!(ids.len(), BD_NCWLF_CASES.len(), "Duplicate test case IDs found");
+        assert_eq!(
+            ids.len(),
+            BD_NCWLF_CASES.len(),
+            "Duplicate test case IDs found"
+        );
     }
 }

@@ -7149,8 +7149,7 @@ mod atc_extreme_adversarial_negative_tests {
         // module surface (the 8-entry list at atc/mod.rs:15-24).
         let production = module_surface_fingerprint_hex();
         assert_eq!(
-            production,
-            "5f142e34c001368344015b663e1c88139f59f1b98e916faacdc80e37c66c0b42",
+            production, "5f142e34c001368344015b663e1c88139f59f1b98e916faacdc80e37c66c0b42",
             "ATC_MODULE_SURFACE fingerprint drifted — either an entry was \
              added/removed/renamed in the 8-module list at atc/mod.rs:15-24, \
              or the canonical byte layout of surface_fingerprint_hex \
@@ -7162,8 +7161,7 @@ mod atc_extreme_adversarial_negative_tests {
         // + LE64(0) count + zero per-module iterations.
         let empty = surface_fingerprint_hex(&[]);
         assert_eq!(
-            empty,
-            "0b50f159303136a952f27380ac8d9ec6f4da2ba45b6cfc46be921b7988de6f09",
+            empty, "0b50f159303136a952f27380ac8d9ec6f4da2ba45b6cfc46be921b7988de6f09",
             "empty-modules fingerprint drifted — check the v1 domain \
              separator, the b\"field:module_count\" interior domain bytes, \
              or the raw LE64(0) count framing"
@@ -7174,8 +7172,7 @@ mod atc_extreme_adversarial_negative_tests {
         // module name.
         let single = surface_fingerprint_hex(&["only_module"]);
         assert_eq!(
-            single,
-            "d9a1f064c2fc5ab8d39309319c18ec00166c01b5483ef27e97423e1f665eb7f8",
+            single, "d9a1f064c2fc5ab8d39309319c18ec00166c01b5483ef27e97423e1f665eb7f8",
             "single-module fingerprint drifted — check the b\"field:module_name\" \
              interior domain or the per-module length-prefix framing"
         );
@@ -7205,7 +7202,10 @@ mod atc_extreme_adversarial_negative_tests {
         // Length+casing contract.
         for h in [&production, &empty, &single] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

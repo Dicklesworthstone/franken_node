@@ -2818,9 +2818,8 @@ mod tests {
             extension_id: "ext-fs-reader".to_string(),
             extension_version: "1.2.3".to_string(),
             artifact_id: "art-x".to_string(),
-            payload_hash:
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                    .to_string(),
+            payload_hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             capabilities: vec![CapabilityEntry {
                 capability_id: "cap:fs:read".to_string(),
                 scope: "/home/user/docs".to_string(),
@@ -2842,9 +2841,8 @@ mod tests {
             extension_id: "ext-net".to_string(),
             extension_version: "2.0".to_string(),
             artifact_id: "art-y".to_string(),
-            payload_hash:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .to_string(),
+            payload_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
             capabilities: vec![
                 CapabilityEntry {
                     capability_id: "cap:net:bind".to_string(),
@@ -2909,7 +2907,10 @@ mod tests {
             compute_contract_signature(&multi_cap),
         ] {
             assert_eq!(sig.len(), 64);
-            assert!(sig.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                sig.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

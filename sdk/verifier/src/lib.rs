@@ -4678,8 +4678,14 @@ mod tests {
         #[test]
         fn conformance_sdk_version_constants_validation() {
             // Test 1: Version format validation
-            assert!(is_valid_version_format(SDK_VERSION), "SDK_VERSION must follow valid format");
-            assert!(is_valid_version_format(SDK_VERSION_MIN), "SDK_VERSION_MIN must follow valid format");
+            assert!(
+                is_valid_version_format(SDK_VERSION),
+                "SDK_VERSION must follow valid format"
+            );
+            assert!(
+                is_valid_version_format(SDK_VERSION_MIN),
+                "SDK_VERSION_MIN must follow valid format"
+            );
 
             // Test 2: Version hierarchy consistency
             assert!(
@@ -4689,11 +4695,20 @@ mod tests {
 
             // Test 3: Version string immutability
             assert_eq!(SDK_VERSION, "vsdk-v1.0", "SDK_VERSION must remain stable");
-            assert_eq!(SDK_VERSION_MIN, "vsdk-v1.0", "SDK_VERSION_MIN must remain stable");
+            assert_eq!(
+                SDK_VERSION_MIN, "vsdk-v1.0",
+                "SDK_VERSION_MIN must remain stable"
+            );
 
             // Test 4: Version length bounds
-            assert!(SDK_VERSION.len() <= 32, "SDK_VERSION length must be bounded");
-            assert!(SDK_VERSION_MIN.len() <= 32, "SDK_VERSION_MIN length must be bounded");
+            assert!(
+                SDK_VERSION.len() <= 32,
+                "SDK_VERSION length must be bounded"
+            );
+            assert!(
+                SDK_VERSION_MIN.len() <= 32,
+                "SDK_VERSION_MIN length must be bounded"
+            );
         }
 
         #[test]
@@ -4796,11 +4811,17 @@ mod tests {
             }
 
             // Test 3: Error codes are properly categorized
-            let signature_errors = error_codes.iter().filter(|c| c.contains("SIGNATURE")).count();
+            let signature_errors = error_codes
+                .iter()
+                .filter(|c| c.contains("SIGNATURE"))
+                .count();
             let schema_errors = error_codes.iter().filter(|c| c.contains("SCHEMA")).count();
             let replay_errors = error_codes.iter().filter(|c| c.contains("REPLAY")).count();
 
-            assert!(signature_errors >= 1, "Must have signature-related error codes");
+            assert!(
+                signature_errors >= 1,
+                "Must have signature-related error codes"
+            );
             assert!(schema_errors >= 1, "Must have schema-related error codes");
             assert!(replay_errors >= 1, "Must have replay-related error codes");
         }
@@ -4809,8 +4830,7 @@ mod tests {
         fn conformance_security_posture_validation() {
             // Test 1: Security posture constant format
             assert_eq!(
-                CRYPTOGRAPHIC_SECURITY_POSTURE,
-                "cryptographic_ed25519_authenticated",
+                CRYPTOGRAPHIC_SECURITY_POSTURE, "cryptographic_ed25519_authenticated",
                 "Security posture constant must remain stable"
             );
 
@@ -4862,10 +4882,7 @@ mod tests {
             // Test 3: Event ID uniqueness across multiple events
             let mut event_ids = BTreeSet::new();
             for i in 0..100 {
-                let test_event = SdkEvent::new(
-                    CAPSULE_SIGNED,
-                    format!("Test event {}", i)
-                );
+                let test_event = SdkEvent::new(CAPSULE_SIGNED, format!("Test event {}", i));
                 assert!(
                     event_ids.insert(test_event.event_id),
                     "Event ID collision detected at iteration {}",
@@ -4875,8 +4892,10 @@ mod tests {
 
             // Test 4: Event serialization stability
             let original_event = SdkEvent::new(SDK_VERSION_CHECK, "Version check test".to_string());
-            let serialized = serde_json::to_string(&original_event).expect("Event should serialize");
-            let deserialized: SdkEvent = serde_json::from_str(&serialized).expect("Event should deserialize");
+            let serialized =
+                serde_json::to_string(&original_event).expect("Event should serialize");
+            let deserialized: SdkEvent =
+                serde_json::from_str(&serialized).expect("Event should deserialize");
 
             assert_eq!(original_event.event_code, deserialized.event_code);
             assert_eq!(original_event.detail, deserialized.detail);
@@ -4937,7 +4956,9 @@ mod tests {
 
             // Test 2: Manifest signature validation
             let key_pair = VerifierKeyPair::generate();
-            let signed_manifest = manifest.sign(&key_pair).expect("Manifest should sign successfully");
+            let signed_manifest = manifest
+                .sign(&key_pair)
+                .expect("Manifest should sign successfully");
 
             assert!(
                 signed_manifest.verify_signature().is_ok(),
@@ -4964,7 +4985,8 @@ mod tests {
             );
 
             let serialized = serde_json::to_string(&original_manifest).expect("Should serialize");
-            let deserialized: CapsuleManifest = serde_json::from_str(&serialized).expect("Should deserialize");
+            let deserialized: CapsuleManifest =
+                serde_json::from_str(&serialized).expect("Should deserialize");
 
             assert_eq!(original_manifest.capsule_id, deserialized.capsule_id);
             assert_eq!(original_manifest.sdk_version, deserialized.sdk_version);
@@ -4975,7 +4997,10 @@ mod tests {
         fn conformance_cryptographic_key_operations() {
             // Test 1: Key pair generation and validation
             let key_pair = VerifierKeyPair::generate();
-            assert!(key_pair.validate().is_ok(), "Generated key pair should be valid");
+            assert!(
+                key_pair.validate().is_ok(),
+                "Generated key pair should be valid"
+            );
 
             // Test 2: Public key derivation consistency
             let public_key1 = key_pair.public_key();
@@ -4998,7 +5023,10 @@ mod tests {
             // Test 4: Cross-key signature verification failure
             let other_key_pair = VerifierKeyPair::generate();
             assert!(
-                other_key_pair.public_key().verify(test_data, &signature).is_err(),
+                other_key_pair
+                    .public_key()
+                    .verify(test_data, &signature)
+                    .is_err(),
                 "Signature should fail verification with wrong key"
             );
 
@@ -5040,8 +5068,10 @@ mod tests {
 
             // Test 4: Verdict reproducibility invariant
             let capsule = create_test_capsule();
-            let verdict1 = replay_capsule_for_verdict(&capsule).expect("First replay should succeed");
-            let verdict2 = replay_capsule_for_verdict(&capsule).expect("Second replay should succeed");
+            let verdict1 =
+                replay_capsule_for_verdict(&capsule).expect("First replay should succeed");
+            let verdict2 =
+                replay_capsule_for_verdict(&capsule).expect("Second replay should succeed");
 
             assert_eq!(
                 verdict1, verdict2,
@@ -5068,7 +5098,8 @@ mod tests {
                         assert!(
                             sdk_error.error_code() == error_code,
                             "Error scenario '{}' should produce error code '{}'",
-                            scenario_desc, error_code
+                            scenario_desc,
+                            error_code
                         );
                     }
                     Ok(_) => {
@@ -5081,10 +5112,13 @@ mod tests {
             // Test 2: Error message quality
             let test_error = SdkError::new(
                 ERR_CAPSULE_SIGNATURE_INVALID,
-                "Test signature verification failed".to_string()
+                "Test signature verification failed".to_string(),
             );
 
-            assert!(!test_error.message().is_empty(), "Error message must not be empty");
+            assert!(
+                !test_error.message().is_empty(),
+                "Error message must not be empty"
+            );
             assert!(
                 test_error.message().len() <= 1024,
                 "Error message must be bounded in length"
@@ -5099,7 +5133,10 @@ mod tests {
         fn is_valid_version_format(version: &str) -> bool {
             version.starts_with("vsdk-v")
                 && version.len() >= 7
-                && version.chars().skip(6).all(|c| c.is_ascii_digit() || c == '.')
+                && version
+                    .chars()
+                    .skip(6)
+                    .all(|c| c.is_ascii_digit() || c == '.')
         }
 
         fn is_valid_event_code_format(code: &str) -> bool {
@@ -5117,7 +5154,9 @@ mod tests {
 
         fn is_valid_rule_id_format(rule_id: &str) -> bool {
             rule_id.contains("::")
-                && rule_id.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c == ':')
+                && rule_id
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c == ':')
         }
 
         fn is_version_compatible(min_version: &str, current_version: &str) -> bool {
@@ -5175,7 +5214,7 @@ mod tests {
             match error_code {
                 ERR_CAPSULE_SIGNATURE_INVALID => Err(SdkError::new(
                     error_code.to_string(),
-                    "Simulated signature verification failure".to_string()
+                    "Simulated signature verification failure".to_string(),
                 )),
                 _ => Ok(()), // Other scenarios not easily simulatable
             }

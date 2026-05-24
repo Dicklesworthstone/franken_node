@@ -1243,7 +1243,11 @@ mod tests {
             assert!(id.starts_with(&prefix_dash));
             let hex_tail = &id[prefix_dash.len()..];
             assert_eq!(hex_tail.len(), 16);
-            assert!(hex_tail.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                hex_tail
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

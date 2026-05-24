@@ -9,9 +9,9 @@
 use std::collections::HashSet;
 
 use franken_node::storage::retrievability_gate::{
-    content_hash, ArtifactId, ProofFailureReason, RetrievabilityConfig, RetrievabilityGate,
-    SegmentId, StorageTier, TargetTierState, RG_EVICTION_BLOCKED, RG_EVICTION_PERMITTED,
-    RG_GATE_INITIALIZED, RG_PROOF_FAILED, RG_PROOF_PASSED,
+    ArtifactId, ProofFailureReason, RG_EVICTION_BLOCKED, RG_EVICTION_PERMITTED,
+    RG_GATE_INITIALIZED, RG_PROOF_FAILED, RG_PROOF_PASSED, RetrievabilityConfig,
+    RetrievabilityGate, SegmentId, StorageTier, TargetTierState, content_hash,
 };
 
 /// **MUST** requirement: Eviction attempts MUST require a successful retrievability proof.
@@ -43,7 +43,11 @@ fn conformance_must_block_eviction_without_proof_verification() {
     );
 
     // Verify no permits issued
-    assert_eq!(gate.passed_count(), 0, "No proof success before target setup");
+    assert_eq!(
+        gate.passed_count(),
+        0,
+        "No proof success before target setup"
+    );
     assert!(gate.failed_count() > 0, "Failure must be recorded");
 }
 
@@ -99,7 +103,10 @@ fn conformance_must_enforce_proof_binding_to_specific_artifact_segment_tier() {
         StorageTier::L3Archive,
         &hash_a,
     );
-    assert!(proof_a_result.is_ok(), "Valid proof for artifact A must succeed");
+    assert!(
+        proof_a_result.is_ok(),
+        "Valid proof for artifact A must succeed"
+    );
     let proof_a = proof_a_result.unwrap();
 
     // Verify proof binding
@@ -109,11 +116,11 @@ fn conformance_must_enforce_proof_binding_to_specific_artifact_segment_tier() {
 
     // Cross-artifact proof attempt must fail: artifact A hash for artifact B
     let cross_artifact_result = gate.check_retrievability(
-        &artifact_b,  // Different artifact
-        &segment_2,   // Different segment
+        &artifact_b, // Different artifact
+        &segment_2,  // Different segment
         StorageTier::L2Warm,
         StorageTier::L3Archive,
-        &hash_a,      // Wrong hash for artifact B
+        &hash_a, // Wrong hash for artifact B
     );
     assert!(
         cross_artifact_result.is_err(),
@@ -122,11 +129,11 @@ fn conformance_must_enforce_proof_binding_to_specific_artifact_segment_tier() {
 
     // Cross-segment proof attempt must fail: segment 1 hash for segment 2
     let cross_segment_result = gate.check_retrievability(
-        &artifact_a,  // Same artifact
-        &segment_2,   // Different segment - not registered for artifact A
+        &artifact_a, // Same artifact
+        &segment_2,  // Different segment - not registered for artifact A
         StorageTier::L2Warm,
         StorageTier::L3Archive,
-        &hash_a,      // Hash doesn't match segment 2
+        &hash_a, // Hash doesn't match segment 2
     );
     assert!(
         cross_segment_result.is_err(),
@@ -167,7 +174,7 @@ fn conformance_must_fail_closed_on_proof_validation_errors() {
         &segment_id,
         StorageTier::L3Archive,
         TargetTierState {
-            content_hash: wrong_hash.clone(),  // Wrong hash
+            content_hash: wrong_hash.clone(), // Wrong hash
             reachable: true,
             fetch_latency_ms: 100,
         },
@@ -188,7 +195,7 @@ fn conformance_must_fail_closed_on_proof_validation_errors() {
         TargetTierState {
             content_hash: valid_hash.clone(),
             reachable: true,
-            fetch_latency_ms: 2000,  // Exceeds 1000ms limit
+            fetch_latency_ms: 2000, // Exceeds 1000ms limit
         },
     );
 
@@ -206,7 +213,7 @@ fn conformance_must_fail_closed_on_proof_validation_errors() {
         StorageTier::L3Archive,
         TargetTierState {
             content_hash: valid_hash.clone(),
-            reachable: false,  // Unreachable
+            reachable: false, // Unreachable
             fetch_latency_ms: 100,
         },
     );
@@ -218,7 +225,7 @@ fn conformance_must_fail_closed_on_proof_validation_errors() {
     );
 
     // Test case 4: Invalid artifact ID must fail closed
-    let empty_artifact = ArtifactId("".to_string());  // Invalid
+    let empty_artifact = ArtifactId("".to_string()); // Invalid
     let invalid_artifact_result = gate.attempt_eviction(&empty_artifact, &segment_id, &valid_hash);
     assert!(
         invalid_artifact_result.is_err(),
@@ -226,12 +233,22 @@ fn conformance_must_fail_closed_on_proof_validation_errors() {
     );
 
     // Verify ALL failures blocked eviction
-    assert_eq!(gate.passed_count(), 0, "No proofs should pass with validation errors");
-    assert!(gate.failed_count() >= 4, "All failure cases must be recorded");
+    assert_eq!(
+        gate.passed_count(),
+        0,
+        "No proofs should pass with validation errors"
+    );
+    assert!(
+        gate.failed_count() >= 4,
+        "All failure cases must be recorded"
+    );
 
     // Verify eviction blocking events
     let events = gate.events();
-    let blocked_events: Vec<_> = events.iter().filter(|e| e.code == RG_EVICTION_BLOCKED).collect();
+    let blocked_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.code == RG_EVICTION_BLOCKED)
+        .collect();
     assert!(
         blocked_events.len() >= 4,
         "All failed proof attempts must log eviction blocking"
@@ -296,13 +313,22 @@ fn conformance_must_maintain_complete_audit_trail_for_all_proof_attempts() {
 
     // Verify success event
     let events = gate.events();
-    let success_events: Vec<_> = events.iter().filter(|e| e.code == RG_PROOF_PASSED).collect();
-    assert!(success_events.len() >= 1, "Proof success must be event-logged");
+    let success_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.code == RG_PROOF_PASSED)
+        .collect();
+    assert!(
+        success_events.len() >= 1,
+        "Proof success must be event-logged"
+    );
 
     let success_event = &success_events[0];
     assert_eq!(success_event.artifact_id, "audit-test");
     assert_eq!(success_event.segment_id, "audit-segment");
-    assert!(success_event.detail.contains("latency=150ms"), "Event must include timing");
+    assert!(
+        success_event.detail.contains("latency=150ms"),
+        "Event must include timing"
+    );
 
     // Test failure case with hash mismatch
     let wrong_hash = content_hash(b"wrong-content");
@@ -311,7 +337,7 @@ fn conformance_must_maintain_complete_audit_trail_for_all_proof_attempts() {
         &segment_id,
         StorageTier::L2Warm,
         StorageTier::L3Archive,
-        &wrong_hash,  // Hash mismatch
+        &wrong_hash, // Hash mismatch
     );
     assert!(failure_result.is_err(), "Hash mismatch must fail");
 
@@ -326,31 +352,59 @@ fn conformance_must_maintain_complete_audit_trail_for_all_proof_attempts() {
     assert!(!failure_receipt.passed);
     assert!(failure_receipt.failure_reason.is_some());
     assert!(
-        failure_receipt.failure_reason.as_ref().unwrap().contains("hash mismatch"),
+        failure_receipt
+            .failure_reason
+            .as_ref()
+            .unwrap()
+            .contains("hash mismatch"),
         "Failure reason must be detailed"
     );
 
     // Verify failure event
-    let failure_events: Vec<_> = events.iter().filter(|e| e.code == RG_PROOF_FAILED).collect();
-    assert!(failure_events.len() >= 1, "Proof failure must be event-logged");
+    let failure_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.code == RG_PROOF_FAILED)
+        .collect();
+    assert!(
+        failure_events.len() >= 1,
+        "Proof failure must be event-logged"
+    );
 
     let failure_event = &failure_events[failure_events.len() - 1]; // Latest failure
     assert_eq!(failure_event.artifact_id, "audit-test");
     assert_eq!(failure_event.segment_id, "audit-segment");
-    assert!(failure_event.detail.contains("Proof failed"), "Failure detail required");
+    assert!(
+        failure_event.detail.contains("Proof failed"),
+        "Failure detail required"
+    );
 
     // Verify audit trail completeness
-    assert_eq!(gate.passed_count() + gate.failed_count(), all_receipts.len(),
-               "All attempts must be receipted");
+    assert_eq!(
+        gate.passed_count() + gate.failed_count(),
+        all_receipts.len(),
+        "All attempts must be receipted"
+    );
     assert_eq!(gate.passed_count(), 1, "One success recorded");
     assert!(gate.failed_count() >= 1, "At least one failure recorded");
 
     // Verify no audit data corruption
     for receipt in all_receipts {
-        assert!(!receipt.artifact_id.is_empty(), "Artifact ID must not be empty in audit");
-        assert!(!receipt.segment_id.is_empty(), "Segment ID must not be empty in audit");
-        assert!(!receipt.source_tier.is_empty(), "Source tier must be logged");
-        assert!(!receipt.target_tier.is_empty(), "Target tier must be logged");
+        assert!(
+            !receipt.artifact_id.is_empty(),
+            "Artifact ID must not be empty in audit"
+        );
+        assert!(
+            !receipt.segment_id.is_empty(),
+            "Segment ID must not be empty in audit"
+        );
+        assert!(
+            !receipt.source_tier.is_empty(),
+            "Source tier must be logged"
+        );
+        assert!(
+            !receipt.target_tier.is_empty(),
+            "Target tier must be logged"
+        );
         // Content hash may be empty on early validation failures - this is OK
         assert!(receipt.proof_timestamp > 0, "Timestamp must be logged");
     }
@@ -370,11 +424,11 @@ fn conformance_should_use_constant_time_hash_comparison() {
 
     // Create a hash that differs in the first vs last character
     let mut early_diff_hash = correct_hash.clone();
-    early_diff_hash.replace_range(0..2, "ff");  // Change first 2 chars
+    early_diff_hash.replace_range(0..2, "ff"); // Change first 2 chars
 
     let mut late_diff_hash = correct_hash.clone();
     let len = late_diff_hash.len();
-    late_diff_hash.replace_range(len-2..len, "ff");  // Change last 2 chars
+    late_diff_hash.replace_range(len - 2..len, "ff"); // Change last 2 chars
 
     gate.register_target(
         &artifact_id,
@@ -405,19 +459,35 @@ fn conformance_should_use_constant_time_hash_comparison() {
     );
 
     // Both should fail due to hash mismatch
-    assert!(early_diff_result.is_err(), "Early position hash diff must fail");
-    assert!(late_diff_result.is_err(), "Late position hash diff must fail");
+    assert!(
+        early_diff_result.is_err(),
+        "Early position hash diff must fail"
+    );
+    assert!(
+        late_diff_result.is_err(),
+        "Late position hash diff must fail"
+    );
 
     // Both should be hash mismatch errors specifically
     if let Err(early_err) = early_diff_result {
-        assert!(matches!(early_err.reason, ProofFailureReason::HashMismatch { .. }));
+        assert!(matches!(
+            early_err.reason,
+            ProofFailureReason::HashMismatch { .. }
+        ));
     }
     if let Err(late_err) = late_diff_result {
-        assert!(matches!(late_err.reason, ProofFailureReason::HashMismatch { .. }));
+        assert!(matches!(
+            late_err.reason,
+            ProofFailureReason::HashMismatch { .. }
+        ));
     }
 
     // Verify both failures are audited equally
-    assert_eq!(gate.failed_count(), 2, "Both hash mismatches must be recorded");
+    assert_eq!(
+        gate.failed_count(),
+        2,
+        "Both hash mismatches must be recorded"
+    );
 }
 
 /// **SHOULD** requirement: Input validation SHOULD reject malformed artifact IDs,
@@ -431,13 +501,13 @@ fn conformance_should_validate_inputs_early_before_processing() {
 
     // Test malformed artifact IDs
     let malformed_artifacts = vec![
-        ArtifactId("".to_string()),                    // Empty
-        ArtifactId("   ".to_string()),                 // Whitespace only
-        ArtifactId(" leading-space".to_string()),      // Leading whitespace
-        ArtifactId("trailing-space ".to_string()),     // Trailing whitespace
-        ArtifactId("control\x00char".to_string()),     // Null byte
-        ArtifactId("control\x0achar".to_string()),     // Newline
-        ArtifactId("<unknown>".to_string()),           // Reserved ID
+        ArtifactId("".to_string()),                // Empty
+        ArtifactId("   ".to_string()),             // Whitespace only
+        ArtifactId(" leading-space".to_string()),  // Leading whitespace
+        ArtifactId("trailing-space ".to_string()), // Trailing whitespace
+        ArtifactId("control\x00char".to_string()), // Null byte
+        ArtifactId("control\x0achar".to_string()), // Newline
+        ArtifactId("<unknown>".to_string()),       // Reserved ID
     ];
 
     for malformed_artifact in malformed_artifacts {
@@ -449,20 +519,26 @@ fn conformance_should_validate_inputs_early_before_processing() {
             &valid_hash,
         );
 
-        assert!(result.is_err(), "Malformed artifact ID must be rejected early");
+        assert!(
+            result.is_err(),
+            "Malformed artifact ID must be rejected early"
+        );
         if let Err(err) = result {
-            assert!(matches!(err.reason, ProofFailureReason::InvalidArtifactId { .. }));
+            assert!(matches!(
+                err.reason,
+                ProofFailureReason::InvalidArtifactId { .. }
+            ));
         }
     }
 
     // Test malformed segment IDs
     let malformed_segments = vec![
-        SegmentId("".to_string()),                     // Empty
-        SegmentId("   ".to_string()),                  // Whitespace only
-        SegmentId(" leading".to_string()),             // Leading whitespace
-        SegmentId("trailing ".to_string()),            // Trailing whitespace
-        SegmentId("control\x09char".to_string()),      // Tab
-        SegmentId("control\x0dchar".to_string()),      // Carriage return
+        SegmentId("".to_string()),                // Empty
+        SegmentId("   ".to_string()),             // Whitespace only
+        SegmentId(" leading".to_string()),        // Leading whitespace
+        SegmentId("trailing ".to_string()),       // Trailing whitespace
+        SegmentId("control\x09char".to_string()), // Tab
+        SegmentId("control\x0dchar".to_string()), // Carriage return
     ];
 
     for malformed_segment in malformed_segments {
@@ -474,9 +550,15 @@ fn conformance_should_validate_inputs_early_before_processing() {
             &valid_hash,
         );
 
-        assert!(result.is_err(), "Malformed segment ID must be rejected early");
+        assert!(
+            result.is_err(),
+            "Malformed segment ID must be rejected early"
+        );
         if let Err(err) = result {
-            assert!(matches!(err.reason, ProofFailureReason::InvalidSegmentId { .. }));
+            assert!(matches!(
+                err.reason,
+                ProofFailureReason::InvalidSegmentId { .. }
+            ));
         }
     }
 
@@ -486,12 +568,12 @@ fn conformance_should_validate_inputs_early_before_processing() {
 
     // Test malformed observed content hashes in target state
     let malformed_hashes = vec![
-        "",                                            // Empty
-        "not-hex-at-all",                             // Non-hex characters
-        "12345",                                      // Too short
-        "Z".repeat(64),                               // Invalid hex chars
-        "1234567890abcdef".repeat(2) + "extra",       // Too long
-        "1234567890ABCDEF".repeat(4),                 // Uppercase (non-canonical)
+        "",                                     // Empty
+        "not-hex-at-all",                       // Non-hex characters
+        "12345",                                // Too short
+        "Z".repeat(64),                         // Invalid hex chars
+        "1234567890abcdef".repeat(2) + "extra", // Too long
+        "1234567890ABCDEF".repeat(4),           // Uppercase (non-canonical)
     ];
 
     for malformed_hash in malformed_hashes {
@@ -516,12 +598,18 @@ fn conformance_should_validate_inputs_early_before_processing() {
 
         assert!(result.is_err(), "Malformed observed hash must be rejected");
         if let Err(err) = result {
-            assert!(matches!(err.reason, ProofFailureReason::InvalidObservedHash { .. }));
+            assert!(matches!(
+                err.reason,
+                ProofFailureReason::InvalidObservedHash { .. }
+            ));
         }
     }
 
     // All validation failures should be audit-logged
-    assert!(gate.failed_count() > 10, "All input validation failures must be recorded");
+    assert!(
+        gate.failed_count() > 10,
+        "All input validation failures must be recorded"
+    );
 }
 
 /// **SHOULD** requirement: Configuration validation SHOULD reject invalid latency
@@ -552,7 +640,7 @@ fn conformance_should_validate_configuration_parameters() {
         TargetTierState {
             content_hash: valid_hash.clone(),
             reachable: true,
-            fetch_latency_ms: 5000,  // Exactly at limit
+            fetch_latency_ms: 5000, // Exactly at limit
         },
     );
 
@@ -563,7 +651,10 @@ fn conformance_should_validate_configuration_parameters() {
         StorageTier::L3Archive,
         &valid_hash,
     );
-    assert!(at_limit_result.is_err(), "Latency at exact limit must fail (fail-closed)");
+    assert!(
+        at_limit_result.is_err(),
+        "Latency at exact limit must fail (fail-closed)"
+    );
 
     // Just under limit should pass
     let under_limit_artifact = ArtifactId("under-limit".to_string());
@@ -574,7 +665,7 @@ fn conformance_should_validate_configuration_parameters() {
         TargetTierState {
             content_hash: valid_hash.clone(),
             reachable: true,
-            fetch_latency_ms: 4999,  // Just under limit
+            fetch_latency_ms: 4999, // Just under limit
         },
     );
 
@@ -585,7 +676,10 @@ fn conformance_should_validate_configuration_parameters() {
         StorageTier::L3Archive,
         &valid_hash,
     );
-    assert!(under_limit_result.is_ok(), "Latency under limit must succeed");
+    assert!(
+        under_limit_result.is_ok(),
+        "Latency under limit must succeed"
+    );
 
     // Configuration with hash matching disabled
     let no_hash_config = RetrievabilityConfig {
@@ -600,7 +694,7 @@ fn conformance_should_validate_configuration_parameters() {
         &segment_id,
         StorageTier::L3Archive,
         TargetTierState {
-            content_hash: content_hash(b"different-content"),  // Different hash
+            content_hash: content_hash(b"different-content"), // Different hash
             reachable: true,
             fetch_latency_ms: 100,
         },
@@ -611,9 +705,12 @@ fn conformance_should_validate_configuration_parameters() {
         &segment_id,
         StorageTier::L2Warm,
         StorageTier::L3Archive,
-        &valid_hash,  // Different expected hash
+        &valid_hash, // Different expected hash
     );
-    assert!(no_hash_result.is_ok(), "Hash mismatch allowed when hash checking disabled");
+    assert!(
+        no_hash_result.is_ok(),
+        "Hash mismatch allowed when hash checking disabled"
+    );
 }
 
 /// **MAY** requirement: The gate MAY support querying proof statistics
@@ -659,14 +756,28 @@ fn conformance_may_support_audit_trail_export_and_statistics() {
     );
 
     // Verify statistics API
-    assert_eq!(gate.passed_count(), 1, "Statistics should track passed proofs");
-    assert_eq!(gate.failed_count(), 1, "Statistics should track failed proofs");
+    assert_eq!(
+        gate.passed_count(),
+        1,
+        "Statistics should track passed proofs"
+    );
+    assert_eq!(
+        gate.failed_count(),
+        1,
+        "Statistics should track failed proofs"
+    );
 
     // Verify audit trail export
     let json_export = gate.receipts_json();
     assert!(!json_export.is_empty(), "Should support JSON export");
-    assert!(json_export.contains("export-test"), "Export should include artifact data");
-    assert!(json_export.contains("passed"), "Export should include pass/fail status");
+    assert!(
+        json_export.contains("export-test"),
+        "Export should include artifact data"
+    );
+    assert!(
+        json_export.contains("passed"),
+        "Export should include pass/fail status"
+    );
 
     // Verify receipt access
     let receipts = gate.receipts();
@@ -682,11 +793,7 @@ fn conformance_may_support_audit_trail_export_and_statistics() {
     assert!(!events.is_empty(), "Should maintain event log");
 
     let event_codes: HashSet<_> = events.iter().map(|e| e.code.as_str()).collect();
-    let expected_codes = vec![
-        RG_GATE_INITIALIZED,
-        RG_PROOF_PASSED,
-        RG_PROOF_FAILED,
-    ];
+    let expected_codes = vec![RG_GATE_INITIALIZED, RG_PROOF_PASSED, RG_PROOF_FAILED];
 
     for expected_code in expected_codes {
         assert!(
@@ -748,11 +855,14 @@ fn conformance_may_provide_eviction_permits_for_successful_proofs() {
         StorageTier::L3Archive,
         TargetTierState {
             content_hash: valid_hash.clone(),
-            reachable: false,  // Unreachable
+            reachable: false, // Unreachable
             fetch_latency_ms: 100,
         },
     );
 
     let no_permit_result = gate.attempt_eviction(&unreachable_artifact, &segment_id, &valid_hash);
-    assert!(no_permit_result.is_err(), "Failed eviction should not return permit");
+    assert!(
+        no_permit_result.is_err(),
+        "Failed eviction should not return permit"
+    );
 }

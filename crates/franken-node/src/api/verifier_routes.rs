@@ -2736,8 +2736,7 @@ mod tests {
         // future refactor that would length-prefix the domain too.
         let empty = sha256_marker_from_parts(b"verifier_routes_golden_domain_v1:", &[]);
         assert_eq!(
-            empty,
-            "sha256:ca9dc50055cd0eb2e18bc9bc231ed37687c820e36924c999207b2c1a06527fad",
+            empty, "sha256:ca9dc50055cd0eb2e18bc9bc231ed37687c820e36924c999207b2c1a06527fad",
             "empty-parts marker drifted — either the domain is now \
              length-prefixed (it must not be), or the `sha256:` prefix or \
              hex casing changed"
@@ -2752,8 +2751,7 @@ mod tests {
             &["op-golden-1", "ATC-7", "2026-04-24T00:00:00Z"],
         );
         assert_eq!(
-            populated,
-            "sha256:f5b31bf1431183f178cf729dcc97ceeadf1658754ee9569f815b55a30fa63a86",
+            populated, "sha256:f5b31bf1431183f178cf729dcc97ceeadf1658754ee9569f815b55a30fa63a86",
             "populated-parts marker drifted — check LE64-len per-part \
              framing or iteration order"
         );
@@ -2765,8 +2763,7 @@ mod tests {
         let with_empty =
             sha256_marker_from_parts(b"verifier_routes_golden_domain_v1:", &["", "non-empty", ""]);
         assert_eq!(
-            with_empty,
-            "sha256:b277160e1f4f7586bbe75e7e4d92d6b28fd063906267761883354c6c9bdb7e61",
+            with_empty, "sha256:b277160e1f4f7586bbe75e7e4d92d6b28fd063906267761883354c6c9bdb7e61",
             "empty-string-part marker drifted — check that an empty &str \
              still emits LE64(0) into the hasher rather than being skipped"
         );

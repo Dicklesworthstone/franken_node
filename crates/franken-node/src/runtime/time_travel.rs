@@ -1684,8 +1684,7 @@ mod tests {
         );
         let zero_full_digest = String::from_utf8(zero.payload.clone()).unwrap();
         assert_eq!(
-            zero_full_digest,
-            "e21bf34f21efe4ee58a5141741368b451e9abd147fa34d310b36c0d0715e4b65",
+            zero_full_digest, "e21bf34f21efe4ee58a5141741368b451e9abd147fa34d310b36c0d0715e4b65",
             "zero payload (decoded as ASCII) MUST equal the full 64-char \
              SHA-256 hex digest"
         );
@@ -1735,7 +1734,11 @@ mod tests {
             let hex_tail = &after_dec[dash + 1..];
             assert!(tick_str.chars().all(|c| c.is_ascii_digit()));
             assert_eq!(hex_tail.len(), 8);
-            assert!(hex_tail.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                hex_tail
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 
@@ -1859,7 +1862,7 @@ mod tests {
         // are preserved.)
         let swapped = ControlDecision {
             decision_id: "hash-payload".to_string(), // was payload
-            payload: b"dec-1".to_vec(),               // was decision_id
+            payload: b"dec-1".to_vec(),              // was decision_id
             metadata: BTreeMap::new(),
         };
         let typical_no_meta = ControlDecision {
@@ -1891,7 +1894,10 @@ mod tests {
         // 6. 64-lowercase-hex length+casing contract.
         for h in [minimal.digest(), typical.digest(), det_digest] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 
@@ -1986,9 +1992,8 @@ mod tests {
         let frame0 = CaptureFrame {
             frame_index: 0,
             clock_tick: 0,
-            input_hash:
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                    .to_string(),
+            input_hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             decision: ControlDecision {
                 decision_id: "dec-0".to_string(),
                 payload: b"payload-a".to_vec(),
@@ -2001,9 +2006,8 @@ mod tests {
         let frame1 = CaptureFrame {
             frame_index: 1,
             clock_tick: 1,
-            input_hash:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .to_string(),
+            input_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
             decision: ControlDecision {
                 decision_id: "dec-1".to_string(),
                 payload: b"payload-b".to_vec(),
@@ -2062,7 +2066,10 @@ mod tests {
             WorkflowSnapshot::compute_integrity_digest(&frames),
         ] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

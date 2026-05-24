@@ -16,12 +16,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Generate simulated 7-day production data representing realistic scenarios
     let historical_samples = generate_realistic_production_data()?;
 
-    println!("📊 Generated {} historical samples over 7-day window", historical_samples.len());
+    println!(
+        "📊 Generated {} historical samples over 7-day window",
+        historical_samples.len()
+    );
 
     let config = MetricsCollectionConfig {
         output_dir: "tests/artifacts/perf/cuckoo_n_distribution".to_string(),
         min_window_hours: 168.0, // 7 days
-        force_export: true, // Allow export with simulated data
+        force_export: true,      // Allow export with simulated data
         historical_samples,
     };
 
@@ -42,8 +45,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 println!("  • p95: {}", metrics["p95"]);
                 println!("  • p99: {}", metrics["p99"]);
                 println!("  • max_observed: {}", metrics["max_observed"]);
-                println!("  • cuckoo_cliff_crossings: {}", metrics["cuckoo_cliff_crossings"]);
-                println!("  • max_growth_rate_per_minute: {}", metrics["max_growth_rate_per_minute"]);
+                println!(
+                    "  • cuckoo_cliff_crossings: {}",
+                    metrics["cuckoo_cliff_crossings"]
+                );
+                println!(
+                    "  • max_growth_rate_per_minute: {}",
+                    metrics["max_growth_rate_per_minute"]
+                );
             }
         }
     } else {
@@ -59,9 +68,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// This simulates a week of `franken_node_revocation_filter_entries` readings that would
 /// be typical for a production franken_node deployment handling trust decisions.
 fn generate_realistic_production_data() -> Result<Vec<RevocationFilterSample>, Box<dyn Error>> {
-    let start_time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_millis() as u64 - (7 * 24 * 60 * 60 * 1000); // 7 days ago
+    let start_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64
+        - (7 * 24 * 60 * 60 * 1000); // 7 days ago
 
     let mut samples = Vec::new();
 

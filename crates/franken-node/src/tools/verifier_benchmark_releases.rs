@@ -922,8 +922,7 @@ mod tests {
         // 1. Empty fixture: all zero counters, no by_type entries.
         let empty = compute_metrics_content_hash(0, 0, 0, &BTreeMap::new(), "demo-v1.0");
         assert_eq!(
-            empty,
-            "63c0a1eaa7d7f2f7814b0668b4c07df2e6d1968feebee76644d1dcc683377339",
+            empty, "63c0a1eaa7d7f2f7814b0668b4c07df2e6d1968feebee76644d1dcc683377339",
             "empty-fixture metrics hash drifted — check `verifier_benchmark_hash_v2:` \
              domain separator or LE64(0) zero-counter framing"
         );
@@ -935,16 +934,10 @@ mod tests {
         by_type.insert("stable".to_string(), 800_000u64);
         by_type.insert("nightly".to_string(), 350_000u64);
         by_type.insert("beta".to_string(), 84_567u64);
-        let populated = compute_metrics_content_hash(
-            100,
-            87,
-            1_234_567,
-            &by_type,
-            "verifier-benchmark-v2.0",
-        );
+        let populated =
+            compute_metrics_content_hash(100, 87, 1_234_567, &by_type, "verifier-benchmark-v2.0");
         assert_eq!(
-            populated,
-            "5721d310160b90c7ed5b74b765aaccc2080c2b105343bfdaaee517d0dc9cc639",
+            populated, "5721d310160b90c7ed5b74b765aaccc2080c2b105343bfdaaee517d0dc9cc639",
             "populated-fixture metrics hash drifted — check BTreeMap \
              sorted-iteration order or per-entry asymmetric framing \
              (release_type LE64-prefixed but downloads raw LE64)"
@@ -956,8 +949,7 @@ mod tests {
         // hasher rather than being silently skipped.
         let empty_schema = compute_metrics_content_hash(5, 3, 99, &BTreeMap::new(), "");
         assert_eq!(
-            empty_schema,
-            "c33f2c1f0ee2fdab2c1d6ac16ae97fc9b432b90f5b23ecf346e6e8e406c857b7",
+            empty_schema, "c33f2c1f0ee2fdab2c1d6ac16ae97fc9b432b90f5b23ecf346e6e8e406c857b7",
             "empty-schema metrics hash drifted — check that an empty \
              schema_version still emits LE64(0) into the hasher rather \
              than being skipped"
@@ -972,13 +964,8 @@ mod tests {
         reordered.insert("beta".to_string(), 84_567u64);
         reordered.insert("stable".to_string(), 800_000u64);
         reordered.insert("nightly".to_string(), 350_000u64);
-        let reordered_hash = compute_metrics_content_hash(
-            100,
-            87,
-            1_234_567,
-            &reordered,
-            "verifier-benchmark-v2.0",
-        );
+        let reordered_hash =
+            compute_metrics_content_hash(100, 87, 1_234_567, &reordered, "verifier-benchmark-v2.0");
         assert_eq!(
             reordered_hash, populated,
             "compute_metrics_content_hash MUST be insertion-order-independent \
@@ -999,7 +986,10 @@ mod tests {
         // Length+casing contract on every output.
         for h in [&empty, &populated, &empty_schema, &bumped_total] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
         assert_ne!(empty, populated);
         assert_ne!(empty, empty_schema);

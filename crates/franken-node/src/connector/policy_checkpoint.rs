@@ -2922,8 +2922,7 @@ mod tests {
             "operator-1",
         );
         assert_eq!(
-            genesis,
-            "ab488c7260050ca5b675070c5e9bf297d4dd2e757bf34cd94f2d45c784a50515",
+            genesis, "ab488c7260050ca5b675070c5e9bf297d4dd2e757bf34cd94f2d45c784a50515",
             "genesis PolicyCheckpoint hash drifted — check the v1 \
              domain separator, the BIG-ENDIAN u64 encoding of \
              sequence/epoch_id/timestamp (NOT LE), or the hardcoded \
@@ -2941,8 +2940,7 @@ mod tests {
             "operator-2",
         );
         assert_eq!(
-            linked,
-            "34a5d37b475b6de13d461ffec1094785d38fb8ab9949f4dc5a84274663302110",
+            linked, "34a5d37b475b6de13d461ffec1094785d38fb8ab9949f4dc5a84274663302110",
             "linked PolicyCheckpoint hash drifted — check Some-parent \
              framing or ReleaseChannel::Beta label (\"beta\", 4 bytes)"
         );
@@ -2958,8 +2956,7 @@ mod tests {
             "operator-internal",
         );
         assert_eq!(
-            custom,
-            "ad5550dbc720449e6b8f833a5c134c4b1da63800a5f9f9ddf51a1c4e1cd9d2d4",
+            custom, "ad5550dbc720449e6b8f833a5c134c4b1da63800a5f9f9ddf51a1c4e1cd9d2d4",
             "custom-channel PolicyCheckpoint hash drifted — check the \
              ReleaseChannel::Custom Display (\"custom:<name>\", NOT \
              just the name)"
@@ -3029,7 +3026,10 @@ mod tests {
         // Length+casing contract.
         for h in [&genesis, &linked, &custom] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

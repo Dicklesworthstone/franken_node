@@ -2537,8 +2537,7 @@ mod tests {
         // 1. Empty refs.
         let empty = compute_derivation_hash(&[], 0);
         assert_eq!(
-            empty,
-            "sha256:b96cb1e060a11bc3d88183a7fe19658438d07e776f23fede5e02246f4c6154fa",
+            empty, "sha256:b96cb1e060a11bc3d88183a7fe19658438d07e776f23fede5e02246f4c6154fa",
             "empty compute_derivation_hash drifted — check the v1 \
              domain separator, raw u64 LE encoding of derived_at, OR \
              LE64(0) zero-refs framing"
@@ -2596,7 +2595,11 @@ mod tests {
         ] {
             assert_eq!(h.len(), 71);
             assert!(h.starts_with("sha256:"));
-            assert!(h[7..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h[7..]
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

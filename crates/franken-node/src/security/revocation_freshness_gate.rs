@@ -2800,7 +2800,10 @@ mod tests {
         // Length+casing contract.
         for h in [&minimal_hex, &realistic_hex, &advisory_hex] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

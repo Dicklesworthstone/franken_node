@@ -17,9 +17,8 @@
 //! - EVD-VIOLATION-004: Operation rejection events
 
 use frankenengine_node::observability::durability_violation::{
-    CausalEvent, CausalEventType, DurabilityViolationDetector, FailedArtifact,
-    HaltPolicy, ProofContext, ViolationContext, generate_bundle,
-    event_codes, DurabilityHaltedError,
+    CausalEvent, CausalEventType, DurabilityHaltedError, DurabilityViolationDetector,
+    FailedArtifact, HaltPolicy, ProofContext, ViolationContext, event_codes, generate_bundle,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -66,7 +65,6 @@ const DURABILITY_VIOLATION_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Identical ViolationContext produces identical bundle_id",
         test_fn: test_must_r_dvb_001_deterministic_bundle_generation,
     },
-
     // MUST_R_DVB_002: INV-VIOLATION-CAUSAL
     ConformanceCase {
         id: "MUST_R_DVB_002",
@@ -75,7 +73,6 @@ const DURABILITY_VIOLATION_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Bundle preserves complete causal event chain ordering",
         test_fn: test_must_r_dvb_002_causal_chain_preservation,
     },
-
     // MUST_R_DVB_003: INV-VIOLATION-HALT
     ConformanceCase {
         id: "MUST_R_DVB_003",
@@ -94,7 +91,6 @@ const EVENT_CODE_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Bundle generation emits EVD-VIOLATION-001",
         test_fn: test_should_evd_violation_001_bundle_generated,
     },
-
     ConformanceCase {
         id: "EVD-VIOLATION-002",
         section: "events",
@@ -102,7 +98,6 @@ const EVENT_CODE_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Halt enforcement emits EVD-VIOLATION-002",
         test_fn: test_should_evd_violation_002_gating_halted,
     },
-
     ConformanceCase {
         id: "EVD-VIOLATION-003",
         section: "events",
@@ -110,7 +105,6 @@ const EVENT_CODE_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Halt clearing emits EVD-VIOLATION-003",
         test_fn: test_should_evd_violation_003_halt_cleared,
     },
-
     ConformanceCase {
         id: "EVD-VIOLATION-004",
         section: "events",
@@ -158,7 +152,8 @@ fn test_must_r_dvb_001_deterministic_bundle_generation() -> TestResult {
     // All bundle contents must be identical
     if bundle1.causal_event_sequence != bundle2.causal_event_sequence {
         return TestResult::Fail {
-            reason: "MUST_R_DVB_001 violated: causal event sequence differs between runs".to_string(),
+            reason: "MUST_R_DVB_001 violated: causal event sequence differs between runs"
+                .to_string(),
         };
     }
 
@@ -234,8 +229,12 @@ fn test_must_r_dvb_002_causal_chain_preservation() -> TestResult {
     }
 
     // Verify ordering preserved
-    for (i, (original, bundled)) in context.events.iter()
-        .zip(bundle.causal_event_sequence.iter()).enumerate() {
+    for (i, (original, bundled)) in context
+        .events
+        .iter()
+        .zip(bundle.causal_event_sequence.iter())
+        .enumerate()
+    {
         if original.event_type != bundled.event_type {
             return TestResult::Fail {
                 reason: format!(
@@ -288,13 +287,15 @@ fn test_must_r_dvb_003_halt_enforcement() -> TestResult {
     // Before violation: operations allowed
     if detector.check_durable_op("ledger").is_err() {
         return TestResult::Fail {
-            reason: "MUST_R_DVB_003 violated: operation blocked before violation emission".to_string(),
+            reason: "MUST_R_DVB_003 violated: operation blocked before violation emission"
+                .to_string(),
         };
     }
 
     if detector.is_halted() {
         return TestResult::Fail {
-            reason: "MUST_R_DVB_003 violated: detector shows halted state before violation".to_string(),
+            reason: "MUST_R_DVB_003 violated: detector shows halted state before violation"
+                .to_string(),
         };
     }
 
@@ -304,13 +305,15 @@ fn test_must_r_dvb_003_halt_enforcement() -> TestResult {
     // After violation: operations blocked
     if !detector.is_halted() {
         return TestResult::Fail {
-            reason: "MUST_R_DVB_003 violated: detector not halted after violation emission".to_string(),
+            reason: "MUST_R_DVB_003 violated: detector not halted after violation emission"
+                .to_string(),
         };
     }
 
     match detector.check_durable_op("ledger") {
         Ok(()) => TestResult::Fail {
-            reason: "MUST_R_DVB_003 violated: durable operation allowed after violation emission".to_string(),
+            reason: "MUST_R_DVB_003 violated: durable operation allowed after violation emission"
+                .to_string(),
         },
         Err(halt_err) => {
             // Verify halt error contains bundle info
@@ -415,14 +418,12 @@ fn create_reference_violation_context() -> ViolationContext {
                 evidence_ref: None,
             },
         ],
-        artifacts: vec![
-            FailedArtifact {
-                artifact_path: "objects/abc123".into(),
-                expected_hash: "deadbeef".into(),
-                actual_hash: "00000000".into(),
-                failure_reason: "hash mismatch after repair".into(),
-            }
-        ],
+        artifacts: vec![FailedArtifact {
+            artifact_path: "objects/abc123".into(),
+            expected_hash: "deadbeef".into(),
+            actual_hash: "00000000".into(),
+            failure_reason: "hash mismatch after repair".into(),
+        }],
         proofs,
         hardening_level: "critical".into(),
         epoch_id: 42,
@@ -461,7 +462,11 @@ pub fn run_full_conformance_suite() -> ConformanceReport {
     // Run MUST_R requirements
     for case in DURABILITY_VIOLATION_CONFORMANCE_CASES {
         let test_result = (case.test_fn)();
-        let verdict = if test_result.is_pass() { "PASS" } else { "FAIL" };
+        let verdict = if test_result.is_pass() {
+            "PASS"
+        } else {
+            "FAIL"
+        };
 
         if test_result.is_pass() && case.level == RequirementLevel::Must {
             must_pass += 1;
@@ -487,7 +492,11 @@ pub fn run_full_conformance_suite() -> ConformanceReport {
     // Run SHOULD event code tests
     for case in EVENT_CODE_CONFORMANCE_CASES {
         let test_result = (case.test_fn)();
-        let verdict = if test_result.is_pass() { "PASS" } else { "FAIL" };
+        let verdict = if test_result.is_pass() {
+            "PASS"
+        } else {
+            "FAIL"
+        };
 
         if test_result.is_pass() && case.level == RequirementLevel::Should {
             should_pass += 1;
@@ -515,11 +524,15 @@ pub fn run_full_conformance_suite() -> ConformanceReport {
 
     let must_score = if total_must > 0 {
         (must_pass as f64) / (total_must as f64) * 100.0
-    } else { 100.0 };
+    } else {
+        100.0
+    };
 
     let should_score = if total_should > 0 {
         (should_pass as f64) / (total_should as f64) * 100.0
-    } else { 100.0 };
+    } else {
+        100.0
+    };
 
     let overall_score = (must_score * 0.8) + (should_score * 0.2);
 

@@ -6,12 +6,12 @@
 //! - INV-SWEEP-BOUNDED: overhead stays within budget (bounded decision log)
 //! - INV-SWEEP-DETERMINISTIC: same inputs produce same outputs
 
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use frankenengine_node::policy::integrity_sweep_scheduler::{
-    EvidenceTrajectory, IntegritySweepScheduler, PolicyBand, SweepDepth, SweepSchedulerConfig,
-    Trend, SweepScheduleDecision,
+    EvidenceTrajectory, IntegritySweepScheduler, PolicyBand, SweepDepth, SweepScheduleDecision,
+    SweepSchedulerConfig, Trend,
 };
 
 #[derive(Debug, Clone)]
@@ -69,7 +69,6 @@ const BD_1FP4_CASES: &[ConformanceCase] = &[
         description: "sweep depth correlates with band severity",
         test_fn: test_sweep_depth_correlates_with_severity,
     },
-
     // INV-SWEEP-HYSTERESIS: de-escalation requires N consecutive lower-band readings
     ConformanceCase {
         id: "bd-1fp4-hysteresis-1",
@@ -99,7 +98,6 @@ const BD_1FP4_CASES: &[ConformanceCase] = &[
         description: "de-escalation only steps down one band at a time",
         test_fn: test_deescalation_single_step,
     },
-
     // INV-SWEEP-BOUNDED: overhead stays within budget (bounded decision log)
     ConformanceCase {
         id: "bd-1fp4-bounded-1",
@@ -115,7 +113,6 @@ const BD_1FP4_CASES: &[ConformanceCase] = &[
         description: "update count tracks all trajectory updates",
         test_fn: test_update_count_tracking,
     },
-
     // INV-SWEEP-DETERMINISTIC: same inputs produce same outputs
     ConformanceCase {
         id: "bd-1fp4-deterministic-1",
@@ -131,7 +128,6 @@ const BD_1FP4_CASES: &[ConformanceCase] = &[
         description: "band classification is deterministic for same evidence",
         test_fn: test_band_classification_deterministic,
     },
-
     // Band classification logic
     ConformanceCase {
         id: "bd-1fp4-classification-1",
@@ -154,7 +150,6 @@ const BD_1FP4_CASES: &[ConformanceCase] = &[
         description: "low repairability can escalate band",
         test_fn: test_low_repairability_escalates,
     },
-
     // Evidence trajectory validation
     ConformanceCase {
         id: "bd-1fp4-evidence-1",
@@ -170,7 +165,6 @@ const BD_1FP4_CASES: &[ConformanceCase] = &[
         description: "non-finite repairability defaults to 0.0",
         test_fn: test_non_finite_repairability_defaults,
     },
-
     // Configuration and ordering
     ConformanceCase {
         id: "bd-1fp4-config-1",
@@ -352,7 +346,10 @@ fn test_deescalation_requires_hysteresis() -> TestResult {
     scheduler.update_trajectory(&green_evidence3);
     if scheduler.current_band() != PolicyBand::Yellow {
         return TestResult::Fail {
-            reason: format!("Should de-escalate to Yellow after 3 readings, got {:?}", scheduler.current_band()),
+            reason: format!(
+                "Should de-escalate to Yellow after 3 readings, got {:?}",
+                scheduler.current_band()
+            ),
         };
     }
 
@@ -376,14 +373,20 @@ fn test_escalation_immediate() -> TestResult {
 
     if scheduler.current_band() != PolicyBand::Red {
         return TestResult::Fail {
-            reason: format!("Escalation should be immediate, expected Red, got {:?}", scheduler.current_band()),
+            reason: format!(
+                "Escalation should be immediate, expected Red, got {:?}",
+                scheduler.current_band()
+            ),
         };
     }
 
     // Hysteresis counter should be reset on escalation
     if scheduler.hysteresis_counter() != 0 {
         return TestResult::Fail {
-            reason: format!("Hysteresis counter should reset on escalation, got {}", scheduler.hysteresis_counter()),
+            reason: format!(
+                "Hysteresis counter should reset on escalation, got {}",
+                scheduler.hysteresis_counter()
+            ),
         };
     }
 
@@ -480,14 +483,20 @@ fn test_decision_log_bounded_capacity() -> TestResult {
         // MAX_DECISIONS is 4096, but we want to verify bounded behavior
         // This test validates the principle rather than exact capacity
         return TestResult::Fail {
-            reason: format!("Decision log should be reasonably bounded, got {} entries", decisions.len()),
+            reason: format!(
+                "Decision log should be reasonably bounded, got {} entries",
+                decisions.len()
+            ),
         };
     }
 
     // Update count should track all updates regardless of log bounds
     if scheduler.update_count() != 100 {
         return TestResult::Fail {
-            reason: format!("Update count should be 100, got {}", scheduler.update_count()),
+            reason: format!(
+                "Update count should be 100, got {}",
+                scheduler.update_count()
+            ),
         };
     }
 
@@ -510,7 +519,8 @@ fn test_update_count_tracking() -> TestResult {
         return TestResult::Fail {
             reason: format!(
                 "Update count should increment by 3, got {} (was {})",
-                scheduler.update_count(), initial_count
+                scheduler.update_count(),
+                initial_count
             ),
         };
     }
@@ -542,7 +552,8 @@ fn test_identical_trajectories_identical_schedules() -> TestResult {
         return TestResult::Fail {
             reason: format!(
                 "Current bands differ: {:?} vs {:?}",
-                scheduler1.current_band(), scheduler2.current_band()
+                scheduler1.current_band(),
+                scheduler2.current_band()
             ),
         };
     }
@@ -551,7 +562,8 @@ fn test_identical_trajectories_identical_schedules() -> TestResult {
         return TestResult::Fail {
             reason: format!(
                 "Hysteresis counters differ: {} vs {}",
-                scheduler1.hysteresis_counter(), scheduler2.hysteresis_counter()
+                scheduler1.hysteresis_counter(),
+                scheduler2.hysteresis_counter()
             ),
         };
     }
@@ -560,7 +572,8 @@ fn test_identical_trajectories_identical_schedules() -> TestResult {
         return TestResult::Fail {
             reason: format!(
                 "Next intervals differ: {:?} vs {:?}",
-                scheduler1.next_sweep_interval(), scheduler2.next_sweep_interval()
+                scheduler1.next_sweep_interval(),
+                scheduler2.next_sweep_interval()
             ),
         };
     }
@@ -616,7 +629,8 @@ fn test_high_rejections_trigger_red() -> TestResult {
         return TestResult::Fail {
             reason: format!(
                 "High rejections ({}) should trigger Red band, got {:?}",
-                config.red_rejection_threshold, scheduler.current_band()
+                config.red_rejection_threshold,
+                scheduler.current_band()
             ),
         };
     }
@@ -643,7 +657,8 @@ fn test_medium_rejections_trigger_yellow() -> TestResult {
         return TestResult::Fail {
             reason: format!(
                 "Medium rejections ({}) should trigger at least Yellow band, got {:?}",
-                config.yellow_rejection_threshold, scheduler.current_band()
+                config.yellow_rejection_threshold,
+                scheduler.current_band()
             ),
         };
     }
@@ -685,13 +700,19 @@ fn test_repairability_clamped() -> TestResult {
 
     if evidence_high.avg_repairability > 1.0 {
         return TestResult::Fail {
-            reason: format!("High repairability should be clamped to 1.0, got {}", evidence_high.avg_repairability),
+            reason: format!(
+                "High repairability should be clamped to 1.0, got {}",
+                evidence_high.avg_repairability
+            ),
         };
     }
 
     if evidence_low.avg_repairability < 0.0 {
         return TestResult::Fail {
-            reason: format!("Low repairability should be clamped to 0.0, got {}", evidence_low.avg_repairability),
+            reason: format!(
+                "Low repairability should be clamped to 0.0, got {}",
+                evidence_low.avg_repairability
+            ),
         };
     }
 
@@ -704,13 +725,19 @@ fn test_non_finite_repairability_defaults() -> TestResult {
 
     if evidence_nan.avg_repairability != 0.0 {
         return TestResult::Fail {
-            reason: format!("NaN repairability should default to 0.0, got {}", evidence_nan.avg_repairability),
+            reason: format!(
+                "NaN repairability should default to 0.0, got {}",
+                evidence_nan.avg_repairability
+            ),
         };
     }
 
     if evidence_inf.avg_repairability != 0.0 {
         return TestResult::Fail {
-            reason: format!("Infinite repairability should default to 0.0, got {}", evidence_inf.avg_repairability),
+            reason: format!(
+                "Infinite repairability should default to 0.0, got {}",
+                evidence_inf.avg_repairability
+            ),
         };
     }
 
@@ -734,13 +761,19 @@ fn test_policy_band_ordering() -> TestResult {
     // Test severity values
     if PolicyBand::Green.severity() != 0 {
         return TestResult::Fail {
-            reason: format!("Green severity should be 0, got {}", PolicyBand::Green.severity()),
+            reason: format!(
+                "Green severity should be 0, got {}",
+                PolicyBand::Green.severity()
+            ),
         };
     }
 
     if PolicyBand::Red.severity() != 2 {
         return TestResult::Fail {
-            reason: format!("Red severity should be 2, got {}", PolicyBand::Red.severity()),
+            reason: format!(
+                "Red severity should be 2, got {}",
+                PolicyBand::Red.severity()
+            ),
         };
     }
 
@@ -751,13 +784,18 @@ fn test_default_config_reasonable() -> TestResult {
     let config = SweepSchedulerConfig::default_config();
 
     // Intervals should be reasonable and ordered
-    if config.red_interval_ms == 0 || config.yellow_interval_ms == 0 || config.green_interval_ms == 0 {
+    if config.red_interval_ms == 0
+        || config.yellow_interval_ms == 0
+        || config.green_interval_ms == 0
+    {
         return TestResult::Fail {
             reason: "All intervals should be > 0".to_string(),
         };
     }
 
-    if config.red_interval_ms >= config.yellow_interval_ms || config.yellow_interval_ms >= config.green_interval_ms {
+    if config.red_interval_ms >= config.yellow_interval_ms
+        || config.yellow_interval_ms >= config.green_interval_ms
+    {
         return TestResult::Fail {
             reason: "Intervals should be ordered: red < yellow < green".to_string(),
         };
@@ -772,7 +810,10 @@ fn test_default_config_reasonable() -> TestResult {
 
     if config.low_repairability_threshold < 0.0 || config.low_repairability_threshold > 1.0 {
         return TestResult::Fail {
-            reason: format!("Repairability threshold should be in [0,1], got {}", config.low_repairability_threshold),
+            reason: format!(
+                "Repairability threshold should be in [0,1], got {}",
+                config.low_repairability_threshold
+            ),
         };
     }
 
@@ -806,7 +847,10 @@ fn bd_1fp4_full_conformance() {
             }
             TestResult::ExpectedFailure { ref reason } => {
                 xfail += 1;
-                eprintln!("XFAIL {}: {}\n  Reason: {reason}", case.id, case.description);
+                eprintln!(
+                    "XFAIL {}: {}\n  Reason: {reason}",
+                    case.id, case.description
+                );
                 "XFAIL"
             }
         };
@@ -852,7 +896,9 @@ fn generate_compliance_matrix() {
         } else {
             0.0
         };
-        println!("| {invariant:<25} | {must_count:^4} | {total:^5} | {passing:^4} | {score:5.1}% |");
+        println!(
+            "| {invariant:<25} | {must_count:^4} | {total:^5} | {passing:^4} | {score:5.1}% |"
+        );
     }
 }
 
@@ -863,9 +909,8 @@ mod tests {
     #[test]
     fn conformance_case_coverage() {
         // Verify we have comprehensive coverage
-        let invariant_counts: BTreeMap<&str, usize> = BD_1FP4_CASES
-            .iter()
-            .fold(BTreeMap::new(), |mut acc, case| {
+        let invariant_counts: BTreeMap<&str, usize> =
+            BD_1FP4_CASES.iter().fold(BTreeMap::new(), |mut acc, case| {
                 *acc.entry(case.invariant).or_default() += 1;
                 acc
             });
@@ -874,7 +919,12 @@ mod tests {
         assert!(invariant_counts.get("INV-SWEEP-ADAPTIVE").unwrap_or(&0) >= &3);
         assert!(invariant_counts.get("INV-SWEEP-HYSTERESIS").unwrap_or(&0) >= &3);
         assert!(invariant_counts.get("INV-SWEEP-BOUNDED").unwrap_or(&0) >= &1);
-        assert!(invariant_counts.get("INV-SWEEP-DETERMINISTIC").unwrap_or(&0) >= &1);
+        assert!(
+            invariant_counts
+                .get("INV-SWEEP-DETERMINISTIC")
+                .unwrap_or(&0)
+                >= &1
+        );
     }
 
     #[test]
@@ -882,6 +932,10 @@ mod tests {
         use std::collections::HashSet;
 
         let ids: HashSet<&str> = BD_1FP4_CASES.iter().map(|case| case.id).collect();
-        assert_eq!(ids.len(), BD_1FP4_CASES.len(), "Duplicate test case IDs found");
+        assert_eq!(
+            ids.len(),
+            BD_1FP4_CASES.len(),
+            "Duplicate test case IDs found"
+        );
     }
 }

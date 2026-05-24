@@ -3,16 +3,16 @@
 //! This harness implements Pattern 4: Spec-Derived Test Matrix for the bd-tg2
 //! specification covering fleet quarantine/revocation API with zone/tenant-scoped operations.
 
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 // Import the fleet quarantine API types and constants
 use frankenengine_node::api::fleet_quarantine::{
-    FLEET_QUARANTINE_INITIATED, FLEET_REVOCATION_ISSUED, FLEET_RELEASED,
-    FLEET_RECONCILE_COMPLETED, FLEET_SCOPE_INVALID, FLEET_ROLLBACK_FAILED,
-    FLEET_NOT_ACTIVATED, FLEET_INTERNAL, FleetQuarantineRequest, FleetRevocationRequest,
-    FleetReleaseRequest, FleetStatusRequest, FleetReconcileRequest, FleetQuarantineResponse,
-    FleetApiService, ZoneId, ExtensionId, IncidentId,
+    ExtensionId, FLEET_INTERNAL, FLEET_NOT_ACTIVATED, FLEET_QUARANTINE_INITIATED,
+    FLEET_RECONCILE_COMPLETED, FLEET_RELEASED, FLEET_REVOCATION_ISSUED, FLEET_ROLLBACK_FAILED,
+    FLEET_SCOPE_INVALID, FleetApiService, FleetQuarantineRequest, FleetQuarantineResponse,
+    FleetReconcileRequest, FleetReleaseRequest, FleetRevocationRequest, FleetStatusRequest,
+    IncidentId, ZoneId,
 };
 
 /// Test categories for organizational purposes
@@ -90,19 +90,30 @@ impl ConformanceReport {
         let mut md = String::new();
         md.push_str("# bd-tg2 Fleet Quarantine/Revocation API Conformance Report\n\n");
         md.push_str(&format!("**Generated:** {}\n\n", self.timestamp));
-        md.push_str(&format!("**Compliance Score:** {:.1}%\n\n", self.compliance_score() * 100.0));
+        md.push_str(&format!(
+            "**Compliance Score:** {:.1}%\n\n",
+            self.compliance_score() * 100.0
+        ));
 
         // Summary table
         md.push_str("## Summary\n\n");
         md.push_str("| Requirement Level | Pass | Fail | Skip | XFAIL |\n");
         md.push_str("|------------------|:----:|:----:|:----:|:-----:|\n");
-        md.push_str(&format!("| MUST | {} | {} | 0 | 0 |\n",
-                             self.stats.must_pass, self.stats.must_fail));
-        md.push_str(&format!("| SHOULD | {} | {} | {} | {} |\n",
-                             self.stats.should_pass, self.stats.should_fail,
-                             self.stats.skipped, self.stats.expected_failures));
-        md.push_str(&format!("| MAY | {} | {} | 0 | 0 |\n",
-                             self.stats.may_pass, self.stats.may_fail));
+        md.push_str(&format!(
+            "| MUST | {} | {} | 0 | 0 |\n",
+            self.stats.must_pass, self.stats.must_fail
+        ));
+        md.push_str(&format!(
+            "| SHOULD | {} | {} | {} | {} |\n",
+            self.stats.should_pass,
+            self.stats.should_fail,
+            self.stats.skipped,
+            self.stats.expected_failures
+        ));
+        md.push_str(&format!(
+            "| MAY | {} | {} | 0 | 0 |\n",
+            self.stats.may_pass, self.stats.may_fail
+        ));
 
         // Detailed results
         md.push_str("\n## Test Results\n\n");
@@ -113,8 +124,10 @@ impl ConformanceReport {
                 TestResult::Skipped { .. } => "⏭️ SKIP",
                 TestResult::ExpectedFailure { .. } => "⏳ XFAIL",
             };
-            md.push_str(&format!("- **{}** [{}] {}: {}\n",
-                                record.id, status, record.section, record.description));
+            md.push_str(&format!(
+                "- **{}** [{}] {}: {}\n",
+                record.id, status, record.section, record.description
+            ));
 
             if let TestResult::Fail { reason } = &record.result {
                 md.push_str(&format!("  - ❌ {}\n", reason));
@@ -151,7 +164,10 @@ fn test_case_tg2_inv_1() -> ConformanceRecord {
         };
 
         // Verify zone ID is preserved in request
-        assert_eq!(quarantine_req.zone_id, zone_id, "Quarantine request must preserve zone ID");
+        assert_eq!(
+            quarantine_req.zone_id, zone_id,
+            "Quarantine request must preserve zone ID"
+        );
 
         // Revocation request must include zone
         let revocation_req = FleetRevocationRequest {
@@ -161,7 +177,10 @@ fn test_case_tg2_inv_1() -> ConformanceRecord {
             trace_id: "trace-inv-1-rev".to_string(),
         };
 
-        assert_eq!(revocation_req.zone_id, zone_id, "Revocation request must preserve zone ID");
+        assert_eq!(
+            revocation_req.zone_id, zone_id,
+            "Revocation request must preserve zone ID"
+        );
 
         // Status request must be zone-scoped
         let status_req = FleetStatusRequest {
@@ -169,15 +188,18 @@ fn test_case_tg2_inv_1() -> ConformanceRecord {
             trace_id: "trace-inv-1-status".to_string(),
         };
 
-        assert_eq!(status_req.zone_id, zone_id, "Status request must preserve zone ID");
+        assert_eq!(
+            status_req.zone_id, zone_id,
+            "Status request must preserve zone ID"
+        );
 
         // Test that zone IDs are validated
         assert!(!zone_id.as_str().is_empty(), "Zone ID must not be empty");
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Zone scoping not properly enforced across operations".to_string()
+                reason: "Zone scoping not properly enforced across operations".to_string(),
             };
         }
     }
@@ -191,7 +213,8 @@ fn test_case_tg2_inv_2() -> ConformanceRecord {
         section: "Core Invariants".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Integration,
-        description: "INV-FLEET-RECEIPT: all operations produce signed decision receipts".to_string(),
+        description: "INV-FLEET-RECEIPT: all operations produce signed decision receipts"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -213,24 +236,37 @@ fn test_case_tg2_inv_2() -> ConformanceRecord {
         match response {
             Ok(resp) => {
                 // Verify receipt is present
-                assert!(resp.receipt.is_some(), "Quarantine response must include signed receipt");
+                assert!(
+                    resp.receipt.is_some(),
+                    "Quarantine response must include signed receipt"
+                );
 
                 if let Some(receipt) = resp.receipt {
-                    assert!(!receipt.signature_b64.is_empty(), "Receipt must have non-empty signature");
-                    assert!(!receipt.payload.is_empty(), "Receipt must have non-empty payload");
+                    assert!(
+                        !receipt.signature_b64.is_empty(),
+                        "Receipt must have non-empty signature"
+                    );
+                    assert!(
+                        !receipt.payload.is_empty(),
+                        "Receipt must have non-empty payload"
+                    );
                     assert_eq!(receipt.zone_id, zone_id, "Receipt must preserve zone ID");
                 }
-            },
+            }
             Err(e) => {
                 // Even error responses should include receipts for audit trail
-                assert!(e.trace_id.is_some(), "Error response should include trace ID");
+                assert!(
+                    e.trace_id.is_some(),
+                    "Error response should include trace ID"
+                );
             }
         }
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Signed decision receipts not properly generated for operations".to_string()
+                reason: "Signed decision receipts not properly generated for operations"
+                    .to_string(),
             };
         }
     }
@@ -244,7 +280,8 @@ fn test_case_tg2_inv_3() -> ConformanceRecord {
         section: "Core Invariants".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Unit,
-        description: "INV-FLEET-BOUNDED: all collections are bounded with capacity eviction".to_string(),
+        description: "INV-FLEET-BOUNDED: all collections are bounded with capacity eviction"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -271,19 +308,24 @@ fn test_case_tg2_inv_3() -> ConformanceRecord {
 
         // Verify capacity is bounded (oldest events evicted)
         let events = api_service.get_fleet_events();
-        assert!(events.len() <= max_events, "Fleet events must be bounded to max capacity");
+        assert!(
+            events.len() <= max_events,
+            "Fleet events must be bounded to max capacity"
+        );
 
         // Verify that recent events are preserved (LIFO eviction of oldest)
         if events.len() == max_events {
             let last_event = events.last().expect("Should have events");
-            assert!(last_event.trace_id.contains(&format!("{}", max_events + 9)),
-                    "Most recent events should be preserved during eviction");
+            assert!(
+                last_event.trace_id.contains(&format!("{}", max_events + 9)),
+                "Most recent events should be preserved during eviction"
+            );
         }
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Collection capacity bounding not working properly".to_string()
+                reason: "Collection capacity bounding not working properly".to_string(),
             };
         }
     }
@@ -297,7 +339,8 @@ fn test_case_tg2_inv_4() -> ConformanceRecord {
         section: "Core Invariants".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Integration,
-        description: "INV-FLEET-SAFE-START: API starts in read-only mode, requires activation".to_string(),
+        description: "INV-FLEET-SAFE-START: API starts in read-only mode, requires activation"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -320,7 +363,11 @@ fn test_case_tg2_inv_4() -> ConformanceRecord {
         assert!(result.is_err(), "Quarantine should fail before activation");
 
         if let Err(e) = result {
-            assert_eq!(e.code(), FLEET_NOT_ACTIVATED, "Should return FLEET_NOT_ACTIVATED error");
+            assert_eq!(
+                e.code(),
+                FLEET_NOT_ACTIVATED,
+                "Should return FLEET_NOT_ACTIVATED error"
+            );
         }
 
         // Read operations should work even before activation
@@ -331,9 +378,10 @@ fn test_case_tg2_inv_4() -> ConformanceRecord {
 
         let status_result = api_service.get_status(status_req);
         // Status should work (read-only) but show inactive state
-        assert!(status_result.is_ok() ||
-                status_result.unwrap_err().code() == FLEET_NOT_ACTIVATED,
-                "Status check should work in read-only mode");
+        assert!(
+            status_result.is_ok() || status_result.unwrap_err().code() == FLEET_NOT_ACTIVATED,
+            "Status check should work in read-only mode"
+        );
 
         // After activation, write operations should work
         api_service.activate().expect("Activation should succeed");
@@ -348,10 +396,10 @@ fn test_case_tg2_inv_4() -> ConformanceRecord {
         let result2 = api_service.quarantine(quarantine_req2);
         assert!(result2.is_ok(), "Quarantine should work after activation");
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Safe start mode not properly enforced".to_string()
+                reason: "Safe start mode not properly enforced".to_string(),
             };
         }
     }
@@ -383,28 +431,51 @@ fn test_case_tg2_evt_1() -> ConformanceRecord {
             trace_id: "trace-evt-1".to_string(),
         };
 
-        let response = api_service.quarantine(quarantine_req).expect("Quarantine should succeed");
+        let response = api_service
+            .quarantine(quarantine_req)
+            .expect("Quarantine should succeed");
 
         // Verify FLEET-001 event is emitted
         let events = api_service.get_fleet_events();
-        let quarantine_event = events.iter().find(|e| e.event_code == FLEET_QUARANTINE_INITIATED);
+        let quarantine_event = events
+            .iter()
+            .find(|e| e.event_code == FLEET_QUARANTINE_INITIATED);
 
-        assert!(quarantine_event.is_some(), "FLEET-001 event should be emitted");
+        assert!(
+            quarantine_event.is_some(),
+            "FLEET-001 event should be emitted"
+        );
 
         if let Some(event) = quarantine_event {
-            assert_eq!(event.event_code, FLEET_QUARANTINE_INITIATED, "Correct event code");
-            assert_eq!(FLEET_QUARANTINE_INITIATED, "FLEET-001", "Event code should match specification");
-            assert_eq!(event.trace_id, "trace-evt-1", "Event should preserve trace ID");
+            assert_eq!(
+                event.event_code, FLEET_QUARANTINE_INITIATED,
+                "Correct event code"
+            );
+            assert_eq!(
+                FLEET_QUARANTINE_INITIATED, "FLEET-001",
+                "Event code should match specification"
+            );
+            assert_eq!(
+                event.trace_id, "trace-evt-1",
+                "Event should preserve trace ID"
+            );
         }
 
         // Verify response indicates success
-        assert!(response.success, "Quarantine response should indicate success");
-        assert!(!response.operation_id.is_empty(), "Response should include operation ID");
+        assert!(
+            response.success,
+            "Quarantine response should indicate success"
+        );
+        assert!(
+            !response.operation_id.is_empty(),
+            "Response should include operation ID"
+        );
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "FLEET-001 event not properly emitted for quarantine operations".to_string()
+                reason: "FLEET-001 event not properly emitted for quarantine operations"
+                    .to_string(),
             };
         }
     }
@@ -436,26 +507,46 @@ fn test_case_tg2_evt_2() -> ConformanceRecord {
             trace_id: "trace-evt-2".to_string(),
         };
 
-        let response = api_service.revoke(revocation_req).expect("Revocation should succeed");
+        let response = api_service
+            .revoke(revocation_req)
+            .expect("Revocation should succeed");
 
         // Verify FLEET-002 event is emitted
         let events = api_service.get_fleet_events();
-        let revocation_event = events.iter().find(|e| e.event_code == FLEET_REVOCATION_ISSUED);
+        let revocation_event = events
+            .iter()
+            .find(|e| e.event_code == FLEET_REVOCATION_ISSUED);
 
-        assert!(revocation_event.is_some(), "FLEET-002 event should be emitted");
+        assert!(
+            revocation_event.is_some(),
+            "FLEET-002 event should be emitted"
+        );
 
         if let Some(event) = revocation_event {
-            assert_eq!(event.event_code, FLEET_REVOCATION_ISSUED, "Correct event code");
-            assert_eq!(FLEET_REVOCATION_ISSUED, "FLEET-002", "Event code should match specification");
-            assert_eq!(event.trace_id, "trace-evt-2", "Event should preserve trace ID");
+            assert_eq!(
+                event.event_code, FLEET_REVOCATION_ISSUED,
+                "Correct event code"
+            );
+            assert_eq!(
+                FLEET_REVOCATION_ISSUED, "FLEET-002",
+                "Event code should match specification"
+            );
+            assert_eq!(
+                event.trace_id, "trace-evt-2",
+                "Event should preserve trace ID"
+            );
         }
 
-        assert!(response.success, "Revocation response should indicate success");
+        assert!(
+            response.success,
+            "Revocation response should indicate success"
+        );
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "FLEET-002 event not properly emitted for revocation operations".to_string()
+                reason: "FLEET-002 event not properly emitted for revocation operations"
+                    .to_string(),
             };
         }
     }
@@ -469,7 +560,8 @@ fn test_case_tg2_err_1() -> ConformanceRecord {
         section: "Error Handling".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Unit,
-        description: "FLEET_SCOPE_INVALID error MUST be returned for invalid zone scoping".to_string(),
+        description: "FLEET_SCOPE_INVALID error MUST be returned for invalid zone scoping"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -492,7 +584,11 @@ fn test_case_tg2_err_1() -> ConformanceRecord {
         assert!(result.is_err(), "Empty zone ID should cause error");
 
         if let Err(e) = result {
-            assert_eq!(e.code(), FLEET_SCOPE_INVALID, "Should return FLEET_SCOPE_INVALID error");
+            assert_eq!(
+                e.code(),
+                FLEET_SCOPE_INVALID,
+                "Should return FLEET_SCOPE_INVALID error"
+            );
         }
 
         // Test with invalid characters in zone ID
@@ -510,13 +606,18 @@ fn test_case_tg2_err_1() -> ConformanceRecord {
         assert!(result2.is_err(), "Invalid zone format should cause error");
 
         if let Err(e) = result2 {
-            assert_eq!(e.code(), FLEET_SCOPE_INVALID, "Should return FLEET_SCOPE_INVALID error");
+            assert_eq!(
+                e.code(),
+                FLEET_SCOPE_INVALID,
+                "Should return FLEET_SCOPE_INVALID error"
+            );
         }
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "FLEET_SCOPE_INVALID error not properly returned for invalid scoping".to_string()
+                reason: "FLEET_SCOPE_INVALID error not properly returned for invalid scoping"
+                    .to_string(),
             };
         }
     }
@@ -530,7 +631,8 @@ fn test_case_tg2_rollback_1() -> ConformanceRecord {
         section: "Rollback Operations".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Integration,
-        description: "INV-FLEET-ROLLBACK: release deterministically rolls back quarantine state".to_string(),
+        description: "INV-FLEET-ROLLBACK: release deterministically rolls back quarantine state"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -549,7 +651,9 @@ fn test_case_tg2_rollback_1() -> ConformanceRecord {
             trace_id: "trace-rollback-quarantine".to_string(),
         };
 
-        let quarantine_resp = api_service.quarantine(quarantine_req).expect("Quarantine should succeed");
+        let quarantine_resp = api_service
+            .quarantine(quarantine_req)
+            .expect("Quarantine should succeed");
         let quarantine_op_id = quarantine_resp.operation_id.clone();
 
         // Verify quarantine is active
@@ -558,9 +662,13 @@ fn test_case_tg2_rollback_1() -> ConformanceRecord {
             trace_id: "trace-rollback-status".to_string(),
         };
 
-        let status = api_service.get_status(status_req).expect("Status should succeed");
-        assert!(status.quarantined_extensions.contains(&extension_id),
-                "Extension should be quarantined");
+        let status = api_service
+            .get_status(status_req)
+            .expect("Status should succeed");
+        assert!(
+            status.quarantined_extensions.contains(&extension_id),
+            "Extension should be quarantined"
+        );
 
         // Step 2: Release (rollback) the quarantine
         let incident_id = IncidentId::new("rollback-incident-001".to_string());
@@ -572,7 +680,9 @@ fn test_case_tg2_rollback_1() -> ConformanceRecord {
             trace_id: "trace-rollback-release".to_string(),
         };
 
-        let release_resp = api_service.release(release_req).expect("Release should succeed");
+        let release_resp = api_service
+            .release(release_req)
+            .expect("Release should succeed");
         assert!(release_resp.success, "Release should be successful");
 
         // Step 3: Verify rollback is deterministic
@@ -581,23 +691,33 @@ fn test_case_tg2_rollback_1() -> ConformanceRecord {
             trace_id: "trace-rollback-verify".to_string(),
         };
 
-        let status2 = api_service.get_status(status_req2).expect("Status should succeed");
-        assert!(!status2.quarantined_extensions.contains(&extension_id),
-                "Extension should no longer be quarantined after rollback");
+        let status2 = api_service
+            .get_status(status_req2)
+            .expect("Status should succeed");
+        assert!(
+            !status2.quarantined_extensions.contains(&extension_id),
+            "Extension should no longer be quarantined after rollback"
+        );
 
         // Verify FLEET-004 release event was emitted
         let events = api_service.get_fleet_events();
         let release_event = events.iter().find(|e| e.event_code == FLEET_RELEASED);
 
-        assert!(release_event.is_some(), "FLEET-004 release event should be emitted");
+        assert!(
+            release_event.is_some(),
+            "FLEET-004 release event should be emitted"
+        );
         if let Some(event) = release_event {
-            assert_eq!(FLEET_RELEASED, "FLEET-004", "Event code should match specification");
+            assert_eq!(
+                FLEET_RELEASED, "FLEET-004",
+                "Event code should match specification"
+            );
         }
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Deterministic rollback not working properly".to_string()
+                reason: "Deterministic rollback not working properly".to_string(),
             };
         }
     }
@@ -611,7 +731,8 @@ fn test_case_tg2_reconcile_1() -> ConformanceRecord {
         section: "Reconciliation".to_string(),
         level: RequirementLevel::Should,
         category: TestCategory::Integration,
-        description: "Fleet reconciliation SHOULD track convergence with progress and ETA".to_string(),
+        description: "Fleet reconciliation SHOULD track convergence with progress and ETA"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -627,30 +748,46 @@ fn test_case_tg2_reconcile_1() -> ConformanceRecord {
             trace_id: "trace-reconcile-1".to_string(),
         };
 
-        let reconcile_resp = api_service.reconcile(reconcile_req).expect("Reconcile should succeed");
+        let reconcile_resp = api_service
+            .reconcile(reconcile_req)
+            .expect("Reconcile should succeed");
 
         // Verify reconciliation response contains convergence info
-        assert!(reconcile_resp.convergence_progress >= 0.0 && reconcile_resp.convergence_progress <= 1.0,
-                "Convergence progress should be between 0.0 and 1.0");
+        assert!(
+            reconcile_resp.convergence_progress >= 0.0
+                && reconcile_resp.convergence_progress <= 1.0,
+            "Convergence progress should be between 0.0 and 1.0"
+        );
 
         if reconcile_resp.convergence_progress < 1.0 {
-            assert!(reconcile_resp.estimated_completion_secs.is_some(),
-                    "ETA should be provided when convergence is incomplete");
+            assert!(
+                reconcile_resp.estimated_completion_secs.is_some(),
+                "ETA should be provided when convergence is incomplete"
+            );
         }
 
         // Verify FLEET-005 reconcile completed event
         let events = api_service.get_fleet_events();
-        let reconcile_event = events.iter().find(|e| e.event_code == FLEET_RECONCILE_COMPLETED);
+        let reconcile_event = events
+            .iter()
+            .find(|e| e.event_code == FLEET_RECONCILE_COMPLETED);
 
-        assert!(reconcile_event.is_some(), "FLEET-005 reconcile event should be emitted");
+        assert!(
+            reconcile_event.is_some(),
+            "FLEET-005 reconcile event should be emitted"
+        );
         if let Some(event) = reconcile_event {
-            assert_eq!(FLEET_RECONCILE_COMPLETED, "FLEET-005", "Event code should match specification");
+            assert_eq!(
+                FLEET_RECONCILE_COMPLETED, "FLEET-005",
+                "Event code should match specification"
+            );
         }
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Fleet reconciliation convergence tracking not working properly".to_string()
+                reason: "Fleet reconciliation convergence tracking not working properly"
+                    .to_string(),
             };
         }
     }
@@ -708,19 +845,30 @@ mod tests {
 
         // Print summary for human review
         println!("\n📊 bd-tg2 Conformance Test Results:");
-        println!("  MUST requirements: {} pass, {} fail",
-                 report.stats.must_pass, report.stats.must_fail);
-        println!("  SHOULD requirements: {} pass, {} fail",
-                 report.stats.should_pass, report.stats.should_fail);
-        println!("  Compliance score: {:.1}%", report.compliance_score() * 100.0);
+        println!(
+            "  MUST requirements: {} pass, {} fail",
+            report.stats.must_pass, report.stats.must_fail
+        );
+        println!(
+            "  SHOULD requirements: {} pass, {} fail",
+            report.stats.should_pass, report.stats.should_fail
+        );
+        println!(
+            "  Compliance score: {:.1}%",
+            report.compliance_score() * 100.0
+        );
 
         // All MUST requirements must pass for conformance
-        assert_eq!(report.stats.must_fail, 0,
-                   "All MUST requirements must pass for bd-tg2 conformance");
+        assert_eq!(
+            report.stats.must_fail, 0,
+            "All MUST requirements must pass for bd-tg2 conformance"
+        );
 
         // Compliance score must be >= 95% for MUST requirements
-        assert!(report.compliance_score() >= 0.95,
-                "bd-tg2 compliance score must be >= 95%");
+        assert!(
+            report.compliance_score() >= 0.95,
+            "bd-tg2 compliance score must be >= 95%"
+        );
 
         println!("✅ bd-tg2 conformance test suite PASSED");
     }

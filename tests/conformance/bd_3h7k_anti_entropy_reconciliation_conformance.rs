@@ -20,15 +20,14 @@
 //! **MUST-AER-009**: `TrustState` operations MUST maintain record capacity limits
 //! **MUST-AER-010**: Fork detection MUST trigger on conflicting MMR roots (ERR_AE_FORK_DETECTED)
 
-use frankenengine_node::runtime::anti_entropy::{
-    AntiEntropyReconciler, ReconciliationConfig, ReconciliationError, TrustRecord, TrustState,
-    EVT_CYCLE_STARTED, EVT_DELTA_COMPUTED, EVT_RECORD_ACCEPTED, EVT_RECORD_REJECTED,
-    EVT_CYCLE_COMPLETED, EVT_FORK_DETECTED, EVT_CANCELLED,
-    ERR_AE_INVALID_CONFIG, ERR_AE_EPOCH_VIOLATION, ERR_AE_PROOF_INVALID,
-    ERR_AE_FORK_DETECTED, ERR_AE_CANCELLED, ERR_AE_BATCH_EXCEEDED,
-    INV_AE_DELTA, INV_AE_ATOMIC, INV_AE_EPOCH, INV_AE_PROOF
-};
 use frankenengine_node::control_plane::mmr_proofs::{InclusionProof, MmrRoot};
+use frankenengine_node::runtime::anti_entropy::{
+    AntiEntropyReconciler, ERR_AE_BATCH_EXCEEDED, ERR_AE_CANCELLED, ERR_AE_EPOCH_VIOLATION,
+    ERR_AE_FORK_DETECTED, ERR_AE_INVALID_CONFIG, ERR_AE_PROOF_INVALID, EVT_CANCELLED,
+    EVT_CYCLE_COMPLETED, EVT_CYCLE_STARTED, EVT_DELTA_COMPUTED, EVT_FORK_DETECTED,
+    EVT_RECORD_ACCEPTED, EVT_RECORD_REJECTED, INV_AE_ATOMIC, INV_AE_DELTA, INV_AE_EPOCH,
+    INV_AE_PROOF, ReconciliationConfig, ReconciliationError, TrustRecord, TrustState,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -91,7 +90,10 @@ impl ConformanceReport {
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
         md.push_str("# bd-3h7k Anti-Entropy Reconciliation Conformance Report\n\n");
-        md.push_str(&format!("**Compliance Score:** {:.1}%\n\n", self.compliance_score() * 100.0));
+        md.push_str(&format!(
+            "**Compliance Score:** {:.1}%\n\n",
+            self.compliance_score() * 100.0
+        ));
         md.push_str("## Test Results\n\n");
 
         for result in self.results.values() {
@@ -105,7 +107,10 @@ impl ConformanceReport {
                 TestResult::Fail { reason } => &format!("❌ FAIL: {}", reason),
                 TestResult::Skip { reason } => &format!("⏭️ SKIP: {}", reason),
             };
-            md.push_str(&format!("- **{}** [{}]: {} - {}\n", result.id, level_str, result.title, status_str));
+            md.push_str(&format!(
+                "- **{}** [{}]: {} - {}\n",
+                result.id, level_str, result.title, status_str
+            ));
         }
 
         md
@@ -122,7 +127,10 @@ pub fn run_bd_3h7k_conformance_tests() -> ConformanceReport {
     results.insert("MUST-AER-002".to_string(), test_delta_batch_limits());
 
     // MUST-AER-003: compute_delta correctly identifies missing vs replacements
-    results.insert("MUST-AER-003".to_string(), test_delta_record_classification());
+    results.insert(
+        "MUST-AER-003".to_string(),
+        test_delta_record_classification(),
+    );
 
     // MUST-AER-004: reconcile applies changes atomically
     results.insert("MUST-AER-004".to_string(), test_atomic_reconciliation());
@@ -166,7 +174,7 @@ fn test_config_validation() -> ConformanceTestResult {
             title: "Config validation rejects invalid configurations".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Zero max_delta_batch should be rejected".to_string()
+                reason: "Zero max_delta_batch should be rejected".to_string(),
             },
         };
     }
@@ -187,7 +195,7 @@ fn test_config_validation() -> ConformanceTestResult {
             title: "Config validation rejects invalid configurations".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Valid config was incorrectly rejected".to_string()
+                reason: "Valid config was incorrectly rejected".to_string(),
             },
         };
     }
@@ -208,14 +216,16 @@ fn test_delta_batch_limits() -> ConformanceTestResult {
 
     let reconciler = match AntiEntropyReconciler::new(config) {
         Ok(r) => r,
-        Err(_) => return ConformanceTestResult {
-            id: "MUST-AER-002".to_string(),
-            title: "compute_delta respects max_delta_batch limits".to_string(),
-            level: RequirementLevel::Must,
-            result: TestResult::Fail {
-                reason: "Failed to create reconciler".to_string()
-            },
-        },
+        Err(_) => {
+            return ConformanceTestResult {
+                id: "MUST-AER-002".to_string(),
+                title: "compute_delta respects max_delta_batch limits".to_string(),
+                level: RequirementLevel::Must,
+                result: TestResult::Fail {
+                    reason: "Failed to create reconciler".to_string(),
+                },
+            };
+        }
     };
 
     let local = TrustState::new(EPOCH_1);
@@ -230,7 +240,7 @@ fn test_delta_batch_limits() -> ConformanceTestResult {
                 title: "compute_delta respects max_delta_batch limits".to_string(),
                 level: RequirementLevel::Must,
                 result: TestResult::Fail {
-                    reason: "Failed to insert test records".to_string()
+                    reason: "Failed to insert test records".to_string(),
                 },
             };
         }
@@ -253,17 +263,20 @@ fn test_delta_batch_limits() -> ConformanceTestResult {
                     title: "compute_delta respects max_delta_batch limits".to_string(),
                     level: RequirementLevel::Must,
                     result: TestResult::Fail {
-                        reason: format!("Wrong batch exceeded values: delta={}, max={}", delta, max)
+                        reason: format!(
+                            "Wrong batch exceeded values: delta={}, max={}",
+                            delta, max
+                        ),
                     },
                 }
             }
-        },
+        }
         _ => ConformanceTestResult {
             id: "MUST-AER-002".to_string(),
             title: "compute_delta respects max_delta_batch limits".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Expected BatchExceeded error but got different result".to_string()
+                reason: "Expected BatchExceeded error but got different result".to_string(),
             },
         },
     }
@@ -277,14 +290,16 @@ fn test_delta_record_classification() -> ConformanceTestResult {
 
     let reconciler = match AntiEntropyReconciler::new(config) {
         Ok(r) => r,
-        Err(_) => return ConformanceTestResult {
-            id: "MUST-AER-003".to_string(),
-            title: "compute_delta correctly identifies missing vs replacements".to_string(),
-            level: RequirementLevel::Must,
-            result: TestResult::Fail {
-                reason: "Failed to create reconciler".to_string()
-            },
-        },
+        Err(_) => {
+            return ConformanceTestResult {
+                id: "MUST-AER-003".to_string(),
+                title: "compute_delta correctly identifies missing vs replacements".to_string(),
+                level: RequirementLevel::Must,
+                result: TestResult::Fail {
+                    reason: "Failed to create reconciler".to_string(),
+                },
+            };
+        }
     };
 
     let mut local = TrustState::new(EPOCH_2);
@@ -302,14 +317,16 @@ fn test_delta_record_classification() -> ConformanceTestResult {
 
     let delta = match reconciler.compute_delta(&local, &remote) {
         Ok(d) => d,
-        Err(e) => return ConformanceTestResult {
-            id: "MUST-AER-003".to_string(),
-            title: "compute_delta correctly identifies missing vs replacements".to_string(),
-            level: RequirementLevel::Must,
-            result: TestResult::Fail {
-                reason: format!("Delta computation failed: {:?}", e)
-            },
-        },
+        Err(e) => {
+            return ConformanceTestResult {
+                id: "MUST-AER-003".to_string(),
+                title: "compute_delta correctly identifies missing vs replacements".to_string(),
+                level: RequirementLevel::Must,
+                result: TestResult::Fail {
+                    reason: format!("Delta computation failed: {:?}", e),
+                },
+            };
+        }
     };
 
     // Should include both the replacement and missing record
@@ -319,7 +336,7 @@ fn test_delta_record_classification() -> ConformanceTestResult {
             title: "compute_delta correctly identifies missing vs replacements".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: format!("Expected 2 delta records, got {}", delta.len())
+                reason: format!("Expected 2 delta records, got {}", delta.len()),
             },
         };
     }
@@ -332,7 +349,7 @@ fn test_delta_record_classification() -> ConformanceTestResult {
             title: "compute_delta correctly identifies missing vs replacements".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Delta missing expected record IDs".to_string()
+                reason: "Delta missing expected record IDs".to_string(),
             },
         };
     }
@@ -353,14 +370,16 @@ fn test_atomic_reconciliation() -> ConformanceTestResult {
 
     let mut reconciler = match AntiEntropyReconciler::new(config) {
         Ok(r) => r,
-        Err(_) => return ConformanceTestResult {
-            id: "MUST-AER-004".to_string(),
-            title: "reconcile applies changes atomically".to_string(),
-            level: RequirementLevel::Must,
-            result: TestResult::Fail {
-                reason: "Failed to create reconciler".to_string()
-            },
-        },
+        Err(_) => {
+            return ConformanceTestResult {
+                id: "MUST-AER-004".to_string(),
+                title: "reconcile applies changes atomically".to_string(),
+                level: RequirementLevel::Must,
+                result: TestResult::Fail {
+                    reason: "Failed to create reconciler".to_string(),
+                },
+            };
+        }
     };
 
     let mut local = TrustState::new(EPOCH_1);
@@ -387,7 +406,7 @@ fn test_atomic_reconciliation() -> ConformanceTestResult {
             title: "reconcile applies changes atomically".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Reconcile should have failed due to batch limit".to_string()
+                reason: "Reconcile should have failed due to batch limit".to_string(),
             },
         };
     }
@@ -399,7 +418,7 @@ fn test_atomic_reconciliation() -> ConformanceTestResult {
             title: "reconcile applies changes atomically".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Local state was corrupted despite reconciliation failure".to_string()
+                reason: "Local state was corrupted despite reconciliation failure".to_string(),
             },
         };
     }
@@ -420,14 +439,16 @@ fn test_epoch_ordering() -> ConformanceTestResult {
 
     let mut reconciler = match AntiEntropyReconciler::new(config) {
         Ok(r) => r,
-        Err(_) => return ConformanceTestResult {
-            id: "MUST-AER-005".to_string(),
-            title: "reconcile enforces epoch ordering".to_string(),
-            level: RequirementLevel::Must,
-            result: TestResult::Fail {
-                reason: "Failed to create reconciler".to_string()
-            },
-        },
+        Err(_) => {
+            return ConformanceTestResult {
+                id: "MUST-AER-005".to_string(),
+                title: "reconcile enforces epoch ordering".to_string(),
+                level: RequirementLevel::Must,
+                result: TestResult::Fail {
+                    reason: "Failed to create reconciler".to_string(),
+                },
+            };
+        }
     };
 
     let mut local = TrustState::new(EPOCH_2);
@@ -443,7 +464,10 @@ fn test_epoch_ordering() -> ConformanceTestResult {
     let result = reconciler.reconcile(&mut local, &remote, &mmr_root, &cancelled);
 
     match result {
-        Err(ReconciliationError::EpochViolation { record_epoch, local_epoch }) => {
+        Err(ReconciliationError::EpochViolation {
+            record_epoch,
+            local_epoch,
+        }) => {
             if record_epoch == EPOCH_3 && local_epoch == EPOCH_2 {
                 ConformanceTestResult {
                     id: "MUST-AER-005".to_string(),
@@ -457,17 +481,20 @@ fn test_epoch_ordering() -> ConformanceTestResult {
                     title: "reconcile enforces epoch ordering".to_string(),
                     level: RequirementLevel::Must,
                     result: TestResult::Fail {
-                        reason: format!("Wrong epoch violation values: record={}, local={}", record_epoch, local_epoch)
+                        reason: format!(
+                            "Wrong epoch violation values: record={}, local={}",
+                            record_epoch, local_epoch
+                        ),
                     },
                 }
             }
-        },
+        }
         _ => ConformanceTestResult {
             id: "MUST-AER-005".to_string(),
             title: "reconcile enforces epoch ordering".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Expected EpochViolation error but got different result".to_string()
+                reason: "Expected EpochViolation error but got different result".to_string(),
             },
         },
     }
@@ -481,14 +508,16 @@ fn test_mmr_proof_validation() -> ConformanceTestResult {
 
     let mut reconciler = match AntiEntropyReconciler::new(config) {
         Ok(r) => r,
-        Err(_) => return ConformanceTestResult {
-            id: "MUST-AER-006".to_string(),
-            title: "reconcile validates MMR inclusion proofs".to_string(),
-            level: RequirementLevel::Must,
-            result: TestResult::Fail {
-                reason: "Failed to create reconciler".to_string()
-            },
-        },
+        Err(_) => {
+            return ConformanceTestResult {
+                id: "MUST-AER-006".to_string(),
+                title: "reconcile validates MMR inclusion proofs".to_string(),
+                level: RequirementLevel::Must,
+                result: TestResult::Fail {
+                    reason: "Failed to create reconciler".to_string(),
+                },
+            };
+        }
     };
 
     let mut local = TrustState::new(EPOCH_1);
@@ -504,20 +533,18 @@ fn test_mmr_proof_validation() -> ConformanceTestResult {
     let result = reconciler.reconcile(&mut local, &remote, &mmr_root, &cancelled);
 
     match result {
-        Err(ReconciliationError::ProofInvalid(_)) => {
-            ConformanceTestResult {
-                id: "MUST-AER-006".to_string(),
-                title: "reconcile validates MMR inclusion proofs".to_string(),
-                level: RequirementLevel::Must,
-                result: TestResult::Pass,
-            }
+        Err(ReconciliationError::ProofInvalid(_)) => ConformanceTestResult {
+            id: "MUST-AER-006".to_string(),
+            title: "reconcile validates MMR inclusion proofs".to_string(),
+            level: RequirementLevel::Must,
+            result: TestResult::Pass,
         },
         _ => ConformanceTestResult {
             id: "MUST-AER-006".to_string(),
             title: "reconcile validates MMR inclusion proofs".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Expected ProofInvalid error when proof_required=true".to_string()
+                reason: "Expected ProofInvalid error when proof_required=true".to_string(),
             },
         },
     }
@@ -531,14 +558,16 @@ fn test_cancellation_support() -> ConformanceTestResult {
 
     let mut reconciler = match AntiEntropyReconciler::new(config) {
         Ok(r) => r,
-        Err(_) => return ConformanceTestResult {
-            id: "MUST-AER-007".to_string(),
-            title: "reconcile supports cancellation".to_string(),
-            level: RequirementLevel::Must,
-            result: TestResult::Fail {
-                reason: "Failed to create reconciler".to_string()
-            },
-        },
+        Err(_) => {
+            return ConformanceTestResult {
+                id: "MUST-AER-007".to_string(),
+                title: "reconcile supports cancellation".to_string(),
+                level: RequirementLevel::Must,
+                result: TestResult::Fail {
+                    reason: "Failed to create reconciler".to_string(),
+                },
+            };
+        }
     };
 
     let mut local = TrustState::new(EPOCH_1);
@@ -551,20 +580,18 @@ fn test_cancellation_support() -> ConformanceTestResult {
     let result = reconciler.reconcile(&mut local, &remote, &mmr_root, &cancelled);
 
     match result {
-        Err(ReconciliationError::Cancelled) => {
-            ConformanceTestResult {
-                id: "MUST-AER-007".to_string(),
-                title: "reconcile supports cancellation".to_string(),
-                level: RequirementLevel::Must,
-                result: TestResult::Pass,
-            }
+        Err(ReconciliationError::Cancelled) => ConformanceTestResult {
+            id: "MUST-AER-007".to_string(),
+            title: "reconcile supports cancellation".to_string(),
+            level: RequirementLevel::Must,
+            result: TestResult::Pass,
         },
         _ => ConformanceTestResult {
             id: "MUST-AER-007".to_string(),
             title: "reconcile supports cancellation".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Expected Cancelled error when cancellation flag is set".to_string()
+                reason: "Expected Cancelled error when cancellation flag is set".to_string(),
             },
         },
     }
@@ -586,7 +613,7 @@ fn test_record_digest_determinism() -> ConformanceTestResult {
             title: "TrustRecord digest is deterministic and domain-separated".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Identical records produced different digests".to_string()
+                reason: "Identical records produced different digests".to_string(),
             },
         };
     }
@@ -598,7 +625,7 @@ fn test_record_digest_determinism() -> ConformanceTestResult {
             title: "TrustRecord digest is deterministic and domain-separated".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Different records produced identical digests".to_string()
+                reason: "Different records produced identical digests".to_string(),
             },
         };
     }
@@ -610,7 +637,7 @@ fn test_record_digest_determinism() -> ConformanceTestResult {
             title: "TrustRecord digest is deterministic and domain-separated".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: format!("Expected 32-byte digest, got {} bytes", digest1.len())
+                reason: format!("Expected 32-byte digest, got {} bytes", digest1.len()),
             },
         };
     }
@@ -629,7 +656,12 @@ fn test_trust_state_capacity() -> ConformanceTestResult {
 
     // Try to insert many records to test capacity limits
     for i in 0..10000 {
-        let record = create_test_record(&format!("capacity-test-{}", i), EPOCH_1, TIMESTAMP_1 + i, NODE_A);
+        let record = create_test_record(
+            &format!("capacity-test-{}", i),
+            EPOCH_1,
+            TIMESTAMP_1 + i,
+            NODE_A,
+        );
         if trust_state.insert(record) {
             successful_inserts += 1;
         } else {
@@ -645,7 +677,7 @@ fn test_trust_state_capacity() -> ConformanceTestResult {
             title: "TrustState maintains capacity limits".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "TrustState appears to have no capacity limits".to_string()
+                reason: "TrustState appears to have no capacity limits".to_string(),
             },
         };
     }
@@ -657,7 +689,10 @@ fn test_trust_state_capacity() -> ConformanceTestResult {
             title: "TrustState maintains capacity limits".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: format!("TrustState capacity too restrictive: only {} inserts", successful_inserts)
+                reason: format!(
+                    "TrustState capacity too restrictive: only {} inserts",
+                    successful_inserts
+                ),
             },
         };
     }
@@ -675,14 +710,16 @@ fn test_fork_detection() -> ConformanceTestResult {
 
     let mut reconciler = match AntiEntropyReconciler::new(config) {
         Ok(r) => r,
-        Err(_) => return ConformanceTestResult {
-            id: "MUST-AER-010".to_string(),
-            title: "Fork detection on conflicting MMR roots".to_string(),
-            level: RequirementLevel::Must,
-            result: TestResult::Fail {
-                reason: "Failed to create reconciler".to_string()
-            },
-        },
+        Err(_) => {
+            return ConformanceTestResult {
+                id: "MUST-AER-010".to_string(),
+                title: "Fork detection on conflicting MMR roots".to_string(),
+                level: RequirementLevel::Must,
+                result: TestResult::Fail {
+                    reason: "Failed to create reconciler".to_string(),
+                },
+            };
+        }
     };
 
     let mut local = TrustState::new(EPOCH_1);
@@ -768,19 +805,31 @@ mod tests {
         let report = run_bd_3h7k_conformance_tests();
 
         // All MUST requirements should pass
-        assert_eq!(report.stats.must_fail, 0, "MUST requirements failed: {:#?}",
-                  report.results.values()
-                      .filter(|r| matches!(r.level, RequirementLevel::Must) &&
-                              matches!(r.result, TestResult::Fail { .. }))
-                      .collect::<Vec<_>>());
+        assert_eq!(
+            report.stats.must_fail,
+            0,
+            "MUST requirements failed: {:#?}",
+            report
+                .results
+                .values()
+                .filter(|r| matches!(r.level, RequirementLevel::Must)
+                    && matches!(r.result, TestResult::Fail { .. }))
+                .collect::<Vec<_>>()
+        );
 
         // Compliance score should be 100%
-        assert!(report.compliance_score() >= 1.0, "Compliance score too low: {:.1}%",
-               report.compliance_score() * 100.0);
+        assert!(
+            report.compliance_score() >= 1.0,
+            "Compliance score too low: {:.1}%",
+            report.compliance_score() * 100.0
+        );
 
         // Should have exactly 10 MUST tests
-        assert_eq!(report.stats.must_pass + report.stats.must_fail, 10,
-                  "Expected exactly 10 MUST tests");
+        assert_eq!(
+            report.stats.must_pass + report.stats.must_fail,
+            10,
+            "Expected exactly 10 MUST tests"
+        );
     }
 
     #[test]
@@ -791,7 +840,10 @@ mod tests {
         let digest1 = record.digest();
         let digest2 = record.digest();
 
-        assert_eq!(digest1, digest2, "Record digest should be consistent across calls");
+        assert_eq!(
+            digest1, digest2,
+            "Record digest should be consistent across calls"
+        );
         assert_eq!(digest1.len(), 32, "Digest should be 32 bytes (SHA-256)");
     }
 
@@ -806,7 +858,9 @@ mod tests {
             max_retry_attempts: 0,
         };
 
-        assert!(AntiEntropyReconciler::new(min_config).is_ok(),
-               "Minimum valid config should be accepted");
+        assert!(
+            AntiEntropyReconciler::new(min_config).is_ok(),
+            "Minimum valid config should be accepted"
+        );
     }
 }

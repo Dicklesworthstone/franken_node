@@ -2311,8 +2311,7 @@ mod additional_negative_path_tests {
         );
         let minimal_hex = hex::encode(minimal.config_hash());
         assert_eq!(
-            minimal_hex,
-            "da4078623685fc932019ad246d6c1af44a469912d72e65b0e7096107a33ff3b8",
+            minimal_hex, "da4078623685fc932019ad246d6c1af44a469912d72e65b0e7096107a33ff3b8",
             "minimal config_hash drifted — check the v1 domain separator \
              or the version-as-u32-LE encoding (must NOT be LE64)"
         );
@@ -2326,8 +2325,7 @@ mod additional_negative_path_tests {
             .with_param("policy", "strict");
         let populated_hex = hex::encode(populated.config_hash());
         assert_eq!(
-            populated_hex,
-            "8a4189e63fc8f1e22cce183bac73f166e527c36de659405c7c4ce9b8e5aee6d2",
+            populated_hex, "8a4189e63fc8f1e22cce183bac73f166e527c36de659405c7c4ce9b8e5aee6d2",
             "populated config_hash drifted — check per-(k,v) LE64 length \
              prefix framing or BTreeMap sorted-iteration assumption"
         );
@@ -2394,7 +2392,8 @@ mod additional_negative_path_tests {
         assert_eq!(seed_minimal.config_version, 1);
 
         // Fixture 2: Different domain with same inputs produces different seed (INV-SEED-DOMAIN-SEP)
-        let seed_placement = derive_seed(&DomainTag::Placement, &content_hash_zero, &config_minimal);
+        let seed_placement =
+            derive_seed(&DomainTag::Placement, &content_hash_zero, &config_minimal);
         assert_eq!(
             seed_placement.to_hex(),
             "a7f2b9c8e4d1a6b3f8e2c9d4a7f1b8e5c2d6a9f3b7e1c8d4a6f2b9e5c7d1a8f3",
@@ -2409,9 +2408,11 @@ mod additional_negative_path_tests {
 
         // Fixture 3: Different content hash with same domain/config produces different seed
         let content_hash_nonzero = ContentHash::from_hex(
-            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        ).expect("valid hex");
-        let seed_different_content = derive_seed(&DomainTag::Repair, &content_hash_nonzero, &config_minimal);
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        )
+        .expect("valid hex");
+        let seed_different_content =
+            derive_seed(&DomainTag::Repair, &content_hash_nonzero, &config_minimal);
         assert_eq!(
             seed_different_content.to_hex(),
             "b3e4f7a2c8d9e6f1b4a7e2c5f8d1a6b9e3f7c2a5d8e4b1f6a9c3e7d2f5a8b4e1",
@@ -2428,7 +2429,8 @@ mod additional_negative_path_tests {
         let config_populated = ScheduleConfig::new(2)
             .with_param("region", "us-west-1")
             .with_param("threshold", "high");
-        let seed_different_config = derive_seed(&DomainTag::Repair, &content_hash_zero, &config_populated);
+        let seed_different_config =
+            derive_seed(&DomainTag::Repair, &content_hash_zero, &config_populated);
         assert_eq!(
             seed_different_config.to_hex(),
             "f8e1c4a7b2d5e9f6c3a8e4d1b7f2a5e8c6d9f3b4a1e7c2f5d8a4b6e9f1c3a7e2",
@@ -2441,7 +2443,11 @@ mod additional_negative_path_tests {
         );
 
         // Fixture 5: Verification domain with complex inputs
-        let seed_verification = derive_seed(&DomainTag::Verification, &content_hash_nonzero, &config_populated);
+        let seed_verification = derive_seed(
+            &DomainTag::Verification,
+            &content_hash_nonzero,
+            &config_populated,
+        );
         assert_eq!(
             seed_verification.to_hex(),
             "e2a5c8f1d4b7e3a6f9c2d5a8e4b1f7c3a9e6d2f5b8a4e1c7d9f2a6b3e8c5d1f4",
@@ -2466,7 +2472,8 @@ mod additional_negative_path_tests {
                         !ct_eq_bytes_inline(seed_a, seed_b),
                         "Seeds at positions {} and {} are identical: this violates \
                          deterministic uniqueness for distinct inputs",
-                        i, j
+                        i,
+                        j
                     );
                 }
             }
@@ -2680,9 +2687,18 @@ mod additional_negative_path_tests {
         let seed_v1 = derive_seed(&DomainTag::Encoding, &content_zero, &config_v1);
         let seed_max = derive_seed(&DomainTag::Encoding, &content_zero, &config_max);
 
-        assert_ne!(seed_v0.bytes, seed_v1.bytes, "Version 0 vs 1 should produce different seeds");
-        assert_ne!(seed_v1.bytes, seed_max.bytes, "Version 1 vs MAX should produce different seeds");
-        assert_ne!(seed_v0.bytes, seed_max.bytes, "Version 0 vs MAX should produce different seeds");
+        assert_ne!(
+            seed_v0.bytes, seed_v1.bytes,
+            "Version 0 vs 1 should produce different seeds"
+        );
+        assert_ne!(
+            seed_v1.bytes, seed_max.bytes,
+            "Version 1 vs MAX should produce different seeds"
+        );
+        assert_ne!(
+            seed_v0.bytes, seed_max.bytes,
+            "Version 0 vs MAX should produce different seeds"
+        );
 
         // Test parameter length boundaries
         let empty_key = "";
@@ -2690,14 +2706,10 @@ mod additional_negative_path_tests {
         let empty_value = "";
         let long_value = "y".repeat(10000); // Very long value
 
-        let config_empty = ScheduleConfig::new(1)
-            .with_param(empty_key, empty_value);
-        let config_long_key = ScheduleConfig::new(1)
-            .with_param(&long_key, "value");
-        let config_long_value = ScheduleConfig::new(1)
-            .with_param("key", &long_value);
-        let config_both_long = ScheduleConfig::new(1)
-            .with_param(&long_key, &long_value);
+        let config_empty = ScheduleConfig::new(1).with_param(empty_key, empty_value);
+        let config_long_key = ScheduleConfig::new(1).with_param(&long_key, "value");
+        let config_long_value = ScheduleConfig::new(1).with_param("key", &long_value);
+        let config_both_long = ScheduleConfig::new(1).with_param(&long_key, &long_value);
 
         let seed_empty = derive_seed(&DomainTag::Repair, &content_zero, &config_empty);
         let seed_long_key = derive_seed(&DomainTag::Repair, &content_zero, &config_long_key);
@@ -2714,8 +2726,10 @@ mod additional_negative_path_tests {
         let seed_zero_content = derive_seed(&DomainTag::Verification, &content_zero, &config_v1);
         let seed_max_content = derive_seed(&DomainTag::Verification, &content_max, &config_v1);
 
-        assert_ne!(seed_zero_content.bytes, seed_max_content.bytes,
-                   "Zero vs max content should produce different seeds");
+        assert_ne!(
+            seed_zero_content.bytes, seed_max_content.bytes,
+            "Zero vs max content should produce different seeds"
+        );
 
         // Test one-bit difference in content hash (avalanche effect)
         let mut content_one_bit = [0u8; 32];
@@ -2725,8 +2739,10 @@ mod additional_negative_path_tests {
         let seed_zero_bit = derive_seed(&DomainTag::Placement, &content_zero, &config_v1);
         let seed_one_bit = derive_seed(&DomainTag::Placement, &content_one_bit_hash, &config_v1);
 
-        assert_ne!(seed_zero_bit.bytes, seed_one_bit.bytes,
-                   "Single bit difference should produce different seeds");
+        assert_ne!(
+            seed_zero_bit.bytes, seed_one_bit.bytes,
+            "Single bit difference should produce different seeds"
+        );
 
         // Test parameter ordering independence (BTreeMap should ensure this)
         let config_order_1 = ScheduleConfig::new(42)
@@ -2741,8 +2757,10 @@ mod additional_negative_path_tests {
         let seed_order_1 = derive_seed(&DomainTag::Scheduling, &content_zero, &config_order_1);
         let seed_order_2 = derive_seed(&DomainTag::Scheduling, &content_zero, &config_order_2);
 
-        assert_eq!(seed_order_1.bytes, seed_order_2.bytes,
-                   "Parameter insertion order should not affect seeds (BTreeMap ordering)");
+        assert_eq!(
+            seed_order_1.bytes, seed_order_2.bytes,
+            "Parameter insertion order should not affect seeds (BTreeMap ordering)"
+        );
 
         // Test cross-domain collision resistance with adversarial inputs
         // Use inputs designed to potentially cause hash collisions
@@ -2757,8 +2775,14 @@ mod additional_negative_path_tests {
         let adversarial_contents = [
             ContentHash::from_bytes([0u8; 32]),
             ContentHash::from_bytes([1u8; 32]),
-            ContentHash::from_hex("0000000000000000000000000000000000000000000000000000000000000001").unwrap(),
-            ContentHash::from_hex("8000000000000000000000000000000000000000000000000000000000000000").unwrap(),
+            ContentHash::from_hex(
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .unwrap(),
+            ContentHash::from_hex(
+                "8000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .unwrap(),
         ];
 
         // Generate all combinations across all domains
@@ -2780,8 +2804,12 @@ mod additional_negative_path_tests {
                         "Collision detected between adversarial inputs:\n\
                          A: domain={:?}, content={}, config_version={}\n\
                          B: domain={:?}, content={}, config_version={}",
-                        domain_a, content_a.to_hex(), config_a.version,
-                        domain_b, content_b.to_hex(), config_b.version
+                        domain_a,
+                        content_a.to_hex(),
+                        config_a.version,
+                        domain_b,
+                        content_b.to_hex(),
+                        config_b.version
                     );
                 }
             }
@@ -2804,7 +2832,8 @@ mod additional_negative_path_tests {
                     assert!(
                         !ct_eq_bytes_inline(seed_a, seed_b),
                         "Version boundary collision: version {} and {} produced identical seeds",
-                        version_a, version_b
+                        version_a,
+                        version_b
                     );
                 }
             }
@@ -2821,18 +2850,41 @@ mod additional_negative_path_tests {
         let hash_duplicate = config_duplicate_attempt.config_hash();
 
         // The configs should have different hashes since the second value overwrites
-        assert_ne!(hash_base, hash_duplicate,
-                   "Config hash should reflect final parameter values after deduplication");
+        assert_ne!(
+            hash_base, hash_duplicate,
+            "Config hash should reflect final parameter values after deduplication"
+        );
 
         // Test hex format edge cases with ContentHash
         let test_hex_cases = [
-            ("0000000000000000000000000000000000000000000000000000000000000000", true),
-            ("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", true),
-            ("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", true),
-            ("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", true), // Uppercase
-            ("gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg", false), // Invalid chars
-            ("00000000000000000000000000000000000000000000000000000000000000", false), // Too short
-            ("000000000000000000000000000000000000000000000000000000000000000000", false), // Too long
+            (
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                true,
+            ),
+            (
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                true,
+            ),
+            (
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                true,
+            ),
+            (
+                "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+                true,
+            ), // Uppercase
+            (
+                "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+                false,
+            ), // Invalid chars
+            (
+                "00000000000000000000000000000000000000000000000000000000000000",
+                false,
+            ), // Too short
+            (
+                "000000000000000000000000000000000000000000000000000000000000000000",
+                false,
+            ), // Too long
         ];
 
         for (hex_str, should_succeed) in test_hex_cases {
@@ -2842,30 +2894,47 @@ mod additional_negative_path_tests {
                 // Round-trip test
                 let round_trip = content_hash.to_hex();
                 assert_eq!(round_trip.len(), 64, "Round-trip hex should be 64 chars");
-                assert_eq!(round_trip, hex_str.to_lowercase(),
-                           "Round-trip should match original (lowercase)");
+                assert_eq!(
+                    round_trip,
+                    hex_str.to_lowercase(),
+                    "Round-trip should match original (lowercase)"
+                );
             } else {
-                assert!(result.is_err(), "Invalid hex '{}' should fail to parse", hex_str);
+                assert!(
+                    result.is_err(),
+                    "Invalid hex '{}' should fail to parse",
+                    hex_str
+                );
             }
         }
 
         // Test domain prefix uniqueness (regression test for domain separation)
-        let all_prefixes: std::collections::HashSet<_> = DomainTag::all()
-            .iter()
-            .map(|d| d.prefix())
-            .collect();
-        assert_eq!(all_prefixes.len(), DomainTag::all().len(),
-                   "All domain prefixes must be unique for proper domain separation");
+        let all_prefixes: std::collections::HashSet<_> =
+            DomainTag::all().iter().map(|d| d.prefix()).collect();
+        assert_eq!(
+            all_prefixes.len(),
+            DomainTag::all().len(),
+            "All domain prefixes must be unique for proper domain separation"
+        );
 
         // Verify domain prefixes follow expected format
         for domain in DomainTag::all() {
             let prefix = domain.prefix();
-            assert!(prefix.starts_with("franken_node."),
-                    "Domain prefix should start with 'franken_node.': {}", prefix);
-            assert!(prefix.ends_with(".v1"),
-                    "Domain prefix should end with '.v1': {}", prefix);
-            assert!(!prefix.contains(' '),
-                    "Domain prefix should not contain spaces: {}", prefix);
+            assert!(
+                prefix.starts_with("franken_node."),
+                "Domain prefix should start with 'franken_node.': {}",
+                prefix
+            );
+            assert!(
+                prefix.ends_with(".v1"),
+                "Domain prefix should end with '.v1': {}",
+                prefix
+            );
+            assert!(
+                !prefix.contains(' '),
+                "Domain prefix should not contain spaces: {}",
+                prefix
+            );
         }
     }
 }

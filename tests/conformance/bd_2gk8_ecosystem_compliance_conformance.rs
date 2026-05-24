@@ -19,9 +19,9 @@
 //! **MUST-ECE-009**: Content addressing MUST use domain-separated SHA-256
 
 use frankenengine_node::connector::ecosystem_compliance::{
-    ComplianceError, ComplianceEvidenceStore, EvidenceSource,
-    ENE_005_COMPLIANCE_EVIDENCE_STORED, ENE_006_COMPLIANCE_EVIDENCE_RETRIEVED,
-    ENE_007_COMPLIANCE_TAMPER_CHECK_PASS, ENE_008_COMPLIANCE_TAMPER_CHECK_FAIL
+    ComplianceError, ComplianceEvidenceStore, ENE_005_COMPLIANCE_EVIDENCE_STORED,
+    ENE_006_COMPLIANCE_EVIDENCE_RETRIEVED, ENE_007_COMPLIANCE_TAMPER_CHECK_PASS,
+    ENE_008_COMPLIANCE_TAMPER_CHECK_FAIL, EvidenceSource,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -87,7 +87,10 @@ impl ConformanceReport {
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
         md.push_str("# bd-2gk8 Ecosystem Compliance Evidence Store Conformance Report\n\n");
-        md.push_str(&format!("**Compliance Score:** {:.1}%\n\n", self.compliance_score() * 100.0));
+        md.push_str(&format!(
+            "**Compliance Score:** {:.1}%\n\n",
+            self.compliance_score() * 100.0
+        ));
         md.push_str("## Test Results\n\n");
 
         for result in self.results.values() {
@@ -101,7 +104,10 @@ impl ConformanceReport {
                 TestResult::Fail { reason } => &format!("❌ FAIL: {}", reason),
                 TestResult::Skip { reason } => &format!("⏭️ SKIP: {}", reason),
             };
-            md.push_str(&format!("- **{}** [{}]: {} - {}\n", result.id, level_str, result.title, status_str));
+            md.push_str(&format!(
+                "- **{}** [{}]: {} - {}\n",
+                result.id, level_str, result.title, status_str
+            ));
         }
 
         md
@@ -113,31 +119,58 @@ pub fn run_bd_2gk8_conformance_tests() -> ConformanceReport {
     let mut store = ComplianceEvidenceStore::new();
 
     // MUST-ECE-001: Store rejects empty/untrimmed required fields
-    results.insert("MUST-ECE-001".to_string(), test_store_field_validation(&mut store));
+    results.insert(
+        "MUST-ECE-001".to_string(),
+        test_store_field_validation(&mut store),
+    );
 
     // MUST-ECE-002: Store computes deterministic content hashes
-    results.insert("MUST-ECE-002".to_string(), test_deterministic_content_hash(&mut store));
+    results.insert(
+        "MUST-ECE-002".to_string(),
+        test_deterministic_content_hash(&mut store),
+    );
 
     // MUST-ECE-003: Store prevents duplicate evidence submission
-    results.insert("MUST-ECE-003".to_string(), test_duplicate_prevention(&mut store));
+    results.insert(
+        "MUST-ECE-003".to_string(),
+        test_duplicate_prevention(&mut store),
+    );
 
     // MUST-ECE-004: Store emits ENE-005 events on successful storage
-    results.insert("MUST-ECE-004".to_string(), test_storage_event_emission(&mut store));
+    results.insert(
+        "MUST-ECE-004".to_string(),
+        test_storage_event_emission(&mut store),
+    );
 
     // MUST-ECE-005: Retrieve performs tamper-evidence verification
-    results.insert("MUST-ECE-005".to_string(), test_retrieve_tamper_verification(&mut store));
+    results.insert(
+        "MUST-ECE-005".to_string(),
+        test_retrieve_tamper_verification(&mut store),
+    );
 
     // MUST-ECE-006: Retrieve emits ENE-007/ENE-008 tamper check events
-    results.insert("MUST-ECE-006".to_string(), test_retrieve_tamper_events(&mut store));
+    results.insert(
+        "MUST-ECE-006".to_string(),
+        test_retrieve_tamper_events(&mut store),
+    );
 
     // MUST-ECE-007: Retrieve emits ENE-006 retrieval events on success
-    results.insert("MUST-ECE-007".to_string(), test_retrieve_event_emission(&mut store));
+    results.insert(
+        "MUST-ECE-007".to_string(),
+        test_retrieve_event_emission(&mut store),
+    );
 
     // MUST-ECE-008: Verify tamper evidence detects content corruption
-    results.insert("MUST-ECE-008".to_string(), test_verify_tamper_detection(&mut store));
+    results.insert(
+        "MUST-ECE-008".to_string(),
+        test_verify_tamper_detection(&mut store),
+    );
 
     // MUST-ECE-009: Content addressing uses domain-separated SHA-256
-    results.insert("MUST-ECE-009".to_string(), test_content_addressing_format(&mut store));
+    results.insert(
+        "MUST-ECE-009".to_string(),
+        test_content_addressing_format(&mut store),
+    );
 
     let stats = compute_stats(&results);
     ConformanceReport { results, stats }
@@ -161,7 +194,7 @@ fn test_store_field_validation(store: &mut ComplianceEvidenceStore) -> Conforman
             title: "Field validation rejects empty publisher_id".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Empty publisher_id was not rejected".to_string()
+                reason: "Empty publisher_id was not rejected".to_string(),
             },
         };
     }
@@ -183,7 +216,7 @@ fn test_store_field_validation(store: &mut ComplianceEvidenceStore) -> Conforman
             title: "Field validation rejects untrimmed title".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Untrimmed title was not rejected".to_string()
+                reason: "Untrimmed title was not rejected".to_string(),
             },
         };
     }
@@ -205,7 +238,7 @@ fn test_store_field_validation(store: &mut ComplianceEvidenceStore) -> Conforman
             title: "Field validation rejects empty content".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Empty content was not rejected".to_string()
+                reason: "Empty content was not rejected".to_string(),
             },
         };
     }
@@ -237,20 +270,20 @@ fn test_deterministic_content_hash(store: &mut ComplianceEvidenceStore) -> Confo
             title: "Content hashes are deterministic".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "First evidence storage failed".to_string()
+                reason: "First evidence storage failed".to_string(),
             },
         };
     };
 
     // Try to store same content again (should fail with duplicate)
     let result2 = store.store_evidence(
-        PUBLISHER_B,  // Different publisher
-        EvidenceSource::TrustFabric,  // Different source
-        "Second submission",  // Different title
-        CONTENT_JSON,  // Same content
+        PUBLISHER_B,                 // Different publisher
+        EvidenceSource::TrustFabric, // Different source
+        "Second submission",         // Different title
+        CONTENT_JSON,                // Same content
         None,
-        &["tag2".to_string()],  // Different tags
-        TIMESTAMP_2,  // Different timestamp
+        &["tag2".to_string()], // Different tags
+        TIMESTAMP_2,           // Different timestamp
         TRACE_B,
     );
 
@@ -260,7 +293,7 @@ fn test_deterministic_content_hash(store: &mut ComplianceEvidenceStore) -> Confo
             title: "Content hashes are deterministic".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Same content did not produce same hash (no duplicate error)".to_string()
+                reason: "Same content did not produce same hash (no duplicate error)".to_string(),
             },
         };
     }
@@ -273,7 +306,7 @@ fn test_deterministic_content_hash(store: &mut ComplianceEvidenceStore) -> Confo
             title: "Content hashes are deterministic".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Computed hash differs from stored hash".to_string()
+                reason: "Computed hash differs from stored hash".to_string(),
             },
         };
     }
@@ -305,7 +338,7 @@ fn test_duplicate_prevention(store: &mut ComplianceEvidenceStore) -> Conformance
             title: "Duplicate evidence submission is prevented".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Initial evidence storage failed".to_string()
+                reason: "Initial evidence storage failed".to_string(),
             },
         };
     };
@@ -315,7 +348,7 @@ fn test_duplicate_prevention(store: &mut ComplianceEvidenceStore) -> Conformance
         PUBLISHER_B,
         EvidenceSource::External,
         "Different Metadata",
-        CONTENT_JSON_ALT,  // Same content → same hash
+        CONTENT_JSON_ALT, // Same content → same hash
         Some("attestation-123"),
         &["different".to_string()],
         TIMESTAMP_2,
@@ -330,18 +363,18 @@ fn test_duplicate_prevention(store: &mut ComplianceEvidenceStore) -> Conformance
                     title: "Duplicate evidence submission is prevented".to_string(),
                     level: RequirementLevel::Must,
                     result: TestResult::Fail {
-                        reason: format!("Duplicate error hash {} != original {}", dup_hash, hash)
+                        reason: format!("Duplicate error hash {} != original {}", dup_hash, hash),
                     },
                 };
             }
-        },
+        }
         _ => {
             return ConformanceTestResult {
                 id: "MUST-ECE-003".to_string(),
                 title: "Duplicate evidence submission is prevented".to_string(),
                 level: RequirementLevel::Must,
                 result: TestResult::Fail {
-                    reason: "Duplicate content was not rejected".to_string()
+                    reason: "Duplicate content was not rejected".to_string(),
                 },
             };
         }
@@ -374,7 +407,7 @@ fn test_storage_event_emission(store: &mut ComplianceEvidenceStore) -> Conforman
             title: "Storage emits ENE-005 events".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Evidence storage failed".to_string()
+                reason: "Evidence storage failed".to_string(),
             },
         };
     };
@@ -387,7 +420,7 @@ fn test_storage_event_emission(store: &mut ComplianceEvidenceStore) -> Conforman
             title: "Storage emits ENE-005 events".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Could not retrieve evidence to verify events".to_string()
+                reason: "Could not retrieve evidence to verify events".to_string(),
             },
         };
     }
@@ -422,7 +455,7 @@ fn test_retrieve_tamper_verification(store: &mut ComplianceEvidenceStore) -> Con
             title: "Retrieve performs tamper-evidence verification".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Evidence storage failed".to_string()
+                reason: "Evidence storage failed".to_string(),
             },
         };
     };
@@ -435,7 +468,7 @@ fn test_retrieve_tamper_verification(store: &mut ComplianceEvidenceStore) -> Con
             title: "Retrieve performs tamper-evidence verification".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: format!("Valid evidence retrieval failed: {}", e)
+                reason: format!("Valid evidence retrieval failed: {}", e),
             },
         };
     }
@@ -449,7 +482,7 @@ fn test_retrieve_tamper_verification(store: &mut ComplianceEvidenceStore) -> Con
             title: "Retrieve performs tamper-evidence verification".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Retrieved content does not match original".to_string()
+                reason: "Retrieved content does not match original".to_string(),
             },
         };
     }
@@ -462,7 +495,7 @@ fn test_retrieve_tamper_verification(store: &mut ComplianceEvidenceStore) -> Con
             title: "Retrieve performs tamper-evidence verification".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Retrieved evidence hash does not match computed hash".to_string()
+                reason: "Retrieved evidence hash does not match computed hash".to_string(),
             },
         };
     }
@@ -495,7 +528,7 @@ fn test_retrieve_tamper_events(store: &mut ComplianceEvidenceStore) -> Conforman
             title: "Retrieve emits tamper check events".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Evidence storage failed".to_string()
+                reason: "Evidence storage failed".to_string(),
             },
         };
     };
@@ -508,7 +541,7 @@ fn test_retrieve_tamper_events(store: &mut ComplianceEvidenceStore) -> Conforman
             title: "Retrieve emits tamper check events".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Evidence retrieval failed".to_string()
+                reason: "Evidence retrieval failed".to_string(),
             },
         };
     }
@@ -543,7 +576,7 @@ fn test_retrieve_event_emission(store: &mut ComplianceEvidenceStore) -> Conforma
             title: "Retrieve emits ENE-006 retrieval events".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Evidence storage failed".to_string()
+                reason: "Evidence storage failed".to_string(),
             },
         };
     };
@@ -556,7 +589,7 @@ fn test_retrieve_event_emission(store: &mut ComplianceEvidenceStore) -> Conforma
             title: "Retrieve emits ENE-006 retrieval events".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Evidence retrieval failed".to_string()
+                reason: "Evidence retrieval failed".to_string(),
             },
         };
     };
@@ -568,7 +601,7 @@ fn test_retrieve_event_emission(store: &mut ComplianceEvidenceStore) -> Conforma
             title: "Retrieve emits ENE-006 retrieval events".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Retrieved evidence has incorrect metadata".to_string()
+                reason: "Retrieved evidence has incorrect metadata".to_string(),
             },
         };
     }
@@ -601,7 +634,7 @@ fn test_verify_tamper_detection(store: &mut ComplianceEvidenceStore) -> Conforma
             title: "Verify tamper evidence detects corruption".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Evidence storage failed".to_string()
+                reason: "Evidence storage failed".to_string(),
             },
         };
     };
@@ -611,24 +644,24 @@ fn test_verify_tamper_detection(store: &mut ComplianceEvidenceStore) -> Conforma
     match verify_result {
         Ok(true) => {
             // Expected for valid evidence
-        },
+        }
         Ok(false) => {
             return ConformanceTestResult {
                 id: "MUST-ECE-008".to_string(),
                 title: "Verify tamper evidence detects corruption".to_string(),
                 level: RequirementLevel::Must,
                 result: TestResult::Fail {
-                    reason: "Tamper verification failed for valid evidence".to_string()
+                    reason: "Tamper verification failed for valid evidence".to_string(),
                 },
             };
-        },
+        }
         Err(e) => {
             return ConformanceTestResult {
                 id: "MUST-ECE-008".to_string(),
                 title: "Verify tamper evidence detects corruption".to_string(),
                 level: RequirementLevel::Must,
                 result: TestResult::Fail {
-                    reason: format!("Tamper verification error: {}", e)
+                    reason: format!("Tamper verification error: {}", e),
                 },
             };
         }
@@ -643,7 +676,7 @@ fn test_verify_tamper_detection(store: &mut ComplianceEvidenceStore) -> Conforma
             title: "Verify tamper evidence detects corruption".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Verification should fail for non-existent evidence".to_string()
+                reason: "Verification should fail for non-existent evidence".to_string(),
             },
         };
     }
@@ -667,7 +700,7 @@ fn test_content_addressing_format(store: &mut ComplianceEvidenceStore) -> Confor
             title: "Content addressing uses domain-separated SHA-256".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: format!("Hash format invalid: {}", hash)
+                reason: format!("Hash format invalid: {}", hash),
             },
         };
     }
@@ -679,7 +712,7 @@ fn test_content_addressing_format(store: &mut ComplianceEvidenceStore) -> Confor
             title: "Content addressing uses domain-separated SHA-256".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: format!("Hash length invalid: {} chars, expected 71", hash.len())
+                reason: format!("Hash length invalid: {} chars, expected 71", hash.len()),
             },
         };
     }
@@ -692,7 +725,7 @@ fn test_content_addressing_format(store: &mut ComplianceEvidenceStore) -> Confor
             title: "Content addressing uses domain-separated SHA-256".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Hash contains non-hex characters".to_string()
+                reason: "Hash contains non-hex characters".to_string(),
             },
         };
     }
@@ -741,19 +774,31 @@ mod tests {
         let report = run_bd_2gk8_conformance_tests();
 
         // All MUST requirements should pass
-        assert_eq!(report.stats.must_fail, 0, "MUST requirements failed: {:#?}",
-                  report.results.values()
-                      .filter(|r| matches!(r.level, RequirementLevel::Must) &&
-                              matches!(r.result, TestResult::Fail { .. }))
-                      .collect::<Vec<_>>());
+        assert_eq!(
+            report.stats.must_fail,
+            0,
+            "MUST requirements failed: {:#?}",
+            report
+                .results
+                .values()
+                .filter(|r| matches!(r.level, RequirementLevel::Must)
+                    && matches!(r.result, TestResult::Fail { .. }))
+                .collect::<Vec<_>>()
+        );
 
         // Compliance score should be 100%
-        assert!(report.compliance_score() >= 1.0, "Compliance score too low: {:.1}%",
-               report.compliance_score() * 100.0);
+        assert!(
+            report.compliance_score() >= 1.0,
+            "Compliance score too low: {:.1}%",
+            report.compliance_score() * 100.0
+        );
 
         // Should have exactly 9 MUST tests
-        assert_eq!(report.stats.must_pass + report.stats.must_fail, 9,
-                  "Expected exactly 9 MUST tests");
+        assert_eq!(
+            report.stats.must_pass + report.stats.must_fail,
+            9,
+            "Expected exactly 9 MUST tests"
+        );
     }
 
     #[test]
@@ -766,8 +811,14 @@ mod tests {
         let hash2 = ComplianceEvidenceStore::compute_content_hash(content2);
         let hash3 = ComplianceEvidenceStore::compute_content_hash(content3);
 
-        assert_eq!(hash1, hash2, "Identical content should produce identical hashes");
-        assert_ne!(hash1, hash3, "Different content should produce different hashes");
+        assert_eq!(
+            hash1, hash2,
+            "Identical content should produce identical hashes"
+        );
+        assert_ne!(
+            hash1, hash3,
+            "Different content should produce different hashes"
+        );
     }
 
     #[test]
@@ -776,25 +827,32 @@ mod tests {
         let content = r#"{"critical": "data"}"#;
 
         // Store evidence
-        let hash = store.store_evidence(
-            "publisher-test",
-            EvidenceSource::SecurityAudit,
-            "Critical Evidence",
-            content,
-            None,
-            &[],
-            "2026-05-22T19:00:00Z",
-            "trace-tamper-test"
-        ).expect("Storage should succeed");
+        let hash = store
+            .store_evidence(
+                "publisher-test",
+                EvidenceSource::SecurityAudit,
+                "Critical Evidence",
+                content,
+                None,
+                &[],
+                "2026-05-22T19:00:00Z",
+                "trace-tamper-test",
+            )
+            .expect("Storage should succeed");
 
         // Verify tamper evidence passes for valid data
-        let result = store.verify_tamper_evidence(&hash, "2026-05-22T19:01:00Z", "trace-verify")
+        let result = store
+            .verify_tamper_evidence(&hash, "2026-05-22T19:01:00Z", "trace-verify")
             .expect("Verification should succeed");
         assert!(result, "Tamper verification should pass for valid evidence");
 
         // Retrieval should succeed and return correct content
-        let evidence = store.retrieve_evidence(&hash, "2026-05-22T19:02:00Z", "trace-retrieve")
+        let evidence = store
+            .retrieve_evidence(&hash, "2026-05-22T19:02:00Z", "trace-retrieve")
             .expect("Retrieval should succeed");
-        assert_eq!(evidence.content, content, "Retrieved content should match original");
+        assert_eq!(
+            evidence.content, content,
+            "Retrieved content should match original"
+        );
     }
 }

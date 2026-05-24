@@ -1658,6 +1658,9 @@ mod tests {
         // 4. Length+casing contract.
         let h = fresh.content_hash();
         assert_eq!(h.len(), 64);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
     }
 }

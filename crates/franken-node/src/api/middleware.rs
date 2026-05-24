@@ -4138,8 +4138,7 @@ pub fn auth_failure_limiter_cardinality_loom_model() {
         // 1. admin: typical production-shaped principal.
         let admin = super::credential_principal("admin", "secret-token-1234");
         assert_eq!(
-            admin,
-            "admin:5f2eee67f927ae27",
+            admin, "admin:5f2eee67f927ae27",
             "admin principal drifted — check the v1 domain separator, \
              LE64 length-prefix per field, 8-byte truncation, OR the \
              '{{label}}:{{hex}}' format string"
@@ -4209,7 +4208,11 @@ pub fn auth_failure_limiter_cardinality_loom_model() {
             assert!(principal.starts_with(expected_prefix));
             let hex_tail = &principal[expected_prefix.len()..];
             assert_eq!(hex_tail.len(), 16);
-            assert!(hex_tail.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                hex_tail
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

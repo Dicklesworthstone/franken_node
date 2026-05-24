@@ -475,10 +475,10 @@ mod tests {
         // Strategy for generating reasonable payload sizes
         fn payload_size_strategy() -> impl Strategy<Value = usize> {
             prop_oneof![
-                0usize..=16,         // Small payloads
-                17usize..=512,       // Medium payloads
-                513usize..=4096,     // Large payloads
-                4097usize..=16384,   // Extra large payloads
+                0usize..=16,       // Small payloads
+                17usize..=512,     // Medium payloads
+                513usize..=4096,   // Large payloads
+                4097usize..=16384, // Extra large payloads
             ]
         }
 

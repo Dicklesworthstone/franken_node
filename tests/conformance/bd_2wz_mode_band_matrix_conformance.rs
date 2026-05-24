@@ -7,11 +7,11 @@
 //! - INV-BAND-ORDERING: Core most protected, Unsafe least protected
 //! - INV-DETERMINISTIC: same inputs always produce same outputs
 
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use frankenengine_node::policy::compat_gates::{
-    divergence_action, CompatibilityBand, CompatibilityMode, DivergenceAction,
+    CompatibilityBand, CompatibilityMode, DivergenceAction, divergence_action,
 };
 
 #[derive(Debug, Clone)]
@@ -55,7 +55,6 @@ const BD_2WZ_CASES: &[ConformanceCase] = &[
         description: "no panic or invalid states in matrix lookup",
         test_fn: test_matrix_no_panic,
     },
-
     // INV-CORE-BAND-PRIORITY: Core band always errors (highest priority)
     ConformanceCase {
         id: "bd-2wz-core-priority-1",
@@ -64,7 +63,6 @@ const BD_2WZ_CASES: &[ConformanceCase] = &[
         description: "Core band always returns Error regardless of mode",
         test_fn: test_core_band_always_errors,
     },
-
     // INV-MODE-ORDERING: Strict mode most restrictive, LegacyRisky most permissive
     ConformanceCase {
         id: "bd-2wz-mode-ordering-1",
@@ -87,7 +85,6 @@ const BD_2WZ_CASES: &[ConformanceCase] = &[
         description: "Balanced mode provides middle ground",
         test_fn: test_balanced_mode_middle_ground,
     },
-
     // INV-BAND-ORDERING: Core most protected, Unsafe least protected
     ConformanceCase {
         id: "bd-2wz-band-ordering-1",
@@ -103,7 +100,6 @@ const BD_2WZ_CASES: &[ConformanceCase] = &[
         description: "band priority ordering: Core > HighValue > Edge > Unsafe",
         test_fn: test_band_priority_ordering,
     },
-
     // INV-DETERMINISTIC: same inputs always produce same outputs
     ConformanceCase {
         id: "bd-2wz-deterministic-1",
@@ -112,7 +108,6 @@ const BD_2WZ_CASES: &[ConformanceCase] = &[
         description: "divergence_action returns consistent results",
         test_fn: test_deterministic_results,
     },
-
     // Specific matrix behavior verification
     ConformanceCase {
         id: "bd-2wz-matrix-1",
@@ -135,7 +130,6 @@ const BD_2WZ_CASES: &[ConformanceCase] = &[
         description: "Unsafe band behavior matches specification",
         test_fn: test_unsafe_band_behavior,
     },
-
     // Enum properties
     ConformanceCase {
         id: "bd-2wz-enums-1",
@@ -169,8 +163,10 @@ fn test_matrix_completeness() -> TestResult {
 
             // Verify action is a valid enum variant
             match action {
-                DivergenceAction::Error | DivergenceAction::Warn |
-                DivergenceAction::Log | DivergenceAction::Blocked => {
+                DivergenceAction::Error
+                | DivergenceAction::Warn
+                | DivergenceAction::Log
+                | DivergenceAction::Blocked => {
                     // Valid action
                 }
             }
@@ -300,10 +296,7 @@ fn test_legacy_risky_most_permissive() -> TestResult {
 }
 
 fn test_balanced_mode_middle_ground() -> TestResult {
-    let non_core_bands = [
-        CompatibilityBand::HighValue,
-        CompatibilityBand::Edge,
-    ];
+    let non_core_bands = [CompatibilityBand::HighValue, CompatibilityBand::Edge];
 
     for &band in &non_core_bands {
         let strict_action = divergence_action(band, CompatibilityMode::Strict);
@@ -556,10 +549,10 @@ fn is_more_restrictive_or_equal(action1: DivergenceAction, action2: DivergenceAc
     use DivergenceAction::*;
 
     let restrictiveness = |action| match action {
-        Error => 4,    // Most restrictive
+        Error => 4, // Most restrictive
         Blocked => 3,
         Warn => 2,
-        Log => 1,      // Least restrictive
+        Log => 1, // Least restrictive
     };
 
     restrictiveness(action1) >= restrictiveness(action2)
@@ -592,7 +585,10 @@ fn bd_2wz_full_conformance() {
             }
             TestResult::ExpectedFailure { ref reason } => {
                 xfail += 1;
-                eprintln!("XFAIL {}: {}\n  Reason: {reason}", case.id, case.description);
+                eprintln!(
+                    "XFAIL {}: {}\n  Reason: {reason}",
+                    case.id, case.description
+                );
                 "XFAIL"
             }
         };
@@ -638,7 +634,9 @@ fn generate_compliance_matrix() {
         } else {
             0.0
         };
-        println!("| {invariant:<25} | {must_count:^4} | {total:^5} | {passing:^4} | {score:5.1}% |");
+        println!(
+            "| {invariant:<25} | {must_count:^4} | {total:^5} | {passing:^4} | {score:5.1}% |"
+        );
     }
 }
 
@@ -649,15 +647,19 @@ mod tests {
     #[test]
     fn conformance_case_coverage() {
         // Verify we have comprehensive coverage
-        let invariant_counts: BTreeMap<&str, usize> = BD_2WZ_CASES
-            .iter()
-            .fold(BTreeMap::new(), |mut acc, case| {
+        let invariant_counts: BTreeMap<&str, usize> =
+            BD_2WZ_CASES.iter().fold(BTreeMap::new(), |mut acc, case| {
                 *acc.entry(case.invariant).or_default() += 1;
                 acc
             });
 
         // Each core invariant should have test coverage
-        assert!(invariant_counts.get("INV-MATRIX-COMPLETENESS").unwrap_or(&0) >= &1);
+        assert!(
+            invariant_counts
+                .get("INV-MATRIX-COMPLETENESS")
+                .unwrap_or(&0)
+                >= &1
+        );
         assert!(invariant_counts.get("INV-CORE-BAND-PRIORITY").unwrap_or(&0) >= &1);
         assert!(invariant_counts.get("INV-MODE-ORDERING").unwrap_or(&0) >= &2);
         assert!(invariant_counts.get("INV-BAND-ORDERING").unwrap_or(&0) >= &1);
@@ -670,6 +672,10 @@ mod tests {
         use std::collections::HashSet;
 
         let ids: HashSet<&str> = BD_2WZ_CASES.iter().map(|case| case.id).collect();
-        assert_eq!(ids.len(), BD_2WZ_CASES.len(), "Duplicate test case IDs found");
+        assert_eq!(
+            ids.len(),
+            BD_2WZ_CASES.len(),
+            "Duplicate test case IDs found"
+        );
     }
 }

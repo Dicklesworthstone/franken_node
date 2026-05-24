@@ -30,12 +30,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use franken_node::tools::vef_perf_budget_gate::{
-    VefOperation, BudgetMode, LatencyBudget, BudgetCheckResult, MeasuredLatency,
-    VefPerfBudgetConfig, VefPerfBudgetError, VefPerfEvent, GateVerdict, OperationVerdict,
-    INV_VEF_PBG_BUDGET, INV_VEF_PBG_GATE, INV_VEF_PBG_BASELINE,
-    INV_VEF_PBG_NOISE, INV_VEF_PBG_EVIDENCE, INV_VEF_PBG_MODE,
-    VEF_PERF_001, VEF_PERF_002, VEF_PERF_003, VEF_PERF_004, VEF_PERF_005, VEF_PERF_ERR_001,
-    BUDGET_SCHEMA_VERSION,
+    BUDGET_SCHEMA_VERSION, BudgetCheckResult, BudgetMode, GateVerdict, INV_VEF_PBG_BASELINE,
+    INV_VEF_PBG_BUDGET, INV_VEF_PBG_EVIDENCE, INV_VEF_PBG_GATE, INV_VEF_PBG_MODE,
+    INV_VEF_PBG_NOISE, LatencyBudget, MeasuredLatency, OperationVerdict, VEF_PERF_001,
+    VEF_PERF_002, VEF_PERF_003, VEF_PERF_004, VEF_PERF_005, VEF_PERF_ERR_001, VefOperation,
+    VefPerfBudgetConfig, VefPerfBudgetError, VefPerfEvent,
 };
 
 /// Test requirement levels from the VEF performance budget gate specification.
@@ -204,7 +203,10 @@ fn test_must_r_vef_pbg_001() -> TestResult {
                 Some(budget) => {
                     if budget.p95_us == 0 || budget.p99_us == 0 {
                         return TestResult::Fail {
-                            reason: format!("Budget for {:?}/{:?} has zero latency", operation, mode),
+                            reason: format!(
+                                "Budget for {:?}/{:?} has zero latency",
+                                operation, mode
+                            ),
                         };
                     }
                     if budget.p95_us > budget.p99_us {
@@ -215,7 +217,10 @@ fn test_must_r_vef_pbg_001() -> TestResult {
                 }
                 None => {
                     return TestResult::Fail {
-                        reason: format!("Missing budget for operation {:?} in mode {:?}", operation, mode),
+                        reason: format!(
+                            "Missing budget for operation {:?} in mode {:?}",
+                            operation, mode
+                        ),
                     };
                 }
             }
@@ -231,9 +236,15 @@ fn test_must_r_vef_pbg_001() -> TestResult {
                 (VefOperation::ControlPlaneHotPath, _) => LatencyBudget::new(5000, 10000),
                 (VefOperation::ExtensionHostHotPath, _) => LatencyBudget::new(5000, 10000),
                 // Micro operations lower budgets
-                (VefOperation::ReceiptEmission, BudgetMode::Normal) => LatencyBudget::new(500, 1000),
-                (VefOperation::ReceiptEmission, BudgetMode::Restricted) => LatencyBudget::new(800, 1500),
-                (VefOperation::ReceiptEmission, BudgetMode::Quarantine) => LatencyBudget::new(1200, 2000),
+                (VefOperation::ReceiptEmission, BudgetMode::Normal) => {
+                    LatencyBudget::new(500, 1000)
+                }
+                (VefOperation::ReceiptEmission, BudgetMode::Restricted) => {
+                    LatencyBudget::new(800, 1500)
+                }
+                (VefOperation::ReceiptEmission, BudgetMode::Quarantine) => {
+                    LatencyBudget::new(1200, 2000)
+                }
                 (VefOperation::ChainAppend, _) => LatencyBudget::new(300, 600),
                 (VefOperation::CheckpointComputation, _) => LatencyBudget::new(2000, 4000),
                 (VefOperation::VerificationGateCheck, _) => LatencyBudget::new(1000, 2000),
@@ -323,7 +334,8 @@ fn test_must_r_vef_pbg_003() -> TestResult {
     let baseline_measurement_3 = MeasuredLatency::new(795, 1205, 1000);
 
     // All baseline measurements should be stable (low coefficient of variation)
-    if !baseline_measurement_1.is_stable(5.0) { // 5% CV threshold
+    if !baseline_measurement_1.is_stable(5.0) {
+        // 5% CV threshold
         return TestResult::Fail {
             reason: "Baseline measurement 1 should be stable".to_string(),
         };
@@ -372,7 +384,8 @@ fn test_must_r_vef_pbg_004() -> TestResult {
 
     // Test 2: Check that coefficient of variation is used for stability
     let high_cv_measurement = MeasuredLatency::new(900, 1800, 10); // Low sample count = potential noise
-    if high_cv_measurement.is_stable(1.0) { // Very strict CV threshold
+    if high_cv_measurement.is_stable(1.0) {
+        // Very strict CV threshold
         return TestResult::Fail {
             reason: "Low sample count measurement should have noise concerns".to_string(),
         };
@@ -380,7 +393,8 @@ fn test_must_r_vef_pbg_004() -> TestResult {
 
     // Test 3: Higher sample count should be more stable
     let low_cv_measurement = MeasuredLatency::new(900, 1800, 10000); // High sample count
-    if !low_cv_measurement.is_stable(5.0) { // Reasonable CV threshold
+    if !low_cv_measurement.is_stable(5.0) {
+        // Reasonable CV threshold
         return TestResult::Fail {
             reason: "High sample count measurement should be stable".to_string(),
         };
@@ -427,7 +441,8 @@ fn test_must_r_vef_pbg_005() -> TestResult {
 
     if passing_result.measured_p95_us.is_none() || passing_result.measured_p99_us.is_none() {
         return TestResult::Fail {
-            reason: "Passing results should also include measured latency values for trending".to_string(),
+            reason: "Passing results should also include measured latency values for trending"
+                .to_string(),
         };
     }
 
@@ -493,7 +508,10 @@ fn test_must_r_vef_pbg_006() -> TestResult {
 
             if !integration_result.within_budget {
                 return TestResult::Fail {
-                    reason: format!("Integration operation {:?} should have higher budget tolerance", operation),
+                    reason: format!(
+                        "Integration operation {:?} should have higher budget tolerance",
+                        operation
+                    ),
                 };
             }
         } else {
@@ -619,18 +637,29 @@ fn run_vef_perf_budget_gate_conformance_suite() {
         // Structured JSON-line output for CI parsing
         println!(
             "{{\"id\":\"{}\",\"verdict\":\"{}\",\"level\":\"{:?}\",\"category\":\"{:?}\",\"duration_ms\":{}}}",
-            case.id, verdict, case.level, case.category, duration.as_millis()
+            case.id,
+            verdict,
+            case.level,
+            case.category,
+            duration.as_millis()
         );
     }
 
     let total = pass + fail + xfail + skip;
     println!("\n═══════════════════════════════════════════════════════════");
     println!("VEF Performance Budget Gate Conformance Summary");
-    println!("Total: {}, Pass: {}, Fail: {}, XFail: {}, Skip: {}", total, pass, fail, xfail, skip);
+    println!(
+        "Total: {}, Pass: {}, Fail: {}, XFail: {}, Skip: {}",
+        total, pass, fail, xfail, skip
+    );
 
     // Calculate conformance score
-    let must_cases = VEF_PBG_CONFORMANCE_CASES.iter().filter(|c| c.level == RequirementLevel::Must).count();
-    let must_pass = VEF_PBG_CONFORMANCE_CASES.iter()
+    let must_cases = VEF_PBG_CONFORMANCE_CASES
+        .iter()
+        .filter(|c| c.level == RequirementLevel::Must)
+        .count();
+    let must_pass = VEF_PBG_CONFORMANCE_CASES
+        .iter()
         .filter(|c| c.level == RequirementLevel::Must)
         .map(|c| (c.test_fn)())
         .filter(|r| matches!(r, TestResult::Pass))
@@ -642,9 +671,16 @@ fn run_vef_perf_budget_gate_conformance_suite() {
         0.0
     };
 
-    println!("MUST Conformance: {:.1}% ({}/{})", conformance_score, must_pass, must_cases);
+    println!(
+        "MUST Conformance: {:.1}% ({}/{})",
+        conformance_score, must_pass, must_cases
+    );
     println!("═══════════════════════════════════════════════════════════");
 
     assert_eq!(fail, 0, "{} conformance tests failed", fail);
-    assert!(conformance_score >= 95.0, "MUST conformance below 95%: {:.1}%", conformance_score);
+    assert!(
+        conformance_score >= 95.0,
+        "MUST conformance below 95%: {:.1}%",
+        conformance_score
+    );
 }

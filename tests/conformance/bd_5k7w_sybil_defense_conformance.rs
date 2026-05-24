@@ -23,11 +23,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 // Import the module under test
 use frankenengine_node::security::sybil_defense::{
-    TrustSignal, TrustNode, TrustAggregator, StakeWeighter, SybilDetector,
-    AggregationMethod, SybilDefenseError,
-    SPS_001_ROBUST_AGGREGATION, SPS_002_STAKE_WEIGHTED,
-    SPS_003_SYBIL_DETECTED, SPS_004_ADVERSARIAL_GATE_PASS,
-    INV_SPS_AGGREGATION, INV_SPS_STAKE, INV_SPS_SYBIL, INV_SPS_ADVERSARIAL
+    AggregationMethod, INV_SPS_ADVERSARIAL, INV_SPS_AGGREGATION, INV_SPS_STAKE, INV_SPS_SYBIL,
+    SPS_001_ROBUST_AGGREGATION, SPS_002_STAKE_WEIGHTED, SPS_003_SYBIL_DETECTED,
+    SPS_004_ADVERSARIAL_GATE_PASS, StakeWeighter, SybilDefenseError, SybilDetector,
+    TrustAggregator, TrustNode, TrustSignal,
 };
 
 /// Test requirement level classification
@@ -81,7 +80,6 @@ pub const SYBIL_DEFENSE_CASES: &[ConformanceCase] = &[
         description: "Edge case: extreme poisoning still bounded",
         test_fn: test_robust_aggregation_extreme_poisoning,
     },
-
     // MUST_R_SPS_002: Stake weight inequality enforcement (INV-SPS-STAKE)
     ConformanceCase {
         id: "SPS-002.1",
@@ -104,7 +102,6 @@ pub const SYBIL_DEFENSE_CASES: &[ConformanceCase] = &[
         description: "Weight boundaries respected at extremes",
         test_fn: test_stake_weight_boundaries,
     },
-
     // MUST_R_SPS_003: Sybil influence containment (INV-SPS-SYBIL)
     ConformanceCase {
         id: "SPS-003.1",
@@ -127,7 +124,6 @@ pub const SYBIL_DEFENSE_CASES: &[ConformanceCase] = &[
         description: "Similarity detection identifies value coordination",
         test_fn: test_sybil_similarity_detection,
     },
-
     // MUST_R_SPS_004: Adversarial test coverage (INV-SPS-ADVERSARIAL)
     ConformanceCase {
         id: "SPS-004.1",
@@ -143,7 +139,6 @@ pub const SYBIL_DEFENSE_CASES: &[ConformanceCase] = &[
         description: "At least 10 distinct adversarial scenarios available",
         test_fn: test_adversarial_scenarios_coverage,
     },
-
     // EVD-SPS-001: SPS_001_ROBUST_AGGREGATION event emission
     ConformanceCase {
         id: "SPS-EVD-001.1",
@@ -152,7 +147,6 @@ pub const SYBIL_DEFENSE_CASES: &[ConformanceCase] = &[
         description: "SPS_001_ROBUST_AGGREGATION event code is defined",
         test_fn: test_robust_aggregation_event_defined,
     },
-
     // EVD-SPS-002: SPS_002_STAKE_WEIGHTED event emission
     ConformanceCase {
         id: "SPS-EVD-002.1",
@@ -161,7 +155,6 @@ pub const SYBIL_DEFENSE_CASES: &[ConformanceCase] = &[
         description: "SPS_002_STAKE_WEIGHTED event code is defined",
         test_fn: test_stake_weighted_event_defined,
     },
-
     // EVD-SPS-003: SPS_003_SYBIL_DETECTED event emission
     ConformanceCase {
         id: "SPS-EVD-003.1",
@@ -170,7 +163,6 @@ pub const SYBIL_DEFENSE_CASES: &[ConformanceCase] = &[
         description: "SPS_003_SYBIL_DETECTED event code is defined",
         test_fn: test_sybil_detected_event_defined,
     },
-
     // EVD-SPS-004: SPS_004_ADVERSARIAL_GATE_PASS event emission
     ConformanceCase {
         id: "SPS-EVD-004.1",
@@ -190,9 +182,11 @@ fn test_robust_aggregation_trimmed_mean() -> TestResult {
     let clean_signals = vec![0.5, 0.6, 0.7, 0.8, 0.9];
     let clean_mean = match aggregator.trimmed_mean(&clean_signals) {
         Ok(result) => result.value,
-        Err(e) => return TestResult::Fail {
-            reason: format!("Clean trimmed mean failed: {}", e),
-        },
+        Err(e) => {
+            return TestResult::Fail {
+                reason: format!("Clean trimmed mean failed: {}", e),
+            };
+        }
     };
 
     // Test with 20% poisoned signals (1 out of 5)
@@ -201,9 +195,11 @@ fn test_robust_aggregation_trimmed_mean() -> TestResult {
 
     let poisoned_mean = match aggregator.trimmed_mean(&poisoned_signals) {
         Ok(result) => result.value,
-        Err(e) => return TestResult::Fail {
-            reason: format!("Poisoned trimmed mean failed: {}", e),
-        },
+        Err(e) => {
+            return TestResult::Fail {
+                reason: format!("Poisoned trimmed mean failed: {}", e),
+            };
+        }
     };
 
     // INV-SPS-AGGREGATION: 20% poisoned signals shift aggregate by <= 5%
@@ -227,9 +223,11 @@ fn test_robust_aggregation_median() -> TestResult {
     let values_with_outliers = vec![0.1, 0.5, 0.6, 0.7, 0.8, 0.9, 10.0]; // 10.0 is extreme outlier
     let median_result = match aggregator.median(&values_with_outliers) {
         Ok(result) => result,
-        Err(e) => return TestResult::Fail {
-            reason: format!("Median calculation failed: {}", e),
-        },
+        Err(e) => {
+            return TestResult::Fail {
+                reason: format!("Median calculation failed: {}", e),
+            };
+        }
     };
 
     // Median should be 0.7 (middle value), unaffected by outlier
@@ -260,9 +258,11 @@ fn test_robust_aggregation_extreme_poisoning() -> TestResult {
 
     let result = match aggregator.trimmed_mean(&extreme_signals) {
         Ok(result) => result,
-        Err(e) => return TestResult::Fail {
-            reason: format!("Extreme trimmed mean failed: {}", e),
-        },
+        Err(e) => {
+            return TestResult::Fail {
+                reason: format!("Extreme trimmed mean failed: {}", e),
+            };
+        }
     };
 
     // Even with extreme poisoning, result should be reasonable (trimming should help)
@@ -313,11 +313,14 @@ fn test_stake_weight_monotonic() -> TestResult {
 
     // Check monotonicity
     for i in 1..weights.len() {
-        if weights[i] < weights[i-1] {
+        if weights[i] < weights[i - 1] {
             return TestResult::Fail {
                 reason: format!(
                     "INV-SPS-STAKE violated: Weight function not monotonic at history {} -> {}: {} -> {}",
-                    histories[i-1], histories[i], weights[i-1], weights[i]
+                    histories[i - 1],
+                    histories[i],
+                    weights[i - 1],
+                    weights[i]
                 ),
             };
         }
@@ -375,7 +378,10 @@ fn test_sybil_influence_containment() -> TestResult {
     let mut honest_signals = Vec::new();
     for i in 0..5 {
         let node_id = format!("honest_{}", i);
-        honest_nodes.insert(node_id.clone(), TrustNode::established(&node_id, 80.0, 200, 500));
+        honest_nodes.insert(
+            node_id.clone(),
+            TrustNode::established(&node_id, 80.0, 200, 500),
+        );
         honest_signals.push(TrustSignal {
             signal_id: format!("honest_signal_{}", i),
             source_node_id: node_id,
@@ -395,7 +401,7 @@ fn test_sybil_influence_containment() -> TestResult {
             signal_id: format!("sybil_signal_{}", i),
             source_node_id: node_id,
             target_id: "test_target".to_string(),
-            value: 0.9, // Slightly higher value to try to manipulate
+            value: 0.9,                    // Slightly higher value to try to manipulate
             timestamp_ms: 1100 + i as u64, // Coordinated timing
         });
     }
@@ -408,11 +414,13 @@ fn test_sybil_influence_containment() -> TestResult {
 
     // Compute honest influence
     let honest_node_ids: Vec<String> = (0..5).map(|i| format!("honest_{}", i)).collect();
-    let honest_influence = detector.compute_influence(&all_signals, &honest_node_ids, &weighter, &all_nodes);
+    let honest_influence =
+        detector.compute_influence(&all_signals, &honest_node_ids, &weighter, &all_nodes);
 
     // Compute Sybil influence
     let sybil_node_ids: Vec<String> = (0..100).map(|i| format!("sybil_{}", i)).collect();
-    let sybil_influence = detector.compute_influence(&all_signals, &sybil_node_ids, &weighter, &all_nodes);
+    let sybil_influence =
+        detector.compute_influence(&all_signals, &sybil_node_ids, &weighter, &all_nodes);
 
     // INV-SPS-SYBIL: 100 Sybil identities < influence of 5 honest nodes
     if sybil_influence >= honest_influence {
@@ -468,7 +476,9 @@ fn test_sybil_burst_detection() -> TestResult {
 
     if !detected.contains("burst_node") {
         return TestResult::Fail {
-            reason: "INV-SPS-SYBIL violated: Burst detection failed to identify coordinated signaling".to_string(),
+            reason:
+                "INV-SPS-SYBIL violated: Burst detection failed to identify coordinated signaling"
+                    .to_string(),
         };
     }
 
@@ -648,7 +658,10 @@ pub fn run_sybil_defense_conformance() -> (usize, usize, usize) {
     }
 
     println!("\nSybil Defense Conformance Summary:");
-    println!("Passed: {}, Failed: {}, Skipped: {}", passed, failed, skipped);
+    println!(
+        "Passed: {}, Failed: {}, Skipped: {}",
+        passed, failed, skipped
+    );
 
     (passed, failed, skipped)
 }
@@ -662,7 +675,10 @@ mod tests {
     fn conformance_must_r_sps_001_robust_aggregation() {
         assert_eq!(test_robust_aggregation_trimmed_mean(), TestResult::Pass);
         assert_eq!(test_robust_aggregation_median(), TestResult::Pass);
-        assert_eq!(test_robust_aggregation_extreme_poisoning(), TestResult::Pass);
+        assert_eq!(
+            test_robust_aggregation_extreme_poisoning(),
+            TestResult::Pass
+        );
     }
 
     #[test]
@@ -708,7 +724,11 @@ mod tests {
     #[test]
     fn run_all_conformance_tests() {
         let (passed, failed, _skipped) = run_sybil_defense_conformance();
-        assert!(failed == 0, "All conformance tests must pass, but {} failed", failed);
+        assert!(
+            failed == 0,
+            "All conformance tests must pass, but {} failed",
+            failed
+        );
         assert!(passed > 0, "At least some tests should pass");
     }
 }

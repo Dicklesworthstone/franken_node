@@ -3417,11 +3417,8 @@ mod tests {
     // longer load across the cluster.
     #[test]
     fn capability_envelope_compute_digest_frozen_canonical_byte_layout_golden() {
-        let identity = ArtifactIdentity::new(
-            "art-id-1",
-            "alice@example.com",
-            "2026-04-24T00:00:00Z",
-        );
+        let identity =
+            ArtifactIdentity::new("art-id-1", "alice@example.com", "2026-04-24T00:00:00Z");
 
         // 1. Empty envelope baseline (no requirements).
         let empty = CapabilityEnvelope::new();
@@ -3547,7 +3544,11 @@ mod tests {
         ] {
             assert_eq!(digest.len(), 71);
             assert!(digest.starts_with("sha256:"));
-            assert!(digest[7..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                digest[7..]
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

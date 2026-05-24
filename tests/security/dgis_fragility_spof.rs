@@ -34,9 +34,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use frankenengine_node::dgis::fragility_model::{
-    FragilityFactor, PublisherProfile, assess_publisher,
-};
 use frankenengine_node::dgis::fragility_fixtures::{
     ExpectedFinding, FixtureVerdict, FragilityFixture, SpofKindLabel, evaluate_fixture,
     load_fixture_from_json, synthesize_active_maintainers_recent_commits,
@@ -44,6 +41,9 @@ use frankenengine_node::dgis::fragility_fixtures::{
     synthesize_independent_packages_no_chains, synthesize_key_person_high_share,
     synthesize_multi_quorum_publishers, synthesize_org_concentrated, synthesize_orphaned_pkg,
     synthesize_single_maintainer_dominant, synthesize_well_distributed_maintainers,
+};
+use frankenengine_node::dgis::fragility_model::{
+    FragilityFactor, PublisherProfile, assess_publisher,
 };
 
 type TestResult = Result<(), String>;

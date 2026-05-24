@@ -528,7 +528,11 @@ mod tests {
                 "franken_node_requests_total",
                 "Total processed requests",
                 1_247_892.0,
-                &[("method", "POST"), ("endpoint", "/validate"), ("status", "200")],
+                &[
+                    ("method", "POST"),
+                    ("endpoint", "/validate"),
+                    ("status", "200"),
+                ],
             )
             .expect("request counter");
 
@@ -555,7 +559,7 @@ mod tests {
             .record_gauge(
                 "franken_node_memory_usage_bytes",
                 "Current memory usage in bytes",
-                1_073_741_824.0,  // 1GB
+                1_073_741_824.0, // 1GB
                 &[("pool", "evidence_ledger"), ("region", "heap")],
             )
             .expect("memory gauge");
@@ -566,7 +570,10 @@ mod tests {
                 "franken_node_quarantine_events_total",
                 "Quarantine events triggered",
                 15.0,
-                &[("reason", "high_risk_code\"injection"), ("action", "block\\log")],
+                &[
+                    ("reason", "high_risk_code\"injection"),
+                    ("action", "block\\log"),
+                ],
             )
             .expect("quarantine counter");
 
@@ -608,20 +615,32 @@ mod tests {
         let metrics = golden_snapshot["metrics"].as_array().unwrap();
 
         // Health metric verification
-        let health_metric = metrics.iter().find(|m| m["name"] == "franken_node_health_status").unwrap();
+        let health_metric = metrics
+            .iter()
+            .find(|m| m["name"] == "franken_node_health_status")
+            .unwrap();
         assert_eq!(health_metric["kind"], "gauge");
         assert_eq!(health_metric["value"], 0.95);
         assert_eq!(health_metric["labels"]["component"], "runtime");
 
         // Request counter verification
-        let request_metric = metrics.iter().find(|m| m["name"] == "franken_node_requests_total").unwrap();
+        let request_metric = metrics
+            .iter()
+            .find(|m| m["name"] == "franken_node_requests_total")
+            .unwrap();
         assert_eq!(request_metric["kind"], "counter");
         assert_eq!(request_metric["value"], 1247892.0);
         assert_eq!(request_metric["labels"]["endpoint"], "/validate");
 
         // Error handling for special characters
-        let quarantine_metric = metrics.iter().find(|m| m["name"] == "franken_node_quarantine_events_total").unwrap();
-        assert_eq!(quarantine_metric["labels"]["reason"], "high_risk_code\"injection");
+        let quarantine_metric = metrics
+            .iter()
+            .find(|m| m["name"] == "franken_node_quarantine_events_total")
+            .unwrap();
+        assert_eq!(
+            quarantine_metric["labels"]["reason"],
+            "high_risk_code\"injection"
+        );
         assert_eq!(quarantine_metric["labels"]["action"], "block\\log");
 
         // Verify Prometheus output contains all metrics
@@ -633,19 +652,29 @@ mod tests {
         assert!(prometheus_output.contains("high_risk_code\\\"injection"));
 
         // Validate metric count bounds (DoS protection verification)
-        assert!(registry.len() <= super::MAX_METRICS_PER_REGISTRY, "Should respect capacity bounds");
+        assert!(
+            registry.len() <= super::MAX_METRICS_PER_REGISTRY,
+            "Should respect capacity bounds"
+        );
 
         // Verify against golden artifact for regression testing
-        let expected_json = include_str!("../../../../tests/golden/observability_metrics_comprehensive_snapshot.json");
-        let expected: serde_json::Value = serde_json::from_str(expected_json)
-            .expect("Golden artifact should be valid JSON");
+        let expected_json = include_str!(
+            "../../../../tests/golden/observability_metrics_comprehensive_snapshot.json"
+        );
+        let expected: serde_json::Value =
+            serde_json::from_str(expected_json).expect("Golden artifact should be valid JSON");
 
         // Compare structural elements
         assert_eq!(golden_snapshot["version"], expected["version"]);
         assert_eq!(golden_snapshot["metrics_count"], expected["metrics_count"]);
-        assert_eq!(golden_snapshot["snapshot_timestamp"], expected["snapshot_timestamp"]);
-        assert_eq!(golden_snapshot["metrics"], expected["metrics"],
-            "Metric snapshot should match golden artifact");
+        assert_eq!(
+            golden_snapshot["snapshot_timestamp"],
+            expected["snapshot_timestamp"]
+        );
+        assert_eq!(
+            golden_snapshot["metrics"], expected["metrics"],
+            "Metric snapshot should match golden artifact"
+        );
     }
 
     #[test]
@@ -659,7 +688,12 @@ mod tests {
         // Fixture 1: Minimal registry with single gauge metric
         let mut registry_minimal = MetricsRegistry::new();
         registry_minimal
-            .record_gauge("franken_node_uptime_seconds", "Node uptime in seconds", 3600.0, &[])
+            .record_gauge(
+                "franken_node_uptime_seconds",
+                "Node uptime in seconds",
+                3600.0,
+                &[],
+            )
             .expect("valid gauge");
 
         let minimal_output = registry_minimal.render_prometheus();
@@ -667,8 +701,7 @@ mod tests {
                                # TYPE franken_node_uptime_seconds gauge\n\
                                franken_node_uptime_seconds 3600\n";
         assert_eq!(
-            minimal_output,
-            expected_minimal,
+            minimal_output, expected_minimal,
             "minimal render_prometheus output drifted — check HELP/TYPE line formatting \
              or metric value precision for gauges without labels"
         );
@@ -684,7 +717,7 @@ mod tests {
                     ("method", "GET"),
                     ("status", "200"),
                     ("path", "/api/v1/health\"test\\newline\n"),
-                ]
+                ],
             )
             .expect("valid counter with escaped labels");
 
@@ -693,8 +726,7 @@ mod tests {
                                # TYPE franken_node_requests_total counter\n\
                                franken_node_requests_total{method=\"GET\",path=\"/api/v1/health\\\"test\\\\newline\\n\",status=\"200\"} 42\n";
         assert_eq!(
-            complex_output,
-            expected_complex,
+            complex_output, expected_complex,
             "complex render_prometheus output drifted — check label escaping for quotes/backslashes/newlines \
              or sorted label ordering in Prometheus output"
         );
@@ -705,10 +737,20 @@ mod tests {
             .record_gauge("z_last_metric", "Last metric alphabetically", 1.0, &[])
             .expect("valid gauge");
         registry_multi
-            .record_counter("a_first_metric", "First metric alphabetically", 5.0, &[("env", "test")])
+            .record_counter(
+                "a_first_metric",
+                "First metric alphabetically",
+                5.0,
+                &[("env", "test")],
+            )
             .expect("valid counter");
         registry_multi
-            .record_gauge("m_middle_metric", "Middle metric", 2.5, &[("region", "us-east-1")])
+            .record_gauge(
+                "m_middle_metric",
+                "Middle metric",
+                2.5,
+                &[("region", "us-east-1")],
+            )
             .expect("valid gauge");
 
         let multi_output = registry_multi.render_prometheus();
@@ -722,8 +764,7 @@ mod tests {
                              # TYPE z_last_metric gauge\n\
                              z_last_metric 1\n";
         assert_eq!(
-            multi_output,
-            expected_multi,
+            multi_output, expected_multi,
             "multi-metric render_prometheus output drifted — check lexicographic metric sorting \
              or multi-metric formatting with different types"
         );
@@ -731,7 +772,12 @@ mod tests {
         // Fixture 4: Edge case values and precision
         let mut registry_edge = MetricsRegistry::new();
         registry_edge
-            .record_gauge("franken_node_precision_test", "Precision test metric", 123.456789, &[])
+            .record_gauge(
+                "franken_node_precision_test",
+                "Precision test metric",
+                123.456789,
+                &[],
+            )
             .expect("valid gauge");
         registry_edge
             .record_counter("franken_node_zero_test", "Zero value test", 0.0, &[])
@@ -745,8 +791,7 @@ mod tests {
                             # TYPE franken_node_zero_test counter\n\
                             franken_node_zero_test 0\n";
         assert_eq!(
-            edge_output,
-            expected_edge,
+            edge_output, expected_edge,
             "edge-case render_prometheus output drifted — check floating-point precision \
              handling or zero-value formatting in Prometheus output"
         );
@@ -758,7 +803,7 @@ mod tests {
                 "franken_node_escape_test",
                 "Help with backslash \\ and newline \n characters",
                 1.0,
-                &[]
+                &[],
             )
             .expect("valid gauge with escaped help");
 
@@ -767,8 +812,7 @@ mod tests {
                                    # TYPE franken_node_escape_test gauge\n\
                                    franken_node_escape_test 1\n";
         assert_eq!(
-            help_escape_output,
-            expected_help_escape,
+            help_escape_output, expected_help_escape,
             "help-escape render_prometheus output drifted — check help text escaping \
              for backslashes and newlines in HELP lines"
         );

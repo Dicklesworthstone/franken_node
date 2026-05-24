@@ -3559,8 +3559,15 @@ mod tests {
             &thresholds,
             1000, // exactly at threshold
         );
-        assert_eq!(decision_at_boundary.kind, ResourceGovernorDecisionKind::Defer);
-        assert!(decision_at_boundary.reason_code.contains("STALE_OBSERVATION"));
+        assert_eq!(
+            decision_at_boundary.kind,
+            ResourceGovernorDecisionKind::Defer
+        );
+        assert!(
+            decision_at_boundary
+                .reason_code
+                .contains("STALE_OBSERVATION")
+        );
 
         // Test just under boundary (should not be stale)
         let decision_under_boundary = decide_resource_action(
@@ -3570,8 +3577,15 @@ mod tests {
             &thresholds,
             999, // just under threshold
         );
-        assert_ne!(decision_under_boundary.kind, ResourceGovernorDecisionKind::Defer);
-        assert!(!decision_under_boundary.reason_code.contains("STALE_OBSERVATION"));
+        assert_ne!(
+            decision_under_boundary.kind,
+            ResourceGovernorDecisionKind::Defer
+        );
+        assert!(
+            !decision_under_boundary
+                .reason_code
+                .contains("STALE_OBSERVATION")
+        );
 
         // Test over boundary (should be stale)
         let decision_over_boundary = decide_resource_action(
@@ -3581,7 +3595,14 @@ mod tests {
             &thresholds,
             1001, // over threshold
         );
-        assert_eq!(decision_over_boundary.kind, ResourceGovernorDecisionKind::Defer);
-        assert!(decision_over_boundary.reason_code.contains("STALE_OBSERVATION"));
+        assert_eq!(
+            decision_over_boundary.kind,
+            ResourceGovernorDecisionKind::Defer
+        );
+        assert!(
+            decision_over_boundary
+                .reason_code
+                .contains("STALE_OBSERVATION")
+        );
     }
 }

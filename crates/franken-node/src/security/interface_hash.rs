@@ -1839,8 +1839,7 @@ mod interface_hash_advanced_negative_tests {
         // domain, non-empty data). Locks the entire layout in one shot.
         let populated = compute_hash("connector.v1", b"hello");
         assert_eq!(
-            populated.hash_hex,
-            "e1c8d7cc7a091aed2a9ccc5be8dd7f7dbab41c78c595c18262df2f5627b4d817",
+            populated.hash_hex, "e1c8d7cc7a091aed2a9ccc5be8dd7f7dbab41c78c595c18262df2f5627b4d817",
             "populated interface_hash drifted — check the `interface_hash_v1:` \
              domain separator, LE64-len prefix widths, or field order \
              (domain before data)"
@@ -1854,8 +1853,7 @@ mod interface_hash_advanced_negative_tests {
         // length-prefix collision-resistance contract documented at L20).
         let empty_data = compute_hash("connector.v1", b"");
         assert_eq!(
-            empty_data.hash_hex,
-            "684ccd19a353f3bede36371dc6359925d20ecec9f1f4e249ab4f5a54a3cae643",
+            empty_data.hash_hex, "684ccd19a353f3bede36371dc6359925d20ecec9f1f4e249ab4f5a54a3cae643",
             "empty-data interface_hash drifted — check that an empty &[u8] \
              data field still emits LE64(0) into the hasher rather than \
              being skipped"
@@ -1879,8 +1877,7 @@ mod interface_hash_advanced_negative_tests {
         // feed the hasher. Locks the all-empty baseline.
         let both_empty = compute_hash("", b"");
         assert_eq!(
-            both_empty.hash_hex,
-            "7a827ea6a5740edb5783006488f41e6fbdbb9fdf4bf0d467f40869e22c4a6c62",
+            both_empty.hash_hex, "7a827ea6a5740edb5783006488f41e6fbdbb9fdf4bf0d467f40869e22c4a6c62",
             "both-empty interface_hash drifted — the all-empty baseline \
              should produce SHA256(b\"interface_hash_v1:\" || LE64(0) || \
              LE64(0)); drift indicates a domain-byte change or LE-width drift"
@@ -1904,7 +1901,10 @@ mod interface_hash_advanced_negative_tests {
                 }
             }
             assert_eq!(a.len(), 64);
-            assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                a.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
 
         // Field-order-sensitivity invariant: compute_hash(domain, data)

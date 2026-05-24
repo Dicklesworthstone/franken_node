@@ -8854,8 +8854,7 @@ mod tests {
         };
         let minimal_hash = super::evidence_entry_hash_hex(&minimal);
         assert_eq!(
-            minimal_hash,
-            "f76209b32c7b798ceae98944596c71fe70dc858b0e88796d0e4829a3fa248ccb",
+            minimal_hash, "f76209b32c7b798ceae98944596c71fe70dc858b0e88796d0e4829a3fa248ccb",
             "minimal-fixture evidence_entry_hash drifted — check v1 domain \
              separator, entry_id None framing (single 0u8), or empty-signature \
              zero-length tail"
@@ -8886,8 +8885,7 @@ mod tests {
         };
         let populated_hash = super::evidence_entry_hash_hex(&populated);
         assert_eq!(
-            populated_hash,
-            "77b0d56da8e864ce9fbaf1745f585fe69d39e67f081bc27f8102e3f19862e810",
+            populated_hash, "77b0d56da8e864ce9fbaf1745f585fe69d39e67f081bc27f8102e3f19862e810",
             "populated-fixture evidence_entry_hash drifted — check Option=Some \
              entry_id 1u8 prefix, decision_kind label-len framing, or \
              signature length-prefixing"
@@ -8922,17 +8920,47 @@ mod tests {
 
         // Create a realistic evidence sequence with diverse entry types
         let entries = [
-            ("QUARANTINE-001", DecisionKind::Quarantine, 1700000001000, 100, r#"{"risk_level":"high","source":"policy_engine"}"#),
-            ("RELEASE-001", DecisionKind::Release, 1700000002000, 150, r#"{"approval":"supervisor","reason":"false_positive"}"#),
-            ("QUARANTINE-002", DecisionKind::Quarantine, 1700000003000, 200, r#"{"malware_detected":true,"family":"trojan"}"#),
-            ("AUDIT-001", DecisionKind::Audit, 1700000004000, 300, r#"{"compliance_check":"passed","auditor_id":"AUD-123"}"#),
-            ("RELEASE-002", DecisionKind::Release, 1700000005000, 250, r#"{"batch_release":true,"count":42}"#),
+            (
+                "QUARANTINE-001",
+                DecisionKind::Quarantine,
+                1700000001000,
+                100,
+                r#"{"risk_level":"high","source":"policy_engine"}"#,
+            ),
+            (
+                "RELEASE-001",
+                DecisionKind::Release,
+                1700000002000,
+                150,
+                r#"{"approval":"supervisor","reason":"false_positive"}"#,
+            ),
+            (
+                "QUARANTINE-002",
+                DecisionKind::Quarantine,
+                1700000003000,
+                200,
+                r#"{"malware_detected":true,"family":"trojan"}"#,
+            ),
+            (
+                "AUDIT-001",
+                DecisionKind::Audit,
+                1700000004000,
+                300,
+                r#"{"compliance_check":"passed","auditor_id":"AUD-123"}"#,
+            ),
+            (
+                "RELEASE-002",
+                DecisionKind::Release,
+                1700000005000,
+                250,
+                r#"{"batch_release":true,"count":42}"#,
+            ),
         ];
 
         // Append entries to build a realistic ledger state
         for (decision_id, kind, timestamp, size, payload_json) in entries {
-            let payload: serde_json::Value = serde_json::from_str(payload_json)
-                .expect("Test payload should be valid JSON");
+            let payload: serde_json::Value =
+                serde_json::from_str(payload_json).expect("Test payload should be valid JSON");
             let mut entry = EvidenceEntry {
                 schema_version: "evidence-ledger-v2".to_string(),
                 entry_id: None, // Will be assigned by ledger
@@ -8955,7 +8983,9 @@ mod tests {
             let signature = signing_key.sign(&entry_bytes);
             entry.signature = hex::encode(signature.to_bytes());
 
-            ledger.append(entry).expect("Entry should append successfully");
+            ledger
+                .append(entry)
+                .expect("Entry should append successfully");
         }
 
         // Create canonical snapshot
@@ -8964,27 +8994,42 @@ mod tests {
         // Verify core snapshot properties
         assert_eq!(snapshot.entries.len(), 5, "Should contain all 5 entries");
         assert_eq!(snapshot.total_appended, 5, "Should track 5 total appends");
-        assert_eq!(snapshot.total_evicted, 0, "Should have no evictions under capacity");
+        assert_eq!(
+            snapshot.total_evicted, 0,
+            "Should have no evictions under capacity"
+        );
 
         // Verify canonical ordering (append order preserved)
-        let decision_ids: Vec<String> = snapshot.entries
+        let decision_ids: Vec<String> = snapshot
+            .entries
             .iter()
             .map(|e| e.decision_id.clone())
             .collect();
         assert_eq!(
             decision_ids,
-            vec!["QUARANTINE-001", "RELEASE-001", "QUARANTINE-002", "AUDIT-001", "RELEASE-002"],
+            vec![
+                "QUARANTINE-001",
+                "RELEASE-001",
+                "QUARANTINE-002",
+                "AUDIT-001",
+                "RELEASE-002"
+            ],
             "Snapshot should preserve append order"
         );
 
         // Verify entry IDs are sequential
-        let entry_ids: Vec<Option<String>> = snapshot.entries
+        let entry_ids: Vec<Option<String>> = snapshot
+            .entries
             .iter()
             .map(|e| e.entry_id.clone())
             .collect();
         for (i, entry_id) in entry_ids.iter().enumerate() {
             match entry_id {
-                Some(id) => assert_eq!(id, &format!("ENTRY-{}", i + 1), "Entry IDs should be sequential"),
+                Some(id) => assert_eq!(
+                    id,
+                    &format!("ENTRY-{}", i + 1),
+                    "Entry IDs should be sequential"
+                ),
                 None => panic!("Entry ID should be assigned by ledger"),
             }
         }
@@ -9064,11 +9109,23 @@ mod tests {
         // Verify each entry matches expected structure
         for (i, entry) in snapshot.entries.iter().enumerate() {
             let golden_entry = &golden_json["entries"][i];
-            assert_eq!(entry.entry_id.as_ref().unwrap(), golden_entry["entry_id"].as_str().unwrap());
-            assert_eq!(entry.decision_id, golden_entry["decision_id"].as_str().unwrap());
-            assert_eq!(entry.timestamp_ms, golden_entry["timestamp_ms"].as_u64().unwrap());
+            assert_eq!(
+                entry.entry_id.as_ref().unwrap(),
+                golden_entry["entry_id"].as_str().unwrap()
+            );
+            assert_eq!(
+                entry.decision_id,
+                golden_entry["decision_id"].as_str().unwrap()
+            );
+            assert_eq!(
+                entry.timestamp_ms,
+                golden_entry["timestamp_ms"].as_u64().unwrap()
+            );
             assert_eq!(entry.epoch_id, golden_entry["epoch_id"].as_u64().unwrap());
-            assert_eq!(entry.size_bytes, golden_entry["size_bytes"].as_u64().unwrap());
+            assert_eq!(
+                entry.size_bytes,
+                golden_entry["size_bytes"].as_u64().unwrap()
+            );
             assert!(!entry.signature.is_empty(), "Entry should have signature");
             assert_eq!(entry.payload, golden_entry["payload"]);
 
@@ -9106,23 +9163,30 @@ mod tests {
         let mut signed_overflow = overflow_entry;
         signed_overflow.signature = hex::encode(overflow_signature.to_bytes());
 
-        ledger.append(signed_overflow).expect("Overflow entry should append");
+        ledger
+            .append(signed_overflow)
+            .expect("Overflow entry should append");
 
         // Verify overflow behavior
         let overflow_snapshot = ledger.snapshot();
-        assert_eq!(overflow_snapshot.entries.len(), 5, "Should still have 5 entries after overflow");
-        assert_eq!(overflow_snapshot.total_appended, 6, "Should track 6 total appends");
+        assert_eq!(
+            overflow_snapshot.entries.len(),
+            5,
+            "Should still have 5 entries after overflow"
+        );
+        assert_eq!(
+            overflow_snapshot.total_appended, 6,
+            "Should track 6 total appends"
+        );
         assert_eq!(overflow_snapshot.total_evicted, 1, "Should have 1 eviction");
 
         // Verify oldest entry was evicted (FIFO)
         assert_ne!(
-            overflow_snapshot.entries[0].decision_id,
-            "QUARANTINE-001",
+            overflow_snapshot.entries[0].decision_id, "QUARANTINE-001",
             "Oldest entry should be evicted"
         );
         assert_eq!(
-            overflow_snapshot.entries[4].decision_id,
-            "OVERFLOW-001",
+            overflow_snapshot.entries[4].decision_id, "OVERFLOW-001",
             "Newest entry should be present"
         );
 
@@ -9132,8 +9196,8 @@ mod tests {
 
         // Replay the same sequence
         for (decision_id, kind, timestamp, size, payload_json) in entries {
-            let payload: serde_json::Value = serde_json::from_str(payload_json)
-                .expect("Test payload should be valid JSON");
+            let payload: serde_json::Value =
+                serde_json::from_str(payload_json).expect("Test payload should be valid JSON");
             let mut entry = EvidenceEntry {
                 schema_version: "evidence-ledger-v2".to_string(),
                 entry_id: None,
@@ -9155,7 +9219,9 @@ mod tests {
             let signature = signing_key_2.sign(&entry_bytes);
             entry.signature = hex::encode(signature.to_bytes());
 
-            replay_ledger.append(entry).expect("Replay entry should append");
+            replay_ledger
+                .append(entry)
+                .expect("Replay entry should append");
         }
 
         let replay_snapshot = replay_ledger.snapshot();

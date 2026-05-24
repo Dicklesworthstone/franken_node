@@ -2128,11 +2128,7 @@ mod tests {
             super::sign_structured(
                 "secret-123",
                 b"mitigation_sig_v1:",
-                &[
-                    &b"mit-id-7"[..],
-                    &b"loss=100"[..],
-                    &b"epoch=42"[..],
-                ],
+                &[&b"mit-id-7"[..], &b"loss=100"[..], &b"epoch=42"[..],],
             ),
             "7b5c4ca16c9e024704d3559c184950b8070e35a27321a8a2752786087c518d7c"
         );
@@ -2174,9 +2170,19 @@ mod tests {
         );
 
         // 7. 64-lowercase-hex length+casing contract.
-        for h in [&base, &diff_secret, &order_a, &order_b, &no_fields, &one_empty_field] {
+        for h in [
+            &base,
+            &diff_secret,
+            &order_a,
+            &order_b,
+            &no_fields,
+            &one_empty_field,
+        ] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

@@ -18,11 +18,10 @@
 //! - EVD-BOUNDARY-004: Checker initialization events
 
 use frankenengine_node::policy::controller_boundary_checks::{
-    ControllerBoundaryChecker, ErrorClass, BoundaryViolation,
-    RejectedMutationRecord,
+    BoundaryViolation, ControllerBoundaryChecker, ErrorClass, RejectedMutationRecord,
 };
 use frankenengine_node::policy::correctness_envelope::{
-    CorrectnessEnvelope, InvariantId, PolicyProposal, PolicyChange,
+    CorrectnessEnvelope, InvariantId, PolicyChange, PolicyProposal,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -69,7 +68,6 @@ const CONTROLLER_BOUNDARY_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "ErrorClass variants are stable across versions with proper serialization",
         test_fn: test_must_r_cbc_001_stable_error_variants,
     },
-
     // MUST_R_CBC_002: INV-BOUNDARY-AUDITABLE
     ConformanceCase {
         id: "MUST_R_CBC_002",
@@ -78,7 +76,6 @@ const CONTROLLER_BOUNDARY_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Every rejection produces exactly one audit record",
         test_fn: test_must_r_cbc_002_auditable_rejections,
     },
-
     // MUST_R_CBC_003: INV-BOUNDARY-MANDATORY
     ConformanceCase {
         id: "MUST_R_CBC_003",
@@ -87,7 +84,6 @@ const CONTROLLER_BOUNDARY_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "All PolicyProposal must pass through check_proposal before apply",
         test_fn: test_must_r_cbc_003_mandatory_enforcement,
     },
-
     // MUST_R_CBC_004: INV-BOUNDARY-FAIL-CLOSED
     ConformanceCase {
         id: "MUST_R_CBC_004",
@@ -106,7 +102,6 @@ const EVENT_CODE_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Check passed events logged with correct code",
         test_fn: test_should_evd_boundary_001_check_passed,
     },
-
     ConformanceCase {
         id: "EVD-BOUNDARY-002",
         section: "events",
@@ -114,7 +109,6 @@ const EVENT_CODE_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Rejection events logged with correct code",
         test_fn: test_should_evd_boundary_002_rejection,
     },
-
     ConformanceCase {
         id: "EVD-BOUNDARY-003",
         section: "events",
@@ -122,7 +116,6 @@ const EVENT_CODE_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Audit trail write events logged with correct code",
         test_fn: test_should_evd_boundary_003_audit_write,
     },
-
     ConformanceCase {
         id: "EVD-BOUNDARY-004",
         section: "events",
@@ -168,9 +161,15 @@ fn test_must_r_cbc_001_stable_error_variants() -> TestResult {
 
     // Verify label stability - labels must be stable identifiers
     let expected_labels = [
-        ("correctness_semantic_mutation", ErrorClass::CorrectnessSemanticMutation),
+        (
+            "correctness_semantic_mutation",
+            ErrorClass::CorrectnessSemanticMutation,
+        ),
         ("envelope_bypass", ErrorClass::EnvelopeBypass),
-        ("unknown_invariant_target", ErrorClass::UnknownInvariantTarget),
+        (
+            "unknown_invariant_target",
+            ErrorClass::UnknownInvariantTarget,
+        ),
     ];
 
     for (expected_label, variant) in &expected_labels {
@@ -179,7 +178,9 @@ fn test_must_r_cbc_001_stable_error_variants() -> TestResult {
                 reason: format!(
                     "MUST_R_CBC_001 violated: label mismatch for {:?}\n\
                      expected: {}, got: {}",
-                    variant, expected_label, variant.label()
+                    variant,
+                    expected_label,
+                    variant.label()
                 ),
             };
         }
@@ -271,7 +272,10 @@ fn test_must_r_cbc_002_auditable_rejections() -> TestResult {
         let timestamp = 1000 + i as u64;
 
         // Verify rejection occurs
-        if checker.check_proposal(proposal, &envelope, timestamp).is_ok() {
+        if checker
+            .check_proposal(proposal, &envelope, timestamp)
+            .is_ok()
+        {
             return TestResult::Fail {
                 reason: format!(
                     "MUST_R_CBC_002 violated: expected rejection for proposal {}, but it passed",
@@ -377,7 +381,9 @@ fn test_must_r_cbc_003_mandatory_enforcement() -> TestResult {
         }
         Ok(()) => {
             return TestResult::Fail {
-                reason: "MUST_R_CBC_003 violated: invalid proposal should be rejected by check_proposal".to_string(),
+                reason:
+                    "MUST_R_CBC_003 violated: invalid proposal should be rejected by check_proposal"
+                        .to_string(),
             };
         }
     }
@@ -426,7 +432,8 @@ fn test_must_r_cbc_004_fail_closed_behavior() -> TestResult {
         }
         Ok(()) => {
             return TestResult::Fail {
-                reason: "MUST_R_CBC_004 violated: malformed proposal should be rejected".to_string(),
+                reason: "MUST_R_CBC_004 violated: malformed proposal should be rejected"
+                    .to_string(),
             };
         }
     }
@@ -446,7 +453,8 @@ fn test_must_r_cbc_004_fail_closed_behavior() -> TestResult {
         }
         Ok(()) => {
             return TestResult::Fail {
-                reason: "MUST_R_CBC_004 violated: proposal with control chars should be rejected".to_string(),
+                reason: "MUST_R_CBC_004 violated: proposal with control chars should be rejected"
+                    .to_string(),
             };
         }
     }
@@ -590,7 +598,11 @@ pub fn run_full_conformance_suite() -> ConformanceReport {
     // Run MUST_R requirements
     for case in CONTROLLER_BOUNDARY_CONFORMANCE_CASES {
         let test_result = (case.test_fn)();
-        let verdict = if test_result.is_pass() { "PASS" } else { "FAIL" };
+        let verdict = if test_result.is_pass() {
+            "PASS"
+        } else {
+            "FAIL"
+        };
 
         if test_result.is_pass() && case.level == RequirementLevel::Must {
             must_pass += 1;
@@ -616,7 +628,11 @@ pub fn run_full_conformance_suite() -> ConformanceReport {
     // Run SHOULD event code tests
     for case in EVENT_CODE_CONFORMANCE_CASES {
         let test_result = (case.test_fn)();
-        let verdict = if test_result.is_pass() { "PASS" } else { "FAIL" };
+        let verdict = if test_result.is_pass() {
+            "PASS"
+        } else {
+            "FAIL"
+        };
 
         if test_result.is_pass() && case.level == RequirementLevel::Should {
             should_pass += 1;
@@ -644,11 +660,15 @@ pub fn run_full_conformance_suite() -> ConformanceReport {
 
     let must_score = if total_must > 0 {
         (must_pass as f64) / (total_must as f64) * 100.0
-    } else { 100.0 };
+    } else {
+        100.0
+    };
 
     let should_score = if total_should > 0 {
         (should_pass as f64) / (total_should as f64) * 100.0
-    } else { 100.0 };
+    } else {
+        100.0
+    };
 
     let overall_score = (must_score * 0.8) + (should_score * 0.2);
 

@@ -5328,11 +5328,11 @@ mod tests {
         // the output_digest. Pins that output is the SOLE input to
         // this digest function.
         let varied = TraceStep::new(
-            99,                        // different seq
-            b"different input".to_vec(),  // different input
+            99,                                   // different seq
+            b"different input".to_vec(),          // different input
             b"replay-output-payload-v1".to_vec(), // same output as `ascii`
             Vec::new(),
-            1_700_000_000,             // different timestamp_ns
+            1_700_000_000, // different timestamp_ns
         );
         assert_eq!(
             varied.output_digest(),
@@ -5351,7 +5351,10 @@ mod tests {
             &large.output_digest(),
         ] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

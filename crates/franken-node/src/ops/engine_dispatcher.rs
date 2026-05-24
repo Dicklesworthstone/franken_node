@@ -5827,7 +5827,11 @@ mod tests {
             assert!(id.starts_with("franken-policy-"));
             let hex_tail = &id["franken-policy-".len()..];
             assert_eq!(hex_tail.len(), 16);
-            assert!(hex_tail.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                hex_tail
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

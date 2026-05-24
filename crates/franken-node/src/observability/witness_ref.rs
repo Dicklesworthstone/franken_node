@@ -2396,7 +2396,8 @@ mod tests {
                 "POLICY-[0-9]{3}",
                 // FLEET prefix codes
                 "FLEET-[0-9]{3}",
-            ].prop_map(|pattern| match pattern {
+            ]
+            .prop_map(|pattern| match pattern {
                 p if p.contains("EVD") => "EVD-WITNESS-999".to_string(),
                 p if p.contains("STAKE") => "STAKE-999".to_string(),
                 p if p.contains("POLICY") => "POLICY-999".to_string(),
@@ -2417,10 +2418,16 @@ mod tests {
                 "[A-Z]{6}[0-9]{3}",
                 // Special characters
                 "[A-Z]+-@#$%-[0-9]+",
-            ].prop_map(|pattern| match pattern.chars().next().unwrap_or(' ') {
+            ]
+            .prop_map(|pattern| match pattern.chars().next().unwrap_or(' ') {
                 ' ' => "   ".to_string(),
                 '[' if pattern.contains("a-z") => "evd-witness-001".to_string(),
-                '[' if pattern.contains("A-Z") && pattern.contains("0-9") && !pattern.contains("-") => "EVDWITNESS001".to_string(),
+                '[' if pattern.contains("A-Z")
+                    && pattern.contains("0-9")
+                    && !pattern.contains("-") =>
+                {
+                    "EVDWITNESS001".to_string()
+                }
                 '[' if pattern.contains("@") => "EVD-@#$%-001".to_string(),
                 _ => "INVALIDFORMAT999".to_string(),
             })
@@ -2687,7 +2694,8 @@ mod tests {
                     && parts[1].len() == 3
             } else {
                 // Other patterns - be permissive for extensibility
-                code.chars().all(|c| c.is_ascii() && (c.is_alphanumeric() || c == '-'))
+                code.chars()
+                    .all(|c| c.is_ascii() && (c.is_alphanumeric() || c == '-'))
                     && code.contains('-')
                     && !code.starts_with('-')
                     && !code.ends_with('-')
@@ -2708,9 +2716,7 @@ mod tests {
         }
 
         fn extract_numeric_suffix(code: &str) -> Option<u32> {
-            code.split('-')
-                .last()
-                .and_then(|s| s.parse::<u32>().ok())
+            code.split('-').last().and_then(|s| s.parse::<u32>().ok())
         }
     }
 }

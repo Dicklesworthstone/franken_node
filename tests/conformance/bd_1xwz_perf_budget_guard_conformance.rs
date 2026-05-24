@@ -5,17 +5,17 @@
 //! Pattern 4: Spec-Derived Test Matrix to ensure comprehensive coverage of all
 //! MUST and SHOULD requirements.
 
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 // Import the module under test
 use frankenengine_node::policy::perf_budget_guard::{
-    BenchmarkMeasurement, BudgetPolicy, GateResult, HotPath, PathBudget,
-    PerformanceBudgetGuard, PerfBudgetError, TimingCollector, PercentileStats,
+    BenchmarkMeasurement, BudgetPolicy, ERR_BUDGET_EXCEEDED, ERR_COLD_START_EXCEEDED,
+    ERR_FLAMEGRAPH_CAPTURE_FAILED, ERR_NO_MEASUREMENTS, GateResult, HotPath,
     PRF_001_BENCHMARK_STARTED, PRF_002_WITHIN_BUDGET, PRF_003_OVER_BUDGET,
     PRF_004_FLAMEGRAPH_CAPTURED, PRF_005_COLD_START, PRF_006_TIMING_SAMPLE,
-    PRF_007_PERCENTILE_COMPUTED, PRF_008_COLD_START_TIMING,
-    ERR_BUDGET_EXCEEDED, ERR_COLD_START_EXCEEDED, ERR_FLAMEGRAPH_CAPTURE_FAILED, ERR_NO_MEASUREMENTS
+    PRF_007_PERCENTILE_COMPUTED, PRF_008_COLD_START_TIMING, PathBudget, PercentileStats,
+    PerfBudgetError, PerformanceBudgetGuard, TimingCollector,
 };
 
 /// Requirement levels from the bd-1xwz specification
@@ -196,7 +196,6 @@ const BD_1XWZ_CASES: &[ConformanceCase] = &[
         description: "INV-PBG-REPORT-ALWAYS: structured report emitted on every gate run",
         test_fn: test_report_always_invariant,
     },
-
     // Event Code Requirements (MUST)
     ConformanceCase {
         id: "1XWZ-EVT-1",
@@ -230,7 +229,6 @@ const BD_1XWZ_CASES: &[ConformanceCase] = &[
         description: "PRF_005_COLD_START emitted for every measurement",
         test_fn: test_cold_start_events,
     },
-
     // Error Handling Requirements (MUST)
     ConformanceCase {
         id: "1XWZ-ERR-1",
@@ -248,7 +246,6 @@ const BD_1XWZ_CASES: &[ConformanceCase] = &[
         description: "fail-closed behavior on invalid floating point values",
         test_fn: test_fail_closed_on_invalid_values,
     },
-
     // Budget Policy Requirements (MUST)
     ConformanceCase {
         id: "1XWZ-POL-1",
@@ -266,7 +263,6 @@ const BD_1XWZ_CASES: &[ConformanceCase] = &[
         description: "default budget used for unknown hot paths",
         test_fn: test_default_budget_fallback,
     },
-
     // Timing Collector Requirements (MUST)
     ConformanceCase {
         id: "1XWZ-TIM-1",
@@ -284,7 +280,6 @@ const BD_1XWZ_CASES: &[ConformanceCase] = &[
         description: "percentile computation only for paths with both baseline and integrated",
         test_fn: test_measurement_synthesis_requirements,
     },
-
     // Edge Cases (SHOULD)
     ConformanceCase {
         id: "1XWZ-EDGE-1",
@@ -314,7 +309,12 @@ const BD_1XWZ_CASES: &[ConformanceCase] = &[
 
 // Test implementation functions
 
-fn make_valid_measurement(hot_path: &str, baseline_p95: f64, integrated_p95: f64, cold_start: f64) -> BenchmarkMeasurement {
+fn make_valid_measurement(
+    hot_path: &str,
+    baseline_p95: f64,
+    integrated_p95: f64,
+    cold_start: f64,
+) -> BenchmarkMeasurement {
     BenchmarkMeasurement {
         hot_path: hot_path.to_string(),
         baseline_p50_us: baseline_p95 * 0.7,
@@ -335,7 +335,9 @@ fn test_budget_enforcement_invariant() -> Result<(), String> {
         make_valid_measurement("health_gate_evaluation", 50.0, 65.0, 15.0), // 30% overhead > 15% budget
     ];
 
-    let result = guard.evaluate(&measurements).map_err(|e| format!("Evaluation failed: {}", e))?;
+    let result = guard
+        .evaluate(&measurements)
+        .map_err(|e| format!("Evaluation failed: {}", e))?;
 
     // Verify policy was enforced: one path should pass, one should fail
     if result.paths_within_budget != 1 || result.paths_over_budget != 1 {
@@ -346,7 +348,9 @@ fn test_budget_enforcement_invariant() -> Result<(), String> {
     }
 
     // Verify health_gate_evaluation failed due to p95 budget violation
-    let health_result = result.path_results.iter()
+    let health_result = result
+        .path_results
+        .iter()
         .find(|r| r.hot_path == "health_gate_evaluation")
         .ok_or("health_gate_evaluation result not found")?;
 
@@ -354,7 +358,11 @@ fn test_budget_enforcement_invariant() -> Result<(), String> {
         return Err("health_gate_evaluation should have failed budget check".to_string());
     }
 
-    if !health_result.violations.iter().any(|v| v.contains("p95 overhead")) {
+    if !health_result
+        .violations
+        .iter()
+        .any(|v| v.contains("p95 overhead"))
+    {
         return Err("Expected p95 overhead violation for health_gate_evaluation".to_string());
     }
 
@@ -365,10 +373,15 @@ fn test_regression_blocking_invariant() -> Result<(), String> {
     let mut guard = PerformanceBudgetGuard::new(BudgetPolicy::default(), "test-inv-2");
 
     // All measurements within budget = should pass
-    let good_measurements = vec![
-        make_valid_measurement("lifecycle_transition", 100.0, 110.0, 20.0),
-    ];
-    let good_result = guard.evaluate(&good_measurements).map_err(|e| format!("Good evaluation failed: {}", e))?;
+    let good_measurements = vec![make_valid_measurement(
+        "lifecycle_transition",
+        100.0,
+        110.0,
+        20.0,
+    )];
+    let good_result = guard
+        .evaluate(&good_measurements)
+        .map_err(|e| format!("Good evaluation failed: {}", e))?;
     if !good_result.overall_pass {
         return Err("Expected overall pass for measurements within budget".to_string());
     }
@@ -381,7 +394,9 @@ fn test_regression_blocking_invariant() -> Result<(), String> {
         make_valid_measurement("lifecycle_transition", 100.0, 110.0, 20.0), // within budget
         make_valid_measurement("health_gate_evaluation", 50.0, 70.0, 15.0), // 40% > 15% budget
     ];
-    let bad_result = guard2.evaluate(&bad_measurements).map_err(|e| format!("Bad evaluation failed: {}", e))?;
+    let bad_result = guard2
+        .evaluate(&bad_measurements)
+        .map_err(|e| format!("Bad evaluation failed: {}", e))?;
 
     if bad_result.overall_pass {
         return Err("Expected overall failure when any measurement exceeds budget".to_string());
@@ -402,7 +417,9 @@ fn test_flamegraph_capture_invariant() -> Result<(), String> {
         make_valid_measurement("lifecycle_transition", 100.0, 120.0, 10.0), // 20% > 15% budget
     ];
 
-    let result = guard.evaluate(&measurements).map_err(|e| format!("Evaluation failed: {}", e))?;
+    let result = guard
+        .evaluate(&measurements)
+        .map_err(|e| format!("Evaluation failed: {}", e))?;
 
     // Verify flamegraph was captured for the failing path
     let path_result = &result.path_results[0];
@@ -412,11 +429,16 @@ fn test_flamegraph_capture_invariant() -> Result<(), String> {
 
     let flamegraph_path = path_result.flamegraph_path.as_ref().unwrap();
     if !flamegraph_path.contains("flamegraph_lifecycle_transition") {
-        return Err(format!("Unexpected flamegraph path format: {}", flamegraph_path));
+        return Err(format!(
+            "Unexpected flamegraph path format: {}",
+            flamegraph_path
+        ));
     }
 
     // Verify PRF_004 event was emitted
-    let has_flamegraph_event = guard.events().iter()
+    let has_flamegraph_event = guard
+        .events()
+        .iter()
         .any(|e| e.code == PRF_004_FLAMEGRAPH_CAPTURED);
     if !has_flamegraph_event {
         return Err("Expected PRF_004_FLAMEGRAPH_CAPTURED event".to_string());
@@ -429,24 +451,37 @@ fn test_report_always_invariant() -> Result<(), String> {
     let mut guard = PerformanceBudgetGuard::new(BudgetPolicy::default(), "test-inv-4");
 
     // Test successful case
-    let measurements = vec![
-        make_valid_measurement("lifecycle_transition", 100.0, 105.0, 10.0),
-    ];
-    let result = guard.evaluate(&measurements).map_err(|e| format!("Evaluation failed: {}", e))?;
+    let measurements = vec![make_valid_measurement(
+        "lifecycle_transition",
+        100.0,
+        105.0,
+        10.0,
+    )];
+    let result = guard
+        .evaluate(&measurements)
+        .map_err(|e| format!("Evaluation failed: {}", e))?;
 
     if result.path_results.is_empty() {
         return Err("Expected path results in report".to_string());
     }
     if result.total_paths != 1 {
-        return Err(format!("Expected total_paths=1, got {}", result.total_paths));
+        return Err(format!(
+            "Expected total_paths=1, got {}",
+            result.total_paths
+        ));
     }
 
     // Test failing case - should still generate report
     let mut guard2 = PerformanceBudgetGuard::new(BudgetPolicy::default(), "test-inv-4b");
-    let bad_measurements = vec![
-        make_valid_measurement("lifecycle_transition", 100.0, 150.0, 10.0),
-    ];
-    let bad_result = guard2.evaluate(&bad_measurements).map_err(|e| format!("Bad evaluation failed: {}", e))?;
+    let bad_measurements = vec![make_valid_measurement(
+        "lifecycle_transition",
+        100.0,
+        150.0,
+        10.0,
+    )];
+    let bad_result = guard2
+        .evaluate(&bad_measurements)
+        .map_err(|e| format!("Bad evaluation failed: {}", e))?;
 
     if bad_result.path_results.is_empty() {
         return Err("Expected path results even for failing measurements".to_string());
@@ -463,14 +498,21 @@ fn test_benchmark_started_events() -> Result<(), String> {
         make_valid_measurement("health_gate_evaluation", 50.0, 55.0, 15.0),
     ];
 
-    guard.evaluate(&measurements).map_err(|e| format!("Evaluation failed: {}", e))?;
+    guard
+        .evaluate(&measurements)
+        .map_err(|e| format!("Evaluation failed: {}", e))?;
 
-    let started_events: Vec<_> = guard.events().iter()
+    let started_events: Vec<_> = guard
+        .events()
+        .iter()
         .filter(|e| e.code == PRF_001_BENCHMARK_STARTED)
         .collect();
 
     if started_events.len() != 2 {
-        return Err(format!("Expected 2 PRF_001 events, got {}", started_events.len()));
+        return Err(format!(
+            "Expected 2 PRF_001 events, got {}",
+            started_events.len()
+        ));
     }
 
     Ok(())
@@ -483,14 +525,21 @@ fn test_within_budget_events() -> Result<(), String> {
         make_valid_measurement("lifecycle_transition", 100.0, 110.0, 20.0), // 10% within 15% budget
     ];
 
-    guard.evaluate(&measurements).map_err(|e| format!("Evaluation failed: {}", e))?;
+    guard
+        .evaluate(&measurements)
+        .map_err(|e| format!("Evaluation failed: {}", e))?;
 
-    let within_events: Vec<_> = guard.events().iter()
+    let within_events: Vec<_> = guard
+        .events()
+        .iter()
         .filter(|e| e.code == PRF_002_WITHIN_BUDGET)
         .collect();
 
     if within_events.len() != 1 {
-        return Err(format!("Expected 1 PRF_002 event, got {}", within_events.len()));
+        return Err(format!(
+            "Expected 1 PRF_002 event, got {}",
+            within_events.len()
+        ));
     }
 
     Ok(())
@@ -503,14 +552,21 @@ fn test_over_budget_events() -> Result<(), String> {
         make_valid_measurement("lifecycle_transition", 100.0, 120.0, 20.0), // 20% > 15% budget
     ];
 
-    guard.evaluate(&measurements).map_err(|e| format!("Evaluation failed: {}", e))?;
+    guard
+        .evaluate(&measurements)
+        .map_err(|e| format!("Evaluation failed: {}", e))?;
 
-    let over_events: Vec<_> = guard.events().iter()
+    let over_events: Vec<_> = guard
+        .events()
+        .iter()
         .filter(|e| e.code == PRF_003_OVER_BUDGET)
         .collect();
 
     if over_events.len() != 1 {
-        return Err(format!("Expected 1 PRF_003 event, got {}", over_events.len()));
+        return Err(format!(
+            "Expected 1 PRF_003 event, got {}",
+            over_events.len()
+        ));
     }
 
     Ok(())
@@ -519,18 +575,28 @@ fn test_over_budget_events() -> Result<(), String> {
 fn test_cold_start_events() -> Result<(), String> {
     let mut guard = PerformanceBudgetGuard::new(BudgetPolicy::default(), "test-evt-4");
 
-    let measurements = vec![
-        make_valid_measurement("lifecycle_transition", 100.0, 110.0, 25.0),
-    ];
+    let measurements = vec![make_valid_measurement(
+        "lifecycle_transition",
+        100.0,
+        110.0,
+        25.0,
+    )];
 
-    guard.evaluate(&measurements).map_err(|e| format!("Evaluation failed: {}", e))?;
+    guard
+        .evaluate(&measurements)
+        .map_err(|e| format!("Evaluation failed: {}", e))?;
 
-    let cold_start_events: Vec<_> = guard.events().iter()
+    let cold_start_events: Vec<_> = guard
+        .events()
+        .iter()
         .filter(|e| e.code == PRF_005_COLD_START)
         .collect();
 
     if cold_start_events.len() != 1 {
-        return Err(format!("Expected 1 PRF_005 event, got {}", cold_start_events.len()));
+        return Err(format!(
+            "Expected 1 PRF_005 event, got {}",
+            cold_start_events.len()
+        ));
     }
 
     Ok(())
@@ -566,7 +632,9 @@ fn test_fail_closed_on_invalid_values() -> Result<(), String> {
         cold_start_ms: 5.0,
     };
 
-    let result = guard.evaluate(&[invalid_measurement]).map_err(|e| format!("Evaluation failed: {}", e))?;
+    let result = guard
+        .evaluate(&[invalid_measurement])
+        .map_err(|e| format!("Evaluation failed: {}", e))?;
 
     if result.overall_pass {
         return Err("Expected failure for invalid baseline values".to_string());
@@ -585,13 +653,25 @@ fn test_canonical_path_budgets() -> Result<(), String> {
     for hot_path in HotPath::canonical() {
         let budget = policy.budget_for(&hot_path);
         if budget.max_overhead_p95_pct <= 0.0 {
-            return Err(format!("Invalid p95 budget for {}: {}", hot_path.label(), budget.max_overhead_p95_pct));
+            return Err(format!(
+                "Invalid p95 budget for {}: {}",
+                hot_path.label(),
+                budget.max_overhead_p95_pct
+            ));
         }
         if budget.max_overhead_p99_pct <= 0.0 {
-            return Err(format!("Invalid p99 budget for {}: {}", hot_path.label(), budget.max_overhead_p99_pct));
+            return Err(format!(
+                "Invalid p99 budget for {}: {}",
+                hot_path.label(),
+                budget.max_overhead_p99_pct
+            ));
         }
         if budget.max_cold_start_ms <= 0.0 {
-            return Err(format!("Invalid cold start budget for {}: {}", hot_path.label(), budget.max_cold_start_ms));
+            return Err(format!(
+                "Invalid cold start budget for {}: {}",
+                hot_path.label(),
+                budget.max_cold_start_ms
+            ));
         }
     }
 
@@ -619,12 +699,16 @@ fn test_timing_sample_events() -> Result<(), String> {
     collector.record_integrated("lifecycle_transition", 110.0);
 
     let events = collector.events();
-    let sample_events: Vec<_> = events.iter()
+    let sample_events: Vec<_> = events
+        .iter()
         .filter(|e| e.code == PRF_006_TIMING_SAMPLE)
         .collect();
 
     if sample_events.len() != 2 {
-        return Err(format!("Expected 2 PRF_006 events, got {}", sample_events.len()));
+        return Err(format!(
+            "Expected 2 PRF_006 events, got {}",
+            sample_events.len()
+        ));
     }
 
     Ok(())
@@ -646,11 +730,17 @@ fn test_measurement_synthesis_requirements() -> Result<(), String> {
     let measurements = collector.to_measurements();
 
     if measurements.len() != 1 {
-        return Err(format!("Expected 1 measurement, got {}", measurements.len()));
+        return Err(format!(
+            "Expected 1 measurement, got {}",
+            measurements.len()
+        ));
     }
 
     if measurements[0].hot_path != "path_complete" {
-        return Err(format!("Expected path_complete, got {}", measurements[0].hot_path));
+        return Err(format!(
+            "Expected path_complete, got {}",
+            measurements[0].hot_path
+        ));
     }
 
     Ok(())
@@ -661,7 +751,9 @@ fn test_exact_boundary_fail_closed() -> Result<(), String> {
 
     // Exactly 15% overhead should fail (fail-closed at boundary)
     let boundary_measurement = make_valid_measurement("lifecycle_transition", 100.0, 115.0, 10.0);
-    let result = guard.evaluate(&[boundary_measurement]).map_err(|e| format!("Evaluation failed: {}", e))?;
+    let result = guard
+        .evaluate(&[boundary_measurement])
+        .map_err(|e| format!("Evaluation failed: {}", e))?;
 
     if result.overall_pass {
         return Err("Expected failure at exact budget boundary (fail-closed)".to_string());
@@ -679,7 +771,9 @@ fn test_flamegraph_path_traversal_protection() -> Result<(), String> {
 
     // Path traversal attempt
     let bad_measurement = make_valid_measurement("../escape_path", 100.0, 120.0, 10.0);
-    let result = guard.evaluate(&[bad_measurement]).map_err(|e| format!("Evaluation failed: {}", e))?;
+    let result = guard
+        .evaluate(&[bad_measurement])
+        .map_err(|e| format!("Evaluation failed: {}", e))?;
 
     // Should not capture flamegraph for path traversal attempts
     if result.path_results[0].flamegraph_path.is_some() {
@@ -687,7 +781,9 @@ fn test_flamegraph_path_traversal_protection() -> Result<(), String> {
     }
 
     // Should not emit PRF_004 event
-    let has_flamegraph_event = guard.events().iter()
+    let has_flamegraph_event = guard
+        .events()
+        .iter()
         .any(|e| e.code == PRF_004_FLAMEGRAPH_CAPTURED);
     if has_flamegraph_event {
         return Err("Should not emit flamegraph event for path traversal".to_string());
@@ -704,7 +800,9 @@ fn test_csv_report_format() -> Result<(), String> {
         make_valid_measurement("health_gate_evaluation", 50.0, 55.0, 15.0),
     ];
 
-    let result = guard.evaluate(&measurements).map_err(|e| format!("Evaluation failed: {}", e))?;
+    let result = guard
+        .evaluate(&measurements)
+        .map_err(|e| format!("Evaluation failed: {}", e))?;
     let csv = PerformanceBudgetGuard::to_csv(&result);
 
     // Check header
@@ -784,7 +882,10 @@ mod tests {
         assert_eq!(report.results.len(), BD_1XWZ_CASES.len());
 
         // Verify all MUST requirements pass (conformance requirement)
-        assert_eq!(report.stats.must_fail, 0, "All MUST requirements should pass");
+        assert_eq!(
+            report.stats.must_fail, 0,
+            "All MUST requirements should pass"
+        );
 
         // Verify compliance score calculation
         let score = report.compliance_score();
@@ -820,8 +921,14 @@ mod tests {
         let has_report_always = BD_1XWZ_CASES.iter().any(|c| c.id == "1XWZ-INV-4");
 
         assert!(has_budget_enforced, "Should test INV-PBG-BUDGET-ENFORCED");
-        assert!(has_regression_blocked, "Should test INV-PBG-REGRESSION-BLOCKED");
-        assert!(has_flamegraph_fail, "Should test INV-PBG-FLAMEGRAPH-ON-FAIL");
+        assert!(
+            has_regression_blocked,
+            "Should test INV-PBG-REGRESSION-BLOCKED"
+        );
+        assert!(
+            has_flamegraph_fail,
+            "Should test INV-PBG-FLAMEGRAPH-ON-FAIL"
+        );
         assert!(has_report_always, "Should test INV-PBG-REPORT-ALWAYS");
     }
 }

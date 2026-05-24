@@ -1942,8 +1942,7 @@ mod tests {
         // 1. Empty-data leaf.
         let leaf_empty = leaf_hash("");
         assert_eq!(
-            leaf_empty,
-            "8a1daa245300be0934f8ce13a469f5f6c232c651becc903e8d1efee4849fa145",
+            leaf_empty, "8a1daa245300be0934f8ce13a469f5f6c232c651becc903e8d1efee4849fa145",
             "leaf_hash(\"\") drifted — check the `transparency_verifier_leaf_v1:` \
              domain separator or LE64(0) empty-payload framing"
         );
@@ -1951,8 +1950,7 @@ mod tests {
         // 2. Populated leaf.
         let leaf_populated = leaf_hash("artifact-binding-payload-v1");
         assert_eq!(
-            leaf_populated,
-            "5b4b52b759f0156effdff37b56a426031826d6b539a9fa2d9374fb12957f4ee7",
+            leaf_populated, "5b4b52b759f0156effdff37b56a426031826d6b539a9fa2d9374fb12957f4ee7",
             "leaf_hash(non-empty) drifted — check the LE64 length-prefix \
              on the data payload"
         );
@@ -2012,7 +2010,10 @@ mod tests {
         // Length+casing contract on every output.
         for h in [&leaf_empty, &leaf_populated] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
         for h in [&interior_lr, &interior_rl, &interior_empty_empty] {
             assert_eq!(h.len(), 32);

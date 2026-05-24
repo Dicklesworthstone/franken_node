@@ -6420,17 +6420,9 @@ mod toctou_concurrency_regression_tests {
         // 1. Minimal: empty issuer + empty scope + zero timestamps +
         // single_use=false + empty trace_id.
         let empty_scope = RemoteScope::new(Vec::new(), Vec::new());
-        let minimal = super::token_id_hash(
-            "",
-            &empty_scope,
-            0,
-            0,
-            false,
-            "",
-        );
+        let minimal = super::token_id_hash("", &empty_scope, 0, 0, false, "");
         assert_eq!(
-            minimal,
-            "9616c9a6eb3df047d742138df98383470c1b212a2a521321ba9b75ec28d8dd8b",
+            minimal, "9616c9a6eb3df047d742138df98383470c1b212a2a521321ba9b75ec28d8dd8b",
             "minimal token_id_hash drifted — check the v1 domain \
              separator `remote_cap_token_id_v1:`, the empty-scope text \
              form \"ops=;endpoints=\" (15 bytes), OR the single_use=false \
@@ -6439,8 +6431,7 @@ mod toctou_concurrency_regression_tests {
 
         // 2. Single-op with single_use=true. Pins the text-form scope
         // serialization for a single TelemetryExport operation.
-        let single_op_scope =
-            RemoteScope::new(vec![RemoteOperation::TelemetryExport], Vec::new());
+        let single_op_scope = RemoteScope::new(vec![RemoteOperation::TelemetryExport], Vec::new());
         let single = super::token_id_hash(
             "issuer-1",
             &single_op_scope,
@@ -6450,8 +6441,7 @@ mod toctou_concurrency_regression_tests {
             "trace-1",
         );
         assert_eq!(
-            single,
-            "82c8047c44b063e187d36f02b3877b9e359b87e1267674a01c25737763e75267",
+            single, "82c8047c44b063e187d36f02b3877b9e359b87e1267674a01c25737763e75267",
             "single-op token_id_hash drifted — check the scope_fingerprint \
              text form (\"ops=16:telemetry_export|;endpoints=\"), the \
              RemoteOperation::TelemetryExport.as_str() label \
@@ -6493,8 +6483,7 @@ mod toctou_concurrency_regression_tests {
 
         // 5. SCOPE-DISTINGUISHABILITY INVARIANT: changing scope MUST
         // flip the hash. Pins that scope_fingerprint contributes.
-        let diff_scope =
-            RemoteScope::new(vec![RemoteOperation::FederationSync], Vec::new());
+        let diff_scope = RemoteScope::new(vec![RemoteOperation::FederationSync], Vec::new());
         let diff_scope_hash = super::token_id_hash(
             "issuer-1",
             &diff_scope,
@@ -6513,7 +6502,10 @@ mod toctou_concurrency_regression_tests {
         // 6. 64-lowercase-hex length+casing contract.
         for h in [&minimal, &single] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

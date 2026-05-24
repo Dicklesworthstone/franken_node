@@ -2487,8 +2487,7 @@ mod tests {
         // "" (locks the empty-payload LE64(0) trailing framing).
         let genesis_empty = compute_chain_hash(None, "");
         assert_eq!(
-            genesis_empty,
-            "902bedd3d4525be8dfb1073ea69e27e8b8756b4f63f500b54f94370e1caac729",
+            genesis_empty, "902bedd3d4525be8dfb1073ea69e27e8b8756b4f63f500b54f94370e1caac729",
             "genesis-empty chain hash drifted — check the v1 domain \
              separator, the GENESIS sentinel string, or the LE64(0) \
              empty-payload framing"
@@ -2497,11 +2496,9 @@ mod tests {
         // Genesis populated fixture: previous_hash = None, payload = a
         // 31-byte JSON snippet. Locks the GENESIS branch + non-zero payload
         // length-prefix encoding.
-        let genesis_populated =
-            compute_chain_hash(None, "{\"decision\":\"admit\",\"epoch\":1}");
+        let genesis_populated = compute_chain_hash(None, "{\"decision\":\"admit\",\"epoch\":1}");
         assert_eq!(
-            genesis_populated,
-            "7364f9fc6b10bf99766966095ad5e0aaecd8d3f49ddd08e3a1af139b29264de8",
+            genesis_populated, "7364f9fc6b10bf99766966095ad5e0aaecd8d3f49ddd08e3a1af139b29264de8",
             "genesis-populated chain hash drifted — check payload \
              length-prefix encoding (LE64 vs BE64, or width drift)"
         );
@@ -2517,8 +2514,7 @@ mod tests {
             "{\"decision\":\"deny\",\"epoch\":2}",
         );
         assert_eq!(
-            linked_populated,
-            "0ed339fbd75f045ba7adc6329b98bb3398950996def8dd2ca29f6eb033eba518",
+            linked_populated, "0ed339fbd75f045ba7adc6329b98bb3398950996def8dd2ca29f6eb033eba518",
             "linked-populated chain hash drifted — check Some(prev) \
              branch framing or field ordering (prev MUST hash before payload)"
         );
@@ -2528,7 +2524,10 @@ mod tests {
         // sentinel collision).
         for hash in [&genesis_empty, &genesis_populated, &linked_populated] {
             assert_eq!(hash.len(), 64);
-            assert!(hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                hash.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
         assert_ne!(genesis_empty, genesis_populated);
         assert_ne!(genesis_populated, linked_populated);

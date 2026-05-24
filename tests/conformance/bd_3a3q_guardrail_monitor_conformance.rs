@@ -3,15 +3,13 @@
 //! This harness implements Pattern 4: Spec-Derived Test Matrix for the bd-3a3q
 //! specification covering anytime-valid guardrail monitor sets for security/durability-critical budgets.
 
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use frankenengine_node::policy::guardrail_monitor::{
     BudgetId, GuardrailMonitor, GuardrailMonitorSet, GuardrailVerdict, event_codes,
 };
-use frankenengine_node::policy::hardening_state_machine::{
-    HardeningLevel, HardeningStateMachine,
-};
+use frankenengine_node::policy::hardening_state_machine::{HardeningLevel, HardeningStateMachine};
 
 /// Test categories for organizational purposes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,19 +86,30 @@ impl ConformanceReport {
         let mut md = String::new();
         md.push_str("# bd-3a3q Guardrail Monitor Conformance Report\n\n");
         md.push_str(&format!("**Generated:** {}\n\n", self.timestamp));
-        md.push_str(&format!("**Compliance Score:** {:.1}%\n\n", self.compliance_score() * 100.0));
+        md.push_str(&format!(
+            "**Compliance Score:** {:.1}%\n\n",
+            self.compliance_score() * 100.0
+        ));
 
         // Summary table
         md.push_str("## Summary\n\n");
         md.push_str("| Requirement Level | Pass | Fail | Skip | XFAIL |\n");
         md.push_str("|------------------|:----:|:----:|:----:|:-----:|\n");
-        md.push_str(&format!("| MUST | {} | {} | 0 | 0 |\n",
-                             self.stats.must_pass, self.stats.must_fail));
-        md.push_str(&format!("| SHOULD | {} | {} | {} | {} |\n",
-                             self.stats.should_pass, self.stats.should_fail,
-                             self.stats.skipped, self.stats.expected_failures));
-        md.push_str(&format!("| MAY | {} | {} | 0 | 0 |\n",
-                             self.stats.may_pass, self.stats.may_fail));
+        md.push_str(&format!(
+            "| MUST | {} | {} | 0 | 0 |\n",
+            self.stats.must_pass, self.stats.must_fail
+        ));
+        md.push_str(&format!(
+            "| SHOULD | {} | {} | {} | {} |\n",
+            self.stats.should_pass,
+            self.stats.should_fail,
+            self.stats.skipped,
+            self.stats.expected_failures
+        ));
+        md.push_str(&format!(
+            "| MAY | {} | {} | 0 | 0 |\n",
+            self.stats.may_pass, self.stats.may_fail
+        ));
 
         // Detailed results
         md.push_str("\n## Test Results\n\n");
@@ -111,8 +120,10 @@ impl ConformanceReport {
                 TestResult::Skipped { .. } => "⏭️ SKIP",
                 TestResult::ExpectedFailure { .. } => "⏳ XFAIL",
             };
-            md.push_str(&format!("- **{}** [{}] {}: {}\n",
-                                record.id, status, record.section, record.description));
+            md.push_str(&format!(
+                "- **{}** [{}] {}: {}\n",
+                record.id, status, record.section, record.description
+            ));
 
             if let TestResult::Fail { reason } = &record.result {
                 md.push_str(&format!("  - ❌ {}\n", reason));
@@ -192,16 +203,30 @@ fn test_case_3a3q_inv_1() -> ConformanceRecord {
         // Test that monitor produces valid verdict at any point
         let verdicts = vec![
             monitor.check(50.0, HardeningLevel::Minimal),
-            monitor.check(85.0, HardeningLevel::Standard),  // Should warn
-            monitor.check(150.0, HardeningLevel::Maximal),  // Should block
-            monitor.check(0.0, HardeningLevel::Minimal),    // Should allow
+            monitor.check(85.0, HardeningLevel::Standard), // Should warn
+            monitor.check(150.0, HardeningLevel::Maximal), // Should block
+            monitor.check(0.0, HardeningLevel::Minimal),   // Should allow
         ];
 
         // Verify all verdicts are valid (no panics, proper enum values)
-        assert_eq!(verdicts[0], GuardrailVerdict::Allow, "Low value should allow");
-        assert!(matches!(verdicts[1], GuardrailVerdict::Warn { .. }), "High value should warn");
-        assert!(matches!(verdicts[2], GuardrailVerdict::Block { .. }), "Excessive value should block");
-        assert_eq!(verdicts[3], GuardrailVerdict::Allow, "Zero value should allow");
+        assert_eq!(
+            verdicts[0],
+            GuardrailVerdict::Allow,
+            "Low value should allow"
+        );
+        assert!(
+            matches!(verdicts[1], GuardrailVerdict::Warn { .. }),
+            "High value should warn"
+        );
+        assert!(
+            matches!(verdicts[2], GuardrailVerdict::Block { .. }),
+            "Excessive value should block"
+        );
+        assert_eq!(
+            verdicts[3],
+            GuardrailVerdict::Allow,
+            "Zero value should allow"
+        );
 
         // Verify event codes are consistent
         assert_eq!(verdicts[0].event_code(), event_codes::GUARD_PASS);
@@ -209,10 +234,10 @@ fn test_case_3a3q_inv_1() -> ConformanceRecord {
         assert_eq!(verdicts[2].event_code(), event_codes::GUARD_BLOCK);
         assert_eq!(verdicts[3].event_code(), event_codes::GUARD_PASS);
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Monitor not producing valid verdicts at all stopping points".to_string()
+                reason: "Monitor not producing valid verdicts at all stopping points".to_string(),
             };
         }
     }
@@ -226,7 +251,8 @@ fn test_case_3a3q_inv_2() -> ConformanceRecord {
         section: "Core Invariants".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Integration,
-        description: "INV-GUARD-PRECEDENCE: guardrail verdicts override Bayesian recommendations".to_string(),
+        description: "INV-GUARD-PRECEDENCE: guardrail verdicts override Bayesian recommendations"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -242,22 +268,31 @@ fn test_case_3a3q_inv_2() -> ConformanceRecord {
         let verdict = monitor_set.check_all(actual_value, HardeningLevel::Standard);
 
         // Guardrail should block regardless of Bayesian recommendation
-        assert!(matches!(verdict, GuardrailVerdict::Block { .. }),
-                "Guardrail must override Bayesian recommendation when budget exceeded");
+        assert!(
+            matches!(verdict, GuardrailVerdict::Block { .. }),
+            "Guardrail must override Bayesian recommendation when budget exceeded"
+        );
 
         // Verify precedence - even if Bayesian says proceed, guardrail blocks
         match verdict {
             GuardrailVerdict::Block { reason, budget_id } => {
-                assert!(reason.contains("100"), "Block reason should mention actual value");
-                assert_eq!(budget_id.as_str(), "cpu_budget", "Budget ID should be preserved");
-            },
+                assert!(
+                    reason.contains("100"),
+                    "Block reason should mention actual value"
+                );
+                assert_eq!(
+                    budget_id.as_str(),
+                    "cpu_budget",
+                    "Budget ID should be preserved"
+                );
+            }
             _ => panic!("Expected Block verdict for over-budget value"),
         }
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Guardrail not overriding Bayesian recommendations properly".to_string()
+                reason: "Guardrail not overriding Bayesian recommendations properly".to_string(),
             };
         }
     }
@@ -271,7 +306,8 @@ fn test_case_3a3q_inv_3() -> ConformanceRecord {
         section: "Core Invariants".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Integration,
-        description: "INV-GUARD-RESTRICTIVE: the set returns the most restrictive verdict".to_string(),
+        description: "INV-GUARD-RESTRICTIVE: the set returns the most restrictive verdict"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -291,15 +327,19 @@ fn test_case_3a3q_inv_3() -> ConformanceRecord {
         let verdict = monitor_set.check_all(test_value, HardeningLevel::Standard);
 
         // Should return Block (most restrictive) even though others would allow/warn
-        assert!(matches!(verdict, GuardrailVerdict::Block { .. }),
-                "Monitor set must return most restrictive verdict");
+        assert!(
+            matches!(verdict, GuardrailVerdict::Block { .. }),
+            "Monitor set must return most restrictive verdict"
+        );
 
         // Verify severity ordering
         let allow_verdict = GuardrailVerdict::Allow;
-        let warn_verdict = GuardrailVerdict::Warn { reason: "test".to_string() };
+        let warn_verdict = GuardrailVerdict::Warn {
+            reason: "test".to_string(),
+        };
         let block_verdict = GuardrailVerdict::Block {
             reason: "test".to_string(),
-            budget_id: BudgetId::new("test")
+            budget_id: BudgetId::new("test"),
         };
 
         assert!(allow_verdict.severity() < warn_verdict.severity());
@@ -308,10 +348,10 @@ fn test_case_3a3q_inv_3() -> ConformanceRecord {
         assert_eq!(warn_verdict.severity(), 1);
         assert_eq!(block_verdict.severity(), 2);
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Monitor set not returning most restrictive verdict".to_string()
+                reason: "Monitor set not returning most restrictive verdict".to_string(),
             };
         }
     }
@@ -325,7 +365,8 @@ fn test_case_3a3q_inv_4() -> ConformanceRecord {
         section: "Core Invariants".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Unit,
-        description: "INV-GUARD-CONFIGURABLE: thresholds are configurable above envelope minimums".to_string(),
+        description: "INV-GUARD-CONFIGURABLE: thresholds are configurable above envelope minimums"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -344,19 +385,28 @@ fn test_case_3a3q_inv_4() -> ConformanceRecord {
         let verdict_below = monitor.check(60.0, HardeningLevel::Standard);
         let verdict_above = monitor.check(80.0, HardeningLevel::Standard);
 
-        assert_eq!(verdict_below, GuardrailVerdict::Allow, "Value below new threshold should allow");
-        assert!(matches!(verdict_above, GuardrailVerdict::Block { .. }),
-                "Value above new threshold should block");
+        assert_eq!(
+            verdict_below,
+            GuardrailVerdict::Allow,
+            "Value below new threshold should allow"
+        );
+        assert!(
+            matches!(verdict_above, GuardrailVerdict::Block { .. }),
+            "Value above new threshold should block"
+        );
 
         // Test rejection of invalid threshold (below minimum)
         let failure = monitor.reconfigure_threshold(0.0);
         assert!(!failure, "Reconfiguration to invalid value should fail");
-        assert_eq!(monitor.threshold, 75.0, "Threshold should remain unchanged after failed reconfiguration");
+        assert_eq!(
+            monitor.threshold, 75.0,
+            "Threshold should remain unchanged after failed reconfiguration"
+        );
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Monitor threshold configuration not working properly".to_string()
+                reason: "Monitor threshold configuration not working properly".to_string(),
             };
         }
     }
@@ -378,14 +428,27 @@ fn test_case_3a3q_evt_1() -> ConformanceRecord {
         let monitor = TestMonitor::new("test_budget", 100.0);
         let verdict = monitor.check(50.0, HardeningLevel::Standard);
 
-        assert_eq!(verdict, GuardrailVerdict::Allow, "Low value should produce Allow verdict");
-        assert_eq!(verdict.event_code(), event_codes::GUARD_PASS, "Allow verdict should use GUARD_PASS event code");
-        assert_eq!(event_codes::GUARD_PASS, "EVD-GUARD-001", "Event code should match specification");
+        assert_eq!(
+            verdict,
+            GuardrailVerdict::Allow,
+            "Low value should produce Allow verdict"
+        );
+        assert_eq!(
+            verdict.event_code(),
+            event_codes::GUARD_PASS,
+            "Allow verdict should use GUARD_PASS event code"
+        );
+        assert_eq!(
+            event_codes::GUARD_PASS,
+            "EVD-GUARD-001",
+            "Event code should match specification"
+        );
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "EVD-GUARD-001 event code not properly emitted for Allow verdicts".to_string()
+                reason: "EVD-GUARD-001 event code not properly emitted for Allow verdicts"
+                    .to_string(),
             };
         }
     }
@@ -407,20 +470,36 @@ fn test_case_3a3q_evt_2() -> ConformanceRecord {
         let monitor = TestMonitor::new("test_budget", 100.0);
         let verdict = monitor.check(150.0, HardeningLevel::Standard);
 
-        assert!(matches!(verdict, GuardrailVerdict::Block { .. }), "High value should produce Block verdict");
-        assert_eq!(verdict.event_code(), event_codes::GUARD_BLOCK, "Block verdict should use GUARD_BLOCK event code");
-        assert_eq!(event_codes::GUARD_BLOCK, "EVD-GUARD-002", "Event code should match specification");
+        assert!(
+            matches!(verdict, GuardrailVerdict::Block { .. }),
+            "High value should produce Block verdict"
+        );
+        assert_eq!(
+            verdict.event_code(),
+            event_codes::GUARD_BLOCK,
+            "Block verdict should use GUARD_BLOCK event code"
+        );
+        assert_eq!(
+            event_codes::GUARD_BLOCK,
+            "EVD-GUARD-002",
+            "Event code should match specification"
+        );
 
         // Verify block verdict contains required fields
         if let GuardrailVerdict::Block { reason, budget_id } = verdict {
             assert!(!reason.is_empty(), "Block reason must not be empty");
-            assert_eq!(budget_id.as_str(), "test_budget", "Budget ID must be correct");
+            assert_eq!(
+                budget_id.as_str(),
+                "test_budget",
+                "Budget ID must be correct"
+            );
         }
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "EVD-GUARD-002 event code not properly emitted for Block verdicts".to_string()
+                reason: "EVD-GUARD-002 event code not properly emitted for Block verdicts"
+                    .to_string(),
             };
         }
     }
@@ -442,20 +521,35 @@ fn test_case_3a3q_evt_3() -> ConformanceRecord {
         let monitor = TestMonitor::new("test_budget", 100.0);
         let verdict = monitor.check(85.0, HardeningLevel::Standard); // 85 > 80 (80% of 100)
 
-        assert!(matches!(verdict, GuardrailVerdict::Warn { .. }), "Medium-high value should produce Warn verdict");
-        assert_eq!(verdict.event_code(), event_codes::GUARD_WARN, "Warn verdict should use GUARD_WARN event code");
-        assert_eq!(event_codes::GUARD_WARN, "EVD-GUARD-003", "Event code should match specification");
+        assert!(
+            matches!(verdict, GuardrailVerdict::Warn { .. }),
+            "Medium-high value should produce Warn verdict"
+        );
+        assert_eq!(
+            verdict.event_code(),
+            event_codes::GUARD_WARN,
+            "Warn verdict should use GUARD_WARN event code"
+        );
+        assert_eq!(
+            event_codes::GUARD_WARN,
+            "EVD-GUARD-003",
+            "Event code should match specification"
+        );
 
         // Verify warn verdict contains required fields
         if let GuardrailVerdict::Warn { reason } = verdict {
             assert!(!reason.is_empty(), "Warn reason must not be empty");
-            assert!(reason.contains("approaching"), "Warn reason should indicate approaching threshold");
+            assert!(
+                reason.contains("approaching"),
+                "Warn reason should indicate approaching threshold"
+            );
         }
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "EVD-GUARD-003 event code not properly emitted for Warn verdicts".to_string()
+                reason: "EVD-GUARD-003 event code not properly emitted for Warn verdicts"
+                    .to_string(),
             };
         }
     }
@@ -469,7 +563,8 @@ fn test_case_3a3q_budget_1() -> ConformanceRecord {
         section: "Budget Management".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Unit,
-        description: "Budget IDs MUST be properly managed and preserved through verdicts".to_string(),
+        description: "Budget IDs MUST be properly managed and preserved through verdicts"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -477,25 +572,43 @@ fn test_case_3a3q_budget_1() -> ConformanceRecord {
         let budget_id = BudgetId::new("memory_overhead");
         let monitor = TestMonitor::new("memory_overhead", 100.0);
 
-        assert_eq!(monitor.budget_id(), &budget_id, "Monitor should preserve budget ID");
-        assert_eq!(budget_id.as_str(), "memory_overhead", "Budget ID string representation should match");
+        assert_eq!(
+            monitor.budget_id(),
+            &budget_id,
+            "Monitor should preserve budget ID"
+        );
+        assert_eq!(
+            budget_id.as_str(),
+            "memory_overhead",
+            "Budget ID string representation should match"
+        );
 
         // Test budget ID formatting
         let formatted = format!("{}", budget_id);
-        assert_eq!(formatted, "memory_overhead", "Budget ID display should match string value");
+        assert_eq!(
+            formatted, "memory_overhead",
+            "Budget ID display should match string value"
+        );
 
         // Test budget ID in Block verdict
         let verdict = monitor.check(150.0, HardeningLevel::Standard);
-        if let GuardrailVerdict::Block { budget_id: verdict_budget_id, .. } = verdict {
-            assert_eq!(verdict_budget_id, budget_id, "Block verdict should preserve budget ID");
+        if let GuardrailVerdict::Block {
+            budget_id: verdict_budget_id,
+            ..
+        } = verdict
+        {
+            assert_eq!(
+                verdict_budget_id, budget_id,
+                "Block verdict should preserve budget ID"
+            );
         } else {
             panic!("Expected Block verdict for over-budget value");
         }
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Budget ID management not working properly".to_string()
+                reason: "Budget ID management not working properly".to_string(),
             };
         }
     }
@@ -531,10 +644,10 @@ fn test_case_3a3q_hardening_1() -> ConformanceRecord {
         assert!((HardeningLevel::Minimal as u8) < (HardeningLevel::Standard as u8));
         assert!((HardeningLevel::Standard as u8) < (HardeningLevel::Maximal as u8));
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Hardening level integration not working properly".to_string()
+                reason: "Hardening level integration not working properly".to_string(),
             };
         }
     }
@@ -592,19 +705,30 @@ mod tests {
 
         // Print summary for human review
         println!("\n📊 bd-3a3q Conformance Test Results:");
-        println!("  MUST requirements: {} pass, {} fail",
-                 report.stats.must_pass, report.stats.must_fail);
-        println!("  SHOULD requirements: {} pass, {} fail",
-                 report.stats.should_pass, report.stats.should_fail);
-        println!("  Compliance score: {:.1}%", report.compliance_score() * 100.0);
+        println!(
+            "  MUST requirements: {} pass, {} fail",
+            report.stats.must_pass, report.stats.must_fail
+        );
+        println!(
+            "  SHOULD requirements: {} pass, {} fail",
+            report.stats.should_pass, report.stats.should_fail
+        );
+        println!(
+            "  Compliance score: {:.1}%",
+            report.compliance_score() * 100.0
+        );
 
         // All MUST requirements must pass for conformance
-        assert_eq!(report.stats.must_fail, 0,
-                   "All MUST requirements must pass for bd-3a3q conformance");
+        assert_eq!(
+            report.stats.must_fail, 0,
+            "All MUST requirements must pass for bd-3a3q conformance"
+        );
 
         // Compliance score must be >= 95% for MUST requirements
-        assert!(report.compliance_score() >= 0.95,
-                "bd-3a3q compliance score must be >= 95%");
+        assert!(
+            report.compliance_score() >= 0.95,
+            "bd-3a3q compliance score must be >= 95%"
+        );
 
         println!("✅ bd-3a3q conformance test suite PASSED");
     }
@@ -618,9 +742,7 @@ mod tests {
                 }
 
                 let mut baseline = HardeningStateMachine::with_level(*start);
-                baseline
-                    .escalate(*target, 1_000, "r92-baseline")
-                    .unwrap();
+                baseline.escalate(*target, 1_000, "r92-baseline").unwrap();
                 let baseline_replay =
                     HardeningStateMachine::replay_transitions(baseline.transition_log());
 
@@ -635,9 +757,7 @@ mod tests {
                         .unwrap_err();
                     assert_eq!(rejected.code(), "HARDEN_ILLEGAL_REGRESSION");
 
-                    perturbed
-                        .escalate(*target, 1_000, "r92-baseline")
-                        .unwrap();
+                    perturbed.escalate(*target, 1_000, "r92-baseline").unwrap();
 
                     assert_eq!(
                         perturbed.current_level(),

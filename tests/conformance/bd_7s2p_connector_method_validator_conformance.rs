@@ -10,8 +10,8 @@
 //! - **MAY-CMV-007**: Optional methods MAY be skipped without affecting verdict
 
 use franken_node::conformance::connector_method_validator::{
-    validate_contract, ContractReport, MethodDeclaration, MethodErrorCode, MethodValidationError,
-    MethodValidationResult, ReportSummary, STANDARD_METHODS,
+    ContractReport, MethodDeclaration, MethodErrorCode, MethodValidationError,
+    MethodValidationResult, ReportSummary, STANDARD_METHODS, validate_contract,
 };
 
 /// **MUST-CMV-001**: All required methods MUST be validated as present
@@ -50,13 +50,20 @@ fn conformance_must_cmv_001_required_methods_validated_or_missing_reported() {
 
     for result in required_failures {
         assert!(
-            result.errors.iter().any(|e| matches!(e.code, MethodErrorCode::MethodMissing)),
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e.code, MethodErrorCode::MethodMissing)),
             "Required method '{}' should have METHOD_MISSING error",
             result.method
         );
 
         assert!(
-            result.errors.iter().any(|e| e.message.contains("Required method") && e.message.contains("not implemented")),
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Required method")
+                    && e.message.contains("not implemented")),
             "Required method '{}' should have descriptive error message",
             result.method
         );
@@ -64,20 +71,17 @@ fn conformance_must_cmv_001_required_methods_validated_or_missing_reported() {
 
     // Verdict should be FAIL when required methods are missing
     assert_eq!(
-        report.verdict,
-        "FAIL",
+        report.verdict, "FAIL",
         "Contract should fail when required methods are missing"
     );
 
     // Summary should accurately reflect failures
     assert_eq!(
-        report.summary.failing,
-        required_count,
+        report.summary.failing, required_count,
         "Summary should count all required method failures"
     );
     assert_eq!(
-        report.summary.passing,
-        0,
+        report.summary.passing, 0,
         "Summary should show no passing methods when all required are missing"
     );
 }
@@ -97,36 +101,50 @@ fn conformance_must_cmv_002_version_compatibility_enforced() {
         ("1.2.5", true, "minor.patch upgrade should be compatible"),
         ("0.9.9", false, "major downgrade should be incompatible"),
         ("2.0.0", false, "major upgrade should be incompatible"),
-        ("2.1.0", false, "major upgrade with minor should be incompatible"),
-        ("0.1.0", false, "different major (0.x) should be incompatible"),
+        (
+            "2.1.0",
+            false,
+            "major upgrade with minor should be incompatible",
+        ),
+        (
+            "0.1.0",
+            false,
+            "different major (0.x) should be incompatible",
+        ),
     ];
 
     for (declared_version, should_be_compatible, description) in version_test_cases {
         let declarations = vec![MethodDeclaration {
-            name: "handshake".to_string(),  // Required method
+            name: "handshake".to_string(), // Required method
             version: declared_version.to_string(),
             has_input_schema: true,
             has_output_schema: true,
         }];
 
         let report = validate_contract(
-            &format!("test-connector-version-{}", declared_version.replace('.', "-")),
-            &declarations
+            &format!(
+                "test-connector-version-{}",
+                declared_version.replace('.', "-")
+            ),
+            &declarations,
         );
 
-        let handshake_result = report.methods.iter()
+        let handshake_result = report
+            .methods
+            .iter()
             .find(|m| m.method == "handshake")
             .expect("handshake method should be in results");
 
-        let has_version_error = handshake_result.errors.iter()
+        let has_version_error = handshake_result
+            .errors
+            .iter()
             .any(|e| matches!(e.code, MethodErrorCode::VersionIncompatible));
 
         if should_be_compatible {
             assert!(
                 !has_version_error,
                 "{}: version {} should be compatible with 1.0.0",
-                description,
-                declared_version
+                description, declared_version
             );
 
             assert_eq!(
@@ -138,8 +156,7 @@ fn conformance_must_cmv_002_version_compatibility_enforced() {
             assert!(
                 has_version_error,
                 "{}: version {} should be incompatible with 1.0.0",
-                description,
-                declared_version
+                description, declared_version
             );
 
             assert_eq!(
@@ -149,12 +166,15 @@ fn conformance_must_cmv_002_version_compatibility_enforced() {
             );
 
             // Check error message quality
-            let version_error = handshake_result.errors.iter()
+            let version_error = handshake_result
+                .errors
+                .iter()
                 .find(|e| matches!(e.code, MethodErrorCode::VersionIncompatible))
                 .unwrap();
 
             assert!(
-                version_error.message.contains(declared_version) && version_error.message.contains("1.0.0"),
+                version_error.message.contains(declared_version)
+                    && version_error.message.contains("1.0.0"),
                 "Version error message should mention both versions: {}",
                 version_error.message
             );
@@ -183,7 +203,7 @@ fn conformance_must_cmv_003_complete_method_coverage_validation() {
             has_output_schema: true,
         },
         MethodDeclaration {
-            name: "simulate".to_string(),  // Optional method
+            name: "simulate".to_string(), // Optional method
             version: "1.0.0".to_string(),
             has_input_schema: true,
             has_output_schema: true,
@@ -203,20 +223,23 @@ fn conformance_must_cmv_003_complete_method_coverage_validation() {
 
     // Verify each standard method is covered
     for spec in STANDARD_METHODS {
-        let method_result = report.methods.iter()
+        let method_result = report
+            .methods
+            .iter()
             .find(|r| r.method == spec.name)
-            .expect(&format!("Report must include result for method '{}'", spec.name));
+            .expect(&format!(
+                "Report must include result for method '{}'",
+                spec.name
+            ));
 
         assert_eq!(
-            method_result.required,
-            spec.required,
+            method_result.required, spec.required,
             "Method '{}' required flag must match specification",
             spec.name
         );
 
         assert_eq!(
-            method_result.version_expected,
-            spec.version,
+            method_result.version_expected, spec.version,
             "Method '{}' expected version must match specification",
             spec.name
         );
@@ -225,7 +248,9 @@ fn conformance_must_cmv_003_complete_method_coverage_validation() {
     // Verify declared methods are marked as PASS
     let declared_methods = ["handshake", "describe", "simulate"];
     for method_name in declared_methods {
-        let result = report.methods.iter()
+        let result = report
+            .methods
+            .iter()
             .find(|r| r.method == method_name)
             .unwrap();
 
@@ -243,9 +268,18 @@ fn conformance_must_cmv_003_complete_method_coverage_validation() {
     }
 
     // Verify undeclared required methods are marked as FAIL
-    let undeclared_required = ["introspect", "capabilities", "configure", "invoke", "health", "shutdown"];
+    let undeclared_required = [
+        "introspect",
+        "capabilities",
+        "configure",
+        "invoke",
+        "health",
+        "shutdown",
+    ];
     for method_name in undeclared_required {
-        let result = report.methods.iter()
+        let result = report
+            .methods
+            .iter()
             .find(|r| r.method == method_name)
             .unwrap();
 
@@ -256,7 +290,10 @@ fn conformance_must_cmv_003_complete_method_coverage_validation() {
         );
 
         assert!(
-            result.errors.iter().any(|e| matches!(e.code, MethodErrorCode::MethodMissing)),
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e.code, MethodErrorCode::MethodMissing)),
             "Undeclared required method '{}' should have METHOD_MISSING error",
             method_name
         );
@@ -271,8 +308,7 @@ fn conformance_must_cmv_003_complete_method_coverage_validation() {
 
     let expected_required = STANDARD_METHODS.iter().filter(|s| s.required).count();
     assert_eq!(
-        report.summary.required_methods,
-        expected_required,
+        report.summary.required_methods, expected_required,
         "Summary required_methods must match specification"
     );
 }
@@ -294,7 +330,7 @@ fn conformance_must_cmv_004_schema_presence_validation_enforced() {
 
     for (has_input, has_output, should_pass, description) in schema_test_cases {
         let declarations = vec![MethodDeclaration {
-            name: "invoke".to_string(),  // Required method
+            name: "invoke".to_string(), // Required method
             version: "1.0.0".to_string(),
             has_input_schema: has_input,
             has_output_schema: has_output,
@@ -302,10 +338,12 @@ fn conformance_must_cmv_004_schema_presence_validation_enforced() {
 
         let report = validate_contract(
             &format!("test-schema-{}-{}", has_input, has_output),
-            &declarations
+            &declarations,
         );
 
-        let invoke_result = report.methods.iter()
+        let invoke_result = report
+            .methods
+            .iter()
             .find(|m| m.method == "invoke")
             .unwrap();
 
@@ -328,7 +366,9 @@ fn conformance_must_cmv_004_schema_presence_validation_enforced() {
                 description
             );
 
-            let has_schema_error = invoke_result.errors.iter()
+            let has_schema_error = invoke_result
+                .errors
+                .iter()
                 .any(|e| matches!(e.code, MethodErrorCode::SchemaMismatch));
 
             assert!(
@@ -338,13 +378,16 @@ fn conformance_must_cmv_004_schema_presence_validation_enforced() {
             );
 
             // Verify error message mentions specific schema missing
-            let schema_error = invoke_result.errors.iter()
+            let schema_error = invoke_result
+                .errors
+                .iter()
                 .find(|e| matches!(e.code, MethodErrorCode::SchemaMismatch))
                 .unwrap();
 
             if !has_input {
                 assert!(
-                    schema_error.message.contains("input") || schema_error.message.contains("Input"),
+                    schema_error.message.contains("input")
+                        || schema_error.message.contains("Input"),
                     "Schema error should mention missing input schema: {}",
                     schema_error.message
                 );
@@ -352,7 +395,8 @@ fn conformance_must_cmv_004_schema_presence_validation_enforced() {
 
             if !has_output {
                 assert!(
-                    schema_error.message.contains("output") || schema_error.message.contains("Output"),
+                    schema_error.message.contains("output")
+                        || schema_error.message.contains("Output"),
                     "Schema error should mention missing output schema: {}",
                     schema_error.message
                 );
@@ -375,57 +419,65 @@ fn conformance_should_cmv_005_validation_errors_provide_actionable_messages() {
         // Version incompatible
         MethodDeclaration {
             name: "describe".to_string(),
-            version: "2.0.0".to_string(),  // Incompatible major version
+            version: "2.0.0".to_string(), // Incompatible major version
             has_input_schema: true,
             has_output_schema: true,
         },
-
         // Schema missing
         MethodDeclaration {
             name: "introspect".to_string(),
             version: "1.0.0".to_string(),
-            has_input_schema: false,  // Missing input schema
+            has_input_schema: false, // Missing input schema
             has_output_schema: true,
         },
-
         // Multiple issues
         MethodDeclaration {
             name: "capabilities".to_string(),
-            version: "0.5.0".to_string(),  // Incompatible version
-            has_input_schema: false,       // Missing input schema
-            has_output_schema: false,      // Missing output schema
+            version: "0.5.0".to_string(), // Incompatible version
+            has_input_schema: false,      // Missing input schema
+            has_output_schema: false,     // Missing output schema
         },
     ];
 
     let report = validate_contract("test-connector-errors", &problematic_declarations);
 
     // Check METHOD_MISSING error message quality
-    let handshake_result = report.methods.iter()
+    let handshake_result = report
+        .methods
+        .iter()
         .find(|m| m.method == "handshake")
         .unwrap();
 
-    let missing_error = handshake_result.errors.iter()
+    let missing_error = handshake_result
+        .errors
+        .iter()
         .find(|e| matches!(e.code, MethodErrorCode::MethodMissing))
         .unwrap();
 
     assert!(
-        missing_error.message.contains("Required method") && missing_error.message.contains("handshake"),
+        missing_error.message.contains("Required method")
+            && missing_error.message.contains("handshake"),
         "METHOD_MISSING error should identify specific method: {}",
         missing_error.message
     );
 
     assert!(
-        missing_error.message.contains("not implemented") || missing_error.message.contains("missing"),
+        missing_error.message.contains("not implemented")
+            || missing_error.message.contains("missing"),
         "METHOD_MISSING error should clearly state the problem: {}",
         missing_error.message
     );
 
     // Check VERSION_INCOMPATIBLE error message quality
-    let describe_result = report.methods.iter()
+    let describe_result = report
+        .methods
+        .iter()
         .find(|m| m.method == "describe")
         .unwrap();
 
-    let version_error = describe_result.errors.iter()
+    let version_error = describe_result
+        .errors
+        .iter()
         .find(|e| matches!(e.code, MethodErrorCode::VersionIncompatible))
         .unwrap();
 
@@ -436,17 +488,22 @@ fn conformance_should_cmv_005_validation_errors_provide_actionable_messages() {
     );
 
     assert!(
-        version_error.message.contains("not compatible") || version_error.message.contains("incompatible"),
+        version_error.message.contains("not compatible")
+            || version_error.message.contains("incompatible"),
         "VERSION_INCOMPATIBLE error should clearly state incompatibility: {}",
         version_error.message
     );
 
     // Check SCHEMA_MISMATCH error message quality
-    let introspect_result = report.methods.iter()
+    let introspect_result = report
+        .methods
+        .iter()
         .find(|m| m.method == "introspect")
         .unwrap();
 
-    let schema_error = introspect_result.errors.iter()
+    let schema_error = introspect_result
+        .errors
+        .iter()
         .find(|e| matches!(e.code, MethodErrorCode::SchemaMismatch))
         .unwrap();
 
@@ -457,7 +514,9 @@ fn conformance_should_cmv_005_validation_errors_provide_actionable_messages() {
     );
 
     // Check multiple error handling for capabilities method
-    let capabilities_result = report.methods.iter()
+    let capabilities_result = report
+        .methods
+        .iter()
         .find(|m| m.method == "capabilities")
         .unwrap();
 
@@ -468,13 +527,23 @@ fn conformance_should_cmv_005_validation_errors_provide_actionable_messages() {
     );
 
     // Should have both version and schema errors
-    let has_version_error = capabilities_result.errors.iter()
+    let has_version_error = capabilities_result
+        .errors
+        .iter()
         .any(|e| matches!(e.code, MethodErrorCode::VersionIncompatible));
-    let has_schema_error = capabilities_result.errors.iter()
+    let has_schema_error = capabilities_result
+        .errors
+        .iter()
         .any(|e| matches!(e.code, MethodErrorCode::SchemaMismatch));
 
-    assert!(has_version_error, "capabilities method should have version error");
-    assert!(has_schema_error, "capabilities method should have schema error");
+    assert!(
+        has_version_error,
+        "capabilities method should have version error"
+    );
+    assert!(
+        has_schema_error,
+        "capabilities method should have schema error"
+    );
 }
 
 /// **SHOULD-CMV-006**: Report summaries SHOULD accurately count
@@ -494,19 +563,17 @@ fn conformance_should_cmv_006_report_summaries_accurately_count_methods() {
         },
         MethodDeclaration {
             name: "describe".to_string(),
-            version: "1.1.0".to_string(),  // Compatible minor upgrade
+            version: "1.1.0".to_string(), // Compatible minor upgrade
             has_input_schema: true,
             has_output_schema: true,
         },
-
         // 1 failing method (version incompatible)
         MethodDeclaration {
             name: "introspect".to_string(),
-            version: "2.0.0".to_string(),  // Incompatible major version
+            version: "2.0.0".to_string(), // Incompatible major version
             has_input_schema: true,
             has_output_schema: true,
         },
-
         // 1 optional method (will be skipped)
         MethodDeclaration {
             name: "simulate".to_string(),
@@ -514,7 +581,6 @@ fn conformance_should_cmv_006_report_summaries_accurately_count_methods() {
             has_input_schema: true,
             has_output_schema: true,
         },
-
         // Missing methods: capabilities, configure, invoke, health, shutdown (all required)
     ];
 
@@ -529,35 +595,27 @@ fn conformance_should_cmv_006_report_summaries_accurately_count_methods() {
 
     // Verify summary accuracy
     assert_eq!(
-        report.summary.total_methods,
-        expected_total,
+        report.summary.total_methods, expected_total,
         "Summary total_methods should be {}, got {}",
-        expected_total,
-        report.summary.total_methods
+        expected_total, report.summary.total_methods
     );
 
     assert_eq!(
-        report.summary.required_methods,
-        expected_required,
+        report.summary.required_methods, expected_required,
         "Summary required_methods should be {}, got {}",
-        expected_required,
-        report.summary.required_methods
+        expected_required, report.summary.required_methods
     );
 
     assert_eq!(
-        report.summary.passing,
-        expected_passing,
+        report.summary.passing, expected_passing,
         "Summary passing should be {}, got {}",
-        expected_passing,
-        report.summary.passing
+        expected_passing, report.summary.passing
     );
 
     assert_eq!(
-        report.summary.failing,
-        expected_failing,
+        report.summary.failing, expected_failing,
         "Summary failing should be {}, got {}",
-        expected_failing,
-        report.summary.failing
+        expected_failing, report.summary.failing
     );
 
     // Verify total consistency
@@ -569,8 +627,7 @@ fn conformance_should_cmv_006_report_summaries_accurately_count_methods() {
 
     // Verify verdict reflects failures
     assert_eq!(
-        report.verdict,
-        "FAIL",
+        report.verdict, "FAIL",
         "Verdict should be FAIL when there are failing methods"
     );
 
@@ -580,20 +637,17 @@ fn conformance_should_cmv_006_report_summaries_accurately_count_methods() {
     let actual_skipped = report.methods.iter().filter(|r| r.status == "SKIP").count();
 
     assert_eq!(
-        report.summary.passing,
-        actual_passing,
+        report.summary.passing, actual_passing,
         "Summary passing count should match actual PASS results"
     );
 
     assert_eq!(
-        report.summary.failing,
-        actual_failing,
+        report.summary.failing, actual_failing,
         "Summary failing count should match actual FAIL results"
     );
 
     assert_eq!(
-        report.summary.skipped,
-        actual_skipped,
+        report.summary.skipped, actual_skipped,
         "Summary skipped count should match actual SKIP results"
     );
 }
@@ -619,12 +673,12 @@ fn conformance_may_cmv_007_optional_methods_skipped_without_affecting_verdict() 
     let report = validate_contract("test-connector-required-only", &required_only_declarations);
 
     // Find optional methods in results
-    let optional_results: Vec<_> = report.methods
-        .iter()
-        .filter(|r| !r.required)
-        .collect();
+    let optional_results: Vec<_> = report.methods.iter().filter(|r| !r.required).collect();
 
-    assert!(!optional_results.is_empty(), "Should have optional method results");
+    assert!(
+        !optional_results.is_empty(),
+        "Should have optional method results"
+    );
 
     // All optional methods should be skipped
     for optional_result in optional_results {
@@ -649,30 +703,26 @@ fn conformance_may_cmv_007_optional_methods_skipped_without_affecting_verdict() 
 
     // Verdict should be PASS when all required methods are present and optional are skipped
     assert_eq!(
-        report.verdict,
-        "PASS",
+        report.verdict, "PASS",
         "Contract should pass when all required methods are present, even if optional methods are skipped"
     );
 
     // Summary should reflect skipped optional methods
     let expected_optional_count = STANDARD_METHODS.iter().filter(|s| !s.required).count();
     assert_eq!(
-        report.summary.skipped,
-        expected_optional_count,
+        report.summary.skipped, expected_optional_count,
         "Summary should count skipped optional methods"
     );
 
     // All required methods should be passing
     let required_count = STANDARD_METHODS.iter().filter(|s| s.required).count();
     assert_eq!(
-        report.summary.passing,
-        required_count,
+        report.summary.passing, required_count,
         "All required methods should be passing"
     );
 
     assert_eq!(
-        report.summary.failing,
-        0,
+        report.summary.failing, 0,
         "No methods should be failing when all required are declared correctly"
     );
 
@@ -687,12 +737,12 @@ fn conformance_may_cmv_007_optional_methods_skipped_without_affecting_verdict() 
         })
         .collect();
 
-    let with_optional_report = validate_contract("test-connector-with-optional", &with_optional_declarations);
+    let with_optional_report =
+        validate_contract("test-connector-with-optional", &with_optional_declarations);
 
     // Both reports should have PASS verdict
     assert_eq!(
-        with_optional_report.verdict,
-        "PASS",
+        with_optional_report.verdict, "PASS",
         "Contract should pass when optional methods are included"
     );
 
@@ -704,8 +754,7 @@ fn conformance_may_cmv_007_optional_methods_skipped_without_affecting_verdict() 
 
     // With optional should have no skipped methods
     assert_eq!(
-        with_optional_report.summary.skipped,
-        0,
+        with_optional_report.summary.skipped, 0,
         "Including all methods should result in no skipped methods"
     );
 }

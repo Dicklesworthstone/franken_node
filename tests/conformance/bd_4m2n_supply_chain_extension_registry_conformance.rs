@@ -24,15 +24,15 @@
 //! **MUST-SER-011**: Admission kernel MUST use cryptographic verification only
 //! **MUST-SER-012**: Extension lifecycle transitions MUST be valid (Submitted→Active→Deprecated→Revoked)
 
+use ed25519_dalek::{Keypair, Signer, Verifier};
+use frankenengine_node::supply_chain::artifact_signing::KeyRing;
 use frankenengine_node::supply_chain::extension_registry::{
-    SignedExtensionRegistry, RegistryConfig, AdmissionKernel, RegistrationRequest,
-    ExtensionRegistrationManifest, ExtensionSignature, ExtensionStatus, VersionEntry,
-    RegistryResult, RegistryError, RegistryAuditRecord
+    AdmissionKernel, ExtensionRegistrationManifest, ExtensionSignature, ExtensionStatus,
+    RegistrationRequest, RegistryAuditRecord, RegistryConfig, RegistryError, RegistryResult,
+    SignedExtensionRegistry, VersionEntry,
 };
-use frankenengine_node::supply_chain::artifact_signing::{KeyRing};
 use frankenengine_node::supply_chain::provenance::{ProvenanceAttestation, ProvenancePolicy};
 use frankenengine_node::supply_chain::transparency_verifier::TransparencyVerifier;
-use ed25519_dalek::{Keypair, Signer, Verifier};
 use std::collections::HashMap;
 
 // Test fixture constants
@@ -97,7 +97,10 @@ impl ConformanceReport {
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
         md.push_str("# bd-4m2n Supply Chain Extension Registry Conformance Report\n\n");
-        md.push_str(&format!("**Compliance Score:** {:.1}%\n\n", self.compliance_score() * 100.0));
+        md.push_str(&format!(
+            "**Compliance Score:** {:.1}%\n\n",
+            self.compliance_score() * 100.0
+        ));
         md.push_str("## Test Results\n\n");
 
         for result in self.results.values() {
@@ -111,7 +114,10 @@ impl ConformanceReport {
                 TestResult::Fail { reason } => &format!("❌ FAIL: {}", reason),
                 TestResult::Skip { reason } => &format!("⏭️ SKIP: {}", reason),
             };
-            md.push_str(&format!("- **{}** [{}]: {} - {}\n", result.id, level_str, result.title, status_str));
+            md.push_str(&format!(
+                "- **{}** [{}]: {} - {}\n",
+                result.id, level_str, result.title, status_str
+            ));
         }
 
         md
@@ -122,10 +128,16 @@ pub fn run_bd_4m2n_conformance_tests() -> ConformanceReport {
     let mut results = HashMap::new();
 
     // MUST-SER-001: Ed25519 signature verification
-    results.insert("MUST-SER-001".to_string(), test_ed25519_signature_verification());
+    results.insert(
+        "MUST-SER-001".to_string(),
+        test_ed25519_signature_verification(),
+    );
 
     // MUST-SER-002: Provenance chain validation
-    results.insert("MUST-SER-002".to_string(), test_provenance_chain_validation());
+    results.insert(
+        "MUST-SER-002".to_string(),
+        test_provenance_chain_validation(),
+    );
 
     // MUST-SER-003: Unique extension names
     results.insert("MUST-SER-003".to_string(), test_extension_name_uniqueness());
@@ -140,7 +152,10 @@ pub fn run_bd_4m2n_conformance_tests() -> ConformanceReport {
     results.insert("MUST-SER-006".to_string(), test_monotonic_revocation());
 
     // MUST-SER-007: Prevent duplicate revocation
-    results.insert("MUST-SER-007".to_string(), test_duplicate_revocation_prevention());
+    results.insert(
+        "MUST-SER-007".to_string(),
+        test_duplicate_revocation_prevention(),
+    );
 
     // MUST-SER-008: Semver monotonicity
     results.insert("MUST-SER-008".to_string(), test_semver_monotonicity());
@@ -152,10 +167,16 @@ pub fn run_bd_4m2n_conformance_tests() -> ConformanceReport {
     results.insert("MUST-SER-010".to_string(), test_deterministic_operations());
 
     // MUST-SER-011: Cryptographic verification only
-    results.insert("MUST-SER-011".to_string(), test_cryptographic_verification_only());
+    results.insert(
+        "MUST-SER-011".to_string(),
+        test_cryptographic_verification_only(),
+    );
 
     // MUST-SER-012: Valid lifecycle transitions
-    results.insert("MUST-SER-012".to_string(), test_valid_lifecycle_transitions());
+    results.insert(
+        "MUST-SER-012".to_string(),
+        test_valid_lifecycle_transitions(),
+    );
 
     let stats = compute_stats(&results);
     ConformanceReport { results, stats }
@@ -180,7 +201,7 @@ fn test_ed25519_signature_verification() -> ConformanceTestResult {
             title: "Ed25519 signature verification".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Valid Ed25519 signature was rejected".to_string()
+                reason: "Valid Ed25519 signature was rejected".to_string(),
             },
         };
     }
@@ -196,7 +217,7 @@ fn test_ed25519_signature_verification() -> ConformanceTestResult {
             title: "Ed25519 signature verification".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Invalid Ed25519 signature was accepted".to_string()
+                reason: "Invalid Ed25519 signature was accepted".to_string(),
             },
         };
     }
@@ -218,7 +239,8 @@ fn test_provenance_chain_validation() -> ConformanceTestResult {
     let signature = create_signature(&keypair, &manifest);
 
     // Test with valid provenance
-    let mut valid_request = create_registration_request(manifest.clone(), signature.clone(), PUBLISHER_A);
+    let mut valid_request =
+        create_registration_request(manifest.clone(), signature.clone(), PUBLISHER_A);
     valid_request.manifest.provenance = create_valid_provenance();
 
     let result = registry.register(valid_request, TRACE_A, NOW_EPOCH);
@@ -228,7 +250,7 @@ fn test_provenance_chain_validation() -> ConformanceTestResult {
             title: "Provenance chain validation".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Valid provenance chain was rejected".to_string()
+                reason: "Valid provenance chain was rejected".to_string(),
             },
         };
     }
@@ -244,7 +266,7 @@ fn test_provenance_chain_validation() -> ConformanceTestResult {
             title: "Provenance chain validation".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Invalid provenance chain was accepted".to_string()
+                reason: "Invalid provenance chain was accepted".to_string(),
             },
         };
     }
@@ -274,7 +296,7 @@ fn test_extension_name_uniqueness() -> ConformanceTestResult {
             title: "Extension name uniqueness".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "First extension registration failed".to_string()
+                reason: "First extension registration failed".to_string(),
             },
         };
     }
@@ -291,7 +313,7 @@ fn test_extension_name_uniqueness() -> ConformanceTestResult {
             title: "Extension name uniqueness".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Duplicate extension name was allowed".to_string()
+                reason: "Duplicate extension name was allowed".to_string(),
             },
         };
     }
@@ -308,7 +330,7 @@ fn test_extension_name_uniqueness() -> ConformanceTestResult {
             title: "Extension name uniqueness".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Different extension name was rejected".to_string()
+                reason: "Different extension name was rejected".to_string(),
             },
         };
     }
@@ -339,7 +361,7 @@ fn test_input_length_bounds() -> ConformanceTestResult {
             title: "Input length bounds enforcement".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Oversized extension name was accepted".to_string()
+                reason: "Oversized extension name was accepted".to_string(),
             },
         };
     }
@@ -357,7 +379,7 @@ fn test_input_length_bounds() -> ConformanceTestResult {
             title: "Input length bounds enforcement".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Oversized description was accepted".to_string()
+                reason: "Oversized description was accepted".to_string(),
             },
         };
     }
@@ -375,7 +397,7 @@ fn test_input_length_bounds() -> ConformanceTestResult {
             title: "Input length bounds enforcement".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Oversized trace ID was accepted".to_string()
+                reason: "Oversized trace ID was accepted".to_string(),
             },
         };
     }
@@ -417,7 +439,7 @@ fn test_no_shape_only_validation() -> ConformanceTestResult {
             title: "No shape-only validation".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Extension accepted despite signature mismatch".to_string()
+                reason: "Extension accepted despite signature mismatch".to_string(),
             },
         };
     }
@@ -450,7 +472,7 @@ fn test_monotonic_revocation() -> ConformanceTestResult {
             title: "Monotonic revocation".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Extension registration failed".to_string()
+                reason: "Extension registration failed".to_string(),
             },
         };
     }
@@ -458,14 +480,19 @@ fn test_monotonic_revocation() -> ConformanceTestResult {
     let extension_id = register_result.extension_id.unwrap();
 
     // Revoke extension
-    let revoke_result = registry.revoke(&extension_id, "security vulnerability", TRACE_B, NOW_EPOCH + 1);
+    let revoke_result = registry.revoke(
+        &extension_id,
+        "security vulnerability",
+        TRACE_B,
+        NOW_EPOCH + 1,
+    );
     if !revoke_result.success {
         return ConformanceTestResult {
             id: "MUST-SER-006".to_string(),
             title: "Monotonic revocation".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Extension revocation failed".to_string()
+                reason: "Extension revocation failed".to_string(),
             },
         };
     }
@@ -479,7 +506,7 @@ fn test_monotonic_revocation() -> ConformanceTestResult {
                 title: "Monotonic revocation".to_string(),
                 level: RequirementLevel::Must,
                 result: TestResult::Fail {
-                    reason: "Extension status not changed to Revoked".to_string()
+                    reason: "Extension status not changed to Revoked".to_string(),
                 },
             };
         }
@@ -489,7 +516,7 @@ fn test_monotonic_revocation() -> ConformanceTestResult {
             title: "Monotonic revocation".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Extension not found after revocation".to_string()
+                reason: "Extension not found after revocation".to_string(),
             },
         };
     }
@@ -519,7 +546,7 @@ fn test_duplicate_revocation_prevention() -> ConformanceTestResult {
             title: "Duplicate revocation prevention".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Extension registration failed".to_string()
+                reason: "Extension registration failed".to_string(),
             },
         };
     }
@@ -534,7 +561,7 @@ fn test_duplicate_revocation_prevention() -> ConformanceTestResult {
             title: "Duplicate revocation prevention".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "First revocation failed".to_string()
+                reason: "First revocation failed".to_string(),
             },
         };
     }
@@ -560,7 +587,7 @@ fn test_semver_monotonicity() -> ConformanceTestResult {
         ("1.0.1", Some([1, 0, 1])),
         ("2.0.0", Some([2, 0, 0])),
         ("invalid", None),
-        ("1.0", None), // Missing patch
+        ("1.0", None),     // Missing patch
         ("1.0.0.0", None), // Too many components
     ];
 
@@ -572,7 +599,7 @@ fn test_semver_monotonicity() -> ConformanceTestResult {
                 title: "Semver monotonicity".to_string(),
                 level: RequirementLevel::Must,
                 result: TestResult::Fail {
-                    reason: format!("Version {} parsed incorrectly", version_str)
+                    reason: format!("Version {} parsed incorrectly", version_str),
                 },
             };
         }
@@ -589,7 +616,7 @@ fn test_semver_monotonicity() -> ConformanceTestResult {
             title: "Semver monotonicity".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Version ordering is incorrect".to_string()
+                reason: "Version ordering is incorrect".to_string(),
             },
         };
     }
@@ -621,7 +648,7 @@ fn test_audit_record_generation() -> ConformanceTestResult {
             title: "Audit record generation".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Extension registration failed".to_string()
+                reason: "Extension registration failed".to_string(),
             },
         };
     }
@@ -633,7 +660,7 @@ fn test_audit_record_generation() -> ConformanceTestResult {
             title: "Audit record generation".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "No audit record generated for registration".to_string()
+                reason: "No audit record generated for registration".to_string(),
             },
         };
     }
@@ -650,7 +677,7 @@ fn test_audit_record_generation() -> ConformanceTestResult {
                 title: "Audit record generation".to_string(),
                 level: RequirementLevel::Must,
                 result: TestResult::Fail {
-                    reason: "No audit record generated for revocation".to_string()
+                    reason: "No audit record generated for revocation".to_string(),
                 },
             };
         }
@@ -691,7 +718,7 @@ fn test_deterministic_operations() -> ConformanceTestResult {
             title: "Deterministic operations".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Registration results differ between registries".to_string()
+                reason: "Registration results differ between registries".to_string(),
             },
         };
     }
@@ -707,7 +734,7 @@ fn test_deterministic_operations() -> ConformanceTestResult {
                 title: "Deterministic operations".to_string(),
                 level: RequirementLevel::Must,
                 result: TestResult::Fail {
-                    reason: "Extension not found in one registry".to_string()
+                    reason: "Extension not found in one registry".to_string(),
                 },
             };
         }
@@ -721,7 +748,7 @@ fn test_deterministic_operations() -> ConformanceTestResult {
                 title: "Deterministic operations".to_string(),
                 level: RequirementLevel::Must,
                 result: TestResult::Fail {
-                    reason: "Extension states differ between registries".to_string()
+                    reason: "Extension states differ between registries".to_string(),
                 },
             };
         }
@@ -762,7 +789,7 @@ fn test_cryptographic_verification_only() -> ConformanceTestResult {
             title: "Cryptographic verification only".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Fake signature passed admission despite crypto failure".to_string()
+                reason: "Fake signature passed admission despite crypto failure".to_string(),
             },
         };
     }
@@ -792,7 +819,7 @@ fn test_valid_lifecycle_transitions() -> ConformanceTestResult {
             title: "Valid lifecycle transitions".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Extension registration failed".to_string()
+                reason: "Extension registration failed".to_string(),
             },
         };
     }
@@ -808,7 +835,7 @@ fn test_valid_lifecycle_transitions() -> ConformanceTestResult {
                 title: "Valid lifecycle transitions".to_string(),
                 level: RequirementLevel::Must,
                 result: TestResult::Fail {
-                    reason: format!("Initial status should be Submitted, got {:?}", ext.status)
+                    reason: format!("Initial status should be Submitted, got {:?}", ext.status),
                 },
             };
         }
@@ -822,7 +849,7 @@ fn test_valid_lifecycle_transitions() -> ConformanceTestResult {
             title: "Valid lifecycle transitions".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Revocation failed".to_string()
+                reason: "Revocation failed".to_string(),
             },
         };
     }
@@ -836,7 +863,7 @@ fn test_valid_lifecycle_transitions() -> ConformanceTestResult {
                 title: "Valid lifecycle transitions".to_string(),
                 level: RequirementLevel::Must,
                 result: TestResult::Fail {
-                    reason: format!("Final status should be Revoked, got {:?}", ext.status)
+                    reason: format!("Final status should be Revoked, got {:?}", ext.status),
                 },
             };
         }
@@ -897,7 +924,10 @@ fn create_test_manifest(name: &str, version: &str) -> ExtensionRegistrationManif
     }
 }
 
-fn create_signature(keypair: &Keypair, manifest: &ExtensionRegistrationManifest) -> ExtensionSignature {
+fn create_signature(
+    keypair: &Keypair,
+    manifest: &ExtensionRegistrationManifest,
+) -> ExtensionSignature {
     let manifest_bytes = serde_json::to_vec(manifest).unwrap();
     let signature = keypair.sign(&manifest_bytes);
 
@@ -997,25 +1027,40 @@ mod tests {
         let report = run_bd_4m2n_conformance_tests();
 
         // All MUST requirements should pass
-        assert_eq!(report.stats.must_fail, 0, "MUST requirements failed: {:#?}",
-                  report.results.values()
-                      .filter(|r| matches!(r.level, RequirementLevel::Must) &&
-                              matches!(r.result, TestResult::Fail { .. }))
-                      .collect::<Vec<_>>());
+        assert_eq!(
+            report.stats.must_fail,
+            0,
+            "MUST requirements failed: {:#?}",
+            report
+                .results
+                .values()
+                .filter(|r| matches!(r.level, RequirementLevel::Must)
+                    && matches!(r.result, TestResult::Fail { .. }))
+                .collect::<Vec<_>>()
+        );
 
         // Compliance score should be 100%
-        assert!(report.compliance_score() >= 1.0, "Compliance score too low: {:.1}%",
-               report.compliance_score() * 100.0);
+        assert!(
+            report.compliance_score() >= 1.0,
+            "Compliance score too low: {:.1}%",
+            report.compliance_score() * 100.0
+        );
 
         // Should have exactly 12 MUST tests
-        assert_eq!(report.stats.must_pass + report.stats.must_fail, 12,
-                  "Expected exactly 12 MUST tests");
+        assert_eq!(
+            report.stats.must_pass + report.stats.must_fail,
+            12,
+            "Expected exactly 12 MUST tests"
+        );
     }
 
     #[test]
     fn test_version_parsing_edge_cases() {
         assert_eq!(parse_monotonic_version("0.0.0"), Some([0, 0, 0]));
-        assert_eq!(parse_monotonic_version("999.999.999"), Some([999, 999, 999]));
+        assert_eq!(
+            parse_monotonic_version("999.999.999"),
+            Some([999, 999, 999])
+        );
         assert_eq!(parse_monotonic_version(""), None);
         assert_eq!(parse_monotonic_version("1"), None);
         assert_eq!(parse_monotonic_version("1.0"), None);

@@ -2768,7 +2768,8 @@ mod tests {
 
         let lock_path = transport.shared_state_lock_path();
         let lock_file = transport.lock_file(&lock_path).expect("open snapshot lock");
-        lock_file_with_backoff(&lock_file, &lock_path, false).expect("take exclusive snapshot lock");
+        lock_file_with_backoff(&lock_file, &lock_path, false)
+            .expect("take exclusive snapshot lock");
 
         let pending_action =
             release_action_record("pending-action", "2026-04-06T01:00:03Z", "inc-pending");
@@ -2850,7 +2851,8 @@ mod tests {
 
         let lock_path = transport.shared_state_lock_path();
         let lock_file = transport.lock_file(&lock_path).expect("open snapshot lock");
-        lock_file_with_backoff(&lock_file, &lock_path, false).expect("take exclusive snapshot lock");
+        lock_file_with_backoff(&lock_file, &lock_path, false)
+            .expect("take exclusive snapshot lock");
 
         let reader_root = root.clone();
         let reader = std::thread::spawn(move || {

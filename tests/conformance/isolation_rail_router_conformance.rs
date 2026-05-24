@@ -30,14 +30,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use franken_node::security::isolation_rail_router::{
-    IsolationRail, RailRouter, ElevationPolicy, WorkloadClassification,
-    ElevationEvent, AuditEntry, RailRouterError,
-    INV_ISO_NO_UNCLASSIFIED, INV_ISO_MONOTONIC_ELEVATION, INV_ISO_ATOMIC_TRANSITION,
-    INV_ISO_DETERMINISTIC_ROUTING, INV_ISO_AUDIT_COMPLETE,
-    ISO_001, ISO_002, ISO_003, ISO_004, ISO_005, ISO_006,
-    ERR_ISO_UNCLASSIFIED, ERR_ISO_DOWNGRADE_REJECTED, ERR_ISO_WORKLOAD_NOT_FOUND,
-    ERR_ISO_DUPLICATE_WORKLOAD, ERR_ISO_INVALID_RISK_SCORE,
-    ERR_ISO_SAME_RAIL_ELEVATION, ERR_ISO_HOT_ELEVATION_DISABLED,
+    AuditEntry, ERR_ISO_DOWNGRADE_REJECTED, ERR_ISO_DUPLICATE_WORKLOAD,
+    ERR_ISO_HOT_ELEVATION_DISABLED, ERR_ISO_INVALID_RISK_SCORE, ERR_ISO_SAME_RAIL_ELEVATION,
+    ERR_ISO_UNCLASSIFIED, ERR_ISO_WORKLOAD_NOT_FOUND, ElevationEvent, ElevationPolicy,
+    INV_ISO_ATOMIC_TRANSITION, INV_ISO_AUDIT_COMPLETE, INV_ISO_DETERMINISTIC_ROUTING,
+    INV_ISO_MONOTONIC_ELEVATION, INV_ISO_NO_UNCLASSIFIED, ISO_001, ISO_002, ISO_003, ISO_004,
+    ISO_005, ISO_006, IsolationRail, RailRouter, RailRouterError, WorkloadClassification,
 };
 
 /// Test requirement levels from the isolation rail router specification.
@@ -211,22 +209,20 @@ fn test_inv_no_unclassified() -> TestResult {
 
     // Test 2: Classify workload and verify it's no longer unclassified
     match router.classify_workload(workload_id, 0.3, "test-source") {
-        Ok(_) => {
-            match router.get_classification(workload_id) {
-                Ok(classification) => {
-                    if classification.workload_id == workload_id {
-                        TestResult::Pass
-                    } else {
-                        TestResult::Fail {
-                            reason: "Classification workload_id mismatch".to_string(),
-                        }
+        Ok(_) => match router.get_classification(workload_id) {
+            Ok(classification) => {
+                if classification.workload_id == workload_id {
+                    TestResult::Pass
+                } else {
+                    TestResult::Fail {
+                        reason: "Classification workload_id mismatch".to_string(),
                     }
                 }
-                Err(e) => TestResult::Fail {
-                    reason: format!("Classified workload should be found: {:?}", e),
-                },
             }
-        }
+            Err(e) => TestResult::Fail {
+                reason: format!("Classified workload should be found: {:?}", e),
+            },
+        },
         Err(e) => TestResult::Fail {
             reason: format!("Failed to classify workload: {:?}", e),
         },
@@ -243,7 +239,10 @@ fn test_inv_monotonic_elevation() -> TestResult {
     let workload_id = "elevation-test-workload";
 
     // Classify workload with low risk score -> Shared rail
-    if router.classify_workload(workload_id, 0.1, "test-source").is_err() {
+    if router
+        .classify_workload(workload_id, 0.1, "test-source")
+        .is_err()
+    {
         return TestResult::Fail {
             reason: "Failed to classify workload initially".to_string(),
         };
@@ -273,16 +272,17 @@ fn test_inv_monotonic_elevation() -> TestResult {
                 Ok(current_rail) => {
                     if current_rail != target_rail {
                         return TestResult::Fail {
-                            reason: format!("Elevation failed: expected {:?}, got {:?}", target_rail, current_rail),
+                            reason: format!(
+                                "Elevation failed: expected {:?}, got {:?}",
+                                target_rail, current_rail
+                            ),
                         };
                     }
 
                     // Now try to downgrade - this MUST fail
                     let weaker_rail = initial_rail;
                     match router.hot_elevate(workload_id, weaker_rail, "downgrade-attempt") {
-                        Err(RailRouterError::DowngradeRejected { .. }) => {
-                            TestResult::Pass
-                        }
+                        Err(RailRouterError::DowngradeRejected { .. }) => TestResult::Pass,
                         Ok(_) => TestResult::Fail {
                             reason: "Downgrade should have been rejected but succeeded".to_string(),
                         },
@@ -312,7 +312,10 @@ fn test_inv_atomic_transition() -> TestResult {
     let workload_id = "atomic-test-workload";
 
     // Classify workload
-    if router.classify_workload(workload_id, 0.2, "test-source").is_err() {
+    if router
+        .classify_workload(workload_id, 0.2, "test-source")
+        .is_err()
+    {
         return TestResult::Fail {
             reason: "Failed to classify workload".to_string(),
         };
@@ -340,14 +343,18 @@ fn test_inv_atomic_transition() -> TestResult {
                         let workloads_on_initial = router.workloads_on_rail(initial_rail);
                         if workloads_on_initial.contains(&workload_id.to_string()) {
                             TestResult::Fail {
-                                reason: "Workload found on both old and new rails (not atomic)".to_string(),
+                                reason: "Workload found on both old and new rails (not atomic)"
+                                    .to_string(),
                             }
                         } else {
                             TestResult::Pass
                         }
                     } else {
                         TestResult::Fail {
-                            reason: format!("Elevation not atomic: expected {:?}, got {:?}", target_rail, current_rail),
+                            reason: format!(
+                                "Elevation not atomic: expected {:?}, got {:?}",
+                                target_rail, current_rail
+                            ),
                         }
                     }
                 }
@@ -429,7 +436,10 @@ fn test_inv_audit_complete() -> TestResult {
             let latest_event = &audit_events[audit_events.len() - 1];
             if !latest_event.operation.contains("classify") {
                 return TestResult::Fail {
-                    reason: format!("Audit event missing classification details: {}", latest_event.operation),
+                    reason: format!(
+                        "Audit event missing classification details: {}",
+                        latest_event.operation
+                    ),
                 };
             }
         }
@@ -442,7 +452,11 @@ fn test_inv_audit_complete() -> TestResult {
 
     // Test 2: Elevation generates audit event
     let pre_elevation_count = router.audit_events().len();
-    match router.hot_elevate(workload_id, IsolationRail::FullIsolation, "audit-elevation-test") {
+    match router.hot_elevate(
+        workload_id,
+        IsolationRail::FullIsolation,
+        "audit-elevation-test",
+    ) {
         Ok(_) => {
             let audit_events = router.audit_events();
             if audit_events.len() <= pre_elevation_count {
@@ -455,7 +469,10 @@ fn test_inv_audit_complete() -> TestResult {
             let latest_event = &audit_events[audit_events.len() - 1];
             if !latest_event.operation.contains("elevate") {
                 return TestResult::Fail {
-                    reason: format!("Audit event missing elevation details: {}", latest_event.operation),
+                    reason: format!(
+                        "Audit event missing elevation details: {}",
+                        latest_event.operation
+                    ),
                 };
             }
         }
@@ -587,18 +604,29 @@ fn run_isolation_rail_router_conformance_suite() {
         // Structured JSON-line output for CI parsing
         println!(
             "{{\"id\":\"{}\",\"verdict\":\"{}\",\"level\":\"{:?}\",\"category\":\"{:?}\",\"duration_ms\":{}}}",
-            case.id, verdict, case.level, case.category, duration.as_millis()
+            case.id,
+            verdict,
+            case.level,
+            case.category,
+            duration.as_millis()
         );
     }
 
     let total = pass + fail + xfail + skip;
     println!("\n═══════════════════════════════════════════════════════════");
     println!("Isolation Rail Router Conformance Summary");
-    println!("Total: {}, Pass: {}, Fail: {}, XFail: {}, Skip: {}", total, pass, fail, xfail, skip);
+    println!(
+        "Total: {}, Pass: {}, Fail: {}, XFail: {}, Skip: {}",
+        total, pass, fail, xfail, skip
+    );
 
     // Calculate conformance score
-    let must_cases = IRR_CONFORMANCE_CASES.iter().filter(|c| c.level == RequirementLevel::Must).count();
-    let must_pass = IRR_CONFORMANCE_CASES.iter()
+    let must_cases = IRR_CONFORMANCE_CASES
+        .iter()
+        .filter(|c| c.level == RequirementLevel::Must)
+        .count();
+    let must_pass = IRR_CONFORMANCE_CASES
+        .iter()
         .filter(|c| c.level == RequirementLevel::Must)
         .map(|c| (c.test_fn)())
         .filter(|r| matches!(r, TestResult::Pass))
@@ -610,9 +638,16 @@ fn run_isolation_rail_router_conformance_suite() {
         0.0
     };
 
-    println!("MUST Conformance: {:.1}% ({}/{})", conformance_score, must_pass, must_cases);
+    println!(
+        "MUST Conformance: {:.1}% ({}/{})",
+        conformance_score, must_pass, must_cases
+    );
     println!("═══════════════════════════════════════════════════════════");
 
     assert_eq!(fail, 0, "{} conformance tests failed", fail);
-    assert!(conformance_score >= 95.0, "MUST conformance below 95%: {:.1}%", conformance_score);
+    assert!(
+        conformance_score >= 95.0,
+        "MUST conformance below 95%: {:.1}%",
+        conformance_score
+    );
 }

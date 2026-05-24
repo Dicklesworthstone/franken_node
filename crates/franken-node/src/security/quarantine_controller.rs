@@ -2201,7 +2201,11 @@ mod quarantine_controller_additional_negative_tests {
         ] {
             assert_eq!(h.len(), 71); // "sha256:" + 64 hex
             assert!(h.starts_with("sha256:"));
-            assert!(h[7..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h[7..]
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

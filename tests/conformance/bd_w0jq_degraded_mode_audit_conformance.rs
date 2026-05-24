@@ -5,12 +5,12 @@
 //! Pattern 4: Spec-Derived Test Matrix to ensure comprehensive coverage of all
 //! MUST and SHOULD requirements.
 
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 // Import the module under test
 use frankenengine_node::security::degraded_mode_audit::{
-    AuditError, DegradedModeAuditLog, DegradedModeEvent, validate_schema
+    AuditError, DegradedModeAuditLog, DegradedModeEvent, validate_schema,
 };
 
 /// Requirement levels from the bd-w0jq specification
@@ -183,7 +183,6 @@ const BD_W0JQ_CASES: &[ConformanceCase] = &[
         description: "whitespace-only fields must be rejected as empty",
         test_fn: test_whitespace_rejection,
     },
-
     // Event Emission Requirements (MUST)
     ConformanceCase {
         id: "W0JQ-EMIT-1",
@@ -201,7 +200,6 @@ const BD_W0JQ_CASES: &[ConformanceCase] = &[
         description: "invalid events must not be appended to log",
         test_fn: test_invalid_events_not_appended,
     },
-
     // Immutability Requirements (MUST)
     ConformanceCase {
         id: "W0JQ-IMMUTABLE-1",
@@ -211,7 +209,6 @@ const BD_W0JQ_CASES: &[ConformanceCase] = &[
         description: "INV-DM-IMMUTABLE: events cannot be modified after append",
         test_fn: test_events_immutable,
     },
-
     // Correlation Requirements (MUST)
     ConformanceCase {
         id: "W0JQ-CORRELATION-1",
@@ -229,7 +226,6 @@ const BD_W0JQ_CASES: &[ConformanceCase] = &[
         description: "INV-DM-CORRELATION: find_by_trace() exact match",
         test_fn: test_correlation_by_trace,
     },
-
     // Error Handling Requirements (MUST)
     ConformanceCase {
         id: "W0JQ-ERROR-1",
@@ -255,7 +251,6 @@ const BD_W0JQ_CASES: &[ConformanceCase] = &[
         description: "DM_SCHEMA_VIOLATION error for invalid event_type",
         test_fn: test_schema_violation_errors,
     },
-
     // Edge Case Requirements (SHOULD)
     ConformanceCase {
         id: "W0JQ-EDGE-1",
@@ -305,13 +300,34 @@ fn test_schema_complete_all_fields() -> Result<(), String> {
 
     // Test each field individually
     let field_tests = [
-        ("event_type", |mut e: DegradedModeEvent| { e.event_type.clear(); e }),
-        ("action_id", |mut e: DegradedModeEvent| { e.action_id.clear(); e }),
-        ("actor", |mut e: DegradedModeEvent| { e.actor.clear(); e }),
-        ("tier", |mut e: DegradedModeEvent| { e.tier.clear(); e }),
-        ("override_reason", |mut e: DegradedModeEvent| { e.override_reason.clear(); e }),
-        ("trace_id", |mut e: DegradedModeEvent| { e.trace_id.clear(); e }),
-        ("timestamp", |mut e: DegradedModeEvent| { e.timestamp.clear(); e }),
+        ("event_type", |mut e: DegradedModeEvent| {
+            e.event_type.clear();
+            e
+        }),
+        ("action_id", |mut e: DegradedModeEvent| {
+            e.action_id.clear();
+            e
+        }),
+        ("actor", |mut e: DegradedModeEvent| {
+            e.actor.clear();
+            e
+        }),
+        ("tier", |mut e: DegradedModeEvent| {
+            e.tier.clear();
+            e
+        }),
+        ("override_reason", |mut e: DegradedModeEvent| {
+            e.override_reason.clear();
+            e
+        }),
+        ("trace_id", |mut e: DegradedModeEvent| {
+            e.trace_id.clear();
+            e
+        }),
+        ("timestamp", |mut e: DegradedModeEvent| {
+            e.timestamp.clear();
+            e
+        }),
     ];
 
     for (field_name, modifier) in field_tests {
@@ -321,8 +337,13 @@ fn test_schema_complete_all_fields() -> Result<(), String> {
             return Err(format!("Empty {} should be rejected", field_name));
         }
         match result.unwrap_err() {
-            AuditError::MissingField { .. } => {}, // Expected
-            other => return Err(format!("Wrong error type for empty {}: {:?}", field_name, other)),
+            AuditError::MissingField { .. } => {} // Expected
+            other => {
+                return Err(format!(
+                    "Wrong error type for empty {}: {:?}",
+                    field_name, other
+                ));
+            }
         }
     }
 
@@ -350,7 +371,10 @@ fn test_event_type_exact_match() -> Result<(), String> {
         valid.event_type = invalid_type.into();
         let result = validate_schema(&valid);
         if result.is_ok() {
-            return Err(format!("Invalid event_type '{}' should be rejected", invalid_type));
+            return Err(format!(
+                "Invalid event_type '{}' should be rejected",
+                invalid_type
+            ));
         }
     }
 
@@ -364,13 +388,19 @@ fn test_whitespace_rejection() -> Result<(), String> {
     for whitespace in whitespace_values {
         event.action_id = whitespace.into();
         if validate_schema(&event).is_ok() {
-            return Err(format!("Whitespace-only action_id should be rejected: {:?}", whitespace));
+            return Err(format!(
+                "Whitespace-only action_id should be rejected: {:?}",
+                whitespace
+            ));
         }
 
         event.actor = whitespace.into();
         event.action_id = "valid".into(); // Reset
         if validate_schema(&event).is_ok() {
-            return Err(format!("Whitespace-only actor should be rejected: {:?}", whitespace));
+            return Err(format!(
+                "Whitespace-only actor should be rejected: {:?}",
+                whitespace
+            ));
         }
         event.actor = "valid".into(); // Reset
     }
@@ -382,7 +412,8 @@ fn test_emit_validates_before_append() -> Result<(), String> {
     let mut log = DegradedModeAuditLog::new();
 
     // Valid emit should succeed
-    log.emit(valid_event()).map_err(|e| format!("Valid emit failed: {}", e))?;
+    log.emit(valid_event())
+        .map_err(|e| format!("Valid emit failed: {}", e))?;
     if log.count() != 1 {
         return Err("Valid event not appended".into());
     }
@@ -459,12 +490,18 @@ fn test_correlation_by_action() -> Result<(), String> {
     // Test exact matches
     let results1 = log.find_by_action("action-1");
     if results1.len() != 1 {
-        return Err(format!("Expected 1 result for action-1, got {}", results1.len()));
+        return Err(format!(
+            "Expected 1 result for action-1, got {}",
+            results1.len()
+        ));
     }
 
     let results2 = log.find_by_action("action-2");
     if results2.len() != 1 {
-        return Err(format!("Expected 1 result for action-2, got {}", results2.len()));
+        return Err(format!(
+            "Expected 1 result for action-2, got {}",
+            results2.len()
+        ));
     }
 
     // Test no partial matches
@@ -493,7 +530,10 @@ fn test_correlation_by_trace() -> Result<(), String> {
     // Both events should be found by trace_id
     let results = log.find_by_trace("trace-1");
     if results.len() != 2 {
-        return Err(format!("Expected 2 results for trace-1, got {}", results.len()));
+        return Err(format!(
+            "Expected 2 results for trace-1, got {}",
+            results.len()
+        ));
     }
 
     // But action_id lookups should be distinct
@@ -539,7 +579,10 @@ fn test_event_not_found_errors() -> Result<(), String> {
     match err {
         AuditError::EventNotFound { action_id } => {
             if action_id != "nonexistent" {
-                return Err(format!("Expected action_id 'nonexistent', got '{}'", action_id));
+                return Err(format!(
+                    "Expected action_id 'nonexistent', got '{}'",
+                    action_id
+                ));
             }
         }
         _ => return Err("Expected EventNotFound variant".into()),
@@ -581,7 +624,10 @@ fn test_multiple_events_same_action() -> Result<(), String> {
 
     let results = log.find_by_action("same-action");
     if results.len() != 2 {
-        return Err(format!("Expected 2 events for same action_id, got {}", results.len()));
+        return Err(format!(
+            "Expected 2 events for same action_id, got {}",
+            results.len()
+        ));
     }
 
     Ok(())
@@ -703,7 +749,10 @@ mod tests {
         assert_eq!(report.results.len(), BD_W0JQ_CASES.len());
 
         // Verify all MUST requirements pass (conformance requirement)
-        assert_eq!(report.stats.must_fail, 0, "All MUST requirements should pass");
+        assert_eq!(
+            report.stats.must_fail, 0,
+            "All MUST requirements should pass"
+        );
 
         // Verify compliance score calculation
         let score = report.compliance_score();
@@ -742,6 +791,9 @@ mod tests {
 
         assert!(has_missing_field, "Should test DM_MISSING_FIELD error code");
         assert!(has_not_found, "Should test DM_EVENT_NOT_FOUND error code");
-        assert!(has_schema_violation, "Should test DM_SCHEMA_VIOLATION error code");
+        assert!(
+            has_schema_violation,
+            "Should test DM_SCHEMA_VIOLATION error code"
+        );
     }
 }

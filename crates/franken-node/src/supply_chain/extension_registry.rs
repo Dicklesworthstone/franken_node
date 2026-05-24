@@ -3264,9 +3264,11 @@ mod tests {
         );
 
         // 2. Typical.
-        let typical_prov =
-            make_provenance("abc123def456", "buildsystem-1.2",
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000");
+        let typical_prov = make_provenance(
+            "abc123def456",
+            "buildsystem-1.2",
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        );
         assert_eq!(
             compute_admission_digest(
                 br#"{"name":"ext-x","version":"1.0"}"#,
@@ -3278,17 +3280,18 @@ mod tests {
 
         // 3. FIELD-ORDER-SENSITIVITY: swap publisher_key_id and
         // vcs_commit_sha contents — MUST flip the digest.
-        let swap_prov =
-            make_provenance("pubkey-7-abc", "buildsystem-1.2",
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000");
+        let swap_prov = make_provenance(
+            "pubkey-7-abc",
+            "buildsystem-1.2",
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        );
         let swap_digest = compute_admission_digest(
             br#"{"name":"ext-x","version":"1.0"}"#,
             "abc123def456", // was vcs
             &swap_prov,
         );
         assert_ne!(
-            swap_digest,
-            "eefdd20557495db33791455e7e8c64162d02a853b089d6de976bd7d9be71a335",
+            swap_digest, "eefdd20557495db33791455e7e8c64162d02a853b089d6de976bd7d9be71a335",
             "swapping publisher_key_id and vcs_commit_sha MUST flip \
              the admission digest"
         );
@@ -3323,7 +3326,11 @@ mod tests {
             ),
         ] {
             assert_eq!(digest.len(), 64);
-            assert!(digest.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                digest
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

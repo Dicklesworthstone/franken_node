@@ -2720,8 +2720,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            genesis,
-            "3e9be5beb36419983ba7294d48ce989902f2c9442136b73a3c5914529af9faf2",
+            genesis, "3e9be5beb36419983ba7294d48ce989902f2c9442136b73a3c5914529af9faf2",
             "genesis derive_checkpoint_id drifted — check the v3 \
              domain separator `checkpoint_content_v3:length_prefixed:`, \
              the labeled-field encoding (LE64+label||LE64+value), OR \
@@ -2737,8 +2736,7 @@ mod tests {
             Some("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
         );
         assert_eq!(
-            linked,
-            "8f1c1054484791cd0bbf623afe6f42571be7865d46e394f160811ed847a79fc9",
+            linked, "8f1c1054484791cd0bbf623afe6f42571be7865d46e394f160811ed847a79fc9",
             "linked derive_checkpoint_id drifted — check the Some branch's \
              distinct label b\"previous_checkpoint_hash:some\""
         );
@@ -2795,7 +2793,10 @@ mod tests {
         // 6. Length+casing contract.
         for h in [&genesis, &linked, &diff_orch] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

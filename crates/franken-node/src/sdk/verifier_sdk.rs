@@ -8057,8 +8057,7 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
         // 1. Empty-fields fixture: only the domain bytes feed the hasher.
         let empty = super::deterministic_hash_fields(&[]);
         assert_eq!(
-            empty,
-            "483f2b83eaf92be15dd1ce2837aa223eae75397db83fbc0ce4df3db02a65b1a2",
+            empty, "483f2b83eaf92be15dd1ce2837aa223eae75397db83fbc0ce4df3db02a65b1a2",
             "empty-fields hash drifted — check the `verifier_sdk_v1:` \
              domain separator or per-field LE64-len framing decision \
              on zero-length fields"
@@ -8067,22 +8066,17 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
         // 2. Single-field fixture: locks per-field {LE64(len), bytes}.
         let single = super::deterministic_hash_fields(&["op-golden-1"]);
         assert_eq!(
-            single,
-            "d712df886288cb44795b23be5a0dc02565b3271c4a08c5d8edd3c0225ccb0ac1",
+            single, "d712df886288cb44795b23be5a0dc02565b3271c4a08c5d8edd3c0225ccb0ac1",
             "single-field hash drifted — check LE64 length-prefix width \
              (must be 8 bytes, not 4 or varint) or domain bytes"
         );
 
         // 3. Multi-field fixture: three distinct-length fields exercise
         // the iteration order. Reordering would flip the hash.
-        let multi = super::deterministic_hash_fields(&[
-            "artifact-x",
-            "sha256:abc",
-            "claim-trust-card",
-        ]);
+        let multi =
+            super::deterministic_hash_fields(&["artifact-x", "sha256:abc", "claim-trust-card"]);
         assert_eq!(
-            multi,
-            "df0f524ecc684b7b8aafbe074ebfe0da20210a326334a85c39b9b36f1083f112",
+            multi, "df0f524ecc684b7b8aafbe074ebfe0da20210a326334a85c39b9b36f1083f112",
             "multi-field hash drifted — check iteration order or per-field \
              {LE64, bytes} framing"
         );
@@ -8095,8 +8089,7 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
         // length-prefix design (see L261-262 doc).
         let with_empty = super::deterministic_hash_fields(&["", "non-empty", ""]);
         assert_eq!(
-            with_empty,
-            "967d055241cf208db64213d05684611034406d5757722a32545f029b838f0795",
+            with_empty, "967d055241cf208db64213d05684611034406d5757722a32545f029b838f0795",
             "with-empty hash drifted — check that an empty &str field \
              still emits LE64(0) into the hasher rather than being skipped \
              (skipping would defeat delimiter-collision-resistance)"
@@ -8105,7 +8098,10 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
         // Cross-fixture distinctness + length+casing contract.
         for h in [&empty, &single, &multi, &with_empty] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
         assert_ne!(empty, single);
         assert_ne!(single, multi);

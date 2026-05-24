@@ -927,13 +927,28 @@ mod tests {
         };
 
         // Test that granted capabilities return true
-        assert!(ctx.granted.get("allowed_capability").copied().unwrap_or(false));
+        assert!(
+            ctx.granted
+                .get("allowed_capability")
+                .copied()
+                .unwrap_or(false)
+        );
 
         // Test that denied capabilities return false (not just key presence)
-        assert!(!ctx.granted.get("denied_capability").copied().unwrap_or(false));
+        assert!(
+            !ctx.granted
+                .get("denied_capability")
+                .copied()
+                .unwrap_or(false)
+        );
 
         // Test that missing capabilities return false
-        assert!(!ctx.granted.get("missing_capability").copied().unwrap_or(false));
+        assert!(
+            !ctx.granted
+                .get("missing_capability")
+                .copied()
+                .unwrap_or(false)
+        );
 
         // Verify the old buggy approach would have failed for denied_capability
         assert!(ctx.granted.contains_key("denied_capability")); // This would be true, incorrectly

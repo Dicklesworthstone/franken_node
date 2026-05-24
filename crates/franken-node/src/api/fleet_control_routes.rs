@@ -2309,14 +2309,24 @@ mod tests {
             match i {
                 0 | 5 | 6 | 7 => {
                     // Valid cases should succeed (including unicode, long names, special chars)
-                    assert!(result.is_ok(), "Lease case {} should succeed: {:?}", i, result);
+                    assert!(
+                        result.is_ok(),
+                        "Lease case {} should succeed: {:?}",
+                        i,
+                        result
+                    );
                     if let Ok(lease) = result {
                         successful_leases.push(lease);
                     }
                 }
                 1 | 2 | 3 => {
                     // Invalid cases should fail (empty holder/resource, zero duration)
-                    assert!(result.is_err(), "Lease case {} should fail: {:?}", i, result);
+                    assert!(
+                        result.is_err(),
+                        "Lease case {} should fail: {:?}",
+                        i,
+                        result
+                    );
                     failed_leases.push(i);
                 }
                 4 => {
@@ -2386,14 +2396,24 @@ mod tests {
             match i {
                 0 | 3 | 4 | 5 => {
                     // Valid cases should succeed
-                    assert!(result.is_ok(), "Fence case {} should succeed: {:?}", i, result);
+                    assert!(
+                        result.is_ok(),
+                        "Fence case {} should succeed: {:?}",
+                        i,
+                        result
+                    );
                     if let Ok(fence) = result {
                         successful_fences.push(fence);
                     }
                 }
                 1 | 2 => {
                     // Invalid cases should fail (empty target/reason)
-                    assert!(result.is_err(), "Fence case {} should fail: {:?}", i, result);
+                    assert!(
+                        result.is_err(),
+                        "Fence case {} should fail: {:?}",
+                        i,
+                        result
+                    );
                     failed_fences.push(i);
                 }
                 _ => {}
@@ -2415,7 +2435,11 @@ mod tests {
             };
 
             let result = execute_fence(&admin, &trace, &action_req);
-            assert!(result.is_ok(), "All fencing actions should be supported: {:?}", action);
+            assert!(
+                result.is_ok(),
+                "All fencing actions should be supported: {:?}",
+                action
+            );
 
             if let Ok(fence) = result {
                 assert_eq!(fence.data.action, action);
@@ -2432,8 +2456,14 @@ mod tests {
 
             // Verify lease list structure
             for lease in &lease_list.data {
-                assert!(!lease.lease_id.is_empty(), "Listed lease should have valid ID");
-                assert!(!lease.holder.is_empty(), "Listed lease should have valid holder");
+                assert!(
+                    !lease.lease_id.is_empty(),
+                    "Listed lease should have valid ID"
+                );
+                assert!(
+                    !lease.holder.is_empty(),
+                    "Listed lease should have valid holder"
+                );
             }
         }
     }

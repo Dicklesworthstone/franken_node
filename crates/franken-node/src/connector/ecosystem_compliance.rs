@@ -1721,7 +1721,11 @@ mod tests {
         for (i, h) in hashes.iter().enumerate() {
             assert_eq!(h.len(), 71); // "sha256:" + 64 hex
             assert!(h.starts_with("sha256:"));
-            assert!(h[7..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h[7..]
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
             for (j, other) in hashes.iter().enumerate() {
                 if i < j {
                     assert_ne!(h, other, "fixtures {i} and {j} MUST be distinct");

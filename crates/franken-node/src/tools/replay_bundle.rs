@@ -4981,7 +4981,8 @@ mod proptest_replay_bundle_invariants {
                 let handle = thread::spawn(move || {
                     for i in 0..25 {
                         let validation_result = validate_bundle_integrity(&bundle_clone);
-                        let mut results_guard = results_clone.lock()
+                        let mut results_guard = results_clone
+                            .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         results_guard.push((thread_id, i, validation_result.is_ok()));
                     }
@@ -4995,7 +4996,8 @@ mod proptest_replay_bundle_invariants {
             }
 
             // Verify all validations succeeded
-            let final_results = results.lock()
+            let final_results = results
+                .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(
                 final_results.len(),
@@ -5025,9 +5027,9 @@ mod proptest_replay_bundle_invariants {
     #[test]
     fn test_poison_recovery_in_concurrent_threads() {
         // Regression test for bd-nbb5s: verify poison recovery works
+        use std::panic;
         use std::sync::{Arc, Mutex};
         use std::thread;
-        use std::panic;
 
         let shared_data = Arc::new(Mutex::new(Vec::<i32>::new()));
         let mut handles = vec![];
@@ -5047,7 +5049,8 @@ mod proptest_replay_bundle_invariants {
             let data_clone = Arc::clone(&shared_data);
             let handle = thread::spawn(move || {
                 // This should use poison recovery, not panic
-                let mut guard = data_clone.lock()
+                let mut guard = data_clone
+                    .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 guard.push(i);
             });
@@ -5056,13 +5059,20 @@ mod proptest_replay_bundle_invariants {
 
         // All threads should complete successfully despite the poisoned mutex
         for handle in handles {
-            handle.join().expect("thread should complete despite poison");
+            handle
+                .join()
+                .expect("thread should complete despite poison");
         }
 
         // Verify the data was successfully written after poison recovery
-        let final_guard = shared_data.lock()
+        let final_guard = shared_data
+            .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        assert_eq!(final_guard.len(), 3, "poison recovery should allow continued use");
+        assert_eq!(
+            final_guard.len(),
+            3,
+            "poison recovery should allow continued use"
+        );
         assert!(final_guard.contains(&0), "data should include 0");
         assert!(final_guard.contains(&1), "data should include 1");
         assert!(final_guard.contains(&2), "data should include 2");

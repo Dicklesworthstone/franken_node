@@ -3796,87 +3796,134 @@ mod tests {
         // Test signature verification with valid signature
         let valid_signature = sign_capsule(&base_capsule, &signing_key);
         base_capsule.signature = valid_signature;
-        assert!(verify_signature(&base_capsule, &verifying_key).is_ok(),
-                "Valid signature should verify successfully");
+        assert!(
+            verify_signature(&base_capsule, &verifying_key).is_ok(),
+            "Valid signature should verify successfully"
+        );
 
         // Test empty signature rejection
         let mut empty_sig_capsule = base_capsule.clone();
         empty_sig_capsule.signature = String::new();
-        assert!(verify_signature(&empty_sig_capsule, &verifying_key).is_err(),
-                "Empty signature should be rejected");
+        assert!(
+            verify_signature(&empty_sig_capsule, &verifying_key).is_err(),
+            "Empty signature should be rejected"
+        );
 
         // Test malformed hex signature rejection
         let mut bad_hex_capsule = base_capsule.clone();
         bad_hex_capsule.signature = "not_hex_data_gggggg".to_string();
-        assert!(verify_signature(&bad_hex_capsule, &verifying_key).is_err(),
-                "Malformed hex signature should be rejected");
+        assert!(
+            verify_signature(&bad_hex_capsule, &verifying_key).is_err(),
+            "Malformed hex signature should be rejected"
+        );
 
         // Test wrong-length signature rejection (64 bytes required)
         let mut short_sig_capsule = base_capsule.clone();
         short_sig_capsule.signature = "deadbeef".to_string(); // Too short
-        assert!(verify_signature(&short_sig_capsule, &verifying_key).is_err(),
-                "Short signature should be rejected");
+        assert!(
+            verify_signature(&short_sig_capsule, &verifying_key).is_err(),
+            "Short signature should be rejected"
+        );
 
         let mut long_sig_capsule = base_capsule.clone();
         long_sig_capsule.signature = "a".repeat(200); // Too long
-        assert!(verify_signature(&long_sig_capsule, &verifying_key).is_err(),
-                "Long signature should be rejected");
+        assert!(
+            verify_signature(&long_sig_capsule, &verifying_key).is_err(),
+            "Long signature should be rejected"
+        );
 
         // Test signature with wrong key rejection
         let (wrong_signing_key, _) = test_keypair();
         let mut wrong_key_capsule = base_capsule.clone();
         wrong_key_capsule.signature = sign_capsule(&wrong_key_capsule, &wrong_signing_key);
-        assert!(verify_signature(&wrong_key_capsule, &verifying_key).is_err(),
-                "Signature with wrong key should be rejected");
+        assert!(
+            verify_signature(&wrong_key_capsule, &verifying_key).is_err(),
+            "Signature with wrong key should be rejected"
+        );
 
         // Test capsule tampering detection - modify each field and verify signature fails
         let test_mutations = [
-            ("capsule_id", |c: &mut ReplayCapsule| c.manifest.capsule_id = "TAMPERED".to_string()),
-            ("description", |c: &mut ReplayCapsule| c.manifest.description = "TAMPERED".to_string()),
-            ("claim_type", |c: &mut ReplayCapsule| c.manifest.claim_type = "TAMPERED".to_string()),
-            ("expected_hash", |c: &mut ReplayCapsule| c.manifest.expected_output_hash = "TAMPERED".to_string()),
-            ("created_at", |c: &mut ReplayCapsule| c.manifest.created_at = "TAMPERED".to_string()),
-            ("creator_identity", |c: &mut ReplayCapsule| c.manifest.creator_identity = "TAMPERED".to_string()),
-            ("payload", |c: &mut ReplayCapsule| c.payload = "TAMPERED".to_string()),
+            ("capsule_id", |c: &mut ReplayCapsule| {
+                c.manifest.capsule_id = "TAMPERED".to_string()
+            }),
+            ("description", |c: &mut ReplayCapsule| {
+                c.manifest.description = "TAMPERED".to_string()
+            }),
+            ("claim_type", |c: &mut ReplayCapsule| {
+                c.manifest.claim_type = "TAMPERED".to_string()
+            }),
+            ("expected_hash", |c: &mut ReplayCapsule| {
+                c.manifest.expected_output_hash = "TAMPERED".to_string()
+            }),
+            ("created_at", |c: &mut ReplayCapsule| {
+                c.manifest.created_at = "TAMPERED".to_string()
+            }),
+            ("creator_identity", |c: &mut ReplayCapsule| {
+                c.manifest.creator_identity = "TAMPERED".to_string()
+            }),
+            ("payload", |c: &mut ReplayCapsule| {
+                c.payload = "TAMPERED".to_string()
+            }),
         ];
 
         for (field_name, mutate_fn) in test_mutations {
             let mut tampered_capsule = base_capsule.clone();
             mutate_fn(&mut tampered_capsule);
-            assert!(verify_signature(&tampered_capsule, &verifying_key).is_err(),
-                    "Tampering with {} should invalidate signature", field_name);
+            assert!(
+                verify_signature(&tampered_capsule, &verifying_key).is_err(),
+                "Tampering with {} should invalidate signature",
+                field_name
+            );
         }
 
         // Test input tampering detection
         let mut input_tampered = base_capsule.clone();
-        input_tampered.inputs.insert("TAMPERED_KEY".to_string(), "TAMPERED_VALUE".to_string());
-        assert!(verify_signature(&input_tampered, &verifying_key).is_err(),
-                "Adding inputs should invalidate signature");
+        input_tampered
+            .inputs
+            .insert("TAMPERED_KEY".to_string(), "TAMPERED_VALUE".to_string());
+        assert!(
+            verify_signature(&input_tampered, &verifying_key).is_err(),
+            "Adding inputs should invalidate signature"
+        );
 
         let mut input_modified = base_capsule.clone();
         if let Some((key, _)) = input_modified.inputs.iter().next() {
             let key = key.clone();
-            input_modified.inputs.insert(key, "MODIFIED_VALUE".to_string());
+            input_modified
+                .inputs
+                .insert(key, "MODIFIED_VALUE".to_string());
         }
-        assert!(verify_signature(&input_modified, &verifying_key).is_err(),
-                "Modifying input values should invalidate signature");
+        assert!(
+            verify_signature(&input_modified, &verifying_key).is_err(),
+            "Modifying input values should invalidate signature"
+        );
 
         // Test metadata tampering detection
         let mut metadata_tampered = base_capsule.clone();
-        metadata_tampered.manifest.metadata.insert("TAMPERED_META".to_string(), "VALUE".to_string());
-        assert!(verify_signature(&metadata_tampered, &verifying_key).is_err(),
-                "Adding metadata should invalidate signature");
+        metadata_tampered
+            .manifest
+            .metadata
+            .insert("TAMPERED_META".to_string(), "VALUE".to_string());
+        assert!(
+            verify_signature(&metadata_tampered, &verifying_key).is_err(),
+            "Adding metadata should invalidate signature"
+        );
 
         // Test input_refs tampering detection
         let mut refs_tampered = base_capsule.clone();
-        refs_tampered.manifest.input_refs.push("TAMPERED_REF".to_string());
-        assert!(verify_signature(&refs_tampered, &verifying_key).is_err(),
-                "Adding input refs should invalidate signature");
+        refs_tampered
+            .manifest
+            .input_refs
+            .push("TAMPERED_REF".to_string());
+        assert!(
+            verify_signature(&refs_tampered, &verifying_key).is_err(),
+            "Adding input refs should invalidate signature"
+        );
 
         // Test signature domain separation (critical security property)
         let domain_separated_payload = {
-            let capsule_bytes = serde_json::to_vec(&base_capsule)
-                .expect("Capsule should serialize");
+            let capsule_bytes =
+                serde_json::to_vec(&base_capsule).expect("Capsule should serialize");
             let mut hasher = Sha256::new();
             hasher.update(ED25519_CAPSULE_SIGNATURE_DOMAIN);
             hasher.update(&capsule_bytes);
@@ -3887,21 +3934,25 @@ mod tests {
         let non_domain_signature = signing_key.sign(&domain_separated_payload);
         let mut non_domain_capsule = base_capsule.clone();
         non_domain_capsule.signature = hex::encode(non_domain_signature.to_bytes());
-        assert!(verify_signature(&non_domain_capsule, &verifying_key).is_err(),
-                "Signature without proper domain separation should fail");
+        assert!(
+            verify_signature(&non_domain_capsule, &verifying_key).is_err(),
+            "Signature without proper domain separation should fail"
+        );
 
         // Test edge cases with extreme field values
         let mut extreme_capsule = ReplayCapsule {
             manifest: CapsuleManifest {
-                schema_version: "x".repeat(1000), // Very long schema version
-                capsule_id: String::new(), // Empty ID
-                description: "z".repeat(100000), // Very long description
-                claim_type: "\n\r\t".to_string(), // Whitespace-only claim type
+                schema_version: "x".repeat(1000),       // Very long schema version
+                capsule_id: String::new(),              // Empty ID
+                description: "z".repeat(100000),        // Very long description
+                claim_type: "\n\r\t".to_string(),       // Whitespace-only claim type
                 input_refs: vec!["".to_string(); 1000], // Many empty refs
-                expected_output_hash: "0".repeat(64), // All-zero hash
+                expected_output_hash: "0".repeat(64),   // All-zero hash
                 created_at: "1970-01-01T00:00:00Z".to_string(), // Epoch timestamp
                 creator_identity: "𝓾𝓷𝓲𝓬𝓸𝓭𝓮".to_string(), // Unicode identity
-                metadata: (0..100).map(|i| (format!("key{}", i), format!("value{}", i))).collect(),
+                metadata: (0..100)
+                    .map(|i| (format!("key{}", i), format!("value{}", i)))
+                    .collect(),
             },
             payload: "".to_string(), // Empty payload
             inputs: BTreeMap::new(), // No inputs
@@ -3910,8 +3961,10 @@ mod tests {
 
         // Sign the extreme capsule
         extreme_capsule.signature = sign_capsule(&extreme_capsule, &signing_key);
-        assert!(verify_signature(&extreme_capsule, &verifying_key).is_ok(),
-                "Extreme but valid capsule should verify");
+        assert!(
+            verify_signature(&extreme_capsule, &verifying_key).is_ok(),
+            "Extreme but valid capsule should verify"
+        );
 
         // Test deterministic signing (same capsule should produce same signature)
         let sig1 = sign_capsule(&base_capsule, &signing_key);
@@ -3920,27 +3973,39 @@ mod tests {
 
         // Test signature length is exactly 64 hex characters (32 bytes)
         let signature = sign_capsule(&base_capsule, &signing_key);
-        assert_eq!(signature.len(), 128, "Signature should be 128 hex chars (64 bytes)");
-        assert!(signature.chars().all(|c| c.is_ascii_hexdigit()),
-                "Signature should contain only hex digits");
+        assert_eq!(
+            signature.len(),
+            128,
+            "Signature should be 128 hex chars (64 bytes)"
+        );
+        assert!(
+            signature.chars().all(|c| c.is_ascii_hexdigit()),
+            "Signature should contain only hex digits"
+        );
 
         // Test case sensitivity of hex signature
         let mut upper_case_sig = base_capsule.clone();
         upper_case_sig.signature = signature.to_uppercase();
-        assert!(verify_signature(&upper_case_sig, &verifying_key).is_ok(),
-                "Uppercase hex signature should verify");
+        assert!(
+            verify_signature(&upper_case_sig, &verifying_key).is_ok(),
+            "Uppercase hex signature should verify"
+        );
 
         let mut lower_case_sig = base_capsule.clone();
         lower_case_sig.signature = signature.to_lowercase();
-        assert!(verify_signature(&lower_case_sig, &verifying_key).is_ok(),
-                "Lowercase hex signature should verify");
+        assert!(
+            verify_signature(&lower_case_sig, &verifying_key).is_ok(),
+            "Lowercase hex signature should verify"
+        );
 
         // Test identity name length boundaries
         let mut max_creator_name = base_capsule.clone();
         max_creator_name.manifest.creator_identity = "a".repeat(MAX_CREATOR_IDENTITY_NAME_LEN);
         max_creator_name.signature = sign_capsule(&max_creator_name, &signing_key);
-        assert!(verify_signature(&max_creator_name, &verifying_key).is_ok(),
-                "Max length creator identity should verify");
+        assert!(
+            verify_signature(&max_creator_name, &verifying_key).is_ok(),
+            "Max length creator identity should verify"
+        );
 
         // Test consistent serialization order (BTreeMap guarantees)
         let mut unordered_inputs = BTreeMap::new();
@@ -3975,7 +4040,9 @@ mod tests {
 
         // Allow for some variation but they should be roughly similar
         let ratio = valid_duration.as_nanos() as f64 / invalid_duration.as_nanos() as f64;
-        assert!(ratio > 0.1 && ratio < 10.0,
-                "Valid and invalid signature verification should have similar timing");
+        assert!(
+            ratio > 0.1 && ratio < 10.0,
+            "Valid and invalid signature verification should have similar timing"
+        );
     }
 }

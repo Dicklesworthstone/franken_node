@@ -3,13 +3,13 @@
 //! This harness implements Pattern 4: Spec-Derived Test Matrix for the bd-1nfu
 //! specification covering remote capability gates for network-bound trust/control operations.
 
-use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use frankenengine_node::security::remote_cap::{
-    CapabilityProvider, CapabilityGate, RemoteCap, RemoteOperation, RemoteScope,
-    RemoteCapError, RemoteCapAuditEvent, ConnectivityMode
+    CapabilityGate, CapabilityProvider, ConnectivityMode, RemoteCap, RemoteCapAuditEvent,
+    RemoteCapError, RemoteOperation, RemoteScope,
 };
 
 /// Test categories for organizational purposes
@@ -87,19 +87,30 @@ impl ConformanceReport {
         let mut md = String::new();
         md.push_str("# bd-1nfu Remote Capability Gate Conformance Report\n\n");
         md.push_str(&format!("**Generated:** {}\n\n", self.timestamp));
-        md.push_str(&format!("**Compliance Score:** {:.1}%\n\n", self.compliance_score() * 100.0));
+        md.push_str(&format!(
+            "**Compliance Score:** {:.1}%\n\n",
+            self.compliance_score() * 100.0
+        ));
 
         // Summary table
         md.push_str("## Summary\n\n");
         md.push_str("| Requirement Level | Pass | Fail | Skip | XFAIL |\n");
         md.push_str("|------------------|:----:|:----:|:----:|:-----:|\n");
-        md.push_str(&format!("| MUST | {} | {} | 0 | 0 |\n",
-                             self.stats.must_pass, self.stats.must_fail));
-        md.push_str(&format!("| SHOULD | {} | {} | {} | {} |\n",
-                             self.stats.should_pass, self.stats.should_fail,
-                             self.stats.skipped, self.stats.expected_failures));
-        md.push_str(&format!("| MAY | {} | {} | 0 | 0 |\n",
-                             self.stats.may_pass, self.stats.may_fail));
+        md.push_str(&format!(
+            "| MUST | {} | {} | 0 | 0 |\n",
+            self.stats.must_pass, self.stats.must_fail
+        ));
+        md.push_str(&format!(
+            "| SHOULD | {} | {} | {} | {} |\n",
+            self.stats.should_pass,
+            self.stats.should_fail,
+            self.stats.skipped,
+            self.stats.expected_failures
+        ));
+        md.push_str(&format!(
+            "| MAY | {} | {} | 0 | 0 |\n",
+            self.stats.may_pass, self.stats.may_fail
+        ));
 
         // Detailed results
         md.push_str("\n## Test Results\n\n");
@@ -110,8 +121,10 @@ impl ConformanceReport {
                 TestResult::Skipped { .. } => "⏭️ SKIP",
                 TestResult::ExpectedFailure { .. } => "⏳ XFAIL",
             };
-            md.push_str(&format!("- **{}** [{}] {}: {}\n",
-                                record.id, status, record.section, record.description));
+            md.push_str(&format!(
+                "- **{}** [{}] {}: {}\n",
+                record.id, status, record.section, record.description
+            ));
 
             if let TestResult::Fail { reason } = &record.result {
                 md.push_str(&format!("  - ❌ {}\n", reason));
@@ -130,7 +143,8 @@ fn test_case_1nfu_inv_1() -> ConformanceRecord {
         section: "Core Invariants".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Unit,
-        description: "RemoteCap tokens MUST contain scope, issuer, expiry, and signature".to_string(),
+        description: "RemoteCap tokens MUST contain scope, issuer, expiry, and signature"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -138,30 +152,36 @@ fn test_case_1nfu_inv_1() -> ConformanceRecord {
         let provider = CapabilityProvider::new("test-secret").expect("valid provider");
         let scope = RemoteScope::new(vec!["https://api.example/v1".to_string()]);
 
-        let (cap, _event) = provider.issue(
-            "test-issuer",
-            scope,
-            1000,
-            300,
-            true,
-            false,
-            "trace-inv-1"
-        ).expect("capability issuance should succeed");
+        let (cap, _event) = provider
+            .issue("test-issuer", scope, 1000, 300, true, false, "trace-inv-1")
+            .expect("capability issuance should succeed");
 
         // Verify all required fields are present and non-empty
         assert!(!cap.token_id.is_empty(), "token_id must be non-empty");
-        assert!(!cap.issuer_identity.is_empty(), "issuer_identity must be non-empty");
-        assert!(cap.expires_at_epoch_secs > 0, "expires_at_epoch_secs must be positive");
-        assert!(!cap.scope.endpoint_prefixes.is_empty(), "scope must have endpoint prefixes");
+        assert!(
+            !cap.issuer_identity.is_empty(),
+            "issuer_identity must be non-empty"
+        );
+        assert!(
+            cap.expires_at_epoch_secs > 0,
+            "expires_at_epoch_secs must be positive"
+        );
+        assert!(
+            !cap.scope.endpoint_prefixes.is_empty(),
+            "scope must have endpoint prefixes"
+        );
         assert!(!cap.signature_b64.is_empty(), "signature must be non-empty");
 
         // Verify scope has endpoint prefixes
-        assert!(!cap.scope.endpoint_prefixes.is_empty(), "scope endpoint prefixes required");
+        assert!(
+            !cap.scope.endpoint_prefixes.is_empty(),
+            "scope endpoint prefixes required"
+        );
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "RemoteCap token missing required fields".to_string()
+                reason: "RemoteCap token missing required fields".to_string(),
             };
         }
     }
@@ -183,9 +203,9 @@ fn test_case_1nfu_inv_2() -> ConformanceRecord {
         let provider = CapabilityProvider::new("test-secret").expect("valid provider");
         let scope = RemoteScope::new(vec!["https://api.example/v1".to_string()]);
 
-        let (cap, _) = provider.issue(
-            "test-issuer", scope, 1000, 300, true, false, "trace-inv-2"
-        ).expect("capability issuance should succeed");
+        let (cap, _) = provider
+            .issue("test-issuer", scope, 1000, 300, true, false, "trace-inv-2")
+            .expect("capability issuance should succeed");
 
         let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
 
@@ -195,18 +215,21 @@ fn test_case_1nfu_inv_2() -> ConformanceRecord {
             RemoteOperation::Upload,
             "https://api.example/v1/upload",
             1100,
-            "trace-gate-check"
+            "trace-gate-check",
         );
 
         assert!(result.is_ok(), "valid capability should pass gate check");
 
         // Gate should record audit event
-        assert!(!gate.audit_log().is_empty(), "gate must record audit events");
+        assert!(
+            !gate.audit_log().is_empty(),
+            "gate must record audit events"
+        );
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "CapabilityGate not functioning as single enforcement point".to_string()
+                reason: "CapabilityGate not functioning as single enforcement point".to_string(),
             };
         }
     }
@@ -220,7 +243,8 @@ fn test_case_1nfu_evt_1() -> ConformanceRecord {
         section: "Event Codes".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Integration,
-        description: "REMOTECAP_ISSUED event MUST be emitted on successful capability issuance".to_string(),
+        description: "REMOTECAP_ISSUED event MUST be emitted on successful capability issuance"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -228,22 +252,31 @@ fn test_case_1nfu_evt_1() -> ConformanceRecord {
         let provider = CapabilityProvider::new("test-secret").expect("valid provider");
         let scope = RemoteScope::new(vec!["https://api.example/v1".to_string()]);
 
-        let (_cap, event) = provider.issue(
-            "test-issuer", scope, 1000, 300, true, false, "trace-evt-1"
-        ).expect("capability issuance should succeed");
+        let (_cap, event) = provider
+            .issue("test-issuer", scope, 1000, 300, true, false, "trace-evt-1")
+            .expect("capability issuance should succeed");
 
         // Verify REMOTECAP_ISSUED event is emitted
         assert_eq!(event.event_code, "REMOTECAP_ISSUED", "correct event code");
-        assert_eq!(event.legacy_event_code, "RC_CAP_GRANTED", "correct legacy event code");
+        assert_eq!(
+            event.legacy_event_code, "RC_CAP_GRANTED",
+            "correct legacy event code"
+        );
         assert!(event.allowed, "event should indicate success");
         assert!(event.token_id.is_some(), "event should include token_id");
-        assert!(event.issuer_identity.is_some(), "event should include issuer_identity");
-        assert_eq!(event.trace_id, "trace-evt-1", "event should include trace_id");
+        assert!(
+            event.issuer_identity.is_some(),
+            "event should include issuer_identity"
+        );
+        assert_eq!(
+            event.trace_id, "trace-evt-1",
+            "event should include trace_id"
+        );
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "REMOTECAP_ISSUED event not properly emitted".to_string()
+                reason: "REMOTECAP_ISSUED event not properly emitted".to_string(),
             };
         }
     }
@@ -257,7 +290,8 @@ fn test_case_1nfu_evt_2() -> ConformanceRecord {
         section: "Event Codes".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Integration,
-        description: "REMOTECAP_DENIED event MUST be emitted on capability check failures".to_string(),
+        description: "REMOTECAP_DENIED event MUST be emitted on capability check failures"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -270,7 +304,7 @@ fn test_case_1nfu_evt_2() -> ConformanceRecord {
             RemoteOperation::Upload,
             "https://api.example/v1/upload",
             1000,
-            "trace-evt-2"
+            "trace-evt-2",
         );
 
         assert!(result.is_err(), "check without capability should fail");
@@ -281,15 +315,24 @@ fn test_case_1nfu_evt_2() -> ConformanceRecord {
 
         let event = audit_log.last().expect("last audit event");
         assert_eq!(event.event_code, "REMOTECAP_DENIED", "correct event code");
-        assert_eq!(event.legacy_event_code, "RC_CHECK_DENIED", "correct legacy event code");
+        assert_eq!(
+            event.legacy_event_code, "RC_CHECK_DENIED",
+            "correct legacy event code"
+        );
         assert!(!event.allowed, "event should indicate denial");
-        assert!(event.denial_code.is_some(), "event should include denial code");
-        assert_eq!(event.trace_id, "trace-evt-2", "event should include trace_id");
+        assert!(
+            event.denial_code.is_some(),
+            "event should include denial code"
+        );
+        assert_eq!(
+            event.trace_id, "trace-evt-2",
+            "event should include trace_id"
+        );
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "REMOTECAP_DENIED event not properly emitted".to_string()
+                reason: "REMOTECAP_DENIED event not properly emitted".to_string(),
             };
         }
     }
@@ -303,7 +346,8 @@ fn test_case_1nfu_evt_3() -> ConformanceRecord {
         section: "Event Codes".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Integration,
-        description: "REMOTECAP_CONSUMED event MUST be emitted on single-use token consumption".to_string(),
+        description: "REMOTECAP_CONSUMED event MUST be emitted on single-use token consumption"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -311,9 +355,17 @@ fn test_case_1nfu_evt_3() -> ConformanceRecord {
         let provider = CapabilityProvider::new("test-secret").expect("valid provider");
         let scope = RemoteScope::new(vec!["https://api.example/v1".to_string()]);
 
-        let (cap, _) = provider.issue(
-            "test-issuer", scope, 1000, 300, true, true, "trace-evt-3" // single_use = true
-        ).expect("capability issuance should succeed");
+        let (cap, _) = provider
+            .issue(
+                "test-issuer",
+                scope,
+                1000,
+                300,
+                true,
+                true,
+                "trace-evt-3", // single_use = true
+            )
+            .expect("capability issuance should succeed");
 
         let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
 
@@ -323,7 +375,7 @@ fn test_case_1nfu_evt_3() -> ConformanceRecord {
             RemoteOperation::Upload,
             "https://api.example/v1/upload",
             1100,
-            "trace-consume"
+            "trace-consume",
         );
 
         assert!(result.is_ok(), "valid single-use capability should pass");
@@ -332,13 +384,16 @@ fn test_case_1nfu_evt_3() -> ConformanceRecord {
         let audit_log = gate.audit_log();
         let event = audit_log.last().expect("consumption audit event");
         assert_eq!(event.event_code, "REMOTECAP_CONSUMED", "correct event code");
-        assert_eq!(event.legacy_event_code, "RC_CHECK_PASSED", "correct legacy event code");
+        assert_eq!(
+            event.legacy_event_code, "RC_CHECK_PASSED",
+            "correct legacy event code"
+        );
         assert!(event.allowed, "event should indicate success");
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "REMOTECAP_CONSUMED event not properly emitted".to_string()
+                reason: "REMOTECAP_CONSUMED event not properly emitted".to_string(),
             };
         }
     }
@@ -352,7 +407,8 @@ fn test_case_1nfu_err_1() -> ConformanceRecord {
         section: "Error Handling".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Unit,
-        description: "REMOTECAP_MISSING error MUST be returned when no capability provided".to_string(),
+        description: "REMOTECAP_MISSING error MUST be returned when no capability provided"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -364,7 +420,7 @@ fn test_case_1nfu_err_1() -> ConformanceRecord {
             RemoteOperation::Upload,
             "https://api.example/v1/upload",
             1000,
-            "trace-err-1"
+            "trace-err-1",
         );
 
         assert!(result.is_err(), "check without capability should fail");
@@ -376,10 +432,10 @@ fn test_case_1nfu_err_1() -> ConformanceRecord {
         let event = audit_log.last().expect("denial audit event");
         assert_eq!(event.denial_code.as_deref(), Some("REMOTECAP_MISSING"));
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "REMOTECAP_MISSING error not properly handled".to_string()
+                reason: "REMOTECAP_MISSING error not properly handled".to_string(),
             };
         }
     }
@@ -393,7 +449,8 @@ fn test_case_1nfu_err_2() -> ConformanceRecord {
         section: "Error Handling".to_string(),
         level: RequirementLevel::Must,
         category: TestCategory::Unit,
-        description: "REMOTECAP_EXPIRED error MUST be returned for expired capabilities".to_string(),
+        description: "REMOTECAP_EXPIRED error MUST be returned for expired capabilities"
+            .to_string(),
         result: TestResult::Pass,
     };
 
@@ -401,9 +458,17 @@ fn test_case_1nfu_err_2() -> ConformanceRecord {
         let provider = CapabilityProvider::new("test-secret").expect("valid provider");
         let scope = RemoteScope::new(vec!["https://api.example/v1".to_string()]);
 
-        let (cap, _) = provider.issue(
-            "test-issuer", scope, 1000, 1, true, false, "trace-err-2" // TTL = 1 second
-        ).expect("capability issuance should succeed");
+        let (cap, _) = provider
+            .issue(
+                "test-issuer",
+                scope,
+                1000,
+                1,
+                true,
+                false,
+                "trace-err-2", // TTL = 1 second
+            )
+            .expect("capability issuance should succeed");
 
         let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
 
@@ -413,17 +478,17 @@ fn test_case_1nfu_err_2() -> ConformanceRecord {
             RemoteOperation::Upload,
             "https://api.example/v1/upload",
             1002, // After expiry (1000 + 1 + 1)
-            "trace-expired"
+            "trace-expired",
         );
 
         assert!(result.is_err(), "expired capability should fail");
         let err = result.unwrap_err();
         assert_eq!(err.code(), "REMOTECAP_EXPIRED", "correct error code");
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "REMOTECAP_EXPIRED error not properly handled".to_string()
+                reason: "REMOTECAP_EXPIRED error not properly handled".to_string(),
             };
         }
     }
@@ -445,9 +510,9 @@ fn test_case_1nfu_sec_1() -> ConformanceRecord {
         let provider = CapabilityProvider::new("test-secret").expect("valid provider");
         let scope = RemoteScope::new(vec!["https://api.example/v1".to_string()]);
 
-        let (mut cap, _) = provider.issue(
-            "test-issuer", scope, 1000, 300, true, false, "trace-sec-1"
-        ).expect("capability issuance should succeed");
+        let (mut cap, _) = provider
+            .issue("test-issuer", scope, 1000, 300, true, false, "trace-sec-1")
+            .expect("capability issuance should succeed");
 
         // Corrupt the signature
         cap.signature_b64 = "invalid-signature".to_string();
@@ -459,17 +524,24 @@ fn test_case_1nfu_sec_1() -> ConformanceRecord {
             RemoteOperation::Upload,
             "https://api.example/v1/upload",
             1100,
-            "trace-forged"
+            "trace-forged",
         );
 
-        assert!(result.is_err(), "forged capability should fail verification");
+        assert!(
+            result.is_err(),
+            "forged capability should fail verification"
+        );
         let err = result.unwrap_err();
-        assert_eq!(err.code(), "REMOTECAP_INVALID_SIGNATURE", "correct error code");
+        assert_eq!(
+            err.code(),
+            "REMOTECAP_INVALID_SIGNATURE",
+            "correct error code"
+        );
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Signature verification not preventing forgery".to_string()
+                reason: "Signature verification not preventing forgery".to_string(),
             };
         }
     }
@@ -491,9 +563,9 @@ fn test_case_1nfu_sec_2() -> ConformanceRecord {
         let provider = CapabilityProvider::new("test-secret").expect("valid provider");
         let scope = RemoteScope::new(vec!["https://api.example/v1".to_string()]);
 
-        let (cap, _) = provider.issue(
-            "test-issuer", scope, 1000, 300, true, false, "trace-sec-2"
-        ).expect("capability issuance should succeed");
+        let (cap, _) = provider
+            .issue("test-issuer", scope, 1000, 300, true, false, "trace-sec-2")
+            .expect("capability issuance should succeed");
 
         let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
 
@@ -503,17 +575,17 @@ fn test_case_1nfu_sec_2() -> ConformanceRecord {
             RemoteOperation::Upload,
             "https://evil.com/upload", // Outside scope
             1100,
-            "trace-scope-violation"
+            "trace-scope-violation",
         );
 
         assert!(result.is_err(), "out-of-scope access should fail");
         let err = result.unwrap_err();
         assert_eq!(err.code(), "REMOTECAP_SCOPE_DENIED", "correct error code");
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Scope validation not preventing unauthorized access".to_string()
+                reason: "Scope validation not preventing unauthorized access".to_string(),
             };
         }
     }
@@ -535,9 +607,17 @@ fn test_case_1nfu_rep_1() -> ConformanceRecord {
         let provider = CapabilityProvider::new("test-secret").expect("valid provider");
         let scope = RemoteScope::new(vec!["https://api.example/v1".to_string()]);
 
-        let (cap, _) = provider.issue(
-            "test-issuer", scope, 1000, 300, true, true, "trace-rep-1" // single_use = true
-        ).expect("capability issuance should succeed");
+        let (cap, _) = provider
+            .issue(
+                "test-issuer",
+                scope,
+                1000,
+                300,
+                true,
+                true,
+                "trace-rep-1", // single_use = true
+            )
+            .expect("capability issuance should succeed");
 
         let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
 
@@ -547,7 +627,7 @@ fn test_case_1nfu_rep_1() -> ConformanceRecord {
             RemoteOperation::Upload,
             "https://api.example/v1/upload",
             1100,
-            "trace-first-use"
+            "trace-first-use",
         );
         assert!(result1.is_ok(), "first use should succeed");
 
@@ -557,16 +637,16 @@ fn test_case_1nfu_rep_1() -> ConformanceRecord {
             RemoteOperation::Upload,
             "https://api.example/v1/upload",
             1100,
-            "trace-replay-attempt"
+            "trace-replay-attempt",
         );
         assert!(result2.is_err(), "replay should fail");
         let err = result2.unwrap_err();
         assert_eq!(err.code(), "REMOTECAP_REPLAY", "correct error code");
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Replay protection not working for single-use tokens".to_string()
+                reason: "Replay protection not working for single-use tokens".to_string(),
             };
         }
     }
@@ -580,34 +660,35 @@ fn test_case_1nfu_loc_1() -> ConformanceRecord {
         section: "Local Mode".to_string(),
         level: RequirementLevel::Should,
         category: TestCategory::Integration,
-        description: "Local-only mode SHOULD allow operations without network capabilities".to_string(),
+        description: "Local-only mode SHOULD allow operations without network capabilities"
+            .to_string(),
         result: TestResult::Pass,
     };
 
     match std::panic::catch_unwind(|| {
-        let mut gate = CapabilityGate::with_mode(
-            "test-secret",
-            ConnectivityMode::LocalOnly
-        ).expect("valid gate in local mode");
+        let mut gate = CapabilityGate::with_mode("test-secret", ConnectivityMode::LocalOnly)
+            .expect("valid gate in local mode");
 
         // Authorize local operation
-        gate.authorize_local_operation(
-            "local_report_generation",
-            1000,
-            "trace-loc-1"
-        );
+        gate.authorize_local_operation("local_report_generation", 1000, "trace-loc-1");
 
         // Verify local mode event is emitted
         let audit_log = gate.audit_log();
         let event = audit_log.last().expect("local mode audit event");
-        assert_eq!(event.event_code, "REMOTECAP_LOCAL_MODE_ACTIVE", "correct event code");
-        assert_eq!(event.legacy_event_code, "RC_LOCAL_MODE_ACTIVE", "correct legacy event code");
+        assert_eq!(
+            event.event_code, "REMOTECAP_LOCAL_MODE_ACTIVE",
+            "correct event code"
+        );
+        assert_eq!(
+            event.legacy_event_code, "RC_LOCAL_MODE_ACTIVE",
+            "correct legacy event code"
+        );
         assert!(event.allowed, "local operation should be allowed");
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Local mode not functioning correctly".to_string()
+                reason: "Local mode not functioning correctly".to_string(),
             };
         }
     }
@@ -630,9 +711,9 @@ fn test_case_1nfu_aud_1() -> ConformanceRecord {
         let scope = RemoteScope::new(vec!["https://api.example/v1".to_string()]);
 
         // Issue capability (should generate audit event)
-        let (cap, _) = provider.issue(
-            "test-issuer", scope, 1000, 300, true, false, "trace-aud-1"
-        ).expect("capability issuance should succeed");
+        let (cap, _) = provider
+            .issue("test-issuer", scope, 1000, 300, true, false, "trace-aud-1")
+            .expect("capability issuance should succeed");
 
         let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
 
@@ -642,7 +723,7 @@ fn test_case_1nfu_aud_1() -> ConformanceRecord {
             RemoteOperation::Upload,
             "https://api.example/v1/upload",
             1100,
-            "trace-use"
+            "trace-use",
         );
 
         // Revoke capability (should generate audit event)
@@ -650,7 +731,10 @@ fn test_case_1nfu_aud_1() -> ConformanceRecord {
 
         // Verify all operations generated audit events
         let provider_audit = provider.audit_log();
-        assert!(!provider_audit.is_empty(), "provider should have audit events");
+        assert!(
+            !provider_audit.is_empty(),
+            "provider should have audit events"
+        );
 
         let gate_audit = gate.audit_log();
         assert!(!gate_audit.is_empty(), "gate should have audit events");
@@ -662,10 +746,10 @@ fn test_case_1nfu_aud_1() -> ConformanceRecord {
             assert!(event.timestamp_epoch_secs > 0, "timestamp required");
         }
     }) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(_) => {
             record.result = TestResult::Fail {
-                reason: "Audit trail not comprehensive".to_string()
+                reason: "Audit trail not comprehensive".to_string(),
             };
         }
     }
@@ -726,19 +810,30 @@ mod tests {
 
         // Print summary for human review
         println!("\n📊 bd-1nfu Conformance Test Results:");
-        println!("  MUST requirements: {} pass, {} fail",
-                 report.stats.must_pass, report.stats.must_fail);
-        println!("  SHOULD requirements: {} pass, {} fail",
-                 report.stats.should_pass, report.stats.should_fail);
-        println!("  Compliance score: {:.1}%", report.compliance_score() * 100.0);
+        println!(
+            "  MUST requirements: {} pass, {} fail",
+            report.stats.must_pass, report.stats.must_fail
+        );
+        println!(
+            "  SHOULD requirements: {} pass, {} fail",
+            report.stats.should_pass, report.stats.should_fail
+        );
+        println!(
+            "  Compliance score: {:.1}%",
+            report.compliance_score() * 100.0
+        );
 
         // All MUST requirements must pass for conformance
-        assert_eq!(report.stats.must_fail, 0,
-                   "All MUST requirements must pass for bd-1nfu conformance");
+        assert_eq!(
+            report.stats.must_fail, 0,
+            "All MUST requirements must pass for bd-1nfu conformance"
+        );
 
         // Compliance score must be >= 95% for MUST requirements
-        assert!(report.compliance_score() >= 0.95,
-                "bd-1nfu compliance score must be >= 95%");
+        assert!(
+            report.compliance_score() >= 0.95,
+            "bd-1nfu compliance score must be >= 95%"
+        );
 
         println!("✅ bd-1nfu conformance test suite PASSED");
     }

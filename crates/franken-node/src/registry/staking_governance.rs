@@ -4087,8 +4087,7 @@ mod staking_governance_boundary_negative_tests {
         // zero-bytes-payload framing.
         let ev_empty = compute_evidence_hash("");
         assert_eq!(
-            ev_empty,
-            "2d8a6c2a2e4336563fe091f523c526124657465319ad021c9b7fd3526addec88",
+            ev_empty, "2d8a6c2a2e4336563fe091f523c526124657465319ad021c9b7fd3526addec88",
             "compute_evidence_hash(\"\") drifted — check the \
              `staking_governance_evidence_v1:` domain separator or the \
              LE64(0) empty-payload framing"
@@ -4100,8 +4099,7 @@ mod staking_governance_boundary_negative_tests {
             "{\"actor\":\"node-7\",\"violation\":\"double-sign\",\"epoch\":42}",
         );
         assert_eq!(
-            ev_populated,
-            "9e6098d69493286daff435151cb33d23680db7638b137cf4d0656ad5a8e6f1e6",
+            ev_populated, "9e6098d69493286daff435151cb33d23680db7638b137cf4d0656ad5a8e6f1e6",
             "compute_evidence_hash(<json>) drifted — check LE64-prefix \
              width or payload encoding"
         );
@@ -4118,8 +4116,7 @@ mod staking_governance_boundary_negative_tests {
         // compute_evidence_hash call on the same string).
         let pen_min = compute_penalty_hash(&ev_empty, 0, 0);
         assert_eq!(
-            pen_min,
-            "38f9fc70218923df839fce3bce3e6aca3ac131a7045676e1e5e0a17cfe9f7cd1",
+            pen_min, "38f9fc70218923df839fce3bce3e6aca3ac131a7045676e1e5e0a17cfe9f7cd1",
             "compute_penalty_hash(empty_ev, 0, 0) drifted — check the \
              `staking_governance_penalty_v1:` domain separator or the \
              zero-u64 slash/stake encoding"
@@ -4131,8 +4128,7 @@ mod staking_governance_boundary_negative_tests {
         // — swapping the two u64 fields would invert penalty hashes).
         let pen_populated = compute_penalty_hash(&ev_populated, 500, 1_000_000_000);
         assert_eq!(
-            pen_populated,
-            "efe99a88ede1920bd263c175ad3f9e8c8096ab7ff2a8480759ec88c47e66345f",
+            pen_populated, "efe99a88ede1920bd263c175ad3f9e8c8096ab7ff2a8480759ec88c47e66345f",
             "compute_penalty_hash(populated_ev, 500, 1_000_000_000) drifted \
              — check field order (evidence_hash before slash_fraction_bps \
              before stake_amount) or LE64 width on the u64 args"
@@ -4165,7 +4161,10 @@ mod staking_governance_boundary_negative_tests {
         // Length contract: all four hashes are 64 lowercase hex chars.
         for h in [&ev_empty, &ev_populated, &pen_min, &pen_populated] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 
@@ -4179,13 +4178,17 @@ mod staking_governance_boundary_negative_tests {
         let mut ledger = StakingLedger::new();
 
         // Phase 1: Create diverse publisher stakes across risk tiers
-        let alice_stake = ledger.deposit("alice-publisher", 1000, RiskTier::Low, 1000)
+        let alice_stake = ledger
+            .deposit("alice-publisher", 1000, RiskTier::Low, 1000)
             .expect("alice deposit should succeed");
-        let bob_stake = ledger.deposit("bob-corp", 5000, RiskTier::Medium, 1001)
+        let bob_stake = ledger
+            .deposit("bob-corp", 5000, RiskTier::Medium, 1001)
             .expect("bob deposit should succeed");
-        let charlie_stake = ledger.deposit("charlie-enterprise", 50000, RiskTier::Critical, 1002)
+        let charlie_stake = ledger
+            .deposit("charlie-enterprise", 50000, RiskTier::Critical, 1002)
             .expect("charlie deposit should succeed");
-        let diana_stake = ledger.deposit("diana-validator", 2500, RiskTier::High, 1003)
+        let diana_stake = ledger
+            .deposit("diana-validator", 2500, RiskTier::High, 1003)
             .expect("diana deposit should succeed");
 
         // Phase 2: Slash alice for policy violation
@@ -4194,9 +4197,10 @@ mod staking_governance_boundary_negative_tests {
             "Failed to maintain required uptime SLA",
             "uptime_metrics: {failures: 12, threshold: 5}",
             "monitoring-system",
-            2000
+            2000,
         );
-        let alice_slash = ledger.slash(alice_stake, alice_evidence, 2001)
+        let alice_slash = ledger
+            .slash(alice_stake, alice_evidence, 2001)
             .expect("alice slash should succeed");
 
         // Phase 3: Bob appeals his slash (future slash for test completeness)
@@ -4205,26 +4209,37 @@ mod staking_governance_boundary_negative_tests {
             "Suspected signature falsification",
             "signature_verification: {invalid_count: 3, threshold: 1}",
             "security-auditor",
-            2100
+            2100,
         );
-        let bob_slash = ledger.slash(bob_stake, bob_evidence, 2101)
+        let bob_slash = ledger
+            .slash(bob_stake, bob_evidence, 2101)
             .expect("bob slash should succeed");
 
-        let bob_appeal = ledger.file_appeal(bob_stake, bob_slash.slash_id, "False positive - signatures were valid but used new key rotation scheme", 2200)
+        let bob_appeal = ledger
+            .file_appeal(
+                bob_stake,
+                bob_slash.slash_id,
+                "False positive - signatures were valid but used new key rotation scheme",
+                2200,
+            )
             .expect("bob appeal should succeed");
 
         // Phase 4: Resolve Bob's appeal (successful restoration)
-        ledger.resolve_appeal(bob_appeal.appeal_id, true, 3000)
+        ledger
+            .resolve_appeal(bob_appeal.appeal_id, true, 3000)
             .expect("bob appeal resolution should succeed");
 
         // Phase 5: Charlie's stake expires naturally
-        let charlie_with_expiry = ledger.deposit("charlie-expiring", 10000, RiskTier::Medium, 3100)
+        let charlie_with_expiry = ledger
+            .deposit("charlie-expiring", 10000, RiskTier::Medium, 3100)
             .expect("charlie expiring deposit should succeed");
-        ledger.expire(charlie_with_expiry, 4000)
+        ledger
+            .expire(charlie_with_expiry, 4000)
             .expect("charlie expiry should succeed");
 
         // Phase 6: Diana withdraws her stake
-        ledger.withdraw(diana_stake, 4100)
+        ledger
+            .withdraw(diana_stake, 4100)
             .expect("diana withdrawal should succeed");
 
         // Phase 7: Create capacity test publishers (test bounded collections)
@@ -4337,29 +4352,42 @@ mod staking_governance_boundary_negative_tests {
         let golden_content = serde_json::to_string_pretty(&golden_state)
             .expect("golden state should serialize to JSON");
 
-        std::fs::create_dir_all("tests/golden")
-            .expect("should create golden directory");
-        std::fs::write("tests/golden/registry_staking_governance_comprehensive.json", golden_content)
-            .expect("should write golden artifact");
+        std::fs::create_dir_all("tests/golden").expect("should create golden directory");
+        std::fs::write(
+            "tests/golden/registry_staking_governance_comprehensive.json",
+            golden_content,
+        )
+        .expect("should write golden artifact");
 
         // Verify golden artifact integrity by reading it back
-        let written_content = std::fs::read_to_string("tests/golden/registry_staking_governance_comprehensive.json")
-            .expect("should read back golden artifact");
+        let written_content =
+            std::fs::read_to_string("tests/golden/registry_staking_governance_comprehensive.json")
+                .expect("should read back golden artifact");
         let parsed_golden: serde_json::Value = serde_json::from_str(&written_content)
             .expect("written golden artifact should parse as JSON");
 
         // Verify essential golden artifact structure
         assert_eq!(parsed_golden["schema_version"], SCHEMA_VERSION);
-        assert!(parsed_golden["accounts"].as_array().unwrap().len() >= 4,
-               "should have at least 4 publisher accounts");
-        assert!(parsed_golden["stakes"].as_array().unwrap().len() >= 4,
-               "should have at least 4 stake records");
-        assert!(parsed_golden["slash_events"].as_array().unwrap().len() >= 2,
-               "should have at least 2 slash events");
-        assert!(parsed_golden["appeals"].as_array().unwrap().len() >= 1,
-               "should have at least 1 appeal");
-        assert!(!parsed_golden["audit_log"].as_array().unwrap().is_empty(),
-               "should have audit log entries");
+        assert!(
+            parsed_golden["accounts"].as_array().unwrap().len() >= 4,
+            "should have at least 4 publisher accounts"
+        );
+        assert!(
+            parsed_golden["stakes"].as_array().unwrap().len() >= 4,
+            "should have at least 4 stake records"
+        );
+        assert!(
+            parsed_golden["slash_events"].as_array().unwrap().len() >= 2,
+            "should have at least 2 slash events"
+        );
+        assert!(
+            parsed_golden["appeals"].as_array().unwrap().len() >= 1,
+            "should have at least 1 appeal"
+        );
+        assert!(
+            !parsed_golden["audit_log"].as_array().unwrap().is_empty(),
+            "should have audit log entries"
+        );
 
         // Verify state consistency in golden artifact
         let stats = &parsed_golden["stats"];
@@ -4386,18 +4414,39 @@ mod staking_governance_boundary_negative_tests {
         );
 
         // Test deterministic slashing across risk tiers
-        let tiers = [RiskTier::Low, RiskTier::Medium, RiskTier::High, RiskTier::Critical];
+        let tiers = [
+            RiskTier::Low,
+            RiskTier::Medium,
+            RiskTier::High,
+            RiskTier::Critical,
+        ];
         for tier in tiers {
             let amount1 = engine.compute_slash_amount(&evidence_base, tier, 1000);
             let amount2 = engine.compute_slash_amount(&evidence_base, tier, 1000);
             let amount3 = engine.compute_slash_amount(&evidence_base, tier, 1000);
 
-            assert_eq!(amount1, amount2, "Slash amounts should be deterministic for {:?}", tier);
-            assert_eq!(amount2, amount3, "Slash amounts should be deterministic for {:?}", tier);
+            assert_eq!(
+                amount1, amount2,
+                "Slash amounts should be deterministic for {:?}",
+                tier
+            );
+            assert_eq!(
+                amount2, amount3,
+                "Slash amounts should be deterministic for {:?}",
+                tier
+            );
 
             // Verify slash amounts are reasonable (not zero, not exceeding stake)
-            assert!(amount1 > 0, "Slash amount should be positive for {:?}", tier);
-            assert!(amount1 <= 1000, "Slash amount should not exceed stake amount for {:?}", tier);
+            assert!(
+                amount1 > 0,
+                "Slash amount should be positive for {:?}",
+                tier
+            );
+            assert!(
+                amount1 <= 1000,
+                "Slash amount should not exceed stake amount for {:?}",
+                tier
+            );
         }
 
         // Test slash amount scaling with stake size
@@ -4411,8 +4460,15 @@ mod staking_governance_boundary_negative_tests {
                 tier_amounts.push((stake_amount, slash_amount));
 
                 // Verify slash amount scales appropriately
-                assert!(slash_amount > 0, "Slash should be positive for stake {}", stake_amount);
-                assert!(slash_amount <= stake_amount, "Slash should not exceed stake");
+                assert!(
+                    slash_amount > 0,
+                    "Slash should be positive for stake {}",
+                    stake_amount
+                );
+                assert!(
+                    slash_amount <= stake_amount,
+                    "Slash should not exceed stake"
+                );
             }
 
             // Verify monotonicity - larger stakes should generally have larger or equal penalties
@@ -4420,9 +4476,14 @@ mod staking_governance_boundary_negative_tests {
                 let (stake1, slash1) = window[0];
                 let (stake2, slash2) = window[1];
                 if stake2 > stake1 {
-                    assert!(slash2 >= slash1,
-                            "Larger stakes should have equal or larger slash amounts: {}→{} vs {}→{}",
-                            stake1, slash1, stake2, slash2);
+                    assert!(
+                        slash2 >= slash1,
+                        "Larger stakes should have equal or larger slash amounts: {}→{} vs {}→{}",
+                        stake1,
+                        slash1,
+                        stake2,
+                        slash2
+                    );
                 }
             }
 
@@ -4432,7 +4493,12 @@ mod staking_governance_boundary_negative_tests {
         // Test tier-based penalty escalation
         let test_stake = 1000u64;
         let mut tier_penalties = Vec::new();
-        for tier in [RiskTier::Low, RiskTier::Medium, RiskTier::High, RiskTier::Critical] {
+        for tier in [
+            RiskTier::Low,
+            RiskTier::Medium,
+            RiskTier::High,
+            RiskTier::Critical,
+        ] {
             let penalty = engine.compute_slash_amount(&evidence_base, tier, test_stake);
             tier_penalties.push((tier, penalty));
         }
@@ -4441,18 +4507,25 @@ mod staking_governance_boundary_negative_tests {
         for window in tier_penalties.windows(2) {
             let (tier1, penalty1) = window[0];
             let (tier2, penalty2) = window[1];
-            assert!(penalty2 >= penalty1,
-                    "Higher risk tiers should have equal or higher penalties: {:?}={} vs {:?}={}",
-                    tier1, penalty1, tier2, penalty2);
+            assert!(
+                penalty2 >= penalty1,
+                "Higher risk tiers should have equal or higher penalties: {:?}={} vs {:?}={}",
+                tier1,
+                penalty1,
+                tier2,
+                penalty2
+            );
         }
 
         // Test appeal window boundary conditions
         let mut ledger = StakingLedger::new();
-        let stake_id = ledger.deposit("test-publisher", 1000, RiskTier::Medium, 1000)
+        let stake_id = ledger
+            .deposit("test-publisher", 1000, RiskTier::Medium, 1000)
             .expect("deposit should succeed");
 
         // Slash the stake
-        let slash_result = ledger.slash(stake_id, evidence_base.clone())
+        let slash_result = ledger
+            .slash(stake_id, evidence_base.clone())
             .expect("slash should succeed");
 
         // Test appeal within window
@@ -4470,7 +4543,8 @@ mod staking_governance_boundary_negative_tests {
 
         // Test boundary edge cases for withdrawal cooldown
         let mut cooldown_ledger = StakingLedger::new();
-        let cooldown_stake = cooldown_ledger.deposit("cooldown-test", 1000, RiskTier::High, 1000)
+        let cooldown_stake = cooldown_ledger
+            .deposit("cooldown-test", 1000, RiskTier::High, 1000)
             .expect("cooldown deposit should succeed");
 
         // Test immediate withdrawal attempt (should fail due to cooldown)
@@ -4481,7 +4555,8 @@ mod staking_governance_boundary_negative_tests {
         let mut capacity_ledger = StakingLedger::new();
 
         // Test maximum stake records boundary
-        for i in 0..MAX_STAKE_RECORDS.min(100) { // Limit for test performance
+        for i in 0..MAX_STAKE_RECORDS.min(100) {
+            // Limit for test performance
             let stake_amount = 10 + (i % 100) as u64;
             let result = capacity_ledger.deposit(
                 &format!("publisher-{:04}", i),
@@ -4496,18 +4571,24 @@ mod staking_governance_boundary_negative_tests {
             );
 
             if i < MAX_STAKE_RECORDS - 1 {
-                assert!(result.is_ok(), "Deposit {} should succeed within capacity", i);
+                assert!(
+                    result.is_ok(),
+                    "Deposit {} should succeed within capacity",
+                    i
+                );
             }
         }
 
         // Test slash event capacity bounds
         let mut slash_test_ledger = StakingLedger::new();
-        let slash_stake = slash_test_ledger.deposit("slash-capacity-test", 10000, RiskTier::Medium, 1000)
+        let slash_stake = slash_test_ledger
+            .deposit("slash-capacity-test", 10000, RiskTier::Medium, 1000)
             .expect("slash capacity test stake should deposit");
 
         // Add multiple slash events to test capacity bounds
         let mut slash_results = Vec::new();
-        for i in 0..10 { // Reduced for test performance
+        for i in 0..10 {
+            // Reduced for test performance
             let evidence = SlashEvidence::new(
                 ViolationType::SecurityBreach,
                 &format!("capacity test violation {}", i),
@@ -4518,7 +4599,8 @@ mod staking_governance_boundary_negative_tests {
 
             // Only slash if stake has sufficient balance
             if let Ok(stake_state) = slash_test_ledger.get_stake(slash_stake) {
-                if stake_state.amount > 100 { // Ensure sufficient balance for slash
+                if stake_state.amount > 100 {
+                    // Ensure sufficient balance for slash
                     if let Ok(slash_result) = slash_test_ledger.slash(slash_stake, evidence) {
                         slash_results.push(slash_result);
                     }
@@ -4527,7 +4609,10 @@ mod staking_governance_boundary_negative_tests {
         }
 
         // Verify that slashes were processed (some may fail due to insufficient balance)
-        assert!(!slash_results.is_empty(), "Some slashes should have succeeded");
+        assert!(
+            !slash_results.is_empty(),
+            "Some slashes should have succeeded"
+        );
 
         // Test appeal capacity boundary
         for (i, slash_result) in slash_results.iter().take(5).enumerate() {
@@ -4540,16 +4625,24 @@ mod staking_governance_boundary_negative_tests {
 
             // Appeals should succeed within capacity limits
             if i < MAX_APPEAL_RECORDS.min(4) {
-                assert!(appeal_result.is_ok(), "Appeal {} should succeed within capacity", i);
+                assert!(
+                    appeal_result.is_ok(),
+                    "Appeal {} should succeed within capacity",
+                    i
+                );
             }
         }
 
         // Test edge case: zero stake amount handling
         let zero_stake_result = capacity_ledger.deposit("zero-test", 0, RiskTier::Low, 1000);
-        assert!(zero_stake_result.is_err(), "Zero stake amount should be rejected");
+        assert!(
+            zero_stake_result.is_err(),
+            "Zero stake amount should be rejected"
+        );
 
         // Test edge case: maximum stake amount
-        let max_stake_result = capacity_ledger.deposit("max-test", u64::MAX, RiskTier::Critical, 1000);
+        let max_stake_result =
+            capacity_ledger.deposit("max-test", u64::MAX, RiskTier::Critical, 1000);
         // This might succeed or fail based on validation logic - just ensure it doesn't panic
 
         // Test violation type consistency in penalty calculation
@@ -4572,12 +4665,21 @@ mod staking_governance_boundary_negative_tests {
                 1000,
             );
 
-            let penalty = engine.compute_slash_amount(&evidence, RiskTier::Medium, test_stake_amount);
+            let penalty =
+                engine.compute_slash_amount(&evidence, RiskTier::Medium, test_stake_amount);
             violation_penalties.insert(violation_type, penalty);
 
             // All penalties should be positive and bounded
-            assert!(penalty > 0, "Penalty for {:?} should be positive", violation_type);
-            assert!(penalty <= test_stake_amount, "Penalty for {:?} should not exceed stake", violation_type);
+            assert!(
+                penalty > 0,
+                "Penalty for {:?} should be positive",
+                violation_type
+            );
+            assert!(
+                penalty <= test_stake_amount,
+                "Penalty for {:?} should not exceed stake",
+                violation_type
+            );
         }
 
         // Test that different violation types may have different penalties (business logic)
@@ -4586,11 +4688,11 @@ mod staking_governance_boundary_negative_tests {
 
         // Test publisher ID validation edge cases
         let problematic_publisher_ids = [
-            "",           // Empty string
-            " ",          // Whitespace only
-            "\n\r\t",     // Control characters
+            "",               // Empty string
+            " ",              // Whitespace only
+            "\n\r\t",         // Control characters
             "a".repeat(1000), // Very long ID
-            "unicode-𝓽𝓮𝓼𝓽", // Unicode characters
+            "unicode-𝓽𝓮𝓼𝓽",   // Unicode characters
         ];
 
         for (i, publisher_id) in problematic_publisher_ids.iter().enumerate() {
@@ -4600,10 +4702,10 @@ mod staking_governance_boundary_negative_tests {
 
         // Test evidence payload boundary cases
         let boundary_payloads = [
-            "",                    // Empty payload
-            "a".repeat(100000),   // Very large payload
-            "\x00\x01\x02",      // Binary data
-            "🚀💻🔒",             // Emoji payload
+            "",                 // Empty payload
+            "a".repeat(100000), // Very large payload
+            "\x00\x01\x02",     // Binary data
+            "🚀💻🔒",           // Emoji payload
         ];
 
         for (i, payload) in boundary_payloads.iter().enumerate() {
@@ -4616,8 +4718,16 @@ mod staking_governance_boundary_negative_tests {
             );
 
             let penalty = engine.compute_slash_amount(&evidence, RiskTier::Medium, 1000);
-            assert!(penalty > 0, "Penalty should be positive for boundary payload {}", i);
-            assert!(penalty <= 1000, "Penalty should be bounded for boundary payload {}", i);
+            assert!(
+                penalty > 0,
+                "Penalty should be positive for boundary payload {}",
+                i
+            );
+            assert!(
+                penalty <= 1000,
+                "Penalty should be bounded for boundary payload {}",
+                i
+            );
         }
     }
 }

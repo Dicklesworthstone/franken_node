@@ -3713,8 +3713,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         // 1. Genesis: all-empty strings + zero f64 + zero weight.
         let genesis = super::chain_evidence_hash("", "", "", 0.0, 0);
         assert_eq!(
-            genesis,
-            "sha256:5d8377c66b4f81636c288c474f29f9527d2e09f361196b2f67741640e47301b2",
+            genesis, "sha256:5d8377c66b4f81636c288c474f29f9527d2e09f361196b2f67741640e47301b2",
             "genesis chain_evidence_hash drifted — check the v1 domain \
              separator, the LE64(0) empty-string framing, OR the f64 \
              zero-bits payload (must be 8 zero bytes, NOT 0.0 formatted \
@@ -3730,8 +3729,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             10,
         );
         assert_eq!(
-            typical,
-            "sha256:cbda8015814aae5362eb97507a52c0004d3966dcb8464e885651fd291032ccde",
+            typical, "sha256:cbda8015814aae5362eb97507a52c0004d3966dcb8464e885651fd291032ccde",
             "typical chain_evidence_hash drifted — check per-string LE64 \
              length-prefix framing OR the f64-as-LE-bit-pattern encoding \
              for likelihood = 0.75"
@@ -3746,8 +3744,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             1,
         );
         assert_eq!(
-            p1_0,
-            "sha256:d91e7a5c95100e7d453083d665ea1360445ee8b4132dffc284f9d03788856dd1",
+            p1_0, "sha256:d91e7a5c95100e7d453083d665ea1360445ee8b4132dffc284f9d03788856dd1",
             "p1.0 chain_evidence_hash drifted — likelihood = 1.0 has a \
              distinct IEEE-754 LE bit pattern (00 00 00 00 00 00 f0 3f) \
              from 0.75 (00 00 00 00 00 00 e8 3f); drift here may indicate \
@@ -3784,7 +3781,11 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         for h in [&genesis, &typical, &p1_0] {
             assert_eq!(h.len(), 71);
             assert!(h.starts_with("sha256:"));
-            assert!(h[7..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h[7..]
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

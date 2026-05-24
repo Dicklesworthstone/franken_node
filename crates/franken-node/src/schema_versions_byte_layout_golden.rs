@@ -4,8 +4,8 @@
 //! serialization stability of the schema version registry. Any change to the
 //! hash outputs below indicates a breaking change to protocol fingerprints.
 
-use sha2::{Digest, Sha256};
 use crate::schema_versions;
+use sha2::{Digest, Sha256};
 
 /// Compute deterministic hash of schema registry entry count.
 ///
@@ -89,35 +89,58 @@ mod frozen_canonical_byte_layout_golden_tests {
         println!("=========================================\n");
 
         // Basic sanity checks
-        assert!(entry_count > 50, "Registry should have substantial entries (got {})", entry_count);
-        assert!(entry_count < 1000, "Registry should not be excessively large (got {})", entry_count);
+        assert!(
+            entry_count > 50,
+            "Registry should have substantial entries (got {})",
+            entry_count
+        );
+        assert!(
+            entry_count < 1000,
+            "Registry should not be excessively large (got {})",
+            entry_count
+        );
 
         // Pin expected count - this will fail first time, showing the actual count
         let expected_count = 109; // Update this when adding schemas
         if entry_count != expected_count {
-            panic!("Schema registry has {} entries, expected {}. \
+            panic!(
+                "Schema registry has {} entries, expected {}. \
                    If this is correct, update expected_count to {}.",
-                   entry_count, expected_count, entry_count);
+                entry_count, expected_count, entry_count
+            );
         }
 
         // For now, we accept any valid hash format as a baseline
-        assert!(count_hash.starts_with("sha256:"), "Hash should be in sha256: format");
-        assert_eq!(count_hash.len(), 71, "SHA-256 hash should be 71 chars (sha256: + 64 hex chars)");
+        assert!(
+            count_hash.starts_with("sha256:"),
+            "Hash should be in sha256: format"
+        );
+        assert_eq!(
+            count_hash.len(),
+            71,
+            "SHA-256 hash should be 71 chars (sha256: + 64 hex chars)"
+        );
 
         // TODO: Replace this placeholder with actual golden hash baseline
         // Run this test once to get the real hash value, then replace the placeholder below
         if count_hash == "sha256:0000000000000000000000000000000000000000000000000000000000000000" {
-            panic!("Golden hash not yet established. Run test to get actual hash:\n\
+            panic!(
+                "Golden hash not yet established. Run test to get actual hash:\n\
                    Actual hash: {}\n\
-                   Replace the placeholder in the code with this value.", count_hash);
+                   Replace the placeholder in the code with this value.",
+                count_hash
+            );
         }
 
         // Golden hash baseline - any change indicates schema registry modification
-        let expected_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-        assert_eq!(count_hash, expected_hash,
-                   "Schema registry entry count hash changed - this indicates API surface modification.\
+        let expected_hash =
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        assert_eq!(
+            count_hash, expected_hash,
+            "Schema registry entry count hash changed - this indicates API surface modification.\
                    \nExpected: {}\nActual: {}\nIf this is expected, update the golden hash.",
-                   expected_hash, count_hash);
+            expected_hash, count_hash
+        );
     }
 
     #[test]
@@ -153,32 +176,59 @@ mod frozen_canonical_byte_layout_golden_tests {
 
         // First time setup: print the hash for manual copying
         println!("\n=== CRITICAL CONSTANTS GOLDEN HASH ===");
-        println!("Constants: {:?}", critical_constants.iter().map(|(name, value)| format!("{name}={value}")).collect::<Vec<_>>());
+        println!(
+            "Constants: {:?}",
+            critical_constants
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+        );
         println!("Hash to copy: {}", constants_hash);
         println!("=====================================\n");
 
         // For now, we accept any valid hash format as a baseline
-        assert!(constants_hash.starts_with("sha256:"), "Hash should be in sha256: format");
-        assert_eq!(constants_hash.len(), 71, "SHA-256 hash should be 71 chars (sha256: + 64 hex chars)");
+        assert!(
+            constants_hash.starts_with("sha256:"),
+            "Hash should be in sha256: format"
+        );
+        assert_eq!(
+            constants_hash.len(),
+            71,
+            "SHA-256 hash should be 71 chars (sha256: + 64 hex chars)"
+        );
 
         // Verify we're actually testing some constants
-        assert!(!critical_constants.is_empty(), "Should test at least one constant");
-        assert!(critical_constants.len() >= 6, "Should test multiple critical constants");
+        assert!(
+            !critical_constants.is_empty(),
+            "Should test at least one constant"
+        );
+        assert!(
+            critical_constants.len() >= 6,
+            "Should test multiple critical constants"
+        );
 
         // TODO: Replace this placeholder with actual golden hash baseline
         // Run this test once to get the real hash value, then replace the placeholder below
-        if constants_hash == "sha256:1111111111111111111111111111111111111111111111111111111111111111" {
-            panic!("Golden hash not yet established. Run test to get actual hash:\n\
+        if constants_hash
+            == "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        {
+            panic!(
+                "Golden hash not yet established. Run test to get actual hash:\n\
                    Actual hash: {}\n\
-                   Replace the placeholder in the code with this value.", constants_hash);
+                   Replace the placeholder in the code with this value.",
+                constants_hash
+            );
         }
 
         // Golden hash baseline - any change indicates critical constants modification
-        let expected_hash = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
-        assert_eq!(constants_hash, expected_hash,
-                   "Critical constants hash changed - this indicates protocol-critical version drift.\
+        let expected_hash =
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        assert_eq!(
+            constants_hash, expected_hash,
+            "Critical constants hash changed - this indicates protocol-critical version drift.\
                    \nExpected: {}\nActual: {}\nIf this is expected, update the golden hash.",
-                   expected_hash, constants_hash);
+            expected_hash, constants_hash
+        );
     }
 
     #[test]
@@ -203,13 +253,19 @@ mod frozen_canonical_byte_layout_golden_tests {
         sorted_versions.sort_by_key(|(name, _)| *name);
         println!("First 5 entries (sorted by name):");
         for (i, (name, version)) in sorted_versions.iter().enumerate().take(5) {
-            println!("  {}: {} = {}", i+1, name, version);
+            println!("  {}: {} = {}", i + 1, name, version);
         }
         println!("============================================\n");
 
         // Verify structural integrity
-        assert!(versions.len() > 50, "Registry should have substantial entries");
-        assert!(versions.len() < 1000, "Registry should not be excessively large");
+        assert!(
+            versions.len() > 50,
+            "Registry should have substantial entries"
+        );
+        assert!(
+            versions.len() < 1000,
+            "Registry should not be excessively large"
+        );
 
         // Verify all entries have valid names and versions
         for (name, version) in &versions {
@@ -220,7 +276,10 @@ mod frozen_canonical_byte_layout_golden_tests {
         }
 
         // Verify hash format
-        assert!(structure_hash.starts_with("sha256:"), "Hash should be in sha256: format");
+        assert!(
+            structure_hash.starts_with("sha256:"),
+            "Hash should be in sha256: format"
+        );
         assert_eq!(structure_hash.len(), 71, "SHA-256 hash should be 71 chars");
 
         // Verify no duplicate names (registry integrity)
@@ -230,21 +289,33 @@ mod frozen_canonical_byte_layout_golden_tests {
             names.dedup();
             names.len()
         };
-        assert_eq!(unique_count, versions.len(), "Schema registry should have no duplicate names");
+        assert_eq!(
+            unique_count,
+            versions.len(),
+            "Schema registry should have no duplicate names"
+        );
 
         // TODO: Replace this placeholder with actual golden hash baseline
         // Run this test once to get the real hash value, then replace the placeholder below
-        if structure_hash == "sha256:2222222222222222222222222222222222222222222222222222222222222222" {
-            panic!("Golden hash not yet established. Run test to get actual hash:\n\
+        if structure_hash
+            == "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        {
+            panic!(
+                "Golden hash not yet established. Run test to get actual hash:\n\
                    Actual hash: {}\n\
-                   Replace the placeholder in the code with this value.", structure_hash);
+                   Replace the placeholder in the code with this value.",
+                structure_hash
+            );
         }
 
         // Golden hash baseline - any change indicates schema registry structure modification
-        let expected_hash = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
-        assert_eq!(structure_hash, expected_hash,
-                   "Schema registry structure hash changed - this indicates schema modification (add/remove/rename).\
+        let expected_hash =
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        assert_eq!(
+            structure_hash, expected_hash,
+            "Schema registry structure hash changed - this indicates schema modification (add/remove/rename).\
                    \nExpected: {}\nActual: {}\nIf this is expected, update the golden hash.",
-                   expected_hash, structure_hash);
+            expected_hash, structure_hash
+        );
     }
 }

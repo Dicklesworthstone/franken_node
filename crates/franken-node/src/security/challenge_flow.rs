@@ -3514,8 +3514,7 @@ mod tests {
         };
         let genesis_hash = genesis.hash();
         assert_eq!(
-            genesis_hash,
-            "b6e107e6593e6cf90cbd9a1f06e94d60ec048debf22b5c770d7af7ece4be4822",
+            genesis_hash, "b6e107e6593e6cf90cbd9a1f06e94d60ec048debf22b5c770d7af7ece4be4822",
             "genesis-fixture ChallengeAuditEntry::hash drifted — check \
              the `challenge_flow_hash_v1:` domain separator OR the \
              load-bearing decision that an empty prev_hash still emits \
@@ -3540,8 +3539,7 @@ mod tests {
         };
         let linked_hash = linked.hash();
         assert_eq!(
-            linked_hash,
-            "d4304d4962e787345e2cee5c32a8d97041736771144baf32d2de9fd72e468066",
+            linked_hash, "d4304d4962e787345e2cee5c32a8d97041736771144baf32d2de9fd72e468066",
             "linked-fixture ChallengeAuditEntry::hash drifted — check \
              the non-empty prev_hash framing or the ChallengeState::label() \
              mapping (proof_received / proof_verified)"
@@ -3562,8 +3560,7 @@ mod tests {
         };
         let empty_hash = empty.hash();
         assert_eq!(
-            empty_hash,
-            "1ae59511410a081494755884f585a3a484d2561b7ac743d04c1a9e8c3892b0d6",
+            empty_hash, "1ae59511410a081494755884f585a3a484d2561b7ac743d04c1a9e8c3892b0d6",
             "empty-fixture ChallengeAuditEntry::hash drifted — check the \
              LE64(0) framing across every length-prefixed string field"
         );
@@ -3596,7 +3593,10 @@ mod tests {
         // Length+casing contract on every output.
         for h in [&genesis_hash, &linked_hash, &empty_hash] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

@@ -7079,7 +7079,10 @@ mod session_auth_boundary_negative_tests {
 
         // 1. Signing role.
         assert_eq!(
-            hex::encode(super::session_key_material("control-signing-v1", KeyRole::Signing)),
+            hex::encode(super::session_key_material(
+                "control-signing-v1",
+                KeyRole::Signing
+            )),
             "6262c8eafdff05e33c8cd1c679c53673a29ca75bdec84940c6c9837a7912f0c4",
             "session_key_material(Signing) drifted — check the v1 domain \
              separator, the Signing-role 2-byte tag [0x00, 0x01], or \
@@ -7135,8 +7138,7 @@ mod session_auth_boundary_negative_tests {
         // catastrophically breaking the key-role separation property
         // bd-qkjac is designed to enforce.
         let same_key_signing = super::session_key_material("shared-key", KeyRole::Signing);
-        let same_key_encryption =
-            super::session_key_material("shared-key", KeyRole::Encryption);
+        let same_key_encryption = super::session_key_material("shared-key", KeyRole::Encryption);
         assert_ne!(
             same_key_signing, same_key_encryption,
             "session_key_material(same key_id, different roles) MUST \
@@ -7159,7 +7161,11 @@ mod session_auth_boundary_negative_tests {
                     );
                 }
             }
-            assert_eq!(mi.len(), 32, "key material must be exactly 32 bytes (SHA-256)");
+            assert_eq!(
+                mi.len(),
+                32,
+                "key material must be exactly 32 bytes (SHA-256)"
+            );
         }
 
         // OUTPUT-LENGTH CONTRACT: every output is exactly 32 raw bytes

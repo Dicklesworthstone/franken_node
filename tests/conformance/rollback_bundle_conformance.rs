@@ -27,12 +27,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use franken_node::connector::rollback_bundle::{
-    BundleComponent, CompatibilityProof, HealthCheckKind, HealthCheckResult,
-    RestoreManifest, ManifestComponent, StateSnapshot, RollbackAuditEntry,
-    RollbackMode, RollbackBundle, RollbackBundleError,
-    event_codes::{RRB_001_BUNDLE_CREATED, RRB_002_ROLLBACK_INITIATED,
-                  RRB_003_ROLLBACK_COMPLETED, RRB_004_ROLLBACK_FAILED},
-    invariants::{INV_RRB_DETERM, INV_RRB_IDEMPOT, INV_RRB_HEALTH, INV_RRB_MANIFEST},
+    BundleComponent, CompatibilityProof, HealthCheckKind, HealthCheckResult, ManifestComponent,
+    RestoreManifest, RollbackAuditEntry, RollbackBundle, RollbackBundleError, RollbackMode,
+    StateSnapshot,
+    event_codes::{
+        RRB_001_BUNDLE_CREATED, RRB_002_ROLLBACK_INITIATED, RRB_003_ROLLBACK_COMPLETED,
+        RRB_004_ROLLBACK_FAILED,
+    },
+    invariants::{INV_RRB_DETERM, INV_RRB_HEALTH, INV_RRB_IDEMPOT, INV_RRB_MANIFEST},
     sha256_hex,
 };
 
@@ -241,17 +243,13 @@ fn test_must_r_rrb_002() -> TestResult {
     let initial_state = StateSnapshot {
         version: "1.0.0".to_string(),
         timestamp_rfc3339: "2026-05-23T00:30:00Z".to_string(),
-        state_data: BTreeMap::from([
-            ("config.toml".to_string(), original_data.clone()),
-        ]),
+        state_data: BTreeMap::from([("config.toml".to_string(), original_data.clone())]),
     };
 
     let rollback_state = StateSnapshot {
         version: "0.9.0".to_string(),
         timestamp_rfc3339: "2026-05-23T00:25:00Z".to_string(),
-        state_data: BTreeMap::from([
-            ("config.toml".to_string(), rollback_data.clone()),
-        ]),
+        state_data: BTreeMap::from([("config.toml".to_string(), rollback_data.clone())]),
     };
 
     // Simulate first rollback application
@@ -335,14 +333,20 @@ fn test_must_r_rrb_003() -> TestResult {
         let label = check_kind.label();
         if label.is_empty() {
             return TestResult::Fail {
-                reason: format!("Health check kind {:?} should have non-empty label", check_kind),
+                reason: format!(
+                    "Health check kind {:?} should have non-empty label",
+                    check_kind
+                ),
             };
         }
 
         // Labels should be valid identifiers (no spaces, special chars)
         if label.contains(' ') || label.contains('\t') || label.contains('\n') {
             return TestResult::Fail {
-                reason: format!("Health check label '{}' should be a valid identifier", label),
+                reason: format!(
+                    "Health check label '{}' should be a valid identifier",
+                    label
+                ),
             };
         }
     }
@@ -473,7 +477,11 @@ fn test_must_r_rrb_004() -> TestResult {
             };
         }
 
-        if !component.expected_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        if !component
+            .expected_hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
+        {
             return TestResult::Fail {
                 reason: "Component hash should contain only hex digits".to_string(),
             };
@@ -515,7 +523,10 @@ fn test_event_rrb_001() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("RRB_001_BUNDLE_CREATED value incorrect: {}", RRB_001_BUNDLE_CREATED),
+            reason: format!(
+                "RRB_001_BUNDLE_CREATED value incorrect: {}",
+                RRB_001_BUNDLE_CREATED
+            ),
         }
     }
 }
@@ -526,7 +537,10 @@ fn test_event_rrb_002() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("RRB_002_ROLLBACK_INITIATED value incorrect: {}", RRB_002_ROLLBACK_INITIATED),
+            reason: format!(
+                "RRB_002_ROLLBACK_INITIATED value incorrect: {}",
+                RRB_002_ROLLBACK_INITIATED
+            ),
         }
     }
 }
@@ -537,7 +551,10 @@ fn test_event_rrb_003() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("RRB_003_ROLLBACK_COMPLETED value incorrect: {}", RRB_003_ROLLBACK_COMPLETED),
+            reason: format!(
+                "RRB_003_ROLLBACK_COMPLETED value incorrect: {}",
+                RRB_003_ROLLBACK_COMPLETED
+            ),
         }
     }
 }
@@ -548,7 +565,10 @@ fn test_event_rrb_004() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("RRB_004_ROLLBACK_FAILED value incorrect: {}", RRB_004_ROLLBACK_FAILED),
+            reason: format!(
+                "RRB_004_ROLLBACK_FAILED value incorrect: {}",
+                RRB_004_ROLLBACK_FAILED
+            ),
         }
     }
 }
@@ -600,18 +620,29 @@ fn run_rollback_bundle_conformance_suite() {
         // Structured JSON-line output for CI parsing
         println!(
             "{{\"id\":\"{}\",\"verdict\":\"{}\",\"level\":\"{:?}\",\"category\":\"{:?}\",\"duration_ms\":{}}}",
-            case.id, verdict, case.level, case.category, duration.as_millis()
+            case.id,
+            verdict,
+            case.level,
+            case.category,
+            duration.as_millis()
         );
     }
 
     let total = pass + fail + xfail + skip;
     println!("\n═══════════════════════════════════════════════════════════");
     println!("Rollback Bundle Conformance Summary");
-    println!("Total: {}, Pass: {}, Fail: {}, XFail: {}, Skip: {}", total, pass, fail, xfail, skip);
+    println!(
+        "Total: {}, Pass: {}, Fail: {}, XFail: {}, Skip: {}",
+        total, pass, fail, xfail, skip
+    );
 
     // Calculate conformance score
-    let must_cases = RRB_CONFORMANCE_CASES.iter().filter(|c| c.level == RequirementLevel::Must).count();
-    let must_pass = RRB_CONFORMANCE_CASES.iter()
+    let must_cases = RRB_CONFORMANCE_CASES
+        .iter()
+        .filter(|c| c.level == RequirementLevel::Must)
+        .count();
+    let must_pass = RRB_CONFORMANCE_CASES
+        .iter()
         .filter(|c| c.level == RequirementLevel::Must)
         .map(|c| (c.test_fn)())
         .filter(|r| matches!(r, TestResult::Pass))
@@ -623,9 +654,16 @@ fn run_rollback_bundle_conformance_suite() {
         0.0
     };
 
-    println!("MUST Conformance: {:.1}% ({}/{})", conformance_score, must_pass, must_cases);
+    println!(
+        "MUST Conformance: {:.1}% ({}/{})",
+        conformance_score, must_pass, must_cases
+    );
     println!("═══════════════════════════════════════════════════════════");
 
     assert_eq!(fail, 0, "{} conformance tests failed", fail);
-    assert!(conformance_score >= 95.0, "MUST conformance below 95%: {:.1}%", conformance_score);
+    assert!(
+        conformance_score >= 95.0,
+        "MUST conformance below 95%: {:.1}%",
+        conformance_score
+    );
 }

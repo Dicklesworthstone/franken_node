@@ -6710,7 +6710,9 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
 
                     // Verify proof determinism (within algorithm)
                     for i in 1..algorithm_proofs.len() {
-                        if let (Some(proof0), Some(proofi)) = (&algorithm_proofs[0], &algorithm_proofs[i]) {
+                        if let (Some(proof0), Some(proofi)) =
+                            (&algorithm_proofs[0], &algorithm_proofs[i])
+                        {
                             assert_eq!(
                                 proof0.output_hash, proofi.output_hash,
                                 "Algorithm {:?} produced non-deterministic proof output hash for fragment set {}: run 0 vs run {}",

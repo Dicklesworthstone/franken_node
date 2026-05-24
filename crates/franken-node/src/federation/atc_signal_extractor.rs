@@ -811,21 +811,16 @@ mod tests {
 
         // === compute_signal_id fixtures ===
 
-        let minimal_sid =
-            super::compute_signal_id("", super::SignalKind::AnomalyObservation, 0);
+        let minimal_sid = super::compute_signal_id("", super::SignalKind::AnomalyObservation, 0);
         assert_eq!(
-            minimal_sid,
-            "d563d6f5320378d00a8b37edabab14aca4fde623dc18bcbcbc1774b4d610c619",
+            minimal_sid, "d563d6f5320378d00a8b37edabab14aca4fde623dc18bcbcbc1774b4d610c619",
             "compute_signal_id(minimal) drifted — check the \
              `atc_signal_v1:` domain separator, LE64-len framing on \
              trace_id/kind, OR raw u64 LE encoding of source_epoch"
         );
 
-        let typical_sid = super::compute_signal_id(
-            "trace-golden-1",
-            super::SignalKind::TrustCardDelta,
-            42,
-        );
+        let typical_sid =
+            super::compute_signal_id("trace-golden-1", super::SignalKind::TrustCardDelta, 42);
         assert_eq!(
             typical_sid,
             "97c04432bfa4bd5ba25ca017e3ae2b05fcdb3b0e40e3235ef19a208cea142af8"
@@ -843,8 +838,7 @@ mod tests {
         let empty_payload: BTreeMap<String, String> = BTreeMap::new();
         let empty_ph = super::compute_payload_hash(&empty_payload);
         assert_eq!(
-            empty_ph,
-            "2dab140c35e462a2c00518b72347cc67a4cc092260d243cec61a6f63e0572baf",
+            empty_ph, "2dab140c35e462a2c00518b72347cc67a4cc092260d243cec61a6f63e0572baf",
             "compute_payload_hash(empty) drifted — check the \
              `atc_signal_payload_v1:` domain separator or LE64(0) \
              zero-entries framing"
@@ -858,8 +852,7 @@ mod tests {
         populated_payload.insert("source".to_string(), "fleet-node-7".to_string());
         let populated_ph = super::compute_payload_hash(&populated_payload);
         assert_eq!(
-            populated_ph,
-            "e03bdf679079a25f7225fedd752e078da6b5bbfde0b4c21e65ff4914b6fbfcb3",
+            populated_ph, "e03bdf679079a25f7225fedd752e078da6b5bbfde0b4c21e65ff4914b6fbfcb3",
             "compute_payload_hash(populated) drifted — check per-(k,v) \
              LE64-prefix framing or BTreeMap sorted-iteration order"
         );
@@ -868,8 +861,7 @@ mod tests {
 
         // 6. CROSS-DOMAIN-DISTINCTNESS: the two empty-input hashes
         // MUST differ because the v1 domains differ.
-        let empty_sid =
-            super::compute_signal_id("", super::SignalKind::AnomalyObservation, 0);
+        let empty_sid = super::compute_signal_id("", super::SignalKind::AnomalyObservation, 0);
         assert_ne!(
             empty_sid, empty_ph,
             "compute_signal_id and compute_payload_hash MUST use \
@@ -912,7 +904,10 @@ mod tests {
             &populated_ph,
         ] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
     }
 }

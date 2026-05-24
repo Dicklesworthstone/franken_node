@@ -4268,8 +4268,7 @@ mod tests {
             hex::encode(sha2::Digest::finalize(h))
         };
         assert_eq!(
-            empty_digest,
-            "1190927be3fd85e3698f0c10b4a34492b6ad1e40dbc624273fea2700dc76a671",
+            empty_digest, "1190927be3fd85e3698f0c10b4a34492b6ad1e40dbc624273fea2700dc76a671",
             "SHA-256 of the empty-all signing message drifted — this is \
              the second-layer canary that catches drift even if the raw \
              bytes are not byte-equal to the inlined hex above"
@@ -4307,11 +4306,8 @@ mod tests {
         let long_artifact = "a".repeat(100);
         let long_connector = "b".repeat(100);
         let long_content_hash = format!("sha256:{}", "f".repeat(64));
-        let populated_long = super::build_signing_message(
-            &long_artifact,
-            &long_connector,
-            &long_content_hash,
-        );
+        let populated_long =
+            super::build_signing_message(&long_artifact, &long_connector, &long_content_hash);
         assert_eq!(populated_long.len(), 319);
         let populated_long_digest = {
             let mut h = sha2::Sha256::new();
@@ -4334,8 +4330,7 @@ mod tests {
         // Field-order-sensitivity invariant: swapping artifact_id and
         // connector_id MUST flip the output. Pins the contract that the
         // three fields are NOT interchangeable.
-        let swapped =
-            super::build_signing_message("connector-y", "artifact-x", "sha256:abc");
+        let swapped = super::build_signing_message("connector-y", "artifact-x", "sha256:abc");
         assert_ne!(
             hex::encode(&swapped),
             hex::encode(&populated_short),

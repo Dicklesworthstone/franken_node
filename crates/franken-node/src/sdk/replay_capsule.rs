@@ -5292,8 +5292,7 @@ mod tests {
         // Empty fixture: locks the v1 domain + LE64(0) no-inputs framing.
         let empty_hash = super::try_compute_inputs_hash(&[]).expect("empty inputs encode");
         assert_eq!(
-            empty_hash,
-            "c518e59d6911021a40ba3d6bb3e67799c4a1c533f57eccaa820f64a9902b9c7a",
+            empty_hash, "c518e59d6911021a40ba3d6bb3e67799c4a1c533f57eccaa820f64a9902b9c7a",
             "empty-inputs hash drifted — check the v1 domain separator or \
              the LE64(0) no-inputs framing"
         );
@@ -5307,8 +5306,7 @@ mod tests {
         }];
         let single_hash = super::try_compute_inputs_hash(&single).expect("single input encodes");
         assert_eq!(
-            single_hash,
-            "2ac37f96f8ee0eac2b0f314c43abc9c8a7e22446037489a2a5c510762e1f6cc1",
+            single_hash, "2ac37f96f8ee0eac2b0f314c43abc9c8a7e22446037489a2a5c510762e1f6cc1",
             "single-input hash drifted — check LE64(seq) encoding or \
              LE64(data.len) prefix"
         );
@@ -5336,8 +5334,7 @@ mod tests {
         ];
         let multi_hash = super::try_compute_inputs_hash(&multi).expect("multi inputs encode");
         assert_eq!(
-            multi_hash,
-            "ecbdeabb0a2e25a11d23997c4a54079cc07106bee4cf74e7961b567ad53bbcbf",
+            multi_hash, "ecbdeabb0a2e25a11d23997c4a54079cc07106bee4cf74e7961b567ad53bbcbf",
             "multi-input hash drifted — check input-iteration order or \
              empty-data LE64(0)+zero-bytes framing"
         );
@@ -5345,7 +5342,10 @@ mod tests {
         // Cross-fixture distinctness + length contract.
         for h in [&empty_hash, &single_hash, &multi_hash] {
             assert_eq!(h.len(), 64);
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
         assert_ne!(empty_hash, single_hash);
         assert_ne!(single_hash, multi_hash);
@@ -5363,8 +5363,8 @@ mod tests {
         single_with_metadata[0]
             .metadata
             .insert("region".to_string(), "us-east-1".to_string());
-        let metadata_variant_hash =
-            super::try_compute_inputs_hash(&single_with_metadata).expect("metadata variant encodes");
+        let metadata_variant_hash = super::try_compute_inputs_hash(&single_with_metadata)
+            .expect("metadata variant encodes");
         assert_eq!(
             metadata_variant_hash, single_hash,
             "CapsuleInput.metadata MUST be excluded from the hash; adding \

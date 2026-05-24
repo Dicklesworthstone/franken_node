@@ -7014,8 +7014,7 @@ mod tests {
             &DecisionReceiptPayload::reconcile(),
         );
         assert_eq!(
-            reconcile_hash,
-            "66eb701efca443842beed029db6b67ef524fee415806173288de7cacc5bcea93",
+            reconcile_hash, "66eb701efca443842beed029db6b67ef524fee415806173288de7cacc5bcea93",
             "canonical bytes for a reconcile receipt drifted — \
              either a Option=None framing byte changed or the domain \
              separator / field order moved"
@@ -7042,8 +7041,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            quarantine_hash,
-            "43b1728d1ba2a39567545882ca2862f362e551446fddf383e271aad37a015378",
+            quarantine_hash, "43b1728d1ba2a39567545882ca2862f362e551446fddf383e271aad37a015378",
             "canonical bytes for a quarantine receipt drifted — \
              check the Option=Some framing (1u8 prefix + payload)"
         );
@@ -7073,12 +7071,19 @@ mod tests {
                     tenant_id: Some("test-tenant".to_string()),
                     reason: format!("boundary test event {}", i),
                 });
-                assert!(result.is_ok(), "quarantine {} should succeed within capacity", i);
+                assert!(
+                    result.is_ok(),
+                    "quarantine {} should succeed within capacity",
+                    i
+                );
             }
 
             // Verify we're at capacity
             let events_count = fleet.state.lock().unwrap().fleet_events.len();
-            assert_eq!(events_count, MAX_FLEET_EVENTS, "should be at exact capacity");
+            assert_eq!(
+                events_count, MAX_FLEET_EVENTS,
+                "should be at exact capacity"
+            );
 
             // Add one more event to trigger eviction
             let overflow_result = fleet.quarantine(QuarantineRequest {
@@ -7088,17 +7093,24 @@ mod tests {
                 reason: "overflow event to test capacity eviction".to_string(),
             });
 
-            assert!(overflow_result.is_ok(), "overflow quarantine should succeed with eviction");
+            assert!(
+                overflow_result.is_ok(),
+                "overflow quarantine should succeed with eviction"
+            );
 
             // Verify capacity is maintained (oldest event evicted)
             let final_count = fleet.state.lock().unwrap().fleet_events.len();
-            assert!(final_count <= MAX_FLEET_EVENTS,
-                "capacity should be maintained after overflow, got {}", final_count);
+            assert!(
+                final_count <= MAX_FLEET_EVENTS,
+                "capacity should be maintained after overflow, got {}",
+                final_count
+            );
         }
 
         #[test]
         fn zone_status_boundary_at_max_capacity() {
-            let transport = FileFleetTransport::new(test_transport_dir().join("zone_status_boundary"));
+            let transport =
+                FileFleetTransport::new(test_transport_dir().join("zone_status_boundary"));
             let mut fleet = FleetQuarantineApi::new(transport, DEFAULT_SIGNING_KEY.to_string())
                 .expect("fleet API init");
 
@@ -7117,12 +7129,19 @@ mod tests {
                     zone_id: format!("zone-{}", i),
                     tenant_id: Some("test-tenant".to_string()),
                 });
-                assert!(status_result.is_ok(), "status check for zone {} should succeed", i);
+                assert!(
+                    status_result.is_ok(),
+                    "status check for zone {} should succeed",
+                    i
+                );
             }
 
             // Verify we're near capacity for zone statuses
             let zone_count = fleet.state.lock().unwrap().zone_status.len();
-            assert!(zone_count <= MAX_ZONE_STATUS, "zone status count should be within bounds");
+            assert!(
+                zone_count <= MAX_ZONE_STATUS,
+                "zone status count should be within bounds"
+            );
 
             // Add more zones to test eviction
             let overflow_result = fleet.quarantine(QuarantineRequest {
@@ -7132,7 +7151,10 @@ mod tests {
                 reason: "zone status overflow test".to_string(),
             });
 
-            assert!(overflow_result.is_ok(), "overflow zone quarantine should succeed");
+            assert!(
+                overflow_result.is_ok(),
+                "overflow zone quarantine should succeed"
+            );
         }
 
         #[test]
@@ -7142,14 +7164,19 @@ mod tests {
                 .expect("fleet API init");
 
             // Create incidents up to MAX_INCIDENTS
-            for i in 0..MAX_INCIDENTS.min(100) { // Limit to 100 for test speed
+            for i in 0..MAX_INCIDENTS.min(100) {
+                // Limit to 100 for test speed
                 let quarantine_result = fleet.quarantine(QuarantineRequest {
                     extension_id: format!("ext-{}", i),
                     zone_id: format!("zone-{}", i % 10), // Cycle through zones
                     tenant_id: Some(format!("tenant-{}", i % 5)), // Cycle through tenants
                     reason: format!("incident boundary test {}", i),
                 });
-                assert!(quarantine_result.is_ok(), "incident {} quarantine should succeed", i);
+                assert!(
+                    quarantine_result.is_ok(),
+                    "incident {} quarantine should succeed",
+                    i
+                );
             }
 
             // Verify incident tracking is bounded
@@ -7157,13 +7184,18 @@ mod tests {
             let incident_count = state.incidents.len();
             drop(state);
 
-            assert!(incident_count <= MAX_INCIDENTS,
-                "incident count should be bounded: got {}, max {}", incident_count, MAX_INCIDENTS);
+            assert!(
+                incident_count <= MAX_INCIDENTS,
+                "incident count should be bounded: got {}, max {}",
+                incident_count,
+                MAX_INCIDENTS
+            );
         }
 
         #[test]
         fn quarantine_request_size_boundaries() {
-            let transport = FileFleetTransport::new(test_transport_dir().join("request_size_boundary"));
+            let transport =
+                FileFleetTransport::new(test_transport_dir().join("request_size_boundary"));
             let mut fleet = FleetQuarantineApi::new(transport, DEFAULT_SIGNING_KEY.to_string())
                 .expect("fleet API init");
 
@@ -7211,10 +7243,11 @@ mod tests {
             use std::sync::Arc;
             use std::thread;
 
-            let transport = FileFleetTransport::new(test_transport_dir().join("concurrent_boundary"));
+            let transport =
+                FileFleetTransport::new(test_transport_dir().join("concurrent_boundary"));
             let fleet = Arc::new(Mutex::new(
                 FleetQuarantineApi::new(transport, DEFAULT_SIGNING_KEY.to_string())
-                    .expect("fleet API init")
+                    .expect("fleet API init"),
             ));
 
             // Test concurrent quarantine operations
@@ -7223,7 +7256,8 @@ mod tests {
                 let fleet_clone = fleet.clone();
                 let handle = thread::spawn(move || {
                     for j in 0..5 {
-                        let mut fleet_guard = fleet_clone.lock()
+                        let mut fleet_guard = fleet_clone
+                            .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         let result = fleet_guard.quarantine(QuarantineRequest {
                             extension_id: format!("concurrent-ext-{}-{}", i, j),
@@ -7235,7 +7269,10 @@ mod tests {
 
                         // Allow some failures due to contention, but not all
                         if result.is_err() {
-                            println!("Concurrent quarantine {}-{} failed (expected under contention)", i, j);
+                            println!(
+                                "Concurrent quarantine {}-{} failed (expected under contention)",
+                                i, j
+                            );
                         }
                     }
                 });
@@ -7248,18 +7285,27 @@ mod tests {
             }
 
             // Verify fleet state remains consistent
-            let final_fleet = fleet.lock()
+            let final_fleet = fleet
+                .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let events_count = final_fleet.state.lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()).fleet_events.len();
+            let events_count = final_fleet
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .fleet_events
+                .len();
             drop(final_fleet);
 
-            assert!(events_count <= MAX_FLEET_EVENTS, "concurrent access should maintain capacity bounds");
+            assert!(
+                events_count <= MAX_FLEET_EVENTS,
+                "concurrent access should maintain capacity bounds"
+            );
         }
 
         #[test]
         fn reconcile_boundary_with_large_convergence_gaps() {
-            let transport = FileFleetTransport::new(test_transport_dir().join("reconcile_boundary"));
+            let transport =
+                FileFleetTransport::new(test_transport_dir().join("reconcile_boundary"));
             let mut fleet = FleetQuarantineApi::new(transport, DEFAULT_SIGNING_KEY.to_string())
                 .expect("fleet API init");
 
@@ -7282,12 +7328,21 @@ mod tests {
                 timeout_seconds: Some(30),
             });
 
-            assert!(reconcile_result.is_ok(), "reconcile should handle large convergence gap");
+            assert!(
+                reconcile_result.is_ok(),
+                "reconcile should handle large convergence gap"
+            );
 
             if let Ok(response) = reconcile_result {
                 // Verify convergence tracking is bounded
-                assert!(response.convergence_progress >= 0.0, "progress should be non-negative");
-                assert!(response.convergence_progress <= 100.0, "progress should not exceed 100%");
+                assert!(
+                    response.convergence_progress >= 0.0,
+                    "progress should be non-negative"
+                );
+                assert!(
+                    response.convergence_progress <= 100.0,
+                    "progress should not exceed 100%"
+                );
 
                 if let Some(eta_seconds) = response.estimated_completion_seconds {
                     assert!(eta_seconds >= 0, "ETA should be non-negative");
@@ -7298,7 +7353,8 @@ mod tests {
 
         #[test]
         fn api_rate_limiting_boundary_behavior() {
-            let transport = FileFleetTransport::new(test_transport_dir().join("rate_limit_boundary"));
+            let transport =
+                FileFleetTransport::new(test_transport_dir().join("rate_limit_boundary"));
             let mut fleet = FleetQuarantineApi::new(transport, DEFAULT_SIGNING_KEY.to_string())
                 .expect("fleet API init");
 
@@ -7328,12 +7384,17 @@ mod tests {
             }
 
             let duration = start_time.elapsed();
-            println!("Rate limit test: {} successes, {} rate limited in {:?}",
-                success_count, failure_count, duration);
+            println!(
+                "Rate limit test: {} successes, {} rate limited in {:?}",
+                success_count, failure_count, duration
+            );
 
             // Verify that either rate limiting kicked in OR all succeeded quickly
             assert!(success_count > 0, "at least some requests should succeed");
-            assert!(duration.as_millis() < 5000, "test should complete within reasonable time");
+            assert!(
+                duration.as_millis() < 5000,
+                "test should complete within reasonable time"
+            );
         }
 
         #[test]
@@ -7355,7 +7416,9 @@ mod tests {
                 }
 
                 fn increment(&self) -> Result<i32, &'static str> {
-                    let mut guard = self.counter.lock()
+                    let mut guard = self
+                        .counter
+                        .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     *guard += 1;
                     Ok(*guard)
@@ -7381,20 +7444,31 @@ mod tests {
                 let handle = thread::spawn(move || {
                     // This should work despite the poisoned mutex
                     let result = fleet_clone.increment();
-                    assert!(result.is_ok(), "increment should succeed despite poison in thread {}", i);
+                    assert!(
+                        result.is_ok(),
+                        "increment should succeed despite poison in thread {}",
+                        i
+                    );
                 });
                 handles.push(handle);
             }
 
             // All threads should complete successfully
             for handle in handles {
-                handle.join().expect("thread should complete despite poison");
+                handle
+                    .join()
+                    .expect("thread should complete despite poison");
             }
 
             // Verify the final state shows all increments worked
-            let final_count = mock_fleet.counter.lock()
+            let final_count = mock_fleet
+                .counter
+                .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            assert_eq!(*final_count, 5, "poison recovery should allow all increments");
+            assert_eq!(
+                *final_count, 5,
+                "poison recovery should allow all increments"
+            );
         }
     }
 }

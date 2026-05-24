@@ -2372,8 +2372,7 @@ mod artifact_signing_boundary_negative_tests {
         );
         let kid_zeros = KeyId::from_verifying_key(&vk_zeros);
         assert_eq!(
-            kid_zeros.0,
-            "d03618689e8baac1",
+            kid_zeros.0, "d03618689e8baac1",
             "KeyId for the all-zero-seed VK drifted — check the v1 domain \
              separator, the LE64(32) VK length prefix, or the 8-byte \
              SHA-256 truncation (16 hex chars)"
@@ -2416,7 +2415,11 @@ mod artifact_signing_boundary_negative_tests {
         // hex chars (8 bytes × 2 hex chars per byte).
         for kid in [&kid_zeros, &kid_sevens, &kid_counting] {
             assert_eq!(kid.0.len(), 16);
-            assert!(kid.0.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+            assert!(
+                kid.0
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+            );
         }
 
         // Determinism invariant: calling from_verifying_key twice on the

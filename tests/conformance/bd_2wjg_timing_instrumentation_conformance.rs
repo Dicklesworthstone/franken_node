@@ -9,12 +9,12 @@
 //! - INV-SAMPLE-SEPARATION: track baseline vs integrated samples separately
 //! - INV-COLD-START-TRACKING: track cold-start timings per hot path
 
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use frankenengine_node::policy::perf_budget_guard::{
-    TimingSample, PercentileStats, TimingCollector, BenchmarkMeasurement,
-    PRF_006_TIMING_SAMPLE, PRF_007_PERCENTILE_COMPUTED, PRF_008_COLD_START_TIMING,
+    BenchmarkMeasurement, PRF_006_TIMING_SAMPLE, PRF_007_PERCENTILE_COMPUTED,
+    PRF_008_COLD_START_TIMING, PercentileStats, TimingCollector, TimingSample,
 };
 
 #[derive(Debug, Clone)]
@@ -65,7 +65,6 @@ const BD_2WJG_CASES: &[ConformanceCase] = &[
         description: "TimingCollector silently ignores invalid durations",
         test_fn: test_timing_collector_ignores_invalid,
     },
-
     // INV-PERCENTILE-ACCURACY: compute correct percentiles using nearest-rank method
     ConformanceCase {
         id: "bd-2wjg-percentile-1",
@@ -88,7 +87,6 @@ const BD_2WJG_CASES: &[ConformanceCase] = &[
         description: "min/max values are correctly identified",
         test_fn: test_min_max_identification,
     },
-
     // INV-EMPTY-HANDLING: handle empty sample sets gracefully
     ConformanceCase {
         id: "bd-2wjg-empty-1",
@@ -104,7 +102,6 @@ const BD_2WJG_CASES: &[ConformanceCase] = &[
         description: "TimingCollector handles missing hot paths gracefully",
         test_fn: test_timing_collector_missing_paths,
     },
-
     // INV-BOUNDED-CAPACITY: respect MAX_TIMING_SAMPLES capacity
     ConformanceCase {
         id: "bd-2wjg-capacity-1",
@@ -120,7 +117,6 @@ const BD_2WJG_CASES: &[ConformanceCase] = &[
         description: "integrated samples respect bounded capacity",
         test_fn: test_integrated_samples_bounded,
     },
-
     // INV-EVENT-EMISSION: emit correct event codes
     ConformanceCase {
         id: "bd-2wjg-events-1",
@@ -150,7 +146,6 @@ const BD_2WJG_CASES: &[ConformanceCase] = &[
         description: "measurements synthesis emits PRF-007 events",
         test_fn: test_measurements_synthesis_emits_prf_007,
     },
-
     // INV-SAMPLE-SEPARATION: track baseline vs integrated samples separately
     ConformanceCase {
         id: "bd-2wjg-separation-1",
@@ -166,7 +161,6 @@ const BD_2WJG_CASES: &[ConformanceCase] = &[
         description: "statistics computation is independent per sample type",
         test_fn: test_independent_statistics_computation,
     },
-
     // INV-COLD-START-TRACKING: track cold-start timings per hot path
     ConformanceCase {
         id: "bd-2wjg-coldstart-1",
@@ -182,7 +176,6 @@ const BD_2WJG_CASES: &[ConformanceCase] = &[
         description: "cold-start validation rejects invalid values",
         test_fn: test_cold_start_validation,
     },
-
     // Additional requirements (SHOULD)
     ConformanceCase {
         id: "bd-2wjg-synthesis-1",
@@ -254,7 +247,7 @@ fn test_timing_collector_ignores_invalid() -> TestResult {
     collector.record_baseline("test-path", f64::NAN);
     collector.record_baseline("test-path", f64::INFINITY);
     collector.record_baseline("test-path", -1.0);
-    collector.record_baseline("test-path", 0.0);  // Zero should also be rejected
+    collector.record_baseline("test-path", 0.0); // Zero should also be rejected
 
     collector.record_integrated("test-path", f64::NAN);
     collector.record_integrated("test-path", f64::INFINITY);
@@ -264,15 +257,21 @@ fn test_timing_collector_ignores_invalid() -> TestResult {
     // Counts should remain unchanged
     if collector.baseline_count("test-path") != initial_baseline_count {
         return TestResult::Fail {
-            reason: format!("Baseline count changed after invalid samples: {} -> {}",
-                initial_baseline_count, collector.baseline_count("test-path")),
+            reason: format!(
+                "Baseline count changed after invalid samples: {} -> {}",
+                initial_baseline_count,
+                collector.baseline_count("test-path")
+            ),
         };
     }
 
     if collector.integrated_count("test-path") != initial_integrated_count {
         return TestResult::Fail {
-            reason: format!("Integrated count changed after invalid samples: {} -> {}",
-                initial_integrated_count, collector.integrated_count("test-path")),
+            reason: format!(
+                "Integrated count changed after invalid samples: {} -> {}",
+                initial_integrated_count,
+                collector.integrated_count("test-path")
+            ),
         };
     }
 
@@ -291,19 +290,28 @@ fn test_percentile_nearest_rank_algorithm() -> TestResult {
 
     if (stats.p50_us - 5.0).abs() > f64::EPSILON {
         return TestResult::Fail {
-            reason: format!("p50 calculation incorrect: expected 5.0, got {}", stats.p50_us),
+            reason: format!(
+                "p50 calculation incorrect: expected 5.0, got {}",
+                stats.p50_us
+            ),
         };
     }
 
     if (stats.p95_us - 10.0).abs() > f64::EPSILON {
         return TestResult::Fail {
-            reason: format!("p95 calculation incorrect: expected 10.0, got {}", stats.p95_us),
+            reason: format!(
+                "p95 calculation incorrect: expected 10.0, got {}",
+                stats.p95_us
+            ),
         };
     }
 
     if (stats.p99_us - 10.0).abs() > f64::EPSILON {
         return TestResult::Fail {
-            reason: format!("p99 calculation incorrect: expected 10.0, got {}", stats.p99_us),
+            reason: format!(
+                "p99 calculation incorrect: expected 10.0, got {}",
+                stats.p99_us
+            ),
         };
     }
 
@@ -318,13 +326,19 @@ fn test_percentile_consistency() -> TestResult {
     // p50 should be <= p95 should be <= p99
     if stats.p50_us > stats.p95_us {
         return TestResult::Fail {
-            reason: format!("p50 ({}) > p95 ({}) - percentiles not ordered", stats.p50_us, stats.p95_us),
+            reason: format!(
+                "p50 ({}) > p95 ({}) - percentiles not ordered",
+                stats.p50_us, stats.p95_us
+            ),
         };
     }
 
     if stats.p95_us > stats.p99_us {
         return TestResult::Fail {
-            reason: format!("p95 ({}) > p99 ({}) - percentiles not ordered", stats.p95_us, stats.p99_us),
+            reason: format!(
+                "p95 ({}) > p99 ({}) - percentiles not ordered",
+                stats.p95_us, stats.p99_us
+            ),
         };
     }
 
@@ -464,14 +478,20 @@ fn test_baseline_recording_emits_prf_006() -> TestResult {
     let events = collector.events();
     if events.len() != initial_event_count + 1 {
         return TestResult::Fail {
-            reason: format!("Expected 1 new event, got {}", events.len() - initial_event_count),
+            reason: format!(
+                "Expected 1 new event, got {}",
+                events.len() - initial_event_count
+            ),
         };
     }
 
     let last_event = &events[events.len() - 1];
     if last_event.code != PRF_006_TIMING_SAMPLE {
         return TestResult::Fail {
-            reason: format!("Expected event code {}, got {}", PRF_006_TIMING_SAMPLE, last_event.code),
+            reason: format!(
+                "Expected event code {}, got {}",
+                PRF_006_TIMING_SAMPLE, last_event.code
+            ),
         };
     }
 
@@ -499,20 +519,29 @@ fn test_integrated_recording_emits_prf_006() -> TestResult {
     let events = collector.events();
     if events.len() != initial_event_count + 1 {
         return TestResult::Fail {
-            reason: format!("Expected 1 new event, got {}", events.len() - initial_event_count),
+            reason: format!(
+                "Expected 1 new event, got {}",
+                events.len() - initial_event_count
+            ),
         };
     }
 
     let last_event = &events[events.len() - 1];
     if last_event.code != PRF_006_TIMING_SAMPLE {
         return TestResult::Fail {
-            reason: format!("Expected event code {}, got {}", PRF_006_TIMING_SAMPLE, last_event.code),
+            reason: format!(
+                "Expected event code {}, got {}",
+                PRF_006_TIMING_SAMPLE, last_event.code
+            ),
         };
     }
 
     if !last_event.detail.contains("integrated") {
         return TestResult::Fail {
-            reason: format!("Expected 'integrated' in detail, got: {}", last_event.detail),
+            reason: format!(
+                "Expected 'integrated' in detail, got: {}",
+                last_event.detail
+            ),
         };
     }
 
@@ -528,20 +557,29 @@ fn test_cold_start_recording_emits_prf_008() -> TestResult {
     let events = collector.events();
     if events.len() != initial_event_count + 1 {
         return TestResult::Fail {
-            reason: format!("Expected 1 new event, got {}", events.len() - initial_event_count),
+            reason: format!(
+                "Expected 1 new event, got {}",
+                events.len() - initial_event_count
+            ),
         };
     }
 
     let last_event = &events[events.len() - 1];
     if last_event.code != PRF_008_COLD_START_TIMING {
         return TestResult::Fail {
-            reason: format!("Expected event code {}, got {}", PRF_008_COLD_START_TIMING, last_event.code),
+            reason: format!(
+                "Expected event code {}, got {}",
+                PRF_008_COLD_START_TIMING, last_event.code
+            ),
         };
     }
 
     if !last_event.detail.contains("cold-start") {
         return TestResult::Fail {
-            reason: format!("Expected 'cold-start' in detail, got: {}", last_event.detail),
+            reason: format!(
+                "Expected 'cold-start' in detail, got: {}",
+                last_event.detail
+            ),
         };
     }
 
@@ -562,7 +600,8 @@ fn test_measurements_synthesis_emits_prf_007() -> TestResult {
     let new_events = events.len() - initial_event_count;
 
     // Should have at least one PRF-007 event for percentile computation
-    let prf_007_events: Vec<_> = events.iter()
+    let prf_007_events: Vec<_> = events
+        .iter()
         .skip(initial_event_count)
         .filter(|e| e.code == PRF_007_PERCENTILE_COMPUTED)
         .collect();
@@ -586,16 +625,26 @@ fn test_baseline_integrated_separation() -> TestResult {
     let integrated_stats = collector.integrated_stats("test-path").unwrap();
 
     // Baseline should only reflect baseline samples
-    if (baseline_stats.min_us - 100.0).abs() > f64::EPSILON || (baseline_stats.max_us - 100.0).abs() > f64::EPSILON {
+    if (baseline_stats.min_us - 100.0).abs() > f64::EPSILON
+        || (baseline_stats.max_us - 100.0).abs() > f64::EPSILON
+    {
         return TestResult::Fail {
-            reason: format!("Baseline stats contaminated: min={}, max={}", baseline_stats.min_us, baseline_stats.max_us),
+            reason: format!(
+                "Baseline stats contaminated: min={}, max={}",
+                baseline_stats.min_us, baseline_stats.max_us
+            ),
         };
     }
 
     // Integrated should only reflect integrated samples
-    if (integrated_stats.min_us - 200.0).abs() > f64::EPSILON || (integrated_stats.max_us - 200.0).abs() > f64::EPSILON {
+    if (integrated_stats.min_us - 200.0).abs() > f64::EPSILON
+        || (integrated_stats.max_us - 200.0).abs() > f64::EPSILON
+    {
         return TestResult::Fail {
-            reason: format!("Integrated stats contaminated: min={}, max={}", integrated_stats.min_us, integrated_stats.max_us),
+            reason: format!(
+                "Integrated stats contaminated: min={}, max={}",
+                integrated_stats.min_us, integrated_stats.max_us
+            ),
         };
     }
 
@@ -619,8 +668,10 @@ fn test_independent_statistics_computation() -> TestResult {
 
     if baseline_stats.p50_us >= integrated_stats.p50_us {
         return TestResult::Fail {
-            reason: format!("Statistics not independent: baseline p50={}, integrated p50={}",
-                baseline_stats.p50_us, integrated_stats.p50_us),
+            reason: format!(
+                "Statistics not independent: baseline p50={}, integrated p50={}",
+                baseline_stats.p50_us, integrated_stats.p50_us
+            ),
         };
     }
 
@@ -632,7 +683,7 @@ fn test_cold_start_per_hot_path() -> TestResult {
 
     collector.record_cold_start("path1", 10.0);
     collector.record_cold_start("path2", 20.0);
-    collector.record_cold_start("path1", 15.0);  // Should overwrite path1
+    collector.record_cold_start("path1", 15.0); // Should overwrite path1
 
     // Add samples to enable measurements synthesis
     collector.record_baseline("path1", 100.0);
@@ -648,9 +699,13 @@ fn test_cold_start_per_hot_path() -> TestResult {
 
     match path1_measurement {
         Some(m) => {
-            if (m.cold_start_ms - 15.0).abs() > f64::EPSILON {  // Should use the latest value
+            if (m.cold_start_ms - 15.0).abs() > f64::EPSILON {
+                // Should use the latest value
                 return TestResult::Fail {
-                    reason: format!("path1 cold_start_ms incorrect: expected 15.0, got {}", m.cold_start_ms),
+                    reason: format!(
+                        "path1 cold_start_ms incorrect: expected 15.0, got {}",
+                        m.cold_start_ms
+                    ),
                 };
             }
         }
@@ -665,7 +720,10 @@ fn test_cold_start_per_hot_path() -> TestResult {
         Some(m) => {
             if (m.cold_start_ms - 20.0).abs() > f64::EPSILON {
                 return TestResult::Fail {
-                    reason: format!("path2 cold_start_ms incorrect: expected 20.0, got {}", m.cold_start_ms),
+                    reason: format!(
+                        "path2 cold_start_ms incorrect: expected 20.0, got {}",
+                        m.cold_start_ms
+                    ),
                 };
             }
         }
@@ -729,14 +787,20 @@ fn test_measurements_synthesis() -> TestResult {
 
     if measurement.hot_path != "test-path" {
         return TestResult::Fail {
-            reason: format!("Wrong hot_path: expected 'test-path', got '{}'", measurement.hot_path),
+            reason: format!(
+                "Wrong hot_path: expected 'test-path', got '{}'",
+                measurement.hot_path
+            ),
         };
     }
 
     // Verify cold start is included
     if (measurement.cold_start_ms - 25.0).abs() > f64::EPSILON {
         return TestResult::Fail {
-            reason: format!("Cold start incorrect: expected 25.0, got {}", measurement.cold_start_ms),
+            reason: format!(
+                "Cold start incorrect: expected 25.0, got {}",
+                measurement.cold_start_ms
+            ),
         };
     }
 
@@ -767,7 +831,11 @@ fn test_measured_paths_both_samples() -> TestResult {
 
     if measured_paths.len() != 1 {
         return TestResult::Fail {
-            reason: format!("Expected 1 measured path, got {}: {:?}", measured_paths.len(), measured_paths),
+            reason: format!(
+                "Expected 1 measured path, got {}: {:?}",
+                measured_paths.len(),
+                measured_paths
+            ),
         };
     }
 
@@ -794,13 +862,19 @@ fn test_sample_counts_accurate() -> TestResult {
 
     if collector.baseline_count("test-path") != 5 {
         return TestResult::Fail {
-            reason: format!("Expected 5 baseline samples, got {}", collector.baseline_count("test-path")),
+            reason: format!(
+                "Expected 5 baseline samples, got {}",
+                collector.baseline_count("test-path")
+            ),
         };
     }
 
     if collector.integrated_count("test-path") != 3 {
         return TestResult::Fail {
-            reason: format!("Expected 3 integrated samples, got {}", collector.integrated_count("test-path")),
+            reason: format!(
+                "Expected 3 integrated samples, got {}",
+                collector.integrated_count("test-path")
+            ),
         };
     }
 
@@ -810,13 +884,19 @@ fn test_sample_counts_accurate() -> TestResult {
 
     if baseline_stats.count != 5 {
         return TestResult::Fail {
-            reason: format!("Baseline stats count mismatch: expected 5, got {}", baseline_stats.count),
+            reason: format!(
+                "Baseline stats count mismatch: expected 5, got {}",
+                baseline_stats.count
+            ),
         };
     }
 
     if integrated_stats.count != 3 {
         return TestResult::Fail {
-            reason: format!("Integrated stats count mismatch: expected 3, got {}", integrated_stats.count),
+            reason: format!(
+                "Integrated stats count mismatch: expected 3, got {}",
+                integrated_stats.count
+            ),
         };
     }
 
@@ -850,7 +930,10 @@ fn bd_2wjg_full_conformance() {
             }
             TestResult::ExpectedFailure { ref reason } => {
                 xfail += 1;
-                eprintln!("XFAIL {}: {}\n  Reason: {reason}", case.id, case.description);
+                eprintln!(
+                    "XFAIL {}: {}\n  Reason: {reason}",
+                    case.id, case.description
+                );
                 "XFAIL"
             }
         };
@@ -896,7 +979,9 @@ fn generate_compliance_matrix() {
         } else {
             0.0
         };
-        println!("| {invariant:<25} | {must_count:^4} | {total:^5} | {passing:^4} | {score:5.1}% |");
+        println!(
+            "| {invariant:<25} | {must_count:^4} | {total:^5} | {passing:^4} | {score:5.1}% |"
+        );
     }
 }
 
@@ -907,21 +992,30 @@ mod tests {
     #[test]
     fn conformance_case_coverage() {
         // Verify we have comprehensive coverage
-        let invariant_counts: BTreeMap<&str, usize> = BD_2WJG_CASES
-            .iter()
-            .fold(BTreeMap::new(), |mut acc, case| {
+        let invariant_counts: BTreeMap<&str, usize> =
+            BD_2WJG_CASES.iter().fold(BTreeMap::new(), |mut acc, case| {
                 *acc.entry(case.invariant).or_default() += 1;
                 acc
             });
 
         // Each core invariant should have multiple test cases
         assert!(invariant_counts.get("INV-TIMING-VALIDATION").unwrap_or(&0) >= &2);
-        assert!(invariant_counts.get("INV-PERCENTILE-ACCURACY").unwrap_or(&0) >= &2);
+        assert!(
+            invariant_counts
+                .get("INV-PERCENTILE-ACCURACY")
+                .unwrap_or(&0)
+                >= &2
+        );
         assert!(invariant_counts.get("INV-EMPTY-HANDLING").unwrap_or(&0) >= &1);
         assert!(invariant_counts.get("INV-BOUNDED-CAPACITY").unwrap_or(&0) >= &1);
         assert!(invariant_counts.get("INV-EVENT-EMISSION").unwrap_or(&0) >= &3);
         assert!(invariant_counts.get("INV-SAMPLE-SEPARATION").unwrap_or(&0) >= &1);
-        assert!(invariant_counts.get("INV-COLD-START-TRACKING").unwrap_or(&0) >= &1);
+        assert!(
+            invariant_counts
+                .get("INV-COLD-START-TRACKING")
+                .unwrap_or(&0)
+                >= &1
+        );
     }
 
     #[test]
@@ -929,6 +1023,10 @@ mod tests {
         use std::collections::HashSet;
 
         let ids: HashSet<&str> = BD_2WJG_CASES.iter().map(|case| case.id).collect();
-        assert_eq!(ids.len(), BD_2WJG_CASES.len(), "Duplicate test case IDs found");
+        assert_eq!(
+            ids.len(),
+            BD_2WJG_CASES.len(),
+            "Duplicate test case IDs found"
+        );
     }
 }

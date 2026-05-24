@@ -11,11 +11,11 @@
 //! - **MAY-RG-008**: Cleanup receipts provide audit trail for resource reclamation
 
 use franken_node::runtime::resource_governor::{
-    event_codes, reason_codes, CleanupCandidate, CleanupReceipt, ObservedValidationProcess,
-    ResourceDiskPressureRoot, ResourceDiskRootKind, ResourceGovernorDecision,
-    ResourceGovernorDecisionKind, ResourcePressureSample, ResourcePressureTier,
-    ResourceProcessCounts, ResourceProcessKind, CLEANUP_RECEIPT_SCHEMA_VERSION,
-    HOTSET_PREFETCH_SCHEMA_VERSION, PRESSURE_SAMPLE_SCHEMA_VERSION, REPORT_SCHEMA_VERSION,
+    CLEANUP_RECEIPT_SCHEMA_VERSION, CleanupCandidate, CleanupReceipt,
+    HOTSET_PREFETCH_SCHEMA_VERSION, ObservedValidationProcess, PRESSURE_SAMPLE_SCHEMA_VERSION,
+    REPORT_SCHEMA_VERSION, ResourceDiskPressureRoot, ResourceDiskRootKind,
+    ResourceGovernorDecision, ResourceGovernorDecisionKind, ResourcePressureSample,
+    ResourcePressureTier, ResourceProcessCounts, ResourceProcessKind, event_codes, reason_codes,
 };
 use std::collections::BTreeSet;
 
@@ -36,8 +36,8 @@ fn conformance_must_rg_001_consistent_decisions_under_identical_conditions() {
         disk_pressure_roots: vec![ResourceDiskPressureRoot {
             path: "/tmp".to_string(),
             kind: ResourceDiskRootKind::Temp,
-            total_bytes: Some(1000000000),  // 1GB
-            free_bytes: Some(200000000),    // 200MB free (20% - Yellow tier)
+            total_bytes: Some(1000000000), // 1GB
+            free_bytes: Some(200000000),   // 200MB free (20% - Yellow tier)
             used_bytes: Some(800000000),
         }],
         rch_worker_count: 8,
@@ -60,20 +60,14 @@ fn conformance_must_rg_001_consistent_decisions_under_identical_conditions() {
     let first_decision = &decisions[0];
     for (i, decision) in decisions.iter().enumerate().skip(1) {
         assert_eq!(
-            decision.kind,
-            first_decision.kind,
+            decision.kind, first_decision.kind,
             "Decision {} differs from first decision: {:?} vs {:?}",
-            i,
-            decision.kind,
-            first_decision.kind
+            i, decision.kind, first_decision.kind
         );
         assert_eq!(
-            decision.reason_code,
-            first_decision.reason_code,
+            decision.reason_code, first_decision.reason_code,
             "Reason code {} differs from first: {} vs {}",
-            i,
-            decision.reason_code,
-            first_decision.reason_code
+            i, decision.reason_code, first_decision.reason_code
         );
     }
 
@@ -102,18 +96,24 @@ fn conformance_must_rg_002_deterministic_process_classification() {
         ("cargo check --all-targets", ResourceProcessKind::Cargo),
         ("cargo clippy --", ResourceProcessKind::Cargo),
         ("/usr/bin/cargo build --release", ResourceProcessKind::Cargo),
-
         // Rustc commands
         ("rustc main.rs", ResourceProcessKind::Rustc),
-        ("rustc --edition 2024 --crate-type bin", ResourceProcessKind::Rustc),
-        ("/usr/local/bin/rustc --emit=dep-info", ResourceProcessKind::Rustc),
-
+        (
+            "rustc --edition 2024 --crate-type bin",
+            ResourceProcessKind::Rustc,
+        ),
+        (
+            "/usr/local/bin/rustc --emit=dep-info",
+            ResourceProcessKind::Rustc,
+        ),
         // RCH commands
         ("rch exec cargo build", ResourceProcessKind::Rch),
         ("rch workers probe", ResourceProcessKind::Rch),
         ("rch status", ResourceProcessKind::Rch),
-        ("/usr/local/bin/rch exec -- cargo test", ResourceProcessKind::Rch),
-
+        (
+            "/usr/local/bin/rch exec -- cargo test",
+            ResourceProcessKind::Rch,
+        ),
         // Other validation
         ("clippy-driver", ResourceProcessKind::OtherValidation),
         ("rust-analyzer", ResourceProcessKind::OtherValidation),
@@ -125,19 +125,15 @@ fn conformance_must_rg_002_deterministic_process_classification() {
             .expect(&format!("Failed to classify command: {}", command));
 
         assert_eq!(
-            process.kind,
-            expected_kind,
+            process.kind, expected_kind,
             "Command '{}' classified as {:?}, expected {:?}",
-            command,
-            process.kind,
-            expected_kind
+            command, process.kind, expected_kind
         );
 
         // Classification must be stable across repeated calls
         let process2 = ObservedValidationProcess::new(Some(5678), command).unwrap();
         assert_eq!(
-            process2.kind,
-            expected_kind,
+            process2.kind, expected_kind,
             "Command '{}' classification changed between calls",
             command
         );
@@ -150,7 +146,7 @@ fn conformance_must_rg_002_deterministic_process_classification() {
         "vim src/main.rs",
         "cat Cargo.toml",
         "python test.py",
-        "",  // Empty command
+        "", // Empty command
     ];
 
     for command in non_validation_commands {
@@ -200,7 +196,7 @@ fn conformance_must_rg_003_fail_closed_pressure_tier_calculation() {
             path: "/tmp".to_string(),
             kind: ResourceDiskRootKind::Temp,
             total_bytes: Some(1000000),
-            free_bytes: Some(2000000),  // More free than total
+            free_bytes: Some(2000000), // More free than total
             used_bytes: Some(0),
         },
     ];
@@ -227,49 +223,56 @@ fn conformance_must_rg_003_fail_closed_pressure_tier_calculation() {
     // Test valid pressure tier boundaries
     let valid_cases = vec![
         // Green tier: >= 15% free (1500 permyriad)
-        (ResourceDiskPressureRoot {
-            path: "/project".to_string(),
-            kind: ResourceDiskRootKind::Project,
-            total_bytes: Some(100_000_000),
-            free_bytes: Some(20_000_000),  // 20% free
-            used_bytes: Some(80_000_000),
-        }, ResourcePressureTier::Green, 2000),
-
+        (
+            ResourceDiskPressureRoot {
+                path: "/project".to_string(),
+                kind: ResourceDiskRootKind::Project,
+                total_bytes: Some(100_000_000),
+                free_bytes: Some(20_000_000), // 20% free
+                used_bytes: Some(80_000_000),
+            },
+            ResourcePressureTier::Green,
+            2000,
+        ),
         // Yellow tier: 5-15% free (500-1500 permyriad)
-        (ResourceDiskPressureRoot {
-            path: "/cache".to_string(),
-            kind: ResourceDiskRootKind::CacheRoot,
-            total_bytes: Some(100_000_000),
-            free_bytes: Some(10_000_000),  // 10% free
-            used_bytes: Some(90_000_000),
-        }, ResourcePressureTier::Yellow, 1000),
-
+        (
+            ResourceDiskPressureRoot {
+                path: "/cache".to_string(),
+                kind: ResourceDiskRootKind::CacheRoot,
+                total_bytes: Some(100_000_000),
+                free_bytes: Some(10_000_000), // 10% free
+                used_bytes: Some(90_000_000),
+            },
+            ResourcePressureTier::Yellow,
+            1000,
+        ),
         // Red tier: < 5% free (< 500 permyriad)
-        (ResourceDiskPressureRoot {
-            path: "/target".to_string(),
-            kind: ResourceDiskRootKind::TargetDir,
-            total_bytes: Some(100_000_000),
-            free_bytes: Some(2_000_000),   // 2% free
-            used_bytes: Some(98_000_000),
-        }, ResourcePressureTier::Red, 200),
+        (
+            ResourceDiskPressureRoot {
+                path: "/target".to_string(),
+                kind: ResourceDiskRootKind::TargetDir,
+                total_bytes: Some(100_000_000),
+                free_bytes: Some(2_000_000), // 2% free
+                used_bytes: Some(98_000_000),
+            },
+            ResourcePressureTier::Red,
+            200,
+        ),
     ];
 
     for (root, expected_tier, expected_permyriad) in valid_cases {
         let pressure_tier = root.pressure_tier();
         assert_eq!(
-            pressure_tier,
-            expected_tier,
+            pressure_tier, expected_tier,
             "Valid case should calculate correct pressure tier: {:?}",
             root
         );
 
         let free_permyriad = root.free_permyriad().unwrap();
         assert_eq!(
-            free_permyriad,
-            expected_permyriad,
+            free_permyriad, expected_permyriad,
             "Free permyriad calculation mismatch: expected {}, got {}",
-            expected_permyriad,
-            free_permyriad
+            expected_permyriad, free_permyriad
         );
     }
 }
@@ -282,26 +285,26 @@ fn conformance_must_rg_003_fail_closed_pressure_tier_calculation() {
 fn conformance_must_rg_004_complete_observation_recording() {
     let comprehensive_sample = ResourcePressureSample {
         schema_version: PRESSURE_SAMPLE_SCHEMA_VERSION.to_string(),
-        timestamp_epoch_secs: 1677721600,  // Specific timestamp
+        timestamp_epoch_secs: 1677721600, // Specific timestamp
         validation_processes: vec![
             ObservedValidationProcess::new(Some(1001), "cargo build --release").unwrap(),
             ObservedValidationProcess::new(Some(1002), "rustc --edition 2024 main.rs").unwrap(),
             ObservedValidationProcess::new(Some(1003), "rch exec -- cargo test").unwrap(),
-            ObservedValidationProcess::new(None, "clippy-driver").unwrap(),  // No PID
+            ObservedValidationProcess::new(None, "clippy-driver").unwrap(), // No PID
         ],
         disk_pressure_roots: vec![
             ResourceDiskPressureRoot {
                 path: "/very/long/project/path/that/should/be/preserved/completely".to_string(),
                 kind: ResourceDiskRootKind::Project,
-                total_bytes: Some(1_000_000_000_000),  // 1TB
-                free_bytes: Some(100_000_000_000),     // 100GB
-                used_bytes: Some(900_000_000_000),     // 900GB
+                total_bytes: Some(1_000_000_000_000), // 1TB
+                free_bytes: Some(100_000_000_000),    // 100GB
+                used_bytes: Some(900_000_000_000),    // 900GB
             },
             ResourceDiskPressureRoot {
                 path: "/tmp/rch-target-cache".to_string(),
                 kind: ResourceDiskRootKind::RchTargetDir,
-                total_bytes: Some(500_000_000_000),    // 500GB
-                free_bytes: Some(25_000_000_000),      // 25GB (5% - Red)
+                total_bytes: Some(500_000_000_000), // 500GB
+                free_bytes: Some(25_000_000_000),   // 25GB (5% - Red)
                 used_bytes: Some(475_000_000_000),
             },
         ],
@@ -335,12 +338,11 @@ fn conformance_must_rg_004_complete_observation_recording() {
     );
 
     // Test JSON round-trip preserves data exactly
-    let deserialized: ResourcePressureSample = serde_json::from_str(&json)
-        .expect("JSON should deserialize back to identical structure");
+    let deserialized: ResourcePressureSample =
+        serde_json::from_str(&json).expect("JSON should deserialize back to identical structure");
 
     assert_eq!(
-        deserialized.timestamp_epoch_secs,
-        comprehensive_sample.timestamp_epoch_secs,
+        deserialized.timestamp_epoch_secs, comprehensive_sample.timestamp_epoch_secs,
         "Timestamp should be preserved exactly"
     );
     assert_eq!(
@@ -354,23 +356,28 @@ fn conformance_must_rg_004_complete_observation_recording() {
         "All disk pressure roots should be preserved"
     );
     assert_eq!(
-        deserialized.rch_worker_count,
-        comprehensive_sample.rch_worker_count,
+        deserialized.rch_worker_count, comprehensive_sample.rch_worker_count,
         "RCH worker count should be preserved"
     );
     assert_eq!(
-        deserialized.unavailable_signals,
-        comprehensive_sample.unavailable_signals,
+        deserialized.unavailable_signals, comprehensive_sample.unavailable_signals,
         "Unavailable signals should be preserved exactly"
     );
 
     // Verify process counts calculation preserves all data
-    let process_counts = ResourceProcessCounts::from_processes(&comprehensive_sample.validation_processes);
+    let process_counts =
+        ResourceProcessCounts::from_processes(&comprehensive_sample.validation_processes);
     assert_eq!(process_counts.cargo, 1, "Should count 1 cargo process");
     assert_eq!(process_counts.rustc, 1, "Should count 1 rustc process");
     assert_eq!(process_counts.rch, 1, "Should count 1 rch process");
-    assert_eq!(process_counts.other_validation, 1, "Should count 1 other validation process");
-    assert_eq!(process_counts.total_validation_processes, 4, "Should count all 4 processes");
+    assert_eq!(
+        process_counts.other_validation, 1,
+        "Should count 1 other validation process"
+    );
+    assert_eq!(
+        process_counts.total_validation_processes, 4,
+        "Should count all 4 processes"
+    );
 }
 
 /// **SHOULD-RG-005**: Source-only mode SHOULD preserve forward progress under high contention
@@ -394,7 +401,7 @@ fn conformance_should_rg_005_source_only_preserves_progress() {
             path: "/project".to_string(),
             kind: ResourceDiskRootKind::Project,
             total_bytes: Some(100_000_000),
-            free_bytes: Some(2_000_000),    // 2% free - Red tier
+            free_bytes: Some(2_000_000), // 2% free - Red tier
             used_bytes: Some(98_000_000),
         }],
         rch_worker_count: 8,
@@ -405,7 +412,7 @@ fn conformance_should_rg_005_source_only_preserves_progress() {
     let decision = ResourceGovernorDecision::make_decision(
         &high_contention_sample,
         "high-contention-test",
-        "test-validator"
+        "test-validator",
     );
 
     // Should allow source-only progress under high contention
@@ -462,7 +469,7 @@ fn conformance_should_rg_006_defer_decisions_include_backoff_reasoning() {
             path: "/target".to_string(),
             kind: ResourceDiskRootKind::TargetDir,
             total_bytes: Some(100_000_000),
-            free_bytes: Some(1_000_000),    // 1% free - Critical Red
+            free_bytes: Some(1_000_000), // 1% free - Critical Red
             used_bytes: Some(99_000_000),
         }],
         rch_worker_count: 8,
@@ -473,7 +480,7 @@ fn conformance_should_rg_006_defer_decisions_include_backoff_reasoning() {
     let decision = ResourceGovernorDecision::make_decision(
         &defer_scenario_sample,
         "defer-test",
-        "test-validator"
+        "test-validator",
     );
 
     if decision.kind == ResourceGovernorDecisionKind::Defer {
@@ -491,7 +498,9 @@ fn conformance_should_rg_006_defer_decisions_include_backoff_reasoning() {
         );
 
         assert!(
-            decision.guidance.contains("backoff") || decision.guidance.contains("retry") || decision.guidance.contains("wait"),
+            decision.guidance.contains("backoff")
+                || decision.guidance.contains("retry")
+                || decision.guidance.contains("wait"),
             "Defer guidance should mention backoff strategy: {}",
             decision.guidance
         );
@@ -511,8 +520,7 @@ fn conformance_should_rg_006_defer_decisions_include_backoff_reasoning() {
     }
 
     // Test JSON serialization includes all defer reasoning
-    let json = serde_json::to_string_pretty(&decision)
-        .expect("Decision should serialize to JSON");
+    let json = serde_json::to_string_pretty(&decision).expect("Decision should serialize to JSON");
 
     if decision.kind == ResourceGovernorDecisionKind::Defer {
         assert!(
@@ -536,10 +544,10 @@ fn conformance_should_rg_007_hotset_prefetch_respects_capacity_boundaries() {
 
     // Test hotset prefetch with various capacity constraints
     let capacity_test_cases = vec![
-        (10 * 1024 * 1024, 100),      // 10MB capacity, 100 files max
-        (100 * 1024 * 1024, 1000),    // 100MB capacity, 1000 files max
-        (1024 * 1024, 10),            // 1MB capacity, 10 files max (tight)
-        (0, 0),                       // Zero capacity (should handle gracefully)
+        (10 * 1024 * 1024, 100),   // 10MB capacity, 100 files max
+        (100 * 1024 * 1024, 1000), // 100MB capacity, 1000 files max
+        (1024 * 1024, 10),         // 1MB capacity, 10 files max (tight)
+        (0, 0),                    // Zero capacity (should handle gracefully)
     ];
 
     for (max_bytes, max_files) in capacity_test_cases {
@@ -554,7 +562,7 @@ fn conformance_should_rg_007_hotset_prefetch_respects_capacity_boundaries() {
             ],
             capacity_limit_bytes: max_bytes,
             capacity_limit_files: max_files,
-            estimated_benefit_permyriad: 2500,  // 25% benefit
+            estimated_benefit_permyriad: 2500, // 25% benefit
             prefetch_reason: reason_codes::HOTSET_PROOF_CACHE_REUSE.to_string(),
         };
 
@@ -582,8 +590,7 @@ fn conformance_should_rg_007_hotset_prefetch_respects_capacity_boundaries() {
         );
 
         // Test JSON serialization preserves capacity constraints
-        let json = serde_json::to_string(&evidence)
-            .expect("Hotset evidence should serialize");
+        let json = serde_json::to_string(&evidence).expect("Hotset evidence should serialize");
 
         assert!(
             json.contains(&max_bytes.to_string()),
@@ -607,7 +614,7 @@ fn conformance_should_rg_007_hotset_prefetch_respects_capacity_boundaries() {
             schema_version: HOTSET_PREFETCH_SCHEMA_VERSION.to_string(),
             timestamp_epoch_secs: 4001,
             prefetch_kind: HotsetPrefetchKind::RecentBeadActivity,
-            target_paths: vec![],  // Empty due to capacity constraints
+            target_paths: vec![], // Empty due to capacity constraints
             capacity_limit_bytes: 1024,
             capacity_limit_files: 1,
             estimated_benefit_permyriad: 0,
@@ -635,14 +642,14 @@ fn conformance_may_rg_008_cleanup_receipts_provide_audit_trail() {
     let cleanup_candidates = vec![
         CleanupCandidate {
             path: "/tmp/old-target-cache".to_string(),
-            estimated_bytes: 100_000_000,  // 100MB
-            last_accessed_epoch_secs: 1677721600 - 86400,  // 1 day old
+            estimated_bytes: 100_000_000,                 // 100MB
+            last_accessed_epoch_secs: 1677721600 - 86400, // 1 day old
             cleanup_reason: "stale target cache".to_string(),
         },
         CleanupCandidate {
             path: "/project/target/debug/deps".to_string(),
-            estimated_bytes: 500_000_000,  // 500MB
-            last_accessed_epoch_secs: 1677721600 - 7200,   // 2 hours old
+            estimated_bytes: 500_000_000,                // 500MB
+            last_accessed_epoch_secs: 1677721600 - 7200, // 2 hours old
             cleanup_reason: "debug artifacts".to_string(),
         },
     ];
@@ -662,8 +669,7 @@ fn conformance_may_rg_008_cleanup_receipts_provide_audit_trail() {
 
     // Validate receipt completeness
     assert_eq!(
-        cleanup_receipt.candidates_evaluated,
-        2,
+        cleanup_receipt.candidates_evaluated, 2,
         "Receipt should record all candidates evaluated"
     );
 
@@ -712,17 +718,15 @@ fn conformance_may_rg_008_cleanup_receipts_provide_audit_trail() {
     );
 
     // Test receipt deserialization preserves audit data
-    let deserialized_receipt: CleanupReceipt = serde_json::from_str(&receipt_json)
-        .expect("Receipt should deserialize from JSON");
+    let deserialized_receipt: CleanupReceipt =
+        serde_json::from_str(&receipt_json).expect("Receipt should deserialize from JSON");
 
     assert_eq!(
-        deserialized_receipt.paths_removed,
-        cleanup_receipt.paths_removed,
+        deserialized_receipt.paths_removed, cleanup_receipt.paths_removed,
         "Deserialized receipt should preserve removed paths"
     );
     assert_eq!(
-        deserialized_receipt.bytes_reclaimed,
-        cleanup_receipt.bytes_reclaimed,
+        deserialized_receipt.bytes_reclaimed, cleanup_receipt.bytes_reclaimed,
         "Deserialized receipt should preserve bytes reclaimed"
     );
 
@@ -797,12 +801,12 @@ fn conformance_should_rg_009_stable_schema_versions() {
     let decision = ResourceGovernorDecision::make_decision(
         &test_sample,
         "schema-stability-test",
-        "test-validator"
+        "test-validator",
     );
 
     // Decision should serialize with stable schema reference
-    let decision_json = serde_json::to_string(&decision)
-        .expect("Decision should serialize with schema version");
+    let decision_json =
+        serde_json::to_string(&decision).expect("Decision should serialize with schema version");
 
     assert!(
         decision_json.contains("franken-node"),
@@ -846,7 +850,7 @@ fn conformance_must_rg_010_decisions_serializable_to_json() {
             request_id: "json-test-3".to_string(),
             guidance: "Retry after backoff period".to_string(),
             proof_class_hint: None,
-            estimated_backoff_secs: Some(300),  // 5 minutes
+            estimated_backoff_secs: Some(300), // 5 minutes
         },
     ];
 
@@ -877,8 +881,7 @@ fn conformance_must_rg_010_decisions_serializable_to_json() {
         );
 
         // Test JSON deserialization
-        let deserialize_result: Result<ResourceGovernorDecision, _> =
-            serde_json::from_str(&json);
+        let deserialize_result: Result<ResourceGovernorDecision, _> = serde_json::from_str(&json);
         assert!(
             deserialize_result.is_ok(),
             "Decision {} should deserialize from JSON",
@@ -887,18 +890,15 @@ fn conformance_must_rg_010_decisions_serializable_to_json() {
 
         let deserialized = deserialize_result.unwrap();
         assert_eq!(
-            deserialized.kind,
-            decision.kind,
+            deserialized.kind, decision.kind,
             "Deserialized kind should match original"
         );
         assert_eq!(
-            deserialized.reason_code,
-            decision.reason_code,
+            deserialized.reason_code, decision.reason_code,
             "Deserialized reason code should match original"
         );
         assert_eq!(
-            deserialized.timestamp_epoch_secs,
-            decision.timestamp_epoch_secs,
+            deserialized.timestamp_epoch_secs, decision.timestamp_epoch_secs,
             "Deserialized timestamp should match original"
         );
     }
@@ -910,15 +910,13 @@ fn conformance_must_rg_010_decisions_serializable_to_json() {
         validation_processes: vec![
             ObservedValidationProcess::new(Some(9001), "cargo build --release").unwrap(),
         ],
-        disk_pressure_roots: vec![
-            ResourceDiskPressureRoot {
-                path: "/complex/test/path".to_string(),
-                kind: ResourceDiskRootKind::Project,
-                total_bytes: Some(1_000_000_000),
-                free_bytes: Some(100_000_000),
-                used_bytes: Some(900_000_000),
-            },
-        ],
+        disk_pressure_roots: vec![ResourceDiskPressureRoot {
+            path: "/complex/test/path".to_string(),
+            kind: ResourceDiskRootKind::Project,
+            total_bytes: Some(1_000_000_000),
+            free_bytes: Some(100_000_000),
+            used_bytes: Some(900_000_000),
+        }],
         rch_worker_count: 16,
         numa_node_count: 4,
         unavailable_signals: vec!["test_signal".to_string()],
@@ -927,12 +925,11 @@ fn conformance_must_rg_010_decisions_serializable_to_json() {
     let sample_json = serde_json::to_string_pretty(&complex_sample)
         .expect("Complex sample should serialize to JSON");
 
-    let sample_parsed: ResourcePressureSample = serde_json::from_str(&sample_json)
-        .expect("Complex sample should deserialize from JSON");
+    let sample_parsed: ResourcePressureSample =
+        serde_json::from_str(&sample_json).expect("Complex sample should deserialize from JSON");
 
     assert_eq!(
-        sample_parsed.schema_version,
-        complex_sample.schema_version,
+        sample_parsed.schema_version, complex_sample.schema_version,
         "Schema version should be preserved through JSON round-trip"
     );
 }
