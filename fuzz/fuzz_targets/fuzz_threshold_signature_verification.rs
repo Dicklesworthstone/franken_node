@@ -493,35 +493,26 @@ fn fuzz_threshold_verification(config: &ThresholdConfig, artifact: &PublicationA
     // Invariant 2: verify_threshold should never panic (we should reach here)
 
     // Invariant 3: Valid signature count should never exceed total signatures provided
-    if result.valid_signatures as usize > artifact.signatures.len() {
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("FUZZ: Invariant violation - valid_signatures ({}) > total signatures ({})",
-                     result.valid_signatures, artifact.signatures.len());
-        }
-        return; // Exit gracefully instead of panicking
-    }
+    assert!(
+        result.valid_signatures as usize <= artifact.signatures.len(),
+        "CRITICAL: valid_signatures ({}) > total signatures ({}) - signature count overflow vulnerability",
+        result.valid_signatures, artifact.signatures.len()
+    );
 
-    // Invariant 4: Valid signature count should never exceed configured threshold
-    if result.verified && result.valid_signatures < config.threshold {
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("FUZZ: Invariant violation - verified=true but valid_signatures ({}) < threshold ({})",
-                     result.valid_signatures, config.threshold);
-        }
-        return; // Exit gracefully instead of panicking
-    }
+    // Invariant 4: Valid signature count should never be below threshold if verified
+    assert!(
+        !result.verified || result.valid_signatures >= config.threshold,
+        "CRITICAL: verified=true but valid_signatures ({}) < threshold ({}) - threshold bypass vulnerability",
+        result.valid_signatures, config.threshold
+    );
 
     // Invariant 5: Test specific expected results based on test case
     match &test_case.signature_strategy {
         SignatureStrategy::AllInvalid { .. } => {
-            if result.verified {
-                #[cfg(debug_assertions)]
-                {
-                    eprintln!("FUZZ: Invariant violation - all invalid signatures but result.verified=true");
-                }
-                return; // Exit gracefully instead of panicking
-            }
+            assert!(
+                !result.verified,
+                "CRITICAL: all signatures are invalid but verification succeeded - invalid signature acceptance vulnerability"
+            );
         },
         SignatureStrategy::Valid { count } => {
             // Only expect verification if we have enough valid signatures and valid config
@@ -537,14 +528,11 @@ fn fuzz_threshold_verification(config: &ThresholdConfig, artifact: &PublicationA
     }
 
     // Invariant 6: Failure reason should be present if and only if verification failed
-    if result.verified && result.failure_reason.is_some() {
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("FUZZ: Invariant violation - verified=true but failure_reason is present: {:?}",
-                     result.failure_reason);
-        }
-        return; // Exit gracefully instead of panicking
-    }
+    assert!(
+        !result.verified || result.failure_reason.is_none(),
+        "CRITICAL: verified=true but failure_reason is present: {:?} - inconsistent verification state vulnerability",
+        result.failure_reason
+    );
 
     // Invariant 7: Test round-trip serialization
     let serialized = serde_json::to_string(&result).unwrap();
