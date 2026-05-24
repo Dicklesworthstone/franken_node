@@ -430,4 +430,306 @@ proptest! {
             }
         }
     }
+
+    /// Saturation conformance test: system behavior under extreme load conditions
+    /// where demand vastly exceeds capacity. Tests priority ordering, budget
+    /// minimums, cascade allocation, and starvation detection under sustained
+    /// saturation pressure.
+    #[test]
+    fn control_lane_policy_metamorphic_saturation_conformance(
+        // Extreme saturation: demand >> capacity in all lanes
+        cancel_pending in 100_u32..=2000,
+        timed_pending in 200_u32..=3000,
+        ready_pending in 500_u32..=5000,
+        // Severely constrained capacity to force saturation
+        total_slots in 1_u32..=20,
+        // Test timestamp reordering metamorphism
+        timestamp_shift_ms in 0_u64..=86400000, // up to 24 hours
+    ) {
+        let mut policy_base = ControlLanePolicy::new();
+        let mut policy_shifted = ControlLanePolicy::new();
+        let mut policy_reordered = ControlLanePolicy::new();
+
+        // Base saturation scenario
+        let metrics_base = policy_base.tick(
+            cancel_pending,
+            timed_pending,
+            ready_pending,
+            total_slots,
+            "saturation-base",
+        );
+
+        // Timestamp-shifted scenario (metamorphic transformation)
+        let base_timestamp = 1000000_u64;
+        let shifted_timestamp = base_timestamp.saturating_add(timestamp_shift_ms);
+
+        // Enqueue tasks with shifted timestamps to test ordering preservation
+        for i in 0..cancel_pending.min(50) {
+            let task_id = format!("cancel-task-{i}");
+            let _ = policy_shifted.enqueue_deadline_task(
+                ControlTaskClass::CancellationHandler,
+                &task_id,
+                shifted_timestamp.saturating_add(i as u64 * 100),
+                "saturation-shifted",
+            );
+        }
+        for i in 0..timed_pending.min(50) {
+            let task_id = format!("timed-task-{i}");
+            let _ = policy_shifted.enqueue_deadline_task(
+                ControlTaskClass::HealthCheck,
+                &task_id,
+                shifted_timestamp.saturating_add(i as u64 * 200),
+                "saturation-shifted",
+            );
+        }
+
+        let metrics_shifted = policy_shifted.tick(
+            cancel_pending,
+            timed_pending,
+            ready_pending,
+            total_slots,
+            "saturation-shifted",
+        );
+
+        // Reordered scenario (metamorphic transformation)
+        // Enqueue in reverse order to test ordering independence
+        for i in (0..cancel_pending.min(50)).rev() {
+            let task_id = format!("cancel-rev-{i}");
+            let _ = policy_reordered.enqueue_deadline_task(
+                ControlTaskClass::DrainOperation,
+                &task_id,
+                base_timestamp.saturating_add(i as u64 * 100),
+                "saturation-reordered",
+            );
+        }
+        for i in (0..timed_pending.min(50)).rev() {
+            let task_id = format!("timed-rev-{i}");
+            let _ = policy_reordered.enqueue_deadline_task(
+                ControlTaskClass::LeaseRenewal,
+                &task_id,
+                base_timestamp.saturating_add(i as u64 * 200),
+                "saturation-reordered",
+            );
+        }
+
+        let metrics_reordered = policy_reordered.tick(
+            cancel_pending,
+            timed_pending,
+            ready_pending,
+            total_slots,
+            "saturation-reordered",
+        );
+
+        // SATURATION CONFORMANCE PROPERTIES
+
+        // Property S1: Budget minimums respected under extreme saturation
+        let cancel_min_slots = u32::try_from(
+            u64::from(total_slots) * CANCEL_LANE_BUDGET_PCT as u64 / 100
+        ).unwrap_or(u32::MAX);
+        if cancel_pending > 0 && total_slots > 0 {
+            prop_assert!(
+                metrics_base.cancel_lane_tasks_run >= cancel_min_slots.max(1).min(total_slots),
+                "Cancel lane minimum budget violated under saturation: \
+                 expected >= {}, got {} (total_slots={}, cancel_pending={})",
+                cancel_min_slots.max(1).min(total_slots),
+                metrics_base.cancel_lane_tasks_run,
+                total_slots,
+                cancel_pending
+            );
+        }
+
+        let timed_min_slots = u32::try_from(
+            u64::from(total_slots) * TIMED_LANE_BUDGET_PCT as u64 / 100
+        ).unwrap_or(u32::MAX);
+        let cancel_leftover = cancel_min_slots.saturating_sub(metrics_base.cancel_lane_tasks_run);
+        let timed_expected_min = if timed_pending > 0 && total_slots > metrics_base.cancel_lane_tasks_run {
+            timed_min_slots.saturating_add(cancel_leftover).max(1)
+                .min(total_slots.saturating_sub(metrics_base.cancel_lane_tasks_run))
+        } else {
+            timed_min_slots.saturating_add(cancel_leftover)
+                .min(total_slots.saturating_sub(metrics_base.cancel_lane_tasks_run))
+        };
+
+        if timed_pending > 0 && total_slots > metrics_base.cancel_lane_tasks_run {
+            prop_assert!(
+                metrics_base.timed_lane_tasks_run >= timed_expected_min,
+                "Timed lane minimum budget violated under saturation: \
+                 expected >= {}, got {} (remaining_slots={})",
+                timed_expected_min,
+                metrics_base.timed_lane_tasks_run,
+                total_slots.saturating_sub(metrics_base.cancel_lane_tasks_run)
+            );
+        }
+
+        // Property S2: Priority ordering preserved under extreme saturation
+        // Cancel must run before ready when both are pending and slots available
+        if cancel_pending > 0 && ready_pending > 0 && total_slots > 0 {
+            prop_assert!(
+                metrics_base.cancel_lane_tasks_run > 0,
+                "Cancel priority violated: cancel tasks starved while ready pending \
+                 (cancel_pending={}, ready_pending={}, total_slots={})",
+                cancel_pending, ready_pending, total_slots
+            );
+        }
+
+        // When cancel is saturated and timed pending, timed runs before ready
+        if cancel_pending >= total_slots && timed_pending > 0 && ready_pending > 0 {
+            let remaining_after_cancel = total_slots.saturating_sub(metrics_base.cancel_lane_tasks_run);
+            if remaining_after_cancel > 0 {
+                prop_assert!(
+                    metrics_base.timed_lane_tasks_run > 0,
+                    "Timed priority violated: timed tasks starved while ready pending \
+                     and slots available after cancel (remaining={})",
+                    remaining_after_cancel
+                );
+            }
+        }
+
+        // Property S3: Slot conservation under saturation
+        let total_run = metrics_base.cancel_lane_tasks_run
+            .saturating_add(metrics_base.timed_lane_tasks_run)
+            .saturating_add(metrics_base.ready_lane_tasks_run);
+        prop_assert!(
+            total_run <= total_slots,
+            "Slot conservation violated under saturation: ran {} > total_slots {}",
+            total_run, total_slots
+        );
+
+        // Property S4: No phantom work under saturation
+        prop_assert!(
+            metrics_base.cancel_lane_tasks_run <= cancel_pending,
+            "Cancel phantom work under saturation: ran {} > pending {}",
+            metrics_base.cancel_lane_tasks_run, cancel_pending
+        );
+        prop_assert!(
+            metrics_base.timed_lane_tasks_run <= timed_pending,
+            "Timed phantom work under saturation: ran {} > pending {}",
+            metrics_base.timed_lane_tasks_run, timed_pending
+        );
+        prop_assert!(
+            metrics_base.ready_lane_tasks_run <= ready_pending,
+            "Ready phantom work under saturation: ran {} > pending {}",
+            metrics_base.ready_lane_tasks_run, ready_pending
+        );
+
+        // Property S5: Starvation detection accuracy under saturation
+        let expected_cancel_starved = cancel_pending > 0 && metrics_base.cancel_lane_tasks_run == 0;
+        let expected_timed_starved = timed_pending > 0 && metrics_base.timed_lane_tasks_run == 0;
+        let expected_ready_starved = ready_pending > 0 && metrics_base.ready_lane_tasks_run == 0;
+
+        prop_assert_eq!(
+            metrics_base.cancel_lane_starved, expected_cancel_starved,
+            "Cancel starvation flag incorrect under saturation"
+        );
+        prop_assert_eq!(
+            metrics_base.timed_lane_starved, expected_timed_starved,
+            "Timed starvation flag incorrect under saturation"
+        );
+        prop_assert_eq!(
+            metrics_base.ready_lane_starved, expected_ready_starved,
+            "Ready starvation flag incorrect under saturation"
+        );
+
+        // Property S6: Cancel never starves with any capacity (critical safety)
+        if total_slots > 0 && cancel_pending > 0 {
+            prop_assert!(
+                !metrics_base.cancel_lane_starved,
+                "CRITICAL: Cancel lane starved despite available capacity \
+                 (total_slots={}, cancel_pending={})",
+                total_slots, cancel_pending
+            );
+            prop_assert!(
+                metrics_base.cancel_lane_tasks_run > 0,
+                "CRITICAL: Cancel lane got zero tasks despite available capacity"
+            );
+        }
+
+        // Property S7: Metamorphic timestamp shift invariance
+        // Timestamp shifts should not affect scheduling decisions for current tick
+        prop_assert_eq!(
+            metrics_base.cancel_lane_tasks_run,
+            metrics_shifted.cancel_lane_tasks_run,
+            "Timestamp shift affected cancel scheduling under saturation"
+        );
+        prop_assert_eq!(
+            metrics_base.timed_lane_tasks_run,
+            metrics_shifted.timed_lane_tasks_run,
+            "Timestamp shift affected timed scheduling under saturation"
+        );
+        prop_assert_eq!(
+            metrics_base.ready_lane_tasks_run,
+            metrics_shifted.ready_lane_tasks_run,
+            "Timestamp shift affected ready scheduling under saturation"
+        );
+
+        // Property S8: Metamorphic task reordering invariance
+        // Task enqueueing order should not affect current tick scheduling totals
+        prop_assert_eq!(
+            metrics_base.cancel_lane_tasks_run,
+            metrics_reordered.cancel_lane_tasks_run,
+            "Task reordering affected cancel scheduling under saturation"
+        );
+        prop_assert_eq!(
+            metrics_base.timed_lane_tasks_run,
+            metrics_reordered.timed_lane_tasks_run,
+            "Task reordering affected timed scheduling under saturation"
+        );
+        prop_assert_eq!(
+            metrics_base.ready_lane_tasks_run,
+            metrics_reordered.ready_lane_tasks_run,
+            "Task reordering affected ready scheduling under saturation"
+        );
+
+        // Property S9: Cascade allocation efficiency under saturation
+        // Verify leftover capacity cascades to lower priority lanes
+        let cancel_theoretical_max = cancel_pending.min(total_slots);
+        let cancel_budget_max = cancel_min_slots.min(total_slots);
+
+        if metrics_base.cancel_lane_tasks_run < cancel_theoretical_max {
+            // If cancel didn't consume all slots, check timed got cascade
+            let remaining = total_slots.saturating_sub(metrics_base.cancel_lane_tasks_run);
+            let timed_theoretical_max = timed_pending.min(remaining);
+
+            if timed_theoretical_max > 0 {
+                prop_assert!(
+                    metrics_base.timed_lane_tasks_run > timed_min_slots.min(remaining),
+                    "Cascade allocation failed: timed should benefit from cancel leftover \
+                     under saturation (remaining={}, timed_run={})",
+                    remaining, metrics_base.timed_lane_tasks_run
+                );
+            }
+        }
+
+        // Property S10: Saturation sustains across multiple ticks
+        // Run additional ticks to verify sustained saturation behavior
+        let metrics_tick2 = policy_base.tick(
+            cancel_pending,
+            timed_pending,
+            ready_pending,
+            total_slots,
+            "saturation-sustain",
+        );
+
+        // Scheduling behavior should be consistent across saturated ticks
+        prop_assert_eq!(
+            metrics_base.cancel_lane_tasks_run,
+            metrics_tick2.cancel_lane_tasks_run,
+            "Cancel scheduling inconsistent across saturated ticks"
+        );
+        prop_assert_eq!(
+            metrics_base.timed_lane_tasks_run,
+            metrics_tick2.timed_lane_tasks_run,
+            "Timed scheduling inconsistent across saturated ticks"
+        );
+        prop_assert_eq!(
+            metrics_base.ready_lane_tasks_run,
+            metrics_tick2.ready_lane_tasks_run,
+            "Ready scheduling inconsistent across saturated ticks"
+        );
+
+        // Verify tick history grows correctly
+        prop_assert_eq!(policy_base.tick_history().len(), 2);
+        prop_assert_eq!(policy_shifted.tick_history().len(), 1);
+        prop_assert_eq!(policy_reordered.tick_history().len(), 1);
+    }
 }
