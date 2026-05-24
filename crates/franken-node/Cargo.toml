@@ -66,6 +66,11 @@ test = false
 required-features = ["advanced-features"]
 
 [[bin]]
+name = "collect-production-metrics"
+path = "src/bin/collect_production_metrics.rs"
+test = false
+
+[[bin]]
 name = "vef-degraded-mode-metamorphic"
 path = "tests/vef_degraded_mode_metamorphic.rs"
 test = false

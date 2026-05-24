@@ -1,0 +1,18 @@
+{
+  "collection_window": {
+    "start_timestamp_ms": 1779638400000,
+    "end_timestamp_ms": 1780243200000,
+    "duration_hours": 168.0,
+    "sample_count": 8
+  },
+  "revocation_filter_metrics": {
+    "p50": 30250.0,
+    "p95": 37200,
+    "p99": 37200,
+    "max_observed": 37200,
+    "cuckoo_cliff_crossings": 4,
+    "max_growth_rate_per_minute": 8.75
+  },
+  "generated_timestamp": 1779657506764,
+  "task_reference": "bd-98xo5.3.2"
+}
