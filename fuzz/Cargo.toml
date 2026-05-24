@@ -807,6 +807,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_key_role_separation_validation"
+path = "fuzz_targets/fuzz_key_role_separation_validation.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_signed_extension_manifest"
 path = "fuzz_targets/fuzz_signed_extension_manifest.rs"
 test = false
