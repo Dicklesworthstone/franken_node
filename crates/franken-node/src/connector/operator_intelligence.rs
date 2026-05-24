@@ -888,8 +888,86 @@ impl RecommendationEngine {
         Ok((rollback_proof, replay))
     }
 
+    /// Compute content-addressed hash of current engine state.
+    ///
+    /// # INV-OIR-STATE-HASH-DETERMINISTIC
+    /// State hash must be deterministic and capture all mutable state
+    /// that affects recommendations and rollback operations.
+    pub fn compute_state_hash(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"recommendation_engine_state_v1:");
+
+        // Hash config
+        hasher.update(b"config:");
+        hasher.update((self.config.min_confidence as u64).to_le_bytes());
+        hasher.update((self.config.max_recommendations as u64).to_le_bytes());
+        hasher.update(if self.config.enable_degraded_mode { b"1" } else { b"0" });
+        hasher.update((self.config.max_missing_sources as u64).to_le_bytes());
+
+        // Hash degraded state
+        hasher.update(b"degraded:");
+        hasher.update(if self.degraded { b"1" } else { b"0" });
+
+        // Hash missing sources (sorted for determinism)
+        hasher.update(b"missing_sources:");
+        let mut sorted_sources = self.missing_sources.clone();
+        sorted_sources.sort();
+        hasher.update((sorted_sources.len() as u64).to_le_bytes());
+        for source in &sorted_sources {
+            hasher.update((source.len() as u64).to_le_bytes());
+            hasher.update(source.as_bytes());
+        }
+
+        // Hash audit trail
+        hasher.update(b"audit_trail:");
+        hasher.update((self.audit_trail.len() as u64).to_le_bytes());
+        for entry in &self.audit_trail {
+            hasher.update((entry.timestamp.len() as u64).to_le_bytes());
+            hasher.update(entry.timestamp.as_bytes());
+            hasher.update((entry.action.len() as u64).to_le_bytes());
+            hasher.update(entry.action.as_bytes());
+            hasher.update((entry.outcome.len() as u64).to_le_bytes());
+            hasher.update(entry.outcome.as_bytes());
+        }
+
+        // Hash closed audit entries (BTreeMap is already sorted)
+        hasher.update(b"closed_audit:");
+        hasher.update((self.closed_audit_entries.len() as u64).to_le_bytes());
+        for (key, entry) in &self.closed_audit_entries {
+            hasher.update((key.len() as u64).to_le_bytes());
+            hasher.update(key.as_bytes());
+            hasher.update((entry.timestamp.len() as u64).to_le_bytes());
+            hasher.update(entry.timestamp.as_bytes());
+            hasher.update((entry.action.len() as u64).to_le_bytes());
+            hasher.update(entry.action.as_bytes());
+            hasher.update((entry.outcome.len() as u64).to_le_bytes());
+            hasher.update(entry.outcome.as_bytes());
+        }
+
+        // Hash events
+        hasher.update(b"events:");
+        hasher.update((self.events.len() as u64).to_le_bytes());
+        for event in &self.events {
+            hasher.update((event.code.len() as u64).to_le_bytes());
+            hasher.update(event.code.as_bytes());
+            hasher.update((event.detail.len() as u64).to_le_bytes());
+            hasher.update(event.detail.as_bytes());
+        }
+
+        // Hash cumulative loss (as raw bytes for determinism)
+        hasher.update(b"cumulative_loss:");
+        hasher.update(self.cumulative_loss.to_le_bytes());
+
+        hasher.finalize().into()
+    }
+
     /// Execute rollback using a proof.
+    ///
+    /// # INV-OIR-ROLLBACK-SUCCESS-VERIFICATION
+    /// After rollback execution, verify actual state matches expected pre_state_hash.
+    /// Fail-closed: propagate error if rollback execution or verification fails.
     pub fn execute_rollback(&mut self, proof: &RollbackProof) -> Result<(), OIError> {
+        // Structural proof verification
         proof.verify()?;
         push_bounded(
             &mut self.events,
@@ -899,17 +977,90 @@ impl RecommendationEngine {
             },
             MAX_EVENTS,
         );
+
+        // Execute the actual rollback operation
+        self.execute_rollback_spec(&proof.rollback_spec)?;
+
+        // CRITICAL: Verify rollback actually succeeded by checking state hash
+        let actual_state_hash = self.compute_state_hash();
+        if !constant_time::ct_eq_bytes(&actual_state_hash, &proof.pre_state_hash) {
+            return Err(OIError::RollbackFailed(format!(
+                "rollback execution succeeded but state verification failed: \
+                 expected pre_state_hash {:?}, got actual_state_hash {:?}. \
+                 Rollback spec may be incomplete or incorrect.",
+                &proof.pre_state_hash[..4],
+                &actual_state_hash[..4]
+            )));
+        }
+
         push_bounded(
             &mut self.events,
             OIEvent {
                 code: EVT_ROLLBACK_EXECUTED.to_string(),
                 detail: format!(
-                    "restored to pre-state hash {:?}",
+                    "verified restoration to pre-state hash {:?}",
                     &proof.pre_state_hash[..proof.pre_state_hash.len().min(4)]
                 ),
             },
             MAX_EVENTS,
         );
+        Ok(())
+    }
+
+    /// Execute rollback spec command sequence.
+    ///
+    /// # INV-OIR-ROLLBACK-SPEC-EXECUTION
+    /// Parse and execute rollback command sequence to restore engine state.
+    /// Currently supports: reset_events, reset_audit_trail, reset_cumulative_loss.
+    fn execute_rollback_spec(&mut self, rollback_spec: &str) -> Result<(), OIError> {
+        // Parse rollback spec (simplified format for now: "rollback:action_spec")
+        if !rollback_spec.starts_with("rollback:") {
+            return Err(OIError::RollbackFailed(
+                "invalid rollback spec format".into()
+            ));
+        }
+
+        let action_spec = &rollback_spec[9..]; // Remove "rollback:" prefix
+
+        // Execute rollback operations based on action spec
+        // This is a simplified implementation - in practice this would be more sophisticated
+        for command in action_spec.split(';') {
+            let command = command.trim();
+            match command {
+                "reset_events" => {
+                    self.events.clear();
+                }
+                "reset_audit_trail" => {
+                    self.audit_trail.clear();
+                }
+                "reset_cumulative_loss" => {
+                    self.cumulative_loss = 0.0;
+                }
+                "exit_degraded_mode" => {
+                    self.degraded = false;
+                    self.missing_sources.clear();
+                }
+                cmd if cmd.starts_with("set_loss:") => {
+                    let loss_str = &cmd[9..];
+                    match loss_str.parse::<f64>() {
+                        Ok(loss) if loss.is_finite() => {
+                            self.cumulative_loss = loss;
+                        }
+                        _ => {
+                            return Err(OIError::RollbackFailed(
+                                format!("invalid loss value: {}", loss_str)
+                            ));
+                        }
+                    }
+                }
+                "" => {} // Skip empty commands
+                unknown => {
+                    return Err(OIError::RollbackFailed(
+                        format!("unknown rollback command: {}", unknown)
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2289,5 +2440,77 @@ mod tests {
         ] {
             assert_eq!(h.len(), 32);
         }
+    }
+
+    #[test]
+    fn test_rollback_silent_failure_detection() {
+        // Regression test for bd-iggxu: rollback execution lacks success verification
+        // A rollback that silently fails (doesn't restore expected state) should be
+        // detected and surfaced as an error, not treated as success.
+
+        let mut engine = make_engine();
+
+        // Modify engine state to create a known pre-state
+        engine.cumulative_loss = 42.0;
+        let expected_pre_state_hash = engine.compute_state_hash();
+
+        // Create more changes to establish a different post-state
+        engine.cumulative_loss = 100.0;
+        engine.missing_sources.push("test-source".to_string());
+        let post_state_hash = engine.compute_state_hash();
+
+        // Create a rollback proof that claims to restore to pre-state
+        // but the rollback_spec is INCOMPLETE (won't actually restore the state)
+        let malicious_proof = RollbackProof {
+            pre_state_hash: expected_pre_state_hash,
+            action_spec: "increase_loss;add_missing_source".to_string(),
+            post_state_hash,
+            rollback_spec: "rollback:reset_cumulative_loss".to_string(), // MISSING: reset missing_sources
+        };
+
+        // The rollback should fail because the incomplete rollback_spec
+        // won't fully restore the engine to the expected pre_state_hash
+        let result = engine.execute_rollback(&malicious_proof);
+
+        match result {
+            Err(OIError::RollbackFailed(msg)) => {
+                // Expected: rollback execution succeeded but state verification failed
+                assert!(
+                    msg.contains("state verification failed"),
+                    "Expected state verification failure message, got: {}",
+                    msg
+                );
+                assert!(
+                    msg.contains("expected pre_state_hash"),
+                    "Expected pre_state_hash in error message, got: {}",
+                    msg
+                );
+            }
+            Ok(()) => {
+                panic!(
+                    "Expected rollback to fail due to incomplete rollback_spec, \
+                     but it reported success. This is the silent failure bug that bd-iggxu addresses."
+                );
+            }
+            Err(other) => {
+                panic!(
+                    "Expected RollbackFailed with state verification error, got: {:?}",
+                    other
+                );
+            }
+        }
+
+        // Verify the engine state was partially rolled back but is inconsistent
+        // (cumulative_loss reset but missing_sources still present)
+        assert_eq!(engine.cumulative_loss, 0.0); // Was reset by incomplete rollback
+        assert!(!engine.missing_sources.is_empty()); // Still present - rollback incomplete
+
+        // Verify the state hash doesn't match the expected pre-state
+        let actual_final_hash = engine.compute_state_hash();
+        assert_ne!(
+            actual_final_hash,
+            expected_pre_state_hash,
+            "Engine state should not match expected pre_state_hash due to incomplete rollback"
+        );
     }
 }

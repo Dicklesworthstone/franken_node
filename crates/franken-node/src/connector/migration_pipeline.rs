@@ -31,9 +31,46 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Mutex, MutexGuard};
 
 use super::rollout_state::RolloutPhase;
 use crate::runtime::nversion_oracle::{BoundaryScope, RiskTier};
+
+// ---------------------------------------------------------------------------
+// Concurrency Protection
+// ---------------------------------------------------------------------------
+
+/// Global registry of active migrations to prevent concurrent pipelines from corrupting state.
+/// Uses a simple string-based registry rather than complex locks for simplicity.
+static ACTIVE_MIGRATIONS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Check and register a migration to prevent concurrency conflicts.
+/// Returns error if another migration is already active.
+fn check_and_register_migration(cohort_id: &str) -> Result<(), PipelineError> {
+    let mut active = ACTIVE_MIGRATIONS.lock().unwrap();
+
+    // Check for any active migrations (fail-closed: only one at a time)
+    if !active.is_empty() {
+        let active_cohort = active.iter().next().unwrap(); // Safe due to !is_empty() check
+        return Err(PipelineError {
+            code: error_codes::ERR_PIPE_CONCURRENT_MIGRATION.to_string(),
+            message: format!(
+                "Migration pipeline for cohort '{}' cannot start: migration for cohort '{}' is already in progress. Concurrent migrations are not supported to prevent state corruption.",
+                cohort_id, active_cohort
+            ),
+        });
+    }
+
+    // Register this migration as active
+    active.insert(cohort_id.to_string());
+    Ok(())
+}
+
+/// Remove a migration from the active registry when completed or failed.
+fn unregister_migration(cohort_id: &str) {
+    let mut active = ACTIVE_MIGRATIONS.lock().unwrap();
+    active.remove(cohort_id);
+}
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -79,6 +116,11 @@ pub mod error_codes {
     pub const ERR_PIPE_ROLLBACK_FAILED: &str = "ERR_PIPE_ROLLBACK_FAILED";
     pub const ERR_PIPE_THRESHOLD_NOT_MET: &str = "ERR_PIPE_THRESHOLD_NOT_MET";
     pub const ERR_PIPE_DUPLICATE_EXTENSION: &str = "ERR_PIPE_DUPLICATE_EXTENSION";
+    /// Concurrent migration blocked to prevent state corruption.
+    ///
+    /// Operator recovery: wait for the active migration to complete, then retry.
+    /// Multiple migrations cannot run simultaneously due to potential state conflicts.
+    pub const ERR_PIPE_CONCURRENT_MIGRATION: &str = "ERR_PIPE_CONCURRENT_MIGRATION";
     /// Hash input exceeded the deterministic pipeline length-prefix boundary.
     ///
     /// Operator recovery: reduce the artifact below the 4 GiB input boundary, or
@@ -110,6 +152,11 @@ const GUARDED_PHASE_CONFIDENCE_BPS: u16 = 5_500;
 const RECEIPT_SIGNING_KEY: &[u8] = b"franken_node.connector.migration_pipeline.receipt_sign_v1";
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Default timestamp for evidence collection (used when field is missing in legacy data).
+fn default_evidence_timestamp() -> String {
+    "1970-01-01T00:00:00Z".to_string() // Very old timestamp to trigger freshness validation failures
+}
 
 // ---------------------------------------------------------------------------
 // PipelineStage
@@ -296,6 +343,10 @@ pub struct ExtensionEvidence {
     pub validation_failures: u32,
     /// Explicit evidence source availability flags.
     pub evidence_sources: BTreeMap<String, bool>,
+    /// Timestamp when this evidence was collected (RFC 3339 format).
+    /// Used for freshness validation to prevent stale evidence usage.
+    #[serde(default = "default_evidence_timestamp")]
+    pub collected_at: String,
 }
 
 /// Known divergence recorded for an extension.
@@ -603,6 +654,9 @@ pub struct PipelineEvent {
 /// The pipeline starts in the INTAKE stage. The idempotency key is derived
 /// deterministically from the cohort definition for INV-PIPE-IDEMPOTENT.
 pub fn new(cohort: &CohortDefinition) -> Result<PipelineState, PipelineError> {
+    // Check for concurrent migrations to prevent state corruption (bd-qkbl9)
+    check_and_register_migration(&cohort.cohort_id)?;
+
     // Check for duplicate extensions (ERR_PIPE_DUPLICATE_EXTENSION)
     let mut seen = std::collections::BTreeSet::new();
     let mut extension_specs = BTreeMap::new();
@@ -743,6 +797,11 @@ pub fn advance(mut state: PipelineState) -> Result<PipelineState, PipelineError>
     });
     state.current_stage = next;
 
+    // Unregister migration when reaching terminal state (bd-qkbl9)
+    if next == PipelineStage::Complete {
+        unregister_migration(&state.cohort_id);
+    }
+
     Ok(state)
 }
 
@@ -766,6 +825,9 @@ pub fn rollback(mut state: PipelineState) -> Result<PipelineState, PipelineError
         timestamp: "2026-02-21T00:00:00Z".to_string(),
     });
     state.current_stage = PipelineStage::Rollback;
+
+    // Unregister migration when rolling back (bd-qkbl9)
+    unregister_migration(&state.cohort_id);
 
     Ok(state)
 }
@@ -1618,6 +1680,55 @@ fn run_execution(state: &PipelineState) -> Vec<ExecutionTrace> {
     traces
 }
 
+/// Maximum age in seconds for evidence to be considered fresh.
+/// Evidence older than this is rejected to prevent stale data usage.
+const EVIDENCE_FRESHNESS_THRESHOLD_SECS: i64 = 3600; // 1 hour
+
+/// Validate that evidence is fresh enough for verification.
+/// Returns error if evidence is stale to prevent verification on outdated data.
+fn validate_evidence_freshness(
+    extension_name: &str,
+    evidence: &ExtensionEvidence,
+    pipeline_start: &str,
+) -> Result<(), PipelineError> {
+    // Parse pipeline start time
+    let pipeline_time = chrono::DateTime::parse_from_rfc3339(pipeline_start)
+        .map_err(|_| PipelineError {
+            code: error_codes::ERR_PIPE_VERIFICATION_FAILED.to_string(),
+            message: format!(
+                "Invalid pipeline start time format: {}",
+                pipeline_start
+            ),
+        })?;
+
+    // Parse evidence collection time
+    let evidence_time = chrono::DateTime::parse_from_rfc3339(&evidence.collected_at)
+        .map_err(|_| PipelineError {
+            code: error_codes::ERR_PIPE_VERIFICATION_FAILED.to_string(),
+            message: format!(
+                "Evidence for extension '{}' has invalid timestamp format: {}",
+                extension_name, evidence.collected_at
+            ),
+        })?;
+
+    // Check if evidence is stale (fail-closed: old evidence = verification failure)
+    let age_secs = pipeline_time.signed_duration_since(evidence_time).num_seconds();
+    if age_secs > EVIDENCE_FRESHNESS_THRESHOLD_SECS {
+        return Err(PipelineError {
+            code: error_codes::ERR_PIPE_VERIFICATION_FAILED.to_string(),
+            message: format!(
+                "Evidence for extension '{}' is stale: collected {} (age: {} seconds, threshold: {} seconds). Verification requires fresh evidence to prevent decisions based on outdated data.",
+                extension_name,
+                evidence.collected_at,
+                age_secs,
+                EVIDENCE_FRESHNESS_THRESHOLD_SECS
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 /// Run verification and produce a report.
 fn run_verification(state: &PipelineState) -> Result<VerificationReport, PipelineError> {
     let mut per_extension_results = BTreeMap::new();
@@ -1647,6 +1758,9 @@ fn run_verification(state: &PipelineState) -> Result<VerificationReport, Pipelin
                 true,
             ),
         });
+
+        // Validate evidence freshness before using it for verification (bd-yx319)
+        validate_evidence_freshness(name, &spec.evidence, &state.started_at)?;
 
         let total_samples = spec
             .evidence
@@ -3334,5 +3448,112 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("signature"));
+    }
+
+    // ── Concurrent Migration Protection ────────────────────────────────────
+
+    #[test]
+    fn test_concurrent_migration_protection_blocks_second_pipeline() {
+        let cohort1 = sample_cohort();
+        let mut cohort2 = sample_cohort();
+        cohort2.cohort_id = "cohort-2".to_string();
+
+        // First migration should succeed
+        let state1 = new(&cohort1).expect("first migration should succeed");
+        assert_eq!(state1.cohort_id, "cohort-sample");
+        assert_eq!(state1.current_stage, PipelineStage::Intake);
+
+        // Second migration should be blocked
+        let err = new(&cohort2).expect_err("second migration should be blocked");
+        assert_eq!(err.code, error_codes::ERR_PIPE_CONCURRENT_MIGRATION);
+        assert!(err.message.contains("already in progress"));
+        assert!(err.message.contains("cohort-sample")); // mentions active cohort
+        assert!(err.message.contains("cohort-2")); // mentions blocked cohort
+
+        // After first migration completes, second should succeed
+        let completed_state1 = run_full_pipeline(&cohort1).expect("first migration should complete");
+        assert_eq!(completed_state1.current_stage, PipelineStage::Complete);
+
+        let state2 = new(&cohort2).expect("second migration should succeed after first completes");
+        assert_eq!(state2.cohort_id, "cohort-2");
+    }
+
+    #[test]
+    fn test_migration_rollback_releases_concurrency_lock() {
+        let cohort1 = sample_cohort();
+        let mut cohort2 = sample_cohort();
+        cohort2.cohort_id = "cohort-rollback-test".to_string();
+
+        // Start first migration
+        let mut state1 = new(&cohort1).expect("first migration should start");
+        state1 = advance(state1).expect("advance to analysis");
+        assert_eq!(state1.current_stage, PipelineStage::Analysis);
+
+        // Second migration should be blocked
+        let err = new(&cohort2).expect_err("second migration should be blocked");
+        assert_eq!(err.code, error_codes::ERR_PIPE_CONCURRENT_MIGRATION);
+
+        // Rollback first migration
+        let rolled_back_state1 = rollback(state1).expect("rollback should succeed");
+        assert_eq!(rolled_back_state1.current_stage, PipelineStage::Rollback);
+
+        // Now second migration should succeed
+        let state2 = new(&cohort2).expect("second migration should succeed after rollback");
+        assert_eq!(state2.cohort_id, "cohort-rollback-test");
+    }
+
+    // ── Evidence Freshness Validation ──────────────────────────────────────
+
+    #[test]
+    fn test_verification_rejects_stale_evidence() {
+        let mut cohort = sample_cohort();
+
+        // Set old evidence timestamp (more than 1 hour ago)
+        let stale_timestamp = "2020-01-01T00:00:00Z";
+        for ext in &mut cohort.extensions {
+            ext.evidence.collected_at = stale_timestamp.to_string();
+        }
+
+        // Create pipeline state with fresh start time
+        let mut state = new(&cohort).expect("pipeline creation should succeed");
+        state.started_at = "2020-01-01T02:00:00Z".to_string(); // 2 hours after evidence
+
+        // Advance to verification stage
+        for _ in 0..4 {
+            state = advance(state).expect("should advance");
+        }
+        assert_eq!(state.current_stage, PipelineStage::Verification);
+
+        // Verification should fail due to stale evidence
+        let err = advance(state).expect_err("verification should fail with stale evidence");
+        assert_eq!(err.code, error_codes::ERR_PIPE_VERIFICATION_FAILED);
+        assert!(err.message.contains("stale"));
+        assert!(err.message.contains("collected 2020-01-01T00:00:00Z"));
+        assert!(err.message.contains("outdated data"));
+    }
+
+    #[test]
+    fn test_verification_accepts_fresh_evidence() {
+        let mut cohort = sample_cohort();
+
+        // Set fresh evidence timestamp (recent)
+        let fresh_timestamp = "2026-02-21T00:30:00Z";
+        for ext in &mut cohort.extensions {
+            ext.evidence.collected_at = fresh_timestamp.to_string();
+        }
+
+        // Create pipeline state with slightly later start time (within threshold)
+        let mut state = new(&cohort).expect("pipeline creation should succeed");
+        state.started_at = "2026-02-21T00:45:00Z".to_string(); // 15 minutes after evidence (within 1 hour threshold)
+
+        // Advance to verification stage and beyond - should succeed
+        for _ in 0..5 {
+            state = advance(state).expect("should advance with fresh evidence");
+        }
+        assert_eq!(state.current_stage, PipelineStage::Verification);
+
+        // Verification should succeed with fresh evidence
+        let state = advance(state).expect("verification should succeed with fresh evidence");
+        assert_eq!(state.current_stage, PipelineStage::ReceiptIssuance);
     }
 }
