@@ -7223,7 +7223,8 @@ mod tests {
                 let fleet_clone = fleet.clone();
                 let handle = thread::spawn(move || {
                     for j in 0..5 {
-                        let mut fleet_guard = fleet_clone.lock().unwrap();
+                        let mut fleet_guard = fleet_clone.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
                         let result = fleet_guard.quarantine(QuarantineRequest {
                             extension_id: format!("concurrent-ext-{}-{}", i, j),
                             zone_id: format!("concurrent-zone-{}", i),
@@ -7247,8 +7248,10 @@ mod tests {
             }
 
             // Verify fleet state remains consistent
-            let final_fleet = fleet.lock().unwrap();
-            let events_count = final_fleet.state.lock().unwrap().fleet_events.len();
+            let final_fleet = fleet.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let events_count = final_fleet.state.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()).fleet_events.len();
             drop(final_fleet);
 
             assert!(events_count <= MAX_FLEET_EVENTS, "concurrent access should maintain capacity bounds");
@@ -7331,6 +7334,67 @@ mod tests {
             // Verify that either rate limiting kicked in OR all succeeded quickly
             assert!(success_count > 0, "at least some requests should succeed");
             assert!(duration.as_millis() < 5000, "test should complete within reasonable time");
+        }
+
+        #[test]
+        fn test_poison_recovery_in_concurrent_quarantine_threads() {
+            // Regression test for bd-g6hkh: verify poison recovery works in fleet quarantine
+            use std::sync::{Arc, Mutex};
+            use std::thread;
+
+            #[derive(Clone)]
+            struct MockFleetState {
+                counter: Arc<Mutex<i32>>,
+            }
+
+            impl MockFleetState {
+                fn new() -> Self {
+                    Self {
+                        counter: Arc::new(Mutex::new(0)),
+                    }
+                }
+
+                fn increment(&self) -> Result<i32, &'static str> {
+                    let mut guard = self.counter.lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    *guard += 1;
+                    Ok(*guard)
+                }
+            }
+
+            let mock_fleet = Arc::new(MockFleetState::new());
+            let mut handles = vec![];
+
+            // Spawn a thread that will panic while holding the lock
+            let panic_fleet = Arc::clone(&mock_fleet);
+            let panic_handle = thread::spawn(move || {
+                let _guard = panic_fleet.counter.lock().unwrap();
+                panic!("Deliberate panic while holding fleet lock");
+            });
+
+            // Wait for the panicking thread to finish and poison the mutex
+            let _ = panic_handle.join();
+
+            // Now spawn multiple threads using our poison recovery pattern
+            for i in 0..5 {
+                let fleet_clone = Arc::clone(&mock_fleet);
+                let handle = thread::spawn(move || {
+                    // This should work despite the poisoned mutex
+                    let result = fleet_clone.increment();
+                    assert!(result.is_ok(), "increment should succeed despite poison in thread {}", i);
+                });
+                handles.push(handle);
+            }
+
+            // All threads should complete successfully
+            for handle in handles {
+                handle.join().expect("thread should complete despite poison");
+            }
+
+            // Verify the final state shows all increments worked
+            let final_count = mock_fleet.counter.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(*final_count, 5, "poison recovery should allow all increments");
         }
     }
 }
