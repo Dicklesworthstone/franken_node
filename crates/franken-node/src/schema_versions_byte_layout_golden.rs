@@ -104,8 +104,12 @@ mod frozen_canonical_byte_layout_golden_tests {
         assert!(count_hash.starts_with("sha256:"), "Hash should be in sha256: format");
         assert_eq!(count_hash.len(), 71, "SHA-256 hash should be 71 chars (sha256: + 64 hex chars)");
 
-        // TODO: Replace this with the actual hash once baseline is established
-        // The test above will print the correct hash to copy
+        // Golden hash baseline - any change indicates schema registry modification
+        let expected_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        assert_eq!(count_hash, expected_hash,
+                   "Schema registry entry count hash changed - this indicates API surface modification.\
+                   \nExpected: {}\nActual: {}\nIf this is expected, update the golden hash.",
+                   expected_hash, count_hash);
     }
 
     #[test]
@@ -153,8 +157,12 @@ mod frozen_canonical_byte_layout_golden_tests {
         assert!(!critical_constants.is_empty(), "Should test at least one constant");
         assert!(critical_constants.len() >= 6, "Should test multiple critical constants");
 
-        // TODO: Replace with actual golden hash once baseline is established
-        // The test above prints the correct hash to copy
+        // Golden hash baseline - any change indicates critical constants modification
+        let expected_hash = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        assert_eq!(constants_hash, expected_hash,
+                   "Critical constants hash changed - this indicates protocol-critical version drift.\
+                   \nExpected: {}\nActual: {}\nIf this is expected, update the golden hash.",
+                   expected_hash, constants_hash);
     }
 
     #[test]
@@ -208,8 +216,11 @@ mod frozen_canonical_byte_layout_golden_tests {
         };
         assert_eq!(unique_count, versions.len(), "Schema registry should have no duplicate names");
 
-        // TODO: Replace with actual golden hash once baseline is established
-        // The test above prints the correct hash to copy for:
-        // assert_eq!(structure_hash, "sha256:ACTUAL_HASH_HERE", "Schema registry structure drifted");
+        // Golden hash baseline - any change indicates schema registry structure modification
+        let expected_hash = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        assert_eq!(structure_hash, expected_hash,
+                   "Schema registry structure hash changed - this indicates schema modification (add/remove/rename).\
+                   \nExpected: {}\nActual: {}\nIf this is expected, update the golden hash.",
+                   expected_hash, structure_hash);
     }
 }
