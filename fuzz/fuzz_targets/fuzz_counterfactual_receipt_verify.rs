@@ -52,9 +52,11 @@ enum SignatureMutation {
     RandomBytes,
 }
 
-fuzz_target!(|mut case: CounterfactualReceiptCase| {
-    fuzz_raw_receipt_json(&mut case);
-    fuzz_structured_receipt(case);
+fuzz_target!(|data: &[u8]| {
+    if let Ok(mut case) = arbitrary::Arbitrary::arbitrary(&mut arbitrary::Unstructured::new(data)) {
+        fuzz_raw_receipt_json(&mut case);
+        fuzz_structured_receipt(case);
+    }
 });
 
 fn fuzz_raw_receipt_json(case: &mut CounterfactualReceiptCase) {

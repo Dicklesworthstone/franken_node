@@ -152,9 +152,9 @@ fuzz_target!(|case: MetricsStatisticsFuzzCase| {
 
     // ── (A) Panic-free ─────────────────────────────────────────────────
     for &(timestamp_ms, entries) in &snapshots_to_add {
-        let snapshot_result = std::panic::catch_unwind(|| {
+        let snapshot_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             exporter.record_revocation_filter_snapshot(timestamp_ms, entries)
-        });
+        }));
         assert!(
             snapshot_result.is_ok(),
             "INV-METRICS-PANIC-FREE violated: record_revocation_filter_snapshot panicked"
@@ -173,9 +173,9 @@ fuzz_target!(|case: MetricsStatisticsFuzzCase| {
     let stats_opt = stats_result.unwrap();
 
     // Test export methods
-    let prometheus_result = std::panic::catch_unwind(|| {
+    let prometheus_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         exporter.export_prometheus()
-    });
+    }));
     assert!(
         prometheus_result.is_ok(),
         "INV-METRICS-PANIC-FREE violated: export_prometheus panicked"

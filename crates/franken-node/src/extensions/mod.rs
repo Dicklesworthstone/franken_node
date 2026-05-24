@@ -83,7 +83,7 @@ mod tests {
             payload_hash: "0".repeat(64),
         };
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact));
+        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
 
         assert!(matches!(reason, AdmissionDenialReason::MissingContract));
     }
@@ -100,7 +100,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-schema", "ext-alpha", contract);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact));
+        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
 
         assert!(matches!(
             reason,
@@ -120,7 +120,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-untrusted", "ext-alpha", contract);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact));
+        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
 
         assert!(matches!(reason, AdmissionDenialReason::SignatureInvalid));
     }
@@ -131,7 +131,7 @@ mod tests {
         contract.capabilities[0].scope = "filesystem:write".to_string();
         let artifact = make_artifact("artifact-tampered", "ext-alpha", contract);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact));
+        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
 
         assert!(matches!(reason, AdmissionDenialReason::SignatureInvalid));
     }
@@ -160,7 +160,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-duplicate", "ext-alpha", contract);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact));
+        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
 
         assert!(matches!(
             reason,
@@ -182,7 +182,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-zero-limit", "ext-alpha", contract);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact));
+        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
 
         assert!(matches!(
             reason,
@@ -195,7 +195,7 @@ mod tests {
         let contract = signed_contract();
         let artifact = make_artifact("artifact-mismatch", "ext-beta", contract);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact));
+        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
 
         assert!(matches!(
             reason,
@@ -209,7 +209,7 @@ mod tests {
         let mut artifact = make_artifact("artifact-payload", "ext-alpha", contract);
         artifact.payload_hash = "A".repeat(64);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact));
+        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
 
         assert!(matches!(
             reason,
@@ -244,7 +244,7 @@ mod tests {
         let contract = signed_contract();
         let artifact = make_artifact("", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact), "empty artifact_id");
+        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "empty artifact_id");
     }
 
     #[test]
@@ -253,7 +253,7 @@ mod tests {
         let artifact = make_artifact("<unknown>", "ext-alpha", contract);
 
         assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact),
+            trusted_gate().evaluate(&artifact, None, 0),
             "artifact_id is reserved",
         );
     }
@@ -270,7 +270,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-whitespace-contract", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact), "contract_id contains");
+        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "contract_id contains");
     }
 
     #[test]
@@ -279,7 +279,7 @@ mod tests {
         contract.signature.clear();
         let artifact = make_artifact("artifact-empty-signature", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact), "empty signature");
+        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "empty signature");
     }
 
     #[test]
@@ -297,7 +297,7 @@ mod tests {
         let artifact = make_artifact("artifact-empty-scope", "ext-alpha", contract);
 
         assert_invalid_capability_detail(
-            trusted_gate().evaluate(&artifact),
+            trusted_gate().evaluate(&artifact, None, 0),
             "empty capability_id or scope",
         );
     }
@@ -316,7 +316,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-padded-capability", "ext-alpha", contract);
 
-        assert_invalid_capability_detail(trusted_gate().evaluate(&artifact), "leading or trailing");
+        assert_invalid_capability_detail(trusted_gate().evaluate(&artifact, None, 0), "leading or trailing");
     }
 
     #[test]
@@ -370,7 +370,7 @@ mod tests {
         let artifact = make_artifact("artifact-empty-contract-extension", "ext-alpha", contract);
 
         assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact),
+            trusted_gate().evaluate(&artifact, None, 0),
             "empty contract extension_id",
         );
     }
@@ -388,7 +388,7 @@ mod tests {
         let artifact = make_artifact("artifact-padded-contract-extension", "ext-alpha", contract);
 
         assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact),
+            trusted_gate().evaluate(&artifact, None, 0),
             "contract extension_id contains",
         );
     }
@@ -405,7 +405,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-empty-signer", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact), "empty signer_id");
+        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "empty signer_id");
     }
 
     #[test]
@@ -420,7 +420,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-padded-signer", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact), "signer_id contains");
+        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "signer_id contains");
     }
 
     #[test]
@@ -435,7 +435,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-zero-epoch", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact), "issued_epoch_ms");
+        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "issued_epoch_ms");
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-empty-capabilities", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact), "capability list");
+        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "capability list");
     }
 
     #[test]
@@ -459,7 +459,7 @@ mod tests {
         let mut artifact = make_artifact("artifact-short-payload", "ext-alpha", contract);
         artifact.payload_hash = "a".repeat(63);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact), "payload_hash");
+        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "payload_hash");
     }
 
     #[test]
@@ -468,7 +468,7 @@ mod tests {
         let long_id = "x".repeat(1024);
         let artifact = make_artifact(&long_id, "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact), "artifact_id");
+        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "artifact_id");
     }
 
     #[test]
@@ -486,7 +486,7 @@ mod tests {
         let artifact = make_artifact("artifact-null-byte", "ext-alpha", contract);
 
         assert_invalid_capability_detail(
-            trusted_gate().evaluate(&artifact),
+            trusted_gate().evaluate(&artifact, None, 0),
             "capability_id contains",
         );
     }
@@ -517,7 +517,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-homograph", "ext-alpha", contract);
 
-        assert_invalid_capability_detail(trusted_gate().evaluate(&artifact), "contains non-ASCII");
+        assert_invalid_capability_detail(trusted_gate().evaluate(&artifact, None, 0), "contains non-ASCII");
     }
 
     #[test]
@@ -534,7 +534,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-traversal", "ext-alpha", contract);
 
-        assert_invalid_capability_detail(trusted_gate().evaluate(&artifact), "path traversal");
+        assert_invalid_capability_detail(trusted_gate().evaluate(&artifact, None, 0), "path traversal");
     }
 
     #[test]
@@ -549,7 +549,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-control-chars", "ext\r\n-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact), "contains control");
+        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "contains control");
     }
 
     #[test]
@@ -558,7 +558,7 @@ mod tests {
         let mut artifact = make_artifact("artifact-non-hex", "ext-alpha", contract);
         artifact.payload_hash = "g".repeat(64); // 'g' is not a hex digit
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact), "payload_hash");
+        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "payload_hash");
     }
 
     #[test]

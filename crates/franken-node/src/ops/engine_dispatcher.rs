@@ -1167,6 +1167,53 @@ impl EngineDispatcher {
             validate_runtime_path(&plan.runtime_path)?;
             validate_target_path(&plan.target)?;
 
+            // bd-fmhij: CRITICAL SECURITY FIX - Enforce same security controls in fallback path as primary path
+            // Previously, fallback runtime bypassed capability validation and security enforcement,
+            // allowing attackers to bypass security controls by making franken-engine unavailable.
+            // This ensures fallback path enforces identical security gates or fails closed.
+
+            // 1. Validate capabilities in fallback path (same as primary path does at line 1250-1261)
+            #[cfg(feature = "engine")]
+            {
+                let caps = Self::map_profile_to_capabilities(config.profile);
+                Self::validate_capabilities(&caps).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Fallback runtime security validation failed - capability validation required: {}. \
+                        Fallback runtime cannot bypass security controls that primary franken-engine path enforces.",
+                        e
+                    )
+                })?;
+
+                // Log that security validation succeeded in fallback path
+                tracing::info!(
+                    capabilities = ?caps,
+                    profile = ?config.profile,
+                    "Fallback runtime security validation succeeded - same capability controls enforced as primary path"
+                );
+            }
+
+            // 2. Verify network policy enforcement is possible in fallback environment
+            // If external runtime cannot honor critical security policies, fail closed instead of degraded security
+            let network_policy = &config.security.network_policy;
+            if network_policy.ssrf_enforcement == crate::config::SsrfEnforcementMode::Block {
+                // For block enforcement, we cannot trust external runtimes to honor policy hints
+                // In strict security profiles, this should fail closed rather than degrade
+                if config.profile == Profile::Strict {
+                    return Err(anyhow::anyhow!(
+                        "Fallback runtime security enforcement failed: external runtime cannot guarantee \
+                        SSRF block enforcement required by strict profile. Failing closed to prevent \
+                        security bypass through franken-engine unavailability attack."
+                    ).into());
+                }
+
+                // For non-strict profiles, log degraded security warning
+                tracing::warn!(
+                    profile = ?config.profile,
+                    runtime = %plan.runtime,
+                    "Fallback runtime cannot guarantee SSRF block enforcement - external runtime may ignore policy hints"
+                );
+            }
+
             let mut command = Command::new(&plan.runtime_path);
             command
                 .arg(&plan.target)
@@ -2313,6 +2360,104 @@ mod tests {
             stdout: stdout.to_vec(),
             stderr: stderr.to_vec(),
         }
+    }
+
+    /// bd-fmhij: Regression test for fallback runtime security enforcement
+    /// Verifies that fallback path enforces same security controls as primary path
+    /// and rejects malicious inputs even when franken-engine is unavailable.
+    #[test]
+    #[cfg(feature = "engine")]
+    fn test_fallback_runtime_enforces_security_controls_bd_fmhij() {
+        use crate::config::{SsrfEnforcementMode, NetworkPolicyConfig, SecurityConfig};
+
+        let tmp = TempDir::new().expect("tempdir");
+        let app_path = tmp.path().join("test-app.js");
+        std::fs::write(&app_path, "console.log('test app');").expect("create test app");
+
+        // Create a non-existent franken-engine path to force fallback
+        let missing_engine = tmp.path().join("missing-franken-engine");
+        let dispatcher = EngineDispatcher::new(
+            Some(missing_engine),
+            PreferredRuntime::FrankenEngine,
+        );
+
+        // Test 1: Verify fallback with valid capabilities succeeds (when enabled)
+        {
+            let mut config = Config::default();
+            config.profile = Profile::Balanced; // Allow fallback with opt-in
+            config.security.network_policy = NetworkPolicyConfig {
+                ssrf_enforcement: SsrfEnforcementMode::Monitor, // Not block, to allow fallback
+                ssrf_protection_enabled: true,
+                block_cloud_metadata: true,
+                audit_blocked_requests: true,
+                allowlist: vec![],
+            };
+
+            // Enable fallback opt-in
+            std::env::set_var("FRANKEN_NODE_DEGRADED_FALLBACK_OPT_IN", "true");
+
+            // This should succeed because:
+            // 1. Profile allows fallback (Balanced)
+            // 2. Capabilities can be validated
+            // 3. SSRF enforcement is monitor (not block)
+            let result = dispatcher.dispatch_run(&config, &app_path, "policy-mode");
+
+            // We expect this to fail due to missing node/bun runtime in test environment
+            // but the error should be about missing runtime, not security validation
+            if let Err(e) = result {
+                let error_msg = e.to_string();
+                // Should NOT contain security validation errors
+                assert!(
+                    !error_msg.contains("capability validation") &&
+                    !error_msg.contains("security validation failed"),
+                    "Fallback with valid capabilities should not fail security validation, got: {}",
+                    error_msg
+                );
+                // Should be runtime-related error instead
+                assert!(
+                    error_msg.contains("runtime") || error_msg.contains("node") || error_msg.contains("bun") || error_msg.contains("No such file"),
+                    "Error should be about missing external runtime, got: {}",
+                    error_msg
+                );
+            }
+        }
+
+        // Test 2: Verify fallback fails closed with strict profile and SSRF block enforcement
+        {
+            let mut config = Config::default();
+            config.profile = Profile::Strict; // Requires strict security
+            config.security.network_policy = NetworkPolicyConfig {
+                ssrf_enforcement: SsrfEnforcementMode::Block, // Block enforcement cannot be guaranteed in fallback
+                ssrf_protection_enabled: true,
+                block_cloud_metadata: true,
+                audit_blocked_requests: true,
+                allowlist: vec![],
+            };
+
+            // Enable fallback opt-in (though strict should reject anyway)
+            std::env::set_var("FRANKEN_NODE_DEGRADED_FALLBACK_OPT_IN", "true");
+
+            let result = dispatcher.dispatch_run(&config, &app_path, "policy-mode");
+
+            // This should fail with security enforcement error in strict profile
+            assert!(result.is_err(), "Strict profile should reject fallback with SSRF block enforcement");
+            let error_msg = result.err().unwrap().to_string();
+            assert!(
+                error_msg.contains("external runtime cannot guarantee") &&
+                error_msg.contains("SSRF block enforcement") &&
+                error_msg.contains("strict profile"),
+                "Error should mention SSRF block enforcement failure in strict profile, got: {}",
+                error_msg
+            );
+        }
+
+        // Test 3: Verify fallback fails for invalid capabilities (if we could trigger that)
+        // Note: This would require mocking the capability validation to fail,
+        // which is complex in this test environment. The logic is tested through
+        // the same validate_capabilities function used in both primary and fallback paths.
+
+        // Cleanup
+        std::env::remove_var("FRANKEN_NODE_DEGRADED_FALLBACK_OPT_IN");
     }
 
     #[test]

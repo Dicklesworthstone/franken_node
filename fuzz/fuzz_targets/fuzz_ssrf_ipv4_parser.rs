@@ -5,7 +5,6 @@ use arbitrary::Arbitrary;
 
 // Import the parse_ipv4 function - need to expose it publicly for fuzzing
 // Using a wrapper to access the private function
-use frankenengine_node::security::ssrf_policy;
 
 /// Comprehensive fuzz target for SSRF IPv4 parsing functions.
 ///
@@ -200,10 +199,10 @@ fn replace_octet(ip: &str, octet_index: u8, new_value: &str) -> Option<String> {
 fn test_parse_ipv4(ip: &str) -> Option<[u8; 4]> {
     // Since parse_ipv4 is private, we'll test through SSRF policy validation
     // which should call the same parsing logic
-    use frankenengine_node::security::ssrf_policy::SsrfPolicy;
+    use frankenengine_node::security::ssrf_policy::SsrfPolicyTemplate;
 
     // Create a test policy and try to validate the IP
-    let policy = SsrfPolicy::default_strict();
+    let policy = SsrfPolicyTemplate::default_template("test-connector".to_string());
 
     // Try to parse as if it were a host in SSRF validation
     // This should trigger the same IPv4 parsing logic
@@ -230,7 +229,7 @@ fuzz_target!(|input: IPv4ParseInput| {
     let std_result = std::net::Ipv4Addr::from_str(&test_string);
 
     // Both should agree on valid IPv4 addresses
-    match (parse_result, std_result) {
+    match (parse_result, std_result.clone()) {
         (Some(_), Ok(_)) => {
             // Both succeeded - verify they produce same result
             if let (Some(our_octets), Ok(std_addr)) = (parse_result, std_result) {
