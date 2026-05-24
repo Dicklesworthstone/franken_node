@@ -6,6 +6,7 @@ use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
 use crate::{
     ActionableError,
     config::{Config, PreferredRuntime, Profile},
+    supply_chain::trust_card::{TrustCardRegistry, SnapshotSourceContext},
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -1054,6 +1055,8 @@ impl EngineDispatcher {
         app_path: &Path,
         config: &Config,
         policy_mode: &str,
+        trusted_extension_ids: &[String],
+        now_secs: u64,
     ) -> Result<RunDispatchReport> {
         // Validate policy_mode to prevent command injection via unsanitized input
         const VALID_POLICY_MODES: &[&str] = &["strict", "balanced", "legacy-risky"];
@@ -1062,6 +1065,54 @@ impl EngineDispatcher {
                 format!("Invalid policy mode '{}'. Must be one of: strict, balanced, legacy-risky", policy_mode),
                 "Use a valid policy mode: --policy strict, --policy balanced, or --policy legacy-risky"
             ).into());
+        }
+
+        // SECURITY: Re-validate trust state to close TOCTOU gap between preflight and execution (bd-zqz0q)
+        let project_root = app_path.parent()
+            .and_then(|p| p.parent())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let authoritative_registry = project_root.join(".state").join("trust_card_registry.json");
+
+        if authoritative_registry.is_file() && !trusted_extension_ids.is_empty() {
+            let mut registry = TrustCardRegistry::load_authoritative_state_from_config(
+                &authoritative_registry,
+                &config.trust,
+                now_secs,
+                SnapshotSourceContext::TrustedFile,
+            ).map_err(|err| anyhow::anyhow!(
+                "Trust registry validation failed at execution time: {}. This prevents TOCTOU attacks where trust state changes between preflight and execution.",
+                err
+            ))?;
+
+            for extension_id in trusted_extension_ids {
+                match registry.read(extension_id, now_secs, "trace-execution-trust-validation")
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))? {
+                    Some(card) => {
+                        // Fail if extension was revoked since preflight
+                        if let crate::supply_chain::trust_card::RevocationStatus::Revoked { reason, .. } = &card.revocation_status {
+                            return Err(anyhow::anyhow!(
+                                "Execution blocked: extension '{}' was revoked since preflight check: {}. This prevents TOCTOU attacks.",
+                                extension_id, reason
+                            ));
+                        }
+
+                        // Fail if extension was quarantined since preflight
+                        if card.active_quarantine {
+                            return Err(anyhow::anyhow!(
+                                "Execution blocked: extension '{}' was quarantined since preflight check. This prevents TOCTOU attacks.",
+                                extension_id
+                            ));
+                        }
+                    }
+                    None => {
+                        return Err(anyhow::anyhow!(
+                            "Execution blocked: extension '{}' is no longer tracked in trust registry since preflight check. This prevents TOCTOU attacks.",
+                            extension_id
+                        ));
+                    }
+                }
+            }
         }
 
         // Precedence: explicit runtime selection > CLI --engine-bin > FRANKEN_ENGINE_BIN env > config [engine].binary_path > candidates.
@@ -2128,6 +2179,115 @@ impl EngineDispatcher {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+    use crate::supply_chain::trust_card::{
+        TrustCard, TrustCardMutation, RevocationStatus, ReputationTrend
+    };
+
+    #[test]
+    fn test_dispatch_run_rejects_revoked_extension_toctou() {
+        // Test that extension revoked between preflight and execution is rejected (bd-zqz0q)
+        let tmp = TempDir::new().expect("tempdir");
+        let app_path = tmp.path().join("test-app");
+        fs::create_dir_all(&app_path).expect("create app dir");
+
+        // Create project structure for trust registry
+        let project_root = tmp.path();
+        let trust_dir = project_root.join(".state");
+        fs::create_dir_all(&trust_dir).expect("create trust dir");
+
+        // Create minimal trust registry with trusted extension
+        let registry_path = trust_dir.join("trust_card_registry.json");
+        let config = Config::default();
+        let now_secs = 1_700_000_000;
+
+        // Create registry with trusted extension
+        let mut registry = TrustCardRegistry::new("test-registry".to_string());
+        let extension_id = "test-extension";
+        registry.update(
+            extension_id,
+            TrustCardMutation {
+                certification_level: None,
+                revocation_status: None, // Initially not revoked
+                active_quarantine: Some(false),
+                reputation_score_basis_points: Some(8000),
+                reputation_trend: Some(ReputationTrend::Stable),
+                user_facing_risk_assessment: None,
+                provenance_summary: None,
+                last_verified_timestamp: None,
+                capability_declarations: None,
+                trust_card_version: None,
+            },
+            now_secs,
+            "test-setup"
+        ).expect("update registry");
+
+        registry.persist_authoritative_state(&registry_path).expect("persist registry");
+
+        // Create dispatcher
+        let dispatcher = EngineDispatcher::new("mock-engine".to_string(), PreferredRuntime::Node);
+        let trusted_extensions = vec![extension_id.to_string()];
+
+        // First call should succeed (extension not revoked)
+        let result1 = dispatcher.dispatch_run(
+            &app_path,
+            &config,
+            "balanced",
+            &trusted_extensions,
+            now_secs
+        );
+        // Note: This may fail due to missing engine binary, but should not fail due to trust validation
+        // The important thing is that it doesn't fail with a trust revocation error
+
+        // Now simulate TOCTOU attack: revoke the extension in the registry
+        let mut registry = TrustCardRegistry::load_authoritative_state_from_config(
+            &registry_path,
+            &config.trust,
+            now_secs,
+            SnapshotSourceContext::TrustedFile,
+        ).expect("reload registry");
+
+        registry.update(
+            extension_id,
+            TrustCardMutation {
+                certification_level: None,
+                revocation_status: Some(RevocationStatus::Revoked {
+                    reason: "TOCTOU test revocation".to_string(),
+                    revoked_at: crate::supply_chain::trust_card::rfc3339_timestamp_from_secs(now_secs),
+                }),
+                active_quarantine: Some(true),
+                reputation_score_basis_points: None,
+                reputation_trend: Some(ReputationTrend::Declining),
+                user_facing_risk_assessment: None,
+                provenance_summary: None,
+                last_verified_timestamp: None,
+                capability_declarations: None,
+                trust_card_version: None,
+            },
+            now_secs,
+            "toctou-revoke"
+        ).expect("revoke extension");
+
+        registry.persist_authoritative_state(&registry_path).expect("persist revoked registry");
+
+        // Second call should be rejected due to revocation
+        let result2 = dispatcher.dispatch_run(
+            &app_path,
+            &config,
+            "balanced",
+            &trusted_extensions,
+            now_secs
+        );
+
+        // Should fail with revocation error
+        assert!(result2.is_err());
+        let error_msg = result2.unwrap_err().to_string();
+        assert!(error_msg.contains("revoked since preflight"));
+        assert!(error_msg.contains("TOCTOU test revocation"));
+        assert!(error_msg.contains("prevents TOCTOU attacks"));
+    }
     use super::*;
     use crate::ops::telemetry_bridge::{BridgeLifecycleState, event_codes, reason_codes};
     use std::collections::BTreeSet;
