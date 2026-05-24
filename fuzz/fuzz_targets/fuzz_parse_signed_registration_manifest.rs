@@ -26,25 +26,71 @@ fuzz_target!(|input: FuzzInput| {
 });
 
 fn fuzz_raw_bytes(bytes: &[u8]) {
-    // Test the function with arbitrary raw bytes
-    let _ = parse_signed_registration_manifest(bytes);
+    // Test deterministic behavior on raw bytes
+    let result1 = parse_signed_registration_manifest(bytes);
+    let result2 = parse_signed_registration_manifest(bytes);
+    assert_eq!(result1.is_ok(), result2.is_ok(),
+              "Manifest parsing should be deterministic");
+
+    // Empty input should be rejected
+    if bytes.is_empty() {
+        assert!(result1.is_err(), "Empty manifest should be rejected");
+    }
+
+    // Very small inputs should be rejected (not valid JSON)
+    if bytes.len() < 10 && !bytes.is_empty() {
+        assert!(result1.is_err(), "Very small input should not parse as valid manifest");
+    }
+
+    // Malformed JSON should be safely rejected
+    if !std::str::from_utf8(bytes).is_ok() {
+        assert!(result1.is_err(), "Non-UTF8 bytes should be rejected");
+    }
 }
 
 fn fuzz_structured_manifest(input: FuzzInput) {
     // Generate various manifest structures to test edge cases
     let test_cases = vec![
         // Valid manifest with fuzzed values
-        generate_manifest(&input.manifest_data),
+        ("valid", generate_manifest(&input.manifest_data)),
         // Invalid schema version
-        generate_manifest_with_schema(&input.manifest_data, &input.invalid_schema),
+        ("invalid_schema", generate_manifest_with_schema(&input.manifest_data, &input.invalid_schema)),
         // Malformed JSON structures
-        generate_malformed_manifest(&input.manifest_data),
+        ("malformed", generate_malformed_manifest(&input.manifest_data)),
         // Edge cases: empty fields, very long fields, special characters
-        generate_edge_case_manifest(&input.manifest_data),
+        ("edge_case", generate_edge_case_manifest(&input.manifest_data)),
     ];
 
-    for manifest_json in test_cases {
-        let _ = parse_signed_registration_manifest(&manifest_json);
+    for (test_type, manifest_json) in test_cases {
+        let result = parse_signed_registration_manifest(&manifest_json);
+
+        // Test deterministic behavior
+        let result2 = parse_signed_registration_manifest(&manifest_json);
+        assert_eq!(result.is_ok(), result2.is_ok(),
+                  "Manifest parsing should be deterministic for {}", test_type);
+
+        match test_type {
+            "valid" => {
+                // Valid manifest structure should either parse or fail gracefully
+                // (may fail due to missing signature verification)
+            },
+            "invalid_schema" => {
+                // Invalid schema version should be rejected
+                if !input.invalid_schema.is_empty() &&
+                   input.invalid_schema != EXTENSION_REGISTRATION_MANIFEST_SCHEMA {
+                    assert!(result.is_err(), "Invalid schema version should be rejected");
+                }
+            },
+            "malformed" => {
+                // Malformed JSON should be rejected
+                // (verify the test case actually produced malformed JSON first)
+            },
+            "edge_case" => {
+                // Edge cases should be handled safely without panic
+                // Function should complete without crashing
+            },
+            _ => unreachable!(),
+        }
     }
 }
 

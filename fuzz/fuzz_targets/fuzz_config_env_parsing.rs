@@ -114,37 +114,126 @@ impl StringInput {
 }
 
 fn test_profile_from_str(input: &str) {
-    let _ = Profile::from_str(input);
+    // Test deterministic parsing behavior
+    let result1 = Profile::from_str(input);
+    let result2 = Profile::from_str(input);
+    assert_eq!(result1.is_ok(), result2.is_ok(), "Profile parsing should be deterministic");
+
+    // Empty input should be rejected
+    if input.is_empty() {
+        assert!(result1.is_err(), "Empty profile string should be rejected");
+    }
+
+    // Valid profiles should parse successfully
+    if input.trim().eq_ignore_ascii_case("production") ||
+       input.trim().eq_ignore_ascii_case("development") ||
+       input.trim().eq_ignore_ascii_case("test") {
+        // Note: Actual validation depends on Profile enum implementation
+    }
 }
 
 fn test_compatibility_mode_from_str(input: &str) {
-    let _ = CompatibilityMode::from_str(input);
+    // Test deterministic parsing behavior
+    let result1 = CompatibilityMode::from_str(input);
+    let result2 = CompatibilityMode::from_str(input);
+    assert_eq!(result1.is_ok(), result2.is_ok(), "CompatibilityMode parsing should be deterministic");
+
+    // Empty input should be rejected
+    if input.is_empty() {
+        assert!(result1.is_err(), "Empty compatibility mode string should be rejected");
+    }
+
+    // Input with null bytes should be rejected
+    if input.contains('\0') {
+        assert!(result1.is_err(), "Input with null bytes should be rejected");
+    }
 }
 
 fn test_preferred_runtime_from_str(input: &str) {
-    let _ = PreferredRuntime::from_str(input);
+    // Test deterministic parsing behavior
+    let result1 = PreferredRuntime::from_str(input);
+    let result2 = PreferredRuntime::from_str(input);
+    assert_eq!(result1.is_ok(), result2.is_ok(), "PreferredRuntime parsing should be deterministic");
+
+    // Empty input should be rejected
+    if input.is_empty() {
+        assert!(result1.is_err(), "Empty preferred runtime string should be rejected");
+    }
+
+    // Input with control characters should be handled safely
+    if input.chars().any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t') {
+        // Control characters should generally be rejected
+        assert!(result1.is_err(), "Input with control characters should be rejected");
+    }
 }
 
 // Mock environment parsing functions since they're private
 fn test_env_bool_parse(key: &str, value: &str) {
-    // Test boolean parsing edge cases
-    let _ = value.parse::<bool>();
+    // Test boolean parsing edge cases and deterministic behavior
+    let result1 = value.parse::<bool>();
+    let result2 = value.parse::<bool>();
+    assert_eq!(result1.is_ok(), result2.is_ok(), "Boolean parsing should be deterministic");
 
     // Test case variations
     let lower = value.to_lowercase();
-    let _ = matches!(lower.as_str(), "true" | "false" | "1" | "0" | "yes" | "no");
+    let is_known_bool = matches!(lower.as_str(), "true" | "false" | "1" | "0" | "yes" | "no");
+
+    // Standard boolean values should be recognized
+    match lower.as_str() {
+        "true" | "1" => {
+            assert!(result1.is_ok(), "Standard true values should parse successfully");
+        },
+        "false" | "0" => {
+            assert!(result1.is_ok(), "Standard false values should parse successfully");
+        },
+        _ => {
+            // Non-standard boolean strings should be rejected by std::str::parse
+            if !["yes", "no"].contains(&lower.as_str()) && value.len() > 10 {
+                assert!(result1.is_err(), "Very long non-boolean strings should be rejected");
+            }
+        }
+    }
 }
 
 fn test_env_numeric_parse(key: &str, value: &str, numeric_type: &NumericType) {
     match numeric_type {
-        NumericType::U8 => { let _ = value.parse::<u8>(); },
-        NumericType::U32 => { let _ = value.parse::<u32>(); },
-        NumericType::U64 => { let _ = value.parse::<u64>(); },
-        NumericType::Usize => { let _ = value.parse::<usize>(); },
+        NumericType::U8 => {
+            let result1 = value.parse::<u8>();
+            let result2 = value.parse::<u8>();
+            assert_eq!(result1.is_ok(), result2.is_ok(), "U8 parsing should be deterministic");
+
+            // Overflow values should be rejected
+            if value.len() > 3 || value.starts_with('-') {
+                assert!(result1.is_err(), "Overflow/negative values should be rejected for u8");
+            }
+        },
+        NumericType::U32 => {
+            let result1 = value.parse::<u32>();
+            let result2 = value.parse::<u32>();
+            assert_eq!(result1.is_ok(), result2.is_ok(), "U32 parsing should be deterministic");
+        },
+        NumericType::U64 => {
+            let result1 = value.parse::<u64>();
+            let result2 = value.parse::<u64>();
+            assert_eq!(result1.is_ok(), result2.is_ok(), "U64 parsing should be deterministic");
+        },
+        NumericType::Usize => {
+            let result1 = value.parse::<usize>();
+            let result2 = value.parse::<usize>();
+            assert_eq!(result1.is_ok(), result2.is_ok(), "Usize parsing should be deterministic");
+        },
         NumericType::F64 => {
-            if let Ok(f) = value.parse::<f64>() {
-                // Test for NaN and infinity which should be rejected
-                let _ = f.is_finite();
+            let result1 = value.parse::<f64>();
+            let result2 = value.parse::<f64>();
+            assert_eq!(result1.is_ok(), result2.is_ok(), "F64 parsing should be deterministic");
+
+            if let Ok(f) = result1 {
+                // Test for NaN and infinity which should be validated
+                let is_finite = f.is_finite();
+                // NaN and infinity are valid f64 values but may not be valid config values
+                if value.to_lowercase().contains("inf") || value.to_lowercase().contains("nan") {
+                    assert!(!is_finite, "Infinity/NaN should not be finite");
+                }
             }
         },
     }
