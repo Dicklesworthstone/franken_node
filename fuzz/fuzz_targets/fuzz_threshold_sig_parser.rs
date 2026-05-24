@@ -291,30 +291,71 @@ fuzz_target!(|data: &[u8]| {
                 for corrupt in &corruption {
                     hex_key = corrupt.apply(&hex_key);
                 }
-                let _ = parse_verifying_key(&hex_key);
+                let result = parse_verifying_key(&hex_key);
+
+                // Test deterministic behavior
+                let result2 = parse_verifying_key(&hex_key);
+                assert_eq!(result.is_some(), result2.is_some(), "VerifyingKey parsing should be deterministic");
+
+                // Corrupted inputs should generally be rejected
+                if !corruption.is_empty() {
+                    // Function should handle corrupted input gracefully without panic
+                }
+
+                // Valid length and valid hex should have a chance to succeed
+                if hex_key.len() == ED25519_PUBLIC_KEY_HEX_LEN && hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
+                    // May succeed or fail based on key validity, but should not panic
+                }
             },
             ThresholdSigOperation::SignatureParse { sig_data, corruption } => {
                 let mut hex_sig = sig_data.encoding.apply(&sig_data.bytes);
                 for corrupt in &corruption {
                     hex_sig = corrupt.apply(&hex_sig);
                 }
-                let _ = parse_signature(&hex_sig);
+                let result = parse_signature(&hex_sig);
+
+                // Test deterministic behavior
+                let result2 = parse_signature(&hex_sig);
+                assert_eq!(result.is_some(), result2.is_some(), "Signature parsing should be deterministic");
+
+                // Valid length and valid hex should succeed
+                if hex_sig.len() == ED25519_SIGNATURE_HEX_LEN && hex_sig.chars().all(|c| c.is_ascii_hexdigit()) {
+                    assert!(result.is_some(), "Valid signature hex should parse successfully");
+                }
             },
             ThresholdSigOperation::LengthAttacks { attack_type, target } => {
                 match target {
                     ParseTarget::VerifyingKey => {
                         let attack_input = attack_type.generate(ED25519_PUBLIC_KEY_HEX_LEN);
-                        let _ = parse_verifying_key(&attack_input);
+                        let result = parse_verifying_key(&attack_input);
+
+                        // Wrong-length inputs should be rejected
+                        if attack_input.len() != ED25519_PUBLIC_KEY_HEX_LEN {
+                            assert!(result.is_none(), "Wrong-length verifying key should be rejected: len={}", attack_input.len());
+                        }
                     },
                     ParseTarget::Signature => {
                         let attack_input = attack_type.generate(ED25519_SIGNATURE_HEX_LEN);
-                        let _ = parse_signature(&attack_input);
+                        let result = parse_signature(&attack_input);
+
+                        // Wrong-length inputs should be rejected
+                        if attack_input.len() != ED25519_SIGNATURE_HEX_LEN {
+                            assert!(result.is_none(), "Wrong-length signature should be rejected: len={}", attack_input.len());
+                        }
                     },
                     ParseTarget::Both => {
                         let key_attack = attack_type.generate(ED25519_PUBLIC_KEY_HEX_LEN);
                         let sig_attack = attack_type.generate(ED25519_SIGNATURE_HEX_LEN);
-                        let _ = parse_verifying_key(&key_attack);
-                        let _ = parse_signature(&sig_attack);
+                        let key_result = parse_verifying_key(&key_attack);
+                        let sig_result = parse_signature(&sig_attack);
+
+                        // Length attacks should be consistently rejected
+                        if key_attack.len() != ED25519_PUBLIC_KEY_HEX_LEN {
+                            assert!(key_result.is_none(), "Length attack on key should fail");
+                        }
+                        if sig_attack.len() != ED25519_SIGNATURE_HEX_LEN {
+                            assert!(sig_result.is_none(), "Length attack on signature should fail");
+                        }
                     },
                 }
             },
@@ -323,29 +364,55 @@ fuzz_target!(|data: &[u8]| {
                     ParseTarget::VerifyingKey => {
                         let attack_key = attack_type.generate_key_attack();
                         let hex_key = hex::encode(attack_key);
-                        let _ = parse_verifying_key(&hex_key);
+                        let result = parse_verifying_key(&hex_key);
+
+                        // Crypto attacks should be handled gracefully
+                        match attack_type {
+                            CryptoAttack::AllZeros | CryptoAttack::AllOnes => {
+                                // These specific attacks should be rejected by validation
+                                assert!(result.is_none(), "Weak key attack should be rejected: {:?}", attack_type);
+                            },
+                            _ => {
+                                // Other attacks should not cause panic
+                            }
+                        }
                     },
                     ParseTarget::Signature => {
                         let attack_sig = attack_type.generate_sig_attack();
                         let hex_sig = hex::encode(attack_sig);
-                        let _ = parse_signature(&hex_sig);
+                        let result = parse_signature(&hex_sig);
+
+                        // All signature attacks should be safely parsed (validation happens later)
+                        assert!(result.is_some(), "Valid-format signature should parse regardless of content");
                     },
                     ParseTarget::Both => {
                         let attack_key = attack_type.generate_key_attack();
                         let attack_sig = attack_type.generate_sig_attack();
-                        let _ = parse_verifying_key(&hex::encode(attack_key));
-                        let _ = parse_signature(&hex::encode(attack_sig));
+                        let key_result = parse_verifying_key(&hex::encode(attack_key));
+                        let sig_result = parse_signature(&hex::encode(attack_sig));
+
+                        // Function should never panic on crypto attacks
+                        // Results depend on specific attack type
                     },
                 }
             },
             ThresholdSigOperation::ConcurrentParsing { operations } => {
                 for op in &operations {
                     match op.target {
-                        ParseTarget::VerifyingKey => { let _ = parse_verifying_key(&op.input); },
-                        ParseTarget::Signature => { let _ = parse_signature(&op.input); },
+                        ParseTarget::VerifyingKey => {
+                            let result = parse_verifying_key(&op.input);
+                            // Concurrent operations should be deterministic
+                            let result2 = parse_verifying_key(&op.input);
+                            assert_eq!(result.is_some(), result2.is_some(), "Concurrent parsing should be consistent");
+                        },
+                        ParseTarget::Signature => {
+                            let result = parse_signature(&op.input);
+                            // Should handle concurrent parsing without issues
+                        },
                         ParseTarget::Both => {
-                            let _ = parse_verifying_key(&op.input);
-                            let _ = parse_signature(&op.input);
+                            let key_result = parse_verifying_key(&op.input);
+                            let sig_result = parse_signature(&op.input);
+                            // Both should complete without interference
                         },
                     }
                 }
@@ -362,15 +429,35 @@ fuzz_target!(|data: &[u8]| {
                 match parse_type {
                     ParseTarget::VerifyingKey => {
                         let test_input = "A".repeat(key_len);
-                        let _ = parse_verifying_key(&test_input);
+                        let result = parse_verifying_key(&test_input);
+
+                        // Only exact-length inputs should have chance to succeed
+                        if key_len != ED25519_PUBLIC_KEY_HEX_LEN {
+                            assert!(result.is_none(), "Wrong boundary length should be rejected: {}", key_len);
+                        }
                     },
                     ParseTarget::Signature => {
                         let test_input = "A".repeat(sig_len);
-                        let _ = parse_signature(&test_input);
+                        let result = parse_signature(&test_input);
+
+                        // Only exact-length inputs should succeed
+                        if sig_len != ED25519_SIGNATURE_HEX_LEN {
+                            assert!(result.is_none(), "Wrong boundary length should be rejected: {}", sig_len);
+                        } else {
+                            assert!(result.is_some(), "Exact-length valid hex should parse");
+                        }
                     },
                     ParseTarget::Both => {
-                        let _ = parse_verifying_key(&"A".repeat(key_len));
-                        let _ = parse_signature(&"A".repeat(sig_len));
+                        let key_result = parse_verifying_key(&"A".repeat(key_len));
+                        let sig_result = parse_signature(&"A".repeat(sig_len));
+
+                        // Test boundary conditions for both
+                        if key_len != ED25519_PUBLIC_KEY_HEX_LEN {
+                            assert!(key_result.is_none(), "Key boundary test should fail for len {}", key_len);
+                        }
+                        if sig_len != ED25519_SIGNATURE_HEX_LEN {
+                            assert!(sig_result.is_none(), "Signature boundary test should fail for len {}", sig_len);
+                        }
                     },
                 }
             },

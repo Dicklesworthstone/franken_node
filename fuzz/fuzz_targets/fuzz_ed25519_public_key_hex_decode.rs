@@ -357,35 +357,90 @@ fuzz_target!(|data: &[u8]| {
             Ed25519HexDecodeTest::ValidKeys { key_bytes, case_variant } => {
                 let hex_str = hex::encode(key_bytes);
                 let test_hex = case_variant.apply(&hex_str);
-                let _ = decode_ed25519_public_key_hex(&test_hex);
+                let result = decode_ed25519_public_key_hex(&test_hex);
+
+                // Valid 64-char hex should decode successfully
+                assert!(result.is_some(), "Valid Ed25519 hex should decode: {}", test_hex);
+
+                // Round-trip property: decode(encode(key)) == key
+                if let Some(decoded) = result {
+                    assert_eq!(decoded, key_bytes, "Round-trip property violated for Ed25519 key");
+                }
             },
             Ed25519HexDecodeTest::LengthAttacks { attack_type, base_content } => {
                 let attack_input = attack_type.generate(&base_content);
-                let _ = decode_ed25519_public_key_hex(&attack_input);
+                let result = decode_ed25519_public_key_hex(&attack_input);
+
+                // Wrong-length inputs should be rejected
+                if attack_input.len() != 64 {
+                    assert!(result.is_none(), "Wrong-length Ed25519 hex should be rejected: len={}", attack_input.len());
+                }
+
+                // Function should never panic on length attacks
             },
             Ed25519HexDecodeTest::InvalidCharacters { char_type, position, base_hex } => {
                 let attack_input = char_type.inject(&base_hex, position);
-                let _ = decode_ed25519_public_key_hex(&attack_input);
+                let result = decode_ed25519_public_key_hex(&attack_input);
+
+                // Invalid hex characters should be rejected
+                if attack_input.len() == 64 && !attack_input.chars().all(|c| c.is_ascii_hexdigit()) {
+                    assert!(result.is_none(), "Invalid hex characters should be rejected: {}", attack_input);
+                }
             },
             Ed25519HexDecodeTest::UnicodeAttacks { unicode_type, insertion_point } => {
                 let attack_input = unicode_type.inject(insertion_point);
-                let _ = decode_ed25519_public_key_hex(&attack_input);
+                let result = decode_ed25519_public_key_hex(&attack_input);
+
+                // Unicode attacks should be rejected
+                if !attack_input.is_ascii() || attack_input.len() != 64 || !attack_input.chars().all(|c| c.is_ascii_hexdigit()) {
+                    assert!(result.is_none(), "Unicode attacks should be rejected: {}", attack_input);
+                }
+
+                // Function should never panic on unicode input
             },
             Ed25519HexDecodeTest::InjectionAttacks { injection_type, payload } => {
                 let attack_input = injection_type.generate(&payload);
-                let _ = decode_ed25519_public_key_hex(&attack_input);
+                let result = decode_ed25519_public_key_hex(&attack_input);
+
+                // Injection attacks should be safely handled
+                if attack_input.len() != 64 || !attack_input.chars().all(|c| c.is_ascii_hexdigit()) {
+                    assert!(result.is_none(), "Injection attacks should be rejected: {}", attack_input);
+                }
             },
             Ed25519HexDecodeTest::BoundaryTests { boundary_type, modifier } => {
                 let boundary_input = boundary_type.generate(modifier);
-                let _ = decode_ed25519_public_key_hex(&boundary_input);
+                let result = decode_ed25519_public_key_hex(&boundary_input);
+
+                // Test deterministic behavior
+                let result2 = decode_ed25519_public_key_hex(&boundary_input);
+                assert_eq!(result.is_some(), result2.is_some(), "Ed25519 decoder should be deterministic");
+
+                // Only exact-length valid hex should succeed
+                if boundary_input.len() == 64 && boundary_input.chars().all(|c| c.is_ascii_hexdigit()) {
+                    assert!(result.is_some(), "Valid 64-char Ed25519 hex should decode: {}", boundary_input);
+                } else {
+                    assert!(result.is_none(), "Invalid boundary input should be rejected");
+                }
             },
             Ed25519HexDecodeTest::EncodingConfusion { confusion_type, base_value } => {
                 let confused_input = confusion_type.apply(&base_value);
-                let _ = decode_ed25519_public_key_hex(&confused_input);
+                let result = decode_ed25519_public_key_hex(&confused_input);
+
+                // Encoding confusion attacks should be rejected
+                if confused_input.len() != 64 || !confused_input.chars().all(|c| c.is_ascii_hexdigit()) {
+                    assert!(result.is_none(), "Encoding confusion should be rejected: {}", confused_input);
+                }
             },
             Ed25519HexDecodeTest::FormatAttacks { format_type, pattern } => {
                 let format_input = format_type.apply(&pattern);
-                let _ = decode_ed25519_public_key_hex(&format_input);
+                let result = decode_ed25519_public_key_hex(&format_input);
+
+                // Format attacks should be safely handled
+                if format_input.len() != 64 || !format_input.chars().all(|c| c.is_ascii_hexdigit()) {
+                    assert!(result.is_none(), "Format attacks should be rejected: {}", format_input);
+                }
+
+                // Function should complete in reasonable time (no DoS)
             },
         }
     }

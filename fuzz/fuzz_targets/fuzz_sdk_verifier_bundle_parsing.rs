@@ -47,23 +47,47 @@ fuzz_target!(|data: FuzzInput| {
 fn fuzz_bundle_structured(input: FuzzReplayBundle) {
     let bundle = input.into_bundle();
     if let Ok(json) = serde_json::to_vec(&bundle) {
-        let _ = deserialize(&json);
-        let _ = serde_json::from_slice::<ReplayBundle>(&json);
-        let _ = hash(&json);
-        let _ = verify(&json);
+        // Round-trip property: deserialize(serialize(bundle)) should succeed
+        let deserialize_result = deserialize(&json);
+        let serde_result = serde_json::from_slice::<ReplayBundle>(&json);
+
+        // Both deserialization methods should agree
+        assert_eq!(deserialize_result.is_ok(), serde_result.is_ok(),
+                  "SDK deserialize and serde deserialization should agree on validity");
+
+        // Hash should not panic on valid JSON
+        let hash_result = hash(&json);
+        assert!(hash_result.is_ok(), "Hash function should not fail on valid JSON");
+
+        // Verify should handle the JSON safely
+        let verify_result = verify(&json);
+        // Note: verify may fail for legitimate reasons (invalid signature, etc.) but should not panic
     }
     if let Ok(pretty_json) = serde_json::to_vec_pretty(&bundle) {
-        let _ = deserialize(&pretty_json);
-        let _ = verify(&pretty_json);
+        let pretty_deserialize = deserialize(&pretty_json);
+        let pretty_verify = verify(&pretty_json);
+
+        // Pretty-printed JSON should parse consistently
+        if let Ok(json) = serde_json::to_vec(&bundle) {
+            let normal_deserialize = deserialize(&json);
+            assert_eq!(pretty_deserialize.is_ok(), normal_deserialize.is_ok(),
+                      "Pretty-printed and normal JSON should have consistent parse results");
+        }
     }
-    let _ = integrity_hash(&bundle);
+
+    // Integrity hash computation should not panic on structured input
+    let integrity_result = integrity_hash(&bundle);
+    // Note: integrity_hash may return error but should not panic
+
     verify_structured_bundle(&bundle);
 }
 
 fn fuzz_timeline_event_structured(input: FuzzTimelineEvent) {
     let event = input.into_event();
     if let Ok(json) = serde_json::to_vec(&event) {
-        let _ = serde_json::from_slice::<TimelineEvent>(&json);
+        // Round-trip property: deserialize(serialize(event)) should succeed
+        let parsed_event = serde_json::from_slice::<TimelineEvent>(&json);
+        assert!(parsed_event.is_ok(), "Timeline event round-trip should succeed");
     }
 
     let mut bundle = create_minimal_bundle_with_header(BundleHeader {
@@ -72,37 +96,55 @@ fn fuzz_timeline_event_structured(input: FuzzTimelineEvent) {
         chunk_count: 0,
     });
     bundle.timeline = vec![event];
-    let _ = integrity_hash(&bundle);
+
+    // Integrity hash should not panic on bundle with valid timeline event
+    let integrity_result = integrity_hash(&bundle);
+    // Note: may legitimately fail but should not panic
+
     verify_structured_bundle(&bundle);
 }
 
 /// Fuzz structured BundleHeader objects
 fn fuzz_bundle_header_structured(header: BundleHeader) {
     if let Ok(json) = serde_json::to_vec(&header) {
-        let _ = serde_json::from_slice::<BundleHeader>(&json);
+        // Round-trip property for BundleHeader
+        let parsed_header = serde_json::from_slice::<BundleHeader>(&json);
+        assert!(parsed_header.is_ok(), "BundleHeader round-trip should succeed");
     }
 
     let test_bundle = create_minimal_bundle_with_header(header);
-    let _ = integrity_hash(&test_bundle);
+
+    // Integrity hash should not panic on minimal bundle with any header
+    let integrity_result = integrity_hash(&test_bundle);
+    // Note: may legitimately fail but should not panic
+
     verify_structured_bundle(&test_bundle);
 }
 
 /// Fuzz structured BundleChunk objects
 fn fuzz_bundle_chunk_structured(chunk: BundleChunk) {
     if let Ok(json) = serde_json::to_vec(&chunk) {
-        let _ = serde_json::from_slice::<BundleChunk>(&json);
+        // Round-trip property for BundleChunk
+        let parsed_chunk = serde_json::from_slice::<BundleChunk>(&json);
+        assert!(parsed_chunk.is_ok(), "BundleChunk round-trip should succeed");
     }
 
     // Test edge cases with chunk indices and sizes
     let test_bundle = create_minimal_bundle_with_chunks(vec![chunk]);
-    let _ = integrity_hash(&test_bundle);
+
+    // Integrity hash should not panic on bundle with any chunk
+    let integrity_result = integrity_hash(&test_bundle);
+    // Note: may legitimately fail but should not panic
+
     verify_structured_bundle(&test_bundle);
 }
 
 /// Fuzz structured BundleSignature objects
 fn fuzz_bundle_signature_structured(signature: BundleSignature) {
     if let Ok(json) = serde_json::to_vec(&signature) {
-        let _ = serde_json::from_slice::<BundleSignature>(&json);
+        // Round-trip property for BundleSignature
+        let parsed_signature = serde_json::from_slice::<BundleSignature>(&json);
+        assert!(parsed_signature.is_ok(), "BundleSignature round-trip should succeed");
     }
 
     // Test hex decoding edge cases
@@ -177,7 +219,9 @@ fn create_minimal_bundle_with_artifact(artifact: BundleArtifact) -> ReplayBundle
 /// Fuzz structured BundleArtifact objects
 fn fuzz_bundle_artifact_structured(artifact: BundleArtifact) {
     if let Ok(json) = serde_json::to_vec(&artifact) {
-        let _ = serde_json::from_slice::<BundleArtifact>(&json);
+        // Round-trip property for BundleArtifact
+        let parsed_artifact = serde_json::from_slice::<BundleArtifact>(&json);
+        assert!(parsed_artifact.is_ok(), "BundleArtifact round-trip should succeed");
     }
 
     // Test hex decoding edge cases
@@ -185,7 +229,11 @@ fn fuzz_bundle_artifact_structured(artifact: BundleArtifact) {
     fuzz_hex_parse(&artifact.digest);
 
     let test_bundle = create_minimal_bundle_with_artifact(artifact);
-    let _ = integrity_hash(&test_bundle);
+
+    // Integrity hash should not panic on bundle with any artifact
+    let integrity_result = integrity_hash(&test_bundle);
+    // Note: may legitimately fail but should not panic
+
     verify_structured_bundle(&test_bundle);
 }
 
@@ -196,31 +244,67 @@ fn fuzz_bundle_raw_bytes(bytes: Vec<u8>) {
         return;
     }
 
-    // Test main deserialization entry point
-    let _ = deserialize(&bytes);
+    // Test deterministic behavior of main deserialization entry point
+    let deserialize_result1 = deserialize(&bytes);
+    let deserialize_result2 = deserialize(&bytes);
+    assert_eq!(deserialize_result1.is_ok(), deserialize_result2.is_ok(),
+              "SDK deserialization should be deterministic");
 
-    // Test individual component deserialization
-    let _ = serde_json::from_slice::<ReplayBundle>(&bytes);
-    let _ = serde_json::from_slice::<BundleHeader>(&bytes);
-    let _ = serde_json::from_slice::<TimelineEvent>(&bytes);
-    let _ = serde_json::from_slice::<BundleChunk>(&bytes);
-    let _ = serde_json::from_slice::<BundleArtifact>(&bytes);
-    let _ = serde_json::from_slice::<BundleSignature>(&bytes);
+    // Test individual component deserialization for consistency
+    let bundle_result = serde_json::from_slice::<ReplayBundle>(&bytes);
+    let header_result = serde_json::from_slice::<BundleHeader>(&bytes);
+    let event_result = serde_json::from_slice::<TimelineEvent>(&bytes);
+    let chunk_result = serde_json::from_slice::<BundleChunk>(&bytes);
+    let artifact_result = serde_json::from_slice::<BundleArtifact>(&bytes);
+    let signature_result = serde_json::from_slice::<BundleSignature>(&bytes);
 
-    // Test hash function with raw bytes
-    let _ = hash(&bytes);
+    // Very small inputs should be rejected for complex structures
+    if bytes.len() < 10 && !bytes.is_empty() {
+        assert!(bundle_result.is_err(), "Very small input should not parse as ReplayBundle");
+        assert!(header_result.is_err(), "Very small input should not parse as BundleHeader");
+    }
+
+    // Empty input should be consistently rejected
+    if bytes.is_empty() {
+        assert!(bundle_result.is_err(), "Empty input should not parse as ReplayBundle");
+        assert!(deserialize_result1.is_err(), "Empty input should not deserialize via SDK");
+    }
+
+    // Hash function should be deterministic
+    let hash_result1 = hash(&bytes);
+    let hash_result2 = hash(&bytes);
+    assert_eq!(hash_result1.is_ok(), hash_result2.is_ok(), "Hash function should be deterministic");
+    if let (Ok(h1), Ok(h2)) = (hash_result1, hash_result2) {
+        assert_eq!(h1, h2, "Hash function should produce identical results for same input");
+    }
 
     // Test validation against malformed input
     if let Ok(bundle) = deserialize(&bytes) {
-        // Test verification logic on potentially malformed data
-        let _ = integrity_hash(&bundle);
-        let _ = verify(&bytes);
+        // Successfully parsed bundles should have consistent integrity hash computation
+        let integrity_result1 = integrity_hash(&bundle);
+        let integrity_result2 = integrity_hash(&bundle);
+        assert_eq!(integrity_result1.is_ok(), integrity_result2.is_ok(),
+                  "Integrity hash computation should be deterministic");
+
+        // Verification should be deterministic on same input
+        let verify_result1 = verify(&bytes);
+        let verify_result2 = verify(&bytes);
+        assert_eq!(verify_result1.is_ok(), verify_result2.is_ok(),
+                  "Bundle verification should be deterministic");
+    } else {
+        // If initial deserialization fails, verify should also fail
+        let verify_result = verify(&bytes);
+        assert!(verify_result.is_err(), "Verify should fail if deserialization fails");
     }
 }
 
 fn verify_structured_bundle(bundle: &ReplayBundle) {
     if let Ok(bytes) = serde_json::to_vec(bundle) {
-        let _ = verify(&bytes);
+        // Verification should be deterministic
+        let verify_result1 = verify(&bytes);
+        let verify_result2 = verify(&bytes);
+        assert_eq!(verify_result1.is_ok(), verify_result2.is_ok(),
+                  "Bundle verification should be deterministic");
     }
 }
 
@@ -323,7 +407,34 @@ fn bytes_json(bytes: Vec<u8>) -> serde_json::Value {
 }
 
 fn fuzz_hex_parse(candidate: &str) {
-    let _ = Vec::<u8>::from_hex(candidate);
+    // Test deterministic hex parsing behavior
+    let hex_result1 = Vec::<u8>::from_hex(candidate);
+    let hex_result2 = Vec::<u8>::from_hex(candidate);
+    assert_eq!(hex_result1.is_ok(), hex_result2.is_ok(),
+              "Hex parsing should be deterministic");
+
+    // If parsing succeeds, results should be identical
+    if let (Ok(bytes1), Ok(bytes2)) = (hex_result1, hex_result2) {
+        assert_eq!(bytes1, bytes2, "Hex parsing should produce identical results");
+    }
+
+    // Test some basic hex validation properties
+    if candidate.is_empty() {
+        let empty_result = Vec::<u8>::from_hex(candidate);
+        assert!(empty_result.is_ok(), "Empty string should parse as empty hex");
+    }
+
+    // Odd-length hex strings should be rejected
+    if candidate.len() % 2 == 1 && !candidate.is_empty() {
+        let odd_result = Vec::<u8>::from_hex(candidate);
+        assert!(odd_result.is_err(), "Odd-length hex string should be rejected");
+    }
+
+    // Valid hex chars should parse if even length
+    if candidate.len() % 2 == 0 && candidate.chars().all(|c| c.is_ascii_hexdigit()) {
+        let valid_result = Vec::<u8>::from_hex(candidate);
+        assert!(valid_result.is_ok(), "Valid even-length hex should parse successfully");
+    }
 }
 
 /// Input structure for hybrid structure-aware + coverage-guided fuzzing.

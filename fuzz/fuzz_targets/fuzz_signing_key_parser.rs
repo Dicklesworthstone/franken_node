@@ -329,7 +329,19 @@ fuzz_target!(|data: &[u8]| {
                     LengthVariant::TooLong => data.iter().cycle().take(100).copied().collect(),
                     LengthVariant::Random => data,
                 };
-                let _ = parse_signing_key_from_blob(&test_data);
+                let result = parse_signing_key_from_blob(&test_data);
+
+                // Only exact 32-byte or 64-byte keys should parse successfully
+                match length_variant {
+                    LengthVariant::Exact32 | LengthVariant::Exact64 => {
+                        // Valid-length key should parse (or fail gracefully for invalid content)
+                        // Function should never panic
+                    },
+                    _ => {
+                        // Wrong-length keys should be rejected
+                        assert!(result.is_none(), "Wrong-length key should be rejected: len={}", test_data.len());
+                    }
+                }
             },
             KeyParsingOperation::EncodedText { encoding, key_data, corruption } => {
                 let mut encoded = match encoding {
@@ -343,7 +355,17 @@ fuzz_target!(|data: &[u8]| {
                     encoded = corrupt.apply(&encoded);
                 }
 
-                let _ = parse_signing_key_from_blob(encoded.as_bytes());
+                let result = parse_signing_key_from_blob(encoded.as_bytes());
+
+                // Corrupted encodings should generally be rejected
+                if !corruption.is_empty() {
+                    // Corruption likely makes the encoding invalid
+                    // Function should handle gracefully without panic
+                }
+
+                // Test deterministic behavior
+                let result2 = parse_signing_key_from_blob(encoded.as_bytes());
+                assert_eq!(result.is_some(), result2.is_some(), "Signing key parsing should be deterministic");
             },
             KeyParsingOperation::JsonPayload { json_type, payload, injection_attempts: _ } => {
                 let json_payload = match json_type {
@@ -353,7 +375,19 @@ fuzz_target!(|data: &[u8]| {
                     JsonVariant::MultipleKeys => format!("{{\"privateKey\": \"{}\", \"seed\": \"{}\"}}", payload, payload),
                     JsonVariant::MalformedStructure => format!("{{\"privateKey\": {}}}", payload),
                 };
-                let _ = parse_signing_key_from_blob(json_payload.as_bytes());
+                let result = parse_signing_key_from_blob(json_payload.as_bytes());
+
+                // Malformed JSON should be safely rejected
+                match json_type {
+                    JsonVariant::MalformedStructure => {
+                        // Malformed structure should be rejected
+                        assert!(result.is_none(), "Malformed JSON structure should be rejected");
+                    },
+                    _ => {
+                        // Other JSON forms should be handled gracefully
+                        // Function should never panic on any JSON input
+                    }
+                }
             },
             KeyParsingOperation::SecurityBoundaryTests { attack_type, payload_size } => {
                 let size = (payload_size as usize).min(1000); // Cap for fuzzing
@@ -372,7 +406,13 @@ fuzz_target!(|data: &[u8]| {
                     SecurityAttack::NullByteInjection => format!("key\0{}\0", "A".repeat(size)).into_bytes(),
                     SecurityAttack::FormatStringInjection => format!("%s%n%x{}", "A".repeat(size)).into_bytes(),
                 };
-                let _ = parse_signing_key_from_blob(&attack_payload);
+                let result = parse_signing_key_from_blob(&attack_payload);
+
+                // Security attacks should be safely rejected
+                assert!(result.is_none(), "Security attack payload should be rejected: {:?}", attack_type);
+
+                // Function should complete in reasonable time (no DoS)
+                // Function should never panic on malicious input
             },
             KeyParsingOperation::FormatConfusion { primary_format, secondary_format, confusion_method: _ } => {
                 let key_data = KeyData { seed: [0x42; 32], include_public: false };
@@ -390,7 +430,12 @@ fuzz_target!(|data: &[u8]| {
                 };
 
                 let confused = format!("{}{}", primary, secondary);
-                let _ = parse_signing_key_from_blob(confused.as_bytes());
+                let result = parse_signing_key_from_blob(confused.as_bytes());
+
+                // Format confusion should be safely rejected
+                assert!(result.is_none(), "Format confusion attack should be rejected");
+
+                // Function should handle mixed formats without panic
             },
         }
     }

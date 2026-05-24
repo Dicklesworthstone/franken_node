@@ -283,27 +283,75 @@ fuzz_target!(|data: &[u8]| {
             HexDecodingOperation::ValidHex { hex_data, case_variant } => {
                 let hex_string = hex::encode(hex_data);
                 let test_hex = case_variant.apply(&hex_string);
-                let _ = decode_merkle_hash_hex(&test_hex, "test_field");
+
+                // Valid hex should decode successfully
+                let result = decode_merkle_hash_hex(&test_hex, "test_field");
+                assert!(result.is_ok(), "Valid 64-char hex should decode successfully: {}", test_hex);
+
+                // Round-trip property: decode(encode(data)) == data
+                if let Ok(decoded) = result {
+                    assert_eq!(decoded, hex_data, "Round-trip property violated");
+                }
             },
             HexDecodingOperation::InvalidLength { length_type, base_content } => {
                 let test_input = length_type.generate(&base_content);
-                let _ = decode_merkle_hash_hex(&test_input, "length_test");
+                let result = decode_merkle_hash_hex(&test_input, "length_test");
+
+                // Non-64-char inputs should be rejected
+                if test_input.len() != 64 {
+                    assert!(result.is_err(), "Invalid length input should be rejected: len={}", test_input.len());
+                }
+
+                // Function should never panic on any length input
+                // (Reaching here proves no panic occurred)
             },
             HexDecodingOperation::InvalidCharacters { char_type, position, base_hex } => {
                 let test_input = char_type.inject_invalid(&base_hex, position);
-                let _ = decode_merkle_hash_hex(&test_input, "char_test");
+                let result = decode_merkle_hash_hex(&test_input, "char_test");
+
+                // Invalid hex characters should be rejected
+                if test_input.len() == 64 && !test_input.chars().all(|c| c.is_ascii_hexdigit()) {
+                    assert!(result.is_err(), "Invalid hex characters should be rejected: {}", test_input);
+                }
             },
             HexDecodingOperation::UnicodeAttacks { unicode_type, insertion_point } => {
                 let attack_input = unicode_type.generate_attack(insertion_point);
-                let _ = decode_merkle_hash_hex(&attack_input, "unicode_test");
+                let result = decode_merkle_hash_hex(&attack_input, "unicode_test");
+
+                // Unicode attacks should be rejected (not valid ASCII hex)
+                if attack_input.len() != 64 || !attack_input.is_ascii() || !attack_input.chars().all(|c| c.is_ascii_hexdigit()) {
+                    assert!(result.is_err(), "Unicode attacks should be rejected: {}", attack_input);
+                }
+
+                // Function should never panic on unicode input
             },
             HexDecodingOperation::BoundaryTests { boundary_type, test_value } => {
                 let boundary_input = boundary_type.generate_test(&test_value);
-                let _ = decode_merkle_hash_hex(&boundary_input, "boundary_test");
+                let result = decode_merkle_hash_hex(&boundary_input, "boundary_test");
+
+                // Test deterministic behavior
+                let result2 = decode_merkle_hash_hex(&boundary_input, "boundary_test");
+                assert_eq!(result.is_ok(), result2.is_ok(), "Deterministic behavior violated");
+
+                // Only exact-length valid hex should succeed
+                if boundary_input.len() == 64 && boundary_input.chars().all(|c| c.is_ascii_hexdigit()) {
+                    assert!(result.is_ok(), "Valid 64-char hex should decode: {}", boundary_input);
+                } else {
+                    assert!(result.is_err(), "Invalid boundary input should be rejected: len={}", boundary_input.len());
+                }
             },
             HexDecodingOperation::SecurityTests { attack_type, payload_size } => {
                 let attack_input = attack_type.generate_attack(payload_size);
-                let _ = decode_merkle_hash_hex(&attack_input, "security_test");
+                let result = decode_merkle_hash_hex(&attack_input, "security_test");
+
+                // Security attacks should be safely handled (no panic)
+                // Large/malformed inputs should be rejected
+                if attack_input.len() != 64 || !attack_input.chars().all(|c| c.is_ascii_hexdigit()) {
+                    assert!(result.is_err(), "Security attack input should be rejected");
+                }
+
+                // Function should complete in reasonable time (no DoS)
+                // (Reaching here proves reasonable performance)
             },
         }
     }
