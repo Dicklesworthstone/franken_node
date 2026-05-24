@@ -1645,7 +1645,7 @@ fn decide_resource_action(
     thresholds: &ResourceGovernorThresholds,
     observation_age_ms: u64,
 ) -> ResourceGovernorDecision {
-    if observation_age_ms > thresholds.stale_observation_after_ms {
+    if observation_age_ms >= thresholds.stale_observation_after_ms {
         return decision(
             ResourceGovernorDecisionKind::Defer,
             reason_codes::DEFER_STALE_OBSERVATION,
@@ -3542,5 +3542,46 @@ mod tests {
                 .expect("skip reason")
                 .contains("protected")
         );
+    }
+
+    #[test]
+    fn staleness_check_uses_fail_closed_boundary_semantics() {
+        // Test for bd-l05d8 fix: observation age exactly at threshold should be treated as stale
+        let observation = ResourceGovernorObservation::default();
+        let mut thresholds = ResourceGovernorThresholds::default();
+        thresholds.stale_observation_after_ms = 1000;
+
+        // Test boundary case: age exactly equals threshold (should be stale with >= comparison)
+        let decision_at_boundary = decide_resource_action(
+            None,
+            false,
+            &observation,
+            &thresholds,
+            1000, // exactly at threshold
+        );
+        assert_eq!(decision_at_boundary.kind, ResourceGovernorDecisionKind::Defer);
+        assert!(decision_at_boundary.reason_code.contains("STALE_OBSERVATION"));
+
+        // Test just under boundary (should not be stale)
+        let decision_under_boundary = decide_resource_action(
+            None,
+            false,
+            &observation,
+            &thresholds,
+            999, // just under threshold
+        );
+        assert_ne!(decision_under_boundary.kind, ResourceGovernorDecisionKind::Defer);
+        assert!(!decision_under_boundary.reason_code.contains("STALE_OBSERVATION"));
+
+        // Test over boundary (should be stale)
+        let decision_over_boundary = decide_resource_action(
+            None,
+            false,
+            &observation,
+            &thresholds,
+            1001, // over threshold
+        );
+        assert_eq!(decision_over_boundary.kind, ResourceGovernorDecisionKind::Defer);
+        assert!(decision_over_boundary.reason_code.contains("STALE_OBSERVATION"));
     }
 }

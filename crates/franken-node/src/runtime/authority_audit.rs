@@ -910,7 +910,33 @@ mod tests {
         let parsed: CapabilityContext = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.trace_id, "trace-1");
         assert_eq!(parsed.principal, "agent-1");
-        assert!(parsed.granted.contains_key("key_access"));
+        assert!(parsed.granted.get("key_access").copied().unwrap_or(false));
+    }
+
+    #[test]
+    fn test_capability_context_correctly_handles_denied_capabilities() {
+        // Test for bd-kqzym fix: ensure stored false values are properly honored
+        let mut granted = BTreeMap::new();
+        granted.insert("allowed_capability".to_string(), true);
+        granted.insert("denied_capability".to_string(), false);
+
+        let ctx = CapabilityContext {
+            granted,
+            trace_id: "trace-2".to_string(),
+            principal: "agent-2".to_string(),
+        };
+
+        // Test that granted capabilities return true
+        assert!(ctx.granted.get("allowed_capability").copied().unwrap_or(false));
+
+        // Test that denied capabilities return false (not just key presence)
+        assert!(!ctx.granted.get("denied_capability").copied().unwrap_or(false));
+
+        // Test that missing capabilities return false
+        assert!(!ctx.granted.get("missing_capability").copied().unwrap_or(false));
+
+        // Verify the old buggy approach would have failed for denied_capability
+        assert!(ctx.granted.contains_key("denied_capability")); // This would be true, incorrectly
     }
 
     // ── SecurityCriticalInventory ────────────────────────────────────

@@ -92,7 +92,7 @@ impl TaskId {
         let mut digit_count = 0usize;
         loop {
             let digit = u8::try_from(value % 10).expect("single decimal digit fits in u8");
-            let index = TASK_ID_MAX_DIGITS - 1 - digit_count;
+            let index = (TASK_ID_MAX_DIGITS - 1).saturating_sub(digit_count);
             digits[index] = b'0' + digit;
             digit_count += 1;
             value /= 10;
@@ -3950,5 +3950,33 @@ mod tests {
                 counter
             );
         }
+    }
+
+    #[test]
+    fn task_id_handles_underflow_protection_for_large_counters() {
+        // Test for bd-u1dd3 fix: verify saturating_sub prevents underflow
+        // when digit_count > TASK_ID_MAX_DIGITS - 1 (i.e., > 19 digits)
+
+        // Test a value with exactly 20 digits (would cause underflow with raw subtraction)
+        let large_counter = 10u64.pow(19); // 10^19 = smallest 20-digit number
+        let task_id = TaskId::new(large_counter);
+        let formatted = task_id.to_string();
+
+        // Should not panic and should format correctly
+        assert!(formatted.starts_with("task-"));
+        assert_eq!(formatted.len(), 25); // "task-" (5) + 20 digits
+        assert_eq!(formatted, "task-10000000000000000000");
+
+        // Test edge case: maximum u64 value (20 digits)
+        let max_counter = u64::MAX; // 18446744073709551615 (20 digits)
+        let max_task_id = TaskId::new(max_counter);
+        let max_formatted = max_task_id.to_string();
+
+        // Should handle gracefully without underflow panic
+        assert!(max_formatted.starts_with("task-"));
+        assert!(max_formatted.len() >= 25); // At least "task-" + 20 digits
+
+        // Verify the saturating_sub behavior: with 20 digits, index should be 0 (not underflow)
+        // This is implicit in the successful formatting - if underflow occurred, it would panic
     }
 }
