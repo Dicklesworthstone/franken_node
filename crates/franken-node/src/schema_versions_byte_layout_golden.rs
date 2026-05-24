@@ -104,6 +104,14 @@ mod frozen_canonical_byte_layout_golden_tests {
         assert!(count_hash.starts_with("sha256:"), "Hash should be in sha256: format");
         assert_eq!(count_hash.len(), 71, "SHA-256 hash should be 71 chars (sha256: + 64 hex chars)");
 
+        // TODO: Replace this placeholder with actual golden hash baseline
+        // Run this test once to get the real hash value, then replace the placeholder below
+        if count_hash == "sha256:0000000000000000000000000000000000000000000000000000000000000000" {
+            panic!("Golden hash not yet established. Run test to get actual hash:\n\
+                   Actual hash: {}\n\
+                   Replace the placeholder in the code with this value.", count_hash);
+        }
+
         // Golden hash baseline - any change indicates schema registry modification
         let expected_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
         assert_eq!(count_hash, expected_hash,
@@ -156,6 +164,14 @@ mod frozen_canonical_byte_layout_golden_tests {
         // Verify we're actually testing some constants
         assert!(!critical_constants.is_empty(), "Should test at least one constant");
         assert!(critical_constants.len() >= 6, "Should test multiple critical constants");
+
+        // TODO: Replace this placeholder with actual golden hash baseline
+        // Run this test once to get the real hash value, then replace the placeholder below
+        if constants_hash == "sha256:1111111111111111111111111111111111111111111111111111111111111111" {
+            panic!("Golden hash not yet established. Run test to get actual hash:\n\
+                   Actual hash: {}\n\
+                   Replace the placeholder in the code with this value.", constants_hash);
+        }
 
         // Golden hash baseline - any change indicates critical constants modification
         let expected_hash = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
@@ -215,6 +231,14 @@ mod frozen_canonical_byte_layout_golden_tests {
             names.len()
         };
         assert_eq!(unique_count, versions.len(), "Schema registry should have no duplicate names");
+
+        // TODO: Replace this placeholder with actual golden hash baseline
+        // Run this test once to get the real hash value, then replace the placeholder below
+        if structure_hash == "sha256:2222222222222222222222222222222222222222222222222222222222222222" {
+            panic!("Golden hash not yet established. Run test to get actual hash:\n\
+                   Actual hash: {}\n\
+                   Replace the placeholder in the code with this value.", structure_hash);
+        }
 
         // Golden hash baseline - any change indicates schema registry structure modification
         let expected_hash = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
