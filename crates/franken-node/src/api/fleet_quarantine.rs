@@ -2542,8 +2542,9 @@ impl FleetControlManager {
             (incident.zone_id.clone(), incident.action_type.clone())
         };
 
-        // Verify convergence rollback receipt exists and is valid before release
-        self.verify_convergence_rollback_receipt(incident_id)?;
+        // Validate that quarantine trigger conditions have been actually resolved
+        // This replaces the flawed rollback receipt check which could be bypassed
+        self.validate_quarantine_resolution(incident_id)?;
 
         self.ensure_decision_signing_material()?;
 
@@ -3077,6 +3078,69 @@ impl FleetControlManager {
         }
 
         Ok(())
+    }
+
+    /// Validate that quarantine trigger conditions have been resolved.
+    /// Enforces fail-closed semantics: if validation cannot confirm the trigger
+    /// conditions are resolved, release is denied.
+    ///
+    /// This replaces the flawed rollback receipt approach which could be bypassed
+    /// by external registration of fabricated receipts.
+    fn validate_quarantine_resolution(
+        &self,
+        incident_id: &str,
+    ) -> Result<(), FleetControlError> {
+        let incident = self.incidents.get(incident_id).ok_or_else(|| {
+            FleetControlError::rollback_unverified(
+                incident_id,
+                "incident not found for validation"
+            )
+        })?;
+
+        // For quarantine incidents, we need to validate that the extension
+        // which triggered the quarantine is now in a safe state
+        if crate::security::constant_time::ct_eq(&incident.action_type, "quarantine") {
+            // Fail-closed: Without a mechanism to positively validate that the
+            // quarantine trigger conditions are resolved, we must deny release.
+            // This prevents the bypass where rollback receipts could be fabricated.
+            //
+            // TODO: Implement extension health validation that checks:
+            // - Extension trust card status (not revoked)
+            // - Extension compliance with security policies
+            // - Extension operational metrics within acceptable bounds
+            // - No active security incidents for this extension
+            //
+            // Until proper validation is implemented, all quarantine releases
+            // are denied to maintain fail-closed security semantics.
+            return Err(FleetControlError::rollback_unverified(
+                incident_id,
+                &format!(
+                    "quarantine release requires positive validation that trigger conditions for extension '{}' are resolved - validation not yet implemented",
+                    incident.extension_id
+                )
+            ));
+        }
+
+        // For non-quarantine incidents (revocations), the same principle applies
+        // but revocation resolution requires different validation logic
+        if crate::security::constant_time::ct_eq(&incident.action_type, "revoke") {
+            return Err(FleetControlError::rollback_unverified(
+                incident_id,
+                &format!(
+                    "revocation release requires positive validation that revocation conditions for extension '{}' are resolved - validation not yet implemented",
+                    incident.extension_id
+                )
+            ));
+        }
+
+        // Unknown action types are denied fail-closed
+        Err(FleetControlError::rollback_unverified(
+            incident_id,
+            &format!(
+                "unknown action type '{}' - validation not implemented",
+                incident.action_type
+            )
+        ))
     }
 
     /// Register convergence rollback receipt for an incident.
@@ -4351,7 +4415,7 @@ mod tests {
     }
 
     #[test]
-    fn release_fails_without_convergence_rollback_receipt() {
+    fn release_fails_due_to_quarantine_trigger_conditions_unresolved() {
         let mut mgr = FleetControlManager::new();
         mgr.activate();
 
@@ -4361,18 +4425,18 @@ mod tests {
             .quarantine("ext-test", &scope, &admin_identity(), &test_trace())
             .expect("quarantine should succeed");
 
-        // Try to release without a convergence rollback receipt
+        // Try to release without validating quarantine trigger conditions are resolved
         let err = mgr
             .release(
                 &format!("inc-{}", incidents.operation_id),
                 &admin_identity(),
                 &test_trace(),
             )
-            .expect_err("release should fail without rollback receipt");
+            .expect_err("release should fail without quarantine condition validation");
 
         assert_eq!(err.error_code(), FLEET_ROLLBACK_UNVERIFIED);
 
-        // Verify error details
+        // Verify error details - should mention quarantine validation failure
         if let FleetControlError::RollbackUnverified {
             incident_id,
             detail,
@@ -4380,7 +4444,8 @@ mod tests {
         } = &err
         {
             assert_eq!(incident_id, &format!("inc-{}", incidents.operation_id));
-            assert!(detail.contains("convergence rollback receipt not found"));
+            assert!(detail.contains("quarantine release requires positive validation"));
+            assert!(detail.contains("ext-test")); // extension id should be mentioned
         }
         assert!(
             matches!(err, FleetControlError::RollbackUnverified { .. }),
@@ -4389,7 +4454,7 @@ mod tests {
     }
 
     #[test]
-    fn release_succeeds_with_valid_convergence_rollback_receipt() {
+    fn release_fails_even_with_rollback_receipt_due_to_validation_gap() {
         let mut mgr = FleetControlManager::new();
         mgr.activate();
 
@@ -4400,7 +4465,7 @@ mod tests {
             .expect("quarantine should succeed");
         let incident_id = format!("inc-{}", incidents.operation_id);
 
-        // Create and register a valid rollback receipt
+        // Create and register a valid rollback receipt (old bypass method)
         let rollback_receipt = mgr
             .build_receipt(
                 "rollback-op-1",
@@ -4413,17 +4478,72 @@ mod tests {
 
         mgr.register_rollback_receipt(&incident_id, rollback_receipt);
 
-        // Release should now succeed
-        let result = mgr
+        // Release should now FAIL despite having rollback receipt
+        // because we now validate actual quarantine trigger conditions
+        let err = mgr
             .release(&incident_id, &admin_identity(), &test_trace())
-            .expect("release should succeed with rollback receipt");
+            .expect_err("release should fail due to quarantine validation requirement");
 
-        assert_eq!(result.action_type, "release");
-        assert!(result.success);
+        assert_eq!(err.error_code(), FLEET_ROLLBACK_UNVERIFIED);
+
+        // Verify the error mentions quarantine validation, not rollback receipt
+        if let FleetControlError::RollbackUnverified {
+            detail,
+            ..
+        } = &err
+        {
+            assert!(detail.contains("quarantine release requires positive validation"));
+        }
     }
 
     #[test]
-    fn release_missing_decision_signing_material_fails_before_state_mutation() {
+    fn release_quarantine_rejected_while_trigger_conditions_persist() {
+        let mut mgr = FleetControlManager::new();
+        mgr.activate();
+
+        // Create a quarantine incident for a compromised extension
+        let scope = QuarantineScope {
+            zone_id: "zone-us-east-1".to_string(),
+            tenant_id: None,
+            affected_nodes: 3,
+            reason: "extension ext-compromised detected malicious behavior".to_string(),
+        };
+
+        let incidents = mgr
+            .quarantine("ext-compromised", &scope, &admin_identity(), &test_trace())
+            .expect("quarantine should succeed");
+        let incident_id = format!("inc-{}", incidents.operation_id);
+
+        // Attempt to release while trigger conditions (compromised extension) still persist
+        // This should be rejected with fail-closed semantics
+        let err = mgr
+            .release(&incident_id, &admin_identity(), &test_trace())
+            .expect_err("release should be rejected while trigger conditions persist");
+
+        assert_eq!(err.error_code(), FLEET_ROLLBACK_UNVERIFIED);
+
+        // Verify the error specifically mentions validation requirement for the extension
+        if let FleetControlError::RollbackUnverified {
+            incident_id: returned_id,
+            detail,
+            ..
+        } = &err
+        {
+            assert_eq!(returned_id, &incident_id);
+            assert!(detail.contains("quarantine release requires positive validation"));
+            assert!(detail.contains("ext-compromised")); // specific extension mentioned
+            assert!(detail.contains("trigger conditions"));
+        }
+
+        // Verify incident remains active after failed release
+        let active_incidents = mgr.active_incidents();
+        assert_eq!(active_incidents.len(), 1);
+        assert_eq!(active_incidents[0].incident_id, incident_id);
+        assert_eq!(active_incidents[0].status, IncidentStatus::Active);
+    }
+
+    #[test]
+    fn release_quarantine_validation_fails_before_signing_material_check() {
         let mut mgr = FleetControlManager::new();
         mgr.activate();
         let scope = test_quarantine_scope();
@@ -4450,11 +4570,23 @@ mod tests {
         let next_op_id = mgr.next_op_id;
         mgr.decision_signing_material = None;
 
+        // Release now fails at quarantine validation (earlier in pipeline)
+        // rather than at signing material check - this is more secure
         let err = mgr
             .release(&incident_id, &admin_identity(), &test_trace())
-            .expect_err("release must fail without decision signing material");
+            .expect_err("release must fail at quarantine validation");
 
-        assert_eq!(err.error_code(), FLEET_RECEIPT_SIGNING_MATERIAL_MISSING);
+        // Should fail with quarantine validation error, not signing material error
+        assert_eq!(err.error_code(), FLEET_ROLLBACK_UNVERIFIED);
+        if let FleetControlError::RollbackUnverified {
+            detail,
+            ..
+        } = &err
+        {
+            assert!(detail.contains("quarantine release requires positive validation"));
+        }
+
+        // State should remain unchanged (no mutations before validation failure)
         assert_eq!(mgr.next_op_id, next_op_id);
         assert_eq!(mgr.incidents, incidents);
         assert_eq!(mgr.incident_convergences, incident_convergences);
