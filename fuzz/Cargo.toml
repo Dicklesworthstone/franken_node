@@ -817,3 +817,9 @@ name = "fuzz_signed_extension_manifest"
 path = "fuzz_targets/fuzz_signed_extension_manifest.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_metrics_exporter_statistics"
+path = "fuzz_targets/fuzz_metrics_exporter_statistics.rs"
+test = false
+doc = false
