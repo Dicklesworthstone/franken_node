@@ -455,7 +455,10 @@ fuzz_target!(|data: &[u8]| {
         match fuzz_input.operation {
             ProcCmdlineDecodeTest::ValidCmdlines { args, separator_variant } => {
                 let cmdline_bytes = separator_variant.apply(&args);
-                let _ = decode_proc_cmdline(&cmdline_bytes);
+                // Test deterministic cmdline parsing
+                let result1 = decode_proc_cmdline(&cmdline_bytes);
+                let result2 = decode_proc_cmdline(&cmdline_bytes);
+                assert_eq!(result1.len(), result2.len(), "Valid cmdline parsing should be deterministic");
             },
             ProcCmdlineDecodeTest::NullByteAttacks { attack_type, base_args } => {
                 let attack_bytes = attack_type.generate(&base_args);

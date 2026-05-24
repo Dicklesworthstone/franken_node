@@ -372,7 +372,10 @@ fuzz_target!(|data: &[u8]| {
             MacDeserializeTest::ValidHex { mac_bytes, case_variant } => {
                 let hex_str = hex::encode(mac_bytes);
                 let test_hex = case_variant.apply(&hex_str);
-                let _ = deserialize_mac_hex(&test_hex);
+                // Test deterministic MAC deserialization
+                let result1 = deserialize_mac_hex(&test_hex);
+                let result2 = deserialize_mac_hex(&test_hex);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "MAC deserialization should be deterministic");
             },
             MacDeserializeTest::LengthAttacks { attack_type, base_content } => {
                 let attack_input = attack_type.generate(&base_content);

@@ -435,35 +435,91 @@ fuzz_target!(|data: &[u8]| {
                     .map(|override_spec| format_variant.apply(&override_spec.key.to_string(), &override_spec.value.to_string()))
                     .collect::<Vec<_>>()
                     .join(",");
-                let _ = parse_override_spec(&spec, &baseline);
+
+                // Test deterministic parsing
+                let result1 = parse_override_spec(&spec, &baseline);
+                let result2 = parse_override_spec(&spec, &baseline);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "Valid override parsing should be deterministic");
+
+                // Valid overrides should parse successfully
+                if !spec.trim().is_empty() && !overrides.is_empty() {
+                    match result1 {
+                        Ok(config) => {
+                            // Parsed config should have reasonable values
+                            assert!(config.alert_threshold < u32::MAX, "Alert threshold should not overflow");
+                            assert!(config.escalation_factor.is_finite(), "Escalation factor should be finite");
+                        },
+                        Err(_) => {
+                            // Some malformed specs may legitimately fail
+                        }
+                    }
+                }
             },
             PolicyOverrideTest::MalformedSegments { attack_type, payload } => {
                 let malformed_spec = attack_type.generate(&payload);
-                let _ = parse_override_spec(&malformed_spec, &baseline);
+                let result = parse_override_spec(&malformed_spec, &baseline);
+
+                // Malformed segments should be rejected
+                assert!(result.is_err(), "Malformed segments should be rejected: {:?}", attack_type);
             },
             PolicyOverrideTest::InjectionAttacks { injection_type, target_key, payload } => {
                 let injection_spec = injection_type.generate_payload(&target_key, &payload);
-                let _ = parse_override_spec(&injection_spec, &baseline);
+                let result = parse_override_spec(&injection_spec, &baseline);
+
+                // Test deterministic injection handling
+                let result2 = parse_override_spec(&injection_spec, &baseline);
+                assert_eq!(result.is_ok(), result2.is_ok(), "Injection handling should be deterministic");
+
+                // Most injection attacks should be safely rejected or contained
+                if let Ok(config) = result {
+                    // Injection should not cause unsafe values
+                    assert!(config.escalation_factor.is_finite(), "Injection should not cause infinite values");
+                }
             },
             PolicyOverrideTest::OverflowAttacks { overflow_type, target_field } => {
                 let overflow_spec = overflow_type.generate(&target_field);
-                let _ = parse_override_spec(&overflow_spec, &baseline);
+                let result = parse_override_spec(&overflow_spec, &baseline);
+
+                // Overflow attacks should be safely handled
+                if let Err(_) = result {
+                    // Overflow rejection is expected and safe
+                } else if let Ok(config) = result {
+                    // If parsed, values should be within safe bounds
+                    assert!(config.escalation_factor.is_finite(), "Overflow should not produce infinite values");
+                }
             },
             PolicyOverrideTest::EdgeCases { edge_type, modifier } => {
                 let edge_spec = edge_type.generate(&modifier);
-                let _ = parse_override_spec(&edge_spec, &baseline);
+                let result = parse_override_spec(&edge_spec, &baseline);
+
+                // Edge cases should be handled safely
+                let result2 = parse_override_spec(&edge_spec, &baseline);
+                assert_eq!(result.is_ok(), result2.is_ok(), "Edge case handling should be deterministic");
             },
             PolicyOverrideTest::FormatConfusion { confusion_type, base_spec } => {
                 let confused_spec = confusion_type.apply(&base_spec);
-                let _ = parse_override_spec(&confused_spec, &baseline);
+                let result = parse_override_spec(&confused_spec, &baseline);
+
+                // Format confusion should not cause crashes
+                let result2 = parse_override_spec(&confused_spec, &baseline);
+                assert_eq!(result.is_ok(), result2.is_ok(), "Format confusion handling should be deterministic");
             },
             PolicyOverrideTest::BoundaryTests { boundary_type, test_value } => {
                 let boundary_spec = boundary_type.generate(&test_value);
-                let _ = parse_override_spec(&boundary_spec, &baseline);
+                let result = parse_override_spec(&boundary_spec, &baseline);
+
+                // Boundary tests should complete without crashes
+                if let Ok(config) = result {
+                    assert!(config.escalation_factor.is_finite(), "Boundary values should be finite");
+                }
             },
             PolicyOverrideTest::CommaInjection { injection_variant, position } => {
                 let comma_spec = injection_variant.apply(position);
-                let _ = parse_override_spec(&comma_spec, &baseline);
+                let result = parse_override_spec(&comma_spec, &baseline);
+
+                // Comma injection should be handled safely
+                let result2 = parse_override_spec(&comma_spec, &baseline);
+                assert_eq!(result.is_ok(), result2.is_ok(), "Comma injection handling should be deterministic");
             },
         }
     }

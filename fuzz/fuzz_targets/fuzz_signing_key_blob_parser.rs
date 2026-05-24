@@ -499,7 +499,10 @@ fuzz_target!(|data: &[u8]| {
             SigningKeyParseTest::ValidKeys { key_data, format_variant } => {
                 let key_bytes = key_data.to_bytes();
                 let formatted = format_variant.apply(&key_bytes);
-                let _ = parse_signing_key_from_blob(&formatted);
+                // Test deterministic signing key parsing
+                let result1 = parse_signing_key_from_blob(&formatted);
+                let result2 = parse_signing_key_from_blob(&formatted);
+                assert_eq!(result1.is_some(), result2.is_some(), "Signing key parsing should be deterministic");
             },
             SigningKeyParseTest::LengthAttacks { attack_type, base_size } => {
                 let attack_bytes = attack_type.generate(base_size);
