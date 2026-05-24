@@ -2768,7 +2768,7 @@ mod tests {
 
         let lock_path = transport.shared_state_lock_path();
         let lock_file = transport.lock_file(&lock_path).expect("open snapshot lock");
-        lock_file.lock().expect("take exclusive snapshot lock");
+        lock_file_with_backoff(&lock_file, &lock_path, false).expect("take exclusive snapshot lock");
 
         let pending_action =
             release_action_record("pending-action", "2026-04-06T01:00:03Z", "inc-pending");
@@ -2850,7 +2850,7 @@ mod tests {
 
         let lock_path = transport.shared_state_lock_path();
         let lock_file = transport.lock_file(&lock_path).expect("open snapshot lock");
-        lock_file.lock().expect("take exclusive snapshot lock");
+        lock_file_with_backoff(&lock_file, &lock_path, false).expect("take exclusive snapshot lock");
 
         let reader_root = root.clone();
         let reader = std::thread::spawn(move || {
@@ -3192,7 +3192,7 @@ mod tests {
             .append(true)
             .open(transport.layout().actions_path())
             .expect("open action log");
-        file.lock().expect("take lock");
+        lock_file_with_backoff(&file, transport.layout().actions_path(), false).expect("take lock");
 
         let started = Instant::now();
         let error = transport
@@ -4547,6 +4547,52 @@ mod tests {
             let second_bytes = canonical_fleet_convergence_receipt_payload(&round_tripped)
                 .expect("re-canonicalising must succeed");
             proptest::prop_assert_eq!(first_bytes, second_bytes);
+        }
+
+        #[test]
+        fn lock_contention_retry_prevents_test_panics() {
+            // Regression test for bd-4lnki: ensure tests don't panic on lock contention,
+            // they retry with backoff instead of hard-failing with .expect()
+            let tempdir = tempdir().expect("tempdir");
+            let root = tempdir.path().join("fleet-state");
+            let mut transport = FileFleetTransport::new(&root);
+            transport.initialize().expect("initialize");
+
+            let lock_path = transport.shared_state_lock_path();
+
+            // Holder process acquires the lock
+            let holder_lock_file = transport.lock_file(&lock_path).expect("open holder lock");
+            lock_file_with_backoff(&holder_lock_file, &lock_path, false).expect("holder takes lock");
+
+            // Contender process tries to acquire the same lock concurrently
+            let contender_lock_path = lock_path.clone();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let contender = std::thread::spawn(move || {
+                let contender_transport = FileFleetTransport::new(&root);
+                let contender_lock_file = contender_transport.lock_file(&contender_lock_path).expect("open contender lock");
+
+                let start = std::time::Instant::now();
+                // This should retry with backoff, not panic on contention
+                let result = lock_file_with_backoff(&contender_lock_file, &contender_lock_path, false);
+                let duration = start.elapsed();
+                sender.send((result, duration)).expect("send result");
+            });
+
+            // Let contender try to acquire lock while holder owns it
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            // Release holder's lock so contender can succeed
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(holder_lock_file); // This releases the lock
+
+            // Verify contender succeeded with retry, didn't panic
+            let (result, duration) = receiver.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("contender should complete");
+            contender.join().expect("contender thread should complete");
+
+            assert!(result.is_ok(), "lock acquisition should succeed with retry: {:?}", result);
+            assert!(duration >= std::time::Duration::from_millis(100),
+                   "should have retried with backoff (took {:?})", duration);
         }
 
         #[test]
