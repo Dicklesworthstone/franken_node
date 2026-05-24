@@ -211,21 +211,13 @@ fn fuzz_ct_eq_bytes(input_a: &[u8], input_b: &[u8], strategy: &MutationStrategy)
     match strategy {
         MutationStrategy::Identical => {
             if input_a == input_b && !result {
-                #[cfg(debug_assertions)]
-                {
-                    eprintln!("FUZZ: Invariant violation - identical inputs but ct_eq_bytes returned false");
-                }
-                return; // Exit gracefully instead of panicking
+                panic!("CRITICAL: Timing attack vulnerability - identical inputs but ct_eq_bytes returned false");
             }
         },
         _ => {
             // For any mutation, if inputs are actually different, should return false
             if input_a != input_b && result {
-                #[cfg(debug_assertions)]
-                {
-                    eprintln!("FUZZ: Invariant violation - different inputs but ct_eq_bytes returned true");
-                }
-                return; // Exit gracefully instead of panicking
+                panic!("CRITICAL: Timing attack vulnerability - different inputs but ct_eq_bytes returned true");
             }
         }
     }
@@ -233,12 +225,8 @@ fn fuzz_ct_eq_bytes(input_a: &[u8], input_b: &[u8], strategy: &MutationStrategy)
     // Invariant: ct_eq_bytes should always equal standard comparison
     let std_result = input_a == input_b;
     if result != std_result {
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("FUZZ: Invariant violation - ct_eq_bytes ({}) diverged from standard equality ({})",
-                     result, std_result);
-        }
-        return; // Exit gracefully instead of panicking
+        panic!("CRITICAL: Timing attack vulnerability - ct_eq_bytes ({}) diverged from standard equality ({})",
+               result, std_result);
     }
 }
 
@@ -252,20 +240,12 @@ fn fuzz_ct_eq_strings(str_a: &str, str_b: &str, strategy: &MutationStrategy) {
     match strategy {
         MutationStrategy::Identical => {
             if str_a == str_b && !result {
-                #[cfg(debug_assertions)]
-                {
-                    eprintln!("FUZZ: Invariant violation - identical strings but ct_eq returned false");
-                }
-                return; // Exit gracefully instead of panicking
+                panic!("CRITICAL: Timing attack vulnerability - identical strings but ct_eq returned false");
             }
         },
         _ => {
             if str_a != str_b && result {
-                #[cfg(debug_assertions)]
-                {
-                    eprintln!("FUZZ: Invariant violation - different strings but ct_eq returned true");
-                }
-                return; // Exit gracefully instead of panicking
+                panic!("CRITICAL: Timing attack vulnerability - different strings but ct_eq returned true");
             }
         }
     }
@@ -273,23 +253,15 @@ fn fuzz_ct_eq_strings(str_a: &str, str_b: &str, strategy: &MutationStrategy) {
     // Invariant: ct_eq should always equal standard string comparison
     let std_result = str_a == str_b;
     if result != std_result {
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("FUZZ: Invariant violation - ct_eq ({}) diverged from standard string equality ({})",
-                     result, std_result);
-        }
-        return; // Exit gracefully instead of panicking
+        panic!("CRITICAL: Timing attack vulnerability - ct_eq ({}) diverged from standard string equality ({})",
+               result, std_result);
     }
 
     // Additional invariant: ct_eq should equal ct_eq_bytes on the underlying bytes
     let bytes_result = ct_eq_bytes(str_a.as_bytes(), str_b.as_bytes());
     if result != bytes_result {
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("FUZZ: Invariant violation - ct_eq ({}) and ct_eq_bytes ({}) diverged on same data",
-                     result, bytes_result);
-        }
-        return; // Exit gracefully instead of panicking
+        panic!("CRITICAL: Timing attack vulnerability - ct_eq ({}) and ct_eq_bytes ({}) diverged on same data",
+               result, bytes_result);
     }
 }
 
