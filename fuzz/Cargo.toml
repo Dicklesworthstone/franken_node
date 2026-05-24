@@ -799,3 +799,15 @@ name = "fuzz_federation_signal_kind_parser"
 path = "fuzz_targets/fuzz_federation_signal_kind_parser.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_fork_detection_divergence_compare"
+path = "fuzz_targets/fuzz_fork_detection_divergence_compare.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_signed_extension_manifest"
+path = "fuzz_targets/fuzz_signed_extension_manifest.rs"
+test = false
+doc = false
