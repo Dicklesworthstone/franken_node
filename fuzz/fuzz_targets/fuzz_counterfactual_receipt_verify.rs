@@ -75,12 +75,20 @@ fn fuzz_raw_receipt_json(case: &mut CounterfactualReceiptCase) {
     };
 
     let signing_key = SigningKey::from_bytes(&case.signer_seed);
-    let _ = verify_counterfactual_receipt(
+    // Test deterministic receipt verification
+    let result1 = verify_counterfactual_receipt(
         &baseline,
         &output,
         &signing_key.verifying_key(),
         &case.raw_signature,
     );
+    let result2 = verify_counterfactual_receipt(
+        &baseline,
+        &output,
+        &signing_key.verifying_key(),
+        &case.raw_signature,
+    );
+    assert_eq!(result1.is_ok(), result2.is_ok(), "Receipt verification should be deterministic");
 }
 
 fn fuzz_structured_receipt(case: CounterfactualReceiptCase) {

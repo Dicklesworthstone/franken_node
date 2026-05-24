@@ -777,7 +777,10 @@ fuzz_target!(|data: &[u8]| {
         match fuzz_input.operation {
             FragilityFixtureTest::ValidFixture { fixture_data, serialization_variant } => {
                 let json_str = fixture_data.to_json(&serialization_variant);
-                let _ = load_fixture_from_json(&json_str);
+                // Test deterministic fixture loading
+                let result1 = load_fixture_from_json(&json_str);
+                let result2 = load_fixture_from_json(&json_str);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "Fixture loading should be deterministic");
             },
             FragilityFixtureTest::MalformedJson { attack_type, base_content } => {
                 let malformed_json = attack_type.apply(&base_content);

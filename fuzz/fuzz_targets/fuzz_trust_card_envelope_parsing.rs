@@ -29,7 +29,10 @@ fn fuzz_trust_card_raw_bytes(bytes: &[u8]) {
     if let Ok(json_str) = std::str::from_utf8(bytes) {
         // Test generic JSON parsing - this exercises core serde_json paths
         // that all trust card deserialization uses
-        let _ = serde_json::from_str::<serde_json::Value>(json_str);
+        // Test deterministic trust card envelope parsing
+        let result1 = serde_json::from_str::<serde_json::Value>(json_str);
+        let result2 = serde_json::from_str::<serde_json::Value>(json_str);
+        assert_eq!(result1.is_ok(), result2.is_ok(), "Trust card parsing should be deterministic");
 
         // Test malformed JSON edge cases that could trigger parser vulnerabilities
         test_json_edge_cases(json_str);

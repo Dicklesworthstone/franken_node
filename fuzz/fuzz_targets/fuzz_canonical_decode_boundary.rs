@@ -509,7 +509,10 @@ fuzz_target!(|data: &[u8]| {
         match fuzz_input.operation {
             CanonicalDecodeTest::ValidPayloads { payload, encoding_variant } => {
                 let encoded = encoding_variant.apply(&payload);
-                let _ = canonical_decode(&encoded);
+                // Test deterministic canonical decoding
+                let result1 = canonical_decode(&encoded);
+                let result2 = canonical_decode(&encoded);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "Canonical decoding should be deterministic");
             },
             CanonicalDecodeTest::LengthPrefixAttacks { attack_type, payload_size } => {
                 let attack_data = attack_type.generate(payload_size);
