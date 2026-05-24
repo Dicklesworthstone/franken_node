@@ -553,9 +553,14 @@ fn test_security_properties(manifest: &SignedExtensionManifest, attack_vector: &
     for field in all_string_fields {
         for pattern in dangerous_patterns {
             if field.contains(pattern) {
-                // Document that dangerous patterns were found (for fuzzing insights)
-                // but don't panic - the validation should handle these gracefully
-                eprintln!("Found dangerous pattern '{}' in field: {}", pattern, field);
+                // SECURITY ASSERTION: Dangerous patterns must be rejected by validation
+                // If they appear in manifest fields, validation has failed critically
+                panic!(
+                    "SECURITY VIOLATION: Dangerous pattern '{}' found in field '{}' - \
+                     manifest validation must reject dangerous patterns before field assignment. \
+                     This indicates a critical security bypass in manifest processing.",
+                    pattern, field
+                );
             }
         }
     }
