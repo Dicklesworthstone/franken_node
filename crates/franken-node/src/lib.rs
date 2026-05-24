@@ -44,7 +44,7 @@ pub fn bounded_read_to_string(path: &std::path::Path, max_bytes: u64) -> std::io
     use std::io::Read;
 
     // Open file and check size atomically to prevent TOCTOU file swapping
-    let mut file = File::open(path)?;
+    let file = File::open(path)?;
     let metadata = file.metadata()?;
     if metadata.len() > max_bytes {
         return Err(file_too_large_error(metadata.len(), max_bytes));
@@ -67,7 +67,7 @@ pub fn bounded_read(path: &std::path::Path, max_bytes: u64) -> std::io::Result<V
     use std::io::Read;
 
     // Open file and check size atomically to prevent TOCTOU file swapping
-    let mut file = File::open(path)?;
+    let file = File::open(path)?;
     let metadata = file.metadata()?;
     if metadata.len() > max_bytes {
         return Err(file_too_large_error(metadata.len(), max_bytes));

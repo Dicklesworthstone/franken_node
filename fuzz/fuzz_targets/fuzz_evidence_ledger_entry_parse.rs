@@ -176,6 +176,7 @@ fn structured_entry(input: &FuzzInput) -> EvidenceEntry {
         payload: payload_value(input),
         size_bytes: input.claimed_size_bytes % LEDGER_MAX_BYTES,
         signature: String::new(),
+        prev_entry_hash: String::new(),
     }
 }
 

@@ -442,7 +442,7 @@ fuzz_target!(|data: &[u8]| {
                 // Test deterministic key ID generation
                 let result1 = key_id_from_bytes(&test_domain, &test_bytes);
                 let result2 = key_id_from_bytes(&test_domain, &test_bytes);
-                assert_eq!(result1.is_ok(), result2.is_ok(), "Key ID generation should be deterministic");
+                assert_eq!(result1, result2, "Key ID generation should be deterministic");
             },
             KeyIdGenerationTest::LengthAttacks { attack_type, base_size } => {
                 let (domain, bytes) = attack_type.generate(base_size);

@@ -194,7 +194,7 @@ fn test_frame_parser_invariants(operation: &FuzzOperation) {
                 assert_eq!(audit.size, frame_input.raw_bytes_len);
                 assert_eq!(audit.depth, frame_input.nesting_depth);
                 assert_eq!(audit.cpu_used, frame_input.decode_cpu_ms);
-                assert_eq!(audit.timestamp, timestamp);
+                assert_eq!(audit.timestamp, *timestamp);
 
                 if verdict.allowed {
                     assert_eq!(audit.verdict, "ALLOW");

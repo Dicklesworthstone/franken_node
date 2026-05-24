@@ -86,7 +86,7 @@ fn fuzz_capability_token_parser(case: CapabilityTokenParserCase) {
     let encoded = serde_json::to_vec(&cap).expect("issued capability token must serialize");
     let decoded = serde_json::from_slice::<RemoteCap>(&encoded)
         .expect("issued capability token must parse");
-    let mut gate = CapabilityGate::new(SECRET);
+    let mut gate = CapabilityGate::new(SECRET).expect("valid capability gate");
     gate.authorize_network(
         Some(&decoded),
         operation,
@@ -118,7 +118,7 @@ fn fuzz_capability_token_parser(case: CapabilityTokenParserCase) {
 fn parse_and_authorize_raw_json(bytes: &[u8], operation: RemoteOperation) {
     let _ = serde_json::from_slice::<serde_json::Value>(bytes);
     if let Ok(cap) = serde_json::from_slice::<RemoteCap>(bytes) {
-        let mut gate = CapabilityGate::new(SECRET);
+        let mut gate = CapabilityGate::new(SECRET).expect("valid capability gate");
         let _ = gate.authorize_network(
             Some(&cap),
             operation,
