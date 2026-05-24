@@ -126,7 +126,7 @@ impl SystemMetricsExporter {
         // Core system metrics
         registry.record_gauge(
             "franken_node_revocation_filter_entries",
-            "Number of entries in the revocation filter (cuckoo filter)",
+            "Number of entries in the revocation filter (BTree-based as of bd-98xo5.3.3)",
             snapshot.revocation_filter_entries as f64,
             &[],
         )?;
