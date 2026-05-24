@@ -299,15 +299,24 @@ fuzz_target!(|data: &[u8]| {
         match fuzz_input.operation {
             FleetOperationParseTest::ValidFormat { epoch, sequence, format_variant } => {
                 let operation_id = format_variant.apply(epoch, sequence);
-                let _ = parse_operation_slot(&operation_id);
+                // Test deterministic operation slot parsing
+                let result1 = parse_operation_slot(&operation_id);
+                let result2 = parse_operation_slot(&operation_id);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "Operation slot parsing should be deterministic");
             },
             FleetOperationParseTest::InvalidPrefix { prefix, payload } => {
                 let operation_id = format!("{}{}", prefix, payload);
-                let _ = parse_operation_slot(&operation_id);
+                // Test deterministic operation slot parsing
+                let result1 = parse_operation_slot(&operation_id);
+                let result2 = parse_operation_slot(&operation_id);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "Operation slot parsing should be deterministic");
             },
             FleetOperationParseTest::HexInjection { epoch_str, sequence_str, injection_type } => {
                 let operation_id = injection_type.inject(&epoch_str, &sequence_str);
-                let _ = parse_operation_slot(&operation_id);
+                // Test deterministic operation slot parsing
+                let result1 = parse_operation_slot(&operation_id);
+                let result2 = parse_operation_slot(&operation_id);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "Operation slot parsing should be deterministic");
             },
             FleetOperationParseTest::IntegerAttacks { attack_type, target } => {
                 let operation_id = match target {
@@ -321,23 +330,38 @@ fuzz_target!(|data: &[u8]| {
                         format!("fleet-op-{}-{}", attack_type.generate_epoch(), attack_type.generate_sequence())
                     },
                 };
-                let _ = parse_operation_slot(&operation_id);
+                // Test deterministic operation slot parsing
+                let result1 = parse_operation_slot(&operation_id);
+                let result2 = parse_operation_slot(&operation_id);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "Operation slot parsing should be deterministic");
             },
             FleetOperationParseTest::FormatConfusion { confusion_type, raw_input } => {
                 let operation_id = confusion_type.apply(&raw_input);
-                let _ = parse_operation_slot(&operation_id);
+                // Test deterministic operation slot parsing
+                let result1 = parse_operation_slot(&operation_id);
+                let result2 = parse_operation_slot(&operation_id);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "Operation slot parsing should be deterministic");
             },
             FleetOperationParseTest::EdgeCases { edge_type, modifier } => {
                 let operation_id = edge_type.generate(&modifier);
-                let _ = parse_operation_slot(&operation_id);
+                // Test deterministic operation slot parsing
+                let result1 = parse_operation_slot(&operation_id);
+                let result2 = parse_operation_slot(&operation_id);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "Operation slot parsing should be deterministic");
             },
             FleetOperationParseTest::LengthAttacks { attack_type, base_format } => {
                 let operation_id = attack_type.generate(&base_format);
-                let _ = parse_operation_slot(&operation_id);
+                // Test deterministic operation slot parsing
+                let result1 = parse_operation_slot(&operation_id);
+                let result2 = parse_operation_slot(&operation_id);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "Operation slot parsing should be deterministic");
             },
             FleetOperationParseTest::EncodingAttacks { encoding_type, base_value } => {
                 let operation_id = encoding_type.apply(base_value);
-                let _ = parse_operation_slot(&operation_id);
+                // Test deterministic operation slot parsing
+                let result1 = parse_operation_slot(&operation_id);
+                let result2 = parse_operation_slot(&operation_id);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "Operation slot parsing should be deterministic");
             },
         }
     }

@@ -217,7 +217,10 @@ fuzz_target!(|data: &[u8]| {
         match fuzz_input.operation {
             GitStatusParsingOperation::SingleStatus(status_input) => {
                 let line = status_input.to_line();
-                let _ = parse_git_status(&line);
+                // Test deterministic git status parsing
+                let result1 = parse_git_status(&line);
+                let result2 = parse_git_status(&line);
+                assert_eq!(result1.len(), result2.len(), "Git status parsing should be deterministic");
             },
             GitStatusParsingOperation::MultipleLines { lines, separator } => {
                 let sep = separator.to_string();

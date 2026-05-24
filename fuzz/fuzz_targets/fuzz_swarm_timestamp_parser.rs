@@ -335,7 +335,10 @@ fuzz_target!(|data: &[u8]| {
         match fuzz_input.operation {
             TimestampParseTest::ValidTimestamp { base_time, timezone_variant } => {
                 let timestamp = base_time.to_rfc3339(&timezone_variant);
-                let _ = parse_base_timestamp(&timestamp);
+                // Test deterministic timestamp parsing
+                let result1 = parse_base_timestamp(&timestamp);
+                let result2 = parse_base_timestamp(&timestamp);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "Timestamp parsing should be deterministic");
             },
             TimestampParseTest::MalformedFormat { format_attack, base_content } => {
                 let attack_input = format_attack.apply(&base_content);

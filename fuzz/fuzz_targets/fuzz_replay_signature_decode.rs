@@ -257,7 +257,10 @@ fuzz_target!(|data: &[u8]| {
         match fuzz_input.operation {
             SignatureDecodingOperation::DirectHex(hex_input) => {
                 let signature = hex_input.generate(128); // ED25519 signature hex length
-                let _ = decode_replay_signature(&signature);
+                // Test deterministic signature decoding
+                let result1 = decode_replay_signature(&signature);
+                let result2 = decode_replay_signature(&signature);
+                assert_eq!(result1.is_ok(), result2.is_ok(), "Signature decoding should be deterministic");
             },
             SignatureDecodingOperation::AttackVectors { attack_type, payload_size } => {
                 let size = (payload_size as usize).min(500); // Cap size
