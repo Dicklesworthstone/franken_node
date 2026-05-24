@@ -787,8 +787,10 @@ mod security_hardening_comprehensive_negative_tests {
                     1001,
                     "memory-test-auth",
                 );
-                // Should complete without excessive memory usage
-                assert!(auth_result.is_ok() || auth_result.is_err()); // Either outcome acceptable
+                // Should complete without excessive memory usage and authorize valid operations
+                assert!(auth_result.is_ok(),
+                    "Network authorization should succeed for valid operations even with massive scopes: {:?}",
+                    auth_result);
             }
             Err(_) => {
                 // Rejection of massive scopes is also acceptable
@@ -1205,9 +1207,9 @@ mod security_hardening_comprehensive_negative_tests {
                     let second_result =
                         policy.check_ssrf(injection_attempt, 443, Protocol::Http, "test2", "test2");
                     assert!(
-                        second_result.is_ok() || second_result.is_err(),
-                        "Should handle injection consistently: {}",
-                        description
+                        second_result.is_ok(),
+                        "Injection handling should be consistent - if first check passed, second identical check must also pass: {} (first passed, second: {:?})",
+                        description, second_result
                     );
                 }
                 Err(_) => {
@@ -1339,8 +1341,9 @@ mod security_hardening_comprehensive_negative_tests {
             "final-time",
         );
         assert!(
-            final_check.is_ok() || final_check.is_err(),
-            "Policy should still function after flooding"
+            final_check.is_ok(),
+            "Policy should still function correctly after flooding - valid hostname should be allowed: {:?}",
+            final_check
         );
     }
 
