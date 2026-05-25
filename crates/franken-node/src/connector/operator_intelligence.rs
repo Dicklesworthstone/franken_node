@@ -1010,7 +1010,7 @@ impl RecommendationEngine {
         // Parse rollback spec (simplified format for now: "rollback:action_spec")
         if !rollback_spec.starts_with("rollback:") {
             return Err(OIError::RollbackFailed(
-                "invalid rollback spec format".into()
+                "invalid rollback spec format".into(),
             ));
         }
 
@@ -1041,17 +1041,19 @@ impl RecommendationEngine {
                             self.cumulative_loss = loss;
                         }
                         _ => {
-                            return Err(OIError::RollbackFailed(
-                                format!("invalid loss value: {}", loss_str)
-                            ));
+                            return Err(OIError::RollbackFailed(format!(
+                                "invalid loss value: {}",
+                                loss_str
+                            )));
                         }
                     }
                 }
                 "" => {} // Skip empty commands
                 unknown => {
-                    return Err(OIError::RollbackFailed(
-                        format!("unknown rollback command: {}", unknown)
-                    ));
+                    return Err(OIError::RollbackFailed(format!(
+                        "unknown rollback command: {}",
+                        unknown
+                    )));
                 }
             }
         }
@@ -2502,8 +2504,7 @@ mod tests {
         // Verify the state hash doesn't match the expected pre-state
         let actual_final_hash = engine.compute_state_hash();
         assert_ne!(
-            actual_final_hash,
-            expected_pre_state_hash,
+            actual_final_hash, expected_pre_state_hash,
             "Engine state should not match expected pre_state_hash due to incomplete rollback"
         );
     }

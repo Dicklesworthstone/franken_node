@@ -26318,19 +26318,23 @@ fn main() -> Result<()> {
 
             // Extract trusted extension IDs from preflight for TOCTOU validation (bd-zqz0q)
             let trusted_extension_ids = match &preflight.verdict {
-                PreFlightVerdict::Passed { results, .. } => {
-                    results
-                        .iter()
-                        .filter(|result| result.status == RunDependencyTrustStatus::Trusted)
-                        .map(|result| result.extension_id.clone())
-                        .collect::<Vec<_>>()
-                }
+                PreFlightVerdict::Passed { results, .. } => results
+                    .iter()
+                    .filter(|result| result.status == RunDependencyTrustStatus::Trusted)
+                    .map(|result| result.extension_id.clone())
+                    .collect::<Vec<_>>(),
                 _ => Vec::new(),
             };
 
             let dispatcher =
                 ops::engine_dispatcher::EngineDispatcher::new(engine_bin, requested_runtime);
-            let dispatch = dispatcher.dispatch_run(&app_path, &resolved.config, &policy, &trusted_extension_ids, now_unix_secs())?;
+            let dispatch = dispatcher.dispatch_run(
+                &app_path,
+                &resolved.config,
+                &policy,
+                &trusted_extension_ids,
+                now_unix_secs(),
+            )?;
             let project_root = run_project_root(&app_path);
             let ssrf_violations = extract_ssrf_violations(dispatch.telemetry.as_ref());
             let auto_quarantined_extensions = maybe_auto_quarantine_run_dependencies(

@@ -3086,15 +3086,9 @@ impl FleetControlManager {
     ///
     /// This replaces the flawed rollback receipt approach which could be bypassed
     /// by external registration of fabricated receipts.
-    fn validate_quarantine_resolution(
-        &self,
-        incident_id: &str,
-    ) -> Result<(), FleetControlError> {
+    fn validate_quarantine_resolution(&self, incident_id: &str) -> Result<(), FleetControlError> {
         let incident = self.incidents.get(incident_id).ok_or_else(|| {
-            FleetControlError::rollback_unverified(
-                incident_id,
-                "incident not found for validation"
-            )
+            FleetControlError::rollback_unverified(incident_id, "incident not found for validation")
         })?;
 
         // For quarantine incidents, we need to validate that the extension
@@ -3117,7 +3111,7 @@ impl FleetControlManager {
                 &format!(
                     "quarantine release requires positive validation that trigger conditions for extension '{}' are resolved - validation not yet implemented",
                     incident.extension_id
-                )
+                ),
             ));
         }
 
@@ -3129,7 +3123,7 @@ impl FleetControlManager {
                 &format!(
                     "revocation release requires positive validation that revocation conditions for extension '{}' are resolved - validation not yet implemented",
                     incident.extension_id
-                )
+                ),
             ));
         }
 
@@ -3139,7 +3133,7 @@ impl FleetControlManager {
             &format!(
                 "unknown action type '{}' - validation not implemented",
                 incident.action_type
-            )
+            ),
         ))
     }
 
@@ -4487,11 +4481,7 @@ mod tests {
         assert_eq!(err.error_code(), FLEET_ROLLBACK_UNVERIFIED);
 
         // Verify the error mentions quarantine validation, not rollback receipt
-        if let FleetControlError::RollbackUnverified {
-            detail,
-            ..
-        } = &err
-        {
+        if let FleetControlError::RollbackUnverified { detail, .. } = &err {
             assert!(detail.contains("quarantine release requires positive validation"));
         }
     }
@@ -4578,11 +4568,7 @@ mod tests {
 
         // Should fail with quarantine validation error, not signing material error
         assert_eq!(err.error_code(), FLEET_ROLLBACK_UNVERIFIED);
-        if let FleetControlError::RollbackUnverified {
-            detail,
-            ..
-        } = &err
-        {
+        if let FleetControlError::RollbackUnverified { detail, .. } = &err {
             assert!(detail.contains("quarantine release requires positive validation"));
         }
 

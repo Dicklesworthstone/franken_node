@@ -6,7 +6,7 @@ use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
 use crate::{
     ActionableError,
     config::{Config, PreferredRuntime, Profile},
-    supply_chain::trust_card::{TrustCardRegistry, SnapshotSourceContext},
+    supply_chain::trust_card::{SnapshotSourceContext, TrustCardRegistry},
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -1068,7 +1068,8 @@ impl EngineDispatcher {
         }
 
         // SECURITY: Re-validate trust state to close TOCTOU gap between preflight and execution (bd-zqz0q)
-        let project_root = app_path.parent()
+        let project_root = app_path
+            .parent()
             .and_then(|p| p.parent())
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
@@ -1086,14 +1087,21 @@ impl EngineDispatcher {
             ))?;
 
             for extension_id in trusted_extension_ids {
-                match registry.read(extension_id, now_secs, "trace-execution-trust-validation")
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))? {
+                match registry
+                    .read(extension_id, now_secs, "trace-execution-trust-validation")
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?
+                {
                     Some(card) => {
                         // Fail if extension was revoked since preflight
-                        if let crate::supply_chain::trust_card::RevocationStatus::Revoked { reason, .. } = &card.revocation_status {
+                        if let crate::supply_chain::trust_card::RevocationStatus::Revoked {
+                            reason,
+                            ..
+                        } = &card.revocation_status
+                        {
                             return Err(anyhow::anyhow!(
                                 "Execution blocked: extension '{}' was revoked since preflight check: {}. This prevents TOCTOU attacks.",
-                                extension_id, reason
+                                extension_id,
+                                reason
                             ));
                         }
 
@@ -2227,11 +2235,11 @@ impl EngineDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::supply_chain::trust_card::{
+        ReputationTrend, RevocationStatus, TrustCard, TrustCardMutation,
+    };
     use std::fs;
     use tempfile::TempDir;
-    use crate::supply_chain::trust_card::{
-        TrustCard, TrustCardMutation, RevocationStatus, ReputationTrend
-    };
 
     #[test]
     fn test_dispatch_run_rejects_revoked_extension_toctou() {
@@ -2253,25 +2261,29 @@ mod tests {
         // Create registry with trusted extension
         let mut registry = TrustCardRegistry::new("test-registry".to_string());
         let extension_id = "test-extension";
-        registry.update(
-            extension_id,
-            TrustCardMutation {
-                certification_level: None,
-                revocation_status: None, // Initially not revoked
-                active_quarantine: Some(false),
-                reputation_score_basis_points: Some(8000),
-                reputation_trend: Some(ReputationTrend::Stable),
-                user_facing_risk_assessment: None,
-                provenance_summary: None,
-                last_verified_timestamp: None,
-                capability_declarations: None,
-                trust_card_version: None,
-            },
-            now_secs,
-            "test-setup"
-        ).expect("update registry");
+        registry
+            .update(
+                extension_id,
+                TrustCardMutation {
+                    certification_level: None,
+                    revocation_status: None, // Initially not revoked
+                    active_quarantine: Some(false),
+                    reputation_score_basis_points: Some(8000),
+                    reputation_trend: Some(ReputationTrend::Stable),
+                    user_facing_risk_assessment: None,
+                    provenance_summary: None,
+                    last_verified_timestamp: None,
+                    capability_declarations: None,
+                    trust_card_version: None,
+                },
+                now_secs,
+                "test-setup",
+            )
+            .expect("update registry");
 
-        registry.persist_authoritative_state(&registry_path).expect("persist registry");
+        registry
+            .persist_authoritative_state(&registry_path)
+            .expect("persist registry");
 
         // Create dispatcher
         let dispatcher = EngineDispatcher::new("mock-engine".to_string(), PreferredRuntime::Node);
@@ -2283,7 +2295,7 @@ mod tests {
             &config,
             "balanced",
             &trusted_extensions,
-            now_secs
+            now_secs,
         );
         // Note: This may fail due to missing engine binary, but should not fail due to trust validation
         // The important thing is that it doesn't fail with a trust revocation error
@@ -2294,30 +2306,37 @@ mod tests {
             &config.trust,
             now_secs,
             SnapshotSourceContext::TrustedFile,
-        ).expect("reload registry");
+        )
+        .expect("reload registry");
 
-        registry.update(
-            extension_id,
-            TrustCardMutation {
-                certification_level: None,
-                revocation_status: Some(RevocationStatus::Revoked {
-                    reason: "TOCTOU test revocation".to_string(),
-                    revoked_at: crate::supply_chain::trust_card::rfc3339_timestamp_from_secs(now_secs),
-                }),
-                active_quarantine: Some(true),
-                reputation_score_basis_points: None,
-                reputation_trend: Some(ReputationTrend::Declining),
-                user_facing_risk_assessment: None,
-                provenance_summary: None,
-                last_verified_timestamp: None,
-                capability_declarations: None,
-                trust_card_version: None,
-            },
-            now_secs,
-            "toctou-revoke"
-        ).expect("revoke extension");
+        registry
+            .update(
+                extension_id,
+                TrustCardMutation {
+                    certification_level: None,
+                    revocation_status: Some(RevocationStatus::Revoked {
+                        reason: "TOCTOU test revocation".to_string(),
+                        revoked_at: crate::supply_chain::trust_card::rfc3339_timestamp_from_secs(
+                            now_secs,
+                        ),
+                    }),
+                    active_quarantine: Some(true),
+                    reputation_score_basis_points: None,
+                    reputation_trend: Some(ReputationTrend::Declining),
+                    user_facing_risk_assessment: None,
+                    provenance_summary: None,
+                    last_verified_timestamp: None,
+                    capability_declarations: None,
+                    trust_card_version: None,
+                },
+                now_secs,
+                "toctou-revoke",
+            )
+            .expect("revoke extension");
 
-        registry.persist_authoritative_state(&registry_path).expect("persist revoked registry");
+        registry
+            .persist_authoritative_state(&registry_path)
+            .expect("persist revoked registry");
 
         // Second call should be rejected due to revocation
         let result2 = dispatcher.dispatch_run(
@@ -2325,7 +2344,7 @@ mod tests {
             &config,
             "balanced",
             &trusted_extensions,
-            now_secs
+            now_secs,
         );
 
         // Should fail with revocation error
@@ -2368,7 +2387,7 @@ mod tests {
     #[test]
     #[cfg(feature = "engine")]
     fn test_fallback_runtime_enforces_security_controls_bd_fmhij() {
-        use crate::config::{SsrfEnforcementMode, NetworkPolicyConfig, SecurityConfig};
+        use crate::config::{NetworkPolicyConfig, SecurityConfig, SsrfEnforcementMode};
 
         let tmp = TempDir::new().expect("tempdir");
         let app_path = tmp.path().join("test-app.js");
@@ -2376,10 +2395,8 @@ mod tests {
 
         // Create a non-existent franken-engine path to force fallback
         let missing_engine = tmp.path().join("missing-franken-engine");
-        let dispatcher = EngineDispatcher::new(
-            Some(missing_engine),
-            PreferredRuntime::FrankenEngine,
-        );
+        let dispatcher =
+            EngineDispatcher::new(Some(missing_engine), PreferredRuntime::FrankenEngine);
 
         // Test 1: Verify fallback with valid capabilities succeeds (when enabled)
         {
@@ -2408,14 +2425,17 @@ mod tests {
                 let error_msg = e.to_string();
                 // Should NOT contain security validation errors
                 assert!(
-                    !error_msg.contains("capability validation") &&
-                    !error_msg.contains("security validation failed"),
+                    !error_msg.contains("capability validation")
+                        && !error_msg.contains("security validation failed"),
                     "Fallback with valid capabilities should not fail security validation, got: {}",
                     error_msg
                 );
                 // Should be runtime-related error instead
                 assert!(
-                    error_msg.contains("runtime") || error_msg.contains("node") || error_msg.contains("bun") || error_msg.contains("No such file"),
+                    error_msg.contains("runtime")
+                        || error_msg.contains("node")
+                        || error_msg.contains("bun")
+                        || error_msg.contains("No such file"),
                     "Error should be about missing external runtime, got: {}",
                     error_msg
                 );
@@ -2440,12 +2460,15 @@ mod tests {
             let result = dispatcher.dispatch_run(&config, &app_path, "policy-mode");
 
             // This should fail with security enforcement error in strict profile
-            assert!(result.is_err(), "Strict profile should reject fallback with SSRF block enforcement");
+            assert!(
+                result.is_err(),
+                "Strict profile should reject fallback with SSRF block enforcement"
+            );
             let error_msg = result.err().unwrap().to_string();
             assert!(
-                error_msg.contains("external runtime cannot guarantee") &&
-                error_msg.contains("SSRF block enforcement") &&
-                error_msg.contains("strict profile"),
+                error_msg.contains("external runtime cannot guarantee")
+                    && error_msg.contains("SSRF block enforcement")
+                    && error_msg.contains("strict profile"),
                 "Error should mention SSRF block enforcement failure in strict profile, got: {}",
                 error_msg
             );

@@ -31,7 +31,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 
 use super::rollout_state::RolloutPhase;
 use crate::runtime::nversion_oracle::{BoundaryScope, RiskTier};
@@ -1692,36 +1692,34 @@ fn validate_evidence_freshness(
     pipeline_start: &str,
 ) -> Result<(), PipelineError> {
     // Parse pipeline start time
-    let pipeline_time = chrono::DateTime::parse_from_rfc3339(pipeline_start)
-        .map_err(|_| PipelineError {
+    let pipeline_time =
+        chrono::DateTime::parse_from_rfc3339(pipeline_start).map_err(|_| PipelineError {
             code: error_codes::ERR_PIPE_VERIFICATION_FAILED.to_string(),
-            message: format!(
-                "Invalid pipeline start time format: {}",
-                pipeline_start
-            ),
+            message: format!("Invalid pipeline start time format: {}", pipeline_start),
         })?;
 
     // Parse evidence collection time
-    let evidence_time = chrono::DateTime::parse_from_rfc3339(&evidence.collected_at)
-        .map_err(|_| PipelineError {
-            code: error_codes::ERR_PIPE_VERIFICATION_FAILED.to_string(),
-            message: format!(
-                "Evidence for extension '{}' has invalid timestamp format: {}",
-                extension_name, evidence.collected_at
-            ),
+    let evidence_time =
+        chrono::DateTime::parse_from_rfc3339(&evidence.collected_at).map_err(|_| {
+            PipelineError {
+                code: error_codes::ERR_PIPE_VERIFICATION_FAILED.to_string(),
+                message: format!(
+                    "Evidence for extension '{}' has invalid timestamp format: {}",
+                    extension_name, evidence.collected_at
+                ),
+            }
         })?;
 
     // Check if evidence is stale (fail-closed: old evidence = verification failure)
-    let age_secs = pipeline_time.signed_duration_since(evidence_time).num_seconds();
+    let age_secs = pipeline_time
+        .signed_duration_since(evidence_time)
+        .num_seconds();
     if age_secs > EVIDENCE_FRESHNESS_THRESHOLD_SECS {
         return Err(PipelineError {
             code: error_codes::ERR_PIPE_VERIFICATION_FAILED.to_string(),
             message: format!(
                 "Evidence for extension '{}' is stale: collected {} (age: {} seconds, threshold: {} seconds). Verification requires fresh evidence to prevent decisions based on outdated data.",
-                extension_name,
-                evidence.collected_at,
-                age_secs,
-                EVIDENCE_FRESHNESS_THRESHOLD_SECS
+                extension_name, evidence.collected_at, age_secs, EVIDENCE_FRESHNESS_THRESHOLD_SECS
             ),
         });
     }
@@ -3471,7 +3469,8 @@ mod tests {
         assert!(err.message.contains("cohort-2")); // mentions blocked cohort
 
         // After first migration completes, second should succeed
-        let completed_state1 = run_full_pipeline(&cohort1).expect("first migration should complete");
+        let completed_state1 =
+            run_full_pipeline(&cohort1).expect("first migration should complete");
         assert_eq!(completed_state1.current_stage, PipelineStage::Complete);
 
         let state2 = new(&cohort2).expect("second migration should succeed after first completes");

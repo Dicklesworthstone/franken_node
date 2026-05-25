@@ -13,7 +13,7 @@ use crate::capacity_defaults::aliases::MAX_TRUSTED_SIGNERS;
 use crate::capacity_defaults::bounded_input::{
     self, AUDIT_BOUNDED_INPUT_REJECTED, BoundedInputPolicy,
 };
-use crate::supply_chain::trust_card::{TrustCardRegistry, RevocationStatus};
+use crate::supply_chain::trust_card::{RevocationStatus, TrustCardRegistry};
 
 /// Report schema version for capability artifact vectors.
 pub const SCHEMA_VERSION: &str = "capability-artifact-v1.0";
@@ -335,7 +335,7 @@ impl AdmissionGate {
         &self,
         artifact: &ExtensionArtifact,
         trust_registry: Option<&mut TrustCardRegistry>,
-        now_secs: u64
+        now_secs: u64,
     ) -> AdmissionOutcome {
         // INV-ARTIFACT-FAIL-CLOSED: missing contract -> deny
         let contract = match &artifact.capability_contract {
@@ -354,10 +354,14 @@ impl AdmissionGate {
             match registry.read(extension_id, now_secs, "capability-admission-trust-check") {
                 Ok(Some(trust_card)) => {
                     // Fail if extension is revoked
-                    if let RevocationStatus::Revoked { reason, .. } = &trust_card.revocation_status {
+                    if let RevocationStatus::Revoked { reason, .. } = &trust_card.revocation_status
+                    {
                         return AdmissionOutcome::Denied {
                             reason: AdmissionDenialReason::TrustRevoked {
-                                detail: format!("Extension '{}' trust card revoked: {}", extension_id, reason)
+                                detail: format!(
+                                    "Extension '{}' trust card revoked: {}",
+                                    extension_id, reason
+                                ),
                             },
                             event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
                         };
@@ -366,7 +370,10 @@ impl AdmissionGate {
                     if trust_card.active_quarantine {
                         return AdmissionOutcome::Denied {
                             reason: AdmissionDenialReason::TrustRevoked {
-                                detail: format!("Extension '{}' trust card quarantined", extension_id)
+                                detail: format!(
+                                    "Extension '{}' trust card quarantined",
+                                    extension_id
+                                ),
                             },
                             event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
                         };
@@ -376,7 +383,10 @@ impl AdmissionGate {
                     // Fail-closed: missing trust card = deny
                     return AdmissionOutcome::Denied {
                         reason: AdmissionDenialReason::TrustRevoked {
-                            detail: format!("Extension '{}' has no trust card registered", extension_id)
+                            detail: format!(
+                                "Extension '{}' has no trust card registered",
+                                extension_id
+                            ),
                         },
                         event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
                     };
@@ -385,7 +395,10 @@ impl AdmissionGate {
                     // Fail-closed: trust registry error = deny
                     return AdmissionOutcome::Denied {
                         reason: AdmissionDenialReason::TrustRevoked {
-                            detail: format!("Extension '{}' trust validation failed: {}", extension_id, err)
+                            detail: format!(
+                                "Extension '{}' trust validation failed: {}",
+                                extension_id, err
+                            ),
                         },
                         event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
                     };
@@ -395,7 +408,7 @@ impl AdmissionGate {
             // Fail-closed: no trust registry provided = deny
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::TrustRevoked {
-                    detail: "Trust registry not available for validation".to_string()
+                    detail: "Trust registry not available for validation".to_string(),
                 },
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
@@ -2980,13 +2993,13 @@ mod tests {
     #[test]
     fn test_admission_denies_revoked_trust_card() {
         // Regression test for bd-i3rdt: admission must check trust card status
-        use tempfile::TempDir;
-        use std::fs;
-        use crate::supply_chain::trust_card::{
-            TrustCardRegistry, TrustCardMutation, RevocationStatus, ReputationTrend,
-            SnapshotSourceContext, rfc3339_timestamp_from_secs
-        };
         use crate::config::Config;
+        use crate::supply_chain::trust_card::{
+            ReputationTrend, RevocationStatus, SnapshotSourceContext, TrustCardMutation,
+            TrustCardRegistry, rfc3339_timestamp_from_secs,
+        };
+        use std::fs;
+        use tempfile::TempDir;
 
         let tmp = TempDir::new().expect("tempdir");
         let registry_path = tmp.path().join("test_registry.json");
@@ -2997,29 +3010,35 @@ mod tests {
         let extension_id = "test-extension";
 
         // Initially add extension as trusted
-        registry.update(
-            extension_id,
-            TrustCardMutation {
-                certification_level: None,
-                revocation_status: None, // Initially active
-                active_quarantine: Some(false),
-                reputation_score_basis_points: Some(8000),
-                reputation_trend: Some(ReputationTrend::Stable),
-                user_facing_risk_assessment: None,
-                provenance_summary: None,
-                last_verified_timestamp: None,
-                capability_declarations: None,
-                trust_card_version: None,
-            },
-            now_secs,
-            "test-setup"
-        ).expect("setup extension");
+        registry
+            .update(
+                extension_id,
+                TrustCardMutation {
+                    certification_level: None,
+                    revocation_status: None, // Initially active
+                    active_quarantine: Some(false),
+                    reputation_score_basis_points: Some(8000),
+                    reputation_trend: Some(ReputationTrend::Stable),
+                    user_facing_risk_assessment: None,
+                    provenance_summary: None,
+                    last_verified_timestamp: None,
+                    capability_declarations: None,
+                    trust_card_version: None,
+                },
+                now_secs,
+                "test-setup",
+            )
+            .expect("setup extension");
 
-        registry.persist_authoritative_state(&registry_path).expect("persist initial registry");
+        registry
+            .persist_authoritative_state(&registry_path)
+            .expect("persist initial registry");
 
         // Create admission gate
         let mut gate_config = AdmissionConfig::new(SCHEMA_VERSION);
-        gate_config.with_signer("signer-A").expect("add trusted signer");
+        gate_config
+            .with_signer("signer-A")
+            .expect("add trusted signer");
         let gate = AdmissionGate::new(gate_config);
 
         // Create valid capability contract
@@ -3040,35 +3059,40 @@ mod tests {
             &config.trust,
             now_secs,
             SnapshotSourceContext::TrustedFile,
-        ).expect("load registry");
+        )
+        .expect("load registry");
 
         // Should succeed initially (extension not revoked)
         let outcome1 = gate.evaluate(&artifact, Some(&mut loaded_registry), now_secs);
         assert!(matches!(outcome1, AdmissionOutcome::Accepted { .. }));
 
         // Now revoke the extension
-        registry.update(
-            extension_id,
-            TrustCardMutation {
-                certification_level: None,
-                revocation_status: Some(RevocationStatus::Revoked {
-                    reason: "Security vulnerability discovered".to_string(),
-                    revoked_at: rfc3339_timestamp_from_secs(now_secs),
-                }),
-                active_quarantine: Some(true),
-                reputation_score_basis_points: None,
-                reputation_trend: Some(ReputationTrend::Declining),
-                user_facing_risk_assessment: None,
-                provenance_summary: None,
-                last_verified_timestamp: None,
-                capability_declarations: None,
-                trust_card_version: None,
-            },
-            now_secs,
-            "revoke-for-test"
-        ).expect("revoke extension");
+        registry
+            .update(
+                extension_id,
+                TrustCardMutation {
+                    certification_level: None,
+                    revocation_status: Some(RevocationStatus::Revoked {
+                        reason: "Security vulnerability discovered".to_string(),
+                        revoked_at: rfc3339_timestamp_from_secs(now_secs),
+                    }),
+                    active_quarantine: Some(true),
+                    reputation_score_basis_points: None,
+                    reputation_trend: Some(ReputationTrend::Declining),
+                    user_facing_risk_assessment: None,
+                    provenance_summary: None,
+                    last_verified_timestamp: None,
+                    capability_declarations: None,
+                    trust_card_version: None,
+                },
+                now_secs,
+                "revoke-for-test",
+            )
+            .expect("revoke extension");
 
-        registry.persist_authoritative_state(&registry_path).expect("persist revoked registry");
+        registry
+            .persist_authoritative_state(&registry_path)
+            .expect("persist revoked registry");
 
         // Reload registry to get updated state
         let mut revoked_registry = TrustCardRegistry::load_authoritative_state_from_config(
@@ -3076,33 +3100,35 @@ mod tests {
             &config.trust,
             now_secs,
             SnapshotSourceContext::TrustedFile,
-        ).expect("reload registry");
+        )
+        .expect("reload registry");
 
         // Should now be denied due to revocation (bd-i3rdt fix)
         let outcome2 = gate.evaluate(&artifact, Some(&mut revoked_registry), now_secs);
         match outcome2 {
-            AdmissionOutcome::Denied { reason, .. } => {
-                match reason {
-                    AdmissionDenialReason::TrustRevoked { detail } => {
-                        assert!(detail.contains("revoked"));
-                        assert!(detail.contains("Security vulnerability discovered"));
-                    }
-                    _ => panic!("Expected TrustRevoked denial reason, got {:?}", reason),
+            AdmissionOutcome::Denied { reason, .. } => match reason {
+                AdmissionDenialReason::TrustRevoked { detail } => {
+                    assert!(detail.contains("revoked"));
+                    assert!(detail.contains("Security vulnerability discovered"));
                 }
-            }
-            _ => panic!("Expected admission denial for revoked trust card, got {:?}", outcome2),
+                _ => panic!("Expected TrustRevoked denial reason, got {:?}", reason),
+            },
+            _ => panic!(
+                "Expected admission denial for revoked trust card, got {:?}",
+                outcome2
+            ),
         }
     }
 
     #[test]
     fn test_admission_denies_quarantined_trust_card() {
         // Test quarantined extensions are also denied admission
-        use tempfile::TempDir;
-        use crate::supply_chain::trust_card::{
-            TrustCardRegistry, TrustCardMutation, RevocationStatus, ReputationTrend,
-            SnapshotSourceContext
-        };
         use crate::config::Config;
+        use crate::supply_chain::trust_card::{
+            ReputationTrend, RevocationStatus, SnapshotSourceContext, TrustCardMutation,
+            TrustCardRegistry,
+        };
+        use tempfile::TempDir;
 
         let tmp = TempDir::new().expect("tempdir");
         let registry_path = tmp.path().join("test_registry.json");
@@ -3112,28 +3138,34 @@ mod tests {
         let extension_id = "quarantined-extension";
 
         // Add extension with active quarantine
-        registry.update(
-            extension_id,
-            TrustCardMutation {
-                certification_level: None,
-                revocation_status: None, // Not revoked, but quarantined
-                active_quarantine: Some(true),
-                reputation_score_basis_points: Some(8000),
-                reputation_trend: Some(ReputationTrend::Declining),
-                user_facing_risk_assessment: None,
-                provenance_summary: None,
-                last_verified_timestamp: None,
-                capability_declarations: None,
-                trust_card_version: None,
-            },
-            now_secs,
-            "test-quarantine-setup"
-        ).expect("setup quarantined extension");
+        registry
+            .update(
+                extension_id,
+                TrustCardMutation {
+                    certification_level: None,
+                    revocation_status: None, // Not revoked, but quarantined
+                    active_quarantine: Some(true),
+                    reputation_score_basis_points: Some(8000),
+                    reputation_trend: Some(ReputationTrend::Declining),
+                    user_facing_risk_assessment: None,
+                    provenance_summary: None,
+                    last_verified_timestamp: None,
+                    capability_declarations: None,
+                    trust_card_version: None,
+                },
+                now_secs,
+                "test-quarantine-setup",
+            )
+            .expect("setup quarantined extension");
 
-        registry.persist_authoritative_state(&registry_path).expect("persist registry");
+        registry
+            .persist_authoritative_state(&registry_path)
+            .expect("persist registry");
 
         let mut gate_config = AdmissionConfig::new(SCHEMA_VERSION);
-        gate_config.with_signer("signer-A").expect("add trusted signer");
+        gate_config
+            .with_signer("signer-A")
+            .expect("add trusted signer");
         let gate = AdmissionGate::new(gate_config);
 
         let contract = make_contract(
@@ -3152,29 +3184,34 @@ mod tests {
             &config.trust,
             now_secs,
             SnapshotSourceContext::TrustedFile,
-        ).expect("load registry");
+        )
+        .expect("load registry");
 
         // Should be denied due to quarantine
         let outcome = gate.evaluate(&artifact, Some(&mut loaded_registry), now_secs);
         match outcome {
-            AdmissionOutcome::Denied { reason, .. } => {
-                match reason {
-                    AdmissionDenialReason::TrustRevoked { detail } => {
-                        assert!(detail.contains("quarantined"));
-                    }
-                    _ => panic!("Expected TrustRevoked denial reason for quarantine, got {:?}", reason),
+            AdmissionOutcome::Denied { reason, .. } => match reason {
+                AdmissionDenialReason::TrustRevoked { detail } => {
+                    assert!(detail.contains("quarantined"));
                 }
-            }
-            _ => panic!("Expected admission denial for quarantined trust card, got {:?}", outcome),
+                _ => panic!(
+                    "Expected TrustRevoked denial reason for quarantine, got {:?}",
+                    reason
+                ),
+            },
+            _ => panic!(
+                "Expected admission denial for quarantined trust card, got {:?}",
+                outcome
+            ),
         }
     }
 
     #[test]
     fn test_admission_denies_missing_trust_card_fail_closed() {
         // Test fail-closed behavior when trust card doesn't exist
-        use tempfile::TempDir;
-        use crate::supply_chain::trust_card::{TrustCardRegistry, SnapshotSourceContext};
         use crate::config::Config;
+        use crate::supply_chain::trust_card::{SnapshotSourceContext, TrustCardRegistry};
+        use tempfile::TempDir;
 
         let tmp = TempDir::new().expect("tempdir");
         let registry_path = tmp.path().join("empty_registry.json");
@@ -3182,10 +3219,14 @@ mod tests {
 
         // Create empty registry
         let registry = TrustCardRegistry::new("empty-registry".to_string());
-        registry.persist_authoritative_state(&registry_path).expect("persist empty registry");
+        registry
+            .persist_authoritative_state(&registry_path)
+            .expect("persist empty registry");
 
         let mut gate_config = AdmissionConfig::new(SCHEMA_VERSION);
-        gate_config.with_signer("signer-A").expect("add trusted signer");
+        gate_config
+            .with_signer("signer-A")
+            .expect("add trusted signer");
         let gate = AdmissionGate::new(gate_config);
 
         let extension_id = "nonexistent-extension";
@@ -3205,20 +3246,25 @@ mod tests {
             &config.trust,
             now_secs,
             SnapshotSourceContext::TrustedFile,
-        ).expect("load empty registry");
+        )
+        .expect("load empty registry");
 
         // Should be denied due to missing trust card (fail-closed)
         let outcome = gate.evaluate(&artifact, Some(&mut loaded_registry), now_secs);
         match outcome {
-            AdmissionOutcome::Denied { reason, .. } => {
-                match reason {
-                    AdmissionDenialReason::TrustRevoked { detail } => {
-                        assert!(detail.contains("no trust card registered"));
-                    }
-                    _ => panic!("Expected TrustRevoked denial reason for missing trust card, got {:?}", reason),
+            AdmissionOutcome::Denied { reason, .. } => match reason {
+                AdmissionDenialReason::TrustRevoked { detail } => {
+                    assert!(detail.contains("no trust card registered"));
                 }
-            }
-            _ => panic!("Expected admission denial for missing trust card, got {:?}", outcome),
+                _ => panic!(
+                    "Expected TrustRevoked denial reason for missing trust card, got {:?}",
+                    reason
+                ),
+            },
+            _ => panic!(
+                "Expected admission denial for missing trust card, got {:?}",
+                outcome
+            ),
         }
     }
 
@@ -3226,7 +3272,9 @@ mod tests {
     fn test_admission_denies_no_trust_registry_provided_fail_closed() {
         // Test fail-closed behavior when no trust registry is provided
         let mut gate_config = AdmissionConfig::new(SCHEMA_VERSION);
-        gate_config.with_signer("signer-A").expect("add trusted signer");
+        gate_config
+            .with_signer("signer-A")
+            .expect("add trusted signer");
         let gate = AdmissionGate::new(gate_config);
 
         let extension_id = "any-extension";
@@ -3243,15 +3291,19 @@ mod tests {
         // Should be denied when no trust registry provided (fail-closed)
         let outcome = gate.evaluate(&artifact, None, 0);
         match outcome {
-            AdmissionOutcome::Denied { reason, .. } => {
-                match reason {
-                    AdmissionDenialReason::TrustRevoked { detail } => {
-                        assert!(detail.contains("Trust registry not available"));
-                    }
-                    _ => panic!("Expected TrustRevoked denial reason for no registry, got {:?}", reason),
+            AdmissionOutcome::Denied { reason, .. } => match reason {
+                AdmissionDenialReason::TrustRevoked { detail } => {
+                    assert!(detail.contains("Trust registry not available"));
                 }
-            }
-            _ => panic!("Expected admission denial when no trust registry provided, got {:?}", outcome),
+                _ => panic!(
+                    "Expected TrustRevoked denial reason for no registry, got {:?}",
+                    reason
+                ),
+            },
+            _ => panic!(
+                "Expected admission denial when no trust registry provided, got {:?}",
+                outcome
+            ),
         }
     }
 }

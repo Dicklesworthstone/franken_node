@@ -244,7 +244,10 @@ mod tests {
         let contract = signed_contract();
         let artifact = make_artifact("", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "empty artifact_id");
+        assert_invalid_contract_detail(
+            trusted_gate().evaluate(&artifact, None, 0),
+            "empty artifact_id",
+        );
     }
 
     #[test]
@@ -270,7 +273,10 @@ mod tests {
         );
         let artifact = make_artifact("artifact-whitespace-contract", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "contract_id contains");
+        assert_invalid_contract_detail(
+            trusted_gate().evaluate(&artifact, None, 0),
+            "contract_id contains",
+        );
     }
 
     #[test]
@@ -279,7 +285,10 @@ mod tests {
         contract.signature.clear();
         let artifact = make_artifact("artifact-empty-signature", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "empty signature");
+        assert_invalid_contract_detail(
+            trusted_gate().evaluate(&artifact, None, 0),
+            "empty signature",
+        );
     }
 
     #[test]
@@ -316,7 +325,10 @@ mod tests {
         );
         let artifact = make_artifact("artifact-padded-capability", "ext-alpha", contract);
 
-        assert_invalid_capability_detail(trusted_gate().evaluate(&artifact, None, 0), "leading or trailing");
+        assert_invalid_capability_detail(
+            trusted_gate().evaluate(&artifact, None, 0),
+            "leading or trailing",
+        );
     }
 
     #[test]
@@ -405,7 +417,10 @@ mod tests {
         );
         let artifact = make_artifact("artifact-empty-signer", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "empty signer_id");
+        assert_invalid_contract_detail(
+            trusted_gate().evaluate(&artifact, None, 0),
+            "empty signer_id",
+        );
     }
 
     #[test]
@@ -420,7 +435,10 @@ mod tests {
         );
         let artifact = make_artifact("artifact-padded-signer", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "signer_id contains");
+        assert_invalid_contract_detail(
+            trusted_gate().evaluate(&artifact, None, 0),
+            "signer_id contains",
+        );
     }
 
     #[test]
@@ -435,7 +453,10 @@ mod tests {
         );
         let artifact = make_artifact("artifact-zero-epoch", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "issued_epoch_ms");
+        assert_invalid_contract_detail(
+            trusted_gate().evaluate(&artifact, None, 0),
+            "issued_epoch_ms",
+        );
     }
 
     #[test]
@@ -450,7 +471,10 @@ mod tests {
         );
         let artifact = make_artifact("artifact-empty-capabilities", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "capability list");
+        assert_invalid_contract_detail(
+            trusted_gate().evaluate(&artifact, None, 0),
+            "capability list",
+        );
     }
 
     #[test]
@@ -517,7 +541,10 @@ mod tests {
         );
         let artifact = make_artifact("artifact-homograph", "ext-alpha", contract);
 
-        assert_invalid_capability_detail(trusted_gate().evaluate(&artifact, None, 0), "contains non-ASCII");
+        assert_invalid_capability_detail(
+            trusted_gate().evaluate(&artifact, None, 0),
+            "contains non-ASCII",
+        );
     }
 
     #[test]
@@ -534,7 +561,10 @@ mod tests {
         );
         let artifact = make_artifact("artifact-traversal", "ext-alpha", contract);
 
-        assert_invalid_capability_detail(trusted_gate().evaluate(&artifact, None, 0), "path traversal");
+        assert_invalid_capability_detail(
+            trusted_gate().evaluate(&artifact, None, 0),
+            "path traversal",
+        );
     }
 
     #[test]
@@ -549,7 +579,10 @@ mod tests {
         );
         let artifact = make_artifact("artifact-control-chars", "ext\r\n-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "contains control");
+        assert_invalid_contract_detail(
+            trusted_gate().evaluate(&artifact, None, 0),
+            "contains control",
+        );
     }
 
     #[test]
