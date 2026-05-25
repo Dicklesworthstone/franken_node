@@ -899,10 +899,10 @@ impl RecommendationEngine {
 
         // Hash config
         hasher.update(b"config:");
-        hasher.update((self.config.min_confidence as u64).to_le_bytes());
+        hasher.update(self.config.confidence_threshold.to_le_bytes());
         hasher.update((self.config.max_recommendations as u64).to_le_bytes());
-        hasher.update(if self.config.enable_degraded_mode { b"1" } else { b"0" });
-        hasher.update((self.config.max_missing_sources as u64).to_le_bytes());
+        hasher.update(self.config.risk_budget.to_le_bytes());
+        hasher.update(self.config.degraded_confidence_penalty.to_le_bytes());
 
         // Hash degraded state
         hasher.update(b"degraded:");
@@ -922,12 +922,9 @@ impl RecommendationEngine {
         hasher.update(b"audit_trail:");
         hasher.update((self.audit_trail.len() as u64).to_le_bytes());
         for entry in &self.audit_trail {
-            hasher.update((entry.timestamp.len() as u64).to_le_bytes());
-            hasher.update(entry.timestamp.as_bytes());
+            hasher.update(entry.timestamp.to_le_bytes());
             hasher.update((entry.action.len() as u64).to_le_bytes());
             hasher.update(entry.action.as_bytes());
-            hasher.update((entry.outcome.len() as u64).to_le_bytes());
-            hasher.update(entry.outcome.as_bytes());
         }
 
         // Hash closed audit entries (BTreeMap is already sorted)
@@ -936,12 +933,9 @@ impl RecommendationEngine {
         for (key, entry) in &self.closed_audit_entries {
             hasher.update((key.len() as u64).to_le_bytes());
             hasher.update(key.as_bytes());
-            hasher.update((entry.timestamp.len() as u64).to_le_bytes());
-            hasher.update(entry.timestamp.as_bytes());
+            hasher.update(entry.timestamp.to_le_bytes());
             hasher.update((entry.action.len() as u64).to_le_bytes());
             hasher.update(entry.action.as_bytes());
-            hasher.update((entry.outcome.len() as u64).to_le_bytes());
-            hasher.update(entry.outcome.as_bytes());
         }
 
         // Hash events
