@@ -2587,7 +2587,7 @@ mod additional_negative_path_tests {
                 );
 
                 // Only test when content hashes are actually different
-                if !ct_eq_bytes_inline(&content_hash_1.bytes, &content_hash_2.bytes) {
+                if !ct_eq_bytes_inline(&content_hash_1.0, &content_hash_2.0) {
                     let config = ScheduleConfig::new(config_version);
 
                     let seed_1 = derive_seed(&domain, &content_hash_1, &config);

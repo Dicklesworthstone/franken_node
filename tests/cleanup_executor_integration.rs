@@ -110,7 +110,7 @@ fn execute_cleanup_permutation_digest(
         failed_count: receipt.summary.failed_count,
         bytes_freed: receipt.bytes_freed,
         bytes_skipped: receipt.bytes_skipped,
-        skipped_pins: receipt.skipped_pins,
+        skipped_pins: receipt.skipped_pins as u64,
         outcomes_by_path,
         deletion_requests,
     }

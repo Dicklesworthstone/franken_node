@@ -139,6 +139,7 @@ fn healthy_evidence() -> ExtensionEvidence {
         validation_samples: 24,
         validation_failures: 0,
         evidence_sources,
+        collected_at: "2026-02-22T12:00:00Z".to_string(),
     }
 }
 

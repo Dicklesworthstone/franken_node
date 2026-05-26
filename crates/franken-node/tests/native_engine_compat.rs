@@ -193,7 +193,7 @@ fn test_native_engine_execution_with_telemetry() {
     let policy_mode = config.profile.to_string();
 
     // Execute through native engine
-    let result = dispatcher.dispatch_run(&app_path, &config, &policy_mode);
+    let result = dispatcher.dispatch_run(&app_path, &config, &policy_mode, &[], 0);
 
     // Verify successful execution
     assert!(
@@ -243,7 +243,7 @@ fn test_strict_profile_rejects_fixture_fallback_without_native_engine() {
     let policy_mode = config.profile.to_string();
 
     // Execute and expect failure
-    let result = dispatcher.dispatch_run(&app_path, &config, &policy_mode);
+    let result = dispatcher.dispatch_run(&app_path, &config, &policy_mode, &[], 0);
 
     assert!(
         result.is_err(),
@@ -285,7 +285,7 @@ fn test_balanced_profile_allows_external_process_fixture_fallback() {
     let policy_mode = config.profile.to_string();
 
     // This should succeed by falling back to external process
-    let result = dispatcher.dispatch_run(&app_path, &config, &policy_mode);
+    let result = dispatcher.dispatch_run(&app_path, &config, &policy_mode, &[], 0);
 
     // Note: This test may fail if no Node/Bun is available, but that's expected behavior
     // The key is that it shouldn't fail with "native engine required" error
@@ -317,7 +317,7 @@ fn test_native_engine_error_handling_propagation() {
     let _telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
     let policy_mode = config.profile.to_string();
 
-    let result = dispatcher.dispatch_run(&nonexistent_path, &config, &policy_mode);
+    let result = dispatcher.dispatch_run(&nonexistent_path, &config, &policy_mode, &[], 0);
 
     assert!(result.is_err(), "Should fail for nonexistent source file");
 
@@ -337,7 +337,7 @@ fn test_native_engine_error_handling_propagation() {
         r#"this is not valid javascript syntax !@#$%"#,
     );
 
-    let result = dispatcher.dispatch_run(&invalid_app_path, &config, &policy_mode);
+    let result = dispatcher.dispatch_run(&invalid_app_path, &config, &policy_mode, &[], 0);
 
     // Engine may or may not reject invalid syntax - depends on implementation
     // The key is that errors should propagate properly, not crash
@@ -397,7 +397,7 @@ fn test_engine_timeout_handling_with_fixture_binary() {
 
     // Execute and measure timing
     let start = std::time::Instant::now();
-    let result = dispatcher.dispatch_run(&app_path, &config, &policy_mode);
+    let result = dispatcher.dispatch_run(&app_path, &config, &policy_mode, &[], 0);
     let duration = start.elapsed();
 
     // The execution should fail due to timeout, not complete successfully
@@ -471,7 +471,7 @@ fn test_native_engine_missing_binary_error_handling() {
     );
 
     // Execute and expect failure due to missing binary
-    let result = dispatcher.dispatch_run(&app_path, &config, "test");
+    let result = dispatcher.dispatch_run(&app_path, &config, "test", &[], 0);
 
     assert!(result.is_err(), "Should fail when engine binary is missing");
 
@@ -514,7 +514,7 @@ fn test_engine_non_zero_exit_code_fixture_error_handling() {
     );
 
     // Execute and expect failure due to non-zero exit
-    let result = dispatcher.dispatch_run(&app_path, &config, "test");
+    let result = dispatcher.dispatch_run(&app_path, &config, "test", &[], 0);
 
     assert!(
         result.is_err(),
@@ -576,7 +576,7 @@ fn test_engine_crash_signal_fixture_error_handling() {
     let _cleanup = EnvCleanup("FRANKEN_ENGINE_TIMEOUT_SECS");
 
     // Execute and expect failure due to signal/crash
-    let result = dispatcher.dispatch_run(&app_path, &config, "test");
+    let result = dispatcher.dispatch_run(&app_path, &config, "test", &[], 0);
 
     assert!(
         result.is_err(),

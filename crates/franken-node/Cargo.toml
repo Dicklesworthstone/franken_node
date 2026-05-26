@@ -343,6 +343,7 @@ required-features = ["control-plane"]
 [[test]]
 name = "connector_lifecycle_public_api_e2e"
 path = "tests/connector_lifecycle_public_api_e2e.rs"
+required-features = ["control-plane"]
 
 [[test]]
 name = "connector_jcq1z_lifecycle_stress"

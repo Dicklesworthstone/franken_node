@@ -111,6 +111,6 @@ fn generate_realistic_production_data() -> Result<Vec<RevocationFilterSample>, B
 }
 
 /// Simple deterministic "randomization" for reproducible test data.
-fn randomish_variation(seed: u64, amplitude: usize) -> usize {
-    ((seed * 1103515245 + 12345) % (amplitude as u64 * 2)) as usize
+fn randomish_variation(seed: u64, amplitude: u64) -> u64 {
+    (seed.wrapping_mul(1103515245).wrapping_add(12345)) % (amplitude * 2)
 }
