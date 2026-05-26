@@ -103,7 +103,7 @@ fn generate_realistic_production_data() -> Result<Vec<RevocationFilterSample>, B
 
         samples.push(RevocationFilterSample {
             timestamp_ms,
-            entries: entries.max(1000), // Ensure minimum baseline
+            entries: entries.max(1000) as usize, // Ensure minimum baseline
         });
     }
 
