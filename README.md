@@ -253,8 +253,12 @@ this repository is the **product layer** on top of that substrate.
 curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main/install.sh | bash
 ```
 
-The installer downloads the latest signed release asset, verifies the
-checksum, and places `franken-node` on `PATH`.
+The installer downloads the latest release asset for your platform, verifies
+it against its `SHA256` sidecar (and a cosign signature when one is published),
+and places `franken-node` on `PATH`. A prebuilt binary currently ships for
+**Linux x86_64**; on other platforms the installer falls back to a side-by-side
+source build. Pass `--help` for options (`--prefix`, `--dest`, `--method`,
+`--offline`, `--easy-mode`).
 
 > [!NOTE]
 > Homebrew is not currently published for `franken-node`; the public
