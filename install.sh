@@ -460,6 +460,8 @@ main() {
   install_completions; maybe_add_path; self_test; final_summary
 }
 
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+# Run main when executed or piped (curl | bash leaves BASH_SOURCE unset under set -u),
+# but not when sourced for testing.
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
   main "$@"
 fi
