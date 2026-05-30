@@ -1,0 +1,59 @@
+# cargo-deny supply-chain gate for franken_node (trust-native platform).
+# Added by the release gauntlet (Round 0, H-010): the repo had NO deny.toml, so
+# `cargo deny check` rejected all 456 permissive-licensed deps under defaults and
+# was wired into no CI workflow. This makes cargo-deny a real, green gate.
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# Tracked-for-remediation advisories (ignore-with-rationale, NOT silently dropped):
+ignore = [
+  # paste 1.0.15 — unmaintained. Transitive only: franken_engine -> parquet -> fp-io -> paste.
+  # No franken_node exec path; fix is upstream/engine-side. Tracked: bd-rjc2m sibling.
+  "RUSTSEC-2024-0436",
+  # serde_cbor 0.11.2 — unmaintained. DIRECT dep behind `cbor-serialization` feature.
+  # Remediation: migrate to `ciborium` (schema-bump discipline — touches canonical bytes).
+  # Tracked: gauntlet G-4. Remove this ignore once the swap lands.
+  "RUSTSEC-2021-0127",
+]
+
+[licenses]
+# All deps observed are permissive; this allowlist makes the gate meaningful.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "0BSD",
+  "Unlicense",
+  "Zlib",
+  "MPL-2.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+# First-party FrankenSuite siblings (asupersync, fastapi-*, fsqlite-*, frankenengine-*)
+# are unpublished path deps with no `license` field. Skip license checks for
+# private/path/git crates; third-party registry crates are still gated by `allow`.
+private = { ignore = true }
+
+# NOTE (gauntlet H-021): the first-party FrankenSuite path-dep crates (fsqlite-*,
+# ftui-*, asupersync, fastapi-*) omit the `license` field in their manifests, so
+# `cargo deny check licenses` still reports them `unlicensed`. The CORRECT fix is
+# upstream: add `license = "MIT"` to each FrankenSuite crate (they are all MIT, same
+# as this repo's LICENSE). Until then, advisories/bans/sources gate GREEN; the license
+# category has a known first-party residual. Do NOT paper over it with per-crate
+# clarify blocks here — fix the source manifests. To run only the green categories in
+# CI today: `cargo deny check advisories bans sources`.
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

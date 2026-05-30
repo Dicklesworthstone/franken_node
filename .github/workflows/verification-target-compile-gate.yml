@@ -1,0 +1,71 @@
+# Recurrence-prevention gate (bd-rjc2m.G1): fail if ANY verification target fails to compile.
+#
+# Root cause this prevents: cargo test / cargo fuzz abort the WHOLE build on a single
+# non-compiling target, silently dropping coverage. A Round-0 gauntlet census found
+# 23/264 conformance + 45/146 fuzz targets rotted this way (see docs/specs/API_DRIFT_REMEDIATION.md).
+#
+# MODE: starts WARN-ONLY (annotate, do not block) so in-flight remediation under
+# bd-rjc2m is not wedged. FLIP to blocking by setting BLOCKING=1 below once bd-rjc2m.E2E1
+# (the full e2e verification) is green.
+name: verification-target-compile-gate
+
+on:
+  pull_request:
+    paths:
+      - 'crates/franken-node/**'
+      - 'tests/**'
+      - 'fuzz/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/check_verification_targets_compile.py'
+      - 'scripts/remediation_log.py'
+  workflow_dispatch: {}
+
+env:
+  BLOCKING: "0"   # set to "1" after bd-rjc2m.E2E1 is green to make this gate blocking
+
+jobs:
+  compile-census:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+      - name: Gate unit tests (parser must be correct first)
+        run: |
+          python3 scripts/test_remediation_log.py
+          python3 scripts/test_check_verification_targets_compile.py
+      - name: Census — conformance [[test]] targets
+        run: |
+          set +e
+          cargo build -p frankenengine-node --tests --keep-going \
+            --features extended-surfaces,test-support > conf_census.log 2>&1
+          echo "conformance census exit: $?"
+      - name: Census — fuzz targets
+        run: |
+          set +e
+          cargo +nightly build --manifest-path fuzz/Cargo.toml --bins --keep-going \
+            > fuzz_census.log 2>&1 || true
+          echo "fuzz census exit: $?"
+      - name: Evaluate gate (warn-only unless BLOCKING=1)
+        run: |
+          export GATE_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ARGS="--from-log conf=conf_census.log,fuzz=fuzz_census.log --out artifacts/verification --ts $GATE_TS"
+          if [ "${BLOCKING}" = "1" ]; then
+            python3 scripts/check_verification_targets_compile.py $ARGS
+          else
+            python3 scripts/check_verification_targets_compile.py $ARGS --warn-only
+          fi
+      - name: Upload census report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-compile-census
+          path: |
+            artifacts/verification/*.jsonl
+            conf_census.log
+            fuzz_census.log
