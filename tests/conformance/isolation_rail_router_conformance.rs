@@ -29,7 +29,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use franken_node::security::isolation_rail_router::{
+use frankenengine_node::security::isolation_rail_router::{
     AuditEntry, ERR_ISO_DOWNGRADE_REJECTED, ERR_ISO_DUPLICATE_WORKLOAD,
     ERR_ISO_HOT_ELEVATION_DISABLED, ERR_ISO_INVALID_RISK_SCORE, ERR_ISO_SAME_RAIL_ELEVATION,
     ERR_ISO_UNCLASSIFIED, ERR_ISO_WORKLOAD_NOT_FOUND, ElevationEvent, ElevationPolicy,

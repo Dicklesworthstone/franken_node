@@ -134,10 +134,10 @@ Version: {}
                     r.category,
                     r.description,
                     match &r.result {
-                        TestResult::Pass => "✅ PASS",
-                        TestResult::Fail { reason } => &format!("❌ FAIL: {}", reason),
-                        TestResult::Skipped { reason } => &format!("⏭️ SKIP: {}", reason),
-                        TestResult::ExpectedFailure { reason } => &format!("⏳ XFAIL: {}", reason),
+                        TestResult::Pass => "✅ PASS".to_string(),
+                        TestResult::Fail { reason } => format!("❌ FAIL: {}", reason),
+                        TestResult::Skipped { reason } => format!("⏭️ SKIP: {}", reason),
+                        TestResult::ExpectedFailure { reason } => format!("⏳ XFAIL: {}", reason),
                     }
                 ))
                 .collect::<Vec<_>>()

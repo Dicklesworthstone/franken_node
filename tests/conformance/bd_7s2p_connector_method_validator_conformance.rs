@@ -9,7 +9,7 @@
 //! - **SHOULD-CMV-006**: Report summaries SHOULD accurately count passing/failing methods
 //! - **MAY-CMV-007**: Optional methods MAY be skipped without affecting verdict
 
-use franken_node::conformance::connector_method_validator::{
+use frankenengine_node::conformance::connector_method_validator::{
     ContractReport, MethodDeclaration, MethodErrorCode, MethodValidationError,
     MethodValidationResult, ReportSummary, STANDARD_METHODS, validate_contract,
 };

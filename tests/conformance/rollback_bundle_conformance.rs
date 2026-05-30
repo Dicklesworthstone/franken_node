@@ -26,7 +26,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use franken_node::connector::rollback_bundle::{
+use frankenengine_node::connector::rollback_bundle::{
     BundleComponent, CompatibilityProof, HealthCheckKind, HealthCheckResult, ManifestComponent,
     RestoreManifest, RollbackAuditEntry, RollbackBundle, RollbackBundleError, RollbackMode,
     StateSnapshot,

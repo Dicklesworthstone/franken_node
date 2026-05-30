@@ -29,7 +29,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use franken_node::tools::vef_perf_budget_gate::{
+use frankenengine_node::tools::vef_perf_budget_gate::{
     BUDGET_SCHEMA_VERSION, BudgetCheckResult, BudgetMode, GateVerdict, INV_VEF_PBG_BASELINE,
     INV_VEF_PBG_BUDGET, INV_VEF_PBG_EVIDENCE, INV_VEF_PBG_GATE, INV_VEF_PBG_MODE,
     INV_VEF_PBG_NOISE, LatencyBudget, MeasuredLatency, OperationVerdict, VEF_PERF_001,

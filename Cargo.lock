@@ -980,7 +980,7 @@ dependencies = [
  "clap",
  "criterion-plot",
  "is-terminal",
- "itertools 0.10.5",
+ "itertools",
  "num-traits",
  "once_cell",
  "oorandom",
@@ -1001,7 +1001,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b50826342786a51a89e2da3a28f1c32b06e387201bc2d19791f622c673706b1"
 dependencies = [
  "cast",
- "itertools 0.10.5",
+ "itertools",
 ]
 
 [[package]]
@@ -1273,6 +1273,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "dp"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.6",
+ "serde",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -1620,6 +1629,16 @@ name = "franken-engine-deterministic-trait"
 version = "0.1.0"
 
 [[package]]
+name = "franken-engine-fixed-layout-derive"
+version = "0.1.0"
+dependencies = [
+ "franken-engine-deterministic-trait",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "franken-evidence"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1653,8 +1672,10 @@ dependencies = [
 name = "frankenengine-engine"
 version = "0.1.0"
 dependencies = [
+ "bumpalo",
  "chrono",
  "clap",
+ "dp",
  "ed25519-dalek",
  "fastapi-core",
  "fp-columnar",
@@ -1665,6 +1686,7 @@ dependencies = [
  "franken-decision",
  "franken-engine-deterministic-derive",
  "franken-engine-deterministic-trait",
+ "franken-engine-fixed-layout-derive",
  "franken-evidence",
  "franken-kernel",
  "frankenengine-extension-host",
@@ -1753,6 +1775,7 @@ dependencies = [
  "tracing-subscriber",
  "tree-sitter",
  "tree-sitter-javascript",
+ "uds_windows",
  "ureq",
  "url",
  "uuid",
@@ -1788,7 +1811,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "fsqlite-core",
  "fsqlite-error",
@@ -1802,14 +1825,14 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ast"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "fsqlite-types",
 ]
 
 [[package]]
 name = "fsqlite-btree"
-version = "0.1.3"
+version = "0.1.6"
 dependencies = [
  "foldhash 0.2.0",
  "fsqlite-error",
@@ -1825,7 +1848,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-core"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "asupersync",
  "blake3",
@@ -1861,14 +1884,14 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-error"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "fsqlite-ext-fts5"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1879,7 +1902,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-icu"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1889,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-json"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1900,7 +1923,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-misc"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1912,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-rtree"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1921,7 +1944,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-func"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "fsqlite-error",
@@ -1931,7 +1954,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-mvcc"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "asupersync",
  "blake3",
@@ -1955,7 +1978,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-observability"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "fsqlite-types",
  "parking_lot",
@@ -1965,7 +1988,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-pager"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "argon2",
  "bumpalo",
@@ -1986,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-parser"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "fsqlite-ast",
  "fsqlite-error",
@@ -1998,7 +2021,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-planner"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "blake3",
  "fsqlite-ast",
@@ -2014,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-types"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "asupersync",
  "bitflags",
@@ -2031,7 +2054,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-vdbe"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "asupersync",
  "crossbeam-deque",
@@ -2052,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-vfs"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "advisory-lock",
  "asupersync",
@@ -2068,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-wal"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "asupersync",
  "blake3",
@@ -2759,15 +2782,6 @@ name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
 dependencies = [
  "either",
 ]
@@ -3631,7 +3645,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools",
  "proc-macro2",
  "quote",
  "syn",
@@ -4812,6 +4826,17 @@ name = "ucd-trie"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
+
+[[package]]
+name = "uds_windows"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
+dependencies = [
+ "memoffset",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "unarray"
