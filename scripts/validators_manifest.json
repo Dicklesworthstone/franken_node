@@ -1,0 +1,130 @@
+{
+  "_schema": "validators-manifest-v1",
+  "_note": "mode: wired|excluded|untriaged. Untriaged = standing wire-or-exclude debt (bd-rjc2m.VALWIRE). Seeded 'wired' = currently referenced by a workflow; refine args during triage.",
+  "checks": {
+    "check_atc_claim_gate.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_benchmark_correctness_artifacts.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_benchmark_specs_package.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_bpet_claim_gate.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_canonical_vectors.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_change_summary_contract.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_close_reason_quality.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_compat_corpus_gate.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_compatibility_threat_evidence.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_compromise_reduction_gate.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_conformance_harness.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_connector_lifecycle.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_dgis_claim_gate.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_health_gate.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_independent_replications_gate.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_lockstep_runner.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_method_validator.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_migration_velocity_gate.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_no_contract_no_merge.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_oracle_close_condition.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_ownership_violations.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_placeholder_surface_inventory.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_proof_carrying_execution_ledger.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_readme_cli_drift.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_release_gate.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_release_perf_profile.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_replay_coverage_gate.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_rollback_command.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_substrate_gate.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_vef_claim_gate.py": {
+      "mode": "wired",
+      "args": []
+    },
+    "check_verification_targets_compile.py": {
+      "mode": "wired",
+      "args": []
+    }
+  }
+}

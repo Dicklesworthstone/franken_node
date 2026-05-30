@@ -1,0 +1,40 @@
+# Aggregate validator gate (bd-rjc2m.VALWIRE): wire-or-exclude every scripts/check_*.py.
+#
+# Round-0 gauntlet: only 31/426 check_*.py are referenced by any workflow (~7%); the other
+# 395 rot silently (H-003). This gate runs the WIRED checks (per scripts/validators_manifest.json)
+# and reports the UNTRIAGED ones as standing debt. NO validator is silently dropped.
+#
+# Reconcile with the existing scripts/run_all_checks.py (blind orchestrator) + scripts/lib/test_logger.py
+# during triage — adopt one path. Promote untriaged -> wired (with args) or excluded (with rationale)
+# in the manifest; flip --strict once the untriaged set is empty.
+name: aggregate-validators-gate
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/check_*.py'
+      - 'scripts/validators_manifest.json'
+      - 'scripts/aggregate_validators_gate.py'
+      - 'docs/specs/**'
+  workflow_dispatch: {}
+
+jobs:
+  validators:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gate unit tests
+        run: python3 scripts/test_aggregate_validators_gate.py
+      - name: Triage state (visibility)
+        run: python3 scripts/aggregate_validators_gate.py --list | awk '{print $1}' | sort | uniq -c
+      - name: Run wired validators (fails on any wired-check failure)
+        run: |
+          # Non-strict: fail only on a WIRED check failing. Flip to --strict after the
+          # untriaged set is emptied (every check_*.py moved to wired-or-excluded).
+          python3 scripts/aggregate_validators_gate.py --out artifacts/validators
+      - name: Upload validator report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aggregate-validators-report
+          path: artifacts/validators/validators_run.jsonl
