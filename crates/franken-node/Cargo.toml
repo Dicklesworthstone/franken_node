@@ -165,6 +165,11 @@ tree-sitter-javascript = "0.25.0"
 blake3 = { version = "1.5", optional = true }
 lazy_static = "1.5.0"
 
+# Windows: AF_UNIX socket support for the telemetry bridge (Unix uses std's
+# os::unix::net). uds_windows mirrors std's UnixListener/UnixStream API.
+[target.'cfg(windows)'.dependencies]
+uds_windows = "1"
+
 [dev-dependencies]
 assert_cmd = "2.0.16"
 assert2 = "0.4.0"

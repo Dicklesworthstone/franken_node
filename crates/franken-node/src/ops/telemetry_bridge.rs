@@ -8,8 +8,14 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{BufRead, BufReader, ErrorKind};
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+// Windows 10+ supports AF_UNIX; uds_windows mirrors std's os::unix::net API so
+// the telemetry-bridge transport works cross-platform with the same call sites.
+#[cfg(windows)]
+use uds_windows::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
@@ -35,11 +41,14 @@ impl SocketLockGuard {
         let lock_path = format!("{}.lock", socket_path);
 
         // Create lock file with appropriate permissions (only owner can read/write)
-        let lock_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .mode(0o600)
+        let mut lock_open_opts = OpenOptions::new();
+        lock_open_opts.create(true).write(true).truncate(false);
+        // Owner-only (0o600) permissions are a Unix concept; on Windows the lock
+        // file relies on default ACLs — the advisory file lock itself is the
+        // real cross-process guard.
+        #[cfg(unix)]
+        lock_open_opts.mode(0o600);
+        let lock_file = lock_open_opts
             .open(&lock_path)
             .map_err(|e| anyhow::anyhow!("failed to create lock file {}: {}", lock_path, e))?;
 
