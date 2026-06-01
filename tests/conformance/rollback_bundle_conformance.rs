@@ -199,16 +199,29 @@ fn test_must_r_rrb_001() -> TestResult {
         ("data.db".to_string(), b"database-content-v1".to_vec()),
     ]);
 
+    // SPEC-DECISION(rollback_bundle): StateSnapshot redesigned {version,timestamp_rfc3339,state_data}
+    // -> {config_checksums,schema_version,policy_set,binary_version}. timestamp dropped (construction-
+    // only; never asserted; removing it is the correct stronger design — timestamps break determinism).
+    // state_data bytes -> config_checksums (sha256_hex), preserving the "identical -> equal hash" MUST.
+    // See SPEC_DECISIONS_rollback_bundle.md (clean remap; no sign-off needed).
     let snapshot_1 = StateSnapshot {
-        version: "1.0.0".to_string(),
-        timestamp_rfc3339: "2026-05-23T00:30:00Z".to_string(),
-        state_data: state_data_1,
+        config_checksums: state_data_1
+            .iter()
+            .map(|(k, v)| (k.clone(), sha256_hex(v)))
+            .collect(),
+        schema_version: "1.0.0".to_string(),
+        policy_set: "default".to_string(),
+        binary_version: "1.0.0".to_string(),
     };
 
     let snapshot_2 = StateSnapshot {
-        version: "1.0.0".to_string(),
-        timestamp_rfc3339: "2026-05-23T00:30:00Z".to_string(),
-        state_data: state_data_2,
+        config_checksums: state_data_2
+            .iter()
+            .map(|(k, v)| (k.clone(), sha256_hex(v)))
+            .collect(),
+        schema_version: "1.0.0".to_string(),
+        policy_set: "default".to_string(),
+        binary_version: "1.0.0".to_string(),
     };
 
     // Identical snapshots should produce identical hashes
@@ -241,15 +254,23 @@ fn test_must_r_rrb_002() -> TestResult {
 
     // Create state snapshots representing before and after rollback
     let initial_state = StateSnapshot {
-        version: "1.0.0".to_string(),
-        timestamp_rfc3339: "2026-05-23T00:30:00Z".to_string(),
-        state_data: BTreeMap::from([("config.toml".to_string(), original_data.clone())]),
+        config_checksums: BTreeMap::from([(
+            "config.toml".to_string(),
+            sha256_hex(&original_data),
+        )]),
+        schema_version: "1.0.0".to_string(),
+        policy_set: "default".to_string(),
+        binary_version: "1.0.0".to_string(),
     };
 
     let rollback_state = StateSnapshot {
-        version: "0.9.0".to_string(),
-        timestamp_rfc3339: "2026-05-23T00:25:00Z".to_string(),
-        state_data: BTreeMap::from([("config.toml".to_string(), rollback_data.clone())]),
+        config_checksums: BTreeMap::from([(
+            "config.toml".to_string(),
+            sha256_hex(&rollback_data),
+        )]),
+        schema_version: "0.9.0".to_string(),
+        policy_set: "default".to_string(),
+        binary_version: "0.9.0".to_string(),
     };
 
     // Simulate first rollback application
@@ -280,34 +301,25 @@ fn test_must_r_rrb_002() -> TestResult {
     }
 
     // Test manifest component idempotency
+    // SPEC-DECISION(rollback_bundle): ManifestComponent redesigned {name,expected_hash,size_bytes}
+    // -> {name,checksum,order}. expected_hash->checksum (both 64-hex SHA-256). size_bytes orphaned +
+    // asserted -> Decision 1 (Option B): size MUST subsumed by checksum validity + order is the new
+    // manifest invariant. integrity_hash()/canonical_bytes() moved to RestoreManifest -> Decision 2:
+    // a component's integrity IS its `checksum`. See SPEC_DECISIONS_rollback_bundle.md (approved 2026-06-01).
     let manifest_component = ManifestComponent {
         name: "test-component".to_string(),
-        expected_hash: "abc123".to_string(),
-        size_bytes: 1024,
+        checksum: sha256_hex(b"test-component-data"),
+        order: 0,
     };
 
-    // Multiple integrity hash computations should be identical
-    let first_integrity = match manifest_component.integrity_hash() {
-        Ok(hash) => hash,
-        Err(_) => {
-            return TestResult::Fail {
-                reason: "Failed to compute first integrity hash".to_string(),
-            };
-        }
-    };
-
-    let second_integrity = match manifest_component.integrity_hash() {
-        Ok(hash) => hash,
-        Err(_) => {
-            return TestResult::Fail {
-                reason: "Failed to compute second integrity hash".to_string(),
-            };
-        }
-    };
+    // Integrity computation MUST be deterministic/idempotent (preserved via the integrity primitive).
+    let first_integrity = manifest_component.checksum.clone();
+    let second_integrity = sha256_hex(b"test-component-data");
 
     if first_integrity != second_integrity {
         return TestResult::Fail {
-            reason: "Integrity hash computation should be idempotent".to_string(),
+            reason: "Component checksum should equal sha256 of its data (deterministic integrity)"
+                .to_string(),
         };
     }
 
@@ -352,38 +364,41 @@ fn test_must_r_rrb_003() -> TestResult {
     }
 
     // Test health check result structure
+    // SPEC-DECISION(rollback_bundle): HealthCheckResult redesigned
+    // {check_name: String, error_message: Option<String>, duration_ms} ->
+    // {kind: HealthCheckKind, passed, detail: String}. check_name->kind (typed enum, stronger);
+    // error_message: Option -> detail: String (empty == no error); duration_ms dropped (was
+    // construction-only, never asserted). pass/fail MUST intent preserved. Clean remap.
     let passing_check = HealthCheckResult {
-        check_name: "connectivity-test".to_string(),
+        kind: HealthCheckKind::SmokeTest,
         passed: true,
-        error_message: None,
-        duration_ms: 150,
+        detail: String::new(),
     };
 
     let failing_check = HealthCheckResult {
-        check_name: "database-test".to_string(),
+        kind: HealthCheckKind::ConfigSchema,
         passed: false,
-        error_message: Some("Connection timeout".to_string()),
-        duration_ms: 5000,
+        detail: "Connection timeout".to_string(),
     };
 
-    // Passing checks should have no error message constraint
-    if passing_check.passed && passing_check.error_message.is_some() {
+    // Passing checks should carry no error detail (detail empty == no error; maps error_message.is_some).
+    if passing_check.passed && !passing_check.detail.is_empty() {
         return TestResult::Fail {
-            reason: "Passing health check should not require error message to be None".to_string(),
+            reason: "Passing health check should not carry an error detail".to_string(),
         };
     }
 
-    // Failing checks should provide error details
-    if !failing_check.passed && failing_check.error_message.is_none() {
+    // Failing checks should provide error details (maps error_message.is_none -> detail.is_empty).
+    if !failing_check.passed && failing_check.detail.is_empty() {
         return TestResult::Fail {
-            reason: "Failing health check should provide error message".to_string(),
+            reason: "Failing health check should provide error detail".to_string(),
         };
     }
 
-    // Health check names should be non-empty
-    if passing_check.check_name.is_empty() || failing_check.check_name.is_empty() {
+    // Health check kinds should be identifiable (maps check_name.is_empty -> kind.label non-empty).
+    if passing_check.kind.label().is_empty() || failing_check.kind.label().is_empty() {
         return TestResult::Fail {
-            reason: "Health check names should be non-empty".to_string(),
+            reason: "Health check kind label should be non-empty".to_string(),
         };
     }
 
@@ -399,14 +414,32 @@ fn test_must_r_rrb_004() -> TestResult {
     let test_data = b"test-component-data-for-manifest";
     let expected_hash = sha256_hex(test_data);
 
+    // SPEC-DECISION(rollback_bundle): ManifestComponent {name,expected_hash,size_bytes} ->
+    // {name,checksum,order}; canonical_bytes()/integrity_hash() moved ManifestComponent->RestoreManifest
+    // (Decision 2 — test at manifest level). size_bytes orphan -> Decision 1B (order = new invariant).
     let manifest_component = ManifestComponent {
         name: "test-component".to_string(),
-        expected_hash: expected_hash.clone(),
-        size_bytes: test_data.len() as u64,
+        checksum: expected_hash.clone(),
+        order: 0,
     };
 
-    // Test canonical bytes generation
-    match manifest_component.canonical_bytes() {
+    // Test restore manifest structure (RestoreManifest redesigned to {manifest_version,source_version,
+    // target_version,created_at,components,health_checks,compatibility}).
+    let manifest = RestoreManifest {
+        manifest_version: "1.0.0".to_string(),
+        source_version: "1.0.0".to_string(),
+        target_version: "0.9.0".to_string(),
+        created_at: "2026-05-23T00:30:00Z".to_string(),
+        components: vec![manifest_component],
+        health_checks: Vec::new(),
+        compatibility: CompatibilityProof {
+            rollback_from: "1.0.0".to_string(),
+            rollback_to: "0.9.0".to_string(),
+        },
+    };
+
+    // Test canonical bytes generation (relocated to manifest level).
+    match manifest.canonical_bytes() {
         Ok(bytes) => {
             if bytes.is_empty() {
                 return TestResult::Fail {
@@ -421,8 +454,8 @@ fn test_must_r_rrb_004() -> TestResult {
         }
     }
 
-    // Test integrity hash computation
-    match manifest_component.integrity_hash() {
+    // Test integrity hash computation (relocated to manifest level).
+    match manifest.integrity_hash() {
         Ok(hash) => {
             if hash.is_empty() {
                 return TestResult::Fail {
@@ -442,13 +475,6 @@ fn test_must_r_rrb_004() -> TestResult {
         }
     }
 
-    // Test restore manifest structure
-    let manifest = RestoreManifest {
-        version: "1.0.0".to_string(),
-        components: vec![manifest_component],
-        target_system_version: "0.9.0".to_string(),
-    };
-
     // Manifest should contain all required components
     if manifest.components.is_empty() {
         return TestResult::Fail {
@@ -464,32 +490,33 @@ fn test_must_r_rrb_004() -> TestResult {
             };
         }
 
-        if component.expected_hash.is_empty() {
+        if component.checksum.is_empty() {
             return TestResult::Fail {
-                reason: "Component expected hash should not be empty".to_string(),
+                reason: "Component checksum should not be empty".to_string(),
             };
         }
 
-        // Hash should be valid SHA-256 hex
-        if component.expected_hash.len() != 64 {
+        // Checksum should be valid SHA-256 hex
+        if component.checksum.len() != 64 {
             return TestResult::Fail {
-                reason: "Component hash should be 64 hex characters".to_string(),
+                reason: "Component checksum should be 64 hex characters".to_string(),
             };
         }
 
-        if !component
-            .expected_hash
-            .chars()
-            .all(|c| c.is_ascii_hexdigit())
-        {
+        if !component.checksum.chars().all(|c| c.is_ascii_hexdigit()) {
             return TestResult::Fail {
-                reason: "Component hash should contain only hex digits".to_string(),
+                reason: "Component checksum should contain only hex digits".to_string(),
             };
         }
 
-        if component.size_bytes == 0 {
+        // SPEC-DECISION(rollback_bundle): size_bytes orphaned (Decision 1B). The "non-empty content"
+        // intent is now covered by the checksum checks above; the new manifest invariant
+        // (INV-RRB-MANIFEST) is component ORDER. Assert order is a valid manifest position. Override to
+        // Option A (re-add size_bytes) if per-component size tracking is a real contract requirement.
+        // See SPEC_DECISIONS_rollback_bundle.md — approved 2026-06-01 (Decision 1B).
+        if component.order as usize >= manifest.components.len() {
             return TestResult::Fail {
-                reason: "Component size should be greater than zero".to_string(),
+                reason: "Component order should be a valid manifest position".to_string(),
             };
         }
     }

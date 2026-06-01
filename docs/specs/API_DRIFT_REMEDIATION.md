@@ -82,6 +82,34 @@ The `verify_all_verification_targets.sh` e2e script (bead `.E2E1`) emits these t
 `artifacts/verification/verify_run_<ts>.jsonl` plus a human summary; the recurrence-prevention
 gate (`.G1`) emits the same shape for the compile census.
 
+## CRITICAL: distinguish RENAME drift from REDESIGN drift
+
+Not all rotted targets are mechanical renames. Two classes — handle differently:
+
+- **RENAME drift** (mechanical): a symbol moved/renamed but the *contract is unchanged*
+  (e.g. `RemoteOperation::Upload`→`ArtifactUpload`, `within_budget` field→method). Apply the
+  map; the assertion's meaning is preserved automatically.
+- **REDESIGN drift** (semantic): the *shape/contract changed*, so there is **no 1:1 mapping** and
+  some assertions have no mechanical equivalent. These require **per-assertion intent-mapping and a
+  spec decision** — and carry real coverage-loss risk if rushed. **Do NOT delete the assertion to
+  compile.** Either map it to the new contract's equivalent property, or (if the new API genuinely
+  dropped a property the MUST relied on) escalate: is that a production gap or an outdated contract?
+
+### Worked example — `vef_perf_budget_gate_conformance` is a REDESIGN
+Current production (`crates/franken-node/src/tools/vef_perf_budget_gate.rs`):
+- `MeasuredLatency::new(p95, p99, sample_count)` (3-arg ctor) is **gone**; `MeasuredLatency` is now a
+  struct literal: `{ operation: VefOperation, mode: BudgetMode, p50_us, p95_us, p99_us, max_us,
+  sample_count, coefficient_of_variation_pct }`. Remediation must build the literal (pick p50<p95,
+  max≥p99, and a cv that matches the test's intent — several cases test stability via cv/sample_count).
+- `BudgetCheckResult.within_budget` → `.passed` (+ new `p95_within_budget`/`p99_within_budget`/`*_headroom_pct`).
+- `BudgetCheckResult.measured_p95_us`/`.measured_p99_us` (the test asserts these are `Some`) **do not
+  exist** in the new struct. **No mechanical equivalent.** SPEC DECISION required: should the gate
+  result echo measured percentiles (production gap → add fields), or is that assertion obsolete (→
+  replace with an equivalent property such as `p95_headroom_pct.is_finite()` AND reconcile the spec)?
+  Resolve WITH the spec owner; record the decision; never silently drop the MUST.
+
+REDESIGN targets (more than the crate-rename) must be triaged this way during remediation.
+
 ## Recurrence prevention
 
 Once remediated, the `.G1` CI gate runs the two census commands above on every relevant change
