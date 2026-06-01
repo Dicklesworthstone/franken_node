@@ -43,7 +43,8 @@ pub enum RequirementLevel {
 }
 
 /// Test categories for organization and reporting.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// API-DRIFT REMEDIATION (bd-rjc2m.4): derive(...PartialEq, Eq...) -> derive(...PartialEq, Eq, PartialOrd, Ord...) (used as BTreeMap key).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TestCategory {
     AcceptanceCriteria,
     Invariants,
@@ -251,10 +252,14 @@ fn test_ac_1_shadow_evaluation_required() -> TestResult {
         knob: RuntimeKnob::ConcurrencyLimit,
         old_value: 64,
         new_value: 128,
-        predicted_metrics: PredictedMetrics {
-            latency_p99_ms: 100,
+        // API-DRIFT REMEDIATION (bd-rjc2m.4): predicted_metrics -> predicted; rationale +
+        // trace_id are new required OptimizationProposal fields.
+        rationale: "bd-21fo conformance proposal".to_string(),
+        trace_id: "bd-21fo-conformance-trace".to_string(),
+        predicted: PredictedMetrics {
+            latency_ms: 100,
             throughput_rps: 1000,
-            cpu_util_pct: 50,
+            error_rate_pct: 0.1, // API-DRIFT (bd-rjc2m.4): cpu_util_pct gone; healthy error rate (envelope max 1.0)
             memory_mb: 512,
         },
     };
@@ -306,10 +311,14 @@ fn test_ac_2_auto_reject_with_evidence() -> TestResult {
         knob: RuntimeKnob::ConcurrencyLimit,
         old_value: 64,
         new_value: u64::MAX, // Extreme value likely to breach safety envelope
-        predicted_metrics: PredictedMetrics {
-            latency_p99_ms: u64::MAX,
+        // API-DRIFT REMEDIATION (bd-rjc2m.4): predicted_metrics -> predicted; rationale +
+        // trace_id are new required OptimizationProposal fields.
+        rationale: "bd-21fo conformance proposal".to_string(),
+        trace_id: "bd-21fo-conformance-trace".to_string(),
+        predicted: PredictedMetrics {
+            latency_ms: u64::MAX,
             throughput_rps: 0,
-            cpu_util_pct: u64::MAX,
+            error_rate_pct: 100.0, // API-DRIFT (bd-rjc2m.4): extreme error rate (violates envelope max 1.0)
             memory_mb: u64::MAX,
         },
     };
@@ -402,10 +411,14 @@ fn test_inv_shadow_required() -> TestResult {
         knob: RuntimeKnob::BatchSize,
         old_value: 32,
         new_value: 64,
-        predicted_metrics: PredictedMetrics {
-            latency_p99_ms: 95,
+        // API-DRIFT REMEDIATION (bd-rjc2m.4): predicted_metrics -> predicted; rationale +
+        // trace_id are new required OptimizationProposal fields.
+        rationale: "bd-21fo conformance proposal".to_string(),
+        trace_id: "bd-21fo-conformance-trace".to_string(),
+        predicted: PredictedMetrics {
+            latency_ms: 95,
             throughput_rps: 1100,
-            cpu_util_pct: 45,
+            error_rate_pct: 0.1, // API-DRIFT (bd-rjc2m.4): healthy error rate
             memory_mb: 500,
         },
     };
@@ -440,10 +453,14 @@ fn test_inv_safety_envelope() -> TestResult {
             knob: RuntimeKnob::ConcurrencyLimit,
             old_value: 64,
             new_value: 128,
-            predicted_metrics: PredictedMetrics {
-                latency_p99_ms: 100,
+            // API-DRIFT REMEDIATION (bd-rjc2m.4): predicted_metrics -> predicted; rationale +
+            // trace_id are new required OptimizationProposal fields.
+            rationale: "bd-21fo conformance proposal".to_string(),
+            trace_id: "bd-21fo-conformance-trace".to_string(),
+            predicted: PredictedMetrics {
+                latency_ms: 100,
                 throughput_rps: 1000,
-                cpu_util_pct: 50,
+                error_rate_pct: 0.1, // API-DRIFT (bd-rjc2m.4): cpu_util_pct gone; healthy error rate (envelope max 1.0)
                 memory_mb: 512,
             },
         },
@@ -452,10 +469,14 @@ fn test_inv_safety_envelope() -> TestResult {
             knob: RuntimeKnob::ConcurrencyLimit,
             old_value: 64,
             new_value: u64::MAX, // Extreme value more likely to breach
-            predicted_metrics: PredictedMetrics {
-                latency_p99_ms: u64::MAX,
+            // API-DRIFT REMEDIATION (bd-rjc2m.4): predicted_metrics -> predicted; rationale +
+            // trace_id are new required OptimizationProposal fields.
+            rationale: "bd-21fo conformance proposal".to_string(),
+            trace_id: "bd-21fo-conformance-trace".to_string(),
+            predicted: PredictedMetrics {
+                latency_ms: u64::MAX,
                 throughput_rps: 0,
-                cpu_util_pct: u64::MAX,
+                error_rate_pct: 100.0, // API-DRIFT (bd-rjc2m.4): extreme error rate (violates envelope max 1.0)
                 memory_mb: u64::MAX,
             },
         },
@@ -495,9 +516,9 @@ fn test_inv_auto_revert() -> TestResult {
 
     // Test live_check functionality
     let live_metrics = PredictedMetrics {
-        latency_p99_ms: 1000,
+        latency_ms: 1000,
         throughput_rps: 100,
-        cpu_util_pct: 95,
+        error_rate_pct: 95.0, // API-DRIFT (bd-rjc2m.4): bad live metrics (violates envelope max 1.0)
         memory_mb: 8192,
     };
 
@@ -561,10 +582,14 @@ fn test_event_candidate_proposed() -> TestResult {
         knob: RuntimeKnob::CacheCapacity,
         old_value: 1024,
         new_value: 2048,
-        predicted_metrics: PredictedMetrics {
-            latency_p99_ms: 100,
+        // API-DRIFT REMEDIATION (bd-rjc2m.4): predicted_metrics -> predicted; rationale +
+        // trace_id are new required OptimizationProposal fields.
+        rationale: "bd-21fo conformance proposal".to_string(),
+        trace_id: "bd-21fo-conformance-trace".to_string(),
+        predicted: PredictedMetrics {
+            latency_ms: 100,
             throughput_rps: 1000,
-            cpu_util_pct: 50,
+            error_rate_pct: 0.1, // API-DRIFT (bd-rjc2m.4): cpu_util_pct gone; healthy error rate (envelope max 1.0)
             memory_mb: 512,
         },
     };
@@ -602,10 +627,14 @@ fn test_event_shadow_eval_start() -> TestResult {
         knob: RuntimeKnob::DrainTimeoutMs,
         old_value: 5000,
         new_value: 10000,
-        predicted_metrics: PredictedMetrics {
-            latency_p99_ms: 120,
+        // API-DRIFT REMEDIATION (bd-rjc2m.4): predicted_metrics -> predicted; rationale +
+        // trace_id are new required OptimizationProposal fields.
+        rationale: "bd-21fo conformance proposal".to_string(),
+        trace_id: "bd-21fo-conformance-trace".to_string(),
+        predicted: PredictedMetrics {
+            latency_ms: 120,
             throughput_rps: 900,
-            cpu_util_pct: 55,
+            error_rate_pct: 0.1, // API-DRIFT (bd-rjc2m.4): healthy error rate
             memory_mb: 600,
         },
     };
@@ -636,10 +665,14 @@ fn test_event_safety_check_pass() -> TestResult {
         knob: RuntimeKnob::BatchSize,
         old_value: 64,
         new_value: 96,
-        predicted_metrics: PredictedMetrics {
-            latency_p99_ms: 90,
+        // API-DRIFT REMEDIATION (bd-rjc2m.4): predicted_metrics -> predicted; rationale +
+        // trace_id are new required OptimizationProposal fields.
+        rationale: "bd-21fo conformance proposal".to_string(),
+        trace_id: "bd-21fo-conformance-trace".to_string(),
+        predicted: PredictedMetrics {
+            latency_ms: 90,
             throughput_rps: 1050,
-            cpu_util_pct: 48,
+            error_rate_pct: 0.1, // API-DRIFT (bd-rjc2m.4): healthy error rate
             memory_mb: 480,
         },
     };
@@ -672,10 +705,14 @@ fn test_event_policy_applied() -> TestResult {
         knob: RuntimeKnob::RetryBudget,
         old_value: 3,
         new_value: 5,
-        predicted_metrics: PredictedMetrics {
-            latency_p99_ms: 110,
+        // API-DRIFT REMEDIATION (bd-rjc2m.4): predicted_metrics -> predicted; rationale +
+        // trace_id are new required OptimizationProposal fields.
+        rationale: "bd-21fo conformance proposal".to_string(),
+        trace_id: "bd-21fo-conformance-trace".to_string(),
+        predicted: PredictedMetrics {
+            latency_ms: 110,
             throughput_rps: 950,
-            cpu_util_pct: 52,
+            error_rate_pct: 0.1, // API-DRIFT (bd-rjc2m.4): healthy error rate
             memory_mb: 520,
         },
     };
@@ -705,9 +742,9 @@ fn test_event_policy_reverted() -> TestResult {
 
     // Test revert event through live_check
     let metrics = PredictedMetrics {
-        latency_p99_ms: 2000,
+        latency_ms: 2000,
         throughput_rps: 50,
-        cpu_util_pct: 90,
+        error_rate_pct: 90.0, // API-DRIFT (bd-rjc2m.4): bad live metrics (violates envelope max 1.0)
         memory_mb: 4096,
     };
 
@@ -744,10 +781,14 @@ fn test_error_unsafe_candidate() -> TestResult {
         knob: RuntimeKnob::ConcurrencyLimit,
         old_value: 1,
         new_value: u64::MAX,
-        predicted_metrics: PredictedMetrics {
-            latency_p99_ms: u64::MAX,
+        // API-DRIFT REMEDIATION (bd-rjc2m.4): predicted_metrics -> predicted; rationale +
+        // trace_id are new required OptimizationProposal fields.
+        rationale: "bd-21fo conformance proposal".to_string(),
+        trace_id: "bd-21fo-conformance-trace".to_string(),
+        predicted: PredictedMetrics {
+            latency_ms: u64::MAX,
             throughput_rps: 0,
-            cpu_util_pct: u64::MAX,
+            error_rate_pct: 100.0, // API-DRIFT (bd-rjc2m.4): extreme error rate (violates envelope max 1.0)
             memory_mb: u64::MAX,
         },
     };
@@ -787,10 +828,14 @@ fn test_error_benefit_below_threshold() -> TestResult {
         knob: RuntimeKnob::BatchSize,
         old_value: 64,
         new_value: 64, // No change
-        predicted_metrics: PredictedMetrics {
-            latency_p99_ms: 100,
+        // API-DRIFT REMEDIATION (bd-rjc2m.4): predicted_metrics -> predicted; rationale +
+        // trace_id are new required OptimizationProposal fields.
+        rationale: "bd-21fo conformance proposal".to_string(),
+        trace_id: "bd-21fo-conformance-trace".to_string(),
+        predicted: PredictedMetrics {
+            latency_ms: 100,
             throughput_rps: 1000,
-            cpu_util_pct: 50,
+            error_rate_pct: 0.1, // API-DRIFT (bd-rjc2m.4): cpu_util_pct gone; healthy error rate (envelope max 1.0)
             memory_mb: 512,
         },
     };
@@ -860,10 +905,14 @@ fn test_edge_audit_capacity() -> TestResult {
             knob: RuntimeKnob::RetryBudget,
             old_value: i,
             new_value: i + 1,
-            predicted_metrics: PredictedMetrics {
-                latency_p99_ms: 100,
+            // API-DRIFT REMEDIATION (bd-rjc2m.4): predicted_metrics -> predicted; rationale +
+            // trace_id are new required OptimizationProposal fields.
+            rationale: "bd-21fo conformance proposal".to_string(),
+            trace_id: "bd-21fo-conformance-trace".to_string(),
+            predicted: PredictedMetrics {
+                latency_ms: 100,
                 throughput_rps: 1000,
-                cpu_util_pct: 50,
+                error_rate_pct: 0.1, // API-DRIFT (bd-rjc2m.4): cpu_util_pct gone; healthy error rate (envelope max 1.0)
                 memory_mb: 512,
             },
         };
@@ -892,10 +941,14 @@ fn test_edge_concurrent_submissions() -> TestResult {
         knob: RuntimeKnob::BatchSize,
         old_value: 32 + i,
         new_value: 64 + i,
-        predicted_metrics: PredictedMetrics {
-            latency_p99_ms: 100,
+        // API-DRIFT REMEDIATION (bd-rjc2m.4): predicted_metrics -> predicted; rationale +
+        // trace_id are new required OptimizationProposal fields.
+        rationale: "bd-21fo conformance proposal".to_string(),
+        trace_id: "bd-21fo-conformance-trace".to_string(),
+        predicted: PredictedMetrics {
+            latency_ms: 100,
             throughput_rps: 1000,
-            cpu_util_pct: 50,
+            error_rate_pct: 0.1, // API-DRIFT (bd-rjc2m.4): cpu_util_pct gone; healthy error rate (envelope max 1.0)
             memory_mb: 512,
         },
     });

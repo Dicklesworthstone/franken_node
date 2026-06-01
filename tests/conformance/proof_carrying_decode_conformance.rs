@@ -28,9 +28,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use frankenengine_node::repair::proof_carrying_decode::{
-    ProofCarryingDecoder, ProofMode, AlgorithmId, Fragment, RepairProof, VerificationResult,
-    DecodeResult, ProofCarryingDecodeError, ProofAuditEvent,
-    REPAIR_PROOF_EMITTED, REPAIR_PROOF_VERIFIED, REPAIR_PROOF_MISSING, REPAIR_PROOF_INVALID,
+    AlgorithmId, DecodeResult, Fragment, ProofAuditEvent, ProofCarryingDecodeError,
+    ProofCarryingDecoder, ProofMode, REPAIR_PROOF_EMITTED, REPAIR_PROOF_INVALID,
+    REPAIR_PROOF_MISSING, REPAIR_PROOF_VERIFIED, RepairProof, VerificationResult,
 };
 
 /// Test requirement levels from the bd-20uo specification.
@@ -42,7 +42,8 @@ pub enum RequirementLevel {
 }
 
 /// Test categories for organization and reporting.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// API-DRIFT REMEDIATION (bd-rjc2m.4): + PartialOrd, Ord (used as BTreeMap key).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TestCategory {
     Invariants,
     Modes,
@@ -107,7 +108,6 @@ pub const BD20UO_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "INV-REPAIR-PROOF-DETERMINISTIC: Same inputs produce identical proof structure",
         test_fn: test_inv_proof_deterministic,
     },
-
     // MUST Requirements: Mode Behavior
     ConformanceCase {
         id: "BD20UO-MODE-MANDATORY",
@@ -125,7 +125,6 @@ pub const BD20UO_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "ADVISORY mode: Missing proofs are logged as warnings but operation proceeds",
         test_fn: test_mode_advisory_warnings,
     },
-
     // SHOULD Requirements: Event Codes
     ConformanceCase {
         id: "BD20UO-EVENT-EMITTED",
@@ -159,7 +158,6 @@ pub const BD20UO_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "REPAIR_PROOF_INVALID event emitted for invalid proofs",
         test_fn: test_event_repair_proof_invalid,
     },
-
     // SHOULD Requirements: Error Codes
     ConformanceCase {
         id: "BD20UO-ERR-MISSING-MANDATORY",
@@ -193,7 +191,6 @@ pub const BD20UO_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "CAPACITY_EXCEEDED error for capacity limits",
         test_fn: test_error_capacity_exceeded,
     },
-
     // Edge Cases
     ConformanceCase {
         id: "BD20UO-EDGE-EMPTY-FRAGMENTS",
@@ -227,7 +224,6 @@ pub const BD20UO_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Multiple concurrent decode operations maintain consistency",
         test_fn: test_edge_concurrent_decode,
     },
-
     // Cryptography
     ConformanceCase {
         id: "BD20UO-CRYPTO-HASH-CONSISTENCY",
@@ -245,7 +241,6 @@ pub const BD20UO_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Signatures properly bind to payload content",
         test_fn: test_crypto_signature_binding,
     },
-
     // Capacity Management
     ConformanceCase {
         id: "BD20UO-CAPACITY-AUDIT-LOG",
@@ -281,12 +276,24 @@ fn test_inv_proof_complete() -> TestResult {
 
     // Create test fragments
     let fragments = vec![
-        Fragment { fragment_id: "frag1".to_string(), data: vec![1, 2, 3] },
-        Fragment { fragment_id: "frag2".to_string(), data: vec![4, 5, 6] },
+        Fragment {
+            fragment_id: "frag1".to_string(),
+            data: vec![1, 2, 3],
+        },
+        Fragment {
+            fragment_id: "frag2".to_string(),
+            data: vec![4, 5, 6],
+        },
     ];
 
     // Attempt decode
-    match decoder.decode("test-object", &fragments, &algorithm, 1234567890, "trace-001") {
+    match decoder.decode(
+        "test-object",
+        &fragments,
+        &algorithm,
+        1234567890,
+        "trace-001",
+    ) {
         Ok(result) => {
             // Must have a proof for successful decode
             if result.proof.is_none() {
@@ -315,8 +322,14 @@ fn test_inv_proof_binding() -> TestResult {
     }
 
     let fragments = vec![
-        Fragment { fragment_id: "frag1".to_string(), data: vec![1, 2, 3] },
-        Fragment { fragment_id: "frag2".to_string(), data: vec![4, 5, 6] },
+        Fragment {
+            fragment_id: "frag1".to_string(),
+            data: vec![1, 2, 3],
+        },
+        Fragment {
+            fragment_id: "frag2".to_string(),
+            data: vec![4, 5, 6],
+        },
     ];
 
     match decoder.decode("bind-test", &fragments, &algorithm, 1234567890, "trace-002") {
@@ -330,7 +343,8 @@ fn test_inv_proof_binding() -> TestResult {
                 }
 
                 // Verify proof has valid attestation
-                if proof.attestation.signer_id.is_empty() || proof.attestation.signature.is_empty() {
+                if proof.attestation.signer_id.is_empty() || proof.attestation.signature.is_empty()
+                {
                     return TestResult::Fail {
                         reason: "Proof attestation is incomplete".to_string(),
                     };
@@ -352,22 +366,30 @@ fn test_inv_proof_binding() -> TestResult {
         }
         Err(e) => TestResult::Fail {
             reason: format!("Decode failed: {:?}", e),
-        }
+        },
     }
 }
 
 /// INV-REPAIR-PROOF-DETERMINISTIC: Same inputs produce identical proof structure
 fn test_inv_proof_deterministic() -> TestResult {
-    let mut decoder1 = ProofCarryingDecoder::new(ProofMode::Mandatory, "test-signer", "test-secret");
-    let mut decoder2 = ProofCarryingDecoder::new(ProofMode::Mandatory, "test-signer", "test-secret");
+    let mut decoder1 =
+        ProofCarryingDecoder::new(ProofMode::Mandatory, "test-signer", "test-secret");
+    let mut decoder2 =
+        ProofCarryingDecoder::new(ProofMode::Mandatory, "test-signer", "test-secret");
 
     let algorithm = AlgorithmId::new("simple_concat");
     let _ = decoder1.register_algorithm(algorithm.clone());
     let _ = decoder2.register_algorithm(algorithm.clone());
 
     let fragments = vec![
-        Fragment { fragment_id: "frag1".to_string(), data: vec![1, 2, 3] },
-        Fragment { fragment_id: "frag2".to_string(), data: vec![4, 5, 6] },
+        Fragment {
+            fragment_id: "frag1".to_string(),
+            data: vec![1, 2, 3],
+        },
+        Fragment {
+            fragment_id: "frag2".to_string(),
+            data: vec![4, 5, 6],
+        },
     ];
 
     let timestamp = 1234567890;
@@ -380,12 +402,13 @@ fn test_inv_proof_deterministic() -> TestResult {
         (Ok(r1), Ok(r2)) => {
             if let (Some(proof1), Some(proof2)) = (r1.proof, r2.proof) {
                 // Compare key proof fields
-                if proof1.object_id != proof2.object_id ||
-                   proof1.input_fragment_hashes != proof2.input_fragment_hashes ||
-                   proof1.algorithm_id != proof2.algorithm_id ||
-                   proof1.output_hash != proof2.output_hash ||
-                   proof1.fragment_count != proof2.fragment_count ||
-                   proof1.timestamp_epoch_secs != proof2.timestamp_epoch_secs {
+                if proof1.object_id != proof2.object_id
+                    || proof1.input_fragment_hashes != proof2.input_fragment_hashes
+                    || proof1.algorithm_id != proof2.algorithm_id
+                    || proof1.output_hash != proof2.output_hash
+                    || proof1.fragment_count != proof2.fragment_count
+                    || proof1.timestamp_epoch_secs != proof2.timestamp_epoch_secs
+                {
                     return TestResult::Fail {
                         reason: "Identical inputs produced different proof structures".to_string(),
                     };
@@ -399,7 +422,7 @@ fn test_inv_proof_deterministic() -> TestResult {
         }
         _ => TestResult::Fail {
             reason: "Decode operations failed inconsistently".to_string(),
-        }
+        },
     }
 }
 
@@ -409,23 +432,30 @@ fn test_mode_mandatory_hard_errors() -> TestResult {
 
     // Try to decode with unknown algorithm (simulating missing proof scenario)
     let unknown_algorithm = AlgorithmId::new("unknown_algorithm");
-    let fragments = vec![
-        Fragment { fragment_id: "frag1".to_string(), data: vec![1, 2, 3] },
-    ];
+    let fragments = vec![Fragment {
+        fragment_id: "frag1".to_string(),
+        data: vec![1, 2, 3],
+    }];
 
-    match decoder.decode("mandatory-test", &fragments, &unknown_algorithm, 1234567890, "trace-003") {
+    match decoder.decode(
+        "mandatory-test",
+        &fragments,
+        &unknown_algorithm,
+        1234567890,
+        "trace-003",
+    ) {
         Ok(_) => TestResult::Fail {
             reason: "Mandatory mode should have failed with unknown algorithm".to_string(),
         },
         Err(err) => {
             // Should get a hard error
             match err {
-                ProofCarryingDecodeError::MissingProofInMandatoryMode { .. } |
-                ProofCarryingDecodeError::InvalidProof { .. } |
-                ProofCarryingDecodeError::ReconstructionFailed { .. } => TestResult::Pass,
+                ProofCarryingDecodeError::MissingProofInMandatoryMode { .. }
+                | ProofCarryingDecodeError::InvalidProof { .. }
+                | ProofCarryingDecodeError::ReconstructionFailed { .. } => TestResult::Pass,
                 _ => TestResult::Fail {
                     reason: format!("Expected hard error in mandatory mode, got: {:?}", err),
-                }
+                },
             }
         }
     }
@@ -443,13 +473,20 @@ fn test_mode_advisory_warnings() -> TestResult {
         };
     }
 
-    let fragments = vec![
-        Fragment { fragment_id: "frag1".to_string(), data: vec![1, 2, 3] },
-    ];
+    let fragments = vec![Fragment {
+        fragment_id: "frag1".to_string(),
+        data: vec![1, 2, 3],
+    }];
 
     let initial_audit_count = decoder.audit_log().len();
 
-    match decoder.decode("advisory-test", &fragments, &algorithm, 1234567890, "trace-004") {
+    match decoder.decode(
+        "advisory-test",
+        &fragments,
+        &algorithm,
+        1234567890,
+        "trace-004",
+    ) {
         Ok(_) => {
             // In advisory mode, operation should proceed even with issues
             // Check that audit log captured the advisory event
@@ -463,11 +500,14 @@ fn test_mode_advisory_warnings() -> TestResult {
         Err(err) => {
             // Some errors might still be hard errors even in advisory mode
             match err {
-                ProofCarryingDecodeError::ReconstructionFailed { .. } |
-                ProofCarryingDecodeError::CapacityExceeded { .. } => TestResult::Pass,
+                ProofCarryingDecodeError::ReconstructionFailed { .. }
+                | ProofCarryingDecodeError::CapacityExceeded { .. } => TestResult::Pass,
+                // API-DRIFT REMEDIATION (bd-rjc2m.4): missing comma between match arms — this
+                // pre-existing syntax error proves the harness never compiled.
                 ProofCarryingDecodeError::MissingProofInMandatoryMode { .. } => TestResult::Fail {
-                    reason: "Advisory mode should not fail with MissingProofInMandatoryMode".to_string(),
-                }
+                    reason: "Advisory mode should not fail with MissingProofInMandatoryMode"
+                        .to_string(),
+                },
                 _ => TestResult::Pass,
             }
         }
@@ -485,13 +525,20 @@ fn test_event_repair_proof_emitted() -> TestResult {
         };
     }
 
-    let fragments = vec![
-        Fragment { fragment_id: "frag1".to_string(), data: vec![1, 2, 3] },
-    ];
+    let fragments = vec![Fragment {
+        fragment_id: "frag1".to_string(),
+        data: vec![1, 2, 3],
+    }];
 
     let initial_audit_count = decoder.audit_log().len();
 
-    match decoder.decode("event-test", &fragments, &algorithm, 1234567890, "trace-005") {
+    match decoder.decode(
+        "event-test",
+        &fragments,
+        &algorithm,
+        1234567890,
+        "trace-005",
+    ) {
         Ok(_) => {
             // Check for REPAIR_PROOF_EMITTED event in audit log
             let emitted_events: Vec<_> = decoder.audit_log()[initial_audit_count..]
@@ -509,7 +556,7 @@ fn test_event_repair_proof_emitted() -> TestResult {
         }
         Err(_) => TestResult::Fail {
             reason: "Decode failed, cannot test REPAIR_PROOF_EMITTED event".to_string(),
-        }
+        },
     }
 }
 
@@ -620,12 +667,18 @@ fn test_edge_empty_fragments() -> TestResult {
 
     let empty_fragments = vec![];
 
-    match decoder.decode("empty-test", &empty_fragments, &algorithm, 1234567890, "trace-006") {
+    match decoder.decode(
+        "empty-test",
+        &empty_fragments,
+        &algorithm,
+        1234567890,
+        "trace-006",
+    ) {
         Ok(_) => TestResult::Pass, // Should handle gracefully
         Err(ProofCarryingDecodeError::ReconstructionFailed { .. }) => TestResult::Pass, // Expected error is acceptable
         Err(e) => TestResult::Fail {
             reason: format!("Unexpected error with empty fragments: {:?}", e),
-        }
+        },
     }
 }
 
@@ -638,16 +691,23 @@ fn test_edge_large_objects() -> TestResult {
 
     // Create a large fragment (but within reasonable bounds)
     let large_data = vec![0x42; 1_000_000];
-    let large_fragments = vec![
-        Fragment { fragment_id: "large-frag".to_string(), data: large_data },
-    ];
+    let large_fragments = vec![Fragment {
+        fragment_id: "large-frag".to_string(),
+        data: large_data,
+    }];
 
-    match decoder.decode("large-test", &large_fragments, &algorithm, 1234567890, "trace-007") {
+    match decoder.decode(
+        "large-test",
+        &large_fragments,
+        &algorithm,
+        1234567890,
+        "trace-007",
+    ) {
         Ok(_) => TestResult::Pass,
         Err(ProofCarryingDecodeError::CapacityExceeded { .. }) => TestResult::Pass, // Expected when hitting limits
         Err(e) => TestResult::Fail {
             reason: format!("Unexpected error with large objects: {:?}", e),
-        }
+        },
     }
 }
 
@@ -658,11 +718,18 @@ fn test_edge_unicode_ids() -> TestResult {
     let algorithm = AlgorithmId::new("simple_concat");
     let _ = decoder.register_algorithm(algorithm.clone());
 
-    let unicode_fragments = vec![
-        Fragment { fragment_id: "片段_αφ".to_string(), data: vec![1, 2, 3] },
-    ];
+    let unicode_fragments = vec![Fragment {
+        fragment_id: "片段_αφ".to_string(),
+        data: vec![1, 2, 3],
+    }];
 
-    match decoder.decode("对象_ὀβ", &unicode_fragments, &algorithm, 1234567890, "trace-008") {
+    match decoder.decode(
+        "对象_ὀβ",
+        &unicode_fragments,
+        &algorithm,
+        1234567890,
+        "trace-008",
+    ) {
         Ok(_) => TestResult::Pass,
         Err(ProofCarryingDecodeError::ReconstructionFailed { .. }) => {
             // May reject Unicode IDs - that's also conformant
@@ -670,7 +737,7 @@ fn test_edge_unicode_ids() -> TestResult {
         }
         Err(e) => TestResult::Fail {
             reason: format!("Unexpected error with Unicode IDs: {:?}", e),
-        }
+        },
     }
 }
 
@@ -686,11 +753,29 @@ fn test_edge_concurrent_decode() -> TestResult {
     let _ = decoder2.register_algorithm(algorithm.clone());
 
     // Simulate rapid sequential operations
-    let fragments1 = vec![Fragment { fragment_id: "frag1".to_string(), data: vec![1, 2, 3] }];
-    let fragments2 = vec![Fragment { fragment_id: "frag2".to_string(), data: vec![4, 5, 6] }];
+    let fragments1 = vec![Fragment {
+        fragment_id: "frag1".to_string(),
+        data: vec![1, 2, 3],
+    }];
+    let fragments2 = vec![Fragment {
+        fragment_id: "frag2".to_string(),
+        data: vec![4, 5, 6],
+    }];
 
-    let result1 = decoder1.decode("concurrent-1", &fragments1, &algorithm, 1234567890, "trace-009");
-    let result2 = decoder2.decode("concurrent-2", &fragments2, &algorithm, 1234567891, "trace-010");
+    let result1 = decoder1.decode(
+        "concurrent-1",
+        &fragments1,
+        &algorithm,
+        1234567890,
+        "trace-009",
+    );
+    let result2 = decoder2.decode(
+        "concurrent-2",
+        &fragments2,
+        &algorithm,
+        1234567891,
+        "trace-010",
+    );
 
     // Both operations should complete successfully or fail predictably
     match (result1, result2) {
@@ -705,8 +790,14 @@ fn test_edge_concurrent_decode() -> TestResult {
 /// Hash functions produce consistent and deterministic results
 fn test_crypto_hash_consistency() -> TestResult {
     // Test fragment hashing consistency
-    let fragment1 = Fragment { fragment_id: "test".to_string(), data: vec![1, 2, 3] };
-    let fragment2 = Fragment { fragment_id: "test".to_string(), data: vec![1, 2, 3] };
+    let fragment1 = Fragment {
+        fragment_id: "test".to_string(),
+        data: vec![1, 2, 3],
+    };
+    let fragment2 = Fragment {
+        fragment_id: "test".to_string(),
+        data: vec![1, 2, 3],
+    };
 
     let hash1 = fragment1.hash();
     let hash2 = fragment2.hash();
@@ -718,7 +809,10 @@ fn test_crypto_hash_consistency() -> TestResult {
     }
 
     // Test that different fragments produce different hashes
-    let fragment3 = Fragment { fragment_id: "test".to_string(), data: vec![1, 2, 4] };
+    let fragment3 = Fragment {
+        fragment_id: "test".to_string(),
+        data: vec![1, 2, 4],
+    };
     let hash3 = fragment3.hash();
 
     if hash1 == hash3 {
@@ -741,9 +835,10 @@ fn test_crypto_signature_binding() -> TestResult {
         };
     }
 
-    let fragments = vec![
-        Fragment { fragment_id: "frag1".to_string(), data: vec![1, 2, 3] },
-    ];
+    let fragments = vec![Fragment {
+        fragment_id: "frag1".to_string(),
+        data: vec![1, 2, 3],
+    }];
 
     match decoder.decode("sig-test", &fragments, &algorithm, 1234567890, "trace-011") {
         Ok(result) => {
@@ -771,7 +866,7 @@ fn test_crypto_signature_binding() -> TestResult {
         }
         Err(e) => TestResult::Fail {
             reason: format!("Decode failed for signature binding test: {:?}", e),
-        }
+        },
     }
 }
 
@@ -782,7 +877,7 @@ fn test_capacity_audit_log() -> TestResult {
         ProofMode::Advisory,
         "test-signer",
         "test-secret",
-        small_capacity
+        small_capacity,
     );
 
     let algorithm = AlgorithmId::new("simple_concat");
@@ -790,16 +885,27 @@ fn test_capacity_audit_log() -> TestResult {
 
     // Generate many operations to test audit log bounds
     for i in 0..20 {
-        let fragments = vec![
-            Fragment { fragment_id: format!("frag-{}", i), data: vec![i as u8] },
-        ];
-        let _ = decoder.decode(&format!("load-test-{}", i), &fragments, &algorithm, 1234567890, &format!("trace-{}", i));
+        let fragments = vec![Fragment {
+            fragment_id: format!("frag-{}", i),
+            data: vec![i as u8],
+        }];
+        let _ = decoder.decode(
+            &format!("load-test-{}", i),
+            &fragments,
+            &algorithm,
+            1234567890,
+            &format!("trace-{}", i),
+        );
     }
 
     // Check that audit log respects capacity
     if decoder.audit_log().len() > small_capacity {
         TestResult::Fail {
-            reason: format!("Audit log exceeded capacity: {} > {}", decoder.audit_log().len(), small_capacity),
+            reason: format!(
+                "Audit log exceeded capacity: {} > {}",
+                decoder.audit_log().len(),
+                small_capacity
+            ),
         }
     } else {
         TestResult::Pass
@@ -814,7 +920,8 @@ fn test_capacity_algorithm_registry() -> TestResult {
 
     // Try to register many algorithms
     let mut registered_count = 0;
-    for i in 0..5000 { // Try to exceed any reasonable limit
+    for i in 0..5000 {
+        // Try to exceed any reasonable limit
         match decoder.register_algorithm(AlgorithmId::new(format!("algo-{}", i))) {
             Ok(_) => registered_count += 1,
             Err(ProofCarryingDecodeError::CapacityExceeded { .. }) => {
@@ -874,16 +981,18 @@ pub fn run_bd20uo_conformance_tests() -> ConformanceReport {
         results.insert(case.id.to_string(), test_record);
 
         // Structured JSON output for CI parsing
-        println!("{{\"id\":\"{}\",\"verdict\":\"{:?}\",\"level\":\"{:?}\",\"duration_ms\":{}}}",
-                case.id,
-                match &results[case.id].result {
-                    TestResult::Pass => "PASS",
-                    TestResult::Fail { .. } => "FAIL",
-                    TestResult::Skipped { .. } => "SKIP",
-                    TestResult::ExpectedFailure { .. } => "XFAIL",
-                },
-                case.level,
-                duration.as_millis());
+        println!(
+            "{{\"id\":\"{}\",\"verdict\":\"{:?}\",\"level\":\"{:?}\",\"duration_ms\":{}}}",
+            case.id,
+            match &results[case.id].result {
+                TestResult::Pass => "PASS",
+                TestResult::Fail { .. } => "FAIL",
+                TestResult::Skipped { .. } => "SKIP",
+                TestResult::ExpectedFailure { .. } => "XFAIL",
+            },
+            case.level,
+            duration.as_millis()
+        );
     }
 
     ConformanceReport {
@@ -958,39 +1067,57 @@ impl ConformanceReport {
         let passing_tests = self.stats.must_pass + self.stats.should_pass + self.stats.may_pass;
         md.push_str(&format!("- **Total Tests**: {}\n", total_tests));
         md.push_str(&format!("- **Passing**: {}\n", passing_tests));
-        md.push_str(&format!("- **Compliance Score**: {:.1}%\n\n", self.compliance_score() * 100.0));
+        md.push_str(&format!(
+            "- **Compliance Score**: {:.1}%\n\n",
+            self.compliance_score() * 100.0
+        ));
 
         md.push_str("## Coverage by Requirement Level\n\n");
         md.push_str("| Level | Pass | Fail | Skip | XFAIL | Total | Score |\n");
         md.push_str("|-------|------|------|------|-------|-------|-------|\n");
 
         let must_total = self.stats.must_pass + self.stats.must_fail;
-        let must_score = if must_total == 0 { 100.0 } else {
+        let must_score = if must_total == 0 {
+            100.0
+        } else {
             (self.stats.must_pass as f64 / must_total as f64) * 100.0
         };
-        md.push_str(&format!("| MUST  | {} | {} | 0 | 0 | {} | {:.1}% |\n",
-                           self.stats.must_pass, self.stats.must_fail, must_total, must_score));
+        md.push_str(&format!(
+            "| MUST  | {} | {} | 0 | 0 | {} | {:.1}% |\n",
+            self.stats.must_pass, self.stats.must_fail, must_total, must_score
+        ));
 
         let should_total = self.stats.should_pass + self.stats.should_fail;
-        let should_score = if should_total == 0 { 100.0 } else {
+        let should_score = if should_total == 0 {
+            100.0
+        } else {
             (self.stats.should_pass as f64 / should_total as f64) * 100.0
         };
-        md.push_str(&format!("| SHOULD| {} | {} | 0 | 0 | {} | {:.1}% |\n",
-                           self.stats.should_pass, self.stats.should_fail, should_total, should_score));
+        md.push_str(&format!(
+            "| SHOULD| {} | {} | 0 | 0 | {} | {:.1}% |\n",
+            self.stats.should_pass, self.stats.should_fail, should_total, should_score
+        ));
 
         let may_total = self.stats.may_pass + self.stats.may_fail;
-        let may_score = if may_total == 0 { 100.0 } else {
+        let may_score = if may_total == 0 {
+            100.0
+        } else {
             (self.stats.may_pass as f64 / may_total as f64) * 100.0
         };
-        md.push_str(&format!("| MAY   | {} | {} | 0 | 0 | {} | {:.1}% |\n\n",
-                           self.stats.may_pass, self.stats.may_fail, may_total, may_score));
+        md.push_str(&format!(
+            "| MAY   | {} | {} | 0 | 0 | {} | {:.1}% |\n\n",
+            self.stats.may_pass, self.stats.may_fail, may_total, may_score
+        ));
 
         md.push_str("## Detailed Results\n\n");
 
         // Group by category
         let mut by_category: BTreeMap<TestCategory, Vec<&TestRecord>> = BTreeMap::new();
         for record in self.results.values() {
-            by_category.entry(record.category.clone()).or_default().push(record);
+            by_category
+                .entry(record.category.clone())
+                .or_default()
+                .push(record);
         }
 
         for (category, records) in by_category {
@@ -1005,8 +1132,10 @@ impl ConformanceReport {
                     TestResult::Skipped { .. } => "⏭️ SKIP",
                     TestResult::ExpectedFailure { .. } => "⏳ XFAIL",
                 };
-                md.push_str(&format!("| {} | {} | {:?} | {} |\n",
-                                   record.id, record.description, record.level, result_str));
+                md.push_str(&format!(
+                    "| {} | {} | {:?} | {} |\n",
+                    record.id, record.description, record.level, result_str
+                ));
             }
             md.push_str("\n");
         }
@@ -1015,10 +1144,14 @@ impl ConformanceReport {
         if self.compliance_score() >= 0.95 {
             md.push_str("**✅ CONFORMANT** - Meets bd-20uo specification requirements.\n\n");
         } else {
-            md.push_str("**❌ NON-CONFORMANT** - Does not meet bd-20uo specification requirements.\n\n");
+            md.push_str(
+                "**❌ NON-CONFORMANT** - Does not meet bd-20uo specification requirements.\n\n",
+            );
             md.push_str("### Failed MUST Requirements\n\n");
             for record in self.results.values() {
-                if let (RequirementLevel::Must, TestResult::Fail { reason }) = (record.level, &record.result) {
+                if let (RequirementLevel::Must, TestResult::Fail { reason }) =
+                    (record.level, &record.result)
+                {
                     md.push_str(&format!("- **{}**: {}\n", record.id, reason));
                 }
             }

@@ -6,8 +6,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+// API-DRIFT REDESIGN (bd-rjc2m.4): added SystemState import -> GuardrailMonitor::check now takes &SystemState. New trait signature requires the state snapshot type.
 use frankenengine_node::policy::guardrail_monitor::{
-    BudgetId, GuardrailMonitor, GuardrailMonitorSet, GuardrailVerdict, event_codes,
+    BudgetId, GuardrailMonitor, GuardrailMonitorSet, GuardrailVerdict, SystemState, event_codes,
 };
 use frankenengine_node::policy::hardening_state_machine::{HardeningLevel, HardeningStateMachine};
 
@@ -135,6 +136,8 @@ impl ConformanceReport {
 }
 
 // Mock guardrail monitor for testing
+// API-DRIFT REDESIGN (bd-rjc2m.4): added #[derive(Debug)] -> GuardrailMonitor now requires fmt::Debug supertrait.
+#[derive(Debug)]
 struct TestMonitor {
     budget_id: BudgetId,
     threshold: f64,
@@ -149,6 +152,36 @@ impl TestMonitor {
             name: format!("test_monitor_{}", budget_id),
         }
     }
+
+    // API-DRIFT REDESIGN (bd-rjc2m.4): reconfigure_threshold moved out of `impl GuardrailMonitor`
+    // into an inherent impl -> reconfigure_threshold is no longer a trait method (E0407). Preserves
+    // the test's ability to reconfigure thresholds.
+    fn reconfigure_threshold(&mut self, new_threshold: f64) -> bool {
+        if new_threshold > 0.0 {
+            self.threshold = new_threshold;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Build a SystemState whose memory utilization (in percent) equals `value_pct`,
+/// preserving the old test's "check(value, level)" semantics on the new API.
+// API-DRIFT REDESIGN (bd-rjc2m.4): new helper -> check() input changed from (f64 value, HardeningLevel)
+// to &SystemState. Maps the old numeric "value" onto memory utilization percent of a 1GB budget.
+fn state_with_value(value_pct: f64, hardening_level: HardeningLevel) -> SystemState {
+    SystemState {
+        memory_used_bytes: (value_pct * 10_000_000.0) as u64, // value% of a 1GB budget
+        memory_budget_bytes: 1_000_000_000,
+        durability_level: 0.99,
+        hardening_level,
+        proposed_hardening_level: None,
+        evidence_emission_active: true,
+        memory_tail_risk: None,
+        reliability_telemetry: None,
+        epoch_id: 1,
+    }
 }
 
 impl GuardrailMonitor for TestMonitor {
@@ -160,7 +193,10 @@ impl GuardrailMonitor for TestMonitor {
         &self.budget_id
     }
 
-    fn check(&self, value: f64, _hardening_level: HardeningLevel) -> GuardrailVerdict {
+    // API-DRIFT REDESIGN (bd-rjc2m.4): check(value, level) -> check(&SystemState). Derive the old
+    // numeric `value` from state.memory_utilization()*100.0, then apply identical threshold logic.
+    fn check(&self, state: &SystemState) -> GuardrailVerdict {
+        let value = state.memory_utilization() * 100.0;
         if value > self.threshold {
             GuardrailVerdict::Block {
                 reason: format!("Value {} exceeds threshold {}", value, self.threshold),
@@ -172,15 +208,6 @@ impl GuardrailMonitor for TestMonitor {
             }
         } else {
             GuardrailVerdict::Allow
-        }
-    }
-
-    fn reconfigure_threshold(&mut self, new_threshold: f64) -> bool {
-        if new_threshold > 0.0 {
-            self.threshold = new_threshold;
-            true
-        } else {
-            false
         }
     }
 }
@@ -201,11 +228,12 @@ fn test_case_3a3q_inv_1() -> ConformanceRecord {
         let monitor = TestMonitor::new("memory_budget", 100.0);
 
         // Test that monitor produces valid verdict at any point
+        // API-DRIFT REDESIGN (bd-rjc2m.4): check(value, level) -> check(&state_with_value(value, level)); Minimal -> Baseline, Maximal -> Maximum. Boundary semantics preserved (50<80 allow, 85>80 warn, 150>100 block, 0 allow).
         let verdicts = vec![
-            monitor.check(50.0, HardeningLevel::Minimal),
-            monitor.check(85.0, HardeningLevel::Standard), // Should warn
-            monitor.check(150.0, HardeningLevel::Maximal), // Should block
-            monitor.check(0.0, HardeningLevel::Minimal),   // Should allow
+            monitor.check(&state_with_value(50.0, HardeningLevel::Baseline)),
+            monitor.check(&state_with_value(85.0, HardeningLevel::Standard)), // Should warn
+            monitor.check(&state_with_value(150.0, HardeningLevel::Maximum)), // Should block
+            monitor.check(&state_with_value(0.0, HardeningLevel::Baseline)),  // Should allow
         ];
 
         // Verify all verdicts are valid (no panics, proper enum values)
@@ -259,13 +287,16 @@ fn test_case_3a3q_inv_2() -> ConformanceRecord {
     match std::panic::catch_unwind(|| {
         let monitor = TestMonitor::new("cpu_budget", 75.0);
         let mut monitor_set = GuardrailMonitorSet::new();
-        monitor_set.add_monitor(Box::new(monitor));
+        // API-DRIFT REDESIGN (bd-rjc2m.4): add_monitor(Box::new(m)) -> register(Box::new(m)). Method renamed.
+        monitor_set.register(Box::new(monitor));
 
         // Simulate Bayesian engine recommending action, but guardrail should block
-        let bayesian_recommendation = "PROCEED_WITH_OPTIMIZATION";
+        let _bayesian_recommendation = "PROCEED_WITH_OPTIMIZATION";
         let actual_value = 100.0; // Exceeds threshold of 75.0
 
-        let verdict = monitor_set.check_all(actual_value, HardeningLevel::Standard);
+        // API-DRIFT REDESIGN (bd-rjc2m.4): check_all(value, level) -> check_all(&state_with_value(value, level)). 100 > 75 still blocks.
+        let verdict =
+            monitor_set.check_all(&state_with_value(actual_value, HardeningLevel::Standard));
 
         // Guardrail should block regardless of Bayesian recommendation
         assert!(
@@ -317,14 +348,17 @@ fn test_case_3a3q_inv_3() -> ConformanceRecord {
         let monitor3 = TestMonitor::new("network_budget", 120.0);
 
         let mut monitor_set = GuardrailMonitorSet::new();
-        monitor_set.add_monitor(Box::new(monitor1));
-        monitor_set.add_monitor(Box::new(monitor2));
-        monitor_set.add_monitor(Box::new(monitor3));
+        // API-DRIFT REDESIGN (bd-rjc2m.4): add_monitor(Box::new(m)) -> register(Box::new(m)). Method renamed.
+        monitor_set.register(Box::new(monitor1));
+        monitor_set.register(Box::new(monitor2));
+        monitor_set.register(Box::new(monitor3));
 
         // Test value that should trigger different verdicts from different monitors
         let test_value = 90.0; // Should block cpu (>80), warn memory (>80), allow network (<120)
 
-        let verdict = monitor_set.check_all(test_value, HardeningLevel::Standard);
+        // API-DRIFT REDESIGN (bd-rjc2m.4): check_all(value, level) -> check_all(&state_with_value(value, level)). 90>80 (cpu) blocks; most-restrictive still Block.
+        let verdict =
+            monitor_set.check_all(&state_with_value(test_value, HardeningLevel::Standard));
 
         // Should return Block (most restrictive) even though others would allow/warn
         assert!(
@@ -382,8 +416,9 @@ fn test_case_3a3q_inv_4() -> ConformanceRecord {
         assert_eq!(monitor.threshold, 75.0, "Threshold should be updated");
 
         // Test that new threshold is actually used
-        let verdict_below = monitor.check(60.0, HardeningLevel::Standard);
-        let verdict_above = monitor.check(80.0, HardeningLevel::Standard);
+        // API-DRIFT REDESIGN (bd-rjc2m.4): check(value, level) -> check(&state_with_value(value, level)). With threshold 75: 60<75 allow, 80>75 block.
+        let verdict_below = monitor.check(&state_with_value(60.0, HardeningLevel::Standard));
+        let verdict_above = monitor.check(&state_with_value(80.0, HardeningLevel::Standard));
 
         assert_eq!(
             verdict_below,
@@ -426,7 +461,8 @@ fn test_case_3a3q_evt_1() -> ConformanceRecord {
 
     match std::panic::catch_unwind(|| {
         let monitor = TestMonitor::new("test_budget", 100.0);
-        let verdict = monitor.check(50.0, HardeningLevel::Standard);
+        // API-DRIFT REDESIGN (bd-rjc2m.4): check(value, level) -> check(&state_with_value(value, level)). 50 < 80 still Allow.
+        let verdict = monitor.check(&state_with_value(50.0, HardeningLevel::Standard));
 
         assert_eq!(
             verdict,
@@ -468,7 +504,8 @@ fn test_case_3a3q_evt_2() -> ConformanceRecord {
 
     match std::panic::catch_unwind(|| {
         let monitor = TestMonitor::new("test_budget", 100.0);
-        let verdict = monitor.check(150.0, HardeningLevel::Standard);
+        // API-DRIFT REDESIGN (bd-rjc2m.4): check(value, level) -> check(&state_with_value(value, level)). 150 > 100 still Block.
+        let verdict = monitor.check(&state_with_value(150.0, HardeningLevel::Standard));
 
         assert!(
             matches!(verdict, GuardrailVerdict::Block { .. }),
@@ -519,7 +556,8 @@ fn test_case_3a3q_evt_3() -> ConformanceRecord {
 
     match std::panic::catch_unwind(|| {
         let monitor = TestMonitor::new("test_budget", 100.0);
-        let verdict = monitor.check(85.0, HardeningLevel::Standard); // 85 > 80 (80% of 100)
+        // API-DRIFT REDESIGN (bd-rjc2m.4): check(value, level) -> check(&state_with_value(value, level)). 85 > 80 (80% of 100) still Warn.
+        let verdict = monitor.check(&state_with_value(85.0, HardeningLevel::Standard)); // 85 > 80 (80% of 100)
 
         assert!(
             matches!(verdict, GuardrailVerdict::Warn { .. }),
@@ -591,7 +629,8 @@ fn test_case_3a3q_budget_1() -> ConformanceRecord {
         );
 
         // Test budget ID in Block verdict
-        let verdict = monitor.check(150.0, HardeningLevel::Standard);
+        // API-DRIFT REDESIGN (bd-rjc2m.4): check(value, level) -> check(&state_with_value(value, level)). 150 > 100 still Block.
+        let verdict = monitor.check(&state_with_value(150.0, HardeningLevel::Standard));
         if let GuardrailVerdict::Block {
             budget_id: verdict_budget_id,
             ..
@@ -630,9 +669,10 @@ fn test_case_3a3q_hardening_1() -> ConformanceRecord {
         let monitor = TestMonitor::new("test_budget", 100.0);
 
         // Test that monitor accepts hardening level parameter
-        let verdict_minimal = monitor.check(80.0, HardeningLevel::Minimal);
-        let verdict_standard = monitor.check(80.0, HardeningLevel::Standard);
-        let verdict_maximal = monitor.check(80.0, HardeningLevel::Maximal);
+        // API-DRIFT REDESIGN (bd-rjc2m.4): check(value, level) -> check(&state_with_value(value, level)); Minimal -> Baseline, Maximal -> Maximum. Verdict is identical across all three levels (TestMonitor ignores hardening level), exactly matching the old test's "interface accepts the parameter" intent; remapping does not alter the value-derived verdict.
+        let verdict_minimal = monitor.check(&state_with_value(80.0, HardeningLevel::Baseline));
+        let verdict_standard = monitor.check(&state_with_value(80.0, HardeningLevel::Standard));
+        let verdict_maximal = monitor.check(&state_with_value(80.0, HardeningLevel::Maximum));
 
         // All should produce same result for our test monitor (it doesn't use hardening level)
         // But the interface should accept the parameter
@@ -641,8 +681,9 @@ fn test_case_3a3q_hardening_1() -> ConformanceRecord {
         assert!(matches!(verdict_maximal, GuardrailVerdict::Warn { .. }));
 
         // Verify hardening levels have proper ordering
-        assert!((HardeningLevel::Minimal as u8) < (HardeningLevel::Standard as u8));
-        assert!((HardeningLevel::Standard as u8) < (HardeningLevel::Maximal as u8));
+        // API-DRIFT REDESIGN (bd-rjc2m.4): Minimal -> Baseline, Maximal -> Maximum. Ordering Baseline < Standard < Maximum preserved by the new 5-variant enum.
+        assert!((HardeningLevel::Baseline as u8) < (HardeningLevel::Standard as u8));
+        assert!((HardeningLevel::Standard as u8) < (HardeningLevel::Maximum as u8));
     }) {
         Ok(()) => {}
         Err(_) => {

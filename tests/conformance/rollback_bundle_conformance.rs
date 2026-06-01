@@ -254,20 +254,14 @@ fn test_must_r_rrb_002() -> TestResult {
 
     // Create state snapshots representing before and after rollback
     let initial_state = StateSnapshot {
-        config_checksums: BTreeMap::from([(
-            "config.toml".to_string(),
-            sha256_hex(&original_data),
-        )]),
+        config_checksums: BTreeMap::from([("config.toml".to_string(), sha256_hex(&original_data))]),
         schema_version: "1.0.0".to_string(),
         policy_set: "default".to_string(),
         binary_version: "1.0.0".to_string(),
     };
 
     let rollback_state = StateSnapshot {
-        config_checksums: BTreeMap::from([(
-            "config.toml".to_string(),
-            sha256_hex(&rollback_data),
-        )]),
+        config_checksums: BTreeMap::from([("config.toml".to_string(), sha256_hex(&rollback_data))]),
         schema_version: "0.9.0".to_string(),
         policy_set: "default".to_string(),
         binary_version: "0.9.0".to_string(),
