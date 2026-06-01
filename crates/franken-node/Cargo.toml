@@ -1373,7 +1373,9 @@ required-features = ["advanced-features"]
 [[test]]
 name = "bd_137_policy_compatibility_gate_conformance"
 path = "../../tests/conformance/bd_137_policy_compatibility_gate_conformance.rs"
-required-features = ["advanced-features"]
+# test-support: the exhaustion cases use CompatGateService::force_*_id_exhaustion()
+# (test-gated accessors; bd-rjc2m.4 API-drift remediation)
+required-features = ["advanced-features", "test-support"]
 
 [[test]]
 name = "bd_ncwlf_hot_path_budget_smoke_conformance"

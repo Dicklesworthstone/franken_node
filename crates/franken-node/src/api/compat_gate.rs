@@ -469,6 +469,26 @@ impl CompatGateService {
         Ok((trace_id, receipt_id))
     }
 
+    /// Test-support: force the trace ID space into the exhausted state so external
+    /// conformance harnesses can exercise the fail-closed exhaustion path
+    /// (`ERR_COMPAT_TRACE_ID_EXHAUSTED`) without private-field access. Compiled out of
+    /// production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn force_trace_id_exhaustion(&mut self) {
+        self.trace_counter = u64::MAX;
+        self.trace_epoch = u64::MAX;
+    }
+
+    /// Test-support: force the receipt ID space into the exhausted state so external
+    /// conformance harnesses can exercise the fail-closed exhaustion path
+    /// (`ERR_COMPAT_RECEIPT_ID_EXHAUSTED`) without private-field access. Compiled out of
+    /// production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn force_receipt_id_exhaustion(&mut self) {
+        self.receipt_counter = u64::MAX;
+        self.receipt_epoch = u64::MAX;
+    }
+
     /// Register a compatibility shim.
     ///
     /// Returns an error instead of evicting an active shim when the registry is full.

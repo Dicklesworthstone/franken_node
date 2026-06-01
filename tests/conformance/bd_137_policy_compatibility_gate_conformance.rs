@@ -28,7 +28,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::api::compat_gate::{
+// API-DRIFT REMEDIATION (bd-rjc2m.4): this harness was written as an inline module
+// (`crate::` paths); as a registered [[test]] integration target it must import through
+// the library crate (renamed franken_node -> frankenengine_node). All imported items
+// exist unchanged in api::compat_gate. See docs/specs/API_DRIFT_REMEDIATION.md.
+use frankenengine_node::api::compat_gate::{
     CompatGateOperationError, CompatGateRegistrationError, CompatGateService, CompatMode,
     GateCheckRequest, GateDecision, INV_PCG_AUDITABLE, INV_PCG_RECEIPT, INV_PCG_TRANSITION,
     INV_PCG_VISIBLE, ModeTransitionRequest, PolicyPredicate, ShimMetadata, error_codes,
@@ -51,7 +55,10 @@ pub enum TestResult {
     ExpectedFailure { reason: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// API-DRIFT REMEDIATION (bd-rjc2m.4): fn-pointer fields cannot derive Serialize/Deserialize
+// (E0277); the case table is compile-time only and never serialized — the serializable
+// surface is ConformanceRecord/ConformanceReport below (assertions unchanged).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConformanceCase {
     pub id: &'static str,
     pub section: &'static str,
@@ -621,7 +628,7 @@ fn test_error_shim_capacity_exceeded() -> TestResult {
     let mut service = create_test_service();
 
     // Fill shim capacity
-    for i in 0..crate::capacity_defaults::aliases::MAX_SHIMS {
+    for i in 0..frankenengine_node::capacity_defaults::aliases::MAX_SHIMS {
         let shim = ShimMetadata {
             shim_id: format!("shim-{}", i),
             description: "test shim".to_string(),
@@ -668,7 +675,7 @@ fn test_error_predicate_capacity_exceeded() -> TestResult {
     let mut service = create_test_service();
 
     // Fill predicate capacity
-    for i in 0..crate::capacity_defaults::aliases::MAX_PREDICATES {
+    for i in 0..frankenengine_node::capacity_defaults::aliases::MAX_PREDICATES {
         let predicate = PolicyPredicate {
             predicate_id: format!("predicate-{}", i),
             signature: "sig".to_string(),
@@ -703,7 +710,7 @@ fn test_error_scope_capacity_exceeded() -> TestResult {
     let mut service = create_test_service();
 
     // Fill scope capacity through direct insertion
-    for i in 0..crate::capacity_defaults::aliases::MAX_ENTRIES {
+    for i in 0..frankenengine_node::capacity_defaults::aliases::MAX_ENTRIES {
         if service
             .set_scope_mode(&format!("scope-{}", i), CompatMode::Strict)
             .is_err()
@@ -725,8 +732,9 @@ fn test_error_trace_id_exhausted() -> TestResult {
     let mut service = create_test_service();
 
     // Set up trace ID exhaustion scenario
-    service.trace_counter = u64::MAX;
-    service.trace_epoch = u64::MAX;
+    // API-DRIFT REMEDIATION (bd-rjc2m.4): direct private-field writes (only possible when
+    // this harness lived inside the module) -> test-support accessor.
+    service.force_trace_id_exhaustion();
 
     let request = GateCheckRequest {
         package_id: "exhaustion-test".to_string(),
@@ -747,8 +755,9 @@ fn test_error_receipt_id_exhausted() -> TestResult {
     let mut service = create_test_service();
 
     // Set up receipt ID exhaustion scenario
-    service.receipt_counter = u64::MAX;
-    service.receipt_epoch = u64::MAX;
+    // API-DRIFT REMEDIATION (bd-rjc2m.4): direct private-field writes (only possible when
+    // this harness lived inside the module) -> test-support accessor.
+    service.force_receipt_id_exhaustion();
 
     let request = GateCheckRequest {
         package_id: "receipt-exhaustion".to_string(),
