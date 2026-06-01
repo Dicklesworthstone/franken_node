@@ -187,7 +187,14 @@ impl ResourceDiskPressureRoot {
         if total == 0 {
             return None;
         }
-        Some(self.free_bytes?.saturating_mul(10_000) / total)
+        let free = self.free_bytes?;
+        // Fail closed on corrupted telemetry: free space exceeding total capacity is
+        // impossible, so the sample cannot be trusted (bd-rjc2m.4 / MUST-RG-003 finding:
+        // this previously computed >100% free => Green on corrupted data).
+        if free > total {
+            return None;
+        }
+        Some(free.saturating_mul(10_000) / total)
     }
 
     pub fn pressure_tier(&self) -> ResourcePressureTier {
@@ -1840,7 +1847,15 @@ fn classify_validation_process(command: &str) -> Option<ResourceProcessKind> {
         Some(ResourceProcessKind::Rch)
     } else if normalized.contains("cargo") {
         Some(ResourceProcessKind::Cargo)
-    } else if normalized.contains("validation") || normalized.contains("proof") {
+    } else if normalized.contains("validation")
+        || normalized.contains("proof")
+        // bd-rjc2m.4 / MUST-RG-002: toolchain validation workloads (clippy, miri,
+        // rust-analyzer) consume the same build resources and must be counted by the
+        // governor; previously unclassified => invisible to contention decisions.
+        || normalized.contains("clippy")
+        || normalized.contains("miri")
+        || normalized.contains("rust-analyzer")
+    {
         Some(ResourceProcessKind::OtherValidation)
     } else {
         None
