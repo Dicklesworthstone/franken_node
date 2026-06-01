@@ -416,3 +416,71 @@ fn runtime_oracle_quorum_uses_integer_ceiling() {
     assert_eq!(majority_result.quorum_threshold, 2);
     assert!(majority_result.quorum_reached);
 }
+
+// ── K-9 (EngineIdentity) oracle self-comparison guard (gauntlet bd-rjc2m.K9 / H-002) ──
+// Placed in this WIRED integration target because the crate's inline `#[cfg(test)]` tests do
+// not run ([lib] test = false). These exercise the public register_runtime / executor_fingerprint
+// guards that prevent one executor faking byte-identical "agreement" with itself.
+
+fn k9_entry(id: &str, name: &str, version: &str, is_ref: bool) -> RuntimeEntry {
+    RuntimeEntry {
+        runtime_id: id.to_string(),
+        runtime_name: name.to_string(),
+        version: version.to_string(),
+        is_reference: is_ref,
+    }
+}
+
+#[test]
+fn k9_register_rejects_same_executor_under_two_ids() {
+    use frankenengine_node::runtime::nversion_oracle::error_codes;
+    let mut oracle = RuntimeOracle::new("k9-collision", 100);
+    oracle
+        .register_runtime(k9_entry("node", "node", "20.0", true))
+        .expect("first registration ok");
+    // Same (name, version) under a DIFFERENT runtime_id == same executor -> must be rejected.
+    let err = oracle
+        .register_runtime(k9_entry("node-copy", "node", "20.0", true))
+        .expect_err("same executor under a second id must be rejected (K-9)");
+    assert_eq!(err.code, error_codes::ERR_NVO_FINGERPRINT_COLLISION);
+    assert_eq!(oracle.runtime_count(), 1, "collision must not be registered");
+}
+
+#[test]
+fn k9_register_allows_genuinely_distinct_runtimes() {
+    let mut oracle = RuntimeOracle::new("k9-distinct", 100);
+    oracle
+        .register_runtime(k9_entry("node", "node", "20.0", true))
+        .expect("node");
+    oracle
+        .register_runtime(k9_entry("bun", "bun", "1.3", true))
+        .expect("bun");
+    oracle
+        .register_runtime(k9_entry("franken", "franken-node", "0.1", false))
+        .expect("franken");
+    assert_eq!(oracle.runtime_count(), 3);
+}
+
+#[test]
+fn k9_duplicate_id_precedence_and_fingerprint_helpers() {
+    use frankenengine_node::runtime::nversion_oracle::error_codes;
+    let mut oracle = RuntimeOracle::new("k9-dup", 100);
+    oracle
+        .register_runtime(k9_entry("node", "node", "20.0", true))
+        .expect("first");
+    // Same id, different name -> duplicate-id check fires first (not the fingerprint check).
+    let err = oracle
+        .register_runtime(k9_entry("node", "other", "99", false))
+        .expect_err("duplicate id");
+    assert_eq!(err.code, error_codes::ERR_NVO_DUPLICATE_RUNTIME);
+    // executor_fingerprint: equal for same (name,version); distinct otherwise; length-prefixed.
+    let a = k9_entry("a", "node", "20.0", true);
+    let b = k9_entry("b", "node", "20.0", false);
+    let c = k9_entry("c", "bun", "1.3", true);
+    assert_eq!(a.executor_fingerprint(), b.executor_fingerprint());
+    assert_ne!(a.executor_fingerprint(), c.executor_fingerprint());
+    assert_ne!(
+        k9_entry("x", "ab", "c", true).executor_fingerprint(),
+        k9_entry("y", "a", "bc", true).executor_fingerprint()
+    );
+}

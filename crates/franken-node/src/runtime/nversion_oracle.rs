@@ -78,6 +78,13 @@ pub mod error_codes {
     pub const ERR_NVO_L1_LINKAGE_BROKEN: &str = "ERR_NVO_L1_LINKAGE_BROKEN";
     pub const ERR_NVO_VOTING_TIMEOUT: &str = "ERR_NVO_VOTING_TIMEOUT";
     pub const ERR_NVO_DUPLICATE_RUNTIME: &str = "ERR_NVO_DUPLICATE_RUNTIME";
+    /// K-9 (EngineIdentity): two DISTINCT runtime_ids resolve to the SAME executor
+    /// fingerprint — registering both would let one executor fake byte-identical
+    /// "agreement" with itself. Rejected at registration. (gauntlet bd-rjc2m.K9 / H-002)
+    pub const ERR_NVO_FINGERPRINT_COLLISION: &str = "ERR_NVO_FINGERPRINT_COLLISION";
+    /// A cross-check whose registered runtimes all share one executor fingerprint is a
+    /// degenerate self-comparison; a meaningful n-version check needs >=2 distinct executors.
+    pub const ERR_NVO_DEGENERATE_PARTITION: &str = "ERR_NVO_DEGENERATE_PARTITION";
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +206,28 @@ pub struct RuntimeEntry {
     pub runtime_name: String,
     pub version: String,
     pub is_reference: bool,
+}
+
+impl RuntimeEntry {
+    /// K-9 (EngineIdentity) executor fingerprint: a stable signal for "is this the SAME
+    /// executor?". Two registrations sharing this fingerprint under different `runtime_id`s
+    /// would permit fake self-agreement (one executor byte-identically "agreeing" with itself).
+    ///
+    /// Derived from `(runtime_name, version)` — the strongest "same binary" signal available
+    /// without a real executable digest. When an executable hash is plumbed through, compute it
+    /// here instead; the registration-time collision check (see `register_runtime`) is the
+    /// load-bearing guard and is independent of how the fingerprint is derived.
+    #[must_use]
+    pub fn executor_fingerprint(&self) -> String {
+        // Domain-separated + length-prefixed so distinct (name, version) pairs cannot collide.
+        format!(
+            "nvo_executor_fingerprint_v1:{}:{}:{}:{}",
+            self.runtime_name.len(),
+            self.runtime_name,
+            self.version.len(),
+            self.version
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +514,23 @@ impl RuntimeOracle {
                 message: format!("runtime '{}' already registered", entry.runtime_id),
             });
         }
+        // K-9 (EngineIdentity) guard: reject a DISTINCT runtime_id that resolves to the SAME
+        // executor fingerprint as an already-registered runtime. Without this, the same executor
+        // registered under two ids would emit byte-identical outputs and fake "agreement".
+        let fingerprint = entry.executor_fingerprint();
+        if let Some(existing) = self
+            .runtimes
+            .values()
+            .find(|r| r.executor_fingerprint() == fingerprint)
+        {
+            return Err(OracleError {
+                code: error_codes::ERR_NVO_FINGERPRINT_COLLISION,
+                message: format!(
+                    "runtime '{}' shares an executor fingerprint with already-registered '{}' (same name+version); refusing to allow self-comparison",
+                    entry.runtime_id, existing.runtime_id
+                ),
+            });
+        }
         let id = entry.runtime_id.clone();
         self.runtimes.insert(id.clone(), entry);
         let mut details = BTreeMap::new();
@@ -523,6 +569,24 @@ impl RuntimeOracle {
                 code: error_codes::ERR_NVO_NO_RUNTIMES,
                 message: "no runtimes registered".to_string(),
             });
+        }
+        // K-9 (EngineIdentity) guard: a cross-check across >=2 runtimes MUST span >=2 DISTINCT
+        // executor fingerprints, else every "agreement" is one executor agreeing with itself.
+        // (Defense-in-depth: register_runtime already prevents same-fingerprint registration.)
+        if self.runtimes.len() >= 2 {
+            let distinct_fingerprints: std::collections::BTreeSet<String> = self
+                .runtimes
+                .values()
+                .map(RuntimeEntry::executor_fingerprint)
+                .collect();
+            if distinct_fingerprints.len() < 2 {
+                return Err(OracleError {
+                    code: error_codes::ERR_NVO_DEGENERATE_PARTITION,
+                    message:
+                        "all registered runtimes share one executor fingerprint; degenerate self-comparison"
+                            .to_string(),
+                });
+            }
         }
 
         if self.active_checks.get(check_id).copied().unwrap_or(false) {
@@ -918,6 +982,83 @@ mod tests {
             version: "1.0.0".to_string(),
             is_reference: true,
         }
+    }
+
+    // ── K-9 (EngineIdentity) oracle self-comparison guard tests (gauntlet bd-rjc2m.K9 / H-002) ──
+    fn k9_entry(id: &str, name: &str, version: &str, is_ref: bool) -> RuntimeEntry {
+        RuntimeEntry {
+            runtime_id: id.to_string(),
+            runtime_name: name.to_string(),
+            version: version.to_string(),
+            is_reference: is_ref,
+        }
+    }
+
+    #[test]
+    fn k9_register_rejects_executor_fingerprint_collision() {
+        let mut oracle = RuntimeOracle::new("k9-collision", 100);
+        oracle
+            .register_runtime(k9_entry("node", "node", "20.0", true))
+            .unwrap();
+        // Same (name, version) under a DIFFERENT runtime_id == same executor -> rejected.
+        let err = oracle
+            .register_runtime(k9_entry("node-copy", "node", "20.0", true))
+            .unwrap_err();
+        assert_eq!(err.code, error_codes::ERR_NVO_FINGERPRINT_COLLISION);
+        assert_eq!(oracle.runtime_count(), 1, "collision must not be registered");
+    }
+
+    #[test]
+    fn k9_register_allows_distinct_fingerprints() {
+        let mut oracle = RuntimeOracle::new("k9-distinct", 100);
+        oracle
+            .register_runtime(k9_entry("node", "node", "20.0", true))
+            .unwrap();
+        oracle
+            .register_runtime(k9_entry("bun", "bun", "1.3", true))
+            .unwrap();
+        oracle
+            .register_runtime(k9_entry("franken", "franken-node", "0.1", false))
+            .unwrap();
+        assert_eq!(oracle.runtime_count(), 3);
+    }
+
+    #[test]
+    fn k9_duplicate_id_still_takes_precedence() {
+        let mut oracle = RuntimeOracle::new("k9-dup", 100);
+        oracle
+            .register_runtime(k9_entry("node", "node", "20.0", true))
+            .unwrap();
+        // Same id, different name -> the duplicate-id check fires first (not fingerprint).
+        let err = oracle
+            .register_runtime(k9_entry("node", "other", "99", false))
+            .unwrap_err();
+        assert_eq!(err.code, error_codes::ERR_NVO_DUPLICATE_RUNTIME);
+    }
+
+    #[test]
+    fn k9_executor_fingerprint_distinct_stable_and_unambiguous() {
+        let a = k9_entry("a", "node", "20.0", true);
+        let b = k9_entry("b", "node", "20.0", false); // same name+version, different id/is_ref
+        let c = k9_entry("c", "bun", "1.3", true);
+        assert_eq!(a.executor_fingerprint(), b.executor_fingerprint()); // same executor
+        assert_ne!(a.executor_fingerprint(), c.executor_fingerprint()); // different executor
+        assert_eq!(a.executor_fingerprint(), a.executor_fingerprint()); // stable
+        // Length-prefixing prevents (name|version) boundary collisions:
+        let x = k9_entry("x", "ab", "c", true);
+        let y = k9_entry("y", "a", "bc", true);
+        assert_ne!(x.executor_fingerprint(), y.executor_fingerprint());
+    }
+
+    #[test]
+    fn k9_existing_distinct_named_runtimes_unaffected() {
+        // Regression: the production code registers runtimes with distinct names per id
+        // (sample_runtime / lockstep_harness), so the K-9 guard must not break them.
+        let mut oracle = RuntimeOracle::new("k9-regression", 100);
+        oracle.register_runtime(sample_runtime("a")).unwrap();
+        oracle.register_runtime(sample_runtime("b")).unwrap();
+        oracle.register_runtime(sample_runtime("c")).unwrap();
+        assert_eq!(oracle.runtime_count(), 3);
     }
 
     fn sample_receipt(receipt_id: &str, divergence_id: &str) -> PolicyReceipt {
