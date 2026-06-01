@@ -1,36 +1,41 @@
-//! bd-20uo Proof-Carrying Decode Conformance Test Harness
-//!
-//! This module implements a comprehensive conformance test suite for the
-//! bd-20uo proof-carrying repair artifacts specification.
-//!
-//! ## Specification Compliance
-//!
-//! Tests every MUST/SHOULD clause from the bd-20uo specification:
-//!
-//! ### MUST Requirements (Invariants)
-//! - INV-REPAIR-PROOF-COMPLETE: Every repair output has a proof or an explicit rejection
-//! - INV-REPAIR-PROOF-BINDING: Proof binds input fragments to output via signed attestation
-//! - INV-REPAIR-PROOF-DETERMINISTIC: Same inputs produce identical proof structure
-//!
-//! ### MUST Requirements (Modes)
-//! - MANDATORY: Missing proofs are hard errors preventing use of repaired objects
-//! - ADVISORY: Missing proofs are logged as warnings but operation proceeds
-//!
-//! ### SHOULD Requirements (Event Code Compliance)
-//! - Event codes: REPAIR_PROOF_EMITTED, REPAIR_PROOF_VERIFIED, REPAIR_PROOF_MISSING, REPAIR_PROOF_INVALID
-//! - Error codes: PROOF_MISSING_MANDATORY, PROOF_INVALID, RECONSTRUCTION_FAILED, CAPACITY_EXCEEDED
-//!
-//! ## Test Architecture
-//!
-//! Uses Pattern 4: Spec-Derived Test Matrix with structured conformance cases.
+// bd-20uo Proof-Carrying Decode Conformance Test Harness
+//
+// API-DRIFT REMEDIATION (bd-rjc2m.4): inner doc comments (`//!`) are illegal in a file
+// consumed via include!() (E0753) — converted to plain comments. This file is included by
+// tests/conformance/bd_20uo_proof_carrying_decode_conformance.rs.
+//
+// This module implements a comprehensive conformance test suite for the
+// bd-20uo proof-carrying repair artifacts specification.
+//
+// ## Specification Compliance
+//
+// Tests every MUST/SHOULD clause from the bd-20uo specification:
+//
+// ### MUST Requirements (Invariants)
+// - INV-REPAIR-PROOF-COMPLETE: Every repair output has a proof or an explicit rejection
+// - INV-REPAIR-PROOF-BINDING: Proof binds input fragments to output via signed attestation
+// - INV-REPAIR-PROOF-DETERMINISTIC: Same inputs produce identical proof structure
+//
+// ### MUST Requirements (Modes)
+// - MANDATORY: Missing proofs are hard errors preventing use of repaired objects
+// - ADVISORY: Missing proofs are logged as warnings but operation proceeds
+//
+// ### SHOULD Requirements (Event Code Compliance)
+// - Event codes: REPAIR_PROOF_EMITTED, REPAIR_PROOF_VERIFIED, REPAIR_PROOF_MISSING, REPAIR_PROOF_INVALID
+// - Error codes: PROOF_MISSING_MANDATORY, PROOF_INVALID, RECONSTRUCTION_FAILED, CAPACITY_EXCEEDED
+//
+// ## Test Architecture
+//
+// Uses Pattern 4: Spec-Derived Test Matrix with structured conformance cases.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+// API-DRIFT REMEDIATION (bd-rjc2m.4): dropped unused imports (DecodeResult, ProofAuditEvent,
+// RepairProof, VerificationResult) — the harness uses them only via inference; clippy -D warnings.
 use frankenengine_node::repair::proof_carrying_decode::{
-    AlgorithmId, DecodeResult, Fragment, ProofAuditEvent, ProofCarryingDecodeError,
-    ProofCarryingDecoder, ProofMode, REPAIR_PROOF_EMITTED, REPAIR_PROOF_INVALID,
-    REPAIR_PROOF_MISSING, REPAIR_PROOF_VERIFIED, RepairProof, VerificationResult,
+    AlgorithmId, Fragment, ProofCarryingDecodeError, ProofCarryingDecoder, ProofMode,
+    REPAIR_PROOF_EMITTED, REPAIR_PROOF_INVALID, REPAIR_PROOF_MISSING, REPAIR_PROOF_VERIFIED,
 };
 
 /// Test requirement levels from the bd-20uo specification.
