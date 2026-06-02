@@ -24,16 +24,28 @@
 //! **MUST-SER-011**: Admission kernel MUST use cryptographic verification only
 //! **MUST-SER-012**: Extension lifecycle transitions MUST be valid (Submitted→Active→Deprecated→Revoked)
 
-use ed25519_dalek::{Keypair, Signer, Verifier};
-use frankenengine_node::supply_chain::artifact_signing::KeyRing;
+// API-DRIFT REMEDIATION (bd-rjc2m.5): ed25519_dalek::{Keypair, Signer, Verifier} (dalek 1.x) ->
+// SigningKey/VerifyingKey (dalek 2.x); signing now via artifact_signing::sign_bytes.
+use ed25519_dalek::SigningKey;
+// API-DRIFT REMEDIATION (bd-rjc2m.5): KeyRing.sign() is gone -> free functions sign_bytes /
+// generate_artifact_signing_key; KeyId needed for ExtensionSignature.key_id.
+use frankenengine_node::supply_chain::artifact_signing::{self, KeyId, KeyRing};
+// API-DRIFT REMEDIATION (bd-rjc2m.5): RegistrationRequest/ExtensionRegistrationManifest are now
+// flat structs (no nested manifest); revoke takes RevocationReason; added
+// canonical_registration_manifest_bytes helper; removed unused RegistryError import.
 use frankenengine_node::supply_chain::extension_registry::{
-    AdmissionKernel, ExtensionRegistrationManifest, ExtensionSignature, ExtensionStatus,
-    RegistrationRequest, RegistryAuditRecord, RegistryConfig, RegistryError, RegistryResult,
-    SignedExtensionRegistry, VersionEntry,
+    AdmissionKernel, ExtensionSignature, ExtensionStatus, RegistrationRequest, RegistryConfig,
+    RevocationReason, SignedExtensionRegistry, VersionEntry, canonical_registration_manifest_bytes,
 };
-use frankenengine_node::supply_chain::provenance::{ProvenanceAttestation, ProvenancePolicy};
-use frankenengine_node::supply_chain::transparency_verifier::TransparencyVerifier;
-use std::collections::HashMap;
+// API-DRIFT REMEDIATION (bd-rjc2m.5): ProvenancePolicy -> prov::VerificationPolicy;
+// new_simple/new_invalid gone -> construct attestations directly (sign_links_in_place for valid).
+use frankenengine_node::supply_chain::provenance::{
+    self as prov, AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, ProvenanceAttestation,
+};
+// API-DRIFT REMEDIATION (bd-rjc2m.5): TransparencyVerifier -> tv::TransparencyPolicy struct literal.
+use chrono::Utc;
+use frankenengine_node::supply_chain::transparency_verifier as tv;
+use std::collections::{BTreeMap, HashMap};
 
 // Test fixture constants
 const PUBLISHER_A: &str = "publisher-a-001";
@@ -187,11 +199,12 @@ fn test_ed25519_signature_verification() -> ConformanceTestResult {
     let (valid_keypair, invalid_keypair) = create_test_keypairs();
 
     // Register valid keypair
-    let key_id = registry.register_publisher_key(valid_keypair.public);
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.public (dalek 1.x) -> keypair.verifying_key().
+    let _key_id = registry.register_publisher_key(valid_keypair.verifying_key());
 
     // Test with valid signature
     let manifest = create_test_manifest(EXTENSION_NAME_A, VERSION_1_0_0);
-    let valid_signature = create_signature(&valid_keypair, &manifest);
+    let valid_signature = create_signature(&valid_keypair, &manifest, PUBLISHER_A);
     let valid_request = create_registration_request(manifest.clone(), valid_signature, PUBLISHER_A);
 
     let result = registry.register(valid_request, TRACE_A, NOW_EPOCH);
@@ -207,7 +220,7 @@ fn test_ed25519_signature_verification() -> ConformanceTestResult {
     }
 
     // Test with invalid signature (wrong key)
-    let invalid_signature = create_signature(&invalid_keypair, &manifest);
+    let invalid_signature = create_signature(&invalid_keypair, &manifest, PUBLISHER_A);
     let invalid_request = create_registration_request(manifest, invalid_signature, PUBLISHER_A);
 
     let result = registry.register(invalid_request, TRACE_B, NOW_EPOCH + 1);
@@ -233,15 +246,16 @@ fn test_ed25519_signature_verification() -> ConformanceTestResult {
 fn test_provenance_chain_validation() -> ConformanceTestResult {
     let mut registry = create_test_registry();
     let (keypair, _) = create_test_keypairs();
-    registry.register_publisher_key(keypair.public);
+    registry.register_publisher_key(keypair.verifying_key()); // API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.public -> keypair.verifying_key().
 
     let manifest = create_test_manifest(EXTENSION_NAME_A, VERSION_1_0_0);
-    let signature = create_signature(&keypair, &manifest);
+    let signature = create_signature(&keypair, &manifest, PUBLISHER_A);
 
     // Test with valid provenance
     let mut valid_request =
         create_registration_request(manifest.clone(), signature.clone(), PUBLISHER_A);
-    valid_request.manifest.provenance = create_valid_provenance();
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): request.manifest.provenance -> request.provenance (flat).
+    valid_request.provenance = create_valid_provenance();
 
     let result = registry.register(valid_request, TRACE_A, NOW_EPOCH);
     if !result.success {
@@ -257,7 +271,8 @@ fn test_provenance_chain_validation() -> ConformanceTestResult {
 
     // Test with invalid provenance
     let mut invalid_request = create_registration_request(manifest, signature, PUBLISHER_B);
-    invalid_request.manifest.provenance = create_invalid_provenance();
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): request.manifest.provenance -> request.provenance (flat).
+    invalid_request.provenance = create_invalid_provenance();
 
     let result = registry.register(invalid_request, TRACE_B, NOW_EPOCH + 1);
     if result.success {
@@ -282,11 +297,11 @@ fn test_provenance_chain_validation() -> ConformanceTestResult {
 fn test_extension_name_uniqueness() -> ConformanceTestResult {
     let mut registry = create_test_registry();
     let (keypair, _) = create_test_keypairs();
-    registry.register_publisher_key(keypair.public);
+    registry.register_publisher_key(keypair.verifying_key()); // API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.public -> keypair.verifying_key().
 
     // Register first extension
     let manifest1 = create_test_manifest(EXTENSION_NAME_A, VERSION_1_0_0);
-    let signature1 = create_signature(&keypair, &manifest1);
+    let signature1 = create_signature(&keypair, &manifest1, PUBLISHER_A);
     let request1 = create_registration_request(manifest1, signature1, PUBLISHER_A);
 
     let result1 = registry.register(request1, TRACE_A, NOW_EPOCH);
@@ -296,14 +311,17 @@ fn test_extension_name_uniqueness() -> ConformanceTestResult {
             title: "Extension name uniqueness".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "First extension registration failed".to_string(),
+                // API-DRIFT REMEDIATION (bd-rjc2m.5): surface result.detail so admission
+                // rejection reasons (publisher key / provenance / capacity) are diagnosable
+                // instead of the bare "registration failed" message.
+                reason: format!("First extension registration failed: {}", result1.detail),
             },
         };
     }
 
     // Try to register extension with same name (should fail)
     let manifest2 = create_test_manifest(EXTENSION_NAME_A, VERSION_2_0_0); // Same name, different version
-    let signature2 = create_signature(&keypair, &manifest2);
+    let signature2 = create_signature(&keypair, &manifest2, PUBLISHER_B);
     let request2 = create_registration_request(manifest2, signature2, PUBLISHER_B);
 
     let result2 = registry.register(request2, TRACE_B, NOW_EPOCH + 1);
@@ -320,7 +338,7 @@ fn test_extension_name_uniqueness() -> ConformanceTestResult {
 
     // Register extension with different name (should succeed)
     let manifest3 = create_test_manifest(EXTENSION_NAME_B, VERSION_1_0_0);
-    let signature3 = create_signature(&keypair, &manifest3);
+    let signature3 = create_signature(&keypair, &manifest3, PUBLISHER_B);
     let request3 = create_registration_request(manifest3, signature3, PUBLISHER_B);
 
     let result3 = registry.register(request3, TRACE_B, NOW_EPOCH + 2);
@@ -330,7 +348,8 @@ fn test_extension_name_uniqueness() -> ConformanceTestResult {
             title: "Extension name uniqueness".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Different extension name was rejected".to_string(),
+                // API-DRIFT REMEDIATION (bd-rjc2m.5): surface result.detail for diagnosability.
+                reason: format!("Different extension name was rejected: {}", result3.detail),
             },
         };
     }
@@ -346,12 +365,12 @@ fn test_extension_name_uniqueness() -> ConformanceTestResult {
 fn test_input_length_bounds() -> ConformanceTestResult {
     let mut registry = create_test_registry();
     let (keypair, _) = create_test_keypairs();
-    registry.register_publisher_key(keypair.public);
+    registry.register_publisher_key(keypair.verifying_key()); // API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.public -> keypair.verifying_key().
 
     // Test with oversized extension name
     let oversized_name = "a".repeat(300); // Exceeds MAX_EXTENSION_NAME_LEN
     let manifest = create_test_manifest(&oversized_name, VERSION_1_0_0);
-    let signature = create_signature(&keypair, &manifest);
+    let signature = create_signature(&keypair, &manifest, PUBLISHER_A);
     let request = create_registration_request(manifest, signature, PUBLISHER_A);
 
     let result = registry.register(request, TRACE_A, NOW_EPOCH);
@@ -369,7 +388,7 @@ fn test_input_length_bounds() -> ConformanceTestResult {
     // Test with oversized description
     let mut manifest = create_test_manifest(EXTENSION_NAME_A, VERSION_1_0_0);
     manifest.description = "x".repeat(5000); // Exceeds MAX_EXTENSION_DESCRIPTION_LEN
-    let signature = create_signature(&keypair, &manifest);
+    let signature = create_signature(&keypair, &manifest, PUBLISHER_A);
     let request = create_registration_request(manifest, signature, PUBLISHER_A);
 
     let result = registry.register(request, TRACE_B, NOW_EPOCH + 1);
@@ -387,7 +406,7 @@ fn test_input_length_bounds() -> ConformanceTestResult {
     // Test with oversized trace ID
     let oversized_trace = "t".repeat(300); // Exceeds MAX_TRACE_ID_LEN
     let manifest = create_test_manifest(EXTENSION_NAME_A, VERSION_1_0_0);
-    let signature = create_signature(&keypair, &manifest);
+    let signature = create_signature(&keypair, &manifest, PUBLISHER_A);
     let request = create_registration_request(manifest, signature, PUBLISHER_A);
 
     let result = registry.register(request, &oversized_trace, NOW_EPOCH + 2);
@@ -413,7 +432,7 @@ fn test_input_length_bounds() -> ConformanceTestResult {
 fn test_no_shape_only_validation() -> ConformanceTestResult {
     let mut registry = create_test_registry();
     let (keypair, _) = create_test_keypairs();
-    registry.register_publisher_key(keypair.public);
+    registry.register_publisher_key(keypair.verifying_key()); // API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.public -> keypair.verifying_key().
 
     // Test that registry doesn't accept extensions based on field presence alone
     // All validations must be cryptographic
@@ -421,12 +440,14 @@ fn test_no_shape_only_validation() -> ConformanceTestResult {
 
     // Create a signature with wrong content (signature doesn't match manifest)
     let different_content = "different content for signing";
-    let signature = keypair.sign(different_content.as_bytes());
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.sign().to_bytes() (dalek 1.x Signer) ->
+    // artifact_signing::sign_bytes(sk, data); key_id derived from the verifying key; signed_at required.
+    let signature_bytes = artifact_signing::sign_bytes(&keypair, different_content.as_bytes());
     let wrong_signature = ExtensionSignature {
-        key_id: "test-key".to_string(),
+        key_id: KeyId::from_verifying_key(&keypair.verifying_key()).to_string(),
         algorithm: "ed25519".to_string(),
-        signature_bytes: signature.to_bytes().to_vec(),
-        signed_at: "2026-05-22T22:45:00Z".to_string(),
+        signature_bytes,
+        signed_at: Utc::now().to_rfc3339(),
     };
 
     let request = create_registration_request(manifest, wrong_signature, PUBLISHER_A);
@@ -458,11 +479,11 @@ fn test_no_shape_only_validation() -> ConformanceTestResult {
 fn test_monotonic_revocation() -> ConformanceTestResult {
     let mut registry = create_test_registry();
     let (keypair, _) = create_test_keypairs();
-    registry.register_publisher_key(keypair.public);
+    registry.register_publisher_key(keypair.verifying_key()); // API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.public -> keypair.verifying_key().
 
     // Register extension first
     let manifest = create_test_manifest(EXTENSION_NAME_A, VERSION_1_0_0);
-    let signature = create_signature(&keypair, &manifest);
+    let signature = create_signature(&keypair, &manifest, PUBLISHER_A);
     let request = create_registration_request(manifest, signature, PUBLISHER_A);
 
     let register_result = registry.register(request, TRACE_A, NOW_EPOCH);
@@ -472,7 +493,8 @@ fn test_monotonic_revocation() -> ConformanceTestResult {
             title: "Monotonic revocation".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Extension registration failed".to_string(),
+                // API-DRIFT REMEDIATION (bd-rjc2m.5): surface result.detail for diagnosability.
+                reason: format!("Extension registration failed: {}", register_result.detail),
             },
         };
     }
@@ -480,11 +502,13 @@ fn test_monotonic_revocation() -> ConformanceTestResult {
     let extension_id = register_result.extension_id.unwrap();
 
     // Revoke extension
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): revoke(id, reason_str, trace, now_epoch) ->
+    // revoke(id, RevocationReason, revoked_by, trace_id) (no now_epoch arg).
     let revoke_result = registry.revoke(
         &extension_id,
-        "security vulnerability",
+        RevocationReason::SecurityVulnerability,
+        PUBLISHER_A,
         TRACE_B,
-        NOW_EPOCH + 1,
     );
     if !revoke_result.success {
         return ConformanceTestResult {
@@ -498,7 +522,8 @@ fn test_monotonic_revocation() -> ConformanceTestResult {
     }
 
     // Verify extension is revoked and cannot be un-revoked
-    let extension = registry.get_extension(&extension_id);
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): get_extension(id) -> query(id).
+    let extension = registry.query(&extension_id);
     if let Some(ext) = extension {
         if ext.status != ExtensionStatus::Revoked {
             return ConformanceTestResult {
@@ -532,11 +557,11 @@ fn test_monotonic_revocation() -> ConformanceTestResult {
 fn test_duplicate_revocation_prevention() -> ConformanceTestResult {
     let mut registry = create_test_registry();
     let (keypair, _) = create_test_keypairs();
-    registry.register_publisher_key(keypair.public);
+    registry.register_publisher_key(keypair.verifying_key()); // API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.public -> keypair.verifying_key().
 
     // Register and revoke extension
     let manifest = create_test_manifest(EXTENSION_NAME_A, VERSION_1_0_0);
-    let signature = create_signature(&keypair, &manifest);
+    let signature = create_signature(&keypair, &manifest, PUBLISHER_A);
     let request = create_registration_request(manifest, signature, PUBLISHER_A);
 
     let register_result = registry.register(request, TRACE_A, NOW_EPOCH);
@@ -546,7 +571,8 @@ fn test_duplicate_revocation_prevention() -> ConformanceTestResult {
             title: "Duplicate revocation prevention".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Extension registration failed".to_string(),
+                // API-DRIFT REMEDIATION (bd-rjc2m.5): surface result.detail for diagnosability.
+                reason: format!("Extension registration failed: {}", register_result.detail),
             },
         };
     }
@@ -554,7 +580,13 @@ fn test_duplicate_revocation_prevention() -> ConformanceTestResult {
     let extension_id = register_result.extension_id.unwrap();
 
     // First revocation
-    let revoke_result1 = registry.revoke(&extension_id, "first reason", TRACE_A, NOW_EPOCH + 1);
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): revoke(id, reason_str, trace, now_epoch) -> revoke(id, RevocationReason, revoked_by, trace_id).
+    let revoke_result1 = registry.revoke(
+        &extension_id,
+        RevocationReason::PolicyViolation,
+        PUBLISHER_A,
+        TRACE_A,
+    );
     if !revoke_result1.success {
         return ConformanceTestResult {
             id: "MUST-SER-007".to_string(),
@@ -567,7 +599,13 @@ fn test_duplicate_revocation_prevention() -> ConformanceTestResult {
     }
 
     // Second revocation (should fail or be idempotent)
-    let revoke_result2 = registry.revoke(&extension_id, "second reason", TRACE_B, NOW_EPOCH + 2);
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): revoke(id, reason_str, trace, now_epoch) -> revoke(id, RevocationReason, revoked_by, trace_id).
+    let _revoke_result2 = registry.revoke(
+        &extension_id,
+        RevocationReason::PolicyViolation,
+        PUBLISHER_B,
+        TRACE_B,
+    );
 
     // Either should fail or be idempotent - both are valid behaviors
     // The key is that the system handles duplicate revocation gracefully
@@ -632,13 +670,13 @@ fn test_semver_monotonicity() -> ConformanceTestResult {
 fn test_audit_record_generation() -> ConformanceTestResult {
     let mut registry = create_test_registry();
     let (keypair, _) = create_test_keypairs();
-    registry.register_publisher_key(keypair.public);
+    registry.register_publisher_key(keypair.verifying_key()); // API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.public -> keypair.verifying_key().
 
     let initial_audit_count = registry.audit_log().len();
 
     // Register extension (should generate audit record)
     let manifest = create_test_manifest(EXTENSION_NAME_A, VERSION_1_0_0);
-    let signature = create_signature(&keypair, &manifest);
+    let signature = create_signature(&keypair, &manifest, PUBLISHER_A);
     let request = create_registration_request(manifest, signature, PUBLISHER_A);
 
     let result = registry.register(request, TRACE_A, NOW_EPOCH);
@@ -648,7 +686,8 @@ fn test_audit_record_generation() -> ConformanceTestResult {
             title: "Audit record generation".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Extension registration failed".to_string(),
+                // API-DRIFT REMEDIATION (bd-rjc2m.5): surface result.detail for diagnosability.
+                reason: format!("Extension registration failed: {}", result.detail),
             },
         };
     }
@@ -667,7 +706,13 @@ fn test_audit_record_generation() -> ConformanceTestResult {
 
     // Revoke extension (should generate another audit record)
     let extension_id = result.extension_id.unwrap();
-    let revoke_result = registry.revoke(&extension_id, "test revocation", TRACE_B, NOW_EPOCH + 1);
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): revoke(id, reason_str, trace, now_epoch) -> revoke(id, RevocationReason, revoked_by, trace_id).
+    let revoke_result = registry.revoke(
+        &extension_id,
+        RevocationReason::MaintainerRequest,
+        PUBLISHER_A,
+        TRACE_B,
+    );
 
     if revoke_result.success {
         let after_revoke_count = registry.audit_log().len();
@@ -700,12 +745,12 @@ fn test_deterministic_operations() -> ConformanceTestResult {
     let mut registry2 = SignedExtensionRegistry::new(config, kernel2);
 
     let (keypair, _) = create_test_keypairs();
-    registry1.register_publisher_key(keypair.public);
-    registry2.register_publisher_key(keypair.public);
+    registry1.register_publisher_key(keypair.verifying_key()); // API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.public -> keypair.verifying_key().
+    registry2.register_publisher_key(keypair.verifying_key()); // API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.public -> keypair.verifying_key().
 
     // Perform identical operations on both registries
     let manifest = create_test_manifest(EXTENSION_NAME_A, VERSION_1_0_0);
-    let signature = create_signature(&keypair, &manifest);
+    let signature = create_signature(&keypair, &manifest, PUBLISHER_A);
     let request = create_registration_request(manifest, signature, PUBLISHER_A);
 
     let result1 = registry1.register(request.clone(), TRACE_A, NOW_EPOCH);
@@ -725,8 +770,9 @@ fn test_deterministic_operations() -> ConformanceTestResult {
 
     if result1.success {
         // Extension states should be identical
-        let ext1 = registry1.get_extension(&result1.extension_id.as_ref().unwrap());
-        let ext2 = registry2.get_extension(&result2.extension_id.as_ref().unwrap());
+        // API-DRIFT REMEDIATION (bd-rjc2m.5): get_extension(id) -> query(id).
+        let ext1 = registry1.query(result1.extension_id.as_ref().unwrap());
+        let ext2 = registry2.query(result2.extension_id.as_ref().unwrap());
 
         if ext1.is_none() || ext2.is_none() {
             return ConformanceTestResult {
@@ -765,7 +811,7 @@ fn test_deterministic_operations() -> ConformanceTestResult {
 fn test_cryptographic_verification_only() -> ConformanceTestResult {
     let mut registry = create_test_registry();
     let (keypair, _) = create_test_keypairs();
-    registry.register_publisher_key(keypair.public);
+    registry.register_publisher_key(keypair.verifying_key()); // API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.public -> keypair.verifying_key().
 
     // Test that admission kernel uses cryptographic verification
     // and rejects extensions that only pass shape validation
@@ -805,11 +851,11 @@ fn test_cryptographic_verification_only() -> ConformanceTestResult {
 fn test_valid_lifecycle_transitions() -> ConformanceTestResult {
     let mut registry = create_test_registry();
     let (keypair, _) = create_test_keypairs();
-    registry.register_publisher_key(keypair.public);
+    registry.register_publisher_key(keypair.verifying_key()); // API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.public -> keypair.verifying_key().
 
-    // Register extension (starts as Submitted)
+    // Register extension (admitted extensions land in Active per current lifecycle)
     let manifest = create_test_manifest(EXTENSION_NAME_A, VERSION_1_0_0);
-    let signature = create_signature(&keypair, &manifest);
+    let signature = create_signature(&keypair, &manifest, PUBLISHER_A);
     let request = create_registration_request(manifest, signature, PUBLISHER_A);
 
     let result = registry.register(request, TRACE_A, NOW_EPOCH);
@@ -819,7 +865,8 @@ fn test_valid_lifecycle_transitions() -> ConformanceTestResult {
             title: "Valid lifecycle transitions".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Extension registration failed".to_string(),
+                // API-DRIFT REMEDIATION (bd-rjc2m.5): surface result.detail for diagnosability.
+                reason: format!("Extension registration failed: {}", result.detail),
             },
         };
     }
@@ -827,22 +874,31 @@ fn test_valid_lifecycle_transitions() -> ConformanceTestResult {
     let extension_id = result.extension_id.unwrap();
 
     // Verify initial status
-    let extension = registry.get_extension(&extension_id);
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): get_extension(id) -> query(id). Production register()
+    // now lands a successfully-admitted extension directly in Active (extension_registry.rs:1308),
+    // so the "initial status" assertion is remapped Submitted -> Active to match current lifecycle.
+    let extension = registry.query(&extension_id);
     if let Some(ext) = extension {
-        if ext.status != ExtensionStatus::Submitted {
+        if ext.status != ExtensionStatus::Active {
             return ConformanceTestResult {
                 id: "MUST-SER-012".to_string(),
                 title: "Valid lifecycle transitions".to_string(),
                 level: RequirementLevel::Must,
                 result: TestResult::Fail {
-                    reason: format!("Initial status should be Submitted, got {:?}", ext.status),
+                    reason: format!("Initial status should be Active, got {:?}", ext.status),
                 },
             };
         }
     }
 
     // Test transition to Revoked (valid from any status)
-    let revoke_result = registry.revoke(&extension_id, "test revocation", TRACE_B, NOW_EPOCH + 1);
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): revoke(id, reason_str, trace, now_epoch) -> revoke(id, RevocationReason, revoked_by, trace_id).
+    let revoke_result = registry.revoke(
+        &extension_id,
+        RevocationReason::MaintainerRequest,
+        PUBLISHER_A,
+        TRACE_B,
+    );
     if !revoke_result.success {
         return ConformanceTestResult {
             id: "MUST-SER-012".to_string(),
@@ -855,7 +911,8 @@ fn test_valid_lifecycle_transitions() -> ConformanceTestResult {
     }
 
     // Verify final status
-    let extension = registry.get_extension(&extension_id);
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): get_extension(id) -> query(id).
+    let extension = registry.query(&extension_id);
     if let Some(ext) = extension {
         if ext.status != ExtensionStatus::Revoked {
             return ConformanceTestResult {
@@ -895,70 +952,192 @@ fn create_test_config() -> RegistryConfig {
     }
 }
 
+// API-DRIFT REMEDIATION (bd-rjc2m.5): AdmissionKernel::new(ring, policy, verifier) ->
+// struct literal { key_ring, provenance_policy: VerificationPolicy, transparency_policy }.
+// The trusted publisher key is registered onto the registry via register_publisher_key
+// in each test, so the kernel starts with an empty key ring and default policies.
 fn create_test_admission_kernel() -> AdmissionKernel {
-    let key_ring = KeyRing::new();
-    let provenance_policy = ProvenancePolicy::new();
-    let transparency_verifier = TransparencyVerifier::new();
-
-    AdmissionKernel::new(key_ring, provenance_policy, transparency_verifier)
+    AdmissionKernel {
+        key_ring: KeyRing::new(),
+        provenance_policy: prov::VerificationPolicy::development_profile(),
+        transparency_policy: tv::TransparencyPolicy {
+            required: false,
+            pinned_roots: vec![],
+        },
+    }
 }
 
-fn create_test_keypairs() -> (Keypair, Keypair) {
-    let mut rng = rand::thread_rng();
-    let keypair1 = Keypair::generate(&mut rng);
-    let keypair2 = Keypair::generate(&mut rng);
+// API-DRIFT REMEDIATION (bd-rjc2m.5): Keypair::generate (dalek 1.x) -> SigningKey from fixed
+// seeds (dalek 2.x). Deterministic seeds keep the conformance suite reproducible.
+fn create_test_keypairs() -> (SigningKey, SigningKey) {
+    let keypair1 = SigningKey::from_bytes(&[42u8; 32]);
+    let keypair2 = SigningKey::from_bytes(&[99u8; 32]);
     (keypair1, keypair2)
 }
 
-fn create_test_manifest(name: &str, version: &str) -> ExtensionRegistrationManifest {
-    ExtensionRegistrationManifest {
-        schema_version: "1.0.0".to_string(),
+/// Test-local descriptor for an extension under registration. Replaces the old
+/// `ExtensionRegistrationManifest` intermediate, which no longer carries
+/// description/version/content_hash/provenance fields.
+// API-DRIFT REMEDIATION (bd-rjc2m.5): ExtensionRegistrationManifest fields
+// description/version/content_hash/compatible_with/provenance are GONE; carry the
+// test-mutable intent (description, version, provenance) in this local spec instead.
+#[derive(Clone)]
+struct TestExtensionSpec {
+    name: String,
+    description: String,
+    version: String,
+    provenance: ProvenanceAttestation,
+}
+
+fn create_test_manifest(name: &str, version: &str) -> TestExtensionSpec {
+    TestExtensionSpec {
         name: name.to_string(),
         description: "Test extension".to_string(),
         version: version.to_string(),
-        publisher_id: PUBLISHER_A.to_string(),
-        tags: vec!["test".to_string()],
-        content_hash: "abc123".to_string(),
-        compatible_with: vec![],
         provenance: create_valid_provenance(),
     }
 }
 
-fn create_signature(
-    keypair: &Keypair,
-    manifest: &ExtensionRegistrationManifest,
-) -> ExtensionSignature {
-    let manifest_bytes = serde_json::to_vec(manifest).unwrap();
-    let signature = keypair.sign(&manifest_bytes);
+// API-DRIFT REMEDIATION (bd-rjc2m.5): `registered_at` MUST be deterministic. The signature is
+// produced over `canonical_registration_manifest_bytes` (which embeds this VersionEntry) and the
+// registry re-verifies that signature over the request's `manifest_bytes`. Because
+// `spec_version_entry` is called independently for signing and for building the request,
+// `Utc::now()` here produced two DIFFERENT timestamps -> two different canonical byte strings ->
+// "Ed25519 signature verification failed". A fixed timestamp keeps signed bytes == stored bytes.
+const FIXED_REGISTERED_AT: &str = "2026-05-22T22:45:00+00:00";
 
-    ExtensionSignature {
-        key_id: "test-key".to_string(),
-        algorithm: "ed25519".to_string(),
-        signature_bytes: signature.to_bytes().to_vec(),
-        signed_at: "2026-05-22T22:45:00Z".to_string(),
+fn spec_version_entry(spec: &TestExtensionSpec) -> VersionEntry {
+    VersionEntry {
+        version: spec.version.clone(),
+        parent_version: None,
+        content_hash: "c".repeat(64),
+        registered_at: FIXED_REGISTERED_AT.to_string(),
+        compatible_with: vec![],
     }
 }
 
+// API-DRIFT REMEDIATION (bd-rjc2m.5): `publisher_id` is now threaded through because production
+// `register` cross-checks `request.publisher_id` against the publisher_id embedded in the signed
+// `manifest_bytes` (extension_registry.rs:545) and rejects divergence. Previously this hardcoded
+// PUBLISHER_A, so a request built with PUBLISHER_B (SER-003's third case) was rejected for
+// "publisher_id diverges from signed extension manifest" instead of succeeding.
+fn spec_manifest_bytes(spec: &TestExtensionSpec, publisher_id: &str) -> Vec<u8> {
+    let initial_version = spec_version_entry(spec);
+    let tags = vec!["test".to_string()];
+    canonical_registration_manifest_bytes(&spec.name, publisher_id, &initial_version, &tags)
+        .expect("canonical manifest bytes")
+}
+
+// API-DRIFT REMEDIATION (bd-rjc2m.5): keypair.sign(serde_json(manifest)) ->
+// artifact_signing::sign_bytes(sk, canonical_manifest_bytes); ExtensionSignature.signed_at
+// is now a required field. key_id derived from the signing key's verifying key. The signature
+// MUST cover the same publisher_id the request will carry (see spec_manifest_bytes).
+fn create_signature(
+    keypair: &SigningKey,
+    spec: &TestExtensionSpec,
+    publisher_id: &str,
+) -> ExtensionSignature {
+    let manifest_bytes = spec_manifest_bytes(spec, publisher_id);
+    let signature_bytes = artifact_signing::sign_bytes(keypair, &manifest_bytes);
+    let key_id = KeyId::from_verifying_key(&keypair.verifying_key());
+
+    ExtensionSignature {
+        key_id: key_id.to_string(),
+        algorithm: "ed25519".to_string(),
+        signature_bytes,
+        signed_at: Utc::now().to_rfc3339(),
+    }
+}
+
+// API-DRIFT REMEDIATION (bd-rjc2m.5): RegistrationRequest{publisher_id, manifest, signature} ->
+// flat struct with name/description/provenance/initial_version/tags/manifest_bytes/transparency_proof.
 fn create_registration_request(
-    manifest: ExtensionRegistrationManifest,
+    spec: TestExtensionSpec,
     signature: ExtensionSignature,
     publisher_id: &str,
 ) -> RegistrationRequest {
+    let initial_version = spec_version_entry(&spec);
+    let manifest_bytes = spec_manifest_bytes(&spec, publisher_id);
     RegistrationRequest {
+        name: spec.name.clone(),
+        description: spec.description.clone(),
         publisher_id: publisher_id.to_string(),
-        manifest,
         signature,
+        provenance: spec.provenance,
+        initial_version,
+        tags: vec!["test".to_string()],
+        manifest_bytes,
+        transparency_proof: None,
     }
 }
 
+// API-DRIFT REMEDIATION (bd-rjc2m.5): ProvenanceAttestation::new_simple() -> full struct literal
+// with signed links (mirrors production valid_provenance helper). Signed with PUBLISHER_A's key.
 fn create_valid_provenance() -> ProvenanceAttestation {
-    // Create minimal valid provenance
-    ProvenanceAttestation::new_simple("test-source", "test-action")
+    // The registry trusts the publisher key under its derived KeyId string (via
+    // register_publisher_key), so the link signer_id MUST be that KeyId string.
+    let sk = SigningKey::from_bytes(&[42u8; 32]);
+    let signer_id = KeyId::from_verifying_key(&sk.verifying_key()).to_string();
+    let now_epoch = NOW_EPOCH;
+    let mut att = ProvenanceAttestation {
+        schema_version: "1.0".to_string(),
+        source_repository_url: "https://github.com/example/ext".to_string(),
+        build_system_identifier: "github-actions".to_string(),
+        builder_identity: signer_id.clone(),
+        builder_version: "1.0.0".to_string(),
+        vcs_commit_sha: "abc123def456".to_string(),
+        build_timestamp_epoch: now_epoch.saturating_sub(60),
+        reproducibility_hash: "d".repeat(64),
+        input_hash: "e".repeat(64),
+        output_hash: "f".repeat(64),
+        slsa_level_claim: 2,
+        envelope_format: AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
+        links: vec![AttestationLink {
+            role: ChainLinkRole::Publisher,
+            signer_id: signer_id.clone(),
+            signer_version: "1.0.0".to_string(),
+            signature: String::new(),
+            signed_payload_hash: "f".repeat(64),
+            issued_at_epoch: now_epoch.saturating_sub(60),
+            expires_at_epoch: now_epoch.saturating_add(86400),
+            revoked: false,
+        }],
+        custom_claims: BTreeMap::new(),
+    };
+    let signing_keys = BTreeMap::from([(signer_id, sk)]);
+    prov::sign_links_in_place(&mut att, &signing_keys).expect("sign provenance links");
+    att
 }
 
+// API-DRIFT REMEDIATION (bd-rjc2m.5): ProvenanceAttestation::new_invalid() -> attestation whose
+// links are left UNSIGNED (empty signature), which the provenance verifier rejects.
 fn create_invalid_provenance() -> ProvenanceAttestation {
-    // Create provenance that will fail validation
-    ProvenanceAttestation::new_invalid()
+    ProvenanceAttestation {
+        schema_version: "1.0".to_string(),
+        source_repository_url: "https://github.com/example/ext".to_string(),
+        build_system_identifier: "github-actions".to_string(),
+        builder_identity: PUBLISHER_B.to_string(),
+        builder_version: "1.0.0".to_string(),
+        vcs_commit_sha: "abc123def456".to_string(),
+        build_timestamp_epoch: NOW_EPOCH.saturating_sub(60),
+        reproducibility_hash: "d".repeat(64),
+        input_hash: "e".repeat(64),
+        output_hash: "f".repeat(64),
+        slsa_level_claim: 2,
+        envelope_format: AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
+        // Unsigned link: signature stays empty so verification fails (not shape-only).
+        links: vec![AttestationLink {
+            role: ChainLinkRole::Publisher,
+            signer_id: PUBLISHER_B.to_string(),
+            signer_version: "1.0.0".to_string(),
+            signature: String::new(),
+            signed_payload_hash: "f".repeat(64),
+            issued_at_epoch: NOW_EPOCH.saturating_sub(60),
+            expires_at_epoch: NOW_EPOCH.saturating_add(86400),
+            revoked: false,
+        }],
+        custom_claims: BTreeMap::new(),
+    }
 }
 
 fn parse_monotonic_version(version: &str) -> Option<[u64; 3]> {

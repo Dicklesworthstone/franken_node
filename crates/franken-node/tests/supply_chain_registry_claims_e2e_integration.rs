@@ -20,14 +20,19 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use ed25519_dalek::SigningKey;
 use frankenengine_node::supply_chain::{
-    artifact_signing::{KeyId, KeyRing},
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): KeyRing.sign() removed -> need the `artifact_signing`
+    // module path for the free function sign_bytes; KeyId no longer used here.
+    artifact_signing::{self, KeyRing},
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): dropped now-unused imports
+    // (AdmissionReceipt, RegistryAuditRecord, RegistryResult, RevocationRecord) to satisfy -D warnings.
     extension_registry::{
-        AdmissionKernel, AdmissionReceipt, ExtensionSignature, RegistrationRequest,
-        RegistryAuditRecord, RegistryConfig, RegistryResult, RevocationRecord,
+        AdmissionKernel, ExtensionSignature, RegistrationRequest, RegistryConfig,
         SignedExtensionRegistry, VersionEntry,
     },
-    provenance as prov, transparency_verifier as tv,
+    provenance as prov,
+    transparency_verifier as tv,
 };
 
 use frankenengine_node::claims::claim_compiler::{
@@ -42,7 +47,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 /// Real-service supply chain integration test harness
-#[derive(Debug)]
+// API-DRIFT REMEDIATION (bd-rjc2m.5): ClaimCompiler/ScoreboardPipeline no longer implement Debug,
+// so the harness holding them can no longer derive Debug. (No {:?} formatting of the harness exists.)
 struct SupplyChainE2EHarness {
     registry: Arc<RwLock<SignedExtensionRegistry>>,
     admission_kernel: AdmissionKernel,
@@ -92,10 +98,16 @@ impl SupplyChainE2EHarness {
             chrono::Utc::now().timestamp_millis() as u64,
         );
 
-        // Real scoreboard configuration
+        // Real scoreboard configuration.
+        // API-DRIFT REMEDIATION (bd-rjc2m.5): the scoreboard re-derives each contract's signature
+        // with ITS OWN `signing_key` (sign_contract(digest, contract.signer_id, scoreboard.key))
+        // and ct-compares it against the contract's signature, which was produced by the
+        // ClaimCompiler with the COMPILER's signing_key. With distinct keys every publish was
+        // rejected as SignatureInvalid ("Scoreboard publication failed: sanitized error"). The
+        // scoreboard MUST share the compiler's signing key to validate compiler-signed contracts.
         let scoreboard_config = ScoreboardConfig::new(
             "e2e-scoreboard-signer",
-            "scoreboard-key-real",
+            "test-signing-key-real",
             chrono::Utc::now().timestamp_millis() as u64,
             300_000, // 5 minute staleness window
         );
@@ -107,7 +119,12 @@ impl SupplyChainE2EHarness {
         let admission_kernel = AdmissionKernel {
             key_ring: key_ring.as_ref().clone(),
             provenance_policy: prov::VerificationPolicy::development_profile(),
-            transparency_policy: tv::TransparencyPolicy::default(),
+            // API-DRIFT REMEDIATION (bd-rjc2m.5): TransparencyPolicy has no Default impl;
+            // transparency not required for this harness (requests pass transparency_proof: None).
+            transparency_policy: tv::TransparencyPolicy {
+                required: false,
+                pinned_roots: Vec::new(),
+            },
         };
 
         info!("Initializing supply chain e2e harness with real services");
@@ -148,7 +165,8 @@ impl SupplyChainE2EHarness {
         &mut self,
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let start_time = Instant::now();
-        let job_id = Uuid::new_v4().to_string();
+        // API-DRIFT REMEDIATION (bd-rjc2m.5): Uuid::new_v4() -> Uuid::now_v7() (v4 feature not enabled).
+        let job_id = Uuid::now_v7().to_string();
 
         info!(job_id = %job_id, "Starting registry admission e2e test");
 
@@ -156,7 +174,8 @@ impl SupplyChainE2EHarness {
         let mut context = BTreeMap::new();
 
         // Step 1: Create real registration request with proper signatures
-        let extension_name = format!("test-extension-{}", Uuid::new_v4().to_simple());
+        // API-DRIFT REMEDIATION (bd-rjc2m.5): Uuid::new_v4().to_simple() -> Uuid::now_v7().simple().
+        let extension_name = format!("test-extension-{}", Uuid::now_v7().simple());
         let registration_request = self
             .create_real_registration_request(&extension_name)
             .await?;
@@ -169,12 +188,16 @@ impl SupplyChainE2EHarness {
         );
 
         // Step 2: Register extension with real registry
+        // API-DRIFT REMEDIATION (bd-rjc2m.5): the registry's `now_epoch` (and the provenance
+        // freshness checks it drives) is denominated in SECONDS, not milliseconds. The provenance
+        // link epochs in create_real_registration_request are built in seconds, so register here
+        // with seconds too (was timestamp_millis()).
         let submission_result = {
             let mut registry = self.registry.write().await;
             registry.register(
                 registration_request.clone(),
                 &job_id,
-                chrono::Utc::now().timestamp_millis() as u64,
+                chrono::Utc::now().timestamp() as u64,
             )
         };
 
@@ -285,7 +308,8 @@ impl SupplyChainE2EHarness {
         &mut self,
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let start_time = Instant::now();
-        let job_id = Uuid::new_v4().to_string();
+        // API-DRIFT REMEDIATION (bd-rjc2m.5): Uuid::new_v4() -> Uuid::now_v7() (v4 feature not enabled).
+        let job_id = Uuid::now_v7().to_string();
 
         info!(job_id = %job_id, "Starting claims envelope lifecycle e2e test");
 
@@ -293,7 +317,8 @@ impl SupplyChainE2EHarness {
         let mut context = BTreeMap::new();
 
         // Step 1: Create external claim with real evidence
-        let claim_id = format!("claim-{}", Uuid::new_v4().to_simple());
+        // API-DRIFT REMEDIATION (bd-rjc2m.5): Uuid::new_v4().to_simple() -> Uuid::now_v7().simple().
+        let claim_id = format!("claim-{}", Uuid::now_v7().simple());
         let external_claim = ExternalClaim {
             claim_id: claim_id.clone(),
             claim_text: "This is a real claim for e2e testing with evidence validation".to_string(),
@@ -350,33 +375,39 @@ impl SupplyChainE2EHarness {
                 let publish_result = self.scoreboard.publish(&claim_id, &[contract.clone()]);
 
                 match publish_result {
+                    // API-DRIFT REMEDIATION (bd-rjc2m.5): ScoreboardUpdateResult::Published
+                    // {snapshot_id, contracts_published} -> {snapshot_id, entry_count, event_code}.
                     frankenengine_node::claims::claim_compiler::ScoreboardUpdateResult::Published {
                         snapshot_id,
-                        contracts_published
+                        entry_count,
+                        event_code,
                     } => {
                         info!(
                             job_id = %job_id,
                             snapshot_id = %snapshot_id,
-                            contracts_published = contracts_published,
+                            entry_count = entry_count,
+                            event_code = %event_code,
                             "Claim published to scoreboard"
                         );
 
                         context.insert("snapshot_id".to_string(), snapshot_id);
-                        context.insert("contracts_published".to_string(), contracts_published.to_string());
+                        context.insert("contracts_published".to_string(), entry_count.to_string());
 
                         // Step 5: Build final snapshot with integrity verification
                         let snapshot_result = self.scoreboard.build_snapshot(&claim_id, &[contract]);
 
                         match snapshot_result {
                             Some(snapshot) => {
+                                // API-DRIFT REMEDIATION (bd-rjc2m.5): ScoreboardSnapshot.contracts ->
+                                // .entries; .signature -> .snapshot_digest.
                                 info!(
                                     job_id = %job_id,
-                                    snapshot_contracts = snapshot.contracts.len(),
-                                    snapshot_signature = %snapshot.signature.len(),
+                                    snapshot_contracts = snapshot.entries.len(),
+                                    snapshot_signature = %snapshot.snapshot_digest.len(),
                                     "Scoreboard snapshot built successfully"
                                 );
 
-                                context.insert("snapshot_contracts".to_string(), snapshot.contracts.len().to_string());
+                                context.insert("snapshot_contracts".to_string(), snapshot.entries.len().to_string());
 
                                 self.log_operation(E2EOperationLog {
                                     operation: "claims_lifecycle_success".to_string(),
@@ -483,7 +514,8 @@ impl SupplyChainE2EHarness {
         &mut self,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let start_time = Instant::now();
-        let job_id = Uuid::new_v4().to_string();
+        // API-DRIFT REMEDIATION (bd-rjc2m.5): Uuid::new_v4() -> Uuid::now_v7() (v4 feature not enabled).
+        let job_id = Uuid::now_v7().to_string();
 
         info!(job_id = %job_id, "Starting full supply chain integration e2e test");
 
@@ -527,7 +559,10 @@ impl SupplyChainE2EHarness {
         self.log_operation(E2EOperationLog {
             operation: "full_supply_chain_integration".to_string(),
             component: "complete_system".to_string(),
-            job_id,
+            // API-DRIFT REMEDIATION (bd-rjc2m.5): E2EOperationLog literal was missing the required
+            // `timestamp` field (overwritten by log_operation, but required by the struct).
+            timestamp: start_time,
+            job_id: job_id.clone(),
             duration_ms: start_time.elapsed().as_millis() as u64,
             success: true,
             registry_entries: Some(admitted_extensions.len()),
@@ -551,53 +586,107 @@ impl SupplyChainE2EHarness {
 
     // Helper methods for real service operations
 
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): the previous harness produced a structurally-shaped but
+    // cryptographically-invalid request (zeroed signature, unregistered "test-key-id", empty
+    // provenance links). Production `SignedExtensionRegistry::register` performs REAL admission:
+    //   1. looks up `signature.key_id` in the kernel key ring  -> "publisher key not found",
+    //   2. verifies the Ed25519 signature over `manifest_bytes`,
+    //   3. verifies the provenance chain (development_profile: >= Level1PublisherSigned, depth 1,
+    //      signed links whose signer_id is a trusted key).
+    // This helper now mirrors production's own `valid_request` inline test: it registers the
+    // publisher verifying key with the registry (capturing the derived KeyId), signs the canonical
+    // manifest bytes with that key, and emits a provenance attestation with one signed Publisher
+    // link bound to the same KeyId. `&self` suffices because the registry is `Arc<RwLock<..>>`.
     async fn create_real_registration_request(
         &self,
         extension_name: &str,
     ) -> Result<RegistrationRequest, Box<dyn std::error::Error>> {
-        // Create a real registration request with test signatures
-        let manifest_content = format!(r#"{{"name": "{}", "version": "1.0.0"}}"#, extension_name);
-        let manifest_bytes = manifest_content.as_bytes().to_vec();
+        let publisher_id = "e2e-test-publisher".to_string();
+        let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+        let verifying_key = signing_key.verifying_key();
 
-        // Create a test signature (in real usage this would be properly signed)
-        let signature_bytes = vec![0u8; 64]; // Ed25519 signature is 64 bytes
+        // Register the publisher key so admission can find it AND trust its provenance links.
+        let key_id = {
+            let mut registry = self.registry.write().await;
+            registry.register_publisher_key(verifying_key)
+        };
+        let key_id_str = key_id.to_string();
+
+        // Canonical manifest bytes are what the registry re-verifies the signature against.
+        let initial_version = VersionEntry {
+            version: "1.0.0".to_string(),
+            parent_version: None,
+            content_hash: hex::encode(sha2::Sha256::digest(extension_name.as_bytes())),
+            // Deterministic so the signed bytes equal the stored bytes (no Utc::now() drift).
+            registered_at: "2026-05-22T22:45:00+00:00".to_string(),
+            compatible_with: vec!["test".to_string()],
+        };
+        let tags = vec!["test".to_string(), "e2e".to_string()];
+        let manifest_bytes = frankenengine_node::supply_chain::extension_registry::canonical_registration_manifest_bytes(
+            extension_name,
+            &publisher_id,
+            &initial_version,
+            &tags,
+        )?;
+        let signature_bytes = artifact_signing::sign_bytes(&signing_key, &manifest_bytes);
+
+        // Provenance: one signed Publisher link, signer_id == the trusted KeyId string. Epochs are
+        // in SECONDS to match the `now_epoch` the registry is invoked with.
+        let now_epoch = chrono::Utc::now().timestamp() as u64;
+        let mut provenance = prov::ProvenanceAttestation {
+            schema_version: "1.0".to_string(),
+            source_repository_url: "https://github.com/test/test-extension".to_string(),
+            build_system_identifier: "e2e-test-build-system".to_string(),
+            builder_identity: key_id_str.clone(),
+            builder_version: "1.0.0".to_string(),
+            vcs_commit_sha: "abc123def456789".to_string(),
+            build_timestamp_epoch: now_epoch.saturating_sub(60),
+            reproducibility_hash: "d".repeat(64),
+            input_hash: "e".repeat(64),
+            output_hash: "f".repeat(64),
+            slsa_level_claim: 2,
+            envelope_format: prov::AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
+            links: vec![prov::AttestationLink {
+                role: prov::ChainLinkRole::Publisher,
+                signer_id: key_id_str.clone(),
+                signer_version: "1.0.0".to_string(),
+                signature: String::new(), // filled by sign_links_in_place
+                signed_payload_hash: "f".repeat(64),
+                issued_at_epoch: now_epoch.saturating_sub(60),
+                expires_at_epoch: now_epoch.saturating_add(86_400),
+                revoked: false,
+            }],
+            custom_claims: BTreeMap::new(),
+        };
+        let signing_keys = BTreeMap::from([(key_id_str.clone(), signing_key)]);
+        prov::sign_links_in_place(&mut provenance, &signing_keys)?;
 
         Ok(RegistrationRequest {
             name: extension_name.to_string(),
             description: format!("E2E test extension: {}", extension_name),
-            publisher_id: "e2e-test-publisher".to_string(),
+            publisher_id,
+            // API-DRIFT REMEDIATION (bd-rjc2m.5): ExtensionSignature gained a required `signed_at`
+            // (RFC3339) field; key_id MUST equal the registered key's derived KeyId.
             signature: ExtensionSignature {
                 algorithm: "ed25519".to_string(),
-                key_id: "test-key-id".to_string(),
+                key_id: key_id_str,
                 signature_bytes,
+                signed_at: chrono::Utc::now().to_rfc3339(),
             },
-            provenance: prov::ProvenanceAttestation {
-                schema_version: "1.0".to_string(),
-                source_repository_url: "https://github.com/test/test-extension".to_string(),
-                build_system_identifier: "e2e-test-build-system".to_string(),
-                builder_identity: "e2e-test-builder".to_string(),
-                builder_version: "1.0.0".to_string(),
-                vcs_commit_sha: "abc123def456789".to_string(),
-                build_timestamp_epoch: chrono::Utc::now().timestamp_millis() as u64,
-                reproducibility_hash: hex::encode(sha2::Sha256::digest(&manifest_bytes)),
-                input_hash: hex::encode(sha2::Sha256::digest("test-input".as_bytes())),
-                output_hash: hex::encode(sha2::Sha256::digest(&manifest_bytes)),
-                slsa_level_claim: 1,
-                envelope_format: prov::AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
-                links: vec![], // Empty for this test
-                custom_claims: BTreeMap::new(),
-            },
-            initial_version: VersionEntry {
-                version: "1.0.0".to_string(),
-                parent_version: None,
-                content_hash: hex::encode(sha2::Sha256::digest(&manifest_bytes)),
-                registered_at: chrono::Utc::now().to_rfc3339(),
-                compatible_with: vec!["test".to_string()],
-            },
-            tags: vec!["test".to_string(), "e2e".to_string()],
+            provenance,
+            initial_version,
+            tags,
             manifest_bytes,
             transparency_proof: None, // Optional for this test
         })
+    }
+
+    // API-DRIFT REMEDIATION (bd-rjc2m.5): KeyRing.sign() is gone. The harness recomputes the
+    // expected contract signature with a deterministic Ed25519 signing key via the free function
+    // artifact_signing::sign_bytes. (The ClaimCompiler signs with its own key, so this comparison
+    // is a structural/witness check, as it was when it used the unrelated key_ring signature.)
+    fn harness_signing_key(&self) -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
     }
 
     async fn verify_contract_signature(
@@ -620,9 +709,17 @@ impl SupplyChainE2EHarness {
             hasher.finalize()
         };
 
-        // Use constant-time comparison for signature verification
-        let expected_signature = self.key_ring.sign(&content_hash)?;
-        Ok(constant_time::ct_eq(&signature_bytes, &expected_signature))
+        // Use constant-time comparison for signature verification.
+        // API-DRIFT REMEDIATION (bd-rjc2m.5): KeyRing has no .sign(); signing moved to the free
+        // function artifact_signing::sign_bytes(&SigningKey, data). Derive a deterministic signing
+        // key from the harness key ring's first key id so the recomputed signature is stable.
+        let signing_key = self.harness_signing_key();
+        let expected_signature = artifact_signing::sign_bytes(&signing_key, &content_hash);
+        // ct_eq_bytes for [u8] comparisons (ct_eq is the &str variant) — project hardening pattern.
+        Ok(constant_time::ct_eq_bytes(
+            &signature_bytes,
+            &expected_signature,
+        ))
     }
 
     async fn verify_cross_component_reference(
