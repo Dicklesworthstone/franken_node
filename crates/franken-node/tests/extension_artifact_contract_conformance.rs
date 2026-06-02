@@ -10,9 +10,21 @@ use frankenengine_node::extensions::artifact_contract::{
     CapabilityEntry, DriftCheckResult, EnforcementEngine, ExtensionArtifact, SCHEMA_VERSION,
     error_codes, event_codes, invariants, make_artifact, make_contract,
 };
+use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
+use frankenengine_node::supply_chain::trust_card::{
+    BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
+    ExtensionIdentity, ProvenanceSummary, PublisherIdentity, ReputationTrend, RevocationStatus,
+    RiskAssessment, RiskLevel, TrustCardInput, TrustCardRegistry,
+};
 use serde_json::{Value, json};
 
 mod bounded_input_policy_contract;
+
+// API-DRIFT REMEDIATION (bd-rjc2m.5): AdmissionGate::evaluate() gained two parameters
+// (trust_registry: Option<&mut TrustCardRegistry>, now_secs: u64) and now fails closed
+// (TrustRevoked) when no registry/card is available — so each case evaluates against a
+// seeded trust registry (see trusted_registry()) at a fixed deterministic timestamp.
+const ADMISSION_NOW_SECS: u64 = 1_750_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequirementLevel {
@@ -85,6 +97,69 @@ fn trusted_gate() -> Result<AdmissionGate, String> {
     Ok(AdmissionGate::new(config))
 }
 
+/// Build a TrustCardRegistry seeded with a valid (non-revoked, non-quarantined) trust card
+/// for the fixture extension, so the admission gate's trust check (INV-ARTIFACT-TRUST-VALIDATED)
+/// passes and the downstream signature/schema/capability invariants can be exercised.
+/// The gate fails closed with TrustRevoked when no registry (or no card) is available.
+fn trusted_registry() -> Result<TrustCardRegistry, String> {
+    let mut registry = TrustCardRegistry::new(300, b"extension-artifact-conformance-trust-key-v1");
+    let input = TrustCardInput {
+        extension: ExtensionIdentity {
+            extension_id: "ext-alpha".to_string(),
+            version: "1.0.0".to_string(),
+        },
+        publisher: PublisherIdentity {
+            publisher_id: "publisher:artifact-conformance".to_string(),
+            display_name: "Artifact Conformance Publisher".to_string(),
+        },
+        certification_level: CertificationLevel::Silver,
+        capability_declarations: vec![CapabilityDeclaration {
+            name: "fs.read".to_string(),
+            description: "filesystem read capability".to_string(),
+            risk: CapabilityRisk::Medium,
+        }],
+        behavioral_profile: BehavioralProfile {
+            network_access: true,
+            filesystem_access: true,
+            subprocess_access: false,
+            profile_summary: "artifact conformance fixture profile".to_string(),
+        },
+        revocation_status: RevocationStatus::Active,
+        provenance_summary: ProvenanceSummary {
+            attestation_level: "conformance-fixture".to_string(),
+            source_uri: "conformance://ext-alpha".to_string(),
+            artifact_hashes: vec!["sha256:".to_string() + &"c".repeat(64)],
+            verified_at: "2026-06-01T00:00:00Z".to_string(),
+        },
+        reputation_score_basis_points: 9_000,
+        reputation_trend: ReputationTrend::Stable,
+        active_quarantine: false,
+        dependency_trust_summary: Vec::new(),
+        last_verified_timestamp: "2026-06-01T00:00:00Z".to_string(),
+        user_facing_risk_assessment: RiskAssessment {
+            level: RiskLevel::Medium,
+            summary: "artifact conformance fixture".to_string(),
+        },
+        evidence_refs: vec![VerifiedEvidenceRef {
+            evidence_id: "artifact-conformance-evidence".to_string(),
+            evidence_type: EvidenceType::TestCoverageReport,
+            verified_at_epoch: ADMISSION_NOW_SECS,
+            verification_receipt_hash: "a".repeat(64),
+        }],
+    };
+    registry
+        .create(input, ADMISSION_NOW_SECS, "artifact-conformance-trust-seed")
+        .map_err(|error| format!("trust card seed should succeed: {error}"))?;
+    Ok(registry)
+}
+
+/// Evaluate an artifact through a trusted gate with a seeded trust registry.
+fn evaluate_with_trust(artifact: &ExtensionArtifact) -> Result<AdmissionOutcome, String> {
+    let gate = trusted_gate()?;
+    let mut trust_registry = trusted_registry()?;
+    Ok(gate.evaluate(artifact, Some(&mut trust_registry), ADMISSION_NOW_SECS))
+}
+
 fn signed_contract() -> CapabilityContract {
     make_contract(
         "contract-1",
@@ -135,7 +210,7 @@ fn case_missing_contract_denies() -> Result<(), String> {
     let mut artifact = signed_artifact();
     artifact.capability_contract = None;
 
-    let (reason, event_code) = denied((trusted_gate()?).evaluate(&artifact))?;
+    let (reason, event_code) = denied(evaluate_with_trust(&artifact)?)?;
     require(
         reason == AdmissionDenialReason::MissingContract,
         format!("expected missing-contract denial, got {reason:?}"),
@@ -160,7 +235,7 @@ fn case_signature_tamper_denies() -> Result<(), String> {
     };
     first_capability.max_calls_per_epoch = first_capability.max_calls_per_epoch.saturating_add(1);
 
-    let (reason, event_code) = denied((trusted_gate()?).evaluate(&artifact))?;
+    let (reason, event_code) = denied(evaluate_with_trust(&artifact)?)?;
     require(
         matches!(reason, AdmissionDenialReason::SignatureInvalid),
         format!("expected signature-invalid denial, got {reason:?}"),
@@ -178,7 +253,7 @@ fn case_signature_tamper_denies() -> Result<(), String> {
 fn case_capability_envelope_only_allows_declared_ids() -> Result<(), String> {
     let contract = signed_contract();
     let artifact = make_artifact("artifact-1", "ext-alpha", contract.clone());
-    let (contract_id, extension_id, event_code) = accepted((trusted_gate()?).evaluate(&artifact))?;
+    let (contract_id, extension_id, event_code) = accepted(evaluate_with_trust(&artifact)?)?;
     require(
         event_code == event_codes::ARTIFACT_ADMISSION_ACCEPTED,
         format!("expected accepted event, got `{event_code}`"),
@@ -266,7 +341,7 @@ fn case_duplicate_capability_denies() -> Result<(), String> {
     );
     let artifact = make_artifact("artifact-duplicate-capability", "ext-alpha", contract);
 
-    let (reason, event_code) = denied((trusted_gate()?).evaluate(&artifact))?;
+    let (reason, event_code) = denied(evaluate_with_trust(&artifact)?)?;
     require(
         matches!(reason, AdmissionDenialReason::InvalidCapability { .. }),
         format!("expected invalid-capability denial, got {reason:?}"),
@@ -292,7 +367,7 @@ fn case_schema_mismatch_denies() -> Result<(), String> {
     );
     let artifact = make_artifact("artifact-schema-mismatch", "ext-alpha", contract);
 
-    let (reason, event_code) = denied((trusted_gate()?).evaluate(&artifact))?;
+    let (reason, event_code) = denied(evaluate_with_trust(&artifact)?)?;
     require(
         matches!(reason, AdmissionDenialReason::SchemaMismatch { .. }),
         format!("expected schema-mismatch denial, got {reason:?}"),

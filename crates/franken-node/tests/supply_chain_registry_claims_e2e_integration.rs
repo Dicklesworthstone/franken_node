@@ -76,9 +76,13 @@ impl SupplyChainE2EHarness {
         let temp_dir = TempDir::new().expect("should create temp directory");
 
         // Real registry configuration - no mocks
+        // API-DRIFT REMEDIATION (bd-rjc2m.5): RegistryConfig{max_entries} ->
+        // {registry_version, require_provenance, require_signature, allow_self_revocation,
+        // max_extensions}. Keep the 10k capacity intent; defaults for the policy gates
+        // (provenance + signature required = the registry's fail-closed defaults).
         let registry_config = RegistryConfig {
-            max_entries: 10_000,
-            // Add other required fields based on actual RegistryConfig
+            max_extensions: 10_000,
+            ..RegistryConfig::default()
         };
 
         // Real claims compiler configuration

@@ -5,6 +5,10 @@
 //! Cargo fails if the actual product paths stop compiling or stop enforcing
 //! evidence, lookup, filtering, and pagination behavior.
 
+// API-DRIFT REMEDIATION (bd-rjc2m.5): create/get/list_trust_cards now take leading
+// (&AuthIdentity, &TraceContext) parameters and enforce route auth contracts;
+// the old trailing trace_id string moved into TraceContext. search_trust_cards unchanged.
+use frankenengine_node::api::middleware::{AuthIdentity, AuthMethod, TraceContext};
 use frankenengine_node::api::trust_card_routes::{
     Pagination, create_trust_card, get_trust_card, list_trust_cards, search_trust_cards,
 };
@@ -21,6 +25,29 @@ const REGISTRY_KEY: &[u8] = b"trust-card-conformance-runner-real-registry-key-v1
 
 fn registry() -> TrustCardRegistry {
     TrustCardRegistry::new(300, REGISTRY_KEY)
+}
+
+/// Route-authorized identity matching the trust-card route contracts (same shape as the
+/// production module's own route tests: bearer token + operator/verifier/reader roles).
+fn route_identity() -> AuthIdentity {
+    AuthIdentity {
+        principal: "trust-card-conformance-runner".to_string(),
+        method: AuthMethod::BearerToken,
+        roles: vec![
+            "operator".to_string(),
+            "verifier".to_string(),
+            "reader".to_string(),
+            "trust-admin".to_string(),
+        ],
+    }
+}
+
+fn route_trace(trace_id: &str) -> TraceContext {
+    TraceContext {
+        trace_id: trace_id.to_string(),
+        span_id: "0000000000000001".to_string(),
+        trace_flags: 1,
+    }
 }
 
 fn evidence_refs(id: &str) -> Vec<VerifiedEvidenceRef> {
@@ -85,6 +112,8 @@ fn registered_runner_reads_real_trust_card_through_api_route() {
     let extension_id = "npm:@runner/api-route";
 
     let created = create_trust_card(
+        &route_identity(),
+        &route_trace("runner-create"),
         &mut registry,
         trust_card_input(
             extension_id,
@@ -93,7 +122,6 @@ fn registered_runner_reads_real_trust_card_through_api_route() {
             CertificationLevel::Silver,
         ),
         BASE_TIMESTAMP,
-        "runner-create",
     )
     .expect("real trust card create route must succeed");
 
@@ -103,10 +131,11 @@ fn registered_runner_reads_real_trust_card_through_api_route() {
     assert_eq!(created.data.card_hash.len(), 64);
 
     let read = get_trust_card(
+        &route_identity(),
+        &route_trace("runner-read"),
         &mut registry,
         extension_id,
         BASE_TIMESTAMP + 1,
-        "runner-read",
     )
     .expect("real trust card read route must succeed");
 
@@ -132,20 +161,22 @@ fn registered_runner_rejects_missing_evidence_without_persisting_card() {
     input.evidence_refs.clear();
 
     let err = create_trust_card(
+        &route_identity(),
+        &route_trace("runner-create-no-evidence"),
         &mut registry,
         input,
         BASE_TIMESTAMP,
-        "runner-create-no-evidence",
     )
     .expect_err("missing evidence must fail closed through the real create route");
 
     assert!(matches!(err, TrustCardError::EvidenceMissing));
 
     let read = get_trust_card(
+        &route_identity(),
+        &route_trace("runner-read-rejected"),
         &mut registry,
         extension_id,
         BASE_TIMESTAMP + 1,
-        "runner-read-rejected",
     )
     .expect("read after rejected create must still be well-formed");
     assert!(read.data.is_none());
@@ -156,6 +187,8 @@ fn registered_runner_exercises_real_search_filter_and_pagination() {
     let mut registry = registry();
 
     create_trust_card(
+        &route_identity(),
+        &route_trace("runner-create-network"),
         &mut registry,
         trust_card_input(
             "npm:@runner/network",
@@ -164,10 +197,11 @@ fn registered_runner_exercises_real_search_filter_and_pagination() {
             CertificationLevel::Gold,
         ),
         BASE_TIMESTAMP,
-        "runner-create-network",
     )
     .expect("network card create route must succeed");
     create_trust_card(
+        &route_identity(),
+        &route_trace("runner-create-filesystem"),
         &mut registry,
         trust_card_input(
             "npm:@runner/filesystem",
@@ -176,7 +210,6 @@ fn registered_runner_exercises_real_search_filter_and_pagination() {
             CertificationLevel::Silver,
         ),
         BASE_TIMESTAMP + 1,
-        "runner-create-filesystem",
     )
     .expect("filesystem card create route must succeed");
 
@@ -208,10 +241,11 @@ fn registered_runner_exercises_real_search_filter_and_pagination() {
         capability: None,
     };
     let listed = list_trust_cards(
+        &route_identity(),
+        &route_trace("runner-list"),
         &mut registry,
         &gold_filter,
         BASE_TIMESTAMP + 3,
-        "runner-list",
         Pagination {
             page: 1,
             per_page: 10,
@@ -222,10 +256,11 @@ fn registered_runner_exercises_real_search_filter_and_pagination() {
     assert_eq!(listed.data[0].certification_level, CertificationLevel::Gold);
 
     let err = list_trust_cards(
+        &route_identity(),
+        &route_trace("runner-invalid-pagination"),
         &mut registry,
         &TrustCardListFilter::empty(),
         BASE_TIMESTAMP + 4,
-        "runner-invalid-pagination",
         Pagination {
             page: 1,
             per_page: 0,
