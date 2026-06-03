@@ -5,12 +5,51 @@ on:
     paths:
       - "crates/franken-node/Cargo.toml"
       - "crates/franken-node/src/**"
+      - "scripts/check_inline_lib_tests.py"
+      - "tests/test_check_inline_lib_tests.py"
       - ".github/workflows/inline-lib-tests-gate.yml"
+  workflow_dispatch:
+    inputs:
+      run_full_inline_tests:
+        description: "Run the expensive dedicated cargo test --lib lane"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
-  inline-lib-tests:
+  inline-lib-test-preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+        working-directory: franken_node
+    steps:
+      - name: Check out franken_node
+        uses: actions/checkout@v4
+        with:
+          path: franken_node
+
+      - name: Check out franken_engine sibling
+        uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/franken_engine
+          path: franken_engine
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Gate parser unit tests
+        run: python3 tests/test_check_inline_lib_tests.py
+
+      - name: Assert inline library test override wiring
+        run: python3 scripts/check_inline_lib_tests.py --preflight --json
+
+  full-inline-lib-tests:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_full_inline_tests }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    needs: inline-lib-test-preflight
     defaults:
       run:
         shell: bash
@@ -47,22 +86,17 @@ jobs:
       - name: Assert inline library tests are discoverable
         run: |
           set -euo pipefail
-          "$HOME/.local/bin/rch" exec -- env CARGO_INCREMENTAL=0 cargo test \
+          "$HOME/.local/bin/rch" exec -- env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" cargo test \
             -p frankenengine-node \
             --lib \
             --features extended-surfaces,test-support \
             -- --list \
             | tee inline-lib-tests.list
-          test_count="$(grep -Ec '^[^[:space:]].*: test$' inline-lib-tests.list || true)"
-          echo "Discovered ${test_count} inline library tests"
-          if [[ "${test_count}" -le 0 ]]; then
-            echo "Expected cargo test --lib to discover at least one inline library test"
-            exit 1
-          fi
+          python3 scripts/check_inline_lib_tests.py inline-lib-tests.list --min-tests 1 --json
 
       - name: Run inline library tests
         run: |
-          "$HOME/.local/bin/rch" exec -- env CARGO_INCREMENTAL=0 cargo test \
+          "$HOME/.local/bin/rch" exec -- env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" cargo test \
             -p frankenengine-node \
             --lib \
             --features extended-surfaces,test-support

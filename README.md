@@ -2362,6 +2362,12 @@ and across the test surface:
   workspace test trees (`tests/integration`, `tests/conformance`,
   `tests/contract`, `tests/e2e`, `tests/golden`, `tests/security`,
   `tests/perf`).
+  The inline library-test portion is guarded by
+  `.github/workflows/inline-lib-tests-gate.yml`. Pull requests run a
+  cheap preflight that asserts the dedicated inline-test override remains
+  wired; the expensive full lane is invoked manually with
+  `run_full_inline_tests=true`, which runs the extended-surfaces/test-support
+  `cargo test --lib` harness under `--cfg franken_node_inline_tests`.
 - Loom-based concurrency interleaving tests for the auth failure limiter,
   operator process-start initialization, evidence-ledger append ordering,
   and the remote-cap replay token set.

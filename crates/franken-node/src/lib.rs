@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![cfg(not(test))]
+#![cfg(any(not(test), franken_node_inline_tests))]
 extern crate self as frankenengine_node;
 
 /// Maximum help URLs to prevent memory exhaustion.

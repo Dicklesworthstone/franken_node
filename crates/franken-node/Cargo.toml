@@ -80,7 +80,7 @@ path = "src/lib.rs"
 test = true
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(franken_node_inline_tests)'] }
 
 [features]
 asupersync-transport = ["dep:asupersync"]
