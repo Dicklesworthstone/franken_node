@@ -6,8 +6,9 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use base64::Engine;
+use libfuzzer_sys::fuzz_target;
 
 // Mock ed25519_dalek types for fuzzing
 #[derive(Debug, Clone)]
@@ -93,7 +94,6 @@ fn parse_signing_key_from_blob(raw: &[u8]) -> Option<MockSigningKey> {
     }
 
     // Try base64 decoding
-    use base64::Engine;
     let base64_engines = [
         &base64::prelude::BASE64_STANDARD,
         &base64::prelude::BASE64_URL_SAFE,
@@ -275,28 +275,49 @@ impl FormatVariant {
             FormatVariant::HexWithPrefix => format!("0x{}", hex::encode(key_bytes)).into_bytes(),
             FormatVariant::HexWithUnderscores => {
                 let hex = hex::encode(key_bytes);
-                let with_underscores = hex.chars()
+                let with_underscores = hex
+                    .chars()
                     .enumerate()
-                    .map(|(i, c)| if i > 0 && i % 8 == 0 { format!("_{}", c) } else { c.to_string() })
+                    .map(|(i, c)| {
+                        if i > 0 && i % 8 == 0 {
+                            format!("_{}", c)
+                        } else {
+                            c.to_string()
+                        }
+                    })
                     .collect::<String>();
                 with_underscores.into_bytes()
-            },
+            }
             FormatVariant::HexWithDashes => {
                 let hex = hex::encode(key_bytes);
-                let with_dashes = hex.chars()
+                let with_dashes = hex
+                    .chars()
                     .enumerate()
-                    .map(|(i, c)| if i > 0 && i % 4 == 0 { format!("-{}", c) } else { c.to_string() })
+                    .map(|(i, c)| {
+                        if i > 0 && i % 4 == 0 {
+                            format!("-{}", c)
+                        } else {
+                            c.to_string()
+                        }
+                    })
                     .collect::<String>();
                 with_dashes.into_bytes()
-            },
-            FormatVariant::Base64Standard => base64::prelude::BASE64_STANDARD.encode(key_bytes).into_bytes(),
-            FormatVariant::Base64UrlSafe => base64::prelude::BASE64_URL_SAFE.encode(key_bytes).into_bytes(),
-            FormatVariant::Base64NoPadding => base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(key_bytes).into_bytes(),
+            }
+            FormatVariant::Base64Standard => base64::prelude::BASE64_STANDARD
+                .encode(key_bytes)
+                .into_bytes(),
+            FormatVariant::Base64UrlSafe => base64::prelude::BASE64_URL_SAFE
+                .encode(key_bytes)
+                .into_bytes(),
+            FormatVariant::Base64NoPadding => base64::prelude::BASE64_URL_SAFE_NO_PAD
+                .encode(key_bytes)
+                .into_bytes(),
             FormatVariant::MixedFormat => {
                 let hex_part = hex::encode(&key_bytes[..key_bytes.len().min(16)]);
-                let b64_part = base64::prelude::BASE64_STANDARD.encode(&key_bytes[key_bytes.len().min(16)..]);
+                let b64_part =
+                    base64::prelude::BASE64_STANDARD.encode(&key_bytes[key_bytes.len().min(16)..]);
                 format!("{}{}", hex_part, b64_part).into_bytes()
-            },
+            }
         }
     }
 }
@@ -322,20 +343,23 @@ impl FormatConfusionType {
         match self {
             FormatConfusionType::TextualNonHex => b"not_hex_at_all".to_vec(),
             FormatConfusionType::InvalidBase64 => b"Invalid@Base64!".to_vec(),
-            FormatConfusionType::MixedEncoding => {
-                [hex::encode(&payload[..payload.len().min(16)]).as_bytes(),
-                 b"MIXED",
-                 &payload[payload.len().min(16)..]].concat()
-            },
+            FormatConfusionType::MixedEncoding => [
+                hex::encode(&payload[..payload.len().min(16)]).as_bytes(),
+                b"MIXED",
+                &payload[payload.len().min(16)..],
+            ]
+            .concat(),
             FormatConfusionType::UnicodeChars => "🔑🚀💻🔥".as_bytes().to_vec(),
-            FormatConfusionType::ControlChars => [&[0x01, 0x02, 0x03, 0x1F, 0x7F], payload].concat(),
+            FormatConfusionType::ControlChars => {
+                [&[0x01, 0x02, 0x03, 0x1F, 0x7F], payload].concat()
+            }
             FormatConfusionType::NullBytes => [payload, &[0x00, 0x00, 0x00]].concat(),
             FormatConfusionType::WhitespaceVariations => {
                 format!(" \t\n{}\r\n ", hex::encode(payload)).into_bytes()
-            },
+            }
             FormatConfusionType::PrefixSuffixAttack => {
                 format!("PREFIX{}SUFFIX", hex::encode(payload)).into_bytes()
-            },
+            }
         }
     }
 }
@@ -348,36 +372,47 @@ impl EncodingType {
                 let mut hex = hex::encode(key_bytes);
                 hex.replace_range(5..6, "G");
                 hex.into_bytes()
-            },
+            }
             EncodingType::OddLengthHex => {
                 let hex = hex::encode(key_bytes);
-                hex[..hex.len()-1].to_string().into_bytes()
-            },
-            EncodingType::CaseMixed => {
-                hex::encode(key_bytes).chars()
-                    .enumerate()
-                    .map(|(i, c)| if i % 2 == 0 { c.to_uppercase().collect::<String>() } else { c.to_lowercase().collect::<String>() })
-                    .collect::<String>()
-                    .into_bytes()
-            },
+                hex[..hex.len() - 1].to_string().into_bytes()
+            }
+            EncodingType::CaseMixed => hex::encode(key_bytes)
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 2 == 0 {
+                        c.to_uppercase().collect::<String>()
+                    } else {
+                        c.to_lowercase().collect::<String>()
+                    }
+                })
+                .collect::<String>()
+                .into_bytes(),
             EncodingType::WithDelimiters => {
                 let hex = hex::encode(key_bytes);
                 hex.chars()
                     .enumerate()
-                    .map(|(i, c)| if i > 0 && i % 4 == 0 { format!(":{}", c) } else { c.to_string() })
+                    .map(|(i, c)| {
+                        if i > 0 && i % 4 == 0 {
+                            format!(":{}", c)
+                        } else {
+                            c.to_string()
+                        }
+                    })
                     .collect::<String>()
                     .into_bytes()
-            },
+            }
             EncodingType::WithPrefixes => format!("hex:{}", hex::encode(key_bytes)).into_bytes(),
             EncodingType::CorruptedBase64 => {
                 let mut b64 = base64::prelude::BASE64_STANDARD.encode(key_bytes);
                 b64.replace_range(5..6, "@");
                 b64.into_bytes()
-            },
+            }
             EncodingType::DoubleDecode => {
                 let first = hex::encode(key_bytes);
                 hex::encode(first.as_bytes()).into_bytes()
-            },
+            }
         }
     }
 }
@@ -385,25 +420,29 @@ impl EncodingType {
 impl ValidationBypassType {
     fn apply(&self, seed: &[u8; 32], fake_public: &[u8; 32]) -> Vec<u8> {
         match self {
-            ValidationBypassType::MismatchedKeypair => [seed.as_slice(), fake_public.as_slice()].concat(),
+            ValidationBypassType::MismatchedKeypair => {
+                [seed.as_slice(), fake_public.as_slice()].concat()
+            }
             ValidationBypassType::ValidSeedWrongPublic => {
                 let mut wrong_public = *fake_public;
                 wrong_public[0] = wrong_public[0].wrapping_add(1);
                 [seed.as_slice(), wrong_public.as_slice()].concat()
-            },
+            }
             ValidationBypassType::CorruptedPublicKey => {
                 let mut corrupted = *fake_public;
                 corrupted[15] ^= 0xFF;
                 [seed.as_slice(), corrupted.as_slice()].concat()
-            },
+            }
             ValidationBypassType::ZeroPublicKey => [seed.as_slice(), &[0u8; 32]].concat(),
             ValidationBypassType::AllOnesPublic => [seed.as_slice(), &[0xFFu8; 32]].concat(),
-            ValidationBypassType::SwappedSeedPublic => [fake_public.as_slice(), seed.as_slice()].concat(),
+            ValidationBypassType::SwappedSeedPublic => {
+                [fake_public.as_slice(), seed.as_slice()].concat()
+            }
             ValidationBypassType::PartialMatch => {
                 let mut partial = *fake_public;
                 partial[..16].copy_from_slice(&seed[..16]);
                 [seed.as_slice(), partial.as_slice()].concat()
-            },
+            }
         }
     }
 }
@@ -456,35 +495,35 @@ impl CorruptionType {
                 if pos < corrupted.len() {
                     corrupted[pos] ^= 0x01;
                 }
-            },
+            }
             CorruptionType::MultiBitFlip => {
                 if pos < corrupted.len() {
                     corrupted[pos] ^= 0xFF;
                 }
-            },
+            }
             CorruptionType::ByteSwap => {
                 if pos + 1 < corrupted.len() {
                     corrupted.swap(pos, pos + 1);
                 }
-            },
+            }
             CorruptionType::Truncation => {
                 if pos < corrupted.len() {
                     corrupted.truncate(pos);
                 }
-            },
+            }
             CorruptionType::Padding => {
                 corrupted.extend_from_slice(&vec![0x00; (position % 32) as usize]);
-            },
+            }
             CorruptionType::Duplication => {
                 if pos < corrupted.len() {
                     corrupted.insert(pos, corrupted[pos]);
                 }
-            },
+            }
             CorruptionType::Inversion => {
                 for byte in &mut corrupted {
                     *byte = !*byte;
                 }
-            },
+            }
         }
 
         corrupted
@@ -496,43 +535,72 @@ fuzz_target!(|data: &[u8]| {
 
     if let Ok(fuzz_input) = FuzzInput::arbitrary(&mut u) {
         match fuzz_input.operation {
-            SigningKeyParseTest::ValidKeys { key_data, format_variant } => {
+            SigningKeyParseTest::ValidKeys {
+                key_data,
+                format_variant,
+            } => {
                 let key_bytes = key_data.to_bytes();
                 let formatted = format_variant.apply(&key_bytes);
                 // Test deterministic signing key parsing
                 let result1 = parse_signing_key_from_blob(&formatted);
                 let result2 = parse_signing_key_from_blob(&formatted);
-                assert_eq!(result1.is_some(), result2.is_some(), "Signing key parsing should be deterministic");
-            },
-            SigningKeyParseTest::LengthAttacks { attack_type, base_size } => {
+                assert_eq!(
+                    result1.is_some(),
+                    result2.is_some(),
+                    "Signing key parsing should be deterministic"
+                );
+            }
+            SigningKeyParseTest::LengthAttacks {
+                attack_type,
+                base_size,
+            } => {
                 let attack_bytes = attack_type.generate(base_size);
                 let _ = parse_signing_key_from_blob(&attack_bytes);
-            },
-            SigningKeyParseTest::FormatConfusion { confusion_type, payload } => {
+            }
+            SigningKeyParseTest::FormatConfusion {
+                confusion_type,
+                payload,
+            } => {
                 let confused_bytes = confusion_type.apply(&payload);
                 let _ = parse_signing_key_from_blob(&confused_bytes);
-            },
-            SigningKeyParseTest::EncodingAttacks { encoding_type, key_bytes } => {
+            }
+            SigningKeyParseTest::EncodingAttacks {
+                encoding_type,
+                key_bytes,
+            } => {
                 let encoded = encoding_type.apply(&key_bytes);
                 let _ = parse_signing_key_from_blob(&encoded);
-            },
-            SigningKeyParseTest::ValidationBypass { bypass_type, seed, fake_public } => {
+            }
+            SigningKeyParseTest::ValidationBypass {
+                bypass_type,
+                seed,
+                fake_public,
+            } => {
                 let bypass_data = bypass_type.apply(&seed, &fake_public);
                 let _ = parse_signing_key_from_blob(&bypass_data);
-            },
-            SigningKeyParseTest::InjectionAttacks { injection_type, payload } => {
+            }
+            SigningKeyParseTest::InjectionAttacks {
+                injection_type,
+                payload,
+            } => {
                 let injection_data = injection_type.inject(&payload);
                 let _ = parse_signing_key_from_blob(&injection_data);
-            },
-            SigningKeyParseTest::BoundaryTests { boundary_type, modifier } => {
+            }
+            SigningKeyParseTest::BoundaryTests {
+                boundary_type,
+                modifier,
+            } => {
                 let boundary_data = boundary_type.generate(modifier);
                 let _ = parse_signing_key_from_blob(&boundary_data);
-            },
-            SigningKeyParseTest::CorruptionTests { corruption_type, position } => {
+            }
+            SigningKeyParseTest::CorruptionTests {
+                corruption_type,
+                position,
+            } => {
                 let base_key = [0x42u8; 32];
                 let corrupted = corruption_type.apply(&base_key, position);
                 let _ = parse_signing_key_from_blob(&corrupted);
-            },
+            }
         }
     }
 });

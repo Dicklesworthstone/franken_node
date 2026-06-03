@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use ed25519_dalek::SigningKey;
-use frankenengine_node::crypto::{CryptoSigner, Ed25519Scheme, Ed25519Signer};
+use frankenengine_node::crypto::{CryptoSigner, Ed25519Scheme, Ed25519Signer, SignatureScheme};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_CONTEXT_BYTES: usize = 128;

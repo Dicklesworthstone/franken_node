@@ -6,9 +6,10 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use base64::Engine;
 use hex::FromHex;
+use libfuzzer_sys::fuzz_target;
 
 // Reimplemented function for fuzzing
 fn decode_ed25519_public_key_hex(public_key_hex: &str) -> Option<[u8; 32]> {
@@ -156,31 +157,52 @@ impl CaseVariant {
         match self {
             CaseVariant::Lowercase => hex.to_lowercase(),
             CaseVariant::Uppercase => hex.to_uppercase(),
-            CaseVariant::Mixed => {
-                hex.chars().enumerate().map(|(i, c)| {
-                    if i % 2 == 0 { c.to_uppercase().collect::<String>() }
-                    else { c.to_lowercase().collect::<String>() }
-                }).collect()
-            },
-            CaseVariant::AlternatingCase => {
-                hex.chars().enumerate().map(|(i, c)| {
-                    if i % 3 == 0 { c.to_uppercase().collect::<String>() }
-                    else { c.to_lowercase().collect::<String>() }
-                }).collect()
-            },
-            CaseVariant::RandomCase => {
-                hex.chars().enumerate().map(|(i, c)| {
-                    if (i * 17 + 13) % 5 == 0 { c.to_uppercase().collect::<String>() }
-                    else { c.to_lowercase().collect::<String>() }
-                }).collect()
-            },
-            CaseVariant::MixedWithDigits => {
-                hex.chars().enumerate().map(|(i, c)| {
-                    if c.is_ascii_digit() { c.to_string() }
-                    else if i % 2 == 0 { c.to_uppercase().collect::<String>() }
-                    else { c.to_lowercase().collect::<String>() }
-                }).collect()
-            },
+            CaseVariant::Mixed => hex
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 2 == 0 {
+                        c.to_uppercase().collect::<String>()
+                    } else {
+                        c.to_lowercase().collect::<String>()
+                    }
+                })
+                .collect(),
+            CaseVariant::AlternatingCase => hex
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 3 == 0 {
+                        c.to_uppercase().collect::<String>()
+                    } else {
+                        c.to_lowercase().collect::<String>()
+                    }
+                })
+                .collect(),
+            CaseVariant::RandomCase => hex
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if (i * 17 + 13) % 5 == 0 {
+                        c.to_uppercase().collect::<String>()
+                    } else {
+                        c.to_lowercase().collect::<String>()
+                    }
+                })
+                .collect(),
+            CaseVariant::MixedWithDigits => hex
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if c.is_ascii_digit() {
+                        c.to_string()
+                    } else if i % 2 == 0 {
+                        c.to_uppercase().collect::<String>()
+                    } else {
+                        c.to_lowercase().collect::<String>()
+                    }
+                })
+                .collect(),
         }
     }
 }
@@ -197,7 +219,7 @@ impl LengthAttackType {
                 } else {
                     format!("{}A", base_content)
                 }
-            },
+            }
             LengthAttackType::Double => format!("{}{}", base_content, base_content),
             LengthAttackType::Massive => "A".repeat(100000),
             LengthAttackType::OddLength => {
@@ -206,7 +228,7 @@ impl LengthAttackType {
                     result.push('A');
                 }
                 result
-            },
+            }
             LengthAttackType::AlmostCorrect => "A".repeat(64 - 1),
         }
     }
@@ -217,7 +239,7 @@ impl InvalidCharType {
         let pos = (position as usize) % base_hex.len().max(1);
         let invalid_char = match self {
             InvalidCharType::NonHexLetters => 'G',
-            InvalidCharType::UnicodeDigits => '１',  // Fullwidth 1
+            InvalidCharType::UnicodeDigits => '１', // Fullwidth 1
             InvalidCharType::SpecialChars => '@',
             InvalidCharType::Whitespace => ' ',
             InvalidCharType::ControlChars => '\x01',
@@ -229,7 +251,7 @@ impl InvalidCharType {
 
         let mut result = base_hex.to_string();
         if pos < result.len() {
-            result.replace_range(pos..pos+1, &invalid_char.to_string());
+            result.replace_range(pos..pos + 1, &invalid_char.to_string());
         } else {
             result.push(invalid_char);
         }
@@ -298,35 +320,64 @@ impl EncodingConfusionType {
         let hex_str = hex::encode(base_value);
         let padded = format!("{}{}", hex_str, hex_str); // Make it 64 chars
         match self {
-            EncodingConfusionType::Base64 => base64::prelude::BASE64_STANDARD.encode(padded.as_bytes()).chars().take(64).collect(),
+            EncodingConfusionType::Base64 => base64::prelude::BASE64_STANDARD
+                .encode(padded.as_bytes())
+                .chars()
+                .take(64)
+                .collect(),
             EncodingConfusionType::Base32 => {
                 // Mock base32 encoding
-                padded.chars().map(|c| match c {
-                    'a'..='f' => char::from(c as u8 - b'a' + b'2'),
-                    '0'..='9' => c,
-                    _ => c,
-                }).collect()
-            },
-            EncodingConfusionType::UrlEncoded => {
-                padded.chars().map(|c| format!("%{:02X}", c as u8)).collect::<String>().chars().take(64).collect()
-            },
+                padded
+                    .chars()
+                    .map(|c| match c {
+                        'a'..='f' => char::from(c as u8 - b'a' + b'2'),
+                        '0'..='9' => c,
+                        _ => c,
+                    })
+                    .collect()
+            }
+            EncodingConfusionType::UrlEncoded => padded
+                .chars()
+                .map(|c| format!("%{:02X}", c as u8))
+                .collect::<String>()
+                .chars()
+                .take(64)
+                .collect(),
             EncodingConfusionType::DoubleEncoded => {
-                let url_encoded = padded.chars().map(|c| format!("%{:02X}", c as u8)).collect::<String>();
-                url_encoded.chars().map(|c| format!("%{:02X}", c as u8)).collect::<String>().chars().take(64).collect()
-            },
+                let url_encoded = padded
+                    .chars()
+                    .map(|c| format!("%{:02X}", c as u8))
+                    .collect::<String>();
+                url_encoded
+                    .chars()
+                    .map(|c| format!("%{:02X}", c as u8))
+                    .collect::<String>()
+                    .chars()
+                    .take(64)
+                    .collect()
+            }
             EncodingConfusionType::MixedEncoding => {
                 format!("0x{}", padded).chars().take(64).collect()
-            },
+            }
             EncodingConfusionType::BinaryData => {
                 // Simulate binary data as hex
-                base_value.iter().map(|b| format!("{:08b}", b)).collect::<String>().chars().take(64).collect()
-            },
+                base_value
+                    .iter()
+                    .map(|b| format!("{:08b}", b))
+                    .collect::<String>()
+                    .chars()
+                    .take(64)
+                    .collect()
+            }
             EncodingConfusionType::JsonEscaped => {
                 format!("\\\"{}\\\"", padded).chars().take(64).collect()
-            },
-            EncodingConfusionType::HtmlEntities => {
-                padded.replace("a", "&amp;").replace("e", "&lt;").chars().take(64).collect()
-            },
+            }
+            EncodingConfusionType::HtmlEntities => padded
+                .replace("a", "&amp;")
+                .replace("e", "&lt;")
+                .chars()
+                .take(64)
+                .collect(),
         }
     }
 }
@@ -340,10 +391,15 @@ impl FormatAttackType {
             FormatAttackType::MiddleInjection => {
                 let mid = base_key.len() / 2;
                 format!("{}{}garbage{}", &base_key[..mid], pattern, &base_key[mid..])
-            },
+            }
             FormatAttackType::WrappedFormat => format!("{{{}}}", base_key),
             FormatAttackType::EscapeSequences => format!("\\x{}\\n", base_key),
-            FormatAttackType::FormatConfusion => format!("{}-{}-{}", &base_key[..8], &base_key[8..16], &base_key[16..]),
+            FormatAttackType::FormatConfusion => format!(
+                "{}-{}-{}",
+                &base_key[..8],
+                &base_key[8..16],
+                &base_key[16..]
+            ),
             FormatAttackType::DelimiterInjection => base_key.replace("a", ":").replace("b", "-"),
         }
     }
@@ -354,94 +410,171 @@ fuzz_target!(|data: &[u8]| {
 
     if let Ok(fuzz_input) = FuzzInput::arbitrary(&mut u) {
         match fuzz_input.operation {
-            Ed25519HexDecodeTest::ValidKeys { key_bytes, case_variant } => {
+            Ed25519HexDecodeTest::ValidKeys {
+                key_bytes,
+                case_variant,
+            } => {
                 let hex_str = hex::encode(key_bytes);
                 let test_hex = case_variant.apply(&hex_str);
                 let result = decode_ed25519_public_key_hex(&test_hex);
 
                 // Valid 64-char hex should decode successfully
-                assert!(result.is_some(), "Valid Ed25519 hex should decode: {}", test_hex);
+                assert!(
+                    result.is_some(),
+                    "Valid Ed25519 hex should decode: {}",
+                    test_hex
+                );
 
                 // Round-trip property: decode(encode(key)) == key
                 if let Some(decoded) = result {
-                    assert_eq!(decoded, key_bytes, "Round-trip property violated for Ed25519 key");
+                    assert_eq!(
+                        decoded, key_bytes,
+                        "Round-trip property violated for Ed25519 key"
+                    );
                 }
-            },
-            Ed25519HexDecodeTest::LengthAttacks { attack_type, base_content } => {
+            }
+            Ed25519HexDecodeTest::LengthAttacks {
+                attack_type,
+                base_content,
+            } => {
                 let attack_input = attack_type.generate(&base_content);
                 let result = decode_ed25519_public_key_hex(&attack_input);
 
                 // Wrong-length inputs should be rejected
                 if attack_input.len() != 64 {
-                    assert!(result.is_none(), "Wrong-length Ed25519 hex should be rejected: len={}", attack_input.len());
+                    assert!(
+                        result.is_none(),
+                        "Wrong-length Ed25519 hex should be rejected: len={}",
+                        attack_input.len()
+                    );
                 }
 
                 // Function should never panic on length attacks
-            },
-            Ed25519HexDecodeTest::InvalidCharacters { char_type, position, base_hex } => {
+            }
+            Ed25519HexDecodeTest::InvalidCharacters {
+                char_type,
+                position,
+                base_hex,
+            } => {
                 let attack_input = char_type.inject(&base_hex, position);
                 let result = decode_ed25519_public_key_hex(&attack_input);
 
                 // Invalid hex characters should be rejected
-                if attack_input.len() == 64 && !attack_input.chars().all(|c| c.is_ascii_hexdigit()) {
-                    assert!(result.is_none(), "Invalid hex characters should be rejected: {}", attack_input);
+                if attack_input.len() == 64 && !attack_input.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    assert!(
+                        result.is_none(),
+                        "Invalid hex characters should be rejected: {}",
+                        attack_input
+                    );
                 }
-            },
-            Ed25519HexDecodeTest::UnicodeAttacks { unicode_type, insertion_point } => {
+            }
+            Ed25519HexDecodeTest::UnicodeAttacks {
+                unicode_type,
+                insertion_point,
+            } => {
                 let attack_input = unicode_type.inject(insertion_point);
                 let result = decode_ed25519_public_key_hex(&attack_input);
 
                 // Unicode attacks should be rejected
-                if !attack_input.is_ascii() || attack_input.len() != 64 || !attack_input.chars().all(|c| c.is_ascii_hexdigit()) {
-                    assert!(result.is_none(), "Unicode attacks should be rejected: {}", attack_input);
+                if !attack_input.is_ascii()
+                    || attack_input.len() != 64
+                    || !attack_input.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    assert!(
+                        result.is_none(),
+                        "Unicode attacks should be rejected: {}",
+                        attack_input
+                    );
                 }
 
                 // Function should never panic on unicode input
-            },
-            Ed25519HexDecodeTest::InjectionAttacks { injection_type, payload } => {
+            }
+            Ed25519HexDecodeTest::InjectionAttacks {
+                injection_type,
+                payload,
+            } => {
                 let attack_input = injection_type.generate(&payload);
                 let result = decode_ed25519_public_key_hex(&attack_input);
 
                 // Injection attacks should be safely handled
-                if attack_input.len() != 64 || !attack_input.chars().all(|c| c.is_ascii_hexdigit()) {
-                    assert!(result.is_none(), "Injection attacks should be rejected: {}", attack_input);
+                if attack_input.len() != 64 || !attack_input.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    assert!(
+                        result.is_none(),
+                        "Injection attacks should be rejected: {}",
+                        attack_input
+                    );
                 }
-            },
-            Ed25519HexDecodeTest::BoundaryTests { boundary_type, modifier } => {
+            }
+            Ed25519HexDecodeTest::BoundaryTests {
+                boundary_type,
+                modifier,
+            } => {
                 let boundary_input = boundary_type.generate(modifier);
                 let result = decode_ed25519_public_key_hex(&boundary_input);
 
                 // Test deterministic behavior
                 let result2 = decode_ed25519_public_key_hex(&boundary_input);
-                assert_eq!(result.is_some(), result2.is_some(), "Ed25519 decoder should be deterministic");
+                assert_eq!(
+                    result.is_some(),
+                    result2.is_some(),
+                    "Ed25519 decoder should be deterministic"
+                );
 
                 // Only exact-length valid hex should succeed
-                if boundary_input.len() == 64 && boundary_input.chars().all(|c| c.is_ascii_hexdigit()) {
-                    assert!(result.is_some(), "Valid 64-char Ed25519 hex should decode: {}", boundary_input);
+                if boundary_input.len() == 64
+                    && boundary_input.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    assert!(
+                        result.is_some(),
+                        "Valid 64-char Ed25519 hex should decode: {}",
+                        boundary_input
+                    );
                 } else {
-                    assert!(result.is_none(), "Invalid boundary input should be rejected");
+                    assert!(
+                        result.is_none(),
+                        "Invalid boundary input should be rejected"
+                    );
                 }
-            },
-            Ed25519HexDecodeTest::EncodingConfusion { confusion_type, base_value } => {
+            }
+            Ed25519HexDecodeTest::EncodingConfusion {
+                confusion_type,
+                base_value,
+            } => {
                 let confused_input = confusion_type.apply(&base_value);
                 let result = decode_ed25519_public_key_hex(&confused_input);
 
                 // Encoding confusion attacks should be rejected
-                if confused_input.len() != 64 || !confused_input.chars().all(|c| c.is_ascii_hexdigit()) {
-                    assert!(result.is_none(), "Encoding confusion should be rejected: {}", confused_input);
+                if confused_input.len() != 64
+                    || !confused_input.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    assert!(
+                        result.is_none(),
+                        "Encoding confusion should be rejected: {}",
+                        confused_input
+                    );
                 }
-            },
-            Ed25519HexDecodeTest::FormatAttacks { format_type, pattern } => {
+            }
+            Ed25519HexDecodeTest::FormatAttacks {
+                format_type,
+                pattern,
+            } => {
                 let format_input = format_type.apply(&pattern);
                 let result = decode_ed25519_public_key_hex(&format_input);
 
                 // Format attacks should be safely handled
-                if format_input.len() != 64 || !format_input.chars().all(|c| c.is_ascii_hexdigit()) {
-                    assert!(result.is_none(), "Format attacks should be rejected: {}", format_input);
+                if format_input.len() != 64 || !format_input.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    assert!(
+                        result.is_none(),
+                        "Format attacks should be rejected: {}",
+                        format_input
+                    );
                 }
 
                 // Function should complete in reasonable time (no DoS)
-            },
+            }
         }
     }
 });

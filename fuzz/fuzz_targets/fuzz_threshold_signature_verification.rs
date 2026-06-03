@@ -1,13 +1,12 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
+use ed25519_dalek::SigningKey;
 use frankenengine_node::security::threshold_sig::{
-    ThresholdConfig, SignerKey, PartialSignature, PublicationArtifact,
-    verify_threshold, sign, FailureReason
+    sign, verify_threshold, PartialSignature, PublicationArtifact, SignerKey, ThresholdConfig,
 };
-use ed25519_dalek::{SigningKey, Signer};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct ThresholdFuzzCase {
@@ -56,7 +55,10 @@ enum SignatureStrategy {
     /// Duplicate signatures (same signer multiple times)
     Duplicates { base_count: u8, duplicate_count: u8 },
     /// Cross-message replay attack
-    Replay { source_hash: String, target_hash: String },
+    Replay {
+        source_hash: String,
+        target_hash: String,
+    },
     /// Signature format attacks
     FormatAttack { attack_type: SigFormatAttack },
 }
@@ -149,19 +151,33 @@ const MAX_STRING_LEN: usize = 4096;
 
 fuzz_target!(|data: &[u8]| {
     let mut unstructured = Unstructured::new(data);
-    let Ok(test_case) = ThresholdFuzzCase::arbitrary(&mut unstructured) else { return };
+    let Ok(test_case) = ThresholdFuzzCase::arbitrary(&mut unstructured) else {
+        return;
+    };
 
     // Bound parameters to prevent resource exhaustion
-    if test_case.config_params.total_signers > MAX_SIGNERS as u32 { return }
-    if test_case.artifact_params.artifact_id.len() > MAX_STRING_LEN { return }
-    if test_case.artifact_params.connector_id.len() > MAX_STRING_LEN { return }
+    if test_case.config_params.total_signers > MAX_SIGNERS as u32 {
+        return;
+    }
+    if test_case.artifact_params.artifact_id.len() > MAX_STRING_LEN {
+        return;
+    }
+    if test_case.artifact_params.connector_id.len() > MAX_STRING_LEN {
+        return;
+    }
 
     // Generate test configuration and artifact
     let (config, signing_keys) = generate_test_config(&test_case.config_params);
-    let artifact = generate_test_artifact(&test_case.artifact_params, &config, &signing_keys, &test_case.signature_strategy);
+    let artifact = generate_test_artifact(
+        &test_case.artifact_params,
+        &config,
+        &signing_keys,
+        &test_case.signature_strategy,
+    );
 
     // Apply attack vector modifications
-    let (modified_config, modified_artifact) = apply_attack_vector(config, artifact, &test_case.attack_vector);
+    let (modified_config, modified_artifact) =
+        apply_attack_vector(config, artifact, &test_case.attack_vector);
 
     // Run verification and test invariants
     fuzz_threshold_verification(&modified_config, &modified_artifact, &test_case);
@@ -208,18 +224,21 @@ fn apply_key_mutation(signer_keys: &mut Vec<SignerKey>, mutation: &KeyMutation) 
     match mutation {
         KeyMutation::Valid => {
             // No mutation
-        },
+        }
         KeyMutation::DuplicatePublicKeys => {
             if signer_keys.len() > 1 {
                 signer_keys[1].public_key_hex = signer_keys[0].public_key_hex.clone();
             }
-        },
+        }
         KeyMutation::DuplicateKeyIds => {
             if signer_keys.len() > 1 {
                 signer_keys[1].key_id = signer_keys[0].key_id.clone();
             }
-        },
-        KeyMutation::MalformedHex { position, replacement } => {
+        }
+        KeyMutation::MalformedHex {
+            position,
+            replacement,
+        } => {
             if !signer_keys.is_empty() {
                 let pos = (*position as usize) % signer_keys[0].public_key_hex.len().max(1);
                 let mut chars: Vec<char> = signer_keys[0].public_key_hex.chars().collect();
@@ -228,13 +247,13 @@ fn apply_key_mutation(signer_keys: &mut Vec<SignerKey>, mutation: &KeyMutation) 
                     signer_keys[0].public_key_hex = chars.into_iter().collect();
                 }
             }
-        },
+        }
         KeyMutation::WrongLength { new_length } => {
             if !signer_keys.is_empty() {
                 let target_len = (*new_length as usize).min(200); // Bound length
                 signer_keys[0].public_key_hex = "00".repeat(target_len);
             }
-        },
+        }
     }
 }
 
@@ -251,12 +270,24 @@ fn generate_test_artifact(
     apply_id_attack(&mut artifact_id, &mut connector_id, &params.id_attack);
 
     // Generate signatures based on strategy
-    let signatures = generate_signatures(signature_strategy, config, signing_keys, &params.content_hash);
+    let content_hash = match signature_strategy {
+        SignatureStrategy::Replay { target_hash, .. } => target_hash.as_str(),
+        _ => &params.content_hash,
+    };
+
+    let signatures = generate_signatures(
+        signature_strategy,
+        config,
+        signing_keys,
+        &artifact_id,
+        &connector_id,
+        content_hash,
+    );
 
     PublicationArtifact {
         artifact_id,
         connector_id,
-        content_hash: params.content_hash.clone(),
+        content_hash: content_hash.to_string(),
         signatures,
     }
 }
@@ -265,29 +296,29 @@ fn apply_id_attack(artifact_id: &mut String, connector_id: &mut String, attack: 
     match attack {
         IdAttack::Clean => {
             // No modification
-        },
+        }
         IdAttack::PathTraversal => {
             *artifact_id = format!("../../../{}", artifact_id);
             *connector_id = format!("connectors/../admin/{}", connector_id);
-        },
+        }
         IdAttack::NullInjection => {
             artifact_id.push('\0');
             artifact_id.push_str("injected");
             connector_id.push('\0');
-        },
+        }
         IdAttack::UnicodeInjection => {
             *artifact_id = format!("\u{202E}{}\u{202D}", artifact_id);
             *connector_id = format!("conn\u{200B}ector-{}", connector_id);
-        },
+        }
         IdAttack::ReservedBypass => {
             *artifact_id = "<unknown>".to_string();
             *connector_id = " <unknown> ".to_string();
-        },
+        }
         IdAttack::LengthOverflow { size } => {
             let target_size = (*size as usize).max(10000).min(100000); // Bound but test large sizes
             *artifact_id = "x".repeat(target_size);
             *connector_id = "y".repeat(target_size);
-        },
+        }
     }
 }
 
@@ -295,26 +326,48 @@ fn generate_signatures(
     strategy: &SignatureStrategy,
     config: &ThresholdConfig,
     signing_keys: &[SigningKey],
+    artifact_id: &str,
+    connector_id: &str,
     content_hash: &str,
 ) -> Vec<PartialSignature> {
     let mut signatures = Vec::new();
 
     match strategy {
         SignatureStrategy::Valid { count } => {
-            let sig_count = (*count as usize).min(MAX_SIGNATURES).min(signing_keys.len()).min(config.signer_keys.len());
+            let sig_count = (*count as usize)
+                .min(MAX_SIGNATURES)
+                .min(signing_keys.len())
+                .min(config.signer_keys.len());
             for i in 0..sig_count {
                 if i < signing_keys.len() && i < config.signer_keys.len() {
-                    let sig = sign(&signing_keys[i], &config.signer_keys[i].key_id, content_hash);
+                    let sig = sign(
+                        &signing_keys[i],
+                        &config.signer_keys[i].key_id,
+                        artifact_id,
+                        connector_id,
+                        content_hash,
+                    );
                     signatures.push(sig);
                 }
             }
-        },
+        }
 
-        SignatureStrategy::Mixed { valid_count, invalid_count } => {
+        SignatureStrategy::Mixed {
+            valid_count,
+            invalid_count,
+        } => {
             // Valid signatures first
-            let valid_count = (*valid_count as usize).min(signing_keys.len()).min(config.signer_keys.len());
+            let valid_count = (*valid_count as usize)
+                .min(signing_keys.len())
+                .min(config.signer_keys.len());
             for i in 0..valid_count {
-                let sig = sign(&signing_keys[i], &config.signer_keys[i].key_id, content_hash);
+                let sig = sign(
+                    &signing_keys[i],
+                    &config.signer_keys[i].key_id,
+                    artifact_id,
+                    connector_id,
+                    content_hash,
+                );
                 signatures.push(sig);
             }
 
@@ -327,7 +380,7 @@ fn generate_signatures(
                     signature_hex: "deadbeef".repeat(16), // Invalid but well-formed
                 });
             }
-        },
+        }
 
         SignatureStrategy::AllInvalid { count } => {
             let sig_count = (*count as usize).min(MAX_SIGNATURES);
@@ -338,13 +391,24 @@ fn generate_signatures(
                     signature_hex: format!("{:064x}", i),
                 });
             }
-        },
+        }
 
-        SignatureStrategy::Duplicates { base_count, duplicate_count } => {
+        SignatureStrategy::Duplicates {
+            base_count,
+            duplicate_count,
+        } => {
             // Generate base signatures
-            let base_count = (*base_count as usize).min(signing_keys.len()).min(config.signer_keys.len());
+            let base_count = (*base_count as usize)
+                .min(signing_keys.len())
+                .min(config.signer_keys.len());
             for i in 0..base_count {
-                let sig = sign(&signing_keys[i], &config.signer_keys[i].key_id, content_hash);
+                let sig = sign(
+                    &signing_keys[i],
+                    &config.signer_keys[i].key_id,
+                    artifact_id,
+                    connector_id,
+                    content_hash,
+                );
                 signatures.push(sig);
             }
 
@@ -356,23 +420,38 @@ fn generate_signatures(
                     signatures.push(base_sig.clone());
                 }
             }
-        },
+        }
 
-        SignatureStrategy::Replay { source_hash, target_hash: _ } => {
+        SignatureStrategy::Replay {
+            source_hash,
+            target_hash: _,
+        } => {
             // Create signature for different content hash (replay attack)
             if !signing_keys.is_empty() && !config.signer_keys.is_empty() {
-                let sig = sign(&signing_keys[0], &config.signer_keys[0].key_id, source_hash);
+                let sig = sign(
+                    &signing_keys[0],
+                    &config.signer_keys[0].key_id,
+                    artifact_id,
+                    connector_id,
+                    source_hash,
+                );
                 signatures.push(sig);
             }
-        },
+        }
 
         SignatureStrategy::FormatAttack { attack_type } => {
             if !signing_keys.is_empty() && !config.signer_keys.is_empty() {
-                let mut sig = sign(&signing_keys[0], &config.signer_keys[0].key_id, content_hash);
+                let mut sig = sign(
+                    &signing_keys[0],
+                    &config.signer_keys[0].key_id,
+                    artifact_id,
+                    connector_id,
+                    content_hash,
+                );
                 apply_signature_format_attack(&mut sig, attack_type);
                 signatures.push(sig);
             }
-        },
+        }
     }
 
     signatures
@@ -383,16 +462,16 @@ fn apply_signature_format_attack(sig: &mut PartialSignature, attack: &SigFormatA
         SigFormatAttack::WrongLength { new_length } => {
             let target_len = (*new_length as usize).min(200);
             sig.signature_hex = "00".repeat(target_len);
-        },
+        }
         SigFormatAttack::NonHex { injection } => {
             sig.signature_hex = format!("deadbeef{}cafebabe", injection);
-        },
+        }
         SigFormatAttack::MixedCase => {
             sig.signature_hex = sig.signature_hex.to_uppercase();
-        },
+        }
         SigFormatAttack::PaddedHex { padding } => {
             sig.signature_hex = format!("{}{}{}", padding, sig.signature_hex, padding);
-        },
+        }
     }
 }
 
@@ -405,21 +484,22 @@ fn apply_attack_vector(
         AttackVector::DomainSeparator { separator } => {
             // Try to inject domain separators into content hash
             artifact.content_hash = format!("{}:{}", separator, artifact.content_hash);
-        },
+        }
 
         AttackVector::UnicodeNormalization => {
             // Apply Unicode normalization attacks to IDs
             artifact.artifact_id = format!("café_{}", artifact.artifact_id); // NFC
-            artifact.connector_id = format!("cafe\u{0301}_{}", artifact.connector_id); // NFD
-        },
+            artifact.connector_id = format!("cafe\u{0301}_{}", artifact.connector_id);
+            // NFD
+        }
 
         AttackVector::HexBypass { variant } => {
             apply_hex_bypass_attack(&mut config, variant);
-        },
+        }
 
         AttackVector::ThresholdBypass { strategy } => {
             apply_threshold_bypass(&mut config, &mut artifact, strategy);
-        },
+        }
 
         AttackVector::IdentityConfusion { fake_mapping } => {
             // Apply identity confusion attacks
@@ -429,66 +509,78 @@ fn apply_attack_vector(
                     artifact.signatures[i].key_id = fake_key.clone();
                 }
             }
-        },
+        }
 
         AttackVector::LengthExtension { extension } => {
             // Attempt length extension on content hash
-            artifact.content_hash.extend(extension.iter().map(|&b| char::from(b.min(127))));
-        },
+            artifact
+                .content_hash
+                .extend(extension.iter().map(|&b| char::from(b.min(127))));
+        }
     }
 
     (config, artifact)
 }
 
 fn apply_hex_bypass_attack(config: &mut ThresholdConfig, variant: &HexBypassVariant) {
-    if config.signer_keys.is_empty() { return }
+    if config.signer_keys.is_empty() {
+        return;
+    }
 
     match variant {
         HexBypassVariant::UnicodeDigits => {
             config.signer_keys[0].public_key_hex = "𝟎𝟏𝟐𝟑".to_string(); // Unicode mathematical digits
-        },
+        }
         HexBypassVariant::ControlChars => {
             config.signer_keys[0].public_key_hex = "00\r\n11\t22".to_string();
-        },
+        }
         HexBypassVariant::NullBytes => {
             config.signer_keys[0].public_key_hex = "00\0011\0022".to_string();
-        },
+        }
         HexBypassVariant::Whitespace => {
             config.signer_keys[0].public_key_hex = "00 11 22 33 44 55 66 77".to_string();
-        },
+        }
     }
 }
 
-fn apply_threshold_bypass(config: &mut ThresholdConfig, _artifact: &mut PublicationArtifact, strategy: &BypassStrategy) {
+fn apply_threshold_bypass(
+    config: &mut ThresholdConfig,
+    _artifact: &mut PublicationArtifact,
+    strategy: &BypassStrategy,
+) {
     match strategy {
         BypassStrategy::InvalidPadding => {
             // Try to set threshold higher than total signers
             config.threshold = config.total_signers.saturating_add(10);
-        },
+        }
         BypassStrategy::CountOverflow => {
             // Try to trigger arithmetic overflow
             config.threshold = u32::MAX;
             config.total_signers = u32::MAX;
-        },
+        }
         BypassStrategy::VoteStuffing => {
             // Already handled in signature generation
-        },
+        }
         BypassStrategy::ThresholdManipulation => {
             // Try edge cases
             config.threshold = 0;
-        },
+        }
     }
 }
 
-fn fuzz_threshold_verification(config: &ThresholdConfig, artifact: &PublicationArtifact, test_case: &ThresholdFuzzCase) {
+fn fuzz_threshold_verification(
+    config: &ThresholdConfig,
+    artifact: &PublicationArtifact,
+    test_case: &ThresholdFuzzCase,
+) {
     // Always use static values for trace_id and timestamp to avoid non-determinism
     let result = verify_threshold(config, artifact, "fuzz-trace", "2026-01-01T00:00:00Z");
 
     // Test invariants that must hold regardless of input
 
     // Invariant 1: Result should always be serializable
-    let _serialized = serde_json::to_string(&result)
-        .expect("VerificationResult should always be serializable");
+    let _serialized =
+        serde_json::to_string(&result).expect("VerificationResult should always be serializable");
 
     // Invariant 2: verify_threshold should never panic (we should reach here)
 
@@ -513,15 +605,17 @@ fn fuzz_threshold_verification(config: &ThresholdConfig, artifact: &PublicationA
                 !result.verified,
                 "CRITICAL: all signatures are invalid but verification succeeded - invalid signature acceptance vulnerability"
             );
-        },
+        }
         SignatureStrategy::Valid { count } => {
             // Only expect verification if we have enough valid signatures and valid config
-            if *count as u32 >= config.threshold && config.validate().is_ok()
+            if *count as u32 >= config.threshold
+                && config.validate().is_ok()
                 && is_valid_artifact_id(&artifact.artifact_id)
-                && is_valid_connector_id(&artifact.connector_id) {
+                && is_valid_connector_id(&artifact.connector_id)
+            {
                 // Should verify if inputs are actually valid
             }
-        },
+        }
         _ => {
             // Other strategies may or may not verify - just ensure no panic
         }
@@ -591,7 +685,9 @@ mod tests {
             signatures: vec![],
         };
 
-        let attack = AttackVector::DomainSeparator { separator: "evil".to_string() };
+        let attack = AttackVector::DomainSeparator {
+            separator: "evil".to_string(),
+        };
         let (_, modified_artifact) = apply_attack_vector(config, artifact, &attack);
         assert!(modified_artifact.content_hash.contains("evil"));
     }

@@ -1,11 +1,11 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use base64::Engine;
+use libfuzzer_sys::fuzz_target;
 
-// We need to expose the private function for fuzzing
-// Since it's private, we'll create a wrapper that tests the same logic
-use frankenengine_node::control_plane::mmr_proofs;
+// Mirror the private production helper so the fuzz target keeps exercising the
+// same strict lowercase-hex contract without widening module visibility.
 
 /// Comprehensive fuzz target for MMR hash hex decoding.
 ///
@@ -77,73 +77,93 @@ impl HashHexInput {
     fn generate_test_string(&self) -> String {
         let mut base_string = match String::from_utf8(self.base_hex.clone()) {
             Ok(s) => s,
-            Err(_) => "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string(),
+            Err(_) => {
+                "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string()
+            }
         };
 
         // Ensure we start with a valid-length base if too short
         if base_string.len() < 32 {
-            base_string = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+            base_string =
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
         }
 
         // Apply format confusion first
         match self.format_confusion {
-            HexFormatConfusion::Standard => {},
+            HexFormatConfusion::Standard => {}
             HexFormatConfusion::WithPrefix => {
                 base_string = format!("0x{}", base_string);
-            },
+            }
             HexFormatConfusion::Base64Like => {
                 // Convert hex to base64-like format
                 if let Ok(bytes) = hex::decode(&base_string[..base_string.len().min(64)]) {
                     base_string = base64::prelude::BASE64_STANDARD.encode(&bytes);
                 }
-            },
+            }
             HexFormatConfusion::UrlEncoded => {
-                base_string = base_string.chars().enumerate().map(|(i, c)| {
-                    if c.is_ascii_hexdigit() && i % 3 == 0 {
-                        format!("%{:02X}", c as u8)
-                    } else {
-                        c.to_string()
-                    }
-                }).collect();
-            },
+                base_string = base_string
+                    .chars()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        if c.is_ascii_hexdigit() && i % 3 == 0 {
+                            format!("%{:02X}", c as u8)
+                        } else {
+                            c.to_string()
+                        }
+                    })
+                    .collect();
+            }
             HexFormatConfusion::SpaceSeparated => {
                 let chars: Vec<char> = base_string.chars().collect();
-                base_string = chars.chunks(2).map(|chunk| chunk.iter().collect::<String>())
-                    .collect::<Vec<String>>().join(" ");
-            },
+                base_string = chars
+                    .chunks(2)
+                    .map(|chunk| chunk.iter().collect::<String>())
+                    .collect::<Vec<String>>()
+                    .join(" ");
+            }
             HexFormatConfusion::ColonSeparated => {
                 let chars: Vec<char> = base_string.chars().collect();
-                base_string = chars.chunks(2).map(|chunk| chunk.iter().collect::<String>())
-                    .collect::<Vec<String>>().join(":");
-            },
+                base_string = chars
+                    .chunks(2)
+                    .map(|chunk| chunk.iter().collect::<String>())
+                    .collect::<Vec<String>>()
+                    .join(":");
+            }
             HexFormatConfusion::AlgorithmPrefix => {
                 base_string = format!("sha256:{}", base_string);
-            },
+            }
             HexFormatConfusion::JsonLike => {
                 base_string = format!(r#"{{"hash": "{}"}}"#, base_string);
-            },
+            }
         }
 
         // Apply attack vector
         match self.attack_type {
-            HexAttackType::None => {},
+            HexAttackType::None => {}
             HexAttackType::CaseVariation => {
-                base_string = base_string.chars().enumerate().map(|(i, c)| {
-                    if i % 3 == 0 && c.is_ascii_lowercase() {
-                        c.to_ascii_uppercase()
-                    } else {
-                        c
-                    }
-                }).collect();
-            },
-            HexAttackType::InvalidHex { char_code, position } => {
+                base_string = base_string
+                    .chars()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        if i % 3 == 0 && c.is_ascii_lowercase() {
+                            c.to_ascii_uppercase()
+                        } else {
+                            c
+                        }
+                    })
+                    .collect();
+            }
+            HexAttackType::InvalidHex {
+                char_code,
+                position,
+            } => {
                 if !char_code.is_ascii_hexdigit() {
                     let pos = (position as usize).min(base_string.len());
                     if pos < base_string.len() {
-                        base_string.replace_range(pos..pos+1, &(char_code as char).to_string());
+                        base_string.replace_range(pos..pos + 1, &(char_code as char).to_string());
                     }
                 }
-            },
+            }
             HexAttackType::LengthAttack { target_length } => {
                 let target = target_length as usize;
                 if target < base_string.len() {
@@ -151,27 +171,31 @@ impl HashHexInput {
                 } else if target > base_string.len() {
                     base_string.push_str(&"0".repeat(target - base_string.len()));
                 }
-            },
+            }
             HexAttackType::NullByte { position } => {
                 let pos = (position as usize).min(base_string.len());
                 base_string.insert(pos, '\0');
-            },
+            }
             HexAttackType::UnicodeHex => {
                 // Replace ASCII hex digits with unicode lookalikes
-                base_string = base_string.replace('0', "０") // fullwidth 0
+                base_string = base_string
+                    .replace('0', "０") // fullwidth 0
                     .replace('1', "１") // fullwidth 1
                     .replace('a', "а"); // cyrillic a
-            },
-            HexAttackType::ControlChar { char_code, position } => {
+            }
+            HexAttackType::ControlChar {
+                char_code,
+                position,
+            } => {
                 if char_code < 32 {
                     let pos = (position as usize).min(base_string.len());
                     base_string.insert(pos, char_code as char);
                 }
-            },
+            }
             HexAttackType::BufferOverflow { multiplier } => {
                 let repeat_count = (multiplier as usize).saturating_mul(100).min(10000);
                 base_string = base_string.repeat(repeat_count.max(1));
-            },
+            }
         }
 
         base_string
@@ -202,56 +226,92 @@ fuzz_target!(|input: HashHexInput| {
 
     // Verify consistent behavior on repeated parsing
     let repeat_result = test_raw_hash_from_lower_hex(&test_string);
-    assert_eq!(parse_result.is_some(), repeat_result.is_some(),
-               "Parse result consistency failed for input: {:?}", test_string);
+    assert_eq!(
+        parse_result.is_some(),
+        repeat_result.is_some(),
+        "Parse result consistency failed for input: {:?}",
+        test_string
+    );
 
     // Test deterministic output for same input
     if let (Some(result1), Some(result2)) = (parse_result, repeat_result) {
-        assert_eq!(result1, result2, "Non-deterministic output for: {}", test_string);
+        assert_eq!(
+            result1, result2,
+            "Non-deterministic output for: {}",
+            test_string
+        );
     }
 
     // Verify strict validation requirements
     match test_string.len() {
         SHA256_HEX_LEN => {
             // Correct length - should pass if all lowercase hex
-            let is_valid_hex = test_string.chars().all(|c| c.is_ascii_hexdigit() && c.is_ascii_lowercase());
+            let is_valid_hex = test_string
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && c.is_ascii_lowercase());
             if is_valid_hex {
-                assert!(parse_result.is_some(), "Valid SHA256 hex should parse: {}", test_string);
+                assert!(
+                    parse_result.is_some(),
+                    "Valid SHA256 hex should parse: {}",
+                    test_string
+                );
             } else {
-                assert!(parse_result.is_none(), "Invalid hex chars should be rejected: {}", test_string);
+                assert!(
+                    parse_result.is_none(),
+                    "Invalid hex chars should be rejected: {}",
+                    test_string
+                );
             }
-        },
+        }
         _ => {
             // Wrong length - should always fail
-            assert!(parse_result.is_none(), "Wrong length should be rejected: {} (len={})",
-                   test_string, test_string.len());
+            assert!(
+                parse_result.is_none(),
+                "Wrong length should be rejected: {} (len={})",
+                test_string,
+                test_string.len()
+            );
         }
     }
 
     // Test that uppercase hex is rejected (strict lowercase requirement)
     if test_string.len() == SHA256_HEX_LEN && test_string.chars().any(|c| c.is_ascii_uppercase()) {
-        assert!(parse_result.is_none(), "Uppercase hex should be rejected: {}", test_string);
+        assert!(
+            parse_result.is_none(),
+            "Uppercase hex should be rejected: {}",
+            test_string
+        );
     }
 
     // Test standard valid hashes are accepted
     match test_string.as_str() {
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" |
-        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" |
-        "0000000000000000000000000000000000000000000000000000000000000000" => {
-            assert!(parse_result.is_some(), "Standard valid hash should parse: {}", test_string);
-        },
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        | "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        | "0000000000000000000000000000000000000000000000000000000000000000" => {
+            assert!(
+                parse_result.is_some(),
+                "Standard valid hash should parse: {}",
+                test_string
+            );
+        }
         _ => {}
     }
 
     // Test that obviously invalid inputs are rejected
     if test_string.contains("xyz") || test_string.contains("XYZ") || test_string.len() > 1000 {
-        assert!(parse_result.is_none(), "Obviously invalid input should be rejected: {}", test_string);
+        assert!(
+            parse_result.is_none(),
+            "Obviously invalid input should be rejected: {}",
+            test_string
+        );
     }
 
     // Ensure no memory leaks on large inputs
     if test_string.len() > 10000 {
         // Force cleanup by parsing a simple hash
-        let _ = test_raw_hash_from_lower_hex("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
+        let _ = test_raw_hash_from_lower_hex(
+            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+        );
     }
 
     // Test timing attack resistance - parsing time should be bounded
@@ -259,6 +319,10 @@ fuzz_target!(|input: HashHexInput| {
         let start = std::time::Instant::now();
         let _ = test_raw_hash_from_lower_hex(&test_string);
         let elapsed = start.elapsed();
-        assert!(elapsed.as_millis() < 10, "Parsing should complete quickly: {}", test_string);
+        assert!(
+            elapsed.as_millis() < 10,
+            "Parsing should complete quickly: {}",
+            test_string
+        );
     }
 });

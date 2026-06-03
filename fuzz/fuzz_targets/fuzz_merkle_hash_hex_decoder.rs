@@ -6,8 +6,8 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, Clone)]
 pub enum ProofFailure {
@@ -128,18 +128,28 @@ impl CaseVariant {
         match self {
             CaseVariant::Lowercase => hex.to_lowercase(),
             CaseVariant::Uppercase => hex.to_uppercase(),
-            CaseVariant::Mixed => {
-                hex.chars().enumerate().map(|(i, c)| {
-                    if i % 2 == 0 { c.to_uppercase().collect::<String>() }
-                    else { c.to_lowercase().collect::<String>() }
-                }).collect()
-            },
-            CaseVariant::Random => {
-                hex.chars().enumerate().map(|(i, c)| {
-                    if i % 3 == 0 { c.to_uppercase().collect::<String>() }
-                    else { c.to_lowercase().collect::<String>() }
-                }).collect()
-            },
+            CaseVariant::Mixed => hex
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 2 == 0 {
+                        c.to_uppercase().collect::<String>()
+                    } else {
+                        c.to_lowercase().collect::<String>()
+                    }
+                })
+                .collect(),
+            CaseVariant::Random => hex
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 3 == 0 {
+                        c.to_uppercase().collect::<String>()
+                    } else {
+                        c.to_lowercase().collect::<String>()
+                    }
+                })
+                .collect(),
         }
     }
 }
@@ -156,7 +166,7 @@ impl LengthType {
                 } else {
                     format!("{}A", base_content)
                 }
-            },
+            }
             LengthType::Double => format!("{}{}", base_content, base_content),
             LengthType::Massive => "A".repeat(100000),
             LengthType::Odd => {
@@ -165,7 +175,7 @@ impl LengthType {
                     result.push('A');
                 }
                 result
-            },
+            }
         }
     }
 }
@@ -178,7 +188,7 @@ impl InvalidCharType {
             InvalidCharType::SpecialChars => "!@#$%^&*()_+-=[]{}|;:,.<>?",
             InvalidCharType::Whitespace => " \t\n\r",
             InvalidCharType::ControlChars => "\x00\x01\x02\x03\x1F\x7F",
-            InvalidCharType::HighAscii => "\x80\x81\xFF",
+            InvalidCharType::HighAscii => "\u{80}\u{81}\u{ff}",
         }
     }
 
@@ -189,7 +199,7 @@ impl InvalidCharType {
 
         let mut result = base_hex.to_string();
         if pos < result.len() {
-            result.replace_range(pos..pos+1, &invalid_char.to_string());
+            result.replace_range(pos..pos + 1, &invalid_char.to_string());
         } else {
             result.push(invalid_char);
         }
@@ -223,7 +233,7 @@ impl BoundaryType {
                 } else {
                     format!("{}{}", test_value, "0".repeat(64 - test_value.len()))
                 }
-            },
+            }
             BoundaryType::PlusOne => {
                 let exact = if test_value.len() >= 64 {
                     test_value.chars().take(64).collect::<String>()
@@ -231,14 +241,14 @@ impl BoundaryType {
                     format!("{}{}", test_value, "0".repeat(64 - test_value.len()))
                 };
                 format!("{}A", exact)
-            },
+            }
             BoundaryType::MinusOne => {
                 if test_value.len() >= 63 {
                     test_value.chars().take(63).collect()
                 } else {
                     format!("{}{}", test_value, "0".repeat(63 - test_value.len()))
                 }
-            },
+            }
             BoundaryType::Zero => String::new(),
             BoundaryType::MaxLength => format!("{}{}", test_value, "A".repeat(1000)),
         }
@@ -254,11 +264,16 @@ impl SecurityAttackType {
             SecurityAttackType::IntegerOverflow => {
                 // Try to cause integer overflow in length calculations
                 "A".repeat(usize::MAX.min(size * 1000))
-            },
+            }
             SecurityAttackType::FormatConfusion => {
                 // Mix different encoding formats
-                format!("{}0x{}\\x{}", "AB".repeat(size), "CD".repeat(size), "EF".repeat(size))
-            },
+                format!(
+                    "{}0x{}\\x{}",
+                    "AB".repeat(size),
+                    "CD".repeat(size),
+                    "EF".repeat(size)
+                )
+            }
             SecurityAttackType::TimingAttack => {
                 // Create inputs that might have different processing times
                 let mut result = String::new();
@@ -270,7 +285,7 @@ impl SecurityAttackType {
                     }
                 }
                 result
-            },
+            }
         }
     }
 }
@@ -280,79 +295,132 @@ fuzz_target!(|data: &[u8]| {
 
     if let Ok(fuzz_input) = FuzzInput::arbitrary(&mut u) {
         match fuzz_input.operation {
-            HexDecodingOperation::ValidHex { hex_data, case_variant } => {
+            HexDecodingOperation::ValidHex {
+                hex_data,
+                case_variant,
+            } => {
                 let hex_string = hex::encode(hex_data);
                 let test_hex = case_variant.apply(&hex_string);
 
                 // Valid hex should decode successfully
                 let result = decode_merkle_hash_hex(&test_hex, "test_field");
-                assert!(result.is_ok(), "Valid 64-char hex should decode successfully: {}", test_hex);
+                assert!(
+                    result.is_ok(),
+                    "Valid 64-char hex should decode successfully: {}",
+                    test_hex
+                );
 
                 // Round-trip property: decode(encode(data)) == data
                 if let Ok(decoded) = result {
                     assert_eq!(decoded, hex_data, "Round-trip property violated");
                 }
-            },
-            HexDecodingOperation::InvalidLength { length_type, base_content } => {
+            }
+            HexDecodingOperation::InvalidLength {
+                length_type,
+                base_content,
+            } => {
                 let test_input = length_type.generate(&base_content);
                 let result = decode_merkle_hash_hex(&test_input, "length_test");
 
                 // Non-64-char inputs should be rejected
                 if test_input.len() != 64 {
-                    assert!(result.is_err(), "Invalid length input should be rejected: len={}", test_input.len());
+                    assert!(
+                        result.is_err(),
+                        "Invalid length input should be rejected: len={}",
+                        test_input.len()
+                    );
                 }
 
                 // Function should never panic on any length input
                 // (Reaching here proves no panic occurred)
-            },
-            HexDecodingOperation::InvalidCharacters { char_type, position, base_hex } => {
+            }
+            HexDecodingOperation::InvalidCharacters {
+                char_type,
+                position,
+                base_hex,
+            } => {
                 let test_input = char_type.inject_invalid(&base_hex, position);
                 let result = decode_merkle_hash_hex(&test_input, "char_test");
 
                 // Invalid hex characters should be rejected
                 if test_input.len() == 64 && !test_input.chars().all(|c| c.is_ascii_hexdigit()) {
-                    assert!(result.is_err(), "Invalid hex characters should be rejected: {}", test_input);
+                    assert!(
+                        result.is_err(),
+                        "Invalid hex characters should be rejected: {}",
+                        test_input
+                    );
                 }
-            },
-            HexDecodingOperation::UnicodeAttacks { unicode_type, insertion_point } => {
+            }
+            HexDecodingOperation::UnicodeAttacks {
+                unicode_type,
+                insertion_point,
+            } => {
                 let attack_input = unicode_type.generate_attack(insertion_point);
                 let result = decode_merkle_hash_hex(&attack_input, "unicode_test");
 
                 // Unicode attacks should be rejected (not valid ASCII hex)
-                if attack_input.len() != 64 || !attack_input.is_ascii() || !attack_input.chars().all(|c| c.is_ascii_hexdigit()) {
-                    assert!(result.is_err(), "Unicode attacks should be rejected: {}", attack_input);
+                if attack_input.len() != 64
+                    || !attack_input.is_ascii()
+                    || !attack_input.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    assert!(
+                        result.is_err(),
+                        "Unicode attacks should be rejected: {}",
+                        attack_input
+                    );
                 }
 
                 // Function should never panic on unicode input
-            },
-            HexDecodingOperation::BoundaryTests { boundary_type, test_value } => {
+            }
+            HexDecodingOperation::BoundaryTests {
+                boundary_type,
+                test_value,
+            } => {
                 let boundary_input = boundary_type.generate_test(&test_value);
                 let result = decode_merkle_hash_hex(&boundary_input, "boundary_test");
 
                 // Test deterministic behavior
                 let result2 = decode_merkle_hash_hex(&boundary_input, "boundary_test");
-                assert_eq!(result.is_ok(), result2.is_ok(), "Deterministic behavior violated");
+                assert_eq!(
+                    result.is_ok(),
+                    result2.is_ok(),
+                    "Deterministic behavior violated"
+                );
 
                 // Only exact-length valid hex should succeed
-                if boundary_input.len() == 64 && boundary_input.chars().all(|c| c.is_ascii_hexdigit()) {
-                    assert!(result.is_ok(), "Valid 64-char hex should decode: {}", boundary_input);
+                if boundary_input.len() == 64
+                    && boundary_input.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    assert!(
+                        result.is_ok(),
+                        "Valid 64-char hex should decode: {}",
+                        boundary_input
+                    );
                 } else {
-                    assert!(result.is_err(), "Invalid boundary input should be rejected: len={}", boundary_input.len());
+                    assert!(
+                        result.is_err(),
+                        "Invalid boundary input should be rejected: len={}",
+                        boundary_input.len()
+                    );
                 }
-            },
-            HexDecodingOperation::SecurityTests { attack_type, payload_size } => {
+            }
+            HexDecodingOperation::SecurityTests {
+                attack_type,
+                payload_size,
+            } => {
                 let attack_input = attack_type.generate_attack(payload_size);
                 let result = decode_merkle_hash_hex(&attack_input, "security_test");
 
                 // Security attacks should be safely handled (no panic)
                 // Large/malformed inputs should be rejected
-                if attack_input.len() != 64 || !attack_input.chars().all(|c| c.is_ascii_hexdigit()) {
+                if attack_input.len() != 64 || !attack_input.chars().all(|c| c.is_ascii_hexdigit())
+                {
                     assert!(result.is_err(), "Security attack input should be rejected");
                 }
 
                 // Function should complete in reasonable time (no DoS)
                 // (Reaching here proves reasonable performance)
-            },
+            }
         }
     }
 });
