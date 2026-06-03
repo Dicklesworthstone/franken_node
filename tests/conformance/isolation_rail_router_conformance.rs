@@ -192,7 +192,10 @@ fn test_inv_no_unclassified() -> TestResult {
     // Test 1: Unclassified workload should be rejected
     let workload_id = "test-workload";
     match router.get_classification(workload_id) {
-        Err(RailRouterError::WorkloadNotFound { .. }) => {
+        // API-DRIFT REMEDIATION (bd-rjc2m.6): production get_classification() now reports an
+        // unknown workload as RailRouterError::Unclassified (the INV-ISO-NO-UNCLASSIFIED
+        // fail-closed semantics; ISO-006 rejection), not WorkloadNotFound.
+        Err(RailRouterError::Unclassified { .. }) => {
             // This is correct - workload doesn't exist = unclassified
         }
         Ok(_) => {
@@ -208,7 +211,8 @@ fn test_inv_no_unclassified() -> TestResult {
     }
 
     // Test 2: Classify workload and verify it's no longer unclassified
-    match router.classify_workload(workload_id, 0.3, "test-source") {
+    // API-DRIFT REMEDIATION (bd-rjc2m.6): classify_workload(id, score, source) -> classify_workload(id, score).
+    match router.classify_workload(workload_id, 0.3) {
         Ok(_) => match router.get_classification(workload_id) {
             Ok(classification) => {
                 if classification.workload_id == workload_id {
@@ -239,10 +243,8 @@ fn test_inv_monotonic_elevation() -> TestResult {
     let workload_id = "elevation-test-workload";
 
     // Classify workload with low risk score -> Shared rail
-    if router
-        .classify_workload(workload_id, 0.1, "test-source")
-        .is_err()
-    {
+    // API-DRIFT REMEDIATION (bd-rjc2m.6): classify_workload(id, score, source) -> classify_workload(id, score).
+    if router.classify_workload(workload_id, 0.1).is_err() {
         return TestResult::Fail {
             reason: "Failed to classify workload initially".to_string(),
         };
@@ -312,10 +314,8 @@ fn test_inv_atomic_transition() -> TestResult {
     let workload_id = "atomic-test-workload";
 
     // Classify workload
-    if router
-        .classify_workload(workload_id, 0.2, "test-source")
-        .is_err()
-    {
+    // API-DRIFT REMEDIATION (bd-rjc2m.6): classify_workload(id, score, source) -> classify_workload(id, score).
+    if router.classify_workload(workload_id, 0.2).is_err() {
         return TestResult::Fail {
             reason: "Failed to classify workload".to_string(),
         };
@@ -374,7 +374,11 @@ fn test_inv_atomic_transition() -> TestResult {
 ///
 /// Specification: INV-ISO-DETERMINISTIC-ROUTING
 fn test_inv_deterministic_routing() -> TestResult {
-    let policy = ElevationPolicy::new(0.25, 0.5, 0.75);
+    // API-DRIFT REMEDIATION (bd-rjc2m.6): ElevationPolicy::new(a, b, c) -> struct literal { thresholds, allow_hot_elevation }.
+    let policy = ElevationPolicy {
+        thresholds: [0.25, 0.5, 0.75],
+        allow_hot_elevation: true,
+    };
 
     // Test multiple risk scores and verify consistent routing
     let test_cases = vec![
@@ -420,25 +424,30 @@ fn test_inv_audit_complete() -> TestResult {
     let mut router = RailRouter::with_default_policy();
 
     let workload_id = "audit-test-workload";
-    let initial_audit_count = router.audit_events().len();
+    // API-DRIFT REMEDIATION (bd-rjc2m.6): router.audit_events() -> router.audit_log().
+    let initial_audit_count = router.audit_log().len();
 
     // Test 1: Classification generates audit event
-    match router.classify_workload(workload_id, 0.4, "audit-test-source") {
+    // API-DRIFT REMEDIATION (bd-rjc2m.6): classify_workload(id, score, source) -> classify_workload(id, score).
+    match router.classify_workload(workload_id, 0.4) {
         Ok(_) => {
-            let audit_events = router.audit_events();
+            // API-DRIFT REMEDIATION (bd-rjc2m.6): router.audit_events() -> router.audit_log().
+            let audit_events = router.audit_log();
             if audit_events.len() <= initial_audit_count {
                 return TestResult::Fail {
                     reason: "No audit event generated for classification".to_string(),
                 };
             }
 
-            // Verify audit event contains classification details
+            // Verify audit event contains classification details.
+            // API-DRIFT REMEDIATION (bd-rjc2m.6): AuditEntry.operation (gone) -> AuditEntry.event_code;
+            // the last event emitted on successful classification is ISO-002 (workload classified/assigned).
             let latest_event = &audit_events[audit_events.len() - 1];
-            if !latest_event.operation.contains("classify") {
+            if latest_event.event_code != ISO_002 {
                 return TestResult::Fail {
                     reason: format!(
-                        "Audit event missing classification details: {}",
-                        latest_event.operation
+                        "Audit event missing classification details: {} (detail: {})",
+                        latest_event.event_code, latest_event.detail
                     ),
                 };
             }
@@ -451,27 +460,31 @@ fn test_inv_audit_complete() -> TestResult {
     }
 
     // Test 2: Elevation generates audit event
-    let pre_elevation_count = router.audit_events().len();
+    // API-DRIFT REMEDIATION (bd-rjc2m.6): router.audit_events() -> router.audit_log().
+    let pre_elevation_count = router.audit_log().len();
     match router.hot_elevate(
         workload_id,
         IsolationRail::FullIsolation,
         "audit-elevation-test",
     ) {
         Ok(_) => {
-            let audit_events = router.audit_events();
+            // API-DRIFT REMEDIATION (bd-rjc2m.6): router.audit_events() -> router.audit_log().
+            let audit_events = router.audit_log();
             if audit_events.len() <= pre_elevation_count {
                 return TestResult::Fail {
                     reason: "No audit event generated for elevation".to_string(),
                 };
             }
 
-            // Verify audit event contains elevation details
+            // Verify audit event contains elevation details.
+            // API-DRIFT REMEDIATION (bd-rjc2m.6): AuditEntry.operation (gone) -> AuditEntry.event_code;
+            // the last event emitted on successful hot-elevation is ISO-004 (hot-elevation completed).
             let latest_event = &audit_events[audit_events.len() - 1];
-            if !latest_event.operation.contains("elevate") {
+            if latest_event.event_code != ISO_004 {
                 return TestResult::Fail {
                     reason: format!(
-                        "Audit event missing elevation details: {}",
-                        latest_event.operation
+                        "Audit event missing elevation details: {} (detail: {})",
+                        latest_event.event_code, latest_event.detail
                     ),
                 };
             }

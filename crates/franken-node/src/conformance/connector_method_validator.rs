@@ -205,13 +205,16 @@ pub fn validate_contract(connector_id: &str, declarations: &[MethodDeclaration])
                     );
                     errors.push(MethodValidationError {
                         code: MethodErrorCode::SchemaMismatch,
+                        // bd-rjc2m.6 / MUST-CMV-004: name every missing schema — when both are
+                        // absent the message previously named only "input", hiding the output
+                        // gap from diagnostics (caught by the revived conformance harness).
                         message: format!(
                             "Method '{}' missing {} schema",
                             spec.name,
-                            if !decl.has_input_schema {
-                                "input"
-                            } else {
-                                "output"
+                            match (decl.has_input_schema, decl.has_output_schema) {
+                                (false, false) => "input and output",
+                                (false, true) => "input",
+                                _ => "output",
                             }
                         ),
                     });
