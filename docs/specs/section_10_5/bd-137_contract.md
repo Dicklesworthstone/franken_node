@@ -33,7 +33,7 @@ the signed configuration receipt.
 
 ```
 GET /api/v1/compatibility/mode?scope={scope_id}
-Output: { mode: strict|balanced|legacy_risky, activated_at, receipt, policy_predicate }
+Output: { mode: strict|balanced|legacy_risky, activated_at, receipt_id, policy_predicate }
 ```
 
 ### 3. Mode Transition Request API

@@ -335,6 +335,12 @@ pub struct ModeQueryResponse {
     pub policy_predicate: Option<PolicyPredicate>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScopeActivationMetadata {
+    activated_at: String,
+    receipt_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Mode transition request/response
 // ---------------------------------------------------------------------------
@@ -389,6 +395,7 @@ pub struct CompatGateEvent {
 
 pub struct CompatGateService {
     scopes: BTreeMap<String, CompatMode>,
+    scope_activations: BTreeMap<String, ScopeActivationMetadata>,
     shims: Vec<ShimMetadata>,
     receipts: Vec<CompatReceipt>,
     events: Vec<CompatGateEvent>,
@@ -403,6 +410,7 @@ impl CompatGateService {
     pub fn new() -> Self {
         Self {
             scopes: BTreeMap::new(),
+            scope_activations: BTreeMap::new(),
             shims: Vec::new(),
             receipts: Vec::new(),
             events: Vec::new(),
@@ -524,15 +532,18 @@ impl CompatGateService {
         scope: &str,
         mode: CompatMode,
     ) -> Result<(), CompatGateOperationError> {
-        self.insert_scope_mode(scope.to_string(), mode)
+        let receipt_id = self.next_receipt_id()?;
+        self.insert_scope_mode(scope.to_string(), mode, receipt_id)
     }
 
     /// Query the current mode for a scope.
     pub fn query_mode(&self, scope: &str) -> Option<ModeQueryResponse> {
-        self.scopes.get(scope).map(|mode| ModeQueryResponse {
+        let mode = self.scopes.get(scope)?;
+        let activation = self.scope_activations.get(scope)?;
+        Some(ModeQueryResponse {
             mode: *mode,
-            activated_at: "2026-01-01T00:00:00Z".to_string(),
-            receipt_id: String::new(),
+            activated_at: activation.activated_at.clone(),
+            receipt_id: activation.receipt_id.clone(),
             policy_predicate: self.predicates.first().cloned(),
         })
     }
@@ -541,6 +552,7 @@ impl CompatGateService {
         &mut self,
         scope: String,
         mode: CompatMode,
+        receipt_id: String,
     ) -> Result<(), CompatGateOperationError> {
         if !self.scopes.contains_key(&scope) && self.scopes.len() >= MAX_SCOPES {
             return Err(CompatGateOperationError::ScopeCapacityExceeded {
@@ -548,7 +560,16 @@ impl CompatGateService {
             });
         }
 
-        self.scopes.insert(scope, mode);
+        let activated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        self.scopes.insert(scope.clone(), mode);
+        self.scope_activations.insert(
+            scope,
+            ScopeActivationMetadata {
+                activated_at,
+                receipt_id,
+            },
+        );
         Ok(())
     }
 
@@ -690,7 +711,11 @@ impl CompatGateService {
         };
 
         if approved {
-            self.insert_scope_mode(request.scope_id.clone(), request.to_mode)?;
+            self.insert_scope_mode(
+                request.scope_id.clone(),
+                request.to_mode,
+                receipt_id.clone(),
+            )?;
 
             self.emit_event(
                 PCG_003_TRANSITION_APPROVED,
@@ -1207,6 +1232,19 @@ mod tests {
     }
 
     #[test]
+    fn mode_query_returns_activation_receipt_metadata() {
+        let svc = make_service_with_scope();
+        let mode = svc
+            .query_mode("project-1")
+            .expect("configured scope should be queryable");
+
+        assert!(!mode.receipt_id.is_empty());
+        assert!(mode.receipt_id.starts_with("rcpt-"));
+        chrono::DateTime::parse_from_rfc3339(&mode.activated_at)
+            .expect("activation timestamp must be RFC3339");
+    }
+
+    #[test]
     fn mode_query_returns_none_for_unknown_scope() {
         let svc = CompatGateService::new();
         assert!(svc.query_mode("unknown").is_none());
@@ -1307,18 +1345,48 @@ mod tests {
     #[test]
     fn transition_updates_scope_mode() {
         let mut svc = make_service_with_scope();
-        svc.request_transition(&ModeTransitionRequest {
-            scope_id: "project-1".into(),
-            from_mode: CompatMode::Balanced,
-            to_mode: CompatMode::Strict,
-            justification: String::new(),
-            requestor: "admin".into(),
-        })
-        .unwrap();
+        let resp = svc
+            .request_transition(&ModeTransitionRequest {
+                scope_id: "project-1".into(),
+                from_mode: CompatMode::Balanced,
+                to_mode: CompatMode::Strict,
+                justification: String::new(),
+                requestor: "admin".into(),
+            })
+            .unwrap();
         assert_eq!(
             svc.query_mode("project-1").unwrap().mode,
             CompatMode::Strict
         );
+        assert_eq!(
+            svc.query_mode("project-1").unwrap().receipt_id,
+            resp.receipt_id
+        );
+    }
+
+    #[test]
+    fn denied_transition_preserves_prior_activation_receipt_metadata() {
+        let mut svc = make_service_with_scope();
+        let before = svc
+            .query_mode("project-1")
+            .expect("configured scope should be queryable");
+
+        let resp = svc
+            .request_transition(&ModeTransitionRequest {
+                scope_id: "project-1".into(),
+                from_mode: CompatMode::Balanced,
+                to_mode: CompatMode::LegacyRisky,
+                justification: String::new(),
+                requestor: "admin".into(),
+            })
+            .expect("denied transition should still return a response");
+
+        assert!(!resp.approved);
+        let after = svc
+            .query_mode("project-1")
+            .expect("configured scope should remain queryable");
+        assert_eq!(after.receipt_id, before.receipt_id);
+        assert_eq!(after.activated_at, before.activated_at);
     }
 
     // ── Divergence receipts ───────────────────────────────────────────────

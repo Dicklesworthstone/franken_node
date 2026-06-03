@@ -836,15 +836,14 @@ fn test_api_mode_query_endpoint() -> TestResult {
             }
 
             if response.activated_at.is_empty() || response.receipt_id.is_empty() {
-                // KNOWN PRODUCTION GAP (bd-rjc2m.4 first-run finding): query_mode() stubs
-                // receipt_id as an empty string and hardcodes activated_at
-                // (api/compat_gate.rs query_mode) — per-scope activation receipts are not
-                // yet tracked. SHOULD-level requirement; recorded as XFAIL until the
-                // receipt-tracking gap is implemented (filed as a bead).
-                return TestResult::ExpectedFailure {
-                    reason: "Mode query missing required metadata fields: production \
-                             query_mode() does not yet track per-scope activation receipts"
-                        .to_string(),
+                return TestResult::Fail {
+                    reason: "Mode query missing required activation receipt metadata".to_string(),
+                };
+            }
+
+            if chrono::DateTime::parse_from_rfc3339(&response.activated_at).is_err() {
+                return TestResult::Fail {
+                    reason: "Mode query activated_at is not RFC3339".to_string(),
                 };
             }
 
