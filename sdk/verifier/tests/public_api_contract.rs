@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use frankenengine_verifier_sdk::*;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -219,6 +220,11 @@ fn assert_rfc3339_timestamp(value: &str, context: &str) -> Result<(), String> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|_| ())
         .map_err(|err| format!("{context} must be RFC3339: {err}"))
+}
+
+fn reference_verifying_key() -> VerifyingKey {
+    let signing_key = SigningKey::from_bytes(&[1_u8; 32]);
+    VerifyingKey::from(&signing_key)
 }
 
 fn is_valid_merkle_proof_step(step: &str) -> bool {
@@ -602,7 +608,7 @@ fn test_verification_result_json_shape() -> Result<(), String> {
     let sdk = create_verifier_sdk("verifier://shape-test");
     let capsule = capsule::build_reference_capsule();
     let result = sdk
-        .verify_claim(&capsule)
+        .verify_claim(&reference_verifying_key(), &capsule)
         .map_err(|err| format!("expected reference claim verification, got {err:?}"))?;
 
     let json_str = serde_json::to_string_pretty(&result).unwrap();
@@ -754,7 +760,7 @@ fn test_transparency_log_entry_json_shape() -> Result<(), String> {
     let sdk = create_verifier_sdk("verifier://shape-test");
     let capsule = capsule::build_reference_capsule();
     let result = sdk
-        .verify_claim(&capsule)
+        .verify_claim(&reference_verifying_key(), &capsule)
         .map_err(|err| format!("expected reference claim verification, got {err:?}"))?;
     let mut log = Vec::new();
     let entry = sdk
@@ -1291,7 +1297,7 @@ fn test_record_session_step_rejects_same_verifier_result_from_different_sdk_inst
         .map_err(|err| format!("primary session creation failed: {err}"))?;
     let capsule = capsule::build_reference_capsule();
     let sibling_result = sibling_sdk
-        .verify_claim(&capsule)
+        .verify_claim(&reference_verifying_key(), &capsule)
         .map_err(|err| format!("sibling claim verification failed: {err}"))?;
 
     match sdk.record_session_step(&mut session, &sibling_result) {
@@ -1309,7 +1315,7 @@ fn test_append_transparency_log_rejects_same_verifier_result_from_different_sdk_
     let sibling_sdk = create_verifier_sdk("verifier://alpha");
     let capsule = capsule::build_reference_capsule();
     let sibling_result = sibling_sdk
-        .verify_claim(&capsule)
+        .verify_claim(&reference_verifying_key(), &capsule)
         .map_err(|err| format!("sibling claim verification failed: {err}"))?;
     let mut log = Vec::new();
 
