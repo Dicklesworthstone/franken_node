@@ -72,19 +72,22 @@ fn test_trace(operation: &str) -> TraceContext {
 fn activated_fleet_manager() -> (FleetControlManager, TempDir) {
     // Create temporary directory for file-based transport
     let temp_dir = tempdir().expect("create temp directory");
-    let transport =
-        FileFleetTransport::new(temp_dir.path().to_path_buf()).expect("create file transport");
+    // API-DRIFT REMEDIATION (bd-rjc2m.7): FileFleetTransport::new now returns Self, not Result -> drop .expect().
+    let transport = FileFleetTransport::new(temp_dir.path().to_path_buf());
 
     // Use real file-based transport instead of mock/in-memory approach
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[63_u8; 32]);
-    let signing_material = Some(FleetDecisionSigningMaterial::from_signing_key(
+
+    // API-DRIFT REMEDIATION (bd-rjc2m.7): FleetControlManager::with_file_transport(transport, FleetDecisionSigningMaterial::from_signing_key(..))
+    // -> public test-support constructor with_file_transport_and_signing_key_for_tests(transport, signing_key, key_source, signing_identity).
+    // FleetDecisionSigningMaterial is now a private type; the public constructor builds it internally.
+    let mut manager = FleetControlManager::with_file_transport_and_signing_key_for_tests(
+        transport,
         signing_key,
         "fleet-quarantine-metamorphic-test",
         "fleet-quarantine-metamorphic",
-    ));
-
-    let mut manager = FleetControlManager::with_file_transport(transport, signing_material)
-        .expect("create manager with file transport");
+    )
+    .expect("create manager with file transport");
     manager.activate();
     (manager, temp_dir)
 }

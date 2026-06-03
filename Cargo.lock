@@ -1695,6 +1695,7 @@ dependencies = [
  "mimalloc",
  "proc-macro2",
  "rand 0.8.6",
+ "regex",
  "rustix",
  "serde",
  "serde_json",

@@ -1151,6 +1151,15 @@ impl RemoteCap {
     pub fn is_single_use(&self) -> bool {
         self.single_use
     }
+
+    /// Test-support: overwrite the capability signature so external conformance
+    /// harnesses can exercise the fail-closed forgery-rejection path
+    /// (`REMOTECAP_INVALID`) without mutating the otherwise-private `signature`
+    /// field. Compiled out of production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn corrupt_signature_for_test(&mut self, forged_signature: &str) {
+        self.signature = forged_signature.to_string();
+    }
 }
 
 /// Stable errors for RemoteCap issuance/enforcement.
