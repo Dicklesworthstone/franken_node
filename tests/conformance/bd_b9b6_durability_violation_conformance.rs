@@ -300,7 +300,11 @@ fn test_must_r_dvb_003_halt_enforcement() -> TestResult {
     }
 
     // Generate violation bundle
-    let bundle = detector.generate_bundle(&context);
+    // API-DRIFT REMEDIATION (bd-rjc2m.7): generate_bundle(&mut self) -> &ViolationBundle now
+    // borrows the detector mutably for the lifetime of the returned reference, which collided
+    // with the later &self calls (is_halted / check_durable_op). Capture the bundle_id by value
+    // so the mutable borrow ends immediately; the assertion (halt_err.bundle_id == this id) holds.
+    let expected_bundle_id = detector.generate_bundle(&context).bundle_id.clone();
 
     // After violation: operations blocked
     if !detector.is_halted() {
@@ -317,12 +321,12 @@ fn test_must_r_dvb_003_halt_enforcement() -> TestResult {
         },
         Err(halt_err) => {
             // Verify halt error contains bundle info
-            if halt_err.bundle_id != bundle.bundle_id {
+            if halt_err.bundle_id != expected_bundle_id {
                 TestResult::Fail {
                     reason: format!(
                         "MUST_R_DVB_003 violated: halt error bundle_id mismatch\n\
                          expected: {}, got: {}",
-                        bundle.bundle_id.as_str(),
+                        expected_bundle_id.as_str(),
                         halt_err.bundle_id.as_str()
                     ),
                 }

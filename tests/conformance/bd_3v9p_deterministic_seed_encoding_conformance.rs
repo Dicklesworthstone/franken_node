@@ -24,7 +24,9 @@ use frankenengine_node::encoding::deterministic_seed::{
     ContentHash, DeterministicSeed, DeterministicSeedDeriver, DomainTag, EVENT_SEED_DERIVED,
     EVENT_SEED_VERSION_BUMP, ScheduleConfig, derive_seed,
 };
-use frankenengine_node::security::constant_time::ct_eq;
+// API-DRIFT REMEDIATION (bd-rjc2m.7): seed bytes are [u8; 32]; constant_time::ct_eq is the
+// &str variant, ct_eq_bytes is the [u8] variant (project hardening pattern). Use ct_eq_bytes.
+use frankenengine_node::security::constant_time::ct_eq_bytes as ct_eq;
 
 /// Test requirement level classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

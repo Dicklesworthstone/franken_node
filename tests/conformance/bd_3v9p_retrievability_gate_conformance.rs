@@ -8,7 +8,8 @@
 
 use std::collections::HashSet;
 
-use franken_node::storage::retrievability_gate::{
+// API-DRIFT REMEDIATION (bd-rjc2m.7): crate renamed franken_node -> frankenengine_node.
+use frankenengine_node::storage::retrievability_gate::{
     ArtifactId, ProofFailureReason, RG_EVICTION_BLOCKED, RG_EVICTION_PERMITTED,
     RG_GATE_INITIALIZED, RG_PROOF_FAILED, RG_PROOF_PASSED, RetrievabilityConfig,
     RetrievabilityGate, SegmentId, StorageTier, TargetTierState, content_hash,
@@ -361,7 +362,12 @@ fn conformance_must_maintain_complete_audit_trail_for_all_proof_attempts() {
     );
 
     // Verify failure event
-    let failure_events: Vec<_> = events
+    // API-DRIFT REMEDIATION (bd-rjc2m.7): re-fetch the event log here. The original `events`
+    // binding was captured BEFORE the failure-generating check_retrievability call, so (a) it
+    // held an immutable borrow of `gate` across that &mut call (E0502) and (b) it could not have
+    // contained the failure event at all — a latent bug. Fetching fresh fixes both.
+    let events_after_failure = gate.events();
+    let failure_events: Vec<_> = events_after_failure
         .iter()
         .filter(|e| e.code == RG_PROOF_FAILED)
         .collect();
@@ -567,10 +573,12 @@ fn conformance_should_validate_inputs_early_before_processing() {
     let segment_id = SegmentId("valid-segment".to_string());
 
     // Test malformed observed content hashes in target state
+    // API-DRIFT REMEDIATION (bd-rjc2m.7): vec mixed &str literals with String values
+    // (.repeat()/`+` yield String); normalize every element to String.
     let malformed_hashes = vec![
-        "",                                     // Empty
-        "not-hex-at-all",                       // Non-hex characters
-        "12345",                                // Too short
+        String::new(),                          // Empty
+        "not-hex-at-all".to_string(),           // Non-hex characters
+        "12345".to_string(),                    // Too short
         "Z".repeat(64),                         // Invalid hex chars
         "1234567890abcdef".repeat(2) + "extra", // Too long
         "1234567890ABCDEF".repeat(4),           // Uppercase (non-canonical)

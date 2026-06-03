@@ -39,8 +39,14 @@ const FIXTURE_REGISTRY_KEY: &[u8] = b"franken-node-trust-card-registry-key-v1";
 static TEST_TRACING_INIT: Once = Once::new();
 
 fn explicit_fixture_registry_config(profile: &str) -> String {
+    // API-DRIFT REMEDIATION (bd-rjc2m.7): production config validation gained a second
+    // fail-closed boundary — `security.authorized_api_keys` must be explicitly configured
+    // (config.rs) — alongside the existing `trust.registry_signing_key`. Supply a fixed
+    // fixture API key so the conformance harness exercises the real (non-synthesized) config
+    // path. Any non-empty key satisfies the validator.
     format!(
-        "profile = \"{profile}\"\n\n[trust]\nregistry_signing_key = \"{}\"\n",
+        "profile = \"{profile}\"\n\n[trust]\nregistry_signing_key = \"{}\"\n\n\
+         [security]\nauthorized_api_keys = [\"fnode-fixture-trust-cli-e2e\"]\n",
         BASE64_STANDARD.encode(FIXTURE_REGISTRY_KEY)
     )
 }
@@ -1192,7 +1198,12 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
             assert_eq!(reason, "manual trust quarantine via CLI; affected_cards=1");
             *quarantine_version
         }
-        FleetAction::Release { .. } | FleetAction::PolicyUpdate { .. } => {
+        // API-DRIFT REMEDIATION (bd-rjc2m.7): FleetAction gained a Revoke variant; this match
+        // expects only Quarantine, so Revoke joins the other non-quarantine actions in the
+        // catch-all panic arm.
+        FleetAction::Release { .. }
+        | FleetAction::PolicyUpdate { .. }
+        | FleetAction::Revoke { .. } => {
             panic!("expected quarantine action: {action_record:#?}")
         }
     };

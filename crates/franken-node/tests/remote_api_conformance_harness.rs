@@ -751,6 +751,14 @@ fn test_remote_capability_protocol_versions() {
     });
 }
 
+// API-DRIFT REMEDIATION (bd-rjc2m.7): LEGACY/CURRENT/FUTURE_SESSION_VERSION were referenced
+// but never defined anywhere (test nor production) — a latent bug that kept this harness from
+// ever compiling. Define them test-local as the three monotonic session-protocol tiers the
+// backward-compatibility scenario exercises; they are `const` so they work in match patterns.
+const LEGACY_SESSION_VERSION: u32 = 1;
+const CURRENT_SESSION_VERSION: u32 = 2;
+const FUTURE_SESSION_VERSION: u32 = 3;
+
 #[test]
 fn test_session_auth_backward_compatibility() {
     // Test session compatibility scenarios

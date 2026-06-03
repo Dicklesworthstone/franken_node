@@ -399,8 +399,12 @@ impl RetrievabilityGate {
     }
 
     /// Register simulated target tier state for testing.
+    // bd-rjc2m.7: widened pub(crate) -> pub so the external bd_3v9p_retrievability conformance
+    // harness (a separate [[test]] crate) can drive the simulated target path, matching the
+    // test-support accessor pattern used elsewhere. Still cfg-gated to test/test-support, so
+    // production builds pay zero cost.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn register_target(
+    pub fn register_target(
         &mut self,
         artifact_id: &ArtifactId,
         segment_id: &SegmentId,
