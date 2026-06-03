@@ -128,11 +128,15 @@ Version: {}
                     r.level,
                     r.category,
                     r.description,
+                    // API-DRIFT REMEDIATION (bd-rjc2m.7): match arms returned `&format!(..)` temporaries
+                    // borrowed past statement end (E0716) -> produce owned `String` from every arm.
                     match &r.result {
-                        TestResult::Pass => "✅ PASS",
-                        TestResult::Fail { reason } => &format!("❌ FAIL: {}", reason),
-                        TestResult::Skipped { reason } => &format!("⏭️ SKIP: {}", reason),
-                        TestResult::ExpectedFailure { reason } => &format!("⏳ XFAIL: {}", reason),
+                        TestResult::Pass => "✅ PASS".to_string(),
+                        TestResult::Fail { reason } => format!("❌ FAIL: {}", reason),
+                        TestResult::Skipped { reason } => format!("⏭️ SKIP: {}", reason),
+                        TestResult::ExpectedFailure { reason } => {
+                            format!("⏳ XFAIL: {}", reason)
+                        }
                     }
                 ))
                 .collect::<Vec<_>>()
@@ -299,35 +303,59 @@ fn test_schema_complete_all_fields() -> Result<(), String> {
     validate_schema(&valid).map_err(|e| format!("Valid event rejected: {}", e))?;
 
     // Test each field individually
-    let field_tests = [
-        ("event_type", |mut e: DegradedModeEvent| {
-            e.event_type.clear();
-            e
-        }),
-        ("action_id", |mut e: DegradedModeEvent| {
-            e.action_id.clear();
-            e
-        }),
-        ("actor", |mut e: DegradedModeEvent| {
-            e.actor.clear();
-            e
-        }),
-        ("tier", |mut e: DegradedModeEvent| {
-            e.tier.clear();
-            e
-        }),
-        ("override_reason", |mut e: DegradedModeEvent| {
-            e.override_reason.clear();
-            e
-        }),
-        ("trace_id", |mut e: DegradedModeEvent| {
-            e.trace_id.clear();
-            e
-        }),
-        ("timestamp", |mut e: DegradedModeEvent| {
-            e.timestamp.clear();
-            e
-        }),
+    // API-DRIFT REMEDIATION (bd-rjc2m.7): array of distinct closure types no longer unifies (E0308) ->
+    // box each modifier as `Box<dyn Fn(DegradedModeEvent) -> DegradedModeEvent>` so the array is homogeneous.
+    type FieldModifier = Box<dyn Fn(DegradedModeEvent) -> DegradedModeEvent>;
+    let field_tests: [(&str, FieldModifier); 7] = [
+        (
+            "event_type",
+            Box::new(|mut e: DegradedModeEvent| {
+                e.event_type.clear();
+                e
+            }),
+        ),
+        (
+            "action_id",
+            Box::new(|mut e: DegradedModeEvent| {
+                e.action_id.clear();
+                e
+            }),
+        ),
+        (
+            "actor",
+            Box::new(|mut e: DegradedModeEvent| {
+                e.actor.clear();
+                e
+            }),
+        ),
+        (
+            "tier",
+            Box::new(|mut e: DegradedModeEvent| {
+                e.tier.clear();
+                e
+            }),
+        ),
+        (
+            "override_reason",
+            Box::new(|mut e: DegradedModeEvent| {
+                e.override_reason.clear();
+                e
+            }),
+        ),
+        (
+            "trace_id",
+            Box::new(|mut e: DegradedModeEvent| {
+                e.trace_id.clear();
+                e
+            }),
+        ),
+        (
+            "timestamp",
+            Box::new(|mut e: DegradedModeEvent| {
+                e.timestamp.clear();
+                e
+            }),
+        ),
     ];
 
     for (field_name, modifier) in field_tests {
