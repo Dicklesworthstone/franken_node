@@ -6,9 +6,9 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use base64::prelude::*;
+use libfuzzer_sys::fuzz_target;
 
 const SIGNATURE_LEN: usize = 32;
 
@@ -32,12 +32,10 @@ fn deserialize_mac_hex(hex: &str) -> Result<[u8; SIGNATURE_LEN], String> {
     }
     let mut arr = [0u8; SIGNATURE_LEN];
     for (i, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
-        let hi = hex_nibble(chunk[0]).ok_or_else(|| {
-            format!("invalid hex char at position {}", i * 2)
-        })?;
-        let lo = hex_nibble(chunk[1]).ok_or_else(|| {
-            format!("invalid hex char at position {}", i * 2 + 1)
-        })?;
+        let hi = hex_nibble(chunk[0])
+            .ok_or_else(|| format!("invalid hex char at position {}", i * 2))?;
+        let lo = hex_nibble(chunk[1])
+            .ok_or_else(|| format!("invalid hex char at position {}", i * 2 + 1))?;
         arr[i] = (hi << 4) | lo;
     }
     Ok(arr)
@@ -177,24 +175,39 @@ impl CaseVariant {
         match self {
             CaseVariant::Lowercase => hex.to_lowercase(),
             CaseVariant::Uppercase => hex.to_uppercase(),
-            CaseVariant::Mixed => {
-                hex.chars().enumerate().map(|(i, c)| {
-                    if i % 2 == 0 { c.to_uppercase().collect::<String>() }
-                    else { c.to_lowercase().collect::<String>() }
-                }).collect()
-            },
-            CaseVariant::AlternatingCase => {
-                hex.chars().enumerate().map(|(i, c)| {
-                    if i % 3 == 0 { c.to_uppercase().collect::<String>() }
-                    else { c.to_lowercase().collect::<String>() }
-                }).collect()
-            },
-            CaseVariant::RandomCase => {
-                hex.chars().enumerate().map(|(i, c)| {
-                    if (i * 17 + 13) % 5 == 0 { c.to_uppercase().collect::<String>() }
-                    else { c.to_lowercase().collect::<String>() }
-                }).collect()
-            },
+            CaseVariant::Mixed => hex
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 2 == 0 {
+                        c.to_uppercase().collect::<String>()
+                    } else {
+                        c.to_lowercase().collect::<String>()
+                    }
+                })
+                .collect(),
+            CaseVariant::AlternatingCase => hex
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 3 == 0 {
+                        c.to_uppercase().collect::<String>()
+                    } else {
+                        c.to_lowercase().collect::<String>()
+                    }
+                })
+                .collect(),
+            CaseVariant::RandomCase => hex
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if (i * 17 + 13) % 5 == 0 {
+                        c.to_uppercase().collect::<String>()
+                    } else {
+                        c.to_lowercase().collect::<String>()
+                    }
+                })
+                .collect(),
         }
     }
 }
@@ -211,7 +224,7 @@ impl LengthAttackType {
                 } else {
                     format!("{}A", base_content)
                 }
-            },
+            }
             LengthAttackType::Double => format!("{}{}", base_content, base_content),
             LengthAttackType::Massive => "A".repeat(100000),
             LengthAttackType::OddLength => {
@@ -220,7 +233,7 @@ impl LengthAttackType {
                     result.push('A');
                 }
                 result
-            },
+            }
             LengthAttackType::AlmostCorrect => "A".repeat(SIGNATURE_LEN * 2 - 1),
         }
     }
@@ -231,7 +244,7 @@ impl InvalidCharType {
         let pos = (position as usize) % base_hex.len().max(1);
         let invalid_char = match self {
             InvalidCharType::NonHexLetters => 'G',
-            InvalidCharType::UnicodeDigits => '１',  // Fullwidth 1
+            InvalidCharType::UnicodeDigits => '１', // Fullwidth 1
             InvalidCharType::SpecialChars => '@',
             InvalidCharType::Whitespace => ' ',
             InvalidCharType::ControlChars => '\x01',
@@ -242,7 +255,7 @@ impl InvalidCharType {
 
         let mut result = base_hex.to_string();
         if pos < result.len() {
-            result.replace_range(pos..pos+1, &invalid_char.to_string());
+            result.replace_range(pos..pos + 1, &invalid_char.to_string());
         } else {
             result.push(invalid_char);
         }
@@ -277,7 +290,7 @@ impl InjectionType {
             InjectionType::CommandInjection => format!("{};rm -rf /", base),
             InjectionType::PathTraversal => format!("{}../../../etc/passwd", base),
             InjectionType::XssPayload => format!("{}<script>alert(1)</script>", base),
-            InjectionType::JsonEscape => format!("{}\\\"}}{}", base),
+            InjectionType::JsonEscape => format!("{base}\\\"}}"),
             InjectionType::RegexEscape => format!("{}.*+?{{}}[]()^$", base),
         }
     }
@@ -303,32 +316,58 @@ impl EncodingConfusionType {
         let hex_str = hex::encode(base_value);
         let padded = format!("{}{}", hex_str, hex_str); // Make it 64 chars
         match self {
-            EncodingConfusionType::Base64 => base64::prelude::BASE64_STANDARD.encode(padded.as_bytes()).chars().take(64).collect(),
+            EncodingConfusionType::Base64 => base64::prelude::BASE64_STANDARD
+                .encode(padded.as_bytes())
+                .chars()
+                .take(64)
+                .collect(),
             EncodingConfusionType::Base32 => {
                 // Mock base32 encoding
-                padded.chars().map(|c| match c {
-                    'a'..='f' => char::from(c as u8 - b'a' + b'2'),
-                    '0'..='9' => c,
-                    _ => c,
-                }).collect()
-            },
-            EncodingConfusionType::UrlEncoded => {
-                padded.chars().map(|c| format!("%{:02X}", c as u8)).collect::<String>().chars().take(64).collect()
-            },
+                padded
+                    .chars()
+                    .map(|c| match c {
+                        'a'..='f' => char::from(c as u8 - b'a' + b'2'),
+                        '0'..='9' => c,
+                        _ => c,
+                    })
+                    .collect()
+            }
+            EncodingConfusionType::UrlEncoded => padded
+                .chars()
+                .map(|c| format!("%{:02X}", c as u8))
+                .collect::<String>()
+                .chars()
+                .take(64)
+                .collect(),
             EncodingConfusionType::DoubleEncoded => {
-                let url_encoded = padded.chars().map(|c| format!("%{:02X}", c as u8)).collect::<String>();
-                url_encoded.chars().map(|c| format!("%{:02X}", c as u8)).collect::<String>().chars().take(64).collect()
-            },
+                let url_encoded = padded
+                    .chars()
+                    .map(|c| format!("%{:02X}", c as u8))
+                    .collect::<String>();
+                url_encoded
+                    .chars()
+                    .map(|c| format!("%{:02X}", c as u8))
+                    .collect::<String>()
+                    .chars()
+                    .take(64)
+                    .collect()
+            }
             EncodingConfusionType::MixedEncoding => {
                 format!("0x{}", padded).chars().take(64).collect()
-            },
+            }
             EncodingConfusionType::BinaryData => {
                 // Simulate binary data as hex
-                base_value.iter().map(|b| format!("{:08b}", b)).collect::<String>().chars().take(64).collect()
-            },
+                base_value
+                    .iter()
+                    .map(|b| format!("{:08b}", b))
+                    .collect::<String>()
+                    .chars()
+                    .take(64)
+                    .collect()
+            }
             EncodingConfusionType::JsonEscaped => {
                 format!("\\\"{}\\\"", padded).chars().take(64).collect()
-            },
+            }
         }
     }
 }
@@ -340,26 +379,26 @@ impl TimingAttackType {
             TimingAttackType::EarlyExit => {
                 // Invalid char at start
                 format!("G{}", "a".repeat(SIGNATURE_LEN * 2 - 1))
-            },
+            }
             TimingAttackType::SlowPath => {
                 // Invalid char at end
                 format!("{}G", "a".repeat(SIGNATURE_LEN * 2 - 1))
-            },
-            TimingAttackType::RepeatedPatterns => {
-                "abcd".repeat(16)
-            },
+            }
+            TimingAttackType::RepeatedPatterns => "abcd".repeat(16),
             TimingAttackType::WorstCase => {
                 // All valid but at boundary
                 "f".repeat(SIGNATURE_LEN * 2)
-            },
+            }
             TimingAttackType::BranchHeavy => {
                 // Mix of upper and lower case to exercise branches
                 "AbCdEf".repeat(11).chars().take(64).collect()
-            },
+            }
             TimingAttackType::CacheUnfriendly => {
                 // Scattered access pattern
-                (0..SIGNATURE_LEN * 2).map(|i| if i % 7 == 0 { 'F' } else { '0' }).collect()
-            },
+                (0..SIGNATURE_LEN * 2)
+                    .map(|i| if i % 7 == 0 { 'F' } else { '0' })
+                    .collect()
+            }
         }
     }
 }
@@ -369,42 +408,71 @@ fuzz_target!(|data: &[u8]| {
 
     if let Ok(fuzz_input) = FuzzInput::arbitrary(&mut u) {
         match fuzz_input.operation {
-            MacDeserializeTest::ValidHex { mac_bytes, case_variant } => {
+            MacDeserializeTest::ValidHex {
+                mac_bytes,
+                case_variant,
+            } => {
                 let hex_str = hex::encode(mac_bytes);
                 let test_hex = case_variant.apply(&hex_str);
                 // Test deterministic MAC deserialization
                 let result1 = deserialize_mac_hex(&test_hex);
                 let result2 = deserialize_mac_hex(&test_hex);
-                assert_eq!(result1.is_ok(), result2.is_ok(), "MAC deserialization should be deterministic");
-            },
-            MacDeserializeTest::LengthAttacks { attack_type, base_content } => {
+                assert_eq!(
+                    result1.is_ok(),
+                    result2.is_ok(),
+                    "MAC deserialization should be deterministic"
+                );
+            }
+            MacDeserializeTest::LengthAttacks {
+                attack_type,
+                base_content,
+            } => {
                 let attack_input = attack_type.generate(&base_content);
                 let _ = deserialize_mac_hex(&attack_input);
-            },
-            MacDeserializeTest::InvalidCharacters { char_type, position, base_hex } => {
+            }
+            MacDeserializeTest::InvalidCharacters {
+                char_type,
+                position,
+                base_hex,
+            } => {
                 let attack_input = char_type.inject(&base_hex, position);
                 let _ = deserialize_mac_hex(&attack_input);
-            },
-            MacDeserializeTest::UnicodeAttacks { unicode_type, insertion_point } => {
+            }
+            MacDeserializeTest::UnicodeAttacks {
+                unicode_type,
+                insertion_point,
+            } => {
                 let attack_input = unicode_type.inject(insertion_point);
                 let _ = deserialize_mac_hex(&attack_input);
-            },
-            MacDeserializeTest::InjectionAttacks { injection_type, payload } => {
+            }
+            MacDeserializeTest::InjectionAttacks {
+                injection_type,
+                payload,
+            } => {
                 let attack_input = injection_type.generate(&payload);
                 let _ = deserialize_mac_hex(&attack_input);
-            },
-            MacDeserializeTest::BoundaryTests { boundary_type, modifier } => {
+            }
+            MacDeserializeTest::BoundaryTests {
+                boundary_type,
+                modifier,
+            } => {
                 let boundary_input = boundary_type.generate(modifier);
                 let _ = deserialize_mac_hex(&boundary_input);
-            },
-            MacDeserializeTest::EncodingConfusion { confusion_type, base_value } => {
+            }
+            MacDeserializeTest::EncodingConfusion {
+                confusion_type,
+                base_value,
+            } => {
                 let confused_input = confusion_type.apply(&base_value);
                 let _ = deserialize_mac_hex(&confused_input);
-            },
-            MacDeserializeTest::TimingAttacks { attack_type, pattern_length } => {
+            }
+            MacDeserializeTest::TimingAttacks {
+                attack_type,
+                pattern_length,
+            } => {
                 let timing_input = attack_type.generate(pattern_length);
                 let _ = deserialize_mac_hex(&timing_input);
-            },
+            }
         }
     }
 });

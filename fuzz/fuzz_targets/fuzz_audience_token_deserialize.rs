@@ -29,8 +29,8 @@
 
 use arbitrary::Arbitrary;
 use frankenengine_node::control_plane::audience_token::{
-    AudienceBoundToken, ERR_ABT_TOKEN_FIELD_CONTROL_CHAR, ERR_ABT_TOKEN_TOO_LARGE,
-    MAX_AUDIENCES_PER_TOKEN, MAX_TOKEN_FIELD_BYTES, MAX_TOKEN_SIGNATURE_BYTES, TokenChain,
+    AudienceBoundToken, TokenChain, ERR_ABT_TOKEN_FIELD_CONTROL_CHAR, ERR_ABT_TOKEN_TOO_LARGE,
+    MAX_AUDIENCES_PER_TOKEN, MAX_TOKEN_FIELD_BYTES, MAX_TOKEN_SIGNATURE_BYTES,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -59,7 +59,7 @@ enum AttackField {
 
 fuzz_target!(|case: AudienceTokenDeserializeCase| {
     // (A) Wholly arbitrary bytes — exercise serde panic-freedom on garbage.
-    let mut raw = case.raw_json;
+    let mut raw = case.raw_json.clone();
     if raw.len() > MAX_RAW_BYTES {
         raw.truncate(MAX_RAW_BYTES);
     }

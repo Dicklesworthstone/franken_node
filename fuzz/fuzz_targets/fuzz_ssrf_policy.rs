@@ -1,13 +1,13 @@
 #![no_main]
 
+use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use arbitrary::{Arbitrary, Unstructured, Result as ArbitraryResult};
 use std::hint::black_box;
 
+use frankenengine_node::security::network_guard::Protocol;
 use frankenengine_node::security::ssrf_policy::{
-    SsrfPolicyTemplate, CidrRange, AllowlistEntry, PolicyReceipt
+    AllowlistEntry, CidrRange, PolicyReceipt, SsrfPolicyTemplate,
 };
-use frankenengine_node::security::network_guard::{Protocol, Action};
 
 /// Maximum reasonable string length for fuzzing inputs to prevent OOM.
 const MAX_STRING_LEN: usize = 1024;
@@ -18,15 +18,18 @@ const MAX_CIDR_RANGES: usize = 100;
 /// Maximum allowlist entries to prevent excessive memory usage.
 const MAX_ALLOWLIST_ENTRIES: usize = 50;
 
-// Custom Arbitrary implementation for Protocol enum
-impl<'a> Arbitrary<'a> for Protocol {
-    fn arbitrary(u: &mut Unstructured<'a>) -> ArbitraryResult<Self> {
-        let choice = u.int_in_range(0..=2)?;
-        Ok(match choice {
-            0 => Protocol::Tcp,
-            1 => Protocol::Udp,
-            _ => Protocol::Http, // Assuming these are the Protocol variants
-        })
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum FuzzProtocol {
+    Http,
+    Tcp,
+}
+
+impl FuzzProtocol {
+    fn to_real(self) -> Protocol {
+        match self {
+            Self::Http => Protocol::Http,
+            Self::Tcp => Protocol::Tcp,
+        }
     }
 }
 
@@ -96,13 +99,23 @@ enum SsrfAttackVector {
     /// IP address confusion
     IpAddressConfusion { ip: FuzzIpAddress },
     /// CIDR range boundary testing
-    CidrBoundaryTest { cidr: FuzzCidrRange, test_ips: Vec<FuzzIpAddress> },
+    CidrBoundaryTest {
+        cidr: FuzzCidrRange,
+        test_ips: Vec<FuzzIpAddress>,
+    },
     /// Allowlist bypass attempts
-    AllowlistBypass { allowed_host: String, malicious_host: String, port: u16 },
+    AllowlistBypass {
+        allowed_host: String,
+        malicious_host: String,
+        port: u16,
+    },
     /// Private range bypass attempts
     PrivateRangeBypass { ip: FuzzIpAddress },
     /// DNS rebinding simulation
-    DnsRebinding { hostname: String, resolved_ip: FuzzIpAddress },
+    DnsRebinding {
+        hostname: String,
+        resolved_ip: FuzzIpAddress,
+    },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -111,7 +124,7 @@ enum FuzzOperation {
     SsrfCheck {
         attack: SsrfAttackVector,
         port: u16,
-        protocol: Protocol,
+        protocol: FuzzProtocol,
         trace_id: String,
         timestamp: String,
     },
@@ -121,26 +134,27 @@ enum FuzzOperation {
         test_ips: Vec<FuzzIpAddress>,
     },
     /// Test serialization round-trip attacks
-    SerializationRoundTrip {
-        policy: FuzzSsrfPolicyTemplate,
-    },
+    SerializationRoundTrip { policy: FuzzSsrfPolicyTemplate },
     /// Test allowlist manipulation
     AllowlistManipulation {
         policy: FuzzSsrfPolicyTemplate,
         new_entries: Vec<FuzzAllowlistEntry>,
     },
     /// Test IP parsing edge cases
-    IpParsingEdgeCases {
-        ip_variants: Vec<FuzzIpAddress>,
-    },
+    IpParsingEdgeCases { ip_variants: Vec<FuzzIpAddress> },
 }
 
 impl FuzzCidrRange {
     fn to_real(self) -> CidrRange {
         CidrRange::new(
-            [self.network_a, self.network_b, self.network_c, self.network_d],
+            [
+                self.network_a,
+                self.network_b,
+                self.network_c,
+                self.network_d,
+            ],
             self.prefix_len.min(32), // Clamp to valid range
-            &Self::bound_string(self.label)
+            &Self::bound_string(self.label),
         )
     }
 
@@ -179,23 +193,26 @@ impl FuzzAllowlistEntry {
 
 impl FuzzSsrfPolicyTemplate {
     fn to_real(self) -> SsrfPolicyTemplate {
-        let bounded_cidrs: Vec<CidrRange> = self.blocked_cidrs
+        let bounded_cidrs: Vec<CidrRange> = self
+            .blocked_cidrs
             .into_iter()
             .take(MAX_CIDR_RANGES)
             .map(|c| c.to_real())
             .collect();
 
-        let bounded_allowlist: Vec<AllowlistEntry> = self.allowlist
+        let bounded_allowlist: Vec<AllowlistEntry> = self
+            .allowlist
             .into_iter()
             .take(MAX_ALLOWLIST_ENTRIES)
             .map(|a| a.to_real())
             .collect();
 
-        SsrfPolicyTemplate::new(
-            &FuzzCidrRange::bound_string(self.connector_id),
-            bounded_cidrs,
-            bounded_allowlist
-        )
+        SsrfPolicyTemplate {
+            connector_id: FuzzCidrRange::bound_string(self.connector_id),
+            blocked_cidrs: bounded_cidrs,
+            allowlist: bounded_allowlist,
+            audit_log: Vec::new(),
+        }
     }
 }
 
@@ -203,19 +220,30 @@ impl FuzzIpAddress {
     fn to_string(self) -> String {
         match self {
             Self::StandardIpv4 { a, b, c, d } => format!("{}.{}.{}.{}", a, b, c, d),
-            Self::HexIpv4 { a, b, c, d } => format!("0x{:02x}.0x{:02x}.0x{:02x}.0x{:02x}", a, b, c, d),
+            Self::HexIpv4 { a, b, c, d } => {
+                format!("0x{:02x}.0x{:02x}.0x{:02x}.0x{:02x}", a, b, c, d)
+            }
             Self::OctalIpv4 { a, b, c, d } => format!("0{:o}.0{:o}.0{:o}.0{:o}", a, b, c, d),
-            Self::CompressedIpv4 { parts } => {
-                match parts.len() {
-                    1 => format!("{}", parts.get(0).unwrap_or(&0)),
-                    2 => format!("{}.{}", parts.get(0).unwrap_or(&0), parts.get(1).unwrap_or(&0)),
-                    3 => format!("{}.{}.{}", parts.get(0).unwrap_or(&0), parts.get(1).unwrap_or(&0), parts.get(2).unwrap_or(&0)),
-                    _ => format!("{}.{}.{}.{}",
-                               parts.get(0).unwrap_or(&0),
-                               parts.get(1).unwrap_or(&0),
-                               parts.get(2).unwrap_or(&0),
-                               parts.get(3).unwrap_or(&0)),
-                }
+            Self::CompressedIpv4 { parts } => match parts.len() {
+                1 => format!("{}", parts.get(0).unwrap_or(&0)),
+                2 => format!(
+                    "{}.{}",
+                    parts.get(0).unwrap_or(&0),
+                    parts.get(1).unwrap_or(&0)
+                ),
+                3 => format!(
+                    "{}.{}.{}",
+                    parts.get(0).unwrap_or(&0),
+                    parts.get(1).unwrap_or(&0),
+                    parts.get(2).unwrap_or(&0)
+                ),
+                _ => format!(
+                    "{}.{}.{}.{}",
+                    parts.get(0).unwrap_or(&0),
+                    parts.get(1).unwrap_or(&0),
+                    parts.get(2).unwrap_or(&0),
+                    parts.get(3).unwrap_or(&0)
+                ),
             },
             Self::Ipv6 { address } => FuzzCidrRange::bound_string(address),
             Self::MaliciousHostname { hostname } => FuzzCidrRange::bound_string(hostname),
@@ -229,7 +257,9 @@ impl FuzzIpAddress {
             Self::HexIpv4 { a, b, c, d } => Some([a, b, c, d]),
             Self::OctalIpv4 { a, b, c, d } => Some([a, b, c, d]),
             Self::CompressedIpv4 { parts } => {
-                if parts.is_empty() { return None; }
+                if parts.is_empty() {
+                    return None;
+                }
                 let first = parts[0];
                 if parts.len() == 1 {
                     Some([
@@ -241,7 +271,7 @@ impl FuzzIpAddress {
                 } else {
                     None // Would need proper compressed IP logic
                 }
-            },
+            }
             _ => None, // Non-IPv4 addresses
         }
     }
@@ -252,47 +282,56 @@ fuzz_target!(|data: &[u8]| {
 
     if let Ok(op) = FuzzOperation::arbitrary(&mut u) {
         match op {
-            FuzzOperation::SsrfCheck { attack, port, protocol, trace_id, timestamp } => {
+            FuzzOperation::SsrfCheck {
+                attack,
+                port,
+                protocol,
+                trace_id,
+                timestamp,
+            } => {
                 let bounded_trace = FuzzCidrRange::bound_string(trace_id);
                 let bounded_timestamp = FuzzCidrRange::bound_string(timestamp);
 
                 let test_host = match attack {
                     SsrfAttackVector::NullByteInjection { base_host } => {
                         format!("{}\0evil.com", FuzzCidrRange::bound_string(base_host))
-                    },
+                    }
                     SsrfAttackVector::PathTraversal { base_host } => {
-                        format!("{}/../../../etc/passwd", FuzzCidrRange::bound_string(base_host))
-                    },
+                        format!(
+                            "{}/../../../etc/passwd",
+                            FuzzCidrRange::bound_string(base_host)
+                        )
+                    }
                     SsrfAttackVector::UnicodeAttack { base_host } => {
                         // Mix NFC and NFD Unicode normalization
                         format!("{}é", FuzzCidrRange::bound_string(base_host)) // NFC
-                    },
+                    }
                     SsrfAttackVector::TrailingDotAttack { host, dot_count } => {
                         let dots = ".".repeat((dot_count % 10) as usize);
                         format!("{}{}", FuzzCidrRange::bound_string(host), dots)
-                    },
+                    }
                     SsrfAttackVector::IpAddressConfusion { ip } => ip.to_string(),
                     SsrfAttackVector::AllowlistBypass { malicious_host, .. } => {
                         FuzzCidrRange::bound_string(malicious_host)
-                    },
+                    }
                     SsrfAttackVector::PrivateRangeBypass { ip } => ip.to_string(),
                     SsrfAttackVector::DnsRebinding { hostname, .. } => {
                         FuzzCidrRange::bound_string(hostname)
-                    },
+                    }
                     _ => "127.0.0.1".to_string(),
                 };
 
-                let mut policy = SsrfPolicyTemplate::new("test-connector", vec![], vec![]);
+                let mut policy = SsrfPolicyTemplate::default_template("test-connector".to_string());
 
                 // Test SSRF checking - should not panic on any input
                 let _result = black_box(policy.check_ssrf(
                     &test_host,
                     port,
-                    protocol,
+                    protocol.to_real(),
                     &bounded_trace,
-                    &bounded_timestamp
+                    &bounded_timestamp,
                 ));
-            },
+            }
 
             FuzzOperation::CidrRangeMatching { cidr, test_ips } => {
                 let real_cidr = cidr.to_real();
@@ -318,33 +357,45 @@ fuzz_target!(|data: &[u8]| {
                         let network_start = network & mask;
                         let network_end = network_start | !mask;
 
-                        let _start_contains = black_box(real_cidr.contains(network_start.to_be_bytes()));
-                        let _end_contains = black_box(real_cidr.contains(network_end.to_be_bytes()));
+                        let _start_contains =
+                            black_box(real_cidr.contains(network_start.to_be_bytes()));
+                        let _end_contains =
+                            black_box(real_cidr.contains(network_end.to_be_bytes()));
                     }
                 }
-            },
+            }
 
             FuzzOperation::SerializationRoundTrip { policy } => {
                 let real_policy = policy.to_real();
 
                 // Test serialization attacks on SSRF policy structures
                 if let Ok(policy_json) = black_box(serde_json::to_string(&real_policy)) {
-                    let _: Result<SsrfPolicyTemplate, _> = black_box(serde_json::from_str(&policy_json));
+                    let _: Result<SsrfPolicyTemplate, _> =
+                        black_box(serde_json::from_str(&policy_json));
                 }
-            },
+            }
 
-            FuzzOperation::AllowlistManipulation { mut policy, new_entries } => {
+            FuzzOperation::AllowlistManipulation {
+                mut policy,
+                new_entries,
+            } => {
                 let mut real_policy = policy.to_real();
 
                 // Test allowlist manipulation and capacity limits
                 for entry in new_entries.into_iter().take(20) {
                     let real_entry = entry.to_real();
-                    real_policy.add_allowlist(real_entry);
+                    let _ = real_policy.add_allowlist(
+                        &real_entry.host,
+                        real_entry.port,
+                        &real_entry.reason,
+                        &real_entry.receipt.trace_id,
+                        &real_entry.receipt.issued_at,
+                    );
                 }
 
                 // Test that allowlist operations don't cause crashes
                 let _allowlist_size = real_policy.allowlist.len();
-            },
+            }
 
             FuzzOperation::IpParsingEdgeCases { ip_variants } => {
                 // Test various IP address parsing edge cases
@@ -361,14 +412,15 @@ fuzz_target!(|data: &[u8]| {
                     }
 
                     // Test edge cases that should be rejected
-                    if ip_string.contains("\0") ||
-                       ip_string.contains("..") ||
-                       ip_string.len() > MAX_STRING_LEN {
+                    if ip_string.contains("\0")
+                        || ip_string.contains("..")
+                        || ip_string.len() > MAX_STRING_LEN
+                    {
                         // These should be handled safely
                         let _parsed = black_box(ip_string.parse::<std::net::IpAddr>());
                     }
                 }
-            },
+            }
         }
     }
 });

@@ -70,22 +70,17 @@ fn fuzz_capability_token_parser(case: CapabilityTokenParserCase) {
     let allowed_endpoint = endpoint_for_prefix(allowed_prefix);
     let ttl = u64::from(case.ttl_hint % 3600).saturating_add(2);
 
-    let provider = CapabilityProvider::new(SECRET);
-    let Ok((cap, _)) = provider.issue(
-        &issuer,
-        scope,
-        NOW,
-        ttl,
-        true,
-        case.single_use,
-        &trace_id,
-    ) else {
+    let Ok(provider) = CapabilityProvider::new(SECRET) else {
+        return;
+    };
+    let Ok((cap, _)) = provider.issue(&issuer, scope, NOW, ttl, true, case.single_use, &trace_id)
+    else {
         return;
     };
 
     let encoded = serde_json::to_vec(&cap).expect("issued capability token must serialize");
-    let decoded = serde_json::from_slice::<RemoteCap>(&encoded)
-        .expect("issued capability token must parse");
+    let decoded =
+        serde_json::from_slice::<RemoteCap>(&encoded).expect("issued capability token must parse");
     let mut gate = CapabilityGate::new(SECRET).expect("valid capability gate");
     gate.authorize_network(
         Some(&decoded),
@@ -100,7 +95,9 @@ fn fuzz_capability_token_parser(case: CapabilityTokenParserCase) {
         let Ok(tampered_cap) = serde_json::from_slice::<RemoteCap>(&tampered) else {
             return;
         };
-        let mut tampered_gate = CapabilityGate::new(SECRET);
+        let Ok(mut tampered_gate) = CapabilityGate::new(SECRET) else {
+            return;
+        };
         let result = tampered_gate.authorize_network(
             Some(&tampered_cap),
             operation,
@@ -159,16 +156,17 @@ fn tamper_token_json(encoded: &[u8], tamper: TokenTamper) -> Option<Vec<u8>> {
             );
         }
         TokenTamper::ScopeOperation => {
-            if let Some(scope) = object.get_mut("scope").and_then(serde_json::Value::as_object_mut)
+            if let Some(scope) = object
+                .get_mut("scope")
+                .and_then(serde_json::Value::as_object_mut)
             {
-                scope.insert(
-                    "operations".to_string(),
-                    serde_json::json!([]),
-                );
+                scope.insert("operations".to_string(), serde_json::json!([]));
             }
         }
         TokenTamper::ScopeEndpoint => {
-            if let Some(scope) = object.get_mut("scope").and_then(serde_json::Value::as_object_mut)
+            if let Some(scope) = object
+                .get_mut("scope")
+                .and_then(serde_json::Value::as_object_mut)
             {
                 scope.insert(
                     "endpoint_prefixes".to_string(),

@@ -118,15 +118,15 @@ fuzz_target!(|case: NetworkGuardFuzzCase| {
     }
 
     // ── (E) Port mismatch ────────────────────────────────────────────
-    if let Some(rule_port) = rule.port
-        && rule_port != case.request_port
-    {
-        assert!(
-            !primary,
-            "INV-NETGUARD-PORT-REQUIRED violated: matcher accepted port \
-             {} when rule required port {rule_port}",
-            case.request_port
-        );
+    if let Some(rule_port) = rule.port {
+        if rule_port != case.request_port {
+            assert!(
+                !primary,
+                "INV-NETGUARD-PORT-REQUIRED violated: matcher accepted port \
+                 {} when rule required port {rule_port}",
+                case.request_port
+            );
+        }
     }
 
     // ── (C) Case-insensitivity ──────────────────────────────────────
@@ -134,10 +134,7 @@ fuzz_target!(|case: NetworkGuardFuzzCase| {
     // a well-defined inverse of to_ascii_lowercase), uppercasing it MUST
     // not change the verdict. We restrict to ASCII to avoid Unicode
     // case-mapping ambiguity.
-    if !request_host.is_empty()
-        && request_host.is_ascii()
-        && !request_host.contains('\0')
-    {
+    if !request_host.is_empty() && request_host.is_ascii() && !request_host.contains('\0') {
         let upper = request_host.to_ascii_uppercase();
         let upper_match = rule.matches(&upper, case.request_port, request_protocol);
         assert_eq!(
@@ -158,15 +155,13 @@ fuzz_target!(|case: NetworkGuardFuzzCase| {
         action: Action::Allow,
         protocol: Protocol::Http,
     };
-    let should_match_subdomain =
-        suffix_rule.matches("foo.example.com", 80, Protocol::Http);
+    let should_match_subdomain = suffix_rule.matches("foo.example.com", 80, Protocol::Http);
     assert!(
         should_match_subdomain,
         "INV-NETGUARD-WILDCARD-DOMAIN-BOUND violated: *.example.com did not \
          match foo.example.com"
     );
-    let should_not_match_exact =
-        suffix_rule.matches("example.com", 80, Protocol::Http);
+    let should_not_match_exact = suffix_rule.matches("example.com", 80, Protocol::Http);
     assert!(
         !should_not_match_exact,
         "INV-NETGUARD-WILDCARD-DOMAIN-BOUND violated: *.example.com matched \

@@ -186,7 +186,9 @@ fn fuzz_issued_token_roundtrip(case: RemoteCapTokenParseCase) {
     };
     let endpoint = endpoint_for_prefix(prefix);
     let ttl = u64::from(case.ttl_hint % 3600).saturating_add(2);
-    let provider = CapabilityProvider::new(SECRET);
+    let Ok(provider) = CapabilityProvider::new(SECRET) else {
+        return;
+    };
     let Ok((cap, _audit)) = provider.issue(
         &issuer,
         scope.clone(),
@@ -205,7 +207,7 @@ fn fuzz_issued_token_roundtrip(case: RemoteCapTokenParseCase) {
     assert_eq!(decoded, cap);
     assert_scope_predicates_are_stable(decoded.scope(), operation, &endpoint);
 
-    let mut gate = CapabilityGate::new(SECRET);
+    let mut gate = CapabilityGate::new(SECRET).expect("valid capability gate");
     gate.authorize_network(
         Some(&decoded),
         operation,
@@ -215,7 +217,8 @@ fn fuzz_issued_token_roundtrip(case: RemoteCapTokenParseCase) {
     )
     .expect("fresh parsed remote cap must authorize its issued scope");
 
-    let mut local_gate = CapabilityGate::with_mode(SECRET, ConnectivityMode::LocalOnly);
+    let mut local_gate =
+        CapabilityGate::with_mode(SECRET, ConnectivityMode::LocalOnly).expect("valid local gate");
     assert!(
         local_gate
             .recheck_network(
@@ -233,7 +236,7 @@ fn fuzz_issued_token_roundtrip(case: RemoteCapTokenParseCase) {
         let Ok(tampered_cap) = serde_json::from_slice::<RemoteCap>(&tampered) else {
             return;
         };
-        let mut tampered_gate = CapabilityGate::new(SECRET);
+        let mut tampered_gate = CapabilityGate::new(SECRET).expect("valid tampered gate");
         let result = tampered_gate.recheck_network(
             Some(&tampered_cap),
             operation,
@@ -249,10 +252,11 @@ fn fuzz_issued_token_roundtrip(case: RemoteCapTokenParseCase) {
 }
 
 fn exercise_parsed_cap(cap: &RemoteCap, operation: RemoteOperation, endpoint: &str, now: u64) {
-    let mut gate = CapabilityGate::new(SECRET);
+    let mut gate = CapabilityGate::new(SECRET).expect("valid parsed-cap gate");
     let _ = gate.recheck_network(Some(cap), operation, endpoint, now, "trace-raw-token-parse");
 
-    let mut local_gate = CapabilityGate::with_mode(SECRET, ConnectivityMode::LocalOnly);
+    let mut local_gate =
+        CapabilityGate::with_mode(SECRET, ConnectivityMode::LocalOnly).expect("valid local gate");
     assert!(
         local_gate
             .recheck_network(
