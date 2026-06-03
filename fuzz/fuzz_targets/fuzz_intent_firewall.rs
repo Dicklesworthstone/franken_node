@@ -71,7 +71,7 @@ impl FuzzFirewallVerdict {
     }
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 struct FuzzRemoteEffect {
     effect_id: String,
     origin: FuzzTrafficOrigin,
@@ -84,7 +84,7 @@ struct FuzzRemoteEffect {
     metadata_entries: Vec<(String, String)>,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 enum FuzzTrafficOrigin {
     Extension { extension_id: String },
     NodeInternal { subsystem: String },
@@ -367,7 +367,7 @@ fuzz_target!(|data: &[u8]| {
                     let bounded_path = FuzzRemoteEffect::bound_string(malicious_path);
                     base_effect.path = bounded_path.clone();
 
-                    let real_effect = base_effect.to_real();
+                    let real_effect = base_effect.clone().to_real();
 
                     // Test that classification handles malicious paths safely
                     let _classification = black_box(IntentClassifier::classify(&real_effect));
