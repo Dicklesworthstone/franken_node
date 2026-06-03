@@ -231,8 +231,10 @@ fn test_strict_profile_rejects_fixture_fallback_without_native_engine() {
 
     let engine_path = create_fixture_engine_binary(temp_dir.path());
 
-    let mut config = Config::default();
-    config.profile = Profile::Strict; // Strict profile should reject fallback
+    let config = Config {
+        profile: Profile::Strict, // Strict profile should reject fallback
+        ..Config::default()
+    };
 
     let dispatcher =
         EngineDispatcher::new(Some(engine_path.clone()), PreferredRuntime::FrankenEngine);

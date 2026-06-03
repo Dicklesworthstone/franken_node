@@ -2417,7 +2417,7 @@ mod tests {
             // 1. Profile allows fallback (Balanced)
             // 2. Capabilities can be validated
             // 3. SSRF enforcement is monitor (not block)
-            let result = dispatcher.dispatch_run(&config, &app_path, "policy-mode");
+            let result = dispatcher.dispatch_run(&app_path, &config, "balanced", &[], 0);
 
             // We expect this to fail due to missing node/bun runtime in test environment
             // but the error should be about missing runtime, not security validation
@@ -2457,7 +2457,7 @@ mod tests {
             // Enable fallback opt-in (though strict should reject anyway)
             std::env::set_var("FRANKEN_NODE_DEGRADED_FALLBACK_OPT_IN", "true");
 
-            let result = dispatcher.dispatch_run(&config, &app_path, "policy-mode");
+            let result = dispatcher.dispatch_run(&app_path, &config, "strict", &[], 0);
 
             // This should fail with security enforcement error in strict profile
             assert!(
@@ -2799,7 +2799,7 @@ mod tests {
         );
 
         let _telemetry_bridge = TelemetryBridge::null();
-        let result = dispatcher.dispatch_run(&app, &config, "strict");
+        let result = dispatcher.dispatch_run(&app, &config, "strict", &[], 0);
 
         assert!(
             result.is_err(),
@@ -5962,7 +5962,7 @@ mod tests {
         let dispatcher = EngineDispatcher::new(None, crate::ops::PreferredRuntime::Auto);
 
         let start = Instant::now();
-        let result = dispatcher.dispatch_run(temp_file.path(), &config, "balanced");
+        let result = dispatcher.dispatch_run(temp_file.path(), &config, "balanced", &[], 0);
         let elapsed = start.elapsed();
 
         // Clean up environment variable

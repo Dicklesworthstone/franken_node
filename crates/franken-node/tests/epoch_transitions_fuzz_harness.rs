@@ -386,10 +386,12 @@ fn fuzz_artifact_id_validation_comprehensive() {
 fn fuzz_epoch_store_recovery_determinism() {
     for &epoch_value in &seed_epoch_values() {
         if epoch_value <= MAX_EPOCH_VALUE {
-            validate_epoch_store_recovery_consistency(epoch_value).expect(&format!(
-                "Epoch store recovery should be deterministic for epoch: {}",
-                epoch_value
-            ));
+            validate_epoch_store_recovery_consistency(epoch_value).unwrap_or_else(|_| {
+                panic!(
+                    "Epoch store recovery should be deterministic for epoch: {}",
+                    epoch_value
+                )
+            });
         }
     }
 }

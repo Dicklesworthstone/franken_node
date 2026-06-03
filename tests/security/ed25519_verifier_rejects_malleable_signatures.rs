@@ -9,6 +9,7 @@
 //!     (`verify_evidence_entry_bytes_with_payload_bytes`)
 //!   - `crates/franken-node/src/supply_chain/artifact_signing.rs:468`
 //!     (`verify_signature`)
+//!
 //! The evidence-ledger consumer derives its replay key from the literal
 //! signature bytes (see `replay_key` at evidence_ledger.rs:268), so an
 //! s-malleated signature bypasses replay detection: same `(timestamp,

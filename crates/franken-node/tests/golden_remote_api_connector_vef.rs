@@ -155,7 +155,7 @@ fn validate_golden_directory_structure() {
             let path = Path::new(dir_path);
             if !path.exists() {
                 fs::create_dir_all(path)
-                    .expect(&format!("Should create golden directory: {}", dir_path));
+                    .unwrap_or_else(|_| panic!("Should create golden directory: {}", dir_path));
             }
         }
     }

@@ -480,21 +480,14 @@ fn activation_pipeline_stage_contract_conformance_matrix() {
         match case.expected_error_code {
             Some(expected_code) => {
                 let Some(last) = transcript.stages.last() else {
-                    assert!(
-                        false,
+                    panic!(
                         "{} failed conformance cases must record a failed stage",
                         case.requirement
                     );
-                    continue;
                 };
                 assert!(!last.success, "{} final stage must fail", case.requirement);
                 let Some(error) = last.error.as_ref() else {
-                    assert!(
-                        false,
-                        "{} failed stage must carry an error",
-                        case.requirement
-                    );
-                    continue;
+                    panic!("{} failed stage must carry an error", case.requirement);
                 };
                 assert_eq!(
                     error.code(),
@@ -525,21 +518,19 @@ fn activation_pipeline_structure_aware_state_transition_fuzz_seeds() -> Result<(
 /// Production default must fail closed until a real executor is supplied.
 #[test]
 fn activation_pipeline_default_executor_fail_closed_conformance() {
-    let transcript = activate(&generate_test_input(0xdefa_17), &DefaultExecutor);
+    let transcript = activate(&generate_test_input(0x00de_fa17), &DefaultExecutor);
 
     assert!(!transcript.completed);
     assert!(verify_stage_order(&transcript));
     assert_eq!(transcript.stages.len(), 1);
 
     let Some(failure) = transcript.stages.first() else {
-        assert!(false, "default executor must record a failed sandbox stage");
-        return;
+        panic!("default executor must record a failed sandbox stage");
     };
     assert_eq!(failure.stage, ActivationStage::SandboxCreate);
     assert!(!failure.success);
     let Some(error) = failure.error.as_ref() else {
-        assert!(false, "default executor failure must record a stage error");
-        return;
+        panic!("default executor failure must record a stage error");
     };
     assert_eq!(error.code(), "ACT_SANDBOX_FAILED");
     assert!(

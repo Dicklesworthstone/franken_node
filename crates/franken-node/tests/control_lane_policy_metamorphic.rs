@@ -683,7 +683,6 @@ proptest! {
         // Property S9: Cascade allocation efficiency under saturation
         // Verify leftover capacity cascades to lower priority lanes
         let cancel_theoretical_max = cancel_pending.min(total_slots);
-        let cancel_budget_max = cancel_min_slots.min(total_slots);
 
         if metrics_base.cancel_lane_tasks_run < cancel_theoretical_max {
             // If cancel didn't consume all slots, check timed got cascade

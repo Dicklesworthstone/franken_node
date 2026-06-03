@@ -404,7 +404,7 @@ fn bounded_mask_panic_recovery_digest(panic_payload: &'static str) -> PanicRecov
         cancel_requested_after_panic,
         deferred_signals_after_panic,
         delivered_after_mask_after_panic,
-        recovery_value: *recovered.value(),
+        recovery_value: recovered.value(),
         recovery_event_names: recovered
             .events
             .iter()

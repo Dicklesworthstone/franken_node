@@ -325,7 +325,7 @@ fn entropy_pattern_bytes(rng: &mut impl RngCore, pattern_index: usize, byte_len:
         0 => vec![0x00; byte_len],
         1 => vec![0xff; byte_len],
         2 => (0..byte_len)
-            .map(|index| if index % 2 == 0 { 0x00 } else { 0xff })
+            .map(|index| if index.is_multiple_of(2) { 0x00 } else { 0xff })
             .collect(),
         _ => {
             let mut bytes = vec![0x00; byte_len];

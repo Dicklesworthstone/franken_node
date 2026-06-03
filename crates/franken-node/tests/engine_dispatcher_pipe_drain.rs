@@ -39,7 +39,7 @@ fn engine_dispatcher_reaps_descendant_pipe_holders() {
 
     let started = Instant::now();
     let report = dispatcher
-        .dispatch_run(&app_path, &config, "strict")
+        .dispatch_run(&app_path, &config, "strict", &[], 0)
         .expect("dispatcher should not hang on inherited pipe descriptors");
     let elapsed = started.elapsed();
 

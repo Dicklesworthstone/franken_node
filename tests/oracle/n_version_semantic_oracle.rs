@@ -5,7 +5,6 @@
 //! `connector::n_version_oracle`.
 
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 // ── Report schema for deserialization ──────────────────────────────────

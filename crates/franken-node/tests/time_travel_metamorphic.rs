@@ -449,7 +449,11 @@ fn empty_trace_builder_fails_correctly() {
                         error_str
                     );
                 }
-                Ok(_) => prop_assert!(false, "Empty trace should not build successfully"),
+                Ok(_) => {
+                    return Err(proptest::test_runner::TestCaseError::fail(
+                        "Empty trace should not build successfully",
+                    ));
+                }
             }
             Ok(())
         })

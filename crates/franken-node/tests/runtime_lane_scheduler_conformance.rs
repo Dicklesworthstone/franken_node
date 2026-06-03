@@ -481,7 +481,7 @@ fn task_id_uniqueness_and_collision_resistance() {
 
     // Generate many tasks to test ID uniqueness
     for i in 0..1000 {
-        let task_class = if i % 2 == 0 {
+        let task_class = if i.is_multiple_of(2) {
             task_classes::epoch_transition()
         } else {
             task_classes::telemetry_export()

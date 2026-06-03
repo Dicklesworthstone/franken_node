@@ -317,7 +317,7 @@ fn scheduler_and_proof_service_verify_real_receipt_windows() -> TestResult {
             checkpoint_backed_inputs = checkpoint_backed_inputs.saturating_add(1);
         }
 
-        let backend = if completed % 2 == 0 {
+        let backend = if completed.is_multiple_of(2) {
             ProofBackendId::HashAttestationV1
         } else {
             ProofBackendId::DoubleHashAttestationV1

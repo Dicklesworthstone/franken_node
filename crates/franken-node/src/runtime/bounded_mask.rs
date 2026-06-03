@@ -2252,7 +2252,7 @@ mod bounded_mask_comprehensive_negative_tests {
                     &policy,
                     |_cx, _cancel| 42u8,
                 )
-                .expect(&format!("large timeout should succeed: {}", description));
+                .unwrap_or_else(|_| panic!("large timeout should succeed: {}", description));
 
                 assert_eq!(result.into_inner(), 42);
             }
@@ -2398,7 +2398,7 @@ mod bounded_mask_comprehensive_negative_tests {
                 &policy,
                 |_cx, _cancel| format!("recovered_{}", i),
             )
-            .expect(&format!("Should recover after panic pattern {}", i));
+            .unwrap_or_else(|_| panic!("Should recover after panic pattern {}", i));
 
             assert_eq!(recovery_result.into_inner(), format!("recovered_{}", i));
         }

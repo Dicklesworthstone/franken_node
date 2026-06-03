@@ -164,7 +164,11 @@ fn write_dense_fixture_incident_evidence(path: &Path, incident_id: &str, event_c
     for idx in 0..event_count {
         let event_id = format!("evt-{:03}", idx + 1);
         let reference = format!("refs/logs/{event_id}.json");
-        let confidence = if idx % 2 == 0 { 50_u64 } else { 30_u64 };
+        let confidence = if idx.is_multiple_of(2) {
+            50_u64
+        } else {
+            30_u64
+        };
         let event_type = match idx % 3 {
             0 => EventType::ExternalSignal,
             1 => EventType::PolicyEval,

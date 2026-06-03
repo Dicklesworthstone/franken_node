@@ -21,7 +21,7 @@
 //!   - `_profile_trust_card_canonical`        (bd-98xo5.12.1 commit `1c72a9f0`)
 //!     → crates/franken-node/src/connector/canonical_serializer.rs
 //!   - `_profile_ed25519_scheme_sign` + `_profile_ed25519_scheme_verify`
-//!                                             (bd-98xo5.12.2 commit landed by peer)
+//!     (bd-98xo5.12.2 commit landed by peer)
 //!     → crates/franken-node/src/crypto/schemes.rs
 //!   - `_profile_threshold_sig_verify`         (bd-98xo5.12.3 commit `bce4f6c0`)
 //!     → crates/franken-node/src/security/threshold_sig.rs

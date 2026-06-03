@@ -227,10 +227,7 @@ fn conformance_must_cmv_003_complete_method_coverage_validation() {
             .methods
             .iter()
             .find(|r| r.method == spec.name)
-            .expect(&format!(
-                "Report must include result for method '{}'",
-                spec.name
-            ));
+            .unwrap_or_else(|| panic!("Report must include result for method '{}'", spec.name));
 
         assert_eq!(
             method_result.required, spec.required,

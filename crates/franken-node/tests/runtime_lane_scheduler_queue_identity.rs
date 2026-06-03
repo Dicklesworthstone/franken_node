@@ -183,7 +183,7 @@ fn drain_front_queue_after_optional_tail_abort(abort_tail: bool) -> QueueDrainOu
     }
 
     scheduler
-        .complete_task(&active.task_id.to_string(), 3_010, "trace-complete-active")
+        .complete_task(active.task_id.as_ref(), 3_010, "trace-complete-active")
         .expect("completion should promote the front queued task");
 
     let counters = scheduler
@@ -606,14 +606,14 @@ fn run_background_queue_with_optional_independent_lane_work(
         );
 
         scheduler
-            .complete_task(&control.task_id.to_string(), 6_006, "meta-control-complete")
+            .complete_task(control.task_id.as_ref(), 6_006, "meta-control-complete")
             .expect("control completion should not mutate background queue");
         scheduler
-            .complete_task(&remote.task_id.to_string(), 6_007, "meta-remote-complete")
+            .complete_task(remote.task_id.as_ref(), 6_007, "meta-remote-complete")
             .expect("remote completion should not mutate background queue");
         scheduler
             .complete_task(
-                &maintenance.task_id.to_string(),
+                maintenance.task_id.as_ref(),
                 6_008,
                 "meta-maintenance-complete",
             )
@@ -630,7 +630,7 @@ fn run_background_queue_with_optional_independent_lane_work(
 
     scheduler
         .complete_task(
-            &first_background.task_id.to_string(),
+            first_background.task_id.as_ref(),
             6_010,
             "meta-bg-complete-1",
         )
@@ -647,7 +647,7 @@ fn run_background_queue_with_optional_independent_lane_work(
 
     scheduler
         .complete_task(
-            &second_background.task_id.to_string(),
+            second_background.task_id.as_ref(),
             6_020,
             "meta-bg-complete-2",
         )
@@ -709,7 +709,7 @@ fn run_head_abort_promotion(with_observation_interleavings: bool) -> QueueLifecy
     }
 
     scheduler
-        .complete_task(&active.task_id.to_string(), 5_010, "meta-complete-active")
+        .complete_task(active.task_id.as_ref(), 5_010, "meta-complete-active")
         .expect("completion should promote replacement queued task");
     assert_eq!(
         scheduler.active_task_ids(SchedulerLane::Background),
@@ -810,7 +810,7 @@ fn run_tail_abort_after_optional_aborted_task_replay(
 
     scheduler
         .complete_task(
-            &active.task_id.to_string(),
+            active.task_id.as_ref(),
             10_910,
             "meta-aborted-replay-complete-active",
         )
@@ -863,7 +863,7 @@ fn run_queue_lifecycle_after_optional_preserving_reload(
 
     scheduler
         .complete_task(
-            &active.task_id.to_string(),
+            active.task_id.as_ref(),
             7_010,
             "meta-reload-complete-active",
         )
@@ -911,7 +911,7 @@ fn run_drained_queue_lifecycle_after_optional_terminal_preserving_reload(
 
     scheduler
         .complete_task(
-            &active.task_id.to_string(),
+            active.task_id.as_ref(),
             11_110,
             "meta-terminal-complete-active",
         )
@@ -983,7 +983,7 @@ fn run_drained_queue_lifecycle_after_optional_terminal_telemetry_snapshots(
 
     scheduler
         .complete_task(
-            &active.task_id.to_string(),
+            active.task_id.as_ref(),
             11_310,
             "meta-terminal-telemetry-complete-active",
         )
@@ -1075,7 +1075,7 @@ fn run_queued_pressure_lifecycle_after_optional_live_telemetry_snapshots(
 
     scheduler
         .complete_task(
-            &active.task_id.to_string(),
+            active.task_id.as_ref(),
             12_110,
             "meta-live-telemetry-complete-active",
         )
@@ -1129,7 +1129,7 @@ fn run_starvation_latch_lifecycle_with_probes(
 
     scheduler
         .complete_task(
-            &active.task_id.to_string(),
+            active.task_id.as_ref(),
             8_200,
             "meta-starve-complete-active",
         )
@@ -1228,7 +1228,7 @@ fn run_queue_lifecycle_after_optional_expanding_reload(
 
     scheduler
         .complete_task(
-            &active.task_id.to_string(),
+            active.task_id.as_ref(),
             9_010,
             "meta-expand-complete-active",
         )
@@ -1281,11 +1281,7 @@ fn run_queue_lifecycle_after_optional_expand_reduce_churn(
     }
 
     scheduler
-        .complete_task(
-            &active.task_id.to_string(),
-            9_510,
-            "meta-churn-complete-active",
-        )
+        .complete_task(active.task_id.as_ref(), 9_510, "meta-churn-complete-active")
         .expect("completion should promote queued task after optional expansion");
     scheduler
         .complete_task(&queued, 9_520, "meta-churn-complete-promoted")
@@ -1371,7 +1367,7 @@ fn run_queue_lifecycle_after_optional_rejected_lane_removal(
 
     scheduler
         .complete_task(
-            &active.task_id.to_string(),
+            active.task_id.as_ref(),
             9_710,
             "meta-reject-reload-complete-active",
         )
@@ -1440,7 +1436,7 @@ fn run_queue_lifecycle_after_optional_invalid_policy_reload(
 
     scheduler
         .complete_task(
-            &active.task_id.to_string(),
+            active.task_id.as_ref(),
             9_910,
             "meta-invalid-reload-complete-active",
         )
@@ -1509,7 +1505,7 @@ fn run_queue_lifecycle_after_optional_missing_task_probes(
 
     scheduler
         .complete_task(
-            &active.task_id.to_string(),
+            active.task_id.as_ref(),
             10_110,
             "meta-missing-probe-complete-active",
         )
@@ -1677,7 +1673,7 @@ fn run_queue_lifecycle_after_optional_telemetry_export_probes(
 
     scheduler
         .complete_task(
-            &active.task_id.to_string(),
+            active.task_id.as_ref(),
             10_310,
             "meta-export-probe-complete-active",
         )
@@ -1720,7 +1716,7 @@ fn run_queue_lifecycle_with_optional_bounded_audit_capacity(
 
     scheduler
         .complete_task(
-            &active.task_id.to_string(),
+            active.task_id.as_ref(),
             10_510,
             "meta-audit-cap-complete-active",
         )
@@ -1767,7 +1763,7 @@ fn run_queue_lifecycle_with_timestamp_offset(
 
     scheduler
         .complete_task(
-            &active.task_id.to_string(),
+            active.task_id.as_ref(),
             13_010 + timestamp_offset_ms,
             "meta-timestamp-shift-complete-active",
         )
@@ -2395,7 +2391,7 @@ fn lane_scheduler_keeps_capped_task_identity_and_promotes_fifo() {
     assert_eq!(counters.rejected_total, 1);
 
     scheduler
-        .complete_task(&active.task_id.to_string(), 1_010, "trace-complete")
+        .complete_task(active.task_id.as_ref(), 1_010, "trace-complete")
         .expect("completion should promote queued task");
 
     assert!(

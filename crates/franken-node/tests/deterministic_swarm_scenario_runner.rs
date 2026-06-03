@@ -10,6 +10,8 @@ use frankenengine_node::tools::swarm_scenario::{
 };
 
 type TestResult = Result<(), String>;
+type IncidentTextMutator = (&'static str, fn(&mut SwarmScenarioOperatorIncident));
+type ScenarioTextMutator = (&'static str, fn(&mut SwarmScenarioSpec));
 
 #[test]
 fn registered_scenarios_cover_green_and_fail_closed_paths() {
@@ -318,7 +320,7 @@ fn high_contention_scenario_rejects_missing_operator_evidence_ref() -> TestResul
 /// removing the rejection on any one of them is caught.
 #[test]
 fn high_contention_scenario_rejects_control_characters_in_operator_incident_text() -> TestResult {
-    let mutators: [(&str, fn(&mut SwarmScenarioOperatorIncident)); 3] = [
+    let mutators: [IncidentTextMutator; 3] = [
         ("reason_code", |incident| {
             incident.reason_code = "SWARM_REASON\nleak".to_string();
         }),
@@ -358,7 +360,7 @@ fn high_contention_scenario_rejects_control_characters_in_operator_incident_text
 
 #[test]
 fn swarm_scenario_rejects_control_characters_in_spec_strings() -> TestResult {
-    let mutators: [(&str, fn(&mut SwarmScenarioSpec)); 5] = [
+    let mutators: [ScenarioTextMutator; 5] = [
         ("base_timestamp", |spec| {
             spec.base_timestamp = "2026-05-05T10:00:00Z\nfake-row".to_string();
         }),

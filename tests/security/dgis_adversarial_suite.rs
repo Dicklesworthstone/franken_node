@@ -93,7 +93,7 @@ fn edge_obfuscation_fixture() -> CampaignFixture {
 }
 
 fn fake_low_risk_pivot_fixture() -> CampaignFixture {
-    let mut graph = ContagionGraph::new(0xFA1E_10);
+    let mut graph = ContagionGraph::new(0x00FA_1E10);
     for node in [
         "pkg:seed-a",
         "pkg:seed-b",
@@ -143,7 +143,7 @@ fn fake_low_risk_pivot_fixture() -> CampaignFixture {
 }
 
 fn delayed_activation_fixture() -> CampaignFixture {
-    let mut graph = ContagionGraph::new(0xDE1A_7ED);
+    let mut graph = ContagionGraph::new(0x0DE1_A7ED);
     for node in ["pkg:maintainer-shell", "pkg:dormant-payload"] {
         add_node(&mut graph, node);
     }

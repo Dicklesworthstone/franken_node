@@ -465,15 +465,15 @@ fn require_local_mjs_fixture(fixture_file: &str) -> TestResult {
 }
 
 fn pass_rate_basis_points(passed: u64, total: u64) -> TestResult<u64> {
-    if total == 0 {
-        Ok(0)
-    } else {
-        let numerator = passed
-            .checked_mul(10_000)
-            .and_then(|value| value.checked_add(total / 2))
-            .ok_or("pass-rate numerator overflow")?;
-        Ok(numerator / total)
-    }
+    let Some(nonzero_total) = std::num::NonZeroU64::new(total) else {
+        return Ok(0);
+    };
+    let total = nonzero_total.get();
+    let numerator = passed
+        .checked_mul(10_000)
+        .and_then(|value| value.checked_add(total / 2))
+        .ok_or("pass-rate numerator overflow")?;
+    Ok(numerator / total)
 }
 
 fn basis_points_to_percent(basis_points: u64) -> TestResult<f64> {

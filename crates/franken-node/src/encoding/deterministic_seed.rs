@@ -2890,7 +2890,8 @@ mod additional_negative_path_tests {
         for (hex_str, should_succeed) in test_hex_cases {
             let result = ContentHash::from_hex(hex_str);
             if should_succeed {
-                let content_hash = result.expect(&format!("Valid hex '{}' should parse", hex_str));
+                let content_hash =
+                    result.unwrap_or_else(|_| panic!("Valid hex '{}' should parse", hex_str));
                 // Round-trip test
                 let round_trip = content_hash.to_hex();
                 assert_eq!(round_trip.len(), 64, "Round-trip hex should be 64 chars");

@@ -26,7 +26,7 @@
 //! 9. **Duplicate partial replay rejection** — replaying any already-valid
 //!    partial signature cannot inflate `valid_signatures` or satisfy quorum.
 //! 10. **Structure-aware adversarial fuzzing** — bounded signer/key/signature
-//!    mutations must fail closed and keep baseline/preparsed verdicts identical.
+//!     mutations must fail closed and keep baseline/preparsed verdicts identical.
 //!
 //! These are the load-bearing safety properties: if any break, the threshold gate
 //! either lets unauthorised publications through or rejects valid quorums.
@@ -535,7 +535,7 @@ proptest! {
         let mut replayed_signatures =
             Vec::with_capacity(baseline_signatures.len() + replay_count);
         replayed_signatures.extend_from_slice(&baseline_signatures[..insert_at]);
-        replayed_signatures.extend(std::iter::repeat(replayed_partial).take(replay_count));
+        replayed_signatures.extend(std::iter::repeat_n(replayed_partial, replay_count));
         replayed_signatures.extend_from_slice(&baseline_signatures[insert_at..]);
         let replayed_artifact = make_artifact(&content_hash, replayed_signatures);
         let replayed = verify_threshold(&quorum.config, &replayed_artifact, "dup-replay", "ts");
@@ -627,7 +627,7 @@ proptest! {
                 let mut replayed =
                     Vec::with_capacity(unique_signatures.len().saturating_add(replay_count));
                 replayed.extend_from_slice(&unique_signatures[..insert_at]);
-                replayed.extend(std::iter::repeat(replayed_partial).take(replay_count));
+                replayed.extend(std::iter::repeat_n(replayed_partial, replay_count));
                 replayed.extend_from_slice(&unique_signatures[insert_at..]);
                 fuzz_artifact.signatures = replayed;
             }

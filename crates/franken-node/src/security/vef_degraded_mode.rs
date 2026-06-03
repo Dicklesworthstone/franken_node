@@ -19,6 +19,10 @@ pub const VEF_DEGRADE_001: &str = "VEF-DEGRADE-001";
 pub const VEF_DEGRADE_002: &str = "VEF-DEGRADE-002";
 pub const VEF_DEGRADE_003: &str = "VEF-DEGRADE-003";
 pub const VEF_DEGRADE_004: &str = "VEF-DEGRADE-004";
+#[allow(
+    dead_code,
+    reason = "contract event code retained for transition-failure receipts"
+)]
 pub const VEF_DEGRADE_ERR_001: &str = "VEF-DEGRADE-ERR-001";
 
 // ── Degraded-mode tiers ─────────────────────────────────────────────────
@@ -335,6 +339,10 @@ impl VefDegradedModeEngine {
     }
 
     #[must_use]
+    #[allow(
+        dead_code,
+        reason = "public accessor retained for downstream policy inspection"
+    )]
     pub fn config(&self) -> &VefDegradedModeConfig {
         &self.config
     }

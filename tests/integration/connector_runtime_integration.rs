@@ -548,7 +548,7 @@ fn test_full_lifecycle_happy_path() {
 
     // 6) ...and the scheduler releases the task slot.
     let released_lane = scheduler
-        .complete_task(&assignment.task_id.to_string(), now_ms(13), trace)
+        .complete_task(assignment.task_id.as_ref(), now_ms(13), trace)
         .expect("scheduler must complete the assigned task");
     assert_eq!(released_lane, SchedulerLane::RemoteEffect);
 

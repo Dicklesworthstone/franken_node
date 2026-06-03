@@ -116,7 +116,7 @@ fn realistic_lifecycle_scenario(
     // Generate realistic message patterns
     for i in 0..message_count {
         messages.push(SessionLifecycleMessage {
-            direction: if i % 2 == 0 {
+            direction: if i.is_multiple_of(2) {
                 MessageDirection::Send
             } else {
                 MessageDirection::Receive

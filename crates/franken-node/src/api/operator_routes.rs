@@ -1702,7 +1702,7 @@ mod tests {
                 let identity = test_identity();
                 let trace = test_trace();
                 let status = get_status(&identity, &trace)
-                    .expect(&format!("Should handle extreme offset: {}", extreme_offset));
+                    .unwrap_or_else(|_| panic!("Should handle extreme offset: {}", extreme_offset));
                 // Uptime should saturate gracefully, not overflow
                 assert!(status.data.uptime_seconds <= u64::MAX);
 
@@ -1864,10 +1864,9 @@ mod tests {
             for &boundary_offset in &epoch_boundaries {
                 install_process_start(boundary_offset, "2000-01-01T00:00:00Z".to_string());
 
-                let boundary_result = get_status(&identity, &trace).expect(&format!(
-                    "Should handle boundary offset: {}",
-                    boundary_offset
-                ));
+                let boundary_result = get_status(&identity, &trace).unwrap_or_else(|_| {
+                    panic!("Should handle boundary offset: {}", boundary_offset)
+                });
                 assert!(boundary_result.data.uptime_seconds <= u64::MAX);
             }
         }

@@ -768,6 +768,7 @@ fn evidence_hotset_prefetch_plan_fails_closed_for_unsafe_candidates() {
 ///   2. Absolute paths to the protected directory itself with no trailing
 ///      "/", e.g. `/data/projects/franken_node/messages`.
 ///   3. Backslash-separated paths on cross-platform fixtures.
+///
 /// Each non-protected entry would then be accepted by `validated()`, marked
 /// `cleanup_eligible = true`, and ultimately deleted by the cleanup adapter.
 /// After the fix to segment-match every protected directory name, these
