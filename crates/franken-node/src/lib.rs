@@ -29,6 +29,7 @@ fn file_too_large_error(actual_bytes: u64, max_bytes: u64) -> std::io::Error {
     )
 }
 
+#[cfg(test)]
 fn read_len_exceeds_limit(len: usize, max_bytes: u64) -> bool {
     len_to_u64_saturating(len) > max_bytes
 }

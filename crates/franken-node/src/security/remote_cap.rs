@@ -30,6 +30,7 @@ const MAX_REPLAY_ENTRIES: usize = 4_096;
 const MIN_SECRET_MATERIAL_LEN: usize = 16;
 const MIN_SECRET_ENTROPY_BITS: usize = 56;
 const REMOTE_CAP_REPLAY_STORE_ENV: &str = "FRANKEN_NODE_REMOTECAP_REPLAY_STORE";
+#[cfg(test)]
 const CUCKOO_REVOCATION_ENV: &str = "FRANKEN_NODE_CUCKOO_REVOCATION";
 const KNOWN_WEAK_SECRET_MATERIAL: &[&str] = &[
     "admin",
@@ -273,6 +274,7 @@ enum CheckMode {
     /// Use cuckoo filter only (fastest, false positives possible)
     FastPath,
     /// Use cuckoo filter with BTreeSet verification (fast + accurate)
+    #[allow(dead_code)]
     Hybrid,
     /// Use BTreeSet only (fallback, always accurate)
     Fallback,
@@ -2086,22 +2088,22 @@ impl CapabilityGate {
             return Err(err);
         }
 
-        if self.verifying_key.is_none() {
-            if let Err(err) = validate_secret_material(&self.verification_secret, "verification") {
-                self.push_audit(build_audit_event(
-                    "REMOTECAP_DENIED",
-                    "RC_CHECK_DENIED",
-                    Some(cap.token_id.clone()),
-                    Some(cap.issuer_identity.clone()),
-                    Some(operation),
-                    Some(endpoint.to_string()),
-                    trace_id.to_string(),
-                    now_epoch_secs,
-                    false,
-                    Some(err.code().to_string()),
-                ));
-                return Err(err);
-            }
+        if self.verifying_key.is_none()
+            && let Err(err) = validate_secret_material(&self.verification_secret, "verification")
+        {
+            self.push_audit(build_audit_event(
+                "REMOTECAP_DENIED",
+                "RC_CHECK_DENIED",
+                Some(cap.token_id.clone()),
+                Some(cap.issuer_identity.clone()),
+                Some(operation),
+                Some(endpoint.to_string()),
+                trace_id.to_string(),
+                now_epoch_secs,
+                false,
+                Some(err.code().to_string()),
+            ));
+            return Err(err);
         }
 
         if let Err(detail) = cap.scope.validate_endpoint_prefixes() {

@@ -135,25 +135,29 @@ fn sanitize_proof_receipt_field(value: &str) -> String {
     sanitized
 }
 
+struct ProofReceiptInput<'a> {
+    connector_id: &'a str,
+    artifact_id: &'a str,
+    trace_id: &'a str,
+    timestamp: &'a str,
+}
+
 fn proof_receipt(
-    connector_id: &str,
-    artifact_id: &str,
+    input: ProofReceiptInput<'_>,
     verified: bool,
     log_root_matched: bool,
     proof_valid: bool,
     failure_reason: Option<ProofFailure>,
-    trace_id: &str,
-    timestamp: &str,
 ) -> ProofReceipt {
     ProofReceipt {
-        connector_id: sanitize_proof_receipt_field(connector_id),
-        artifact_id: sanitize_proof_receipt_field(artifact_id),
+        connector_id: sanitize_proof_receipt_field(input.connector_id),
+        artifact_id: sanitize_proof_receipt_field(input.artifact_id),
         verified,
         log_root_matched,
         proof_valid,
         failure_reason,
-        trace_id: sanitize_proof_receipt_field(trace_id),
-        timestamp: sanitize_proof_receipt_field(timestamp),
+        trace_id: sanitize_proof_receipt_field(input.trace_id),
+        timestamp: sanitize_proof_receipt_field(input.timestamp),
     }
 }
 
@@ -274,29 +278,30 @@ pub fn verify_inclusion(
     trace_id: &str,
     timestamp: &str,
 ) -> ProofReceipt {
+    let receipt_input = || ProofReceiptInput {
+        connector_id,
+        artifact_id,
+        trace_id,
+        timestamp,
+    };
+
     if let Some(reason) = invalid_artifact_id_reason(artifact_id) {
         return proof_receipt(
-            connector_id,
-            artifact_id,
+            receipt_input(),
             false,
             false,
             false,
             Some(ProofFailure::InvalidArtifactId { reason }),
-            trace_id,
-            timestamp,
         );
     }
 
     if let Some(reason) = invalid_connector_id_reason(connector_id) {
         return proof_receipt(
-            connector_id,
-            artifact_id,
+            receipt_input(),
             false,
             false,
             false,
             Some(ProofFailure::InvalidConnectorId { reason }),
-            trace_id,
-            timestamp,
         );
     }
 
@@ -306,35 +311,22 @@ pub fn verify_inclusion(
         None => {
             if policy.required {
                 return proof_receipt(
-                    connector_id,
-                    artifact_id,
+                    receipt_input(),
                     false,
                     false,
                     false,
                     Some(ProofFailure::ProofMissing),
-                    trace_id,
-                    timestamp,
                 );
             }
             // Not required, not provided → pass
-            return proof_receipt(
-                connector_id,
-                artifact_id,
-                true,
-                true,
-                true,
-                None,
-                trace_id,
-                timestamp,
-            );
+            return proof_receipt(receipt_input(), true, true, true, None);
         }
     };
 
     // Validate proof metadata bounds before any hash work.
     if proof.tree_size == 0 || proof.leaf_index >= proof.tree_size {
         return proof_receipt(
-            connector_id,
-            artifact_id,
+            receipt_input(),
             false,
             false,
             false,
@@ -345,16 +337,13 @@ pub fn verify_inclusion(
                 ),
                 expected: "0 <= leaf_index < tree_size".into(),
             }),
-            trace_id,
-            timestamp,
         );
     }
 
     let audit_path_limit = audit_path_len_limit(proof.tree_size);
     if proof.audit_path.len() < audit_path_limit {
         return proof_receipt(
-            connector_id,
-            artifact_id,
+            receipt_input(),
             false,
             false,
             false,
@@ -366,14 +355,11 @@ pub fn verify_inclusion(
                 ),
                 expected: format!("audit_path_len >= {audit_path_limit}"),
             }),
-            trace_id,
-            timestamp,
         );
     }
     if proof.audit_path.len() > audit_path_limit {
         return proof_receipt(
-            connector_id,
-            artifact_id,
+            receipt_input(),
             false,
             false,
             false,
@@ -385,16 +371,13 @@ pub fn verify_inclusion(
                 ),
                 expected: format!("audit_path_len <= {audit_path_limit}"),
             }),
-            trace_id,
-            timestamp,
         );
     }
 
     // Check leaf hash matches artifact hash
     if !constant_time::ct_eq_bytes(proof.leaf_hash.as_bytes(), artifact_hash.as_bytes()) {
         return proof_receipt(
-            connector_id,
-            artifact_id,
+            receipt_input(),
             false,
             false,
             false,
@@ -402,8 +385,6 @@ pub fn verify_inclusion(
                 expected: artifact_hash.into(),
                 actual: proof.leaf_hash.clone(),
             }),
-            trace_id,
-            timestamp,
         );
     }
 
@@ -411,16 +392,7 @@ pub fn verify_inclusion(
     let computed_root = match recompute_root(proof) {
         Ok(root) => root,
         Err(failure_reason) => {
-            return proof_receipt(
-                connector_id,
-                artifact_id,
-                false,
-                false,
-                false,
-                Some(failure_reason),
-                trace_id,
-                timestamp,
-            );
+            return proof_receipt(receipt_input(), false, false, false, Some(failure_reason));
         }
     };
 
@@ -428,29 +400,17 @@ pub fn verify_inclusion(
     let root_pinned = policy.is_checkpoint_pinned(proof.tree_size, &computed_root);
     if !root_pinned {
         return proof_receipt(
-            connector_id,
-            artifact_id,
+            receipt_input(),
             false,
             false,
             false,
             Some(ProofFailure::RootNotPinned {
                 root_hash: computed_root,
             }),
-            trace_id,
-            timestamp,
         );
     }
 
-    proof_receipt(
-        connector_id,
-        artifact_id,
-        true,
-        true,
-        true,
-        None,
-        trace_id,
-        timestamp,
-    )
+    proof_receipt(receipt_input(), true, true, true, None)
 }
 
 fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
