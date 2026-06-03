@@ -5,12 +5,10 @@ use std::path::PathBuf;
 /// Trigger every clap debug-assertion (argument-name uniqueness, group
 /// invariants, etc.) across the entire `Cli` tree.
 ///
-/// The crate's `[lib]` is built with `test = false`, so the inline
-/// `#[cfg(test)] mod tests` in `cli.rs` never runs. Without this integration
-/// test, structural clap bugs in subcommands escape the suite and panic only
-/// at runtime when a user actually invokes the broken command. This test
-/// regression-protects the fix where `RegistryPublishArgs::version` collided
-/// with clap's auto-generated `--version` flag.
+/// This integration test keeps the CLI contract pinned through the public
+/// crate surface as well as inline module coverage. It regression-protects the
+/// fix where `RegistryPublishArgs::version` collided with clap's
+/// auto-generated `--version` flag.
 #[test]
 fn cli_structure_passes_clap_debug_assertions() {
     Cli::command().debug_assert();

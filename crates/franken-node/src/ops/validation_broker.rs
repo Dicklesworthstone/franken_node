@@ -1485,11 +1485,14 @@ impl InputSet {
 
         result
     }
+}
 
-    /// Test that the length-prefixed canonical material construction prevents hash collisions
-    #[cfg(test)]
+#[cfg(test)]
+mod input_set_tests {
+    use super::*;
+
     #[test]
-    fn test_canonical_material_collision_resistance() {
+    fn canonical_material_is_collision_resistant() {
         // Test case 1: Different digest paths with colons
         let mut input1 = InputSet {
             git_commit: "abc123".to_string(),

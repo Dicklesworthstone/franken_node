@@ -2329,11 +2329,12 @@ mod tests {
             let err = channel.process_message(&message, "ts").unwrap_err();
 
             prop_assert_eq!(err.code(), "ACC_AUTH_FAILED");
-            prop_assert!(matches!(
+            let is_subject_auth_error = matches!(
                 err,
                 ChannelError::AuthFailed { reason, .. }
                     if reason.starts_with("subject_id_")
-            ));
+            );
+            prop_assert!(is_subject_auth_error);
         }
 
         #[test]
@@ -2373,11 +2374,12 @@ mod tests {
             let err = channel.process_message(&message, "ts").unwrap_err();
 
             prop_assert_eq!(err.code(), "ACC_AUTH_FAILED");
-            prop_assert!(matches!(
+            let is_payload_auth_error = matches!(
                 err,
                 ChannelError::AuthFailed { reason, .. }
                     if reason.starts_with("payload_hash_")
-            ));
+            );
+            prop_assert!(is_payload_auth_error);
         }
     }
 }

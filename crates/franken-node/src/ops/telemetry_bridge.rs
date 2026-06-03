@@ -14,14 +14,14 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 // Windows 10+ supports AF_UNIX; uds_windows mirrors std's os::unix::net API so
 // the telemetry-bridge transport works cross-platform with the same call sites.
-#[cfg(windows)]
-use uds_windows::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use uds_windows::{UnixListener, UnixStream};
 
 const PERSIST_QUEUE_CAPACITY: usize = 256;
 const PERSIST_BATCH_MAX: usize = 64;

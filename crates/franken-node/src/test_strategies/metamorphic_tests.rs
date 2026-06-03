@@ -154,88 +154,83 @@ mod tests {
     #[test]
     fn mr_permutation_timestamp_format_validity() {
         // MR5: All generated timestamps should be valid RFC3339 format
-        proptest!(|()| {
-            let strategy = rfc3339_timestamp();
+        let strategy = rfc3339_timestamp();
 
-            // Test multiple timestamp generations
-            for seed in 0..30u64 {
-                let mut rng = proptest::test_runner::TestRng::deterministic_rng(
-                    proptest::test_runner::RngAlgorithm::ChaCha,
+        // Test multiple timestamp generations
+        for seed in 0..30u64 {
+            let mut rng = proptest::test_runner::TestRng::deterministic_rng(
+                proptest::test_runner::RngAlgorithm::ChaCha,
+            );
+            rng.set_seed(seed);
+
+            if let Ok(tree) = strategy.new_tree(&mut rng) {
+                let timestamp = tree.current();
+
+                // Should match RFC3339 basic pattern
+                assert!(
+                    timestamp.starts_with("2026-") && timestamp.ends_with('Z'),
+                    "Timestamp should be 2026 year with Z suffix: '{}'",
+                    timestamp
                 );
-                rng.set_seed(seed);
 
-                if let Ok(tree) = strategy.new_tree(&mut rng) {
-                    let timestamp = tree.current();
+                // Should have correct length (YYYY-MM-DDTHH:MM:SS.sssZ = 24 chars)
+                assert_eq!(
+                    timestamp.len(),
+                    24,
+                    "Timestamp should be 24 characters: '{}'",
+                    timestamp
+                );
 
-                    // Should match RFC3339 basic pattern
-                    prop_assert!(
-                        timestamp.starts_with("2026-") && timestamp.ends_with('Z'),
-                        "Timestamp should be 2026 year with Z suffix: '{}'",
-                        timestamp
-                    );
-
-                    // Should have correct length (YYYY-MM-DDTHH:MM:SS.sssZ = 24 chars)
-                    prop_assert_eq!(
-                        timestamp.len(),
-                        24,
-                        "Timestamp should be 24 characters: '{}'",
-                        timestamp
-                    );
-
-                    // Check basic format components
-                    let parts: Vec<&str> =
-                        timestamp.split(&['T', '-', ':', '.', 'Z'][..]).collect();
-                    prop_assert!(
-                        parts.len() >= 6,
-                        "Timestamp should have all components: '{}'",
-                        timestamp
-                    );
-                }
+                // Check basic format components
+                let parts: Vec<&str> = timestamp.split(&['T', '-', ':', '.', 'Z'][..]).collect();
+                assert!(
+                    parts.len() >= 6,
+                    "Timestamp should have all components: '{}'",
+                    timestamp
+                );
             }
-        });
+        }
     }
 
     #[test]
     fn mr_additive_hash_format_consistency() {
         // MR6: SHA256 hashes should always have consistent format
-        proptest!(|()| {
-            let strategy = sha256_hash();
+        let strategy = sha256_hash();
 
-            for seed in 0..20u64 {
-                let mut rng = proptest::test_runner::TestRng::deterministic_rng(
-                    proptest::test_runner::RngAlgorithm::ChaCha,
+        for seed in 0..20u64 {
+            let mut rng = proptest::test_runner::TestRng::deterministic_rng(
+                proptest::test_runner::RngAlgorithm::ChaCha,
+            );
+            rng.set_seed(seed);
+
+            if let Ok(tree) = strategy.new_tree(&mut rng) {
+                let hash = tree.current();
+
+                assert!(
+                    hash.starts_with("sha256:"),
+                    "Hash should start with sha256: prefix: '{}'",
+                    hash
                 );
-                rng.set_seed(seed);
 
-                if let Ok(tree) = strategy.new_tree(&mut rng) {
-                    let hash = tree.current();
+                let hex_part = &hash[7..]; // Skip "sha256:" prefix
+                assert_eq!(
+                    hex_part.len(),
+                    64,
+                    "SHA256 hex should be 64 characters: '{}'",
+                    hex_part
+                );
 
-                    prop_assert!(
-                        hash.starts_with("sha256:"),
-                        "Hash should start with sha256: prefix: '{}'",
+                // Should be valid hex
+                for ch in hex_part.chars() {
+                    assert!(
+                        ch.is_ascii_hexdigit(),
+                        "Invalid hex character '{}' in hash '{}'",
+                        ch,
                         hash
                     );
-
-                    let hex_part = &hash[7..]; // Skip "sha256:" prefix
-                    prop_assert_eq!(
-                        hex_part.len(),
-                        64,
-                        "SHA256 hex should be 64 characters: '{}'",
-                        hex_part
-                    );
-
-                    // Should be valid hex
-                    for ch in hex_part.chars() {
-                        prop_assert!(
-                            ch.is_ascii_hexdigit(),
-                            "Invalid hex character '{}' in hash '{}'",
-                            ch,
-                            hash
-                        );
-                    }
                 }
             }
-        });
+        }
     }
 
     #[test]

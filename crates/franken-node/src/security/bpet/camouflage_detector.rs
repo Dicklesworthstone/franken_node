@@ -580,9 +580,8 @@ fn linreg_slope(y: &[f64]) -> f64 {
 // Local helpers (bounded growth + severity clamp)
 // ---------------------------------------------------------------------------
 
-/// Local bounded-growth helper. Mirrors `crate::push_bounded` but is defined
-/// here so the module compiles cleanly under `#[cfg(test)]` (the crate-level
-/// helper lives in `lib.rs`, which is gated `cfg(not(test))`).
+/// Local bounded-growth helper. Mirrors `crate::push_bounded` while keeping
+/// the detector's test helpers self-contained.
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
         items.clear();

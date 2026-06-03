@@ -3354,9 +3354,11 @@ pub(super) fn canonicalize_value(value: Value) -> Value {
 }
 
 #[cfg(test)]
+#[path = "test_canonical_optimization.rs"]
 mod test_canonical_optimization;
 
 #[cfg(test)]
+#[path = "canonical_perf_test.rs"]
 mod canonical_perf_test;
 
 #[cfg(test)]

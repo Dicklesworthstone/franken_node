@@ -6,8 +6,8 @@ use frankenengine_node::ops::telemetry_bridge::{
 
 /// Integration test for telemetry_bridge slowloris regression
 ///
-/// This test was previously in telemetry_bridge.rs #[cfg(test)] but those
-/// tests were dead code because the lib target has `test = false` in Cargo.toml.
+/// This test mirrors the telemetry_bridge.rs inline regression through the
+/// public crate surface.
 ///
 /// Referenced in bd-28p1b: ensure slowloris protection regression tests are executable.
 #[test]

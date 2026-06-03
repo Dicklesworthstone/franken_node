@@ -1,7 +1,7 @@
 //! BPET phenotype extraction conformance tests (bd-2xgs.1).
 //!
-//! This harness exercises the public extractor API because the crate disables
-//! inline library tests with `test = false`.
+//! This harness exercises the public extractor API alongside the inline
+//! library tests.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;

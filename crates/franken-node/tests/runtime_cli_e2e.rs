@@ -418,9 +418,9 @@ fn runtime_oracle_quorum_uses_integer_ceiling() {
 }
 
 // ── K-9 (EngineIdentity) oracle self-comparison guard (gauntlet bd-rjc2m.K9 / H-002) ──
-// Placed in this WIRED integration target because the crate's inline `#[cfg(test)]` tests do
-// not run ([lib] test = false). These exercise the public register_runtime / executor_fingerprint
-// guards that prevent one executor faking byte-identical "agreement" with itself.
+// Kept in this wired integration target so the public register_runtime /
+// executor_fingerprint guards are exercised in addition to inline coverage.
+// These prevent one executor faking byte-identical "agreement" with itself.
 
 fn k9_entry(id: &str, name: &str, version: &str, is_ref: bool) -> RuntimeEntry {
     RuntimeEntry {
@@ -443,7 +443,11 @@ fn k9_register_rejects_same_executor_under_two_ids() {
         .register_runtime(k9_entry("node-copy", "node", "20.0", true))
         .expect_err("same executor under a second id must be rejected (K-9)");
     assert_eq!(err.code, error_codes::ERR_NVO_FINGERPRINT_COLLISION);
-    assert_eq!(oracle.runtime_count(), 1, "collision must not be registered");
+    assert_eq!(
+        oracle.runtime_count(),
+        1,
+        "collision must not be registered"
+    );
 }
 
 #[test]

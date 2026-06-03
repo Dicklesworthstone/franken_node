@@ -1,11 +1,8 @@
 //! Integration tests for the unified evolution-risk scorer (bd-1jpc).
 //!
-//! `crates/franken-node/Cargo.toml` sets `test = false` on `[lib]`, so the
-//! inline `#[cfg(test)] mod tests` block inside
-//! `crates/franken-node/src/security/bpet/evolution_risk_scorer.rs` does
-//! not run under `cargo test`. This file re-exercises the same 15
-//! contracts through the public API so the scorer is actually verified by
-//! `cargo test -p frankenengine-node`.
+//! This file mirrors the inline coverage through the public API so the same
+//! 15 contracts are exercised by `cargo test -p frankenengine-node` integration
+//! targets as well as the library harness.
 
 use std::collections::BTreeMap;
 

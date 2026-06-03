@@ -8078,7 +8078,7 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
         assert_eq!(
             multi, "df0f524ecc684b7b8aafbe074ebfe0da20210a326334a85c39b9b36f1083f112",
             "multi-field hash drifted — check iteration order or per-field \
-             {LE64, bytes} framing"
+             {{LE64, bytes}} framing"
         );
 
         // 4. With-empty fixture: 0-length field sandwiched between non-

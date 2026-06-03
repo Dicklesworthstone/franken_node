@@ -5031,7 +5031,8 @@ mod tests {
             prop_assert_eq!(
                 &after_second,
                 &after_first,
-                "rewrite(rewrite(project)) changed the project snapshot for seed {seed}"
+                "rewrite(rewrite(project)) changed the project snapshot for seed {}",
+                seed
             );
             prop_assert_eq!(second.rewrites_applied, 0);
             prop_assert!(
@@ -5044,7 +5045,8 @@ mod tests {
             prop_assert_eq!(
                 &after_dry_run,
                 &after_second,
-                "dry-run rewrite after fixed point mutated the project snapshot for seed {seed}"
+                "dry-run rewrite after fixed point mutated the project snapshot for seed {}",
+                seed
             );
             prop_assert_eq!(dry_run_after_apply.rewrites_planned, 0);
             prop_assert_eq!(dry_run_after_apply.rewrites_applied, 0);

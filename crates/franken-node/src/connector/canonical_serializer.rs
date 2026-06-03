@@ -6486,7 +6486,7 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
         // and not panic.
         let value = serde_json::json!({
             "data": "x".repeat(500),
-            "more_data": [1; 200],
+            "more_data": vec![1; 200],
         });
         let mut writer = FailAfterNBytes::new(100);
         let result = write_canonical_value(&value, &mut writer);

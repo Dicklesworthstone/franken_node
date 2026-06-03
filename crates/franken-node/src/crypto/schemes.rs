@@ -1209,9 +1209,8 @@ mod tests {
     // realistic per-call elapsed range. The default-features tests
     // also pin that enabling/disabling the profiling cfg never
     // changes the byte output of sign_raw or the bool of verify_raw.
-    // Per [lib] test = false in Cargo.toml, these inline tests are
-    // compile-checked rather than executed; the integration test
-    // surface for Ed25519Scheme byte-equivalence lives in
+    // These inline tests pin the profiling sentinels directly; the
+    // integration surface for Ed25519Scheme byte-equivalence lives in
     // tests/ed25519_verifier_rejects_malleable_signatures.rs and the
     // existing tests/security/* fixtures.
     // ─────────────────────────────────────────────────────────────

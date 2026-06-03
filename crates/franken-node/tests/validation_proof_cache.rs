@@ -814,8 +814,7 @@ fn protected_workspace_paths_reject_relative_and_no_trailing_slash_forms() {
 /// Companion: a substring that contains a protected name as part of a
 /// non-protected segment must NOT trip the check. `messages_archive` is the
 /// canonical false-positive worry when moving from substring to segment
-/// matching, so pin it as an integration test rather than relying on the
-/// inline tests block which `[lib] test = false` keeps from running.
+/// matching, so pin it both as an integration test and in inline coverage.
 #[test]
 fn protected_workspace_path_check_does_not_flag_lookalike_segments() {
     let entry = ResourceArtifactInventoryEntry::new(
@@ -3025,7 +3024,9 @@ fn source_only_swarm_performance_evidence_bounds_1024_requests()
         evidence
             .optional_heavy_benchmark
             .example_command
-            .starts_with("rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_swarm_perf cargo bench"),
+            .starts_with(
+            "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_swarm_perf cargo bench"
+        ),
         "optional heavy benchmark must be explicitly rch-only with an isolated target dir"
     );
     assert_eq!(

@@ -191,8 +191,12 @@ impl<'a> fmt::Display for DisplayWith<'a> {
 mod tests {
     use super::*;
 
-    #[test]
     fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn node_interner_is_send_sync() {
+        assert_send_sync::<NodeInterner>();
+    }
 
     #[test]
     fn intern_same_string_returns_same_id() {

@@ -711,7 +711,7 @@ impl RchAdapterOutcome {
 }
 
 #[cfg(test)]
-mod tests {
+mod command_policy_tests {
     use super::*;
     use crate::ops::validation_broker::{FlightRecorderAdapterOutcomeClass, RchMode, TimeoutClass};
 

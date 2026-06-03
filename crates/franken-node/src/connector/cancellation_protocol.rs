@@ -1347,8 +1347,8 @@ fn run_conformance_transition_case(case: &ConformanceTransitionCase) {
 
 /// Assert the documented cancellation protocol transition matrix.
 ///
-/// This helper is kept executable from integration tests because this crate's
-/// library target has `test = false`.
+/// Integration tests call this helper directly to pin the same transition
+/// matrix through the public crate surface.
 #[doc(hidden)]
 pub fn assert_cancellation_protocol_conformance_for_tests() {
     let cases = vec![

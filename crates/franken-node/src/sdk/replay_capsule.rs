@@ -3730,7 +3730,8 @@ mod tests {
             // Empty hash
             "".to_string(),
             // Binary data as string
-            String::from_utf8(vec![0xFF, 0xFE, 0xFD, 0xFC; 16]).unwrap_or("fallback".to_string()),
+            String::from_utf8([0xFF, 0xFE, 0xFD, 0xFC].repeat(16))
+                .unwrap_or("fallback".to_string()),
             // Unicode in hash
             "控制字符abc123".repeat(4),
             // Null bytes

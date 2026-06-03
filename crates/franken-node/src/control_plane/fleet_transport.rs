@@ -4552,52 +4552,6 @@ mod tests {
         }
 
         #[test]
-        fn lock_contention_retry_prevents_test_panics() {
-            // Regression test for bd-4lnki: ensure tests don't panic on lock contention,
-            // they retry with backoff instead of hard-failing with .expect()
-            let tempdir = tempdir().expect("tempdir");
-            let root = tempdir.path().join("fleet-state");
-            let mut transport = FileFleetTransport::new(&root);
-            transport.initialize().expect("initialize");
-
-            let lock_path = transport.shared_state_lock_path();
-
-            // Holder process acquires the lock
-            let holder_lock_file = transport.lock_file(&lock_path).expect("open holder lock");
-            lock_file_with_backoff(&holder_lock_file, &lock_path, false).expect("holder takes lock");
-
-            // Contender process tries to acquire the same lock concurrently
-            let contender_lock_path = lock_path.clone();
-            let (sender, receiver) = std::sync::mpsc::channel();
-            let contender = std::thread::spawn(move || {
-                let contender_transport = FileFleetTransport::new(&root);
-                let contender_lock_file = contender_transport.lock_file(&contender_lock_path).expect("open contender lock");
-
-                let start = std::time::Instant::now();
-                // This should retry with backoff, not panic on contention
-                let result = lock_file_with_backoff(&contender_lock_file, &contender_lock_path, false);
-                let duration = start.elapsed();
-                sender.send((result, duration)).expect("send result");
-            });
-
-            // Let contender try to acquire lock while holder owns it
-            std::thread::sleep(std::time::Duration::from_millis(50));
-
-            // Release holder's lock so contender can succeed
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            drop(holder_lock_file); // This releases the lock
-
-            // Verify contender succeeded with retry, didn't panic
-            let (result, duration) = receiver.recv_timeout(std::time::Duration::from_secs(5))
-                .expect("contender should complete");
-            contender.join().expect("contender thread should complete");
-
-            assert!(result.is_ok(), "lock acquisition should succeed with retry: {:?}", result);
-            assert!(duration >= std::time::Duration::from_millis(100),
-                   "should have retried with backoff (took {:?})", duration);
-        }
-
-        #[test]
         fn prop_float_error_format_pins_legacy_template(key_byte in 1u8..=26u8) {
             // Any non-finite f64 at a deterministic location must
             // produce an error whose message contains BOTH the
@@ -4624,5 +4578,55 @@ mod tests {
                 detail
             );
         }
+    }
+
+    #[test]
+    fn lock_contention_retry_prevents_test_panics() {
+        // Regression test for bd-4lnki: ensure tests don't panic on lock contention,
+        // they retry with backoff instead of hard-failing with .expect()
+        let tempdir = tempdir().expect("tempdir");
+        let root = tempdir.path().join("fleet-state");
+        let mut transport = FileFleetTransport::new(&root);
+        transport.initialize().expect("initialize");
+
+        let lock_path = transport.shared_state_lock_path();
+
+        // Holder process acquires the lock.
+        let holder_lock_file = transport.lock_file(&lock_path).expect("open holder lock");
+        lock_file_with_backoff(&holder_lock_file, &lock_path, false).expect("holder takes lock");
+
+        let contender_lock_path = lock_path.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let contender = std::thread::spawn(move || {
+            let contender_transport = FileFleetTransport::new(&root);
+            let contender_lock_file = contender_transport
+                .lock_file(&contender_lock_path)
+                .expect("open contender lock");
+
+            let start = std::time::Instant::now();
+            let result = lock_file_with_backoff(&contender_lock_file, &contender_lock_path, false);
+            let duration = start.elapsed();
+            sender.send((result, duration)).expect("send result");
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(holder_lock_file);
+
+        let (result, duration) = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("contender should complete");
+        contender.join().expect("contender thread should complete");
+
+        assert!(
+            result.is_ok(),
+            "lock acquisition should succeed with retry: {:?}",
+            result
+        );
+        assert!(
+            duration >= std::time::Duration::from_millis(100),
+            "should have retried with backoff (took {:?})",
+            duration
+        );
     }
 }

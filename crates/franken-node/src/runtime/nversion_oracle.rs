@@ -1005,7 +1005,11 @@ mod tests {
             .register_runtime(k9_entry("node-copy", "node", "20.0", true))
             .unwrap_err();
         assert_eq!(err.code, error_codes::ERR_NVO_FINGERPRINT_COLLISION);
-        assert_eq!(oracle.runtime_count(), 1, "collision must not be registered");
+        assert_eq!(
+            oracle.runtime_count(),
+            1,
+            "collision must not be registered"
+        );
     }
 
     #[test]

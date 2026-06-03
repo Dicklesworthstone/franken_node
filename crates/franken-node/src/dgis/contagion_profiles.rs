@@ -458,9 +458,8 @@ pub fn evaluate_profile(profile: &ContagionProfile) -> Result<ProfileVerdict, Pr
 /// the bounded-growth guard is here in case future invariants are added.
 const MAX_DIVERGENCES: usize = 32;
 
-/// Inline equivalent of `crate::push_bounded` so this module remains usable
-/// from inside `#[cfg(test)]` mods (where `lib.rs` is gated out by the
-/// crate's `#![cfg(not(test))]`).
+/// Inline equivalent of `crate::push_bounded` so this module can test the
+/// local divergence limit without depending on crate-root helper wiring.
 fn push_bounded_div(items: &mut Vec<String>, item: String) {
     if MAX_DIVERGENCES == 0 {
         items.clear();
