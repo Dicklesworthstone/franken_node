@@ -12,6 +12,14 @@ use frankenengine_node::security::remote_cap::{
     CapabilityGate, CapabilityProvider, ConnectivityMode, RemoteOperation, RemoteScope,
 };
 
+// API-DRIFT REMEDIATION (bd-rjc2m.7): the previous secret literal "test-secret" (11 chars) is
+// rejected by production's hardened key-material validator (MIN_SECRET_MATERIAL_LEN = 16 chars
+// AND MIN_SECRET_ENTROPY_BITS = 56), surfacing as CryptoEngineUnavailable at runtime. This is a
+// latent test bug exposed once the gate runs as a real integration binary. Use a single shared,
+// sufficiently long/high-entropy, non-weak secret for both the provider and the verifying gate so
+// HMAC verification still matches across them.
+const RC_TEST_SECRET: &str = "conformance-secret-material-x7Q2z9";
+
 /// Test categories for organizational purposes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TestCategory {
@@ -149,7 +157,7 @@ fn test_case_1nfu_inv_1() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let provider = CapabilityProvider::new("test-secret").expect("valid provider");
+        let provider = CapabilityProvider::new(RC_TEST_SECRET).expect("valid provider");
         // API-DRIFT REMEDIATION (bd-rjc2m.7): RemoteScope::new(endpoints) -> RemoteScope::new(operations, endpoints).
         let scope = RemoteScope::new(
             vec![RemoteOperation::ArtifactUpload],
@@ -210,7 +218,7 @@ fn test_case_1nfu_inv_2() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let provider = CapabilityProvider::new("test-secret").expect("valid provider");
+        let provider = CapabilityProvider::new(RC_TEST_SECRET).expect("valid provider");
         // API-DRIFT REMEDIATION (bd-rjc2m.7): RemoteScope::new(endpoints) -> RemoteScope::new(operations, endpoints).
         let scope = RemoteScope::new(
             vec![RemoteOperation::ArtifactUpload],
@@ -221,7 +229,7 @@ fn test_case_1nfu_inv_2() -> ConformanceRecord {
             .issue("test-issuer", scope, 1000, 300, true, false, "trace-inv-2")
             .expect("capability issuance should succeed");
 
-        let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
+        let mut gate = CapabilityGate::new(RC_TEST_SECRET).expect("valid gate");
 
         // Valid token should pass through gate
         // API-DRIFT REMEDIATION (bd-rjc2m.7): gate.check(..) -> gate.authorize_network(..); RemoteOperation::Upload -> ArtifactUpload.
@@ -264,7 +272,7 @@ fn test_case_1nfu_evt_1() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let provider = CapabilityProvider::new("test-secret").expect("valid provider");
+        let provider = CapabilityProvider::new(RC_TEST_SECRET).expect("valid provider");
         // API-DRIFT REMEDIATION (bd-rjc2m.7): RemoteScope::new(endpoints) -> RemoteScope::new(operations, endpoints).
         let scope = RemoteScope::new(
             vec![RemoteOperation::ArtifactUpload],
@@ -315,7 +323,7 @@ fn test_case_1nfu_evt_2() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
+        let mut gate = CapabilityGate::new(RC_TEST_SECRET).expect("valid gate");
 
         // Attempt operation without capability (should fail)
         // API-DRIFT REMEDIATION (bd-rjc2m.7): gate.check(..) -> gate.authorize_network(..); RemoteOperation::Upload -> ArtifactUpload.
@@ -372,7 +380,7 @@ fn test_case_1nfu_evt_3() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let provider = CapabilityProvider::new("test-secret").expect("valid provider");
+        let provider = CapabilityProvider::new(RC_TEST_SECRET).expect("valid provider");
         // API-DRIFT REMEDIATION (bd-rjc2m.7): RemoteScope::new(endpoints) -> RemoteScope::new(operations, endpoints).
         let scope = RemoteScope::new(
             vec![RemoteOperation::ArtifactUpload],
@@ -391,7 +399,7 @@ fn test_case_1nfu_evt_3() -> ConformanceRecord {
             )
             .expect("capability issuance should succeed");
 
-        let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
+        let mut gate = CapabilityGate::new(RC_TEST_SECRET).expect("valid gate");
 
         // Use the single-use token
         // API-DRIFT REMEDIATION (bd-rjc2m.7): gate.check(..) -> gate.authorize_network(..); RemoteOperation::Upload -> ArtifactUpload.
@@ -438,7 +446,7 @@ fn test_case_1nfu_err_1() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
+        let mut gate = CapabilityGate::new(RC_TEST_SECRET).expect("valid gate");
 
         // API-DRIFT REMEDIATION (bd-rjc2m.7): gate.check(..) -> gate.authorize_network(..); RemoteOperation::Upload -> ArtifactUpload.
         let result = gate.authorize_network(
@@ -481,7 +489,7 @@ fn test_case_1nfu_err_2() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let provider = CapabilityProvider::new("test-secret").expect("valid provider");
+        let provider = CapabilityProvider::new(RC_TEST_SECRET).expect("valid provider");
         // API-DRIFT REMEDIATION (bd-rjc2m.7): RemoteScope::new(endpoints) -> RemoteScope::new(operations, endpoints).
         let scope = RemoteScope::new(
             vec![RemoteOperation::ArtifactUpload],
@@ -500,7 +508,7 @@ fn test_case_1nfu_err_2() -> ConformanceRecord {
             )
             .expect("capability issuance should succeed");
 
-        let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
+        let mut gate = CapabilityGate::new(RC_TEST_SECRET).expect("valid gate");
 
         // Use capability after expiry
         // API-DRIFT REMEDIATION (bd-rjc2m.7): gate.check(..) -> gate.authorize_network(..); RemoteOperation::Upload -> ArtifactUpload.
@@ -538,7 +546,7 @@ fn test_case_1nfu_sec_1() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let provider = CapabilityProvider::new("test-secret").expect("valid provider");
+        let provider = CapabilityProvider::new(RC_TEST_SECRET).expect("valid provider");
         // API-DRIFT REMEDIATION (bd-rjc2m.7): RemoteScope::new(endpoints) -> RemoteScope::new(operations, endpoints).
         let scope = RemoteScope::new(
             vec![RemoteOperation::ArtifactUpload],
@@ -553,7 +561,7 @@ fn test_case_1nfu_sec_1() -> ConformanceRecord {
         // API-DRIFT REMEDIATION (bd-rjc2m.7): cap.signature_b64 = .. (field removed) -> cap.corrupt_signature_for_test(..) test-support mutator.
         cap.corrupt_signature_for_test("invalid-signature");
 
-        let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
+        let mut gate = CapabilityGate::new(RC_TEST_SECRET).expect("valid gate");
 
         // API-DRIFT REMEDIATION (bd-rjc2m.7): gate.check(..) -> gate.authorize_network(..); RemoteOperation::Upload -> ArtifactUpload.
         let result = gate.authorize_network(
@@ -595,7 +603,7 @@ fn test_case_1nfu_sec_2() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let provider = CapabilityProvider::new("test-secret").expect("valid provider");
+        let provider = CapabilityProvider::new(RC_TEST_SECRET).expect("valid provider");
         // API-DRIFT REMEDIATION (bd-rjc2m.7): RemoteScope::new(endpoints) -> RemoteScope::new(operations, endpoints).
         let scope = RemoteScope::new(
             vec![RemoteOperation::ArtifactUpload],
@@ -606,7 +614,7 @@ fn test_case_1nfu_sec_2() -> ConformanceRecord {
             .issue("test-issuer", scope, 1000, 300, true, false, "trace-sec-2")
             .expect("capability issuance should succeed");
 
-        let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
+        let mut gate = CapabilityGate::new(RC_TEST_SECRET).expect("valid gate");
 
         // Try to access endpoint outside scope
         // API-DRIFT REMEDIATION (bd-rjc2m.7): gate.check(..) -> gate.authorize_network(..); RemoteOperation::Upload -> ArtifactUpload.
@@ -644,7 +652,7 @@ fn test_case_1nfu_rep_1() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let provider = CapabilityProvider::new("test-secret").expect("valid provider");
+        let provider = CapabilityProvider::new(RC_TEST_SECRET).expect("valid provider");
         // API-DRIFT REMEDIATION (bd-rjc2m.7): RemoteScope::new(endpoints) -> RemoteScope::new(operations, endpoints).
         let scope = RemoteScope::new(
             vec![RemoteOperation::ArtifactUpload],
@@ -663,7 +671,7 @@ fn test_case_1nfu_rep_1() -> ConformanceRecord {
             )
             .expect("capability issuance should succeed");
 
-        let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
+        let mut gate = CapabilityGate::new(RC_TEST_SECRET).expect("valid gate");
 
         // First use should succeed
         // API-DRIFT REMEDIATION (bd-rjc2m.7): gate.check(..) -> gate.authorize_network(..); RemoteOperation::Upload -> ArtifactUpload.
@@ -712,7 +720,7 @@ fn test_case_1nfu_loc_1() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let mut gate = CapabilityGate::with_mode("test-secret", ConnectivityMode::LocalOnly)
+        let mut gate = CapabilityGate::with_mode(RC_TEST_SECRET, ConnectivityMode::LocalOnly)
             .expect("valid gate in local mode");
 
         // Authorize local operation
@@ -753,7 +761,7 @@ fn test_case_1nfu_aud_1() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let provider = CapabilityProvider::new("test-secret").expect("valid provider");
+        let provider = CapabilityProvider::new(RC_TEST_SECRET).expect("valid provider");
         // API-DRIFT REMEDIATION (bd-rjc2m.7): RemoteScope::new(endpoints) -> RemoteScope::new(operations, endpoints).
         let scope = RemoteScope::new(
             vec![RemoteOperation::ArtifactUpload],
@@ -765,7 +773,7 @@ fn test_case_1nfu_aud_1() -> ConformanceRecord {
             .issue("test-issuer", scope, 1000, 300, true, false, "trace-aud-1")
             .expect("capability issuance should succeed");
 
-        let mut gate = CapabilityGate::new("test-secret").expect("valid gate");
+        let mut gate = CapabilityGate::new(RC_TEST_SECRET).expect("valid gate");
 
         // Use capability (should generate audit event)
         // API-DRIFT REMEDIATION (bd-rjc2m.7): gate.check(..) -> gate.authorize_network(..); RemoteOperation::Upload -> ArtifactUpload.
