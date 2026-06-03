@@ -77,7 +77,7 @@ test = false
 
 [lib]
 path = "src/lib.rs"
-test = false
+test = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
