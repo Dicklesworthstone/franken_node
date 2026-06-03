@@ -337,10 +337,7 @@ impl SignatureScheme for Ed25519Scheme {
         };
 
         // Sign the digest using ed25519-dalek
-        let signing_key = match SigningKey::try_from(secret_key) {
-            Ok(key) => key,
-            Err(e) => return Err(Ed25519Error::MalformedKey(e.to_string())),
-        };
+        let signing_key = SigningKey::from(secret_key);
 
         #[cfg(feature = "blake3")]
         let digest_bytes = digest.as_bytes();
@@ -387,10 +384,7 @@ impl SignatureScheme for Ed25519Scheme {
             Err(_) => return false, // Constant-time failure
         };
 
-        let sig = match Signature::try_from(signature) {
-            Ok(sig) => sig,
-            Err(_) => return false, // Constant-time failure
-        };
+        let sig = Signature::from(signature);
 
         // Perform constant-time verification
         #[cfg(feature = "blake3")]

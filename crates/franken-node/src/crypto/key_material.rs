@@ -193,14 +193,14 @@ impl KeyMaterial for Ed25519KeyMaterial {
         // Use blake3 for consistent, strong fingerprinting when available
         #[cfg(feature = "blake3")]
         {
-            let hash = blake3::hash(&self.public_key);
+            let hash = blake3::hash(self.public_key);
             format!("ed25519:{}", hex::encode(&hash.as_bytes()[..8]))
         }
         #[cfg(not(feature = "blake3"))]
         {
             // Fallback to SHA256 when blake3 is not available
             use sha2::{Digest, Sha256};
-            let hash = Sha256::digest(&self.public_key);
+            let hash = Sha256::digest(self.public_key);
             format!("ed25519:{}", hex::encode(&hash.as_slice()[..8]))
         }
     }

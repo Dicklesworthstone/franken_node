@@ -1124,8 +1124,7 @@ fn write_canonical_value_inner<W: std::io::Write>(
             //   a Value holding NaN/±Inf cannot be built via the safe API).
             // - String: escape-correct per RFC 8259 § 7 (\", \\, \uXXXX
             //   for control bytes); matches the existing encoder bit-for-bit.
-            serde_json::to_writer(out, value)
-                .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
+            serde_json::to_writer(out, value).map_err(std::io::Error::other)
         }
         Value::Array(items) => {
             out.write_all(b"[")?;
@@ -1153,8 +1152,7 @@ fn write_canonical_value_inner<W: std::io::Write>(
                 }
                 first = false;
                 // Key as a JSON string (escape-correct via serde_json).
-                serde_json::to_writer(&mut *out, key)
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+                serde_json::to_writer(&mut *out, key).map_err(std::io::Error::other)?;
                 out.write_all(b":")?;
                 let nested = map
                     .get(key)
