@@ -117,9 +117,9 @@ fuzz_target!(|case: ForkDetectionCompareFuzzCase| {
     let mut detector2 = DivergenceDetector::new();
 
     // ── (A) Panic-free ─────────────────────────────────────────────────
-    let result = std::panic::catch_unwind(|| {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         detector.compare(&local, &remote)
-    });
+    }));
     assert!(
         result.is_ok(),
         "INV-FDC-PANIC-FREE violated: compare panicked on arbitrary StateVectors"

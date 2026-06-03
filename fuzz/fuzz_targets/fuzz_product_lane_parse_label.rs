@@ -2,6 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use base64::Engine;
 use frankenengine_node::runtime::lane_router::ProductLane;
 
 /// Comprehensive fuzz target for ProductLane::parse_label string parsing.
@@ -155,7 +156,8 @@ fuzz_target!(|input: LaneParseInput| {
 
     // Test whitespace handling - trim should work
     let trimmed_test = test_string.trim();
-    if ["cancel", "timed", "realtime", "ready", "background"].contains(&trimmed_test.to_lowercase()) {
+    let trimmed_lower = trimmed_test.to_ascii_lowercase();
+    if ["cancel", "timed", "realtime", "ready", "background"].contains(&trimmed_lower.as_str()) {
         assert!(parse_result.is_some(), "Valid lane with whitespace should parse after trim");
     }
 

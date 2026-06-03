@@ -88,11 +88,11 @@ fuzz_target!(|case: ConnectorContractFuzzCase| {
         report.summary.total_methods,
     );
     assert_eq!(
-        report.results.len(),
+        report.methods.len(),
         EXPECTED_TOTAL_METHODS,
         "INV-CMV-TOTAL-METHODS-FIXED violated: results.len()={} != \
          STANDARD_METHODS.len()={EXPECTED_TOTAL_METHODS}",
-        report.results.len(),
+        report.methods.len(),
     );
 
     // ── (C) Count conservation
@@ -114,11 +114,11 @@ fuzz_target!(|case: ConnectorContractFuzzCase| {
         "INV-CMV-DETERMINISM violated: summary differs across consecutive calls"
     );
     assert_eq!(
-        report.results.len(),
-        report2.results.len(),
+        report.methods.len(),
+        report2.methods.len(),
         "INV-CMV-DETERMINISM violated: results.len() differs"
     );
-    for (r1, r2) in report.results.iter().zip(report2.results.iter()) {
+    for (r1, r2) in report.methods.iter().zip(report2.methods.iter()) {
         assert_eq!(
             r1.method, r2.method,
             "INV-CMV-DETERMINISM violated: method name order differs"

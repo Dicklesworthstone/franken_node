@@ -88,7 +88,7 @@ fuzz_target!(|data: &[u8]| {
                 "rejected outcome must echo the input claim_id"
             );
         }
-        CompilationResult::Accepted { contract, .. } => {
+        CompilationResult::Compiled { contract, .. } => {
             assert!(
                 !contract.claim_id.is_empty(),
                 "accepted contract must carry a non-empty claim_id"
@@ -110,10 +110,10 @@ fuzz_target!(|data: &[u8]| {
     );
     let blocked_outcome = blocked.compile(&claim);
 
-    if matches!(open_outcome, CompilationResult::Accepted { .. }) {
+    if matches!(open_outcome, CompilationResult::Compiled { .. }) {
         assert!(
             matches!(blocked_outcome, CompilationResult::Rejected { .. }),
-            "blocking the source must flip an Accepted outcome to Rejected"
+            "blocking the source must flip a Compiled outcome to Rejected"
         );
     }
 });

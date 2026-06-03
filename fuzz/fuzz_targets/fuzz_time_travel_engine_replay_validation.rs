@@ -18,7 +18,7 @@
 #![no_main]
 
 use frankenengine_node::replay::time_travel_engine::{
-    ReplayEngine, WorkflowTrace, TraceStep, EnvironmentSnapshot, SideEffect, TimeTravelError
+    EnvironmentSnapshot, ReplayEngine, SideEffect, TraceStep, WorkflowTrace, SCHEMA_VERSION,
 };
 use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
@@ -39,7 +39,7 @@ const MAX_SIDE_EFFECTS: usize = 20;
 /// Maximum number of environment variables.
 const MAX_ENV_VARS: usize = 50;
 
-#[derive(Arbitrary, Debug, Clone)]
+#[derive(Debug, Clone)]
 struct FuzzString {
     inner: String,
 }
@@ -152,6 +152,7 @@ impl From<FuzzWorkflowTrace> for WorkflowTrace {
             steps,
             environment: fuzz.environment.into(),
             trace_digest: String::new(), // Will be computed by with_canonical_digest
+            schema_version: SCHEMA_VERSION.to_string(),
         }
         .with_canonical_digest() // Compute proper digest
     }
@@ -182,7 +183,7 @@ fuzz_target!(|input: TimeTravelEngineFuzzInput| {
                 let trace = WorkflowTrace::from(fuzz_trace);
 
                 // Test trace validation
-                let _ = trace.validate(&trace.trace_id);
+                let _ = trace.validate();
 
                 // Test registration
                 let _ = engine.register_trace(trace);
@@ -221,7 +222,7 @@ fuzz_target!(|input: TimeTravelEngineFuzzInput| {
             assert_eq!(trace.trace_id, trace_id);
 
             // Steps should be in sequence order (0-based, consecutive)
-            for (i, step) in trace.steps.iter().enumerate() {
+            for (_i, _step) in trace.steps.iter().enumerate() {
                 // Allow some flexibility in sequence numbering for malformed input
                 // but check that we don't have obvious corruption
                 if trace.steps.len() < 1000 { // Only check for reasonable-sized traces

@@ -23,7 +23,7 @@ const MAX_STRING_LEN: usize = 1024;
 /// Maximum number of operations per fuzz iteration.
 const MAX_OPS: usize = 200;
 
-#[derive(Arbitrary, Debug, Clone)]
+#[derive(Debug, Clone)]
 struct FuzzString {
     inner: String,
 }
@@ -68,7 +68,7 @@ enum CancelOperation {
     Finalize {
         workflow_id: FuzzString,
         timestamp_ms: u64,
-        resources: ResourceTracker,
+        resources: FuzzResourceTracker,
         trace_id: FuzzString,
     },
     GetCurrentPhase {
@@ -99,13 +99,6 @@ impl From<FuzzResourceTracker> for ResourceTracker {
     }
 }
 
-impl<'a> Arbitrary<'a> for ResourceTracker {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let fuzz_tracker: FuzzResourceTracker = u.arbitrary()?;
-        Ok(ResourceTracker::from(fuzz_tracker))
-    }
-}
-
 #[derive(Arbitrary, Debug)]
 struct FuzzDrainConfig {
     timeout_ms: u64,
@@ -130,8 +123,7 @@ fuzz_target!(|input: CancelProtocolFuzzInput| {
 
     // Create protocol with optional custom audit log capacity
     let mut protocol = if let Some(capacity) = input.audit_log_capacity {
-        CancellationProtocol::new(drain_config)
-            .with_audit_log_capacity(capacity.into())
+        CancellationProtocol::with_audit_log_capacity(drain_config, capacity.into())
     } else {
         CancellationProtocol::new(drain_config)
     };
@@ -162,6 +154,7 @@ fuzz_target!(|input: CancelProtocolFuzzInput| {
                 );
             },
             CancelOperation::Finalize { workflow_id, timestamp_ms, resources, trace_id } => {
+                let resources = ResourceTracker::from(resources);
                 let _ = protocol.finalize(
                     workflow_id.as_str(),
                     &resources,
