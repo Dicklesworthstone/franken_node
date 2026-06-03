@@ -2,8 +2,7 @@
 
 use arbitrary::Arbitrary;
 use frankenengine_node::supply_chain::extension_registry::{
-    parse_signed_registration_manifest, ExtensionRegistrationManifest, VersionEntry,
-    EXTENSION_REGISTRATION_MANIFEST_SCHEMA,
+    parse_signed_registration_manifest, EXTENSION_REGISTRATION_MANIFEST_SCHEMA,
 };
 use libfuzzer_sys::fuzz_target;
 use serde_json::json;
@@ -29,8 +28,11 @@ fn fuzz_raw_bytes(bytes: &[u8]) {
     // Test deterministic behavior on raw bytes
     let result1 = parse_signed_registration_manifest(bytes);
     let result2 = parse_signed_registration_manifest(bytes);
-    assert_eq!(result1.is_ok(), result2.is_ok(),
-              "Manifest parsing should be deterministic");
+    assert_eq!(
+        result1.is_ok(),
+        result2.is_ok(),
+        "Manifest parsing should be deterministic"
+    );
 
     // Empty input should be rejected
     if bytes.is_empty() {
@@ -39,7 +41,10 @@ fn fuzz_raw_bytes(bytes: &[u8]) {
 
     // Very small inputs should be rejected (not valid JSON)
     if bytes.len() < 10 && !bytes.is_empty() {
-        assert!(result1.is_err(), "Very small input should not parse as valid manifest");
+        assert!(
+            result1.is_err(),
+            "Very small input should not parse as valid manifest"
+        );
     }
 
     // Malformed JSON should be safely rejected
@@ -54,11 +59,20 @@ fn fuzz_structured_manifest(input: FuzzInput) {
         // Valid manifest with fuzzed values
         ("valid", generate_manifest(&input.manifest_data)),
         // Invalid schema version
-        ("invalid_schema", generate_manifest_with_schema(&input.manifest_data, &input.invalid_schema)),
+        (
+            "invalid_schema",
+            generate_manifest_with_schema(&input.manifest_data, &input.invalid_schema),
+        ),
         // Malformed JSON structures
-        ("malformed", generate_malformed_manifest(&input.manifest_data)),
+        (
+            "malformed",
+            generate_malformed_manifest(&input.manifest_data),
+        ),
         // Edge cases: empty fields, very long fields, special characters
-        ("edge_case", generate_edge_case_manifest(&input.manifest_data)),
+        (
+            "edge_case",
+            generate_edge_case_manifest(&input.manifest_data),
+        ),
     ];
 
     for (test_type, manifest_json) in test_cases {
@@ -66,29 +80,34 @@ fn fuzz_structured_manifest(input: FuzzInput) {
 
         // Test deterministic behavior
         let result2 = parse_signed_registration_manifest(&manifest_json);
-        assert_eq!(result.is_ok(), result2.is_ok(),
-                  "Manifest parsing should be deterministic for {}", test_type);
+        assert_eq!(
+            result.is_ok(),
+            result2.is_ok(),
+            "Manifest parsing should be deterministic for {}",
+            test_type
+        );
 
         match test_type {
             "valid" => {
                 // Valid manifest structure should either parse or fail gracefully
                 // (may fail due to missing signature verification)
-            },
+            }
             "invalid_schema" => {
                 // Invalid schema version should be rejected
-                if !input.invalid_schema.is_empty() &&
-                   input.invalid_schema != EXTENSION_REGISTRATION_MANIFEST_SCHEMA {
+                if !input.invalid_schema.is_empty()
+                    && input.invalid_schema != EXTENSION_REGISTRATION_MANIFEST_SCHEMA
+                {
                     assert!(result.is_err(), "Invalid schema version should be rejected");
                 }
-            },
+            }
             "malformed" => {
                 // Malformed JSON should be rejected
                 // (verify the test case actually produced malformed JSON first)
-            },
+            }
             "edge_case" => {
                 // Edge cases should be handled safely without panic
                 // Function should complete without crashing
-            },
+            }
             _ => unreachable!(),
         }
     }
@@ -180,14 +199,16 @@ fn generate_malformed_manifest(data: &ManifestData) -> Vec<u8> {
 }
 
 fn generate_edge_case_manifest(data: &ManifestData) -> Vec<u8> {
+    let long_publisher = "x".repeat(MAX_STRING_LEN);
+    let publisher_id = if data.use_long_publisher {
+        long_publisher.as_str()
+    } else {
+        data.publisher_id.as_str()
+    };
     let manifest = json!({
         "schema_version": EXTENSION_REGISTRATION_MANIFEST_SCHEMA,
         "name": if data.use_empty_name { "" } else { &data.name },
-        "publisher_id": if data.use_long_publisher {
-            &"x".repeat(MAX_STRING_LEN)
-        } else {
-            &data.publisher_id
-        },
+        "publisher_id": publisher_id,
         "initial_version": {
             "version": if data.use_unicode_version {
                 "1.0.0-α.β.γ.δ.ε.ζ.η.θ.ι.κ.λ.μ.ν.ξ.ο.π.ρ.σ.τ.υ.φ.χ.ψ.ω"
@@ -217,7 +238,10 @@ fn truncate_string(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        s.chars().take(max_len.saturating_sub(3)).collect::<String>() + "..."
+        s.chars()
+            .take(max_len.saturating_sub(3))
+            .collect::<String>()
+            + "..."
     }
 }
 

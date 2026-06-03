@@ -27,12 +27,16 @@ fuzz_target!(|input: FuzzInput| {
 });
 
 fn fuzz_receipt_roundtrip(input: &FuzzInput) {
-    let decision = input.decision.into();
+    let decision = Decision::from(input.decision);
+    let receipt_input = json!({"input": bounded_text(&input.payload), "selector": input.selector});
+    let receipt_output =
+        json!({"output": bounded_text(&input.alt_payload), "accepted": input.flag});
     let receipt = match Receipt::new(
         &format!("action-{}", bounded_text(&input.action)),
         &format!("actor-{}", bounded_text(&input.actor)),
-        &json!({"input": bounded_text(&input.payload), "selector": input.selector}),
-        &json!({"output": bounded_text(&input.alt_payload), "accepted": input.flag}),
+        "franken-node:fuzz-receipt-roundtrip",
+        &receipt_input,
+        &receipt_output,
         decision,
         &bounded_text(&input.reason),
         vec![format!("evidence/{}.json", input.selector % 16)],

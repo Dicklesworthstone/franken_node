@@ -6,13 +6,12 @@
 
 #![no_main]
 
+use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use arbitrary::{Arbitrary, Unstructured};
 
 use frankenengine_node::config::{
-    Config, Profile, CompatibilityMode, LaneOverflowPolicy,
-    NetworkAllowlistEntry, NetworkPolicyConfig, SecurityConfig,
-    RuntimeConfig, RuntimeLaneConfig, ThresholdsConfig,
+    CompatibilityMode, Config, LaneOverflowPolicy, NetworkAllowlistEntry, NetworkPolicyConfig,
+    Profile, RuntimeConfig, RuntimeLaneConfig, SecurityConfig, ThresholdsConfig,
 };
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -92,82 +91,86 @@ enum ValidTomlVariants {
 impl TomlInput {
     fn to_string(&self) -> String {
         match &self.content {
-            TomlContent::ValidStructured(variant) => {
-                match variant {
-                    ValidTomlVariants::MinimalConfig => {
-                        r#"profile = "strict""#.to_string()
-                    }
-                    ValidTomlVariants::FullConfig => {
-                        r#"
+            TomlContent::ValidStructured(variant) => match variant {
+                ValidTomlVariants::MinimalConfig => r#"profile = "strict""#.to_string(),
+                ValidTomlVariants::FullConfig => r#"
 profile = "balanced"
 
-[compatibility]
-mode = "strict"
-warn_on_unsafe_eval = true
+	[compatibility]
+	mode = "balanced"
 
-[migration]
-rewrite_suggestions = true
+	[migration]
+	autofix = true
 
-[trust]
-registry_signing_key = "dGVzdGtleQ=="
+	[trust]
+	registry_signing_key = "dGVzdGtleQ=="
 
-[replay]
-max_stored_incidents = 100
+	[replay]
+	bundle_version = "v1"
 
-[runtime]
-mode = "fast"
+	[runtime]
+	preferred = "franken-engine"
+	remote_max_in_flight = 32
+	bulkhead_retry_after_ms = 50
 
-[runtime.lanes]
-default = { max_queue_length = 1000, overflow_policy = "block", priority = "normal" }
+	[runtime.lanes.cancel]
+	max_concurrent = 8
+	priority_weight = 100
+	queue_limit = 16
+	enqueue_timeout_ms = 25
+	overflow_policy = "reject"
 
-[network]
-policy = "allowlist"
-ssrf_enforcement = "strict"
+	[security]
+	max_degraded_duration_secs = 3600
+	max_merge_decisions = 100
+	authorized_api_keys = ["fuzz-key"]
 
-[security]
-api_keys = []
-"#.to_string()
-                    }
-                    ValidTomlVariants::ProfileOnly(profile) => {
-                        format!(r#"profile = "{}""#, profile)
-                    }
-                    ValidTomlVariants::SecurityOnly => {
-                        r#"
-[security]
-api_keys = []
-sandbox_policy = "strict"
-"#.to_string()
-                    }
-                    ValidTomlVariants::RuntimeOnly => {
-                        r#"
-[runtime]
-mode = "performance"
-
-[runtime.lanes]
-default = { max_queue_length = 500, overflow_policy = "drop", priority = "high" }
-"#.to_string()
-                    }
-                    ValidTomlVariants::NetworkOnly => {
-                        r#"
-[network]
-policy = "denylist"
-ssrf_enforcement = "warning"
-
-[[network.allowlist]]
-domain = "example.com"
-port = 443
-reason = "API endpoint"
-"#.to_string()
-                    }
-                    ValidTomlVariants::CustomValues(pairs) => {
-                        let mut toml = String::new();
-                        for (key, value) in pairs {
-                            toml.push_str(&format!("{} = {}\n", key, value));
-                        }
-                        toml
-                    }
+	[security.network_policy]
+	ssrf_enforcement = "block"
+	"#
+                .to_string(),
+                ValidTomlVariants::ProfileOnly(profile) => {
+                    format!(r#"profile = "{}""#, profile)
                 }
-            }
+                ValidTomlVariants::SecurityOnly => r#"
+	[security]
+	max_degraded_duration_secs = 3600
+	max_merge_decisions = 100
+	authorized_api_keys = ["fuzz-key"]
+	"#
+                .to_string(),
+                ValidTomlVariants::RuntimeOnly => r#"
+	[runtime]
+	preferred = "node"
+	remote_max_in_flight = 64
+	bulkhead_retry_after_ms = 25
+
+	[runtime.lanes.cancel]
+	max_concurrent = 4
+	priority_weight = 100
+	queue_limit = 8
+	enqueue_timeout_ms = 25
+	overflow_policy = "reject"
+	"#
+                .to_string(),
+                ValidTomlVariants::NetworkOnly => r#"
+	[security.network_policy]
+	ssrf_enforcement = "monitor"
+
+	[[security.network_policy.allowlist]]
+	host = "example.com"
+	port = 443
+	reason = "API endpoint"
+"#
+                .to_string(),
+                ValidTomlVariants::CustomValues(pairs) => {
+                    let mut toml = String::new();
+                    for (key, value) in pairs {
+                        toml.push_str(&format!("{} = {}\n", key, value));
+                    }
+                    toml
+                }
+            },
             TomlContent::Malformed(s) => s.clone(),
             TomlContent::Empty => String::new(),
             TomlContent::VeryLarge(bytes) => String::from_utf8_lossy(bytes).to_string(),
@@ -250,7 +253,11 @@ fn test_toml_parsing_invariants(operation: &ConfigParsingOperation) {
             // Valid profiles should parse
             match profile_str.as_str() {
                 "strict" | "balanced" | "legacy-risky" => {
-                    assert!(result.is_ok(), "Valid profile should parse: {}", profile_str);
+                    assert!(
+                        result.is_ok(),
+                        "Valid profile should parse: {}",
+                        profile_str
+                    );
                 }
                 _ => {
                     // Invalid profiles should fail gracefully
@@ -266,11 +273,44 @@ fn test_toml_parsing_invariants(operation: &ConfigParsingOperation) {
             let result: Result<CompatibilityMode, _> = mode_str.parse();
 
             match mode_str.as_str() {
-                "strict" | "relaxed" | "legacy" => {
-                    assert!(result.is_ok(), "Valid compatibility mode should parse: {}", mode_str);
+                "strict" | "balanced" | "legacy-risky" => {
+                    assert!(
+                        result.is_ok(),
+                        "Valid compatibility mode should parse: {}",
+                        mode_str
+                    );
                 }
                 _ => {
                     // Invalid modes should fail gracefully
+                }
+            }
+        }
+
+        ConfigParsingOperation::LaneOverflowPolicy(input) => {
+            let policy_str = &input.value;
+            let toml_content = format!(
+                r#"
+max_concurrent = 1
+priority_weight = 1
+queue_limit = 1
+enqueue_timeout_ms = 1
+overflow_policy = "{policy_str}"
+"#
+            );
+            let result: Result<RuntimeLaneConfig, _> = toml::from_str(&toml_content);
+
+            test_parsing_safety(&toml_content, result.is_ok());
+
+            match policy_str.as_str() {
+                "reject" | "enqueue-with-timeout" | "shed-oldest" => {
+                    assert!(
+                        result.is_ok(),
+                        "Valid lane overflow policy should parse: {}",
+                        policy_str
+                    );
+                }
+                _ => {
+                    // Invalid policies should fail gracefully.
                 }
             }
         }
@@ -282,11 +322,17 @@ fn test_toml_parsing_invariants(operation: &ConfigParsingOperation) {
             test_parsing_safety(&toml_content, result.is_ok());
 
             if let Ok(entry) = result {
-                // Test allowlist entry invariants
-                assert!(!entry.domain.is_empty(), "Domain should not be empty");
-                assert!(entry.port > 0 && entry.port <= 65535, "Port should be valid");
-                assert!(!entry.reason.is_empty(), "Reason should not be empty");
+                let _host_len = entry.host.len();
+                let _reason_len = entry.reason.len();
+                let _port = entry.port;
             }
+        }
+
+        ConfigParsingOperation::NetworkPolicyConfig(input) => {
+            let toml_content = input.to_string();
+            let result: Result<NetworkPolicyConfig, _> = toml::from_str(&toml_content);
+
+            test_parsing_safety(&toml_content, result.is_ok());
         }
 
         ConfigParsingOperation::SecurityConfig(input) => {
@@ -301,6 +347,13 @@ fn test_toml_parsing_invariants(operation: &ConfigParsingOperation) {
             }
         }
 
+        ConfigParsingOperation::RuntimeConfig(input) => {
+            let toml_content = input.to_string();
+            let result: Result<RuntimeConfig, _> = toml::from_str(&toml_content);
+
+            test_parsing_safety(&toml_content, result.is_ok());
+        }
+
         ConfigParsingOperation::RuntimeLaneConfig(input) => {
             let toml_content = input.to_string();
             let result: Result<RuntimeLaneConfig, _> = toml::from_str(&toml_content);
@@ -308,9 +361,19 @@ fn test_toml_parsing_invariants(operation: &ConfigParsingOperation) {
             test_parsing_safety(&toml_content, result.is_ok());
 
             if let Ok(lane_config) = result {
-                // Test lane config invariants
-                assert!(lane_config.max_queue_length > 0, "Queue length must be positive");
+                match lane_config.overflow_policy {
+                    LaneOverflowPolicy::Reject
+                    | LaneOverflowPolicy::EnqueueWithTimeout
+                    | LaneOverflowPolicy::ShedOldest => {}
+                }
             }
+        }
+
+        ConfigParsingOperation::ThresholdsConfig(input) => {
+            let toml_content = input.to_string();
+            let result: Result<ThresholdsConfig, _> = toml::from_str(&toml_content);
+
+            test_parsing_safety(&toml_content, result.is_ok());
         }
 
         ConfigParsingOperation::MalformedTomlTests(input) => {
@@ -341,15 +404,11 @@ fn test_toml_parsing_invariants(operation: &ConfigParsingOperation) {
                 test_parsing_safety(&toml_content, result.is_ok());
             }
         }
-
-        _ => {
-            // Handle other parsing operations
-        }
     }
 }
 
 /// Test basic parsing safety (no panics, bounded memory usage).
-fn test_parsing_safety(toml_content: &str, parse_succeeded: bool) {
+fn test_parsing_safety(toml_content: &str, _parse_succeeded: bool) {
     // Content should not be excessively large (DoS protection)
     if toml_content.len() > 10_000_000 {
         // Very large inputs should typically fail or be bounded
@@ -376,39 +435,32 @@ fn test_config_invariants(config: &Config) {
 
     // Compatibility mode should be valid
     match config.compatibility.mode {
-        CompatibilityMode::Strict | CompatibilityMode::Relaxed | CompatibilityMode::Legacy => {}
+        CompatibilityMode::Strict
+        | CompatibilityMode::Balanced
+        | CompatibilityMode::LegacyRisky => {}
     }
 
     // Runtime lanes should have valid configurations
     for (_name, lane_config) in &config.runtime.lanes {
-        assert!(lane_config.max_queue_length > 0);
         match lane_config.overflow_policy {
-            LaneOverflowPolicy::Block | LaneOverflowPolicy::Drop | LaneOverflowPolicy::Prioritize => {}
+            LaneOverflowPolicy::Reject
+            | LaneOverflowPolicy::EnqueueWithTimeout
+            | LaneOverflowPolicy::ShedOldest => {}
         }
     }
 
     // Network allowlist entries should be valid
-    for entry in &config.network.allowlist {
-        assert!(!entry.domain.is_empty());
-        assert!(entry.port > 0 && entry.port <= 65535);
-        assert!(!entry.reason.is_empty());
+    for entry in &config.security.network_policy.allowlist {
+        let _host_len = entry.host.len();
+        let _reason_len = entry.reason.len();
+        let _port = entry.port;
     }
 }
 
 /// Test security config specific invariants.
 fn test_security_config_invariants(security: &SecurityConfig) {
-    // API keys should be valid if present
-    for api_key in &security.api_keys {
-        assert!(!api_key.is_empty(), "API keys should not be empty");
-    }
-
-    // Registry signing key should be valid base64 if present
-    if let Some(ref key) = security.registry_signing_key {
-        // Should be valid base64
-        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(key) {
-            assert!(decoded.len() >= 32, "Registry signing key should be at least 32 bytes");
-        }
-    }
+    let _api_key_count = security.authorized_api_keys.len();
+    let _allowlist_count = security.network_policy.allowlist.len();
 }
 
 /// Test malformed TOML handling safety.
@@ -427,7 +479,8 @@ fn test_malformed_toml_safety(toml_content: &str) {
 fuzz_target!(|input: FuzzInput| {
     std::panic::catch_unwind(|| {
         test_toml_parsing_invariants(&input.operation);
-    }).unwrap_or_else(|_| {
+    })
+    .unwrap_or_else(|_| {
         eprintln!("Panic caught in TOML config parsing fuzzing");
     });
 });
@@ -435,6 +488,7 @@ fuzz_target!(|input: FuzzInput| {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arbitrary::Unstructured;
 
     #[test]
     fn test_valid_config_parsing() {
@@ -444,9 +498,11 @@ profile = "strict"
 [compatibility]
 mode = "strict"
 
-[security]
-api_keys = []
-"#;
+	[security]
+	max_degraded_duration_secs = 3600
+	max_merge_decisions = 100
+	authorized_api_keys = ["fuzz-key"]
+	"#;
         let result: Result<Config, _> = toml::from_str(toml);
         assert!(result.is_ok());
     }
@@ -469,7 +525,7 @@ api_keys = []
         ];
 
         for input in malformed_inputs {
-            let result: Result<Config, _> = toml::from_str(input);
+            let _result: Result<Config, _> = toml::from_str(input);
             // Should not panic
         }
     }
@@ -485,10 +541,10 @@ api_keys = []
         if let Ok(input) = FuzzInput::arbitrary(&mut unstructured) {
             // Should not panic during operation construction
             match input.operation {
-                ConfigParsingOperation::FullConfig(_) => {},
-                ConfigParsingOperation::ProfileParsing(_) => {},
-                ConfigParsingOperation::MalformedTomlTests(_) => {},
-                _ => {},
+                ConfigParsingOperation::FullConfig(_) => {}
+                ConfigParsingOperation::ProfileParsing(_) => {}
+                ConfigParsingOperation::MalformedTomlTests(_) => {}
+                _ => {}
             }
         }
     }

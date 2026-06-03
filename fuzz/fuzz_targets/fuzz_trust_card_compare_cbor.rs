@@ -2,9 +2,9 @@
 
 use arbitrary::Arbitrary;
 use frankenengine_node::supply_chain::trust_card::{
-    TrustCard, TrustCardComparison, TrustCardRegistry, TrustCardRegistrySnapshot,
     compute_card_hash, fixture_registry, render_comparison_human, render_trust_card_human,
-    to_canonical_json, verify_card_signature,
+    to_canonical_json, verify_card_signature, TrustCard, TrustCardComparison, TrustCardRegistry,
+    TrustCardRegistrySnapshot,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -56,7 +56,9 @@ fn fuzz_fixture_compare(now_secs: u64, selector: u8) {
         return;
     };
 
-    let snapshot = registry.snapshot();
+    let Ok(snapshot) = registry.snapshot() else {
+        return;
+    };
     let cbor = serde_cbor::to_vec(&snapshot).expect("fixture snapshot must encode as CBOR");
     let decoded = serde_cbor::from_slice::<TrustCardRegistrySnapshot>(&cbor)
         .expect("fixture snapshot CBOR must decode");
@@ -70,7 +72,12 @@ fn fuzz_fixture_compare(now_secs: u64, selector: u8) {
         ("npm:@beta/telemetry-bridge", "npm:@acme/auth-guard")
     };
     let comparison = registry
-        .compare(left, right, now_secs.saturating_add(10), "trace-fuzz-compare")
+        .compare(
+            left,
+            right,
+            now_secs.saturating_add(10),
+            "trace-fuzz-compare",
+        )
         .expect("fixture cards should compare");
     let _ = render_comparison_human(&comparison);
     let comparison_cbor = serde_cbor::to_vec(&comparison).expect("comparison must encode");

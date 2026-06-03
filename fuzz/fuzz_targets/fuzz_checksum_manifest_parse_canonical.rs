@@ -32,7 +32,7 @@
 //!       parsed entries and re-serialising via `canonical_bytes()`
 //!       must re-parse losslessly.
 
-use frankenengine_node::supply_chain::artifact_signing::{ChecksumManifest, ManifestEntry};
+use frankenengine_node::supply_chain::artifact_signing::{ChecksumManifest, KeyId, ManifestEntry};
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
 use std::str;
@@ -113,6 +113,8 @@ fuzz_target!(|data: &[u8]| {
     }
     let manifest = ChecksumManifest {
         entries: roundtrip_map,
+        key_id: KeyId("fuzz-key".to_string()),
+        signature: Vec::new(),
     };
     let canonical = manifest.canonical_bytes();
     let canonical_text = str::from_utf8(&canonical)

@@ -1,27 +1,27 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
 use frankenengine_node::replay::time_travel_engine::{
-    WorkflowTrace, EnvironmentSnapshot, TraceStep, SideEffect,
-    DivergenceKind, ReplayResult, Divergence, ReplayVerdict, TimeTravelError,
+    Divergence, DivergenceKind, EnvironmentSnapshot, ReplayResult, ReplayVerdict, SideEffect,
+    TimeTravelError, TraceStep, WorkflowTrace,
 };
+use libfuzzer_sys::fuzz_target;
 
-/// Fuzz target for replay bundle deserialization.
-///
-/// Tests structure-aware fuzzing of the replay module's JSON deserialization patterns.
-/// This targets untrusted attacker-controlled input through serde_json::from_str calls.
-///
-/// Strategy: Hybrid structure-aware + coverage-guided approach
-/// 1. Generate structured objects using Arbitrary (better coverage of valid inputs)
-/// 2. Test raw JSON string fuzzing (finds edge cases in parser)
-/// 3. Round-trip testing (serialize → deserialize invariants)
-///
-/// Priority targets (per bd-3id7l):
-/// 1. WorkflowTrace - main bundle format (highest risk)
-/// 2. EnvironmentSnapshot - environment data
-/// 3. TraceStep - individual execution steps
-/// 4. SideEffect - step side effects
+// Fuzz target for replay bundle deserialization.
+//
+// Tests structure-aware fuzzing of the replay module's JSON deserialization patterns.
+// This targets untrusted attacker-controlled input through serde_json::from_str calls.
+//
+// Strategy: Hybrid structure-aware + coverage-guided approach
+// 1. Generate structured objects using Arbitrary (better coverage of valid inputs)
+// 2. Test raw JSON string fuzzing (finds edge cases in parser)
+// 3. Round-trip testing (serialize -> deserialize invariants)
+//
+// Priority targets (per bd-3id7l):
+// 1. WorkflowTrace - main bundle format (highest risk)
+// 2. EnvironmentSnapshot - environment data
+// 3. TraceStep - individual execution steps
+// 4. SideEffect - step side effects
 fuzz_target!(|data: FuzzInput| {
     match data {
         FuzzInput::StructuredWorkflowTrace(trace) => {
@@ -49,14 +49,14 @@ fn fuzz_workflow_trace_structured(trace: WorkflowTrace) {
             let _ = deserialized.validate();
 
             // Test digest computation (potential panic/overflow site)
-            let original_digest = WorkflowTrace::compute_digest(&trace.steps);
-            let deserialized_digest = WorkflowTrace::compute_digest(&deserialized.steps);
+            let original_digest = trace.canonical_digest();
+            let deserialized_digest = deserialized.canonical_digest();
 
             // Round-trip invariant: digest MUST be preserved - this is a critical data integrity check
-            if original_digest != deserialized_digest {
-                panic!("CRITICAL: Replay bundle digest integrity violation - original: {}, deserialized: {}",
-                       original_digest, deserialized_digest);
-            }
+            assert_eq!(
+                original_digest, deserialized_digest,
+                "CRITICAL: Replay bundle digest integrity violation"
+            );
         }
 
         // Test pretty-printing (different JSON format)
@@ -67,7 +67,7 @@ fn fuzz_workflow_trace_structured(trace: WorkflowTrace) {
 
     // Test validation on arbitrary structured data (may be invalid)
     let _ = trace.validate();
-    let _ = WorkflowTrace::compute_digest(&trace.steps);
+    let _ = trace.canonical_digest();
 }
 
 /// Fuzz structured EnvironmentSnapshot objects
@@ -80,7 +80,7 @@ fn fuzz_environment_structured(env: EnvironmentSnapshot) {
 
     // Test validation with various trace IDs (edge case testing)
     let _ = env.validate("fuzz-trace-id");
-    let _ = env.validate("");  // Empty trace ID edge case
+    let _ = env.validate(""); // Empty trace ID edge case
     let _ = env.validate("very-long-trace-id-with-special-chars-àáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ");
 }
 
@@ -111,7 +111,7 @@ fn fuzz_raw_json_strings(json_bytes: Vec<u8>) {
     // Fuzz WorkflowTrace deserialization (highest priority)
     if let Ok(trace) = serde_json::from_str::<WorkflowTrace>(json_str) {
         let _ = trace.validate();
-        let _ = WorkflowTrace::compute_digest(&trace.steps);
+        let _ = trace.canonical_digest();
     }
 
     // Fuzz all other deserialization entry points found in target discovery
