@@ -253,17 +253,9 @@ pub struct BarrierPlanCatalog {
 }
 
 /// Deterministic, bounded critical-node immunization planner.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ImmunizationPlanner {
     config: ImmunizationPlannerConfig,
-}
-
-impl Default for ImmunizationPlanner {
-    fn default() -> Self {
-        Self {
-            config: ImmunizationPlannerConfig::default(),
-        }
-    }
 }
 
 impl ImmunizationPlanner {
@@ -1075,10 +1067,7 @@ fn ceil_div_f64(value: f64, divisor: f64) -> u32 {
     if scaled >= f64::from(u32::MAX) {
         u32::MAX
     } else {
-        match format!("{scaled:.0}").parse::<u32>() {
-            Ok(parsed) => parsed,
-            Err(_) => u32::MAX,
-        }
+        format!("{scaled:.0}").parse::<u32>().unwrap_or(u32::MAX)
     }
 }
 

@@ -656,7 +656,11 @@ fn synthesize_observed(
             // High-frequency micro-perturbations on velocity; the
             // perturbation magnitude depends only on step_idx parity so the
             // function stays pure.
-            let micro = if step_idx % 2 == 0 { 0.02 } else { -0.02 };
+            let micro = if step_idx.is_multiple_of(2) {
+                0.02
+            } else {
+                -0.02
+            };
             let vel = (baseline_velocity + 0.10 * t + micro).clamp(0.0, 1.0);
             let cap = baseline_capability + t * (1.0 - baseline_capability) + 0.02 * t;
             (cap, vel, baseline_response, 0.02 * t + micro.abs())

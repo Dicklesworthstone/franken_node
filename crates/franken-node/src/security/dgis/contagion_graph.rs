@@ -48,11 +48,11 @@ pub fn validate_node_id(node: &NodeId) -> Result<(), GraphError> {
 ///
 /// The four variants line up with the supply-chain compromise vectors that
 /// the simulator must reason about per bd-1q38:
-///   * `DependencyImport`  — A depends on B (xz-style transitive propagation)
-///   * `MaintainerOverlap` — same maintainer in commit access for A and B
-///                           (xz-style social-engineering pivot)
-///   * `OrgOverlap`        — same publishing org (dependency-confusion pivot)
-///   * `NamespaceShadow`   — typosquat / shadow namespace relationship
+/// * `DependencyImport`  — A depends on B (xz-style transitive propagation)
+/// * `MaintainerOverlap` — same maintainer in commit access for A and B
+///   (xz-style social-engineering pivot)
+/// * `OrgOverlap`        — same publishing org (dependency-confusion pivot)
+/// * `NamespaceShadow`   — typosquat / shadow namespace relationship
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeKind {
     DependencyImport,

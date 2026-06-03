@@ -671,7 +671,7 @@ pub struct WindowedGraph {
 /// Construct with [`IngestionPipeline::new`] (which sets sane defaults) or
 /// [`IngestionPipeline::with_caps`] for full control. The pipeline is `Send`
 /// + `Sync` only by virtue of its fields; nothing here owns interior
-/// mutability or unsafe references.
+///   mutability or unsafe references.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IngestionPipeline {
     /// Canonical observation hashes already absorbed (the dedup gate).
@@ -816,7 +816,7 @@ pub fn ingest(
         maintainer_ids.push(mid);
     }
     let mut dep_ids: Vec<NodeId> = Vec::with_capacity(observation.dependencies.len());
-    for (dep_name, _req) in &observation.dependencies {
+    for dep_name in observation.dependencies.keys() {
         let did = dependency_node_id(dep_name);
         if !pipeline.nodes.contains_key(&did) {
             pipeline.nodes.insert(did.clone(), NodeKind::Package);

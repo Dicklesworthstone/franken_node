@@ -532,7 +532,7 @@ fn classify_blocked_proof_rehydration_candidate(
     coalesced_command: bool,
     priority_rank: u32,
 ) -> Result<BlockedProofRehydrationCandidate, RecoveryPlannerError> {
-    let command_digest = digest_rehydration_command(&command);
+    let command_digest = digest_rehydration_command(command);
     let stale_age = input.now_ms.saturating_sub(bead.updated_at_ms) >= input.max_blocker_age_ms;
     let missing_path = bead.referenced_paths.iter().find(|path| !path.exists);
     let closed_blocker = bead

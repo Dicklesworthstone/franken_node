@@ -155,7 +155,7 @@ pub struct SeedInvariants {
     pub min_total_nodes: usize,
     /// Minimum number of edges the finalised graph must contain (MaintainedBy
     /// + Depends edges, each (from,to,kind) counted once even if the seed
-    /// includes the same edge across multiple observations).
+    ///   includes the same edge across multiple observations).
     pub min_total_edges: usize,
     /// Total observation count (including duplicates). The pipeline will
     /// dedup byte-identical observations, so the *unique* count may be

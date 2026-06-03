@@ -685,11 +685,9 @@ fn capability_score_for_sample(sample: &PhenotypeSample) -> f64 {
     let mut matched_any = false;
     for (field, value) in &sample.fields {
         let lower = field.to_ascii_lowercase();
-        if lower.contains("capability") || lower.contains("permission") {
-            if value.is_finite() {
-                matched += *value;
-                matched_any = true;
-            }
+        if (lower.contains("capability") || lower.contains("permission")) && value.is_finite() {
+            matched += *value;
+            matched_any = true;
         }
     }
     if matched_any && matched.is_finite() {

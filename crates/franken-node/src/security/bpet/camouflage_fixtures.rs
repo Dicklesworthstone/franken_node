@@ -401,9 +401,9 @@ fn cap(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
     m
 }
 
-fn build_series(
-    samples: Vec<(i64, BTreeMap<String, f64>, BTreeMap<String, f64>)>,
-) -> TrajectorySeries {
+type FixtureSample = (i64, BTreeMap<String, f64>, BTreeMap<String, f64>);
+
+fn build_series(samples: Vec<FixtureSample>) -> TrajectorySeries {
     let mut s = TrajectorySeries::new(0, 100_000).expect("valid window");
     for (ts, obs, decl) in samples {
         let sample = TrajectorySample::new(ts, obs, decl).expect("finite values");

@@ -1211,7 +1211,7 @@ impl EngineDispatcher {
                         "Fallback runtime security enforcement failed: external runtime cannot guarantee \
                         SSRF block enforcement required by strict profile. Failing closed to prevent \
                         security bypass through franken-engine unavailability attack."
-                    ).into());
+                    ));
                 }
 
                 // For non-strict profiles, log degraded security warning
