@@ -6,10 +6,10 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GitStatusResult {
     modified_count: u32,
     untracked_count: u32,
@@ -130,7 +130,10 @@ enum StatusTransformation {
 
 impl GitStatusInput {
     fn to_line(&self) -> String {
-        format!("{}{} {}", self.index_status, self.worktree_status, self.filename)
+        format!(
+            "{}{} {}",
+            self.index_status, self.worktree_status, self.filename
+        )
     }
 }
 
@@ -141,7 +144,9 @@ impl LineSeparator {
             LineSeparator::Windows => "\r\n",
             LineSeparator::Mac => "\r",
             LineSeparator::Mixed => "\n\r\n",
-            LineSeparator::Custom(_) => "\n", // Fallback to unix for custom
+            LineSeparator::Custom(c) if matches!(*c, '\r') => "\r",
+            LineSeparator::Custom(c) if matches!(*c, '\0') => "\n",
+            LineSeparator::Custom(_) => "\n", // Fallback to unix for other custom separators
         }
     }
 }
@@ -159,7 +164,10 @@ impl UnicodeVariant {
     }
 }
 
-fn apply_transformations(input: &GitStatusInput, transformations: &[StatusTransformation]) -> String {
+fn apply_transformations(
+    input: &GitStatusInput,
+    transformations: &[StatusTransformation],
+) -> String {
     let mut result = input.to_line();
 
     for transform in transformations {
@@ -167,34 +175,41 @@ fn apply_transformations(input: &GitStatusInput, transformations: &[StatusTransf
             StatusTransformation::TruncateAt(n) => {
                 let len = (*n as usize).min(result.len());
                 result.truncate(len);
-            },
+            }
             StatusTransformation::AddControlChars => {
                 result.push_str("\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0B\x0C\x0E\x0F");
-            },
+            }
             StatusTransformation::AddNullBytes => {
                 result.push('\0');
                 result.push_str("after_null");
-            },
+            }
             StatusTransformation::RepeatLine(n) => {
                 let original = result.clone();
                 for _ in 0..(*n as usize).min(10) {
                     result.push('\n');
                     result.push_str(&original);
                 }
-            },
+            }
             StatusTransformation::AddInvalidUtf8 => {
                 // Simulate invalid UTF-8 by adding replacement chars
                 result.push('\u{FFFD}');
-            },
+            }
             StatusTransformation::MixCaseCharacters => {
-                result = result.chars().enumerate().map(|(i, c)| {
-                    if i % 2 == 0 { c.to_uppercase().collect::<String>() }
-                    else { c.to_lowercase().collect::<String>() }
-                }).collect();
-            },
+                result = result
+                    .chars()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        if i % 2 == 0 {
+                            c.to_uppercase().collect::<String>()
+                        } else {
+                            c.to_lowercase().collect::<String>()
+                        }
+                    })
+                    .collect();
+            }
             StatusTransformation::AddExtraSpaces => {
                 result = format!("    {}    ", result);
-            },
+            }
             StatusTransformation::SwapStatusChars => {
                 if result.len() >= 2 {
                     let mut chars: Vec<char> = result.chars().collect();
@@ -203,7 +218,7 @@ fn apply_transformations(input: &GitStatusInput, transformations: &[StatusTransf
                         result = chars.into_iter().collect();
                     }
                 }
-            },
+            }
         }
     }
 
@@ -220,21 +235,31 @@ fuzz_target!(|data: &[u8]| {
                 // Test deterministic git status parsing
                 let result1 = parse_git_status(&line);
                 let result2 = parse_git_status(&line);
-                assert_eq!(result1.len(), result2.len(), "Git status parsing should be deterministic");
-            },
+                assert_eq!(
+                    result1, result2,
+                    "Git status parsing should be deterministic"
+                );
+            }
             GitStatusParsingOperation::MultipleLines { lines, separator } => {
                 let sep = separator.to_string();
-                let combined = lines.iter()
+                let combined = lines
+                    .iter()
                     .map(|line| line.to_line())
                     .collect::<Vec<_>>()
                     .join(sep);
                 let _ = parse_git_status(&combined);
-            },
-            GitStatusParsingOperation::EdgeCases { base_input, transformations } => {
+            }
+            GitStatusParsingOperation::EdgeCases {
+                base_input,
+                transformations,
+            } => {
                 let transformed = apply_transformations(&base_input, &transformations);
                 let _ = parse_git_status(&transformed);
-            },
-            GitStatusParsingOperation::MaliciousInputs { attack_type, payload } => {
+            }
+            GitStatusParsingOperation::MaliciousInputs {
+                attack_type,
+                payload,
+            } => {
                 let malicious = match attack_type {
                     AttackType::BufferOverflow => "A".repeat(100000),
                     AttackType::FormatString => format!("{}%s%n%x", payload),
@@ -244,14 +269,17 @@ fuzz_target!(|data: &[u8]| {
                     AttackType::DeepNesting => "\n".repeat(1000) + &payload,
                 };
                 let _ = parse_git_status(&malicious);
-            },
-            GitStatusParsingOperation::UnicodeEdgeCases { base, unicode_variants } => {
+            }
+            GitStatusParsingOperation::UnicodeEdgeCases {
+                base,
+                unicode_variants,
+            } => {
                 let mut test_input = base;
                 for variant in &unicode_variants {
                     test_input = variant.apply(&test_input);
                 }
                 let _ = parse_git_status(&test_input);
-            },
+            }
         }
     }
 });

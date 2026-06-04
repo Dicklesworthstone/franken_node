@@ -6,12 +6,9 @@
 
 #![no_main]
 
+use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use arbitrary::{Arbitrary, Unstructured};
 use std::path::PathBuf;
-
-// Import CLI validation functions
-use frankenengine_node::cli::{validate_user_content_pathbuf};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct FuzzInput {
@@ -40,7 +37,7 @@ enum PathType {
     SystemBinary,
 }
 
-#[derive(Debug, Clone, Arbitrary)]
+#[derive(Debug, Clone, Copy, Arbitrary)]
 enum ValidationOpType {
     Sequential,
     Mixed,
@@ -133,7 +130,10 @@ fn test_path_validation_invariants(operation: &PathValidationOperation) {
 
             // Invariant: Absolute paths must be rejected for user content
             if path_str.starts_with('/') {
-                assert!(result.is_err(), "Absolute paths should be rejected for user content");
+                assert!(
+                    result.is_err(),
+                    "Absolute paths should be rejected for user content"
+                );
             }
 
             // Invariant: Backslashes must be rejected
@@ -142,16 +142,25 @@ fn test_path_validation_invariants(operation: &PathValidationOperation) {
             }
 
             // Invariant: Directory traversal (..) must be rejected
-            if path_str.split(&['/', '\\'][..]).any(|segment| segment == "..") {
-                assert!(result.is_err(), "Directory traversal (..) should be rejected");
+            if path_str
+                .split(&['/', '\\'][..])
+                .any(|segment| segment == "..")
+            {
+                assert!(
+                    result.is_err(),
+                    "Directory traversal (..) should be rejected"
+                );
             }
 
             // Invariant: Valid paths should succeed
             if !path_str.contains('\0')
                 && !path_str.starts_with('/')
                 && !path_str.contains('\\')
-                && !path_str.split(&['/', '\\'][..]).any(|segment| segment == "..")
-                && !path_str.is_empty() {
+                && !path_str
+                    .split(&['/', '\\'][..])
+                    .any(|segment| segment == "..")
+                && !path_str.is_empty()
+            {
                 // This should be a valid path for user content
                 // Note: Empty paths may or may not be valid depending on implementation
             }
@@ -163,12 +172,21 @@ fn test_path_validation_invariants(operation: &PathValidationOperation) {
 
             // Invariant: Paths with null bytes must be rejected
             if path_str.contains('\0') {
-                assert!(result.is_err(), "Null bytes should be rejected for system paths");
+                assert!(
+                    result.is_err(),
+                    "Null bytes should be rejected for system paths"
+                );
             }
 
             // Invariant: Directory traversal (..) must be rejected
-            if path_str.split(&['/', '\\'][..]).any(|segment| segment == "..") {
-                assert!(result.is_err(), "Directory traversal should be rejected for system paths");
+            if path_str
+                .split(&['/', '\\'][..])
+                .any(|segment| segment == "..")
+            {
+                assert!(
+                    result.is_err(),
+                    "Directory traversal should be rejected for system paths"
+                );
             }
 
             // Note: Absolute paths are allowed for system binaries
@@ -179,11 +197,15 @@ fn test_path_validation_invariants(operation: &PathValidationOperation) {
 
             match pathbuf_input.path_type {
                 PathType::UserContent => {
-                    let result = validate_user_content_pathbuf(&pathbuf);
+                    let path_string = pathbuf.to_string_lossy();
+                    let result = validate_user_content_path_wrapper(&path_string);
 
                     // Test UTF-8 validity
                     if pathbuf.to_str().is_none() {
-                        assert!(result.is_err(), "Invalid UTF-8 in PathBuf should be rejected");
+                        assert!(
+                            result.is_err(),
+                            "Invalid UTF-8 in PathBuf should be rejected"
+                        );
                     }
                 }
                 PathType::SystemBinary => {
@@ -208,28 +230,43 @@ fn test_path_validation_invariants(operation: &PathValidationOperation) {
             }
         }
 
-        PathValidationOperation::EdgeCaseCombination { path1, path2, operation_type: _ } => {
+        PathValidationOperation::EdgeCaseCombination {
+            path1,
+            path2,
+            operation_type,
+        } => {
             // Test edge case combinations
             let path1_str = path1.to_string();
             let path2_str = path2.to_string();
 
             let result1 = validate_user_content_path_wrapper(&path1_str);
-            let result2 = validate_user_content_path_wrapper(&path2_str);
+            let result2 = match operation_type {
+                ValidationOpType::Sequential | ValidationOpType::Boundary => {
+                    validate_user_content_path_wrapper(&path2_str)
+                }
+                ValidationOpType::Mixed => validate_system_binary_path_wrapper(&path2_str),
+            };
 
             // Test deterministic validation
             let result1_repeat = validate_user_content_path_wrapper(&path1_str);
-            let result2_repeat = validate_user_content_path_wrapper(&path2_str);
+            let result2_repeat = match operation_type {
+                ValidationOpType::Sequential | ValidationOpType::Boundary => {
+                    validate_user_content_path_wrapper(&path2_str)
+                }
+                ValidationOpType::Mixed => validate_system_binary_path_wrapper(&path2_str),
+            };
 
             // Validation should be deterministic
-            match (result1, result1_repeat) {
-                (Ok(_), Ok(_)) | (Err(_), Err(_)) => {},
-                _ => panic!("Path validation should be deterministic"),
-            }
-
-            match (result2, result2_repeat) {
-                (Ok(_), Ok(_)) | (Err(_), Err(_)) => {},
-                _ => panic!("Path validation should be deterministic"),
-            }
+            assert_eq!(
+                result1.is_ok(),
+                result1_repeat.is_ok(),
+                "Path validation should be deterministic"
+            );
+            assert_eq!(
+                result2.is_ok(),
+                result2_repeat.is_ok(),
+                "Path validation should be deterministic"
+            );
         }
     }
 }
@@ -239,15 +276,26 @@ fn test_individual_path_constraints(path: &str, result: &Result<(), String>, pat
     match path_type {
         PathType::UserContent => {
             // User content specific constraints
-            if path.contains('\0') || path.starts_with('/') || path.contains('\\')
-                || path.split(&['/', '\\'][..]).any(|segment| segment == "..") {
-                assert!(result.is_err(), "Invalid user content path should be rejected: {}", path);
+            if path.contains('\0')
+                || path.starts_with('/')
+                || path.contains('\\')
+                || path.split(&['/', '\\'][..]).any(|segment| segment == "..")
+            {
+                assert!(
+                    result.is_err(),
+                    "Invalid user content path should be rejected: {}",
+                    path
+                );
             }
         }
         PathType::SystemBinary => {
             // System binary specific constraints
             if path.contains('\0') || path.split(&['/', '\\'][..]).any(|segment| segment == "..") {
-                assert!(result.is_err(), "Invalid system binary path should be rejected: {}", path);
+                assert!(
+                    result.is_err(),
+                    "Invalid system binary path should be rejected: {}",
+                    path
+                );
             }
             // Note: Absolute paths are allowed for system binaries
         }
@@ -266,20 +314,28 @@ fn test_error_message_security(operation: &PathValidationOperation) {
 
                 // Check for specific error patterns
                 if path_str.contains('\0') {
-                    assert!(error.to_lowercase().contains("null"),
-                        "Null byte error should mention null bytes");
+                    assert!(
+                        error.to_lowercase().contains("null"),
+                        "Null byte error should mention null bytes"
+                    );
                 }
                 if path_str.starts_with('/') {
-                    assert!(error.to_lowercase().contains("absolute"),
-                        "Absolute path error should mention absolute paths");
+                    assert!(
+                        error.to_lowercase().contains("absolute"),
+                        "Absolute path error should mention absolute paths"
+                    );
                 }
                 if path_str.contains('\\') {
-                    assert!(error.to_lowercase().contains("backslash"),
-                        "Backslash error should mention backslashes");
+                    assert!(
+                        error.to_lowercase().contains("backslash"),
+                        "Backslash error should mention backslashes"
+                    );
                 }
                 if path_str.contains("..") {
-                    assert!(error.to_lowercase().contains("traversal") || error.contains(".."),
-                        "Traversal error should mention traversal");
+                    assert!(
+                        error.to_lowercase().contains("traversal") || error.contains(".."),
+                        "Traversal error should mention traversal"
+                    );
                 }
             }
         }
@@ -296,7 +352,10 @@ fn validate_user_content_path_wrapper(path: &str) -> Result<(), String> {
 
     // Absolute path check
     if path.starts_with('/') {
-        return Err(format!("Absolute paths not allowed for user content: {}", path));
+        return Err(format!(
+            "Absolute paths not allowed for user content: {}",
+            path
+        ));
     }
 
     // Backslash check
@@ -330,7 +389,8 @@ fuzz_target!(|input: FuzzInput| {
     std::panic::catch_unwind(|| {
         test_path_validation_invariants(&input.operation);
         test_error_message_security(&input.operation);
-    }).unwrap_or_else(|_| {
+    })
+    .unwrap_or_else(|_| {
         eprintln!("Panic caught in CLI path validation fuzzing");
     });
 });
@@ -359,11 +419,11 @@ mod tests {
     #[test]
     fn test_pathbuf_validation() {
         let valid_pathbuf = PathBuf::from("valid/path");
-        let result = validate_user_content_pathbuf(&valid_pathbuf);
+        let result = validate_user_content_path_wrapper(&valid_pathbuf.to_string_lossy());
         assert!(result.is_ok());
 
         let invalid_pathbuf = PathBuf::from("/absolute/path");
-        let result = validate_user_content_pathbuf(&invalid_pathbuf);
+        let result = validate_user_content_path_wrapper(&invalid_pathbuf.to_string_lossy());
         assert!(result.is_err());
     }
 
@@ -378,11 +438,11 @@ mod tests {
         if let Ok(input) = FuzzInput::arbitrary(&mut unstructured) {
             // Should not panic during operation construction
             match input.operation {
-                PathValidationOperation::UserContentPath(_) => {},
-                PathValidationOperation::SystemBinaryPath(_) => {},
-                PathValidationOperation::PathBufValidation(_) => {},
-                PathValidationOperation::BatchValidation { .. } => {},
-                PathValidationOperation::EdgeCaseCombination { .. } => {},
+                PathValidationOperation::UserContentPath(_) => {}
+                PathValidationOperation::SystemBinaryPath(_) => {}
+                PathValidationOperation::PathBufValidation(_) => {}
+                PathValidationOperation::BatchValidation { .. } => {}
+                PathValidationOperation::EdgeCaseCombination { .. } => {}
             }
         }
     }

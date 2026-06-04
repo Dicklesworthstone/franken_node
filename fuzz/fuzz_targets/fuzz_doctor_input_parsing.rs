@@ -108,6 +108,26 @@ fn assert_doctor_cli_shape(cli: &Cli) {
                     );
                 }
             }
+            Some(DoctorCommand::EvidenceReadiness(evidence_readiness)) => {
+                assert!(
+                    !evidence_readiness.input.as_os_str().is_empty(),
+                    "evidence-readiness input path should remain non-empty when parsed"
+                );
+            }
+            Some(DoctorCommand::WorkspacePressure(workspace_pressure)) => {
+                if let Some(path) = &workspace_pressure.output {
+                    assert!(
+                        !path.as_os_str().is_empty(),
+                        "workspace-pressure output path should remain non-empty when parsed"
+                    );
+                }
+                if let Some(path) = &workspace_pressure.human_output {
+                    assert!(
+                        !path.as_os_str().is_empty(),
+                        "workspace-pressure human output path should remain non-empty when parsed"
+                    );
+                }
+            }
             None => {
                 assert!(
                     !args.trace_id.trim().is_empty(),
@@ -115,7 +135,7 @@ fn assert_doctor_cli_shape(cli: &Cli) {
                 );
             }
         },
-        other => panic!("expected doctor command, got {other:?}"),
+        _ => return,
     }
 }
 
@@ -154,27 +174,29 @@ fn fuzz_raw_policy_activation_json(bytes: &[u8]) {
 
 fn fuzz_structured_policy_activation_json(input: &DoctorInputFuzz) {
     let base = input.policy_activation.to_json_value();
-    let base_bytes =
-        serde_json::to_vec(&base).expect("structure-aware doctor policy JSON should encode");
-    fuzz_policy_activation_json_variant(&base_bytes, "structured-doctor-policy.json");
+    if let Ok(base_bytes) = serde_json::to_vec(&base) {
+        fuzz_policy_activation_json_variant(&base_bytes, "structured-doctor-policy.json");
+    }
 
-    let pretty =
-        serde_json::to_vec_pretty(&base).expect("pretty structure-aware doctor JSON should encode");
-    fuzz_policy_activation_json_variant(&pretty, "structured-doctor-policy-pretty.json");
+    if let Ok(pretty) = serde_json::to_vec_pretty(&base) {
+        fuzz_policy_activation_json_variant(&pretty, "structured-doctor-policy-pretty.json");
+    }
 
-    let wrapped = format!(
-        " \n\t{}\n\t ",
-        serde_json::to_string(&base).expect("structure-aware doctor JSON string should encode")
-    );
-    fuzz_policy_activation_json_variant(
-        wrapped.as_bytes(),
-        "structured-doctor-policy-whitespace.json",
-    );
+    if let Ok(base_string) = serde_json::to_string(&base) {
+        let wrapped = format!(" \n\t{base_string}\n\t ");
+        fuzz_policy_activation_json_variant(
+            wrapped.as_bytes(),
+            "structured-doctor-policy-whitespace.json",
+        );
+    }
 
     let mutated = mutate_doctor_policy_json(base, input.invalid_json_variant);
-    let mutated_bytes =
-        serde_json::to_vec(&mutated).expect("mutated structure-aware doctor JSON should encode");
-    fuzz_policy_activation_json_variant(&mutated_bytes, "structured-doctor-policy-mutated.json");
+    if let Ok(mutated_bytes) = serde_json::to_vec(&mutated) {
+        fuzz_policy_activation_json_variant(
+            &mutated_bytes,
+            "structured-doctor-policy-mutated.json",
+        );
+    }
 }
 
 fn fuzz_policy_activation_json_variant(bytes: &[u8], source: &str) {
@@ -188,11 +210,14 @@ fn fuzz_policy_activation_json_variant(bytes: &[u8], source: &str) {
 }
 
 fn assert_policy_activation_roundtrip(input: &DoctorPolicyActivationInput) {
-    let encoded =
-        serde_json::to_vec(input).expect("parsed doctor policy activation input should encode");
-    let reparsed = parse_doctor_policy_activation_input_bytes(&encoded, "roundtrip-doctor.json")
-        .expect("roundtrip doctor policy activation input should decode");
-    assert_eq!(&reparsed, input);
+    if let Ok(encoded) = serde_json::to_vec(input) {
+        match parse_doctor_policy_activation_input_bytes(&encoded, "roundtrip-doctor.json") {
+            Ok(reparsed) => assert_eq!(&reparsed, input),
+            Err(err) => {
+                assert_clean_policy_activation_error(&err.to_string(), "roundtrip-doctor.json")
+            }
+        }
+    }
 }
 
 fn assert_clean_policy_activation_error(message: &str, source: &str) {

@@ -209,6 +209,9 @@ fn validate_result_shape(result: Result<(), MigrationRollbackValidationError>) {
         Err(MigrationRollbackValidationError::ParentTraversal { path, .. }) => {
             assert!(path.split(['/', '\\']).any(|segment| segment == ".."));
         }
+        Err(MigrationRollbackValidationError::UnsafePathSeparator { path, .. }) => {
+            assert!(path.contains('\\'));
+        }
         Err(MigrationRollbackValidationError::EntryContentTooLarge {
             content_bytes, max, ..
         }) => {

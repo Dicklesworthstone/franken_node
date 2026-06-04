@@ -1,33 +1,79 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
 
 use frankenengine_node::storage::frankensqlite_adapter::{
-    FrankensqliteAdapter, AdapterConfig, CallerContext, CallerRole, PersistenceClass,
+    AdapterConfig, CallerContext, CallerRole, FrankensqliteAdapter, PersistenceClass,
     MAX_STORE_KEY_BYTES, MAX_STORE_VALUE_BYTES,
 };
 
 // Size limits for bounded fuzzing
 const MAX_OPERATIONS: usize = 16;
-const MAX_KEY_LEN: usize = 256.min(MAX_STORE_KEY_BYTES);
-const MAX_VALUE_LEN: usize = 1024.min(MAX_STORE_VALUE_BYTES);
+const MAX_KEY_LEN: usize = if MAX_STORE_KEY_BYTES < 256 {
+    MAX_STORE_KEY_BYTES
+} else {
+    256
+};
+const MAX_VALUE_LEN: usize = if MAX_STORE_VALUE_BYTES < 1024 {
+    MAX_STORE_VALUE_BYTES
+} else {
+    1024
+};
 const MAX_STRING_LEN: usize = 128;
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum FuzzCallerRole {
+    System,
+    Service,
+    ReadOnly,
+    Restricted,
+}
+
+impl From<FuzzCallerRole> for CallerRole {
+    fn from(role: FuzzCallerRole) -> Self {
+        match role {
+            FuzzCallerRole::System => Self::System,
+            FuzzCallerRole::Service => Self::Service,
+            FuzzCallerRole::ReadOnly => Self::ReadOnly,
+            FuzzCallerRole::Restricted => Self::Restricted,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum FuzzPersistenceClass {
+    ControlState,
+    AuditLog,
+    Snapshot,
+    Cache,
+}
+
+impl From<FuzzPersistenceClass> for PersistenceClass {
+    fn from(class: FuzzPersistenceClass) -> Self {
+        match class {
+            FuzzPersistenceClass::ControlState => Self::ControlState,
+            FuzzPersistenceClass::AuditLog => Self::AuditLog,
+            FuzzPersistenceClass::Snapshot => Self::Snapshot,
+            FuzzPersistenceClass::Cache => Self::Cache,
+        }
+    }
+}
 
 /// Fuzzable caller context with bounded strings
 #[derive(Debug, Clone, Arbitrary)]
 struct FuzzCallerContext {
     #[arbitrary(with = bounded_string)]
     caller_id: String,
-    role: CallerRole,
+    role: FuzzCallerRole,
     #[arbitrary(with = bounded_string)]
     trace_id: String,
 }
 
 impl From<FuzzCallerContext> for CallerContext {
     fn from(fuzz: FuzzCallerContext) -> Self {
-        CallerContext::new(fuzz.caller_id, fuzz.role, fuzz.trace_id)
+        CallerContext::new(fuzz.caller_id, fuzz.role.into(), fuzz.trace_id)
     }
 }
 
@@ -59,7 +105,7 @@ impl From<FuzzAdapterConfig> for AdapterConfig {
 enum StorageOp {
     Write {
         caller: FuzzCallerContext,
-        class: PersistenceClass,
+        class: FuzzPersistenceClass,
         #[arbitrary(with = bounded_key)]
         key: String,
         #[arbitrary(with = bounded_value)]
@@ -67,12 +113,12 @@ enum StorageOp {
     },
     Read {
         caller: FuzzCallerContext,
-        class: PersistenceClass,
+        class: FuzzPersistenceClass,
         #[arbitrary(with = bounded_key)]
         key: String,
     },
     WriteLegacy {
-        class: PersistenceClass,
+        class: FuzzPersistenceClass,
         #[arbitrary(with = bounded_key)]
         key: String,
         #[arbitrary(with = bounded_value)]
@@ -112,10 +158,10 @@ fn bounded_string(u: &mut Unstructured) -> arbitrary::Result<String> {
 fn bounded_db_path(u: &mut Unstructured) -> arbitrary::Result<String> {
     let path_type = u.int_in_range(0..=4)?;
     match path_type {
-        0 => Ok("memory.db".to_string()), // Valid relative path
+        0 => Ok("memory.db".to_string()),    // Valid relative path
         1 => Ok("/tmp/test.db".to_string()), // Valid absolute path
         2 => Ok("../escape.db".to_string()), // Path traversal attempt
-        3 => Ok("/etc/passwd".to_string()), // Dangerous absolute path
+        3 => Ok("/etc/passwd".to_string()),  // Dangerous absolute path
         4 => {
             // Random path with potential issues
             let mut path = bounded_string(u)?;
@@ -153,10 +199,10 @@ fn bounded_key(u: &mut Unstructured) -> arbitrary::Result<String> {
     for &byte in bytes {
         match byte {
             // Include problematic characters for log injection testing
-            0 => key.push('\0'), // Null byte
-            10 => key.push('\n'), // Newline
-            13 => key.push('\r'), // Carriage return
-            92 => key.push('\\'), // Backslash
+            0 => key.push('\0'),                            // Null byte
+            10 => key.push('\n'),                           // Newline
+            13 => key.push('\r'),                           // Carriage return
+            92 => key.push('\\'),                           // Backslash
             _ => key.push(char::from(byte.clamp(32, 126))), // Printable ASCII
         }
     }
@@ -196,14 +242,20 @@ fuzz_target!(|data: &[u8]| {
 
     // Track operation state for invariant checking
     let mut expected_keys: BTreeMap<(PersistenceClass, String), Vec<u8>> = BTreeMap::new();
-    let mut write_count = 0;
-    let mut read_count = 0;
+    let mut write_count: usize = 0;
+    let mut read_count: usize = 0;
 
     // Execute fuzzed operations sequence
     for op in input.operations {
         match op {
-            StorageOp::Write { caller, class, key, value } => {
+            StorageOp::Write {
+                caller,
+                class,
+                key,
+                value,
+            } => {
                 let caller_ctx: CallerContext = caller.into();
+                let class = PersistenceClass::from(class);
 
                 // Test write operation with authorization
                 match adapter.write(&caller_ctx, class, &key, &value) {
@@ -224,6 +276,7 @@ fuzz_target!(|data: &[u8]| {
 
             StorageOp::Read { caller, class, key } => {
                 let caller_ctx: CallerContext = caller.into();
+                let class = PersistenceClass::from(class);
 
                 // Test read operation with authorization
                 match adapter.read(&caller_ctx, class, &key) {
@@ -250,8 +303,11 @@ fuzz_target!(|data: &[u8]| {
             }
 
             StorageOp::WriteLegacy { class, key, value } => {
-                // Test legacy write path
-                match adapter.write_legacy(class, &key, &value) {
+                let class = PersistenceClass::from(class);
+                let caller_ctx = CallerContext::system("fuzz::legacy-write", "fuzz-legacy-write");
+
+                // Test the explicit system-caller path that replaced implicit legacy authorization.
+                match adapter.write(&caller_ctx, class, &key, &value) {
                     Ok(_) => {
                         expected_keys.insert((class, key.clone()), value);
                         write_count += 1;
@@ -275,7 +331,11 @@ fuzz_target!(|data: &[u8]| {
     assert!(summary.write_failures <= summary.total_writes);
 
     // Schema version should be reasonable
-    assert!(summary.schema_version <= 1000, "Schema version suspiciously high: {}", summary.schema_version);
+    assert!(
+        summary.schema_version <= 1000,
+        "Schema version suspiciously high: {}",
+        summary.schema_version
+    );
 
     // Replay metrics should be consistent
     assert!(summary.replay_mismatches <= summary.replay_count);

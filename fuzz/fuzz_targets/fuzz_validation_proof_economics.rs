@@ -1,19 +1,17 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use chrono::{DateTime, Utc, Duration};
+use chrono::{Duration, Utc};
+use libfuzzer_sys::fuzz_target;
 
 use frankenengine_node::observability::validation_proof_economics::{
-    ValidationProofEconomicsGenerator, ValidationProofEconomicsReport,
-    EconomicsReportingPeriod, SloTargets,
+    EconomicsReportingPeriod, SloTargets, ValidationProofEconomicsGenerator,
+    ValidationProofEconomicsReport,
 };
 use frankenengine_node::ops::validation_broker::{
-    ValidationProofStatus, ProofEvidenceSource, ProofQualification,
+    ProofEvidenceSource, ProofStatusKind, QueueState, ValidationProofStatus,
 };
-use frankenengine_node::ops::validation_proof_debt_ledger::{
-    ValidationProofDebtLedger, ValidationProofDebtClass, ValidationProofDebtState,
-};
+use frankenengine_node::ops::validation_proof_debt_ledger::build_validation_proof_debt_ledger;
 
 // Size limits for bounded fuzzing
 const MAX_PROOF_STATUSES: usize = 100;
@@ -21,6 +19,87 @@ const MAX_DEBT_ENTRIES: usize = 50;
 const MAX_DURATION_SECONDS: u64 = 86400 * 7; // 1 week max
 const MAX_SLO_VALUE: f64 = 1000000.0; // Reasonable upper bound
 const MAX_TIMESTAMP_OFFSET_SECONDS: i64 = 86400 * 365; // 1 year
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum FuzzProofEvidenceSource {
+    Unknown,
+    BrokerQueue,
+    FreshExecution,
+    SourceOnlyFallback,
+    ProofCacheHit,
+    CoalescedInflight,
+    CoalescedWaiter,
+    CoalescedCompleted,
+    CoalescerRejected,
+}
+
+impl From<FuzzProofEvidenceSource> for ProofEvidenceSource {
+    fn from(source: FuzzProofEvidenceSource) -> Self {
+        match source {
+            FuzzProofEvidenceSource::Unknown => Self::Unknown,
+            FuzzProofEvidenceSource::BrokerQueue => Self::BrokerQueue,
+            FuzzProofEvidenceSource::FreshExecution => Self::FreshExecution,
+            FuzzProofEvidenceSource::SourceOnlyFallback => Self::SourceOnlyFallback,
+            FuzzProofEvidenceSource::ProofCacheHit => Self::ProofCacheHit,
+            FuzzProofEvidenceSource::CoalescedInflight => Self::CoalescedInflight,
+            FuzzProofEvidenceSource::CoalescedWaiter => Self::CoalescedWaiter,
+            FuzzProofEvidenceSource::CoalescedCompleted => Self::CoalescedCompleted,
+            FuzzProofEvidenceSource::CoalescerRejected => Self::CoalescerRejected,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum FuzzProofStatusKind {
+    Unknown,
+    Queued,
+    Leased,
+    Running,
+    Reused,
+    Failed,
+    Passed,
+    SourceOnly,
+    Cancelled,
+}
+
+impl From<FuzzProofStatusKind> for ProofStatusKind {
+    fn from(status: FuzzProofStatusKind) -> Self {
+        match status {
+            FuzzProofStatusKind::Unknown => Self::Unknown,
+            FuzzProofStatusKind::Queued => Self::Queued,
+            FuzzProofStatusKind::Leased => Self::Leased,
+            FuzzProofStatusKind::Running => Self::Running,
+            FuzzProofStatusKind::Reused => Self::Reused,
+            FuzzProofStatusKind::Failed => Self::Failed,
+            FuzzProofStatusKind::Passed => Self::Passed,
+            FuzzProofStatusKind::SourceOnly => Self::SourceOnly,
+            FuzzProofStatusKind::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum FuzzQueueState {
+    Queued,
+    Leased,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl From<FuzzQueueState> for QueueState {
+    fn from(state: FuzzQueueState) -> Self {
+        match state {
+            FuzzQueueState::Queued => Self::Queued,
+            FuzzQueueState::Leased => Self::Leased,
+            FuzzQueueState::Running => Self::Running,
+            FuzzQueueState::Completed => Self::Completed,
+            FuzzQueueState::Failed => Self::Failed,
+            FuzzQueueState::Cancelled => Self::Cancelled,
+        }
+    }
+}
 
 /// Fuzzable SLO targets with bounded values
 #[derive(Debug, Clone, Arbitrary)]
@@ -77,30 +156,32 @@ impl From<FuzzEconomicsReportingPeriod> for EconomicsReportingPeriod {
 struct FuzzValidationProofStatus {
     #[arbitrary(with = bounded_proof_id)]
     proof_id: String,
-    proof_source: ProofEvidenceSource,
-    qualification: ProofQualification,
+    #[arbitrary(with = bounded_proof_id)]
+    bead_id: String,
+    #[arbitrary(with = bounded_proof_id)]
+    thread_id: String,
+    proof_source: FuzzProofEvidenceSource,
+    status: FuzzProofStatusKind,
+    queue_state: Option<FuzzQueueState>,
     deduplicated: bool,
+    #[arbitrary(with = bounded_queue_depth)]
+    queue_depth: usize,
     #[arbitrary(with = bounded_timestamp_offset)]
-    created_offset_seconds: i64,
-    #[arbitrary(with = bounded_wait_time)]
-    wait_time_seconds: f64,
-    #[arbitrary(with = bounded_processing_time)]
-    processing_time_seconds: f64,
+    observed_offset_seconds: i64,
 }
 
 impl From<FuzzValidationProofStatus> for ValidationProofStatus {
     fn from(fuzz: FuzzValidationProofStatus) -> Self {
-        let created_at = Utc::now() + Duration::seconds(fuzz.created_offset_seconds);
-
-        Self {
-            proof_id: fuzz.proof_id,
-            proof_source: fuzz.proof_source,
-            qualification: fuzz.qualification,
-            deduplicated: fuzz.deduplicated,
-            created_at,
-            wait_time_seconds: fuzz.wait_time_seconds,
-            processing_time_seconds: fuzz.processing_time_seconds,
-        }
+        let observed_at = Utc::now() + Duration::seconds(fuzz.observed_offset_seconds);
+        let mut status = Self::unknown(&fuzz.bead_id, &fuzz.thread_id, observed_at);
+        status.request_id = (!fuzz.proof_id.is_empty()).then_some(fuzz.proof_id);
+        status.proof_source = fuzz.proof_source.into();
+        status.status = fuzz.status.into();
+        status.queue_state = fuzz.queue_state.map(Into::into);
+        status.deduplicated = fuzz.deduplicated;
+        status.queue_depth = fuzz.queue_depth;
+        status.reason = Some("fuzz validation proof status".to_string());
+        status
     }
 }
 
@@ -109,12 +190,7 @@ impl From<FuzzValidationProofStatus> for ValidationProofStatus {
 struct FuzzDebtEntry {
     #[arbitrary(with = bounded_debt_id)]
     debt_id: String,
-    debt_class: ValidationProofDebtClass,
-    debt_state: ValidationProofDebtState,
-    #[arbitrary(with = bounded_timestamp_offset)]
-    created_offset_seconds: i64,
-    #[arbitrary(with = bounded_debt_amount)]
-    debt_amount: u64,
+    blocks_other_work: bool,
 }
 
 /// Operations to test on the economics generator
@@ -208,11 +284,11 @@ fn bounded_duration(u: &mut Unstructured) -> arbitrary::Result<u64> {
 fn bounded_proof_id(u: &mut Unstructured) -> arbitrary::Result<String> {
     let choice = u.int_in_range(0..=5)?;
     Ok(match choice {
-        0 => String::new(), // Empty
-        1 => "PROOF-001".to_string(), // Valid
+        0 => String::new(),              // Empty
+        1 => "PROOF-001".to_string(),    // Valid
         2 => "PROOF\x00002".to_string(), // Null byte
-        3 => "PROOF\n003".to_string(), // Newline
-        4 => "a".repeat(1000), // Very long
+        3 => "PROOF\n003".to_string(),   // Newline
+        4 => "a".repeat(1000),           // Very long
         5 => {
             let len = u.int_in_range(0..=100)?;
             let bytes = u.bytes(len)?;
@@ -226,29 +302,9 @@ fn bounded_debt_id(u: &mut Unstructured) -> arbitrary::Result<String> {
     bounded_proof_id(u) // Same logic
 }
 
-fn bounded_wait_time(u: &mut Unstructured) -> arbitrary::Result<f64> {
-    let value = u.choose(&[
-        0.0,
-        1.0,
-        60.0,
-        300.0,
-        3600.0,
-        f64::NAN,
-        f64::INFINITY,
-        -1.0,
-    ])?;
-    Ok(*value)
-}
-
-fn bounded_processing_time(u: &mut Unstructured) -> arbitrary::Result<f64> {
-    bounded_wait_time(u) // Same logic
-}
-
-fn bounded_debt_amount(u: &mut Unstructured) -> arbitrary::Result<u64> {
-    u.int_in_range(0..=1_000_000)
-}
-
-fn bounded_proof_statuses(u: &mut Unstructured) -> arbitrary::Result<Vec<FuzzValidationProofStatus>> {
+fn bounded_proof_statuses(
+    u: &mut Unstructured,
+) -> arbitrary::Result<Vec<FuzzValidationProofStatus>> {
     let len = u.int_in_range(0..=MAX_PROOF_STATUSES)?;
     (0..len).map(|_| u.arbitrary()).collect()
 }
@@ -258,7 +314,9 @@ fn bounded_debt_entries(u: &mut Unstructured) -> arbitrary::Result<Vec<FuzzDebtE
     (0..len).map(|_| u.arbitrary()).collect()
 }
 
-fn bounded_economics_operations(u: &mut Unstructured) -> arbitrary::Result<Vec<EconomicsOperation>> {
+fn bounded_economics_operations(
+    u: &mut Unstructured,
+) -> arbitrary::Result<Vec<EconomicsOperation>> {
     let len = u.int_in_range(1..=8)?;
     (0..len).map(|_| u.arbitrary()).collect()
 }
@@ -297,23 +355,15 @@ fuzz_target!(|data: &[u8]| {
 
                 // Convert fuzz inputs to real types
                 let period: EconomicsReportingPeriod = reporting_period.into();
-                let statuses: Vec<ValidationProofStatus> = proof_statuses
-                    .into_iter()
-                    .map(|s| s.into())
-                    .collect();
+                let statuses: Vec<ValidationProofStatus> =
+                    proof_statuses.into_iter().map(|s| s.into()).collect();
 
-                // Create debt ledger with fuzzed entries
-                let mut debt_ledger = ValidationProofDebtLedger::new();
-                for debt_entry in debt_entries {
-                    let created_at = Utc::now() + Duration::seconds(debt_entry.created_offset_seconds);
-                    debt_ledger.add_debt(
-                        debt_entry.debt_id,
-                        debt_entry.debt_class,
-                        debt_entry.debt_state,
-                        created_at,
-                        debt_entry.debt_amount,
-                    );
-                }
+                let blocking_beads = debt_entries
+                    .iter()
+                    .filter(|entry| entry.blocks_other_work)
+                    .map(|entry| entry.debt_id.as_str());
+                let debt_ledger =
+                    build_validation_proof_debt_ledger(&statuses, Utc::now(), blocking_beads);
 
                 // Generate the report
                 let report = generator.generate_report(&statuses, &debt_ledger, period);
@@ -321,8 +371,7 @@ fuzz_target!(|data: &[u8]| {
 
                 // Verify report properties
                 assert_eq!(
-                    report.schema_version,
-                    "franken-node/validation-proof-economics/v1",
+                    report.schema_version, "franken-node/validation-proof-economics/v1",
                     "Schema version should be consistent"
                 );
 
@@ -333,11 +382,13 @@ fuzz_target!(|data: &[u8]| {
                 );
 
                 let calculated_duration = (report.reporting_period.end_time
-                    - report.reporting_period.start_time).num_seconds() as u64;
+                    - report.reporting_period.start_time)
+                    .num_seconds() as u64;
 
                 // Allow some tolerance for duration calculation
                 assert!(
-                    calculated_duration <= report.reporting_period.duration_seconds.saturating_add(60),
+                    calculated_duration
+                        <= report.reporting_period.duration_seconds.saturating_add(60),
                     "Calculated duration should match reported duration (with tolerance)"
                 );
 
@@ -359,7 +410,8 @@ fuzz_target!(|data: &[u8]| {
                     if slo_metric.current_value.is_finite() && slo_metric.target_value.is_finite() {
                         // Normal comparison case
                         assert!(
-                            slo_metric.current_value >= 0.0 || slo_metric.metric_name.contains("offset"),
+                            slo_metric.current_value >= 0.0
+                                || slo_metric.metric_name.contains("offset"),
                             "Metrics should generally be non-negative unless they're offset values"
                         );
                     }
@@ -367,9 +419,17 @@ fuzz_target!(|data: &[u8]| {
                 }
 
                 // Economics breakdown should have consistent totals
-                let breakdown_total = report.economics_breakdown.savings_by_source.values().sum::<f64>();
-                if breakdown_total.is_finite() {
-                    assert!(breakdown_total >= 0.0, "Total savings should be non-negative");
+                let breakdown_total = report
+                    .economics_breakdown
+                    .savings_by_evidence_source
+                    .values()
+                    .map(|savings| savings.estimated_time_saved_seconds)
+                    .sum::<u64>();
+                if breakdown_total > 0 {
+                    assert!(
+                        report.summary.worker_time_saved_seconds > 0,
+                        "Breakdown savings imply summary worker time savings"
+                    );
                 }
             }
 
@@ -377,17 +437,33 @@ fuzz_target!(|data: &[u8]| {
                 // Test default SLO targets
                 let default_targets = SloTargets::default();
 
-                assert!(default_targets.max_queue_depth > 0, "Default queue depth should be positive");
-                assert!(default_targets.max_average_wait_time_seconds > 0.0, "Default wait time should be positive");
-                assert!(default_targets.max_failure_rate >= 0.0 && default_targets.max_failure_rate <= 1.0,
-                       "Default failure rate should be between 0 and 1");
-                assert!(default_targets.max_debt_age_seconds > 0.0, "Default debt age should be positive");
-                assert!(default_targets.min_coalescing_efficiency >= 0.0 && default_targets.min_coalescing_efficiency <= 1.0,
-                       "Default coalescing efficiency should be between 0 and 1");
+                assert!(
+                    default_targets.max_queue_depth > 0,
+                    "Default queue depth should be positive"
+                );
+                assert!(
+                    default_targets.max_average_wait_time_seconds > 0.0,
+                    "Default wait time should be positive"
+                );
+                assert!(
+                    default_targets.max_failure_rate >= 0.0
+                        && default_targets.max_failure_rate <= 1.0,
+                    "Default failure rate should be between 0 and 1"
+                );
+                assert!(
+                    default_targets.max_debt_age_seconds > 0.0,
+                    "Default debt age should be positive"
+                );
+                assert!(
+                    default_targets.min_coalescing_efficiency >= 0.0
+                        && default_targets.min_coalescing_efficiency <= 1.0,
+                    "Default coalescing efficiency should be between 0 and 1"
+                );
 
                 // Test generator creation with defaults
                 let default_generator = ValidationProofEconomicsGenerator::new();
-                let custom_generator = ValidationProofEconomicsGenerator::with_slo_targets(default_targets);
+                let custom_generator =
+                    ValidationProofEconomicsGenerator::with_slo_targets(default_targets);
 
                 // Both should work without panicking
                 let _ = default_generator;
@@ -406,22 +482,15 @@ fuzz_target!(|data: &[u8]| {
                 let targets: SloTargets = slo_targets.into();
                 let generator = ValidationProofEconomicsGenerator::with_slo_targets(targets);
                 let period: EconomicsReportingPeriod = reporting_period.into();
-                let statuses: Vec<ValidationProofStatus> = proof_statuses
-                    .into_iter()
-                    .map(|s| s.into())
-                    .collect();
+                let statuses: Vec<ValidationProofStatus> =
+                    proof_statuses.into_iter().map(|s| s.into()).collect();
 
-                let mut debt_ledger = ValidationProofDebtLedger::new();
-                for debt_entry in debt_entries {
-                    let created_at = Utc::now() + Duration::seconds(debt_entry.created_offset_seconds);
-                    debt_ledger.add_debt(
-                        debt_entry.debt_id,
-                        debt_entry.debt_class,
-                        debt_entry.debt_state,
-                        created_at,
-                        debt_entry.debt_amount,
-                    );
-                }
+                let blocking_beads = debt_entries
+                    .iter()
+                    .filter(|entry| entry.blocks_other_work)
+                    .map(|entry| entry.debt_id.as_str());
+                let debt_ledger =
+                    build_validation_proof_debt_ledger(&statuses, Utc::now(), blocking_beads);
 
                 let report = generator.generate_report(&statuses, &debt_ledger, period);
 
@@ -432,15 +501,17 @@ fuzz_target!(|data: &[u8]| {
 
                         // Verify JSON is not empty
                         assert!(!json_str.is_empty(), "Serialized JSON should not be empty");
-                        assert!(json_str.contains("schema_version"), "JSON should contain schema version");
+                        assert!(
+                            json_str.contains("schema_version"),
+                            "JSON should contain schema version"
+                        );
 
                         // Test round-trip deserialization
                         match serde_json::from_str::<ValidationProofEconomicsReport>(&json_str) {
                             Ok(deserialized) => {
                                 // Verify round-trip consistency
                                 assert_eq!(
-                                    report.schema_version,
-                                    deserialized.schema_version,
+                                    report.schema_version, deserialized.schema_version,
                                     "Schema version should survive round-trip"
                                 );
                                 assert_eq!(
@@ -463,11 +534,20 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Invariant checks - these must hold regardless of input
-    assert!(successful_generations <= report_count, "Successful generations should not exceed attempts");
-    assert!(successful_serializations <= serialization_attempts, "Successful serializations should not exceed attempts");
+    assert!(
+        successful_generations <= report_count,
+        "Successful generations should not exceed attempts"
+    );
+    assert!(
+        successful_serializations <= serialization_attempts,
+        "Successful serializations should not exceed attempts"
+    );
 
     // At least one operation should have been attempted
-    assert!(report_count > 0 || serialization_attempts > 0, "At least one operation should be attempted");
+    assert!(
+        report_count > 0 || serialization_attempts > 0,
+        "At least one operation should be attempted"
+    );
 
     // Test edge cases with extreme SLO values
     let extreme_targets = SloTargets {
@@ -480,7 +560,8 @@ fuzz_target!(|data: &[u8]| {
 
     let extreme_generator = ValidationProofEconomicsGenerator::with_slo_targets(extreme_targets);
     let empty_statuses: Vec<ValidationProofStatus> = vec![];
-    let empty_debt_ledger = ValidationProofDebtLedger::new();
+    let empty_debt_ledger =
+        build_validation_proof_debt_ledger(&empty_statuses, Utc::now(), Vec::<String>::new());
     let now = Utc::now();
     let extreme_period = EconomicsReportingPeriod {
         start_time: now,
@@ -489,5 +570,6 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // This should not panic even with extreme values
-    let _extreme_report = extreme_generator.generate_report(&empty_statuses, &empty_debt_ledger, extreme_period);
+    let _extreme_report =
+        extreme_generator.generate_report(&empty_statuses, &empty_debt_ledger, extreme_period);
 });

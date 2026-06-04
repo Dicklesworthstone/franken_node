@@ -1,13 +1,11 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
+use frankenengine_node::observability::evidence_ledger::{test_entry, DecisionKind, EvidenceEntry};
 use frankenengine_node::observability::witness_ref::{
-    WitnessRef, WitnessId, WitnessKind, WitnessSet, WitnessValidator,
-};
-use frankenengine_node::observability::evidence_ledger::{
-    EvidenceEntry, DecisionKind, EvidenceEntryBuilder,
+    WitnessId, WitnessKind, WitnessRef, WitnessSet, WitnessValidator,
 };
 
 // Size limits for bounded fuzzing
@@ -17,12 +15,56 @@ const MAX_LOCATOR_LEN: usize = 512;
 const MAX_WITNESS_COUNT: usize = 32;
 const MAX_ID_LEN: usize = 256;
 
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum FuzzWitnessKind {
+    Telemetry,
+    StateSnapshot,
+    ProofArtifact,
+    ExternalSignal,
+}
+
+impl From<FuzzWitnessKind> for WitnessKind {
+    fn from(kind: FuzzWitnessKind) -> Self {
+        match kind {
+            FuzzWitnessKind::Telemetry => Self::Telemetry,
+            FuzzWitnessKind::StateSnapshot => Self::StateSnapshot,
+            FuzzWitnessKind::ProofArtifact => Self::ProofArtifact,
+            FuzzWitnessKind::ExternalSignal => Self::ExternalSignal,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum FuzzDecisionKind {
+    Admit,
+    Deny,
+    Quarantine,
+    Release,
+    Rollback,
+    Throttle,
+    Escalate,
+}
+
+impl From<FuzzDecisionKind> for DecisionKind {
+    fn from(kind: FuzzDecisionKind) -> Self {
+        match kind {
+            FuzzDecisionKind::Admit => Self::Admit,
+            FuzzDecisionKind::Deny => Self::Deny,
+            FuzzDecisionKind::Quarantine => Self::Quarantine,
+            FuzzDecisionKind::Release => Self::Release,
+            FuzzDecisionKind::Rollback => Self::Rollback,
+            FuzzDecisionKind::Throttle => Self::Throttle,
+            FuzzDecisionKind::Escalate => Self::Escalate,
+        }
+    }
+}
+
 /// Fuzzable witness reference with bounded strings
 #[derive(Debug, Clone, Arbitrary)]
 struct FuzzWitnessRef {
     #[arbitrary(with = bounded_witness_id)]
     witness_id: String,
-    witness_kind: WitnessKind,
+    witness_kind: FuzzWitnessKind,
     #[arbitrary(with = bounded_locator)]
     locator: Option<String>,
     #[arbitrary(with = bounded_hash)]
@@ -31,7 +73,11 @@ struct FuzzWitnessRef {
 
 impl From<FuzzWitnessRef> for WitnessRef {
     fn from(fuzz: FuzzWitnessRef) -> Self {
-        let mut witness = WitnessRef::new(fuzz.witness_id, fuzz.witness_kind, fuzz.integrity_hash);
+        let mut witness = WitnessRef::new(
+            fuzz.witness_id,
+            fuzz.witness_kind.into(),
+            fuzz.integrity_hash,
+        );
         if let Some(locator) = fuzz.locator {
             witness = witness.with_locator(locator);
         }
@@ -44,7 +90,7 @@ impl From<FuzzWitnessRef> for WitnessRef {
 struct FuzzEvidenceEntry {
     #[arbitrary(with = bounded_decision_id)]
     decision_id: String,
-    decision_kind: DecisionKind,
+    decision_kind: FuzzDecisionKind,
     #[arbitrary(with = bounded_description)]
     description: String,
     #[arbitrary(with = bounded_context)]
@@ -53,10 +99,13 @@ struct FuzzEvidenceEntry {
 
 impl From<FuzzEvidenceEntry> for EvidenceEntry {
     fn from(fuzz: FuzzEvidenceEntry) -> Self {
-        EvidenceEntryBuilder::new(fuzz.decision_id, fuzz.decision_kind)
-            .with_description(fuzz.description)
-            .with_context(fuzz.context)
-            .build()
+        let mut entry = test_entry(&fuzz.decision_id, 1);
+        entry.decision_kind = fuzz.decision_kind.into();
+        entry.payload = serde_json::json!({
+            "description": fuzz.description,
+            "context": fuzz.context,
+        });
+        entry
     }
 }
 
@@ -102,14 +151,14 @@ struct FuzzInput {
 fn bounded_witness_id(u: &mut Unstructured) -> arbitrary::Result<String> {
     let choice = u.int_in_range(0..=8)?;
     Ok(match choice {
-        0 => String::new(), // Empty - should be invalid
-        1 => "WIT-001".to_string(), // Valid format
-        2 => " WIT-002".to_string(), // Leading space
-        3 => "WIT-003 ".to_string(), // Trailing space
+        0 => String::new(),            // Empty - should be invalid
+        1 => "WIT-001".to_string(),    // Valid format
+        2 => " WIT-002".to_string(),   // Leading space
+        3 => "WIT-003 ".to_string(),   // Trailing space
         4 => "WIT\x00004".to_string(), // Null byte
-        5 => "WIT\n005".to_string(), // Newline
-        6 => "WIT-006\t".to_string(), // Tab
-        7 => "a".repeat(300), // Very long
+        5 => "WIT\n005".to_string(),   // Newline
+        6 => "WIT-006\t".to_string(),  // Tab
+        7 => "a".repeat(300),          // Very long
         8 => {
             // Random witness ID with potential issues
             let len = u.int_in_range(0..=MAX_ID_LEN)?;
@@ -131,18 +180,18 @@ fn bounded_locator(u: &mut Unstructured) -> arbitrary::Result<Option<String>> {
 fn bounded_locator_test(u: &mut Unstructured) -> arbitrary::Result<String> {
     let choice = u.int_in_range(0..=12)?;
     Ok(match choice {
-        0 => String::new(), // Empty - should be invalid
+        0 => String::new(),                          // Empty - should be invalid
         1 => "bundles/proof-123.bundle".to_string(), // Valid format
-        2 => "/absolute/path".to_string(), // Absolute path - should be invalid
-        3 => "//double-slash".to_string(), // Double slash start - invalid
-        4 => "path//double".to_string(), // Double slash middle - invalid
-        5 => "path/./current".to_string(), // Current dir - invalid
-        6 => "path/../parent".to_string(), // Parent dir traversal - invalid
-        7 => "path%20encoded".to_string(), // Percent encoding - invalid
-        8 => "path:with:colons".to_string(), // Colons - invalid
-        9 => "path@with@ats".to_string(), // At symbols - invalid
+        2 => "/absolute/path".to_string(),           // Absolute path - should be invalid
+        3 => "//double-slash".to_string(),           // Double slash start - invalid
+        4 => "path//double".to_string(),             // Double slash middle - invalid
+        5 => "path/./current".to_string(),           // Current dir - invalid
+        6 => "path/../parent".to_string(),           // Parent dir traversal - invalid
+        7 => "path%20encoded".to_string(),           // Percent encoding - invalid
+        8 => "path:with:colons".to_string(),         // Colons - invalid
+        9 => "path@with@ats".to_string(),            // At symbols - invalid
         10 => "path\\with\\backslashes".to_string(), // Backslashes - invalid
-        11 => "path\x00null".to_string(), // Null bytes - invalid
+        11 => "path\x00null".to_string(),            // Null bytes - invalid
         12 => {
             // Random locator with various characters
             let len = u.int_in_range(0..=MAX_LOCATOR_LEN)?;
@@ -226,31 +275,54 @@ fuzz_target!(|data: &[u8]| {
                 let hash_hex = witness_ref.hash_hex();
 
                 // Verify hash hex format
-                assert_eq!(hash_hex.len(), 64, "Hash hex should be 64 characters (32 bytes)");
-                assert!(hash_hex.chars().all(|c| c.is_ascii_hexdigit()),
-                       "Hash hex should contain only hex digits");
+                assert_eq!(
+                    hash_hex.len(),
+                    64,
+                    "Hash hex should be 64 characters (32 bytes)"
+                );
+                assert!(
+                    hash_hex.chars().all(|c| c.is_ascii_hexdigit()),
+                    "Hash hex should contain only hex digits"
+                );
 
                 // Verify witness ID is preserved
-                assert!(!witness_id_str.is_empty() || witness_id_str.trim() != witness_id_str,
-                       "Witness ID validation inconsistent");
+                assert!(
+                    !witness_id_str.is_empty() || witness_id_str.trim() != witness_id_str,
+                    "Witness ID validation inconsistent"
+                );
 
                 // Test locator validation if present
                 if let Some(ref locator) = witness_ref.replay_bundle_locator {
                     // Locator should follow validation rules
-                    let is_valid_locator = !locator.trim().is_empty() &&
-                                         locator.trim() == locator &&
-                                         locator.len() <= 512 &&
-                                         !locator.starts_with('/') &&
-                                         !locator.starts_with("//") &&
-                                         !locator.contains("//");
+                    let is_valid_locator = !locator.trim().is_empty()
+                        && locator.trim() == locator
+                        && locator.len() <= 512
+                        && !locator.starts_with('/')
+                        && !locator.starts_with("//")
+                        && !locator.contains("//");
 
                     // If locator is present, it should have passed validation
                     if is_valid_locator {
-                        assert!(!locator.contains(".."), "Valid locator should not contain parent dir refs");
-                        assert!(!locator.contains("%"), "Valid locator should not contain percent encoding");
-                        assert!(!locator.contains(":"), "Valid locator should not contain colons");
-                        assert!(!locator.contains("@"), "Valid locator should not contain at symbols");
-                        assert!(!locator.contains("\\"), "Valid locator should not contain backslashes");
+                        assert!(
+                            !locator.contains(".."),
+                            "Valid locator should not contain parent dir refs"
+                        );
+                        assert!(
+                            !locator.contains("%"),
+                            "Valid locator should not contain percent encoding"
+                        );
+                        assert!(
+                            !locator.contains(":"),
+                            "Valid locator should not contain colons"
+                        );
+                        assert!(
+                            !locator.contains("@"),
+                            "Valid locator should not contain at symbols"
+                        );
+                        assert!(
+                            !locator.contains("\\"),
+                            "Valid locator should not contain backslashes"
+                        );
                     }
                 }
             }
@@ -258,6 +330,7 @@ fuzz_target!(|data: &[u8]| {
             WitnessOperation::CreateWitnessSet { witnesses } => {
                 let mut witness_set = WitnessSet::new();
                 witness_set_count += 1;
+                let input_witnesses_empty = witnesses.is_empty();
 
                 let initial_count = witness_set.len();
                 assert_eq!(initial_count, 0, "New witness set should be empty");
@@ -268,13 +341,21 @@ fuzz_target!(|data: &[u8]| {
                     witness_set.add(witness_ref);
 
                     // Verify set doesn't exceed bounds
-                    assert!(witness_set.len() <= 4096, "Witness set should respect MAX_REFS bound");
+                    assert!(
+                        witness_set.len() <= 4096,
+                        "Witness set should respect MAX_REFS bound"
+                    );
                 }
 
                 // Test witness set properties
-                assert!(witness_set.len() >= initial_count, "Witness count should not decrease");
-                assert!(!witness_set.is_empty() || witnesses.is_empty(),
-                       "Empty witness set should only occur with empty input");
+                assert!(
+                    witness_set.len() >= initial_count,
+                    "Witness count should not decrease"
+                );
+                assert!(
+                    !witness_set.is_empty() || input_witnesses_empty,
+                    "Empty witness set should only occur with empty input"
+                );
             }
 
             WitnessOperation::ValidateWithWitnessSet { entry, witnesses } => {
@@ -295,16 +376,19 @@ fuzz_target!(|data: &[u8]| {
                         successful_validations += 1;
 
                         // Successful validation implies certain properties
-                        let decision_kind = evidence_entry.decision_kind();
-                        let is_high_impact = matches!(decision_kind,
-                            DecisionKind::Quarantine |
-                            DecisionKind::Release |
-                            DecisionKind::Escalate
+                        let decision_kind = evidence_entry.decision_kind;
+                        let is_high_impact = matches!(
+                            decision_kind,
+                            DecisionKind::Quarantine
+                                | DecisionKind::Release
+                                | DecisionKind::Escalate
                         );
 
                         if is_high_impact {
-                            assert!(!witness_set.is_empty(),
-                                   "High-impact decisions should have witness references");
+                            assert!(
+                                !witness_set.is_empty(),
+                                "High-impact decisions should have witness references"
+                            );
                         }
                     }
                     Err(_) => {
@@ -325,22 +409,28 @@ fuzz_target!(|data: &[u8]| {
                 let contains_double_slash = locator.contains("//");
 
                 // Test basic validation properties
-                if is_empty || has_whitespace_diff || too_long ||
-                   starts_with_slash || starts_with_double_slash || contains_double_slash {
+                if is_empty
+                    || has_whitespace_diff
+                    || too_long
+                    || starts_with_slash
+                    || starts_with_double_slash
+                    || contains_double_slash
+                {
                     // Should be invalid - but we don't assert since the function is internal
                 }
 
                 // Test character validation
                 let has_invalid_chars = locator.chars().any(|ch| {
-                    !ch.is_ascii() || ch.is_control() ||
-                    matches!(ch, '%' | ':' | '@' | '\\') ||
-                    !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | '.' | '/')
+                    !ch.is_ascii()
+                        || ch.is_control()
+                        || matches!(ch, '%' | ':' | '@' | '\\')
+                        || !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | '.' | '/')
                 });
 
                 // Test path component validation
-                let has_invalid_components = locator.split('/').any(|component| {
-                    component.is_empty() || component == "." || component == ".."
-                });
+                let has_invalid_components = locator
+                    .split('/')
+                    .any(|component| component.is_empty() || component == "." || component == "..");
 
                 // These conditions indicate an invalid locator
                 if has_invalid_chars || has_invalid_components {
@@ -364,14 +454,23 @@ fuzz_target!(|data: &[u8]| {
 
                 // Test ID as string operations
                 let as_str = _witness_id_obj.as_str();
-                assert_eq!(as_str, witness_id, "WitnessId should preserve original string");
+                assert_eq!(
+                    as_str, witness_id,
+                    "WitnessId should preserve original string"
+                );
 
                 // Test display formatting
                 let display_str = format!("{}", _witness_id_obj);
-                assert_eq!(display_str, witness_id, "Display format should match original");
+                assert_eq!(
+                    display_str, witness_id,
+                    "Display format should match original"
+                );
             }
 
-            WitnessOperation::HashIntegrityCheck { witness, expected_hash } => {
+            WitnessOperation::HashIntegrityCheck {
+                witness,
+                expected_hash,
+            } => {
                 let witness_ref: WitnessRef = witness.into();
 
                 // Test hash operations
@@ -379,17 +478,30 @@ fuzz_target!(|data: &[u8]| {
                 let expected_hex = hex::encode(expected_hash);
 
                 // Verify hash consistency
-                assert_eq!(hash_hex.len(), expected_hex.len(), "Hash hex length should be consistent");
-                assert!(hash_hex.chars().all(|c| c.is_ascii_hexdigit()),
-                       "Hash should only contain hex digits");
+                assert_eq!(
+                    hash_hex.len(),
+                    expected_hex.len(),
+                    "Hash hex length should be consistent"
+                );
+                assert!(
+                    hash_hex.chars().all(|c| c.is_ascii_hexdigit()),
+                    "Hash should only contain hex digits"
+                );
 
                 // Test hash integrity comparison
                 if witness_ref.integrity_hash == expected_hash {
-                    assert_eq!(hash_hex, expected_hex, "Hash hex should match when bytes match");
+                    assert_eq!(
+                        hash_hex, expected_hex,
+                        "Hash hex should match when bytes match"
+                    );
                 }
 
                 // Verify hash is always lowercase
-                assert_eq!(hash_hex, hash_hex.to_lowercase(), "Hash hex should be lowercase");
+                assert_eq!(
+                    hash_hex,
+                    hash_hex.to_lowercase(),
+                    "Hash hex should be lowercase"
+                );
             }
         }
     }
@@ -397,56 +509,74 @@ fuzz_target!(|data: &[u8]| {
     // Invariant checks - these must hold regardless of input
 
     // Count consistency
-    assert!(validation_attempts == successful_validations + failed_validations,
-           "Validation attempt count should equal success + failure count");
+    assert!(
+        validation_attempts == successful_validations + failed_validations,
+        "Validation attempt count should equal success + failure count"
+    );
 
     // Validator state consistency
-    assert!(validator.validated_count() >= successful_validations as u64,
-           "Validator validated count should be at least successful validations");
-    assert!(validator.rejected_count() >= failed_validations as u64,
-           "Validator rejected count should be at least failed validations");
+    assert!(
+        validator.validated_count() >= successful_validations as u64,
+        "Validator validated count should be at least successful validations"
+    );
+    assert!(
+        validator.rejected_count() >= failed_validations as u64,
+        "Validator rejected count should be at least failed validations"
+    );
 
     // Bounds checking
-    assert!(witness_ref_count <= MAX_OPERATIONS, "Witness ref count within bounds");
-    assert!(witness_set_count <= MAX_OPERATIONS, "Witness set count within bounds");
+    assert!(
+        witness_ref_count <= MAX_OPERATIONS,
+        "Witness ref count within bounds"
+    );
+    assert!(
+        witness_set_count <= MAX_OPERATIONS,
+        "Witness set count within bounds"
+    );
 
     // Test additional locator validation edge cases
-    let test_locators = [
-        "",                          // Empty
-        "/absolute",                 // Absolute path
-        "//double",                  // Double slash start
-        "path//middle",              // Double slash middle
-        "path/./current",            // Current directory
-        "path/../parent",            // Parent directory
-        "path%20space",              // Percent encoding
-        "path:colon",                // Colon
-        "path@at",                   // At symbol
-        "path\\backslash",           // Backslash
-        "valid/path",                // Valid case
-        "a".repeat(600),             // Too long
+    let test_locators = vec![
+        String::new(),                 // Empty
+        "/absolute".to_string(),       // Absolute path
+        "//double".to_string(),        // Double slash start
+        "path//middle".to_string(),    // Double slash middle
+        "path/./current".to_string(),  // Current directory
+        "path/../parent".to_string(),  // Parent directory
+        "path%20space".to_string(),    // Percent encoding
+        "path:colon".to_string(),      // Colon
+        "path@at".to_string(),         // At symbol
+        "path\\backslash".to_string(), // Backslash
+        "valid/path".to_string(),      // Valid case
+        "a".repeat(600),               // Too long
     ];
 
     for test_locator in &test_locators {
         // Create witness with each test locator
-        let test_witness = WitnessRef::new(
-            "test-witness",
-            WitnessKind::Telemetry,
-            [0; 32]
-        ).with_locator(test_locator);
+        let test_witness = WitnessRef::new("test-witness", WitnessKind::Telemetry, [0; 32])
+            .with_locator(test_locator.as_str());
 
         // Verify locator is preserved (validation happens at creation time)
         if let Some(ref locator) = test_witness.replay_bundle_locator {
-            assert_eq!(locator, test_locator, "Locator should be preserved as provided");
+            assert_eq!(
+                locator, test_locator,
+                "Locator should be preserved as provided"
+            );
         }
     }
 
     // Test witness kind enumeration
     for kind in WitnessKind::all() {
         let test_witness = WitnessRef::new("test", *kind, [1; 32]);
-        assert_eq!(test_witness.witness_kind, *kind, "Witness kind should be preserved");
+        assert_eq!(
+            test_witness.witness_kind, *kind,
+            "Witness kind should be preserved"
+        );
 
         let kind_label = kind.label();
         assert!(!kind_label.is_empty(), "Kind label should not be empty");
-        assert!(kind_label.len() < 32, "Kind label should be reasonable length");
+        assert!(
+            kind_label.len() < 32,
+            "Kind label should be reasonable length"
+        );
     }
 });

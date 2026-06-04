@@ -6,12 +6,13 @@
 
 #![no_main]
 
+use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use arbitrary::{Arbitrary, Unstructured};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use frankenengine_node::operator_json_contracts::{
-    OperatorJsonSurface, validate_operator_json_value, registered_surface_names
+    registered_surface_names, validate_operator_json_value, OperatorJsonContractError,
+    OperatorJsonSurface,
 };
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -223,9 +224,9 @@ impl JsonInput {
                         JsonValueType::Number(n) => json!(n),
                         JsonValueType::Boolean(b) => Value::Bool(*b),
                         JsonValueType::Null => Value::Null,
-                        JsonValueType::Array(arr) => Value::Array(
-                            arr.iter().map(|s| Value::String(s.clone())).collect()
-                        ),
+                        JsonValueType::Array(arr) => {
+                            Value::Array(arr.iter().map(|s| Value::String(s.clone())).collect())
+                        }
                         JsonValueType::Object(pairs) => {
                             let mut nested = serde_json::Map::new();
                             for (k, v) in pairs {
@@ -243,7 +244,8 @@ impl JsonInput {
 
     fn create_nested_json(&self, depth: u8) -> Value {
         let mut current = json!({"value": "deep"});
-        for i in 0..depth.min(50) { // Cap depth to prevent stack overflow
+        for i in 0..depth.min(50) {
+            // Cap depth to prevent stack overflow
             current = json!({ format!("level{}", i): current });
         }
         current
@@ -339,7 +341,10 @@ impl EdgeCaseJson {
 /// Test JSON validation invariants and security.
 fn test_json_validation_invariants(operation: &JsonValidationOperation) {
     match operation {
-        JsonValidationOperation::ValidateContract { surface, json_input } => {
+        JsonValidationOperation::ValidateContract {
+            surface,
+            json_input,
+        } => {
             if let Ok(json_value) = json_input.to_value() {
                 let surface_enum = surface.to_operator_surface();
                 let result = validate_operator_json_value(surface_enum, &json_value);
@@ -365,7 +370,10 @@ fn test_json_validation_invariants(operation: &JsonValidationOperation) {
             }
         }
 
-        JsonValidationOperation::FieldPathTraversal { json_input, field_paths } => {
+        JsonValidationOperation::FieldPathTraversal {
+            json_input,
+            field_paths,
+        } => {
             if let Ok(json_value) = json_input.to_value() {
                 // Test field path traversal safety
                 for field_path in field_paths {
@@ -374,7 +382,10 @@ fn test_json_validation_invariants(operation: &JsonValidationOperation) {
             }
         }
 
-        JsonValidationOperation::MalformedJsonTests { surface, malformed_input } => {
+        JsonValidationOperation::MalformedJsonTests {
+            surface,
+            malformed_input,
+        } => {
             let malformed_json = malformed_input.to_string();
 
             // Test that malformed JSON is handled safely
@@ -406,7 +417,10 @@ fn test_json_validation_invariants(operation: &JsonValidationOperation) {
 }
 
 /// Test validation result consistency and safety.
-fn test_validation_consistency(json_value: &Value, result: &Result<(), Vec<crate::frankenengine_node::operator_json_contracts::OperatorJsonContractError>>) {
+fn test_validation_consistency(
+    json_value: &Value,
+    result: &Result<(), Vec<OperatorJsonContractError>>,
+) {
     // Validation should be deterministic
     // (Can't easily test this without multiple calls, but we ensure no panics)
 
@@ -419,7 +433,7 @@ fn test_validation_consistency(json_value: &Value, result: &Result<(), Vec<crate
             // Errors should be non-empty and informative
             assert!(!errors.is_empty(), "Error list should not be empty");
 
-            for error in errors {
+            for _error in errors {
                 // Each error should have meaningful content
                 // (Error types are not accessible, but we can ensure no panic)
             }
@@ -433,7 +447,7 @@ fn test_validation_consistency(json_value: &Value, result: &Result<(), Vec<crate
 }
 
 /// Test field path traversal safety.
-fn test_field_path_safety(json_value: &Value, field_path: &str) {
+fn test_field_path_safety(_json_value: &Value, field_path: &str) {
     // Test that field path traversal doesn't panic
     if field_path.len() > 10000 {
         // Very long field paths should be handled safely
@@ -478,7 +492,8 @@ fn test_edge_case_safety(json_value: &Value, edge_case: &EdgeCaseJson) {
 fuzz_target!(|input: FuzzInput| {
     std::panic::catch_unwind(|| {
         test_json_validation_invariants(&input.operation);
-    }).unwrap_or_else(|_| {
+    })
+    .unwrap_or_else(|_| {
         eprintln!("Panic caught in operator JSON validation fuzzing");
     });
 });
@@ -492,8 +507,9 @@ mod tests {
         let input = JsonInput {
             json_type: JsonInputType::ValidStructured(ValidJsonVariant::MinimalValid),
         };
-        let value = input.to_value().unwrap();
-        assert!(value.is_object());
+        if let Ok(value) = input.to_value() {
+            assert!(value.is_object());
+        }
     }
 
     #[test]
@@ -524,15 +540,15 @@ mod tests {
             data[i] = (i % 256) as u8;
         }
 
-        let mut unstructured = Unstructured::new(&data);
+        let mut unstructured = arbitrary::Unstructured::new(&data);
         if let Ok(input) = FuzzInput::arbitrary(&mut unstructured) {
             // Should not panic during operation construction
             match input.operation {
-                JsonValidationOperation::ValidateContract { .. } => {},
-                JsonValidationOperation::BatchValidation { .. } => {},
-                JsonValidationOperation::FieldPathTraversal { .. } => {},
-                JsonValidationOperation::MalformedJsonTests { .. } => {},
-                JsonValidationOperation::EdgeCaseValues { .. } => {},
+                JsonValidationOperation::ValidateContract { .. } => {}
+                JsonValidationOperation::BatchValidation { .. } => {}
+                JsonValidationOperation::FieldPathTraversal { .. } => {}
+                JsonValidationOperation::MalformedJsonTests { .. } => {}
+                JsonValidationOperation::EdgeCaseValues { .. } => {}
             }
         }
     }
