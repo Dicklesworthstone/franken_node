@@ -11,10 +11,6 @@ ignore = [
   # paste 1.0.15 — unmaintained. Transitive only: franken_engine -> parquet -> fp-io -> paste.
   # No franken_node exec path; fix is upstream/engine-side. Tracked: bd-rjc2m sibling.
   "RUSTSEC-2024-0436",
-  # serde_cbor 0.11.2 — unmaintained. DIRECT dep behind `cbor-serialization` feature.
-  # Remediation: migrate to `ciborium` (schema-bump discipline — touches canonical bytes).
-  # Tracked: gauntlet G-4. Remove this ignore once the swap lands.
-  "RUSTSEC-2021-0127",
 ]
 
 [licenses]
@@ -48,11 +44,12 @@ private = { ignore = true }
 # NOTE (gauntlet H-021): the first-party FrankenSuite path-dep crates (fsqlite-*,
 # ftui-*, asupersync, fastapi-*) omit the `license` field in their manifests, so
 # `cargo deny check licenses` still reports them `unlicensed`. The CORRECT fix is
-# upstream: add `license = "MIT"` to each FrankenSuite crate (they are all MIT, same
-# as this repo's LICENSE). Until then, advisories/bans/sources gate GREEN; the license
+# upstream: add `license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"` where the
+# FrankenSuite rider applies, and plain `MIT` only for crates that genuinely carry
+# plain MIT terms. Until then, advisories/bans/sources gate GREEN; the license
 # category has a known first-party residual. Do NOT paper over it with per-crate
-# clarify blocks here — fix the source manifests. To run only the green categories in
-# CI today: `cargo deny check advisories bans sources`.
+# clarify blocks here — fix the source manifests. To run only the green categories
+# in CI today: `cargo deny check advisories bans sources`.
 
 [bans]
 multiple-versions = "warn"

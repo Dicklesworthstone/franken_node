@@ -92,6 +92,8 @@ pub type Ed25519PrivateKey = SigningKey;
 pub type Ed25519PublicKey = VerifyingKey;
 /// Canonical signature algorithm/version bound into every decision receipt payload.
 pub const DECISION_RECEIPT_SIGNATURE_VERSION: &str = "ed25519-v1";
+/// CBOR export envelope schema for decision receipt bundles.
+pub const DECISION_RECEIPT_CBOR_EXPORT_SCHEMA_VERSION: &str = "decision-receipt-cbor-v2";
 /// Maximum age in seconds for receipt freshness validation (fail-closed).
 /// Receipts older than this are rejected to prevent replay attacks via clock skew.
 pub const MAX_RECEIPT_AGE_SECS: u64 = 3600; // 1 hour
@@ -151,6 +153,13 @@ pub struct ReceiptQuery {
     pub from_timestamp: Option<String>,
     pub to_timestamp: Option<String>,
     pub limit: Option<usize>,
+}
+
+#[cfg(feature = "cbor-serialization")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ReceiptCborExportEnvelope {
+    schema_version: String,
+    receipts: Vec<SignedReceipt>,
 }
 
 /// Replay protection tracker for used receipt nonces.
@@ -231,10 +240,16 @@ pub enum ReceiptError {
     JsonEncode(serde_json::Error),
     #[error("failed to encode receipts as CBOR: {0}")]
     #[cfg(feature = "cbor-serialization")]
-    CborEncode(serde_cbor::Error),
+    CborEncode(String),
     #[error("failed to decode receipts from CBOR: {0}")]
     #[cfg(feature = "cbor-serialization")]
-    CborDecode(serde_cbor::Error),
+    CborDecode(String),
+    #[error("unsupported decision receipt CBOR schema_version '{found}', expected '{expected}'")]
+    #[cfg(feature = "cbor-serialization")]
+    UnsupportedCborSchemaVersion {
+        expected: &'static str,
+        found: String,
+    },
     #[error("failed to decode signature: {0}")]
     SignatureDecode(base64::DecodeError),
     #[error("invalid Ed25519 signature bytes")]
@@ -726,25 +741,50 @@ pub fn export_receipts_json(
         .map_err(ReceiptError::JsonEncode)
 }
 
+#[cfg(feature = "cbor-serialization")]
+fn encode_cbor_to_vec(value: &impl Serialize) -> Result<Vec<u8>, ReceiptError> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes)
+        .map_err(|source| ReceiptError::CborEncode(source.to_string()))?;
+    Ok(bytes)
+}
+
+#[cfg(feature = "cbor-serialization")]
+fn decode_cbor_from_slice<'de, T>(bytes: &'de [u8]) -> Result<T, ReceiptError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    ciborium::de::from_reader(bytes).map_err(|source| ReceiptError::CborDecode(source.to_string()))
+}
+
 /// Export filtered receipts as CBOR.
 #[cfg(feature = "cbor-serialization")]
 pub fn export_receipts_cbor(
     receipts: &[SignedReceipt],
     filter: &ReceiptQuery,
 ) -> Result<Vec<u8>, ReceiptError> {
-    serde_cbor::to_vec(&export_receipts(receipts, filter)).map_err(ReceiptError::CborEncode)
+    let envelope = ReceiptCborExportEnvelope {
+        schema_version: DECISION_RECEIPT_CBOR_EXPORT_SCHEMA_VERSION.to_string(),
+        receipts: export_receipts(receipts, filter),
+    };
+    encode_cbor_to_vec(&envelope)
 }
 
 /// Import receipts from CBOR.
 #[cfg(feature = "cbor-serialization")]
 pub fn import_receipts_cbor(bytes: &[u8]) -> Result<Vec<SignedReceipt>, ReceiptError> {
-    let receipts: Vec<SignedReceipt> =
-        serde_cbor::from_slice(bytes).map_err(ReceiptError::CborDecode)?;
-    for signed in &receipts {
+    let envelope: ReceiptCborExportEnvelope = decode_cbor_from_slice(bytes)?;
+    if envelope.schema_version != DECISION_RECEIPT_CBOR_EXPORT_SCHEMA_VERSION {
+        return Err(ReceiptError::UnsupportedCborSchemaVersion {
+            expected: DECISION_RECEIPT_CBOR_EXPORT_SCHEMA_VERSION,
+            found: envelope.schema_version,
+        });
+    }
+    for signed in &envelope.receipts {
         validate_receipt_payload_fields(&signed.receipt)?;
         validate_confidence(signed.receipt.confidence)?;
     }
-    Ok(receipts)
+    Ok(envelope.receipts)
 }
 
 /// Write filtered receipt export to file. `.cbor` writes binary CBOR; all other
@@ -1616,6 +1656,7 @@ mod tests {
         assert!(matches!(err, ReceiptError::HashChainMismatch { .. }));
     }
 
+    #[cfg(feature = "cbor-serialization")]
     #[test]
     fn cbor_roundtrip_preserves_receipts() {
         let key = demo_signing_key();
@@ -1635,6 +1676,47 @@ mod tests {
 
     #[test]
     #[cfg(feature = "cbor-serialization")]
+    fn cbor_export_uses_versioned_envelope() {
+        let key = demo_signing_key();
+        let mut chain = Vec::new();
+        append_signed_receipt(
+            &mut chain,
+            make_receipt("policy_change", Decision::Approved),
+            &key,
+        )
+        .expect("append");
+
+        let encoded = export_receipts_cbor(&chain, &ReceiptQuery::default()).expect("encode CBOR");
+        let envelope: ReceiptCborExportEnvelope =
+            decode_cbor_from_slice(&encoded).expect("decode envelope");
+
+        assert_eq!(
+            envelope.schema_version,
+            DECISION_RECEIPT_CBOR_EXPORT_SCHEMA_VERSION
+        );
+        assert_eq!(envelope.receipts, chain);
+    }
+
+    #[test]
+    #[cfg(feature = "cbor-serialization")]
+    fn import_receipts_cbor_rejects_wrong_envelope_schema_version() {
+        let envelope = ReceiptCborExportEnvelope {
+            schema_version: "decision-receipt-cbor-v1".to_string(),
+            receipts: Vec::new(),
+        };
+        let encoded = encode_cbor_to_vec(&envelope).expect("encode wrong schema");
+
+        let err = import_receipts_cbor(&encoded).expect_err("wrong schema must fail");
+
+        assert!(matches!(
+            err,
+            ReceiptError::UnsupportedCborSchemaVersion { ref found, .. }
+                if found == "decision-receipt-cbor-v1"
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "cbor-serialization")]
     fn import_receipts_cbor_rejects_invalid_bytes() {
         let err = import_receipts_cbor(b"not-cbor").expect_err("invalid CBOR must fail");
 
@@ -1644,10 +1726,13 @@ mod tests {
     #[test]
     #[cfg(feature = "cbor-serialization")]
     fn import_receipts_cbor_rejects_partially_shaped_receipt_list() {
-        let encoded = serde_cbor::to_vec(&vec![json!({
-            "receipt_id": "receipt-1",
-            "action_name": "quarantine"
-        })])
+        let encoded = encode_cbor_to_vec(&json!({
+            "schema_version": DECISION_RECEIPT_CBOR_EXPORT_SCHEMA_VERSION,
+            "receipts": [{
+                "receipt_id": "receipt-1",
+                "action_name": "quarantine"
+            }]
+        }))
         .expect("encode partial receipt");
 
         let err = import_receipts_cbor(&encoded).expect_err("partial receipt list must fail");
@@ -1776,7 +1861,7 @@ mod tests {
     #[test]
     #[cfg(feature = "cbor-serialization")]
     fn import_receipts_cbor_rejects_non_receipt_shape() {
-        let encoded = serde_cbor::to_vec(&json!({"not": "a receipt list"})).expect("encode");
+        let encoded = encode_cbor_to_vec(&json!({"not": "a receipt list"})).expect("encode");
 
         let err = import_receipts_cbor(&encoded).expect_err("non-receipt CBOR shape must fail");
 

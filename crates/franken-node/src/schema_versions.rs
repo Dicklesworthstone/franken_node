@@ -88,6 +88,7 @@ pub const CONFORMANCE_SUITE_VERSION: &str = "1.0.0";
 
 // ── Security ───────────────────────────────────────────────────────
 pub const INTENT_FIREWALL: &str = "fw-v1.0";
+pub const DECISION_RECEIPT_CBOR_EXPORT: &str = "decision-receipt-cbor-v2";
 pub const ZK_ATTESTATION: &str = "zka-v1.0";
 pub const STAKING_GOVERNANCE: &str = "staking-v1.0";
 pub const LINEAGE_TRACKER: &str = "ifl-v1.0";
@@ -239,6 +240,7 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("conformance_suite_version", CONFORMANCE_SUITE_VERSION),
         // Security
         ("intent_firewall", INTENT_FIREWALL),
+        ("decision_receipt_cbor_export", DECISION_RECEIPT_CBOR_EXPORT),
         ("zk_attestation", ZK_ATTESTATION),
         ("staking_governance", STAKING_GOVERNANCE),
         ("lineage_tracker", LINEAGE_TRACKER),

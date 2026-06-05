@@ -105,11 +105,12 @@ Everything else in the workspace is at latest within pinned semver range.
 
 ## Phase C — flagged deprecated
 
-### serde_cbor: 0.11.2 (unmaintained since 2020)
+### serde_cbor: 0.11.2 → ciborium 0.2.2 ✓ DONE (2026-06-05)
 
-- **Recommendation:** migrate to `ciborium` (actively maintained).
 - **Scope:** optional dep behind `cbor-serialization` feature.
-- **Action:** not touched — migration is a project-architecture decision.
+- **Source change:** `serde_cbor` was replaced with `ciborium` in both the main crate and fuzz harness.
+- **Schema discipline:** decision-receipt CBOR exports now use the explicit envelope schema `decision-receipt-cbor-v2`.
+- **Supply-chain gate:** removed the `RUSTSEC-2021-0127` ignore from `deny.toml`.
 
 ## Prior pass (2026-04-21)
 

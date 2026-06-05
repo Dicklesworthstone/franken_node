@@ -108,7 +108,7 @@ test-support = ["control-plane", "admin-tools"]
 http-client = ["dep:ureq", "dep:url"]
 external-commands = ["dep:which", "dep:ctrlc"]
 compression = ["dep:flate2"]
-cbor-serialization = ["dep:serde_cbor"]
+cbor-serialization = ["dep:ciborium"]
 engine = ["dep:frankenengine-engine", "dep:frankenengine-extension-host"]
 blake3 = ["dep:blake3"]
 # bd-98xo5.12.1: opt-in profiling feature pulling in the hdrhistogram
@@ -139,7 +139,7 @@ hex = "0.4.3"
 base64 = "0.22.1"
 franken-security-macros = { path = "../franken-security-macros" }
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
-serde_cbor = { version = "0.11.2", optional = true }
+ciborium = { version = "0.2.2", optional = true }
 flate2 = { version = "1.0.35", optional = true }
 rand = "0.8.5"
 asupersync = { version = "0.3.1", optional = true }

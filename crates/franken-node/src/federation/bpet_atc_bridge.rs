@@ -1055,7 +1055,7 @@ mod tests {
     // This is the FIRST golden in the suite to pin serde_json
     // string/tuple encoding as part of the canonical-byte contract.
     // A future refactor that switched from serde_json to a different
-    // serialization library (e.g., serde_cbor, postcard, bincode)
+    // serialization library (e.g., ciborium, postcard, bincode)
     // would silently flip every existing hash. Pinning these outputs
     // documents that serde_json IS the contract — not "any
     // serializer that produces deterministic bytes."

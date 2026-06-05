@@ -2,9 +2,9 @@
 
 use arbitrary::Arbitrary;
 use frankenengine_node::supply_chain::trust_card::{
+    TrustCard, TrustCardComparison, TrustCardRegistry, TrustCardRegistrySnapshot,
     compute_card_hash, fixture_registry, render_comparison_human, render_trust_card_human,
-    to_canonical_json, verify_card_signature, TrustCard, TrustCardComparison, TrustCardRegistry,
-    TrustCardRegistrySnapshot,
+    to_canonical_json, verify_card_signature,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -31,22 +31,22 @@ fn fuzz_trust_card_compare_cbor(mut case: TrustCardCompareCborCase) {
 }
 
 fn fuzz_raw_cbor(bytes: &[u8]) {
-    if let Ok(card) = serde_cbor::from_slice::<TrustCard>(bytes) {
+    if let Ok(card) = cbor_from_slice::<TrustCard>(bytes) {
         let _ = compute_card_hash(&card);
         let _ = verify_card_signature(&card, TRUST_CARD_REGISTRY_KEY);
         let _ = render_trust_card_human(&card);
         let _ = serde_json::to_vec(&card);
-        let _ = serde_cbor::to_vec(&card);
+        let _ = cbor_to_vec(&card);
     }
 
-    if let Ok(snapshot) = serde_cbor::from_slice::<TrustCardRegistrySnapshot>(bytes) {
+    if let Ok(snapshot) = cbor_from_slice::<TrustCardRegistrySnapshot>(bytes) {
         let _ = TrustCardRegistry::from_snapshot(snapshot, TRUST_CARD_REGISTRY_KEY, 1);
     }
 
-    if let Ok(comparison) = serde_cbor::from_slice::<TrustCardComparison>(bytes) {
+    if let Ok(comparison) = cbor_from_slice::<TrustCardComparison>(bytes) {
         let _ = render_comparison_human(&comparison);
         let _ = serde_json::to_vec(&comparison);
-        let _ = serde_cbor::to_vec(&comparison);
+        let _ = cbor_to_vec(&comparison);
     }
 }
 
@@ -59,8 +59,8 @@ fn fuzz_fixture_compare(now_secs: u64, selector: u8) {
     let Ok(snapshot) = registry.snapshot() else {
         return;
     };
-    let cbor = serde_cbor::to_vec(&snapshot).expect("fixture snapshot must encode as CBOR");
-    let decoded = serde_cbor::from_slice::<TrustCardRegistrySnapshot>(&cbor)
+    let cbor = cbor_to_vec(&snapshot).expect("fixture snapshot must encode as CBOR");
+    let decoded = cbor_from_slice::<TrustCardRegistrySnapshot>(&cbor)
         .expect("fixture snapshot CBOR must decode");
     let _ = to_canonical_json(&decoded);
     TrustCardRegistry::from_snapshot(decoded, TRUST_CARD_REGISTRY_KEY, now_secs)
@@ -80,8 +80,8 @@ fn fuzz_fixture_compare(now_secs: u64, selector: u8) {
         )
         .expect("fixture cards should compare");
     let _ = render_comparison_human(&comparison);
-    let comparison_cbor = serde_cbor::to_vec(&comparison).expect("comparison must encode");
-    let decoded_comparison = serde_cbor::from_slice::<TrustCardComparison>(&comparison_cbor)
+    let comparison_cbor = cbor_to_vec(&comparison).expect("comparison must encode");
+    let decoded_comparison = cbor_from_slice::<TrustCardComparison>(&comparison_cbor)
         .expect("comparison CBOR must decode");
     assert_eq!(comparison, decoded_comparison);
 
@@ -95,4 +95,14 @@ fn fuzz_fixture_compare(now_secs: u64, selector: u8) {
         )
         .expect("fixture versions should compare");
     let _ = render_comparison_human(&version_comparison);
+}
+
+fn cbor_to_vec(value: &impl serde::Serialize) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).map_err(|err| err.to_string())?;
+    Ok(bytes)
+}
+
+fn cbor_from_slice<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    ciborium::de::from_reader(bytes).map_err(|err| err.to_string())
 }

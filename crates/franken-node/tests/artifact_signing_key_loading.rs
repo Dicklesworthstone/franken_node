@@ -1,11 +1,13 @@
 use std::error::Error;
 
+#[cfg(feature = "cbor-serialization")]
+use frankenengine_node::security::decision_receipt::{
+    DECISION_RECEIPT_CBOR_EXPORT_SCHEMA_VERSION, export_receipts_cbor, import_receipts_cbor,
+};
 use frankenengine_node::security::decision_receipt::{
     Decision, Receipt, ReceiptError, ReceiptQuery, export_receipts_to_path, sign_receipt,
     verify_receipt,
 };
-#[cfg(feature = "cbor-serialization")]
-use frankenengine_node::security::decision_receipt::{export_receipts_cbor, import_receipts_cbor};
 use frankenengine_node::supply_chain::artifact_signing::{
     ArtifactSigningError, generate_artifact_signing_key, sign_bytes, signing_key_from_seed_bytes,
     signing_key_from_seed_hex, verify_signature,
@@ -80,6 +82,15 @@ fn decision_receipts_sign_with_configured_key_material() -> Result<(), Box<dyn E
     assert!(verified);
 
     Ok(())
+}
+
+#[cfg(feature = "cbor-serialization")]
+#[test]
+fn decision_receipt_cbor_export_schema_version_is_bumped() {
+    assert_eq!(
+        DECISION_RECEIPT_CBOR_EXPORT_SCHEMA_VERSION,
+        "decision-receipt-cbor-v2"
+    );
 }
 
 #[cfg(feature = "cbor-serialization")]

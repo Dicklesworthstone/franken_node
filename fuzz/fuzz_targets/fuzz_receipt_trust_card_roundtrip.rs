@@ -4,18 +4,17 @@ use std::collections::BTreeMap;
 
 use arbitrary::Arbitrary;
 use frankenengine_node::security::decision_receipt::{
-    demo_public_key, demo_signing_key, export_receipts_cbor, export_receipts_json,
-    import_receipts_cbor, sign_receipt, verify_receipt, Decision, Receipt, ReceiptQuery,
-    SignedReceipt,
+    Decision, Receipt, ReceiptQuery, SignedReceipt, demo_public_key, demo_signing_key,
+    export_receipts_cbor, export_receipts_json, import_receipts_cbor, sign_receipt, verify_receipt,
 };
 use frankenengine_node::supply_chain::trust_card::{
-    to_canonical_json, AuditRecord, BehavioralProfile, CapabilityDeclaration, CapabilityRisk,
-    CertificationLevel, DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary,
-    PublisherIdentity, ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel,
-    TelemetryEvent, TrustCard, TrustCardRegistrySnapshot,
+    AuditRecord, BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
+    DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
+    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TelemetryEvent, TrustCard,
+    TrustCardRegistrySnapshot, to_canonical_json,
 };
 use libfuzzer_sys::fuzz_target;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const MAX_TEXT_BYTES: usize = 256;
 const MAX_RAW_BYTES: usize = 256 * 1024;
@@ -78,8 +77,8 @@ fn fuzz_trust_card_roundtrip(input: &FuzzInput) {
     let decoded: TrustCard = serde_json::from_str(&json).expect("trust card JSON decode");
     assert_eq!(decoded, card);
 
-    let cbor = serde_cbor::to_vec(&card).expect("trust card CBOR encode");
-    let decoded_cbor: TrustCard = serde_cbor::from_slice(&cbor).expect("trust card CBOR decode");
+    let cbor = cbor_to_vec(&card).expect("trust card CBOR encode");
+    let decoded_cbor: TrustCard = cbor_from_slice(&cbor).expect("trust card CBOR decode");
     assert_eq!(decoded_cbor, card);
 
     let canonical = to_canonical_json(&card).expect("trust card canonical JSON");
@@ -99,9 +98,9 @@ fn fuzz_trust_card_roundtrip(input: &FuzzInput) {
         serde_json::from_str(&snapshot_json).expect("snapshot JSON decode");
     assert_eq!(snapshot_decoded, snapshot);
 
-    let snapshot_cbor = serde_cbor::to_vec(&snapshot).expect("snapshot CBOR encode");
+    let snapshot_cbor = cbor_to_vec(&snapshot).expect("snapshot CBOR encode");
     let snapshot_cbor_decoded: TrustCardRegistrySnapshot =
-        serde_cbor::from_slice(&snapshot_cbor).expect("snapshot CBOR decode");
+        cbor_from_slice(&snapshot_cbor).expect("snapshot CBOR decode");
     assert_eq!(snapshot_cbor_decoded, snapshot);
 }
 
@@ -114,11 +113,21 @@ fn fuzz_raw_envelopes(bytes: &[u8]) {
     let _ = serde_json::from_slice::<TrustCard>(bytes);
     let _ = serde_json::from_slice::<TrustCardRegistrySnapshot>(bytes);
     let _ = serde_json::from_slice::<TelemetryEvent>(bytes);
-    let _ = serde_cbor::from_slice::<SignedReceipt>(bytes);
-    let _ = serde_cbor::from_slice::<Vec<SignedReceipt>>(bytes);
-    let _ = serde_cbor::from_slice::<TrustCard>(bytes);
-    let _ = serde_cbor::from_slice::<TrustCardRegistrySnapshot>(bytes);
-    let _ = serde_cbor::from_slice::<Value>(bytes);
+    let _ = cbor_from_slice::<SignedReceipt>(bytes);
+    let _ = cbor_from_slice::<Vec<SignedReceipt>>(bytes);
+    let _ = cbor_from_slice::<TrustCard>(bytes);
+    let _ = cbor_from_slice::<TrustCardRegistrySnapshot>(bytes);
+    let _ = cbor_from_slice::<Value>(bytes);
+}
+
+fn cbor_to_vec(value: &impl serde::Serialize) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).map_err(|err| err.to_string())?;
+    Ok(bytes)
+}
+
+fn cbor_from_slice<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    ciborium::de::from_reader(bytes).map_err(|err| err.to_string())
 }
 
 fn trust_card_from_input(input: &FuzzInput) -> TrustCard {

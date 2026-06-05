@@ -101,7 +101,7 @@ mod frozen_canonical_byte_layout_golden_tests {
         );
 
         // Pin expected count - this will fail first time, showing the actual count
-        let expected_count = 109; // Update this when adding schemas
+        let expected_count = 110; // Update this when adding schemas
         if entry_count != expected_count {
             panic!(
                 "Schema registry has {} entries, expected {}. \
