@@ -3,8 +3,14 @@
   "api_family": "stream",
   "description": "Lockstep compatibility fixtures for Node stream.Readable, stream.Writable, and stream.Transform event ordering and backpressure semantics.",
   "lockstep": {
-    "runtimes": ["node", "bun", "franken-node"],
-    "harness": "franken-node verify lockstep crates/franken-node/tests/fixtures/compat_corpus/stream --runtimes node,bun,franken-node"
+    "runtimes": ["bun", "franken-node"],
+    "runtime_exclusions": [
+      {
+        "runtime": "node",
+        "reason": "Default stream corpus runs exclude node because this checkout may resolve node to the Bun shim; explicit real-Node triad runs must opt in."
+      }
+    ],
+    "harness": "franken-node verify lockstep crates/franken-node/tests/fixtures/compat_corpus/stream --runtimes bun,franken-node"
   },
   "cases": [
     {
@@ -12,6 +18,7 @@
       "file": "readable_from_array_event_order.mjs",
       "api": "stream.Readable.from",
       "requirement": "Readable emits data before end and close for finite iterable input.",
+      "divergence_axes": ["output", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -20,6 +27,7 @@
       "file": "readable_paused_explicit_read.mjs",
       "api": "stream.Readable.read",
       "requirement": "Paused Readable exposes data via readable/read before end.",
+      "divergence_axes": ["output", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -28,6 +36,7 @@
       "file": "readable_async_iterator_order.mjs",
       "api": "stream.Readable async iterator",
       "requirement": "Readable async iterator yields chunks in source order and completes once.",
+      "divergence_axes": ["output", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -36,6 +45,7 @@
       "file": "readable_object_mode_event_order.mjs",
       "api": "stream.Readable objectMode",
       "requirement": "Object-mode Readable preserves object chunk identity and end ordering.",
+      "divergence_axes": ["output"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -44,6 +54,7 @@
       "file": "readable_destroy_error_close_order.mjs",
       "api": "stream.Readable.destroy",
       "requirement": "Readable error signaling is observable before close during teardown.",
+      "divergence_axes": ["exit", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -52,6 +63,7 @@
       "file": "writable_write_finish_order.mjs",
       "api": "stream.Writable.write/end",
       "requirement": "Writable write callbacks settle before final finish/close ordering.",
+      "divergence_axes": ["output", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -60,6 +72,7 @@
       "file": "writable_cork_uncork_batch_order.mjs",
       "api": "stream.Writable.cork/uncork",
       "requirement": "Corked Writable batches writes until uncork while preserving write order.",
+      "divergence_axes": ["output", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -68,6 +81,7 @@
       "file": "writable_backpressure_drain_order.mjs",
       "api": "stream.Writable backpressure",
       "requirement": "Writable returns false under highWaterMark pressure and later emits drain.",
+      "divergence_axes": ["output", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -76,6 +90,7 @@
       "file": "writable_final_before_finish.mjs",
       "api": "stream.Writable _final",
       "requirement": "Writable _final callback runs before prefinish, finish, and close.",
+      "divergence_axes": ["output", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -84,6 +99,7 @@
       "file": "writable_destroy_error_close_order.mjs",
       "api": "stream.Writable.destroy",
       "requirement": "Writable error signaling is observable before close during teardown.",
+      "divergence_axes": ["exit", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -92,6 +108,7 @@
       "file": "transform_uppercase_pipeline.mjs",
       "api": "stream.Transform pipeline",
       "requirement": "Transform emits transformed bytes in order through pipeline.",
+      "divergence_axes": ["output"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -100,6 +117,7 @@
       "file": "transform_object_mode_map.mjs",
       "api": "stream.Transform objectMode",
       "requirement": "Object-mode Transform maps object chunks in source order.",
+      "divergence_axes": ["output"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -108,6 +126,7 @@
       "file": "transform_flush_order.mjs",
       "api": "stream.Transform _flush",
       "requirement": "Transform _flush output is delivered after transformed input and before finish.",
+      "divergence_axes": ["output", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -116,6 +135,7 @@
       "file": "transform_backpressure_drain_order.mjs",
       "api": "stream.Transform backpressure",
       "requirement": "Transform writable side participates in write false/drain backpressure semantics.",
+      "divergence_axes": ["output", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -124,6 +144,7 @@
       "file": "pipeline_success_event_order.mjs",
       "api": "stream/promises.pipeline",
       "requirement": "Successful pipeline resolves after source end and destination finish.",
+      "divergence_axes": ["output", "exit", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -132,6 +153,7 @@
       "file": "pipeline_error_propagation.mjs",
       "api": "stream/promises.pipeline error",
       "requirement": "Pipeline rejects with the transform error and closes participating streams.",
+      "divergence_axes": ["output", "exit", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -140,6 +162,7 @@
       "file": "pipe_readable_to_writable_order.mjs",
       "api": "stream.Readable.pipe",
       "requirement": "Readable.pipe delivers chunks to Writable in order before finish.",
+      "divergence_axes": ["output", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -148,6 +171,7 @@
       "file": "unpipe_event_order.mjs",
       "api": "stream.Readable.unpipe",
       "requirement": "Readable.unpipe triggers destination unpipe notification before manual end.",
+      "divergence_axes": ["output", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -156,6 +180,7 @@
       "file": "pass_through_event_order.mjs",
       "api": "stream.PassThrough",
       "requirement": "PassThrough preserves chunk order and normal end/close events.",
+      "divergence_axes": ["output", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     },
@@ -164,6 +189,7 @@
       "file": "async_transform_callback_order.mjs",
       "api": "stream.Transform async callback",
       "requirement": "Async Transform callbacks preserve output ordering before pipeline resolution.",
+      "divergence_axes": ["output", "side-effect"],
       "band": "high-value",
       "risk_band": "high"
     }

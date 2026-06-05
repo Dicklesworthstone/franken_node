@@ -7,7 +7,9 @@ use serde_json::Value;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const REQUIRED_EVENT_CODES: &[&str] = &["CCG-001", "CCG-002", "CCG-003", "CCG-004"];
-const REQUIRED_RUNTIMES: &[&str] = &["node", "bun", "franken-node"];
+const REQUIRED_DIVERGENCE_AXES: &[&str] = &["output", "exit", "side-effect"];
+const SUPPORTED_LOCKSTEP_RUNTIMES: &[&str] = &["bun", "franken-node"];
+const EXCLUDED_LOCKSTEP_RUNTIME: &str = "node";
 const REQUIRED_STATUS_VALUES: &[&str] = &["pass", "fail", "error", "skip"];
 
 #[test]
@@ -109,6 +111,17 @@ fn stream_manifest_cases_have_complete_metadata() -> TestResult {
                 .is_empty(),
             format!("stream fixture {case_id} must document its requirement"),
         )?;
+        let axes = divergence_axes(case, case_id)?;
+        require(
+            !axes.is_empty(),
+            format!("stream fixture {case_id} must declare at least one divergence axis"),
+        )?;
+        for axis in axes {
+            require(
+                REQUIRED_DIVERGENCE_AXES.contains(&axis),
+                format!("stream fixture {case_id} declares unsupported divergence axis {axis}"),
+            )?;
+        }
         require(
             required_str(case, "band", "stream fixture band")? == "high-value",
             format!("stream fixture {case_id} must stay in the high-value band"),
@@ -135,12 +148,36 @@ fn stream_lockstep_manifest_names_all_required_runtimes() -> TestResult {
         .ok_or("stream lockstep runtimes must be an array")?;
     let runtime_names: BTreeSet<&str> = runtimes.iter().filter_map(Value::as_str).collect();
 
-    for runtime in REQUIRED_RUNTIMES {
+    for runtime in SUPPORTED_LOCKSTEP_RUNTIMES {
         require(
             runtime_names.contains(runtime),
             format!("stream lockstep runtimes missing {runtime}"),
         )?;
     }
+    require(
+        runtime_names.len() == SUPPORTED_LOCKSTEP_RUNTIMES.len(),
+        "stream lockstep runtimes must contain only the supported default dyad",
+    )?;
+    require(
+        !runtime_names.contains(EXCLUDED_LOCKSTEP_RUNTIME),
+        "stream lockstep default runtimes must not include the Bun node shim",
+    )?;
+
+    let exclusions = lockstep
+        .get("runtime_exclusions")
+        .and_then(Value::as_array)
+        .ok_or("stream lockstep runtime_exclusions must be an array")?;
+    let node_exclusion = exclusions.iter().find(|entry| {
+        entry.get("runtime").and_then(Value::as_str) == Some(EXCLUDED_LOCKSTEP_RUNTIME)
+    });
+    let reason = node_exclusion
+        .and_then(|entry| entry.get("reason"))
+        .and_then(Value::as_str)
+        .ok_or("stream lockstep must explain node exclusion")?;
+    require(
+        reason.contains("Bun shim") || reason.contains("Bun node shim"),
+        "stream lockstep node exclusion must cite the Bun node shim risk",
+    )?;
 
     let harness = lockstep
         .get("harness")
@@ -149,9 +186,50 @@ fn stream_lockstep_manifest_names_all_required_runtimes() -> TestResult {
     require(
         harness.contains("verify lockstep")
             && harness.contains("compat_corpus/stream")
-            && harness.contains("node,bun,franken-node"),
-        "stream lockstep harness must execute the stream corpus across declared runtimes",
+            && harness.contains("bun,franken-node")
+            && !harness.contains("node,bun,franken-node"),
+        "stream lockstep harness must execute the stream corpus across the supported dyad",
     )?;
+
+    Ok(())
+}
+
+#[test]
+fn stream_divergence_corpus_covers_output_exit_and_side_effect_axes() -> TestResult {
+    let manifest = load_stream_manifest()?;
+    let cases = stream_cases(&manifest)?;
+    let mut covered = BTreeSet::new();
+    let mut axis_counts: BTreeMap<&str, usize> = BTreeMap::new();
+
+    for case in cases {
+        let case_id = required_str(case, "id", "stream fixture id")?;
+        let fixture_file = required_str(case, "file", "stream fixture file")?;
+        let fixture_source = fs::read_to_string(corpus_root().join(fixture_file))?;
+        let axes = divergence_axes(case, case_id)?;
+
+        for axis in axes {
+            covered.insert(axis);
+            *axis_counts.entry(axis).or_default() += 1;
+        }
+
+        require(
+            fixture_source.contains("emitCase(") && fixture_source.contains(case_id),
+            format!(
+                "stream fixture {case_id} must emit deterministic JSON for lockstep comparison"
+            ),
+        )?;
+    }
+
+    for axis in REQUIRED_DIVERGENCE_AXES {
+        require(
+            covered.contains(axis),
+            format!("stream lockstep divergence corpus missing {axis} axis coverage"),
+        )?;
+        require(
+            axis_counts.get(axis).copied().unwrap_or(0) >= 2,
+            format!("stream lockstep divergence corpus must include at least two {axis} cases"),
+        )?;
+    }
 
     Ok(())
 }
@@ -403,6 +481,19 @@ fn stream_cases(manifest: &Value) -> TestResult<&[Value]> {
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .ok_or_else(|| "stream manifest cases must be an array".into())
+}
+
+fn divergence_axes<'a>(case: &'a Value, case_id: &str) -> TestResult<Vec<&'a str>> {
+    case.get("divergence_axes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("stream fixture {case_id} divergence_axes must be an array"))?
+        .iter()
+        .map(|axis| {
+            axis.as_str().ok_or_else(|| {
+                format!("stream fixture {case_id} divergence axis must be a string").into()
+            })
+        })
+        .collect()
 }
 
 fn per_test_results(report: &Value) -> TestResult<&[Value]> {
