@@ -11,6 +11,7 @@ from check_lockstep_runner import (  # noqa: E402
     build_report,
     check_design_exists,
     check_config_schema,
+    check_runtime_scope_contract,
     check_primary_implementation_cited,
     check_phases_documented,
     check_delta_format,
@@ -87,6 +88,32 @@ def test_release_gating():
 def test_config_schema_json_valid():
     data = read_json(ROOT / "schemas" / "lockstep_runner_config.schema.json")
     require_equal(data["properties"]["runtimes"]["type"], "array", "runtime schema type")
+
+
+def test_config_schema_requires_disabled_runtime_exclusion_reason():
+    data = read_json(ROOT / "schemas" / "lockstep_runner_config.schema.json")
+    runtime_items = data["properties"]["runtimes"]["items"]
+    require("exclusion_reason" in runtime_items["properties"], "exclusion_reason field missing")
+    require("required" in runtime_items["properties"], "required flag missing")
+    require(
+        any(
+            entry.get("then", {}).get("required") == ["exclusion_reason"]
+            for entry in runtime_items.get("allOf", [])
+        ),
+        "disabled runtimes must require exclusion_reason",
+    )
+
+
+def test_runtime_scope_contract_documents_supported_dyad_and_node_exclusion():
+    result = check_runtime_scope_contract()
+    require_equal(result["status"], "PASS", "runtime scope check status")
+    require(result["details"]["design_default_dyad"], "design must document bun/franken default")
+    require(result["details"]["design_node_exclusion"], "design must document Node exclusion")
+    require(result["details"]["design_explicit_triad"], "design must document explicit real Node triad")
+    require(result["details"]["contract_default_dyad"], "contract must document bun/franken default")
+    require(result["details"]["contract_node_exclusion"], "contract must document Node exclusion")
+    require(result["details"]["cli_default_dyad"], "CLI default must match supported dyad")
+    require(result["details"]["schema_exclusion_reason"], "schema must expose exclusion reason")
 
 
 def test_design_has_architecture_section():

@@ -778,7 +778,11 @@ pub struct VerifyLockstepArgs {
     pub project_path: PathBuf,
 
     /// Comma-separated list of runtimes to compare.
-    #[arg(long, default_value = "node,bun,franken-node")]
+    ///
+    /// The default uses the supported CI/dev dyad. Pass
+    /// `--runtimes node,bun,franken-node` only on hosts with a real Node.js
+    /// binary, not Bun's node shim.
+    #[arg(long, default_value = "bun,franken-node")]
     pub runtimes: String,
 
     /// Emit divergence fixtures for failing comparisons.
@@ -2103,6 +2107,37 @@ mod parser_contract_extra_tests {
             .expect_err("unknown nested verify command should fail");
 
         assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn verify_lockstep_defaults_to_supported_bun_franken_dyad() {
+        let cli = parse(&["franken-node", "verify", "lockstep", "."])
+            .expect("verify lockstep should parse with default runtimes");
+
+        let Command::Verify(VerifyCommand::Lockstep(args)) = cli.command else {
+            panic!("expected verify lockstep command");
+        };
+
+        assert_eq!(args.runtimes, "bun,franken-node");
+    }
+
+    #[test]
+    fn verify_lockstep_accepts_explicit_real_node_triad() {
+        let cli = parse(&[
+            "franken-node",
+            "verify",
+            "lockstep",
+            ".",
+            "--runtimes",
+            "node,bun,franken-node",
+        ])
+        .expect("verify lockstep should accept an explicit real Node triad");
+
+        let Command::Verify(VerifyCommand::Lockstep(args)) = cli.command else {
+            panic!("expected verify lockstep command");
+        };
+
+        assert_eq!(args.runtimes, "node,bun,franken-node");
     }
 
     #[test]

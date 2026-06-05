@@ -55,6 +55,7 @@ VERIFICATION_COMMANDS = [
             "primary Rust implementation path citations",
             "verify lockstep CLI dispatch citations",
             "runner configuration schema",
+            "runtime availability and Node exclusion rationale",
             "phase coverage",
             "delta report format",
             "release gating rules",
@@ -108,6 +109,56 @@ def check_config_schema() -> dict:
     except json.JSONDecodeError:
         check["status"] = "FAIL"
         check["details"]["error"] = "Invalid JSON in schema"
+    return check
+
+
+def check_runtime_scope_contract() -> dict:
+    """L1-RUNTIME-SCOPE: Check supported runtime set and Node exclusion are explicit."""
+    check = {
+        "id": "L1-RUNTIME-SCOPE",
+        "status": "PASS",
+        "details": {},
+    }
+
+    design_text = DESIGN_PATH.read_text(encoding="utf-8") if DESIGN_PATH.exists() else ""
+    contract_text = CONTRACT_PATH.read_text(encoding="utf-8") if CONTRACT_PATH.exists() else ""
+    cli_path = ROOT / PRIMARY_IMPLEMENTATION_PATHS["verify_cli_args"]
+    cli_text = cli_path.read_text(encoding="utf-8") if cli_path.exists() else ""
+
+    try:
+        schema = json.loads(CONFIG_SCHEMA_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        schema = {}
+
+    runtime_item = schema.get("properties", {}).get("runtimes", {}).get("items", {})
+    runtime_properties = runtime_item.get("properties", {})
+
+    design_lower = design_text.lower()
+    contract_lower = contract_text.lower()
+    checks = {
+        "design_default_dyad": "bun,franken-node" in design_text,
+        "design_node_exclusion": "node.js leg is excluded" in design_lower
+        and "bun" in design_lower
+        and "wrapper" in design_lower,
+        "design_explicit_triad": "--runtimes node,bun,franken-node" in design_text,
+        "contract_default_dyad": "bun,franken-node" in contract_text,
+        "contract_node_exclusion": "node.js leg" in contract_lower
+        and "excluded" in contract_lower
+        and "bun" in contract_lower
+        and "wrapper" in contract_lower,
+        "cli_default_dyad": 'default_value = "bun,franken-node"' in cli_text,
+        "schema_exclusion_reason": "exclusion_reason" in runtime_properties,
+        "schema_required_flag": "required" in runtime_properties,
+    }
+
+    check["details"].update(checks)
+    missing = [name for name, passed in checks.items() if not passed]
+    if missing:
+        check["status"] = "FAIL"
+        check["details"]["missing"] = missing
+        check["details"][
+            "error"
+        ] = "Runtime availability contract does not fully document the supported dyad and Node exclusion"
     return check
 
 
@@ -218,6 +269,7 @@ def build_report(timestamp: str) -> dict:
         check_design_exists(),
         check_primary_implementation_cited(),
         check_config_schema(),
+        check_runtime_scope_contract(),
         check_phases_documented(),
         check_delta_format(),
         check_release_gating(),

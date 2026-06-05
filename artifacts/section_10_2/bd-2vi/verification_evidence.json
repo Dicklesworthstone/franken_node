@@ -2,8 +2,8 @@
   "schema_version": "1.0",
   "bead_id": "bd-2vi",
   "artifact_type": "verification_evidence",
-  "timestamp": "2026-02-20T09:42:26.095619+00:00",
-  "git_commit": "32b56e4c639fd2a39f3f0b77ee55a656ae65109e",
+  "timestamp": "2026-06-05T01:22:42.747598+00:00",
+  "git_commit": "working-tree-bd-rjc2m.20",
   "verdict": "PASS",
   "evidence_paths": {
     "primary_lockstep_harness": "crates/franken-node/src/runtime/lockstep_harness.rs",
@@ -26,6 +26,7 @@
         "primary Rust implementation path citations",
         "verify lockstep CLI dispatch citations",
         "runner configuration schema",
+        "runtime availability and Node exclusion rationale",
         "phase coverage",
         "delta report format",
         "release gating rules"
@@ -54,6 +55,10 @@
       "status": "PASS"
     },
     {
+      "id": "L1-RUNTIME-SCOPE",
+      "status": "PASS"
+    },
+    {
       "id": "L1-PHASES",
       "status": "PASS"
     },
@@ -67,35 +72,50 @@
     }
   ],
   "unit_tests": {
-    "total": 11,
-    "passed": 11,
+    "total": 14,
+    "passed": 14,
     "failed": 0
   },
   "outputs": [
     {
       "path": "docs/L1_LOCKSTEP_RUNNER.md",
-      "sha256": "32c8e67abf574e40cd394a60e604026cfdcf01e38a9bf496f4feee9b2f2aaaf2",
-      "size_bytes": 4423
+      "sha256": "5b2d51e5679972747d5dd1ffd89ec5e618f15f3bf3bc19e8596eb9cdae12f60d",
+      "size_bytes": 6034
     },
     {
       "path": "schemas/lockstep_runner_config.schema.json",
-      "sha256": "abb3900d56fe36d27a0f8b20875d57359bcdb7fd635133d6401114379a8eb44c",
-      "size_bytes": 1744
+      "sha256": "b1215638eaeba184267f06c8b8c57b6872e4bab0a2d6a4d3bb9fb51165253c9d",
+      "size_bytes": 2429
     },
     {
       "path": "docs/specs/section_10_2/bd-2vi_contract.md",
-      "sha256": "ca96e8bb0132837ecd2f49851aa76947c7a2dadb79d40f92e759bb365689fc9e",
-      "size_bytes": 2145
+      "sha256": "4a2c9ba3a8f792befed6e71d43bf3b07b631125d4cd3c6130a8b991dc1473ac0",
+      "size_bytes": 2927
     },
     {
       "path": "scripts/check_lockstep_runner.py",
-      "sha256": "8b98d31b542553cd0e2249b107ca2487906d5ed3e6d76fd2cc1963b961ec955c",
-      "size_bytes": 9385
+      "sha256": "b871173a6788edb1f7cd105f5042cc5542ee5e503546f2bc86691b395f616e51",
+      "size_bytes": 11611
     },
     {
       "path": "tests/test_check_lockstep_runner.py",
-      "sha256": "272ca042d711cca07bc473c22edae107f1d686a171d7108373b1ef17c418fe1f",
-      "size_bytes": 5036
+      "sha256": "796b2b47c14547c7b7e74f1a9a39ab12def09449ee112e1682ed612cb733f0e6",
+      "size_bytes": 7777
+    },
+    {
+      "path": "README.md",
+      "sha256": "1d0fbe271eccf995015f4694fd239cd25cb715fe059cbd0263938f29b09691b3",
+      "size_bytes": 153379
+    },
+    {
+      "path": "crates/franken-node/src/cli.rs",
+      "sha256": "a8bda7796d8d6b1a423414a42386ada53daff3672cbcee5da81d8acdb4cbfc9c",
+      "size_bytes": 120416
+    },
+    {
+      "path": "crates/franken-node/src/main.rs",
+      "sha256": "1f3c27aeb45df7ee2b47a1728d8f4eab17bf6a82d33cd9b27244e79065714f4a",
+      "size_bytes": 1151431
     }
   ]
 }

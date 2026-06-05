@@ -32,9 +32,32 @@
             "type": "boolean",
             "default": true,
             "description": "Whether this runtime is active."
+          },
+          "required": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether the runtime must be available for this runner configuration to be valid."
+          },
+          "exclusion_reason": {
+            "type": "string",
+            "minLength": 12,
+            "description": "Required rationale when enabled is false."
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "enabled": { "const": false }
+              },
+              "required": ["enabled"]
+            },
+            "then": {
+              "required": ["exclusion_reason"]
+            }
+          }
+        ]
       }
     },
     "fixture_dir": {

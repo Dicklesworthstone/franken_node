@@ -26275,17 +26275,17 @@ fn main() -> Result<()> {
 
             // Optional lockstep pre-flight check (bd-3p0qh)
             let lockstep_verdict = if lockstep_preflight {
-                eprintln!("Running lockstep pre-flight check across runtimes...");
+                eprintln!("Running lockstep pre-flight check across supported runtimes...");
                 let harness = runtime::lockstep_harness::LockstepHarness::new(vec![
-                    "node".to_string(),
                     "bun".to_string(),
+                    "franken-node".to_string(),
                 ]);
                 match harness.verify_lockstep(&app_path, false) {
                     Ok(()) => {
                         eprintln!("Lockstep pre-flight: PASSED");
                         Some(serde_json::json!({
                             "status": "passed",
-                            "runtimes": ["node", "bun"]
+                            "runtimes": ["bun", "franken-node"]
                         }))
                     }
                     Err(e) => {
@@ -26304,7 +26304,7 @@ fn main() -> Result<()> {
                         Some(serde_json::json!({
                             "status": "diverged",
                             "error": error_msg,
-                            "runtimes": ["node", "bun"],
+                            "runtimes": ["bun", "franken-node"],
                             "blocked": false
                         }))
                     }

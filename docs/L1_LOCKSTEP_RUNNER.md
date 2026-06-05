@@ -1,7 +1,10 @@
 # L1 Lockstep Runner
 
-> Executes compatibility fixtures across Node.js, Bun, and franken_node in lockstep,
-> canonicalizes results, and produces structured divergence reports.
+> Executes compatibility fixtures across configured reference runtimes in
+> lockstep, canonicalizes results, and produces structured divergence reports.
+> The checked-in CI/dev default is the Bun + franken runtime dyad. The Node.js
+> leg is opt-in and must be backed by a real Node.js binary, not Bun's
+> `node` wrapper.
 
 **Authority**: [PLAN_TO_CREATE_FRANKEN_NODE.md](plans/PLAN_TO_CREATE_FRANKEN_NODE.md) Section 10.2
 **Related**: [COMPATIBILITY_BANDS.md](COMPATIBILITY_BANDS.md), [fixture_runner.py](../scripts/fixture_runner.py)
@@ -11,7 +14,16 @@
 
 ## 1. Overview
 
-The L1 Product Oracle validates that franken_node's external behavior matches Node.js and Bun for core and high-value compatibility bands. It operates by executing identical fixture inputs across all configured runtimes and comparing canonicalized outputs.
+The L1 Product Oracle validates that franken_node's external behavior matches
+the configured JavaScript reference runtimes for core and high-value
+compatibility bands. It operates by executing identical fixture inputs across
+all enabled runtimes and comparing canonicalized outputs.
+
+The current repository default is `bun,franken-node` because the evaluation
+host exposes `node` as Bun's compatibility wrapper (`/home/ubuntu/.bun/bin/node`),
+which is not an independent Node.js oracle. Real Node.js coverage is still
+supported by passing `--runtimes node,bun,franken-node` on hosts where
+`node --version` returns a real Node.js version.
 
 ## Implementation Map
 
@@ -27,7 +39,7 @@ The L1 Product Oracle validates that franken_node's external behavior matches No
 - Filter by band and tags if configured
 
 ### Phase 2: Runtime Execution
-- For each fixture, execute the test scenario against each configured runtime
+- For each fixture, execute the test scenario against each enabled configured runtime
 - Capture: return value, error output, exit code, timing
 - Timeout: 30s per fixture per runtime
 
@@ -57,7 +69,13 @@ The L1 Product Oracle validates that franken_node's external behavior matches No
 {
   "schema_version": "1.0",
   "timestamp": "2025-01-15T12:00:00Z",
-  "runtimes": ["node-20.11.0", "bun-1.0.0", "franken_node-0.1.0"],
+  "runtimes": ["bun-1.3.14", "franken_node-0.1.0"],
+  "excluded_runtimes": [
+    {
+      "name": "node",
+      "reason": "excluded on this host because `node` resolves to Bun's wrapper; provide a real Node.js binary and pass --runtimes node,bun,franken-node to enable the triad"
+    }
+  ],
   "fixtures_executed": 100,
   "fixtures_matched": 95,
   "fixtures_diverged": 5,
@@ -84,9 +102,16 @@ The runner reads `lockstep_runner_config.json` (or uses defaults):
 {
   "schema_version": "1.0",
   "runtimes": [
-    {"name": "node", "command": "node", "version_flag": "--version"},
-    {"name": "bun", "command": "bun", "version_flag": "--version"},
-    {"name": "franken_node", "command": "franken-node", "version_flag": "--version"}
+    {
+      "name": "node",
+      "command": "node",
+      "version_flag": "--version",
+      "enabled": false,
+      "required": false,
+      "exclusion_reason": "Bun's node wrapper is not an independent Node.js oracle in the default CI/dev image."
+    },
+    {"name": "bun", "command": "bun", "version_flag": "--version", "enabled": true, "required": true},
+    {"name": "franken_node", "command": "franken-node", "version_flag": "--version", "enabled": true, "required": true}
   ],
   "fixture_dir": "docs/fixtures",
   "output_dir": "artifacts/oracle",
@@ -102,7 +127,18 @@ The runner reads `lockstep_runner_config.json` (or uses defaults):
 - **Edge band divergences**: Logged but never block
 - Oracle verdicts feed into release policy (Section 10.2)
 
-## 6. References
+## 6. Runtime Availability Contract
+
+- The supported default runtime set is `bun,franken-node`.
+- The Node.js leg is excluded by default in this checkout because `node` is a
+  Bun-provided wrapper and cannot serve as an independent oracle.
+- Real Node.js remains supported as an explicit triad leg when a host provides a
+  real Node.js binary; operators enable it with
+  `franken-node verify lockstep <path> --runtimes node,bun,franken-node`.
+- Every machine-readable report or config that disables a runtime must carry an
+  `exclusion_reason` so the omission is auditable.
+
+## 7. References
 
 - [COMPATIBILITY_BANDS.md](COMPATIBILITY_BANDS.md) — Band definitions
 - [COMPATIBILITY_MODE_POLICY.md](COMPATIBILITY_MODE_POLICY.md) — Mode enforcement

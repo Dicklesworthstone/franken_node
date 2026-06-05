@@ -114,7 +114,8 @@ replay part of the runtime contract, so JS/TS velocity comes with:
   signed bundle that any operator can replay byte-for-byte and run policy
   counterfactuals against
 - **Migration autopilot**: audit → rewrite → validate → rollout, with
-  rollback artifacts and lockstep validation against Node/Bun on every step
+  rollback artifacts and lockstep validation against Bun and the franken
+  runtime by default; real Node.js can be added when available
 - **Fleet control plane**: quarantine, release, and reconciliation with
   signed decision receipts and convergence telemetry
 - **Verifier SDK**: independent third parties can validate security and
@@ -129,7 +130,7 @@ replay part of the runtime contract, so JS/TS velocity comes with:
 | Deterministic incident replay | Signed bundles with timeline, evidence, policy decisions; replay is exact |
 | Counterfactual simulator | Re-execute incidents under a different policy mode and inspect the diff |
 | Migration autopilot | Audit, rewrite, validate, and rollout transforms with rollback bundles |
-| Compatibility oracle | Lockstep checks across Node, Bun, and franken-engine with divergence receipts |
+| Compatibility oracle | Lockstep checks across Bun and franken-engine by default, with real Node.js as an explicit third leg when available |
 | Fleet quarantine plane | Quarantine, reconcile, release across zones; signed decision receipts |
 | Signed extension registry | Ed25519-signed artifacts, provenance enforcement, assurance levels |
 | Remote capability tokens | Scope-bound, single-use-optional Ed25519 capability tokens with audience binding |
@@ -157,7 +158,7 @@ franken-node migrate audit ./my-app --format json --out migration-audit.json
 franken-node migrate rewrite ./my-app --apply --emit-rollback ./rollback-plan.json
 
 # 5) Validate behavior in lockstep across runtimes
-franken-node verify lockstep ./my-app --runtimes node,bun,franken-node --emit-fixtures
+franken-node verify lockstep ./my-app --runtimes bun,franken-node --emit-fixtures
 
 # 6) Seed trust cards from package.json + lockfile
 franken-node trust scan ./my-app --deep --audit
@@ -327,7 +328,7 @@ franken-node verify release ./release-dir --key-dir ./trusted-public-keys
    ```
 4. **Validate compatibility before rollout:**
    ```bash
-   franken-node verify lockstep ./my-app --runtimes node,bun,franken-node
+   franken-node verify lockstep ./my-app --runtimes bun,franken-node
    ```
 5. **Run in policy-governed mode:**
    ```bash
@@ -396,13 +397,14 @@ runtime team.
 
 ```bash
 franken-node migrate rewrite ./app --apply --emit-rollback rollback.json
-franken-node verify lockstep ./app --runtimes node,bun,franken-node --emit-fixtures
+franken-node verify lockstep ./app --runtimes bun,franken-node --emit-fixtures
 ```
 
 The rollback bundle is a signed, reversible diff. The lockstep oracle runs
-the project in `node`, `bun`, and `franken-node` and records divergence
+the project in `bun` and `franken-node` by default and records divergence
 receipts (with the exact event stream that diverged); material behavioral
-deltas fail closed.
+deltas fail closed. On hosts with a real Node.js binary, add it explicitly with
+`--runtimes node,bun,franken-node`.
 
 ### Day 5 — Pre-production validation
 
@@ -650,7 +652,7 @@ every leaf command available in the current build.
 | `franken-node verify migration <id>` | Verify migration compatibility. |
 | `franken-node verify compatibility <target>` | Verify compatibility claims. |
 | `franken-node verify corpus <path>` | Verify corpus schema and coverage. |
-| `franken-node verify lockstep <path>` | Compare behavior across runtimes; `--runtimes node,bun,franken-node`; `--emit-fixtures` writes divergence fixtures. |
+| `franken-node verify lockstep <path>` | Compare behavior across runtimes; default `--runtimes bun,franken-node`; use `--runtimes node,bun,franken-node` only when `node` is a real Node.js binary. `--emit-fixtures` writes divergence fixtures. |
 | `franken-node verify release <path>` | Verify release artifact signatures. **Fails closed without `--key-dir`.** |
 | `franken-node verify transparency-log <path>` | Verify transparency-log integrity. |
 | `franken-node verify recovery-runbook` | Generate recovery runbook from `--readiness-input`. |
@@ -1017,7 +1019,7 @@ conformance tests under `tests/` and `crates/franken-node/tests/`.
 | **Fleet quarantine state machine** | `api::fleet_quarantine`, `control_plane::fleet_transport` | `QuarantineScope`, `FleetAction` (quarantine/revoke/release), signed `DecisionReceipt`, `ConvergencePhase` tracking, file-backed durable transport |
 | **Deterministic incident replay** | `replay::time_travel_engine`, `tools::replay_bundle` | `WorkflowTrace` capture, environment snapshot, schema versioning, `ReplayVerdict`, divergence detection, fsync-backed durable serialization |
 | **Counterfactual simulator** | `replay::time_travel_engine` + `sdk/verifier` | Re-execute the same trace under an alternative `--policy`; emit diff of decisions, blocked actions, and evidence |
-| **Compatibility lockstep oracle** | `runtime::lockstep_harness`, `api::compat_gate` | N-version execution across Node/Bun/franken-engine with divergence receipts |
+| **Compatibility lockstep oracle** | `runtime::lockstep_harness`, `api::compat_gate` | N-version execution across Bun/franken-engine by default, with optional real Node.js coverage and divergence receipts |
 | **Migration autopilot** | `migration::*`, BPET migration gate | Audit → rewrite → validate → rollout; deterministic audit logs; rollback bundles |
 | **Signed extension registry** | `registry::*`, `extensions::artifact_contract` | Ed25519-signed artifacts, schema enforcement, assurance levels, GC, search |
 | **Threshold signature verification** | `security::threshold_sig` | k-of-n quorum, cached configurations, domain-separated and constant-time verification |
@@ -1928,7 +1930,13 @@ corresponding tests under `tests/conformance/`:
 ```json
 {
   "schema_version": "v1",
-  "runtimes": ["node", "bun", "franken-node"],
+  "runtimes": ["bun", "franken-node"],
+  "excluded_runtimes": [
+    {
+      "name": "node",
+      "reason": "excluded because this host provides Bun's node wrapper rather than a real Node.js binary"
+    }
+  ],
   "status": "divergent",
   "divergences": [
     {
@@ -2236,7 +2244,7 @@ Common integrations:
 
 - name: franken-node lockstep
   run: |
-    franken-node verify lockstep . --runtimes node,bun,franken-node \
+    franken-node verify lockstep . --runtimes bun,franken-node \
         --emit-fixtures
 
 - name: Upload SARIF for code scanning
@@ -2309,7 +2317,7 @@ implementation CI gate.
 | Bayesian sentinel inference and containment actions | Extension ecosystem and trust distribution (registry, trust cards, reputation) |
 | Native Rust execution (no V8/QuickJS bindings) | Packaging, rollout, and enterprise control planes |
 | | Product-layer policy controls and verification surfaces |
-| | L1 Product Oracle (compatibility semantics vs. Node/Bun) |
+| | L1 Product Oracle (default Bun/franken lockstep; real Node.js opt-in) |
 | | Fleet operations (quarantine, incident replay, convergence) |
 
 The split keeps the verifier SDK auditable: a third party can verify
@@ -2547,7 +2555,7 @@ into the corresponding section above.
 |---|---|
 | Adopt | `franken-node init --profile balanced --scan` |
 | Audit a project | `franken-node migrate audit . --format sarif --out audit.sarif` |
-| Validate behavior | `franken-node verify lockstep . --runtimes node,bun,franken-node` |
+| Validate behavior | `franken-node verify lockstep . --runtimes bun,franken-node` |
 | Seed trust cards | `franken-node trust scan . --deep --audit` |
 | Refresh trust | `franken-node trust sync --force` |
 | Run in strict mode | `franken-node run ./app --policy strict --lockstep-preflight` |
@@ -2639,7 +2647,7 @@ Three oracle dimensions must all be GREEN:
 
 | Dimension | Owner | Validates | Artifact |
 |---|---|---|---|
-| **L1 Product Oracle** | Track 10.2 | Spec-first compatibility against Node/Bun behavior | `artifacts/oracle/l1_product_verdict.json` |
+| **L1 Product Oracle** | Track 10.2 | Spec-first compatibility against Bun/franken behavior by default; real Node.js is an explicit third leg when available | `artifacts/oracle/l1_product_verdict.json` |
 | **L2 Engine-Boundary Oracle** | Track 10.17 | franken_engine integration points conform to the engine-split contract | `artifacts/oracle/l2_engine_verdict.json` |
 | **Release Policy Linkage** | Track 10.2 | Release gates consume both verdicts and enforce pass-through | `artifacts/oracle/release_policy_verdict.json` |
 
@@ -2700,7 +2708,7 @@ paths and trust anchors where indicated.
 ```bash
 # Reproduce the lockstep oracle on your project
 franken-node verify lockstep ./my-app \
-    --runtimes node,bun,franken-node \
+    --runtimes bun,franken-node \
     --emit-fixtures
 
 # Reproduce a benchmark report
@@ -2916,9 +2924,10 @@ one pass.
 
 For many high-value workloads, yes. For edge compatibility cases, use
 `franken-node verify lockstep` and inspect divergence receipts before
-production rollout. The platform delegates JS/TS execution to Node, Bun,
-or `franken_engine` depending on `[runtime].preferred` and the lockstep
-oracle.
+production rollout. The default lockstep oracle compares Bun and the franken
+runtime because this evaluation environment does not provide a real Node.js
+binary. On hosts with real Node.js installed, pass
+`--runtimes node,bun,franken-node` to exercise the full triad.
 
 ### Does franken-node require a full rewrite of existing projects?
 

@@ -2,13 +2,22 @@
 
 ## Decision Rationale
 
-The canonical plan (Section 10.2) requires an L1 Product Oracle that runs the same compatibility fixtures across Node.js, Bun, and franken_node, then compares canonicalized results. This bead implements the lockstep runner framework and its validation infrastructure.
+The canonical plan (Section 10.2) requires an L1 Product Oracle that runs the
+same compatibility fixtures across the configured JavaScript reference runtimes
+and franken_node, then compares canonicalized results. This bead implements the
+lockstep runner framework and its validation infrastructure.
+
+The supported default in this repository is the `bun,franken-node` dyad. The
+Node.js leg is an opt-in third leg and must be backed by a real Node.js binary;
+the evaluation host's `node` command resolves to Bun's compatibility wrapper,
+so that leg is excluded with rationale by default rather than counted as an
+independent oracle.
 
 ## L1 Oracle Architecture
 
 The L1 lockstep runner:
 1. Loads fixture files from `docs/fixtures/`
-2. Executes each fixture against configured runtimes (Node, Bun, franken_node)
+2. Executes each fixture against enabled configured runtimes (default: Bun and franken_node)
 3. Canonicalizes outputs using the result canonicalizer
 4. Compares canonical outputs to detect divergences
 5. Produces a structured delta report
@@ -25,9 +34,16 @@ The L1 lockstep runner:
 {
   "schema_version": "1.0",
   "runtimes": [
-    {"name": "node", "command": "node", "version_flag": "--version"},
-    {"name": "bun", "command": "bun", "version_flag": "--version"},
-    {"name": "franken_node", "command": "franken-node", "version_flag": "--version"}
+    {
+      "name": "node",
+      "command": "node",
+      "version_flag": "--version",
+      "enabled": false,
+      "required": false,
+      "exclusion_reason": "Bun's node wrapper is not an independent Node.js oracle in the default CI/dev image."
+    },
+    {"name": "bun", "command": "bun", "version_flag": "--version", "enabled": true, "required": true},
+    {"name": "franken_node", "command": "franken-node", "version_flag": "--version", "enabled": true, "required": true}
   ],
   "fixture_dir": "docs/fixtures",
   "output_dir": "artifacts/oracle"
@@ -41,6 +57,8 @@ The L1 lockstep runner:
 3. Runner configuration schema validates all required fields.
 4. Design covers: fixture loading, runtime execution, canonicalization, delta detection.
 5. Delta report format is machine-readable.
+6. Disabled runtime entries carry an `exclusion_reason`, and Node.js is never
+   counted as an active oracle when `node` resolves to Bun's wrapper.
 
 ## Failure Semantics
 
